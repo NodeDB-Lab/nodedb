@@ -43,8 +43,11 @@ io-uring = "0.7"
 loro = "1"
 
 # Query engine
+datafusion = "45"
 datafusion-common = "45"
 datafusion-execution = "45"
+datafusion-expr = "45"
+datafusion-physical-plan = "45"
 
 # Config & serialization
 toml = "0.8"
