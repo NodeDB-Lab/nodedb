@@ -1,5 +1,5 @@
 [workspace]
-members = ["synapsedb-bridge", "synapsedb-wal", "synapsedb-mem"]
+members = ["synapsedb-bridge", "synapsedb-wal", "synapsedb-mem", "synapsedb-crdt"]
 resolver = "2"
 
 [workspace.package]
@@ -13,6 +13,7 @@ license = "Apache-2.0"
 synapsedb-bridge = { path = "synapsedb-bridge" }
 synapsedb-wal = { path = "synapsedb-wal" }
 synapsedb-mem = { path = "synapsedb-mem" }
+synapsedb-crdt = { path = "synapsedb-crdt" }
 
 # Async runtimes
 tokio = { version = "1", features = ["full"] }
@@ -34,6 +35,16 @@ libc = "0.2"
 
 # Checksums
 crc32c = "0.6"
+
+# io_uring
+io-uring = "0.7"
+
+# CRDTs
+loro = "1"
+
+# Query engine
+datafusion-common = "45"
+datafusion-execution = "45"
 
 # Benchmarking
 fluxbench = "0.1"
