@@ -16,6 +16,7 @@ use nodedb_raft::message::LogEntry;
 use nodedb_raft::transport::RaftTransport;
 
 use crate::error::{ClusterError, Result};
+use crate::forward::RequestForwarder;
 use crate::health;
 use crate::multi_raft::MultiRaft;
 use crate::rpc_codec::RaftRpc;
@@ -41,12 +42,13 @@ pub trait CommitApplier: Send + Sync + 'static {
 /// Owns the MultiRaft state (behind `Arc<Mutex>`) and drives it via periodic
 /// ticks. Implements [`RaftRpcHandler`] so it can be passed directly to
 /// [`NexarTransport::serve`] for incoming RPC dispatch.
-pub struct RaftLoop<A: CommitApplier> {
+pub struct RaftLoop<A: CommitApplier, F: RequestForwarder = crate::forward::NoopForwarder> {
     node_id: u64,
     multi_raft: Arc<Mutex<MultiRaft>>,
     transport: Arc<NexarTransport>,
     topology: Arc<RwLock<ClusterTopology>>,
     applier: A,
+    forwarder: Arc<F>,
     tick_interval: Duration,
 }
 
@@ -64,6 +66,30 @@ impl<A: CommitApplier> RaftLoop<A> {
             transport,
             topology,
             applier,
+            forwarder: Arc::new(crate::forward::NoopForwarder),
+            tick_interval: DEFAULT_TICK_INTERVAL,
+        }
+    }
+
+}
+
+impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
+    /// Create a RaftLoop with a custom request forwarder (for cluster mode).
+    pub fn with_forwarder(
+        multi_raft: MultiRaft,
+        transport: Arc<NexarTransport>,
+        topology: Arc<RwLock<ClusterTopology>>,
+        applier: A,
+        forwarder: Arc<F>,
+    ) -> Self {
+        let node_id = multi_raft.node_id();
+        Self {
+            node_id,
+            multi_raft: Arc::new(Mutex::new(multi_raft)),
+            transport,
+            topology,
+            applier,
+            forwarder,
             tick_interval: DEFAULT_TICK_INTERVAL,
         }
     }
@@ -178,7 +204,7 @@ impl<A: CommitApplier> RaftLoop<A> {
 
 // ── Incoming RPC handler ────────────────────────────────────────────
 
-impl<A: CommitApplier> RaftRpcHandler for RaftLoop<A> {
+impl<A: CommitApplier, F: RequestForwarder> RaftRpcHandler for RaftLoop<A, F> {
     async fn handle_rpc(&self, rpc: RaftRpc) -> Result<RaftRpc> {
         match rpc {
             // Raft consensus RPCs — lock MultiRaft (sync, never across await).
@@ -208,6 +234,11 @@ impl<A: CommitApplier> RaftRpcHandler for RaftLoop<A> {
                 let (_updated, ack) =
                     health::handle_topology_update(self.node_id, &self.topology, &update);
                 Ok(ack)
+            }
+            // Query forwarding — execute locally via the RequestForwarder.
+            RaftRpc::ForwardRequest(req) => {
+                let resp = self.forwarder.execute_forwarded(req).await;
+                Ok(RaftRpc::ForwardResponse(resp))
             }
             other => Err(ClusterError::Transport {
                 detail: format!("unexpected request type in RPC handler: {other:?}"),

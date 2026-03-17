@@ -46,8 +46,38 @@ const RPC_PING: u8 = 9;
 const RPC_PONG: u8 = 10;
 const RPC_TOPOLOGY_UPDATE: u8 = 11;
 const RPC_TOPOLOGY_ACK: u8 = 12;
+const RPC_FORWARD_REQ: u8 = 13;
+const RPC_FORWARD_RESP: u8 = 14;
 
 // ── Cluster management wire types ───────────────────────────────────
+
+/// Forward a SQL query to the leader node for a vShard.
+///
+/// Used when a client connects to a non-leader node. The receiving node
+/// re-plans and executes the SQL locally against its Data Plane.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ForwardRequest {
+    /// The SQL statement to execute.
+    pub sql: String,
+    /// Tenant ID (authenticated on the originating node, trusted here).
+    pub tenant_id: u32,
+    /// Milliseconds remaining until the client's deadline.
+    pub deadline_remaining_ms: u64,
+    /// Distributed trace ID for observability.
+    pub trace_id: u64,
+}
+
+/// Response to a forwarded SQL query.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ForwardResponse {
+    /// True if the query succeeded.
+    pub success: bool,
+    /// Result payloads — one per result set produced by the query.
+    /// Each payload is the raw bytes from the Data Plane response.
+    pub payloads: Vec<Vec<u8>>,
+    /// Non-empty if success=false.
+    pub error_message: String,
+}
 
 /// Health check ping.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -138,6 +168,9 @@ pub enum RaftRpc {
     // Topology broadcast
     TopologyUpdate(TopologyUpdate),
     TopologyAck(TopologyAck),
+    // Query forwarding
+    ForwardRequest(ForwardRequest),
+    ForwardResponse(ForwardResponse),
 }
 
 impl RaftRpc {
@@ -155,6 +188,8 @@ impl RaftRpc {
             Self::Pong(_) => RPC_PONG,
             Self::TopologyUpdate(_) => RPC_TOPOLOGY_UPDATE,
             Self::TopologyAck(_) => RPC_TOPOLOGY_ACK,
+            Self::ForwardRequest(_) => RPC_FORWARD_REQ,
+            Self::ForwardResponse(_) => RPC_FORWARD_RESP,
         }
     }
 }
@@ -255,6 +290,8 @@ fn serialize_payload(rpc: &RaftRpc) -> Result<Vec<u8>> {
         RaftRpc::Pong(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
         RaftRpc::TopologyUpdate(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
         RaftRpc::TopologyAck(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::ForwardRequest(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::ForwardResponse(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
     };
     bytes.map(|b| b.to_vec()).map_err(|e| ClusterError::Codec {
         detail: format!("rkyv serialize failed: {e}"),
@@ -363,6 +400,20 @@ fn deserialize_payload(rpc_type: u8, payload: &[u8]) -> Result<RaftRpc> {
                     }
                 })?;
             Ok(RaftRpc::TopologyAck(msg))
+        }
+        RPC_FORWARD_REQ => {
+            let msg = rkyv::from_bytes::<ForwardRequest, rkyv::rancor::Error>(&aligned)
+                .map_err(|e| ClusterError::Codec {
+                    detail: format!("rkyv deserialize ForwardRequest: {e}"),
+                })?;
+            Ok(RaftRpc::ForwardRequest(msg))
+        }
+        RPC_FORWARD_RESP => {
+            let msg = rkyv::from_bytes::<ForwardResponse, rkyv::rancor::Error>(&aligned)
+                .map_err(|e| ClusterError::Codec {
+                    detail: format!("rkyv deserialize ForwardResponse: {e}"),
+                })?;
+            Ok(RaftRpc::ForwardResponse(msg))
         }
         _ => Err(ClusterError::Codec {
             detail: format!("unknown rpc_type: {rpc_type}"),
