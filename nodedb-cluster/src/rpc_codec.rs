@@ -42,8 +42,41 @@ const RPC_INSTALL_SNAPSHOT_REQ: u8 = 5;
 const RPC_INSTALL_SNAPSHOT_RESP: u8 = 6;
 const RPC_JOIN_REQ: u8 = 7;
 const RPC_JOIN_RESP: u8 = 8;
+const RPC_PING: u8 = 9;
+const RPC_PONG: u8 = 10;
+const RPC_TOPOLOGY_UPDATE: u8 = 11;
+const RPC_TOPOLOGY_ACK: u8 = 12;
 
 // ── Cluster management wire types ───────────────────────────────────
+
+/// Health check ping.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct PingRequest {
+    pub sender_id: u64,
+    /// Sender's current topology version — lets the responder detect staleness.
+    pub topology_version: u64,
+}
+
+/// Health check pong.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct PongResponse {
+    pub responder_id: u64,
+    pub topology_version: u64,
+}
+
+/// Push topology update to a peer.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct TopologyUpdate {
+    pub version: u64,
+    pub nodes: Vec<JoinNodeInfo>,
+}
+
+/// Acknowledgement of a topology update.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct TopologyAck {
+    pub responder_id: u64,
+    pub accepted_version: u64,
+}
 
 /// Request to join an existing cluster.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -99,6 +132,12 @@ pub enum RaftRpc {
     // Cluster management
     JoinRequest(JoinRequest),
     JoinResponse(JoinResponse),
+    // Health check
+    Ping(PingRequest),
+    Pong(PongResponse),
+    // Topology broadcast
+    TopologyUpdate(TopologyUpdate),
+    TopologyAck(TopologyAck),
 }
 
 impl RaftRpc {
@@ -112,6 +151,10 @@ impl RaftRpc {
             Self::InstallSnapshotResponse(_) => RPC_INSTALL_SNAPSHOT_RESP,
             Self::JoinRequest(_) => RPC_JOIN_REQ,
             Self::JoinResponse(_) => RPC_JOIN_RESP,
+            Self::Ping(_) => RPC_PING,
+            Self::Pong(_) => RPC_PONG,
+            Self::TopologyUpdate(_) => RPC_TOPOLOGY_UPDATE,
+            Self::TopologyAck(_) => RPC_TOPOLOGY_ACK,
         }
     }
 }
@@ -208,6 +251,10 @@ fn serialize_payload(rpc: &RaftRpc) -> Result<Vec<u8>> {
         RaftRpc::InstallSnapshotResponse(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
         RaftRpc::JoinRequest(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
         RaftRpc::JoinResponse(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::Ping(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::Pong(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::TopologyUpdate(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::TopologyAck(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
     };
     bytes.map(|b| b.to_vec()).map_err(|e| ClusterError::Codec {
         detail: format!("rkyv serialize failed: {e}"),
@@ -280,6 +327,42 @@ fn deserialize_payload(rpc_type: u8, payload: &[u8]) -> Result<RaftRpc> {
                     }
                 })?;
             Ok(RaftRpc::JoinResponse(msg))
+        }
+        RPC_PING => {
+            let msg =
+                rkyv::from_bytes::<PingRequest, rkyv::rancor::Error>(&aligned).map_err(|e| {
+                    ClusterError::Codec {
+                        detail: format!("rkyv deserialize PingRequest: {e}"),
+                    }
+                })?;
+            Ok(RaftRpc::Ping(msg))
+        }
+        RPC_PONG => {
+            let msg =
+                rkyv::from_bytes::<PongResponse, rkyv::rancor::Error>(&aligned).map_err(|e| {
+                    ClusterError::Codec {
+                        detail: format!("rkyv deserialize PongResponse: {e}"),
+                    }
+                })?;
+            Ok(RaftRpc::Pong(msg))
+        }
+        RPC_TOPOLOGY_UPDATE => {
+            let msg =
+                rkyv::from_bytes::<TopologyUpdate, rkyv::rancor::Error>(&aligned).map_err(|e| {
+                    ClusterError::Codec {
+                        detail: format!("rkyv deserialize TopologyUpdate: {e}"),
+                    }
+                })?;
+            Ok(RaftRpc::TopologyUpdate(msg))
+        }
+        RPC_TOPOLOGY_ACK => {
+            let msg =
+                rkyv::from_bytes::<TopologyAck, rkyv::rancor::Error>(&aligned).map_err(|e| {
+                    ClusterError::Codec {
+                        detail: format!("rkyv deserialize TopologyAck: {e}"),
+                    }
+                })?;
+            Ok(RaftRpc::TopologyAck(msg))
         }
         _ => Err(ClusterError::Codec {
             detail: format!("unknown rpc_type: {rpc_type}"),

@@ -7,7 +7,7 @@
 //! - Committed entries are applied via a [`CommitApplier`] callback
 //! - RPC responses are fed back asynchronously (non-blocking tick loop)
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tracing::{debug, warn};
@@ -16,8 +16,10 @@ use nodedb_raft::message::LogEntry;
 use nodedb_raft::transport::RaftTransport;
 
 use crate::error::{ClusterError, Result};
+use crate::health;
 use crate::multi_raft::MultiRaft;
 use crate::rpc_codec::RaftRpc;
+use crate::topology::ClusterTopology;
 use crate::transport::{NexarTransport, RaftRpcHandler};
 
 /// Default tick interval (10ms — fast enough for sub-second elections).
@@ -40,17 +42,27 @@ pub trait CommitApplier: Send + Sync + 'static {
 /// ticks. Implements [`RaftRpcHandler`] so it can be passed directly to
 /// [`NexarTransport::serve`] for incoming RPC dispatch.
 pub struct RaftLoop<A: CommitApplier> {
+    node_id: u64,
     multi_raft: Arc<Mutex<MultiRaft>>,
     transport: Arc<NexarTransport>,
+    topology: Arc<RwLock<ClusterTopology>>,
     applier: A,
     tick_interval: Duration,
 }
 
 impl<A: CommitApplier> RaftLoop<A> {
-    pub fn new(multi_raft: MultiRaft, transport: Arc<NexarTransport>, applier: A) -> Self {
+    pub fn new(
+        multi_raft: MultiRaft,
+        transport: Arc<NexarTransport>,
+        topology: Arc<RwLock<ClusterTopology>>,
+        applier: A,
+    ) -> Self {
+        let node_id = multi_raft.node_id();
         Self {
+            node_id,
             multi_raft: Arc::new(Mutex::new(multi_raft)),
             transport,
+            topology,
             applier,
             tick_interval: DEFAULT_TICK_INTERVAL,
         }
@@ -168,22 +180,34 @@ impl<A: CommitApplier> RaftLoop<A> {
 
 impl<A: CommitApplier> RaftRpcHandler for RaftLoop<A> {
     async fn handle_rpc(&self, rpc: RaftRpc) -> Result<RaftRpc> {
-        // All MultiRaft methods are synchronous — lock is never held across await.
-        let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
         match rpc {
+            // Raft consensus RPCs — lock MultiRaft (sync, never across await).
             RaftRpc::AppendEntriesRequest(req) => {
+                let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
                 let resp = mr.handle_append_entries(&req)?;
                 Ok(RaftRpc::AppendEntriesResponse(resp))
             }
             RaftRpc::RequestVoteRequest(req) => {
+                let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
                 let resp = mr.handle_request_vote(&req)?;
                 Ok(RaftRpc::RequestVoteResponse(resp))
             }
-            RaftRpc::InstallSnapshotRequest(_req) => {
-                // Snapshot handling is a later batch.
-                Err(ClusterError::Transport {
-                    detail: "InstallSnapshot not yet implemented".into(),
-                })
+            RaftRpc::InstallSnapshotRequest(_req) => Err(ClusterError::Transport {
+                detail: "InstallSnapshot not yet implemented".into(),
+            }),
+            // Health check.
+            RaftRpc::Ping(req) => {
+                let topo_version = {
+                    let topo = self.topology.read().unwrap_or_else(|p| p.into_inner());
+                    topo.version()
+                };
+                Ok(health::handle_ping(self.node_id, topo_version, &req))
+            }
+            // Topology broadcast.
+            RaftRpc::TopologyUpdate(update) => {
+                let (_updated, ack) =
+                    health::handle_topology_update(self.node_id, &self.topology, &update);
+                Ok(ack)
             }
             other => Err(ClusterError::Transport {
                 detail: format!("unexpected request type in RPC handler: {other:?}"),
@@ -243,7 +267,8 @@ mod tests {
         }
 
         let applier = CountingApplier::new();
-        let raft_loop = Arc::new(RaftLoop::new(mr, transport, applier));
+        let topo = Arc::new(RwLock::new(ClusterTopology::new()));
+        let raft_loop = Arc::new(RaftLoop::new(mr, transport, topo, applier));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -316,9 +341,13 @@ mod tests {
         let a2 = CountingApplier::new();
         let a3 = CountingApplier::new();
 
-        let rl1 = Arc::new(RaftLoop::new(mr1, t1.clone(), a1));
-        let rl2 = Arc::new(RaftLoop::new(mr2, t2.clone(), a2));
-        let rl3 = Arc::new(RaftLoop::new(mr3, t3.clone(), a3));
+        let topo1 = Arc::new(RwLock::new(ClusterTopology::new()));
+        let topo2 = Arc::new(RwLock::new(ClusterTopology::new()));
+        let topo3 = Arc::new(RwLock::new(ClusterTopology::new()));
+
+        let rl1 = Arc::new(RaftLoop::new(mr1, t1.clone(), topo1, a1));
+        let rl2 = Arc::new(RaftLoop::new(mr2, t2.clone(), topo2, a2));
+        let rl3 = Arc::new(RaftLoop::new(mr3, t3.clone(), topo3, a3));
 
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
@@ -401,7 +430,8 @@ mod tests {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
 
-        let raft_loop = RaftLoop::new(mr, transport, CountingApplier::new());
+        let topo = Arc::new(RwLock::new(ClusterTopology::new()));
+        let raft_loop = RaftLoop::new(mr, transport, topo, CountingApplier::new());
 
         // Tick to trigger election.
         raft_loop.do_tick();
@@ -435,7 +465,8 @@ mod tests {
         let mut mr = MultiRaft::new(1, rt);
         mr.add_group(0, vec![2, 3]);
 
-        let raft_loop = RaftLoop::new(mr, transport, CountingApplier::new());
+        let topo = Arc::new(RwLock::new(ClusterTopology::new()));
+        let raft_loop = RaftLoop::new(mr, transport, topo, CountingApplier::new());
 
         let req = RaftRpc::RequestVoteRequest(nodedb_raft::RequestVoteRequest {
             term: 1,

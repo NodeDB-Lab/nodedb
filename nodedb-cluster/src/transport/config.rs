@@ -45,7 +45,12 @@ pub fn make_raft_server_config() -> Result<quinn::ServerConfig> {
         }
     })?;
 
-    let mut tls_config = rustls::ServerConfig::builder()
+    let provider = rustls::crypto::ring::default_provider();
+    let mut tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("server TLS protocol versions: {e}"),
+        })?
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)
         .map_err(|e| ClusterError::Transport {
@@ -68,7 +73,12 @@ pub fn make_raft_server_config() -> Result<quinn::ServerConfig> {
 ///
 /// Production clusters use mTLS via [`nexar::transport::tls::make_client_config_mtls`].
 pub fn make_raft_client_config() -> Result<quinn::ClientConfig> {
-    let mut tls_config = rustls::ClientConfig::builder()
+    let provider = rustls::crypto::ring::default_provider();
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("client TLS protocol versions: {e}"),
+        })?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
@@ -120,8 +130,12 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms.supported_schemes())
+            .unwrap_or_else(|| {
+                rustls::crypto::ring::default_provider()
+                    .signature_verification_algorithms
+                    .supported_schemes()
+            })
     }
 }
