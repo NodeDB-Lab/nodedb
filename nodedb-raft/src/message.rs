@@ -3,7 +3,17 @@
 /// Each entry carries the term in which it was created and an opaque command
 /// payload. The state machine interprets the payload; Raft only cares about
 /// term and index for consistency.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct LogEntry {
     /// The term when this entry was received by the leader.
     pub term: u64,
@@ -18,7 +28,15 @@ pub struct LogEntry {
 ///
 /// Invoked by leader to replicate log entries; also used as heartbeat
 /// (entries is empty).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct AppendEntriesRequest {
     /// Leader's term.
     pub term: u64,
@@ -36,7 +54,15 @@ pub struct AppendEntriesRequest {
     pub group_id: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct AppendEntriesResponse {
     /// Current term, for leader to update itself.
     pub term: u64,
@@ -48,7 +74,15 @@ pub struct AppendEntriesResponse {
 }
 
 /// RequestVote RPC (Raft paper Figure 2).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct RequestVoteRequest {
     /// Candidate's term.
     pub term: u64,
@@ -62,7 +96,15 @@ pub struct RequestVoteRequest {
     pub group_id: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct RequestVoteResponse {
     /// Current term, for candidate to update itself.
     pub term: u64,
@@ -73,7 +115,15 @@ pub struct RequestVoteResponse {
 /// InstallSnapshot RPC (Raft paper Figure 13).
 ///
 /// Used when a follower is too far behind for log-based catch-up.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct InstallSnapshotRequest {
     /// Leader's term.
     pub term: u64,
@@ -93,7 +143,15 @@ pub struct InstallSnapshotRequest {
     pub group_id: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct InstallSnapshotResponse {
     /// Current term, for leader to update itself.
     pub term: u64,

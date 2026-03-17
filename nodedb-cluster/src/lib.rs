@@ -3,6 +3,7 @@ pub mod ghost;
 pub mod migration;
 pub mod multi_raft;
 pub mod routing;
+pub mod rpc_codec;
 pub mod wire;
 
 pub use error::{ClusterError, Result};

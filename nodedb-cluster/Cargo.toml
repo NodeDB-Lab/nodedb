@@ -17,6 +17,12 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 rand = { workspace = true }
 
+# Serialization (compact binary for RPCs — matches nexar wire format)
+rkyv = { version = "0.8", features = ["alloc"] }
+
+# Checksums
+crc32c = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }

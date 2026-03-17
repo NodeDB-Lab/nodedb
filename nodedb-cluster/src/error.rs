@@ -27,4 +27,7 @@ pub enum ClusterError {
 
     #[error("transport error: {detail}")]
     Transport { detail: String },
+
+    #[error("codec error: {detail}")]
+    Codec { detail: String },
 }
