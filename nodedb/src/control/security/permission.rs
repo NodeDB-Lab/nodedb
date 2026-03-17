@@ -289,7 +289,7 @@ fn collection_target(tenant_id: TenantId, collection: &str) -> String {
 }
 
 fn owner_key(object_type: &str, tenant_id: u32, object_name: &str) -> String {
-    format!("{object_type}:{tenant_id}:{object_name}")
+    SystemCatalog::owner_key(object_type, tenant_id, object_name)
 }
 
 /// Parse a permission name (case-insensitive). Also accepts SQL aliases.

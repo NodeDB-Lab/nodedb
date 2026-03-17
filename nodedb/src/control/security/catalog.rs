@@ -24,7 +24,7 @@ const ROLES: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.roles"
 /// Table: "target:role_or_user" → MessagePack-serialized permission grant.
 const PERMISSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.permissions");
 
-/// Table: "type:name" → owner username.
+/// Table: "{object_type}:{tenant_id}:{object_name}" → owner username.
 const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.owners");
 
 /// Table: metadata key → value bytes (counters, config).
@@ -467,7 +467,7 @@ impl SystemCatalog {
     // ── Ownership operations ────────────────────────────────────────
 
     /// Key format: "{object_type}:{tenant_id}:{object_name}"
-    fn owner_key(object_type: &str, tenant_id: u32, object_name: &str) -> String {
+    pub fn owner_key(object_type: &str, tenant_id: u32, object_name: &str) -> String {
         format!("{object_type}:{tenant_id}:{object_name}")
     }
 
