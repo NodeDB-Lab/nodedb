@@ -11,7 +11,7 @@ pub struct UserRecord {
     pub user_id: u64,
     pub username: String,
     pub tenant_id: TenantId,
-    /// PBKDF2-SHA256 password hash (stored as `pbkdf2-sha256$iterations$salt$hash`).
+    /// Argon2id password hash (PHC string format: `$argon2id$v=19$m=...&t=...&p=...$<salt>$<hash>`).
     pub password_hash: String,
     /// Salt used for SCRAM-SHA-256 (16 bytes, stored as raw bytes).
     pub scram_salt: Vec<u8>,
