@@ -75,6 +75,9 @@ roaring = "0.10"
 # Random
 rand = "0.9"
 
+# QUIC transport
+quinn = "0.11"
+
 # Ecosystem
 numr = "0.5"
 nexar = "0.1"

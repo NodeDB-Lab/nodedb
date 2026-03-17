@@ -28,7 +28,7 @@ use nodedb_raft::message::{
 const WIRE_VERSION: u8 = 1;
 
 /// Header size in bytes: version(1) + rpc_type(1) + payload_len(4) + crc32c(4).
-const HEADER_SIZE: usize = 10;
+pub const HEADER_SIZE: usize = 10;
 
 /// Maximum payload size (64 MiB) — prevents degenerate allocations from corrupt frames.
 const MAX_PAYLOAD_SIZE: u32 = 64 * 1024 * 1024;
