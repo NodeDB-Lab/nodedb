@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!(num_cores, "data plane cores running (eventfd-driven)");
 
-    // Create shared state (must happen after notifiers are wired).
-    let shared = SharedState::new(dispatcher, Arc::clone(&wal));
+    // Create shared state with persistent system catalog.
+    let shared = SharedState::open(dispatcher, Arc::clone(&wal), &config.catalog_path())?;
 
     // Bootstrap credentials.
     let auth_mode = config.auth.mode.clone();

@@ -37,6 +37,7 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// Create shared state with in-memory credential store (for tests).
     pub fn new(dispatcher: Dispatcher, wal: Arc<WalManager>) -> Arc<Self> {
         Arc::new(Self {
             dispatcher: Mutex::new(dispatcher),
@@ -46,6 +47,23 @@ impl SharedState {
             audit: Mutex::new(AuditLog::new(10_000)),
             tenants: Mutex::new(TenantIsolation::new(TenantQuota::default())),
         })
+    }
+
+    /// Create shared state with persistent credential store (for production).
+    pub fn open(
+        dispatcher: Dispatcher,
+        wal: Arc<WalManager>,
+        catalog_path: &std::path::Path,
+    ) -> crate::Result<Arc<Self>> {
+        let credentials = CredentialStore::open(catalog_path)?;
+        Ok(Arc::new(Self {
+            dispatcher: Mutex::new(dispatcher),
+            tracker: RequestTracker::new(),
+            wal,
+            credentials: Arc::new(credentials),
+            audit: Mutex::new(AuditLog::new(10_000)),
+            tenants: Mutex::new(TenantIsolation::new(TenantQuota::default())),
+        }))
     }
 
     /// Check tenant quota before dispatching a request. Returns Ok if allowed.

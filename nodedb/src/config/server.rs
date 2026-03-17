@@ -69,6 +69,11 @@ impl ServerConfig {
     pub fn segments_dir(&self) -> PathBuf {
         self.data_dir.join("segments")
     }
+
+    /// System catalog (auth, roles, tenants) redb file.
+    pub fn catalog_path(&self) -> PathBuf {
+        self.data_dir.join("system.redb")
+    }
 }
 
 use super::EngineConfig;
