@@ -212,6 +212,80 @@ impl CredentialStore {
         }
     }
 
+    /// Update a user's password. Recomputes both Argon2 hash and SCRAM credentials.
+    pub fn update_password(&self, username: &str, password: &str) -> crate::Result<()> {
+        let mut users = write_lock(&self.users)?;
+        let record = users
+            .get_mut(username)
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: format!("user '{username}' not found"),
+            })?;
+        if !record.is_active {
+            return Err(crate::Error::BadRequest {
+                detail: format!("user '{username}' is inactive"),
+            });
+        }
+        let salt = generate_scram_salt();
+        record.scram_salted_password = compute_scram_salted_password(password, &salt);
+        record.scram_salt = salt;
+        record.password_hash = hash_password_argon2(password)?;
+        Ok(())
+    }
+
+    /// Replace all roles for a user.
+    pub fn update_roles(&self, username: &str, roles: Vec<Role>) -> crate::Result<()> {
+        let mut users = write_lock(&self.users)?;
+        let record = users
+            .get_mut(username)
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: format!("user '{username}' not found"),
+            })?;
+        record.is_superuser = roles.contains(&Role::Superuser);
+        record.roles = roles;
+        Ok(())
+    }
+
+    /// Add a role to a user (if not already present).
+    pub fn add_role(&self, username: &str, role: Role) -> crate::Result<()> {
+        let mut users = write_lock(&self.users)?;
+        let record = users
+            .get_mut(username)
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: format!("user '{username}' not found"),
+            })?;
+        if !record.roles.contains(&role) {
+            record.roles.push(role.clone());
+            if matches!(role, Role::Superuser) {
+                record.is_superuser = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a role from a user.
+    pub fn remove_role(&self, username: &str, role: &Role) -> crate::Result<()> {
+        let mut users = write_lock(&self.users)?;
+        let record = users
+            .get_mut(username)
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: format!("user '{username}' not found"),
+            })?;
+        record.roles.retain(|r| r != role);
+        if matches!(role, Role::Superuser) {
+            record.is_superuser = false;
+        }
+        Ok(())
+    }
+
+    /// List all active users with full details (for SHOW USERS).
+    pub fn list_user_details(&self) -> Vec<UserRecord> {
+        let users = match read_lock(&self.users) {
+            Ok(u) => u,
+            Err(_) => return Vec::new(),
+        };
+        users.values().filter(|u| u.is_active).cloned().collect()
+    }
+
     /// Check if any users exist (used to determine if bootstrap is needed).
     pub fn is_empty(&self) -> bool {
         read_lock(&self.users).map(|u| u.is_empty()).unwrap_or(true)
@@ -221,7 +295,9 @@ impl CredentialStore {
 // ── Password hashing ───────────────────────────────────────────────
 
 use argon2::Argon2;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng};
+use argon2::password_hash::{
+    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
+};
 
 /// Generate a 16-byte cryptographic random salt for SCRAM.
 fn generate_scram_salt() -> Vec<u8> {
