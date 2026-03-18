@@ -102,6 +102,12 @@ impl NodeDbPgHandler {
     }
 
     /// Check if the identity has permission for the given plan.
+    ///
+    /// Enforcement layers:
+    /// 1. Superuser → always allowed
+    /// 2. System catalog (`_system.*`) → superuser only
+    /// 3. Collection-level grants (PermissionStore::check with ownership + roles + grants)
+    /// 4. Built-in role fallback (role_grants_permission)
     pub(super) fn check_permission(
         &self,
         identity: &AuthenticatedIdentity,
@@ -114,7 +120,24 @@ impl NodeDbPgHandler {
         let required = required_permission(plan);
         let collection = extract_collection(plan);
 
-        // Check collection-level permissions first.
+        // Block non-superuser access to system catalog collections.
+        if let Some(coll) = collection {
+            if coll.starts_with("_system") {
+                self.state.audit_record(
+                    AuditEvent::AuthzDenied,
+                    Some(identity.tenant_id),
+                    &identity.username,
+                    &format!("system catalog access denied: {coll}"),
+                );
+                return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "42501".to_owned(),
+                    "permission denied: system catalog access requires superuser".to_owned(),
+                ))));
+            }
+        }
+
+        // Check collection-level permissions (ownership + explicit grants + role grants).
         if let Some(coll) = collection {
             if self
                 .state

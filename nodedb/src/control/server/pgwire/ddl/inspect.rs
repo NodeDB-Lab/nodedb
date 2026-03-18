@@ -211,6 +211,65 @@ pub fn show_grants(
     ))])
 }
 
+/// SHOW PERMISSIONS ON <collection>
+///
+/// Shows all grants and the owner for a specific collection.
+pub fn show_permissions(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    parts: &[&str],
+) -> PgWireResult<Vec<Response>> {
+    // SHOW PERMISSIONS ON <collection>
+    if parts.len() < 4
+        || !parts[1].eq_ignore_ascii_case("PERMISSIONS")
+        || !parts[2].eq_ignore_ascii_case("ON")
+    {
+        return Err(sqlstate_error(
+            "42601",
+            "syntax: SHOW PERMISSIONS ON <collection>",
+        ));
+    }
+
+    let collection = parts[3];
+    let target = format!("collection:{}:{collection}", identity.tenant_id.as_u32());
+
+    let schema = Arc::new(vec![
+        text_field("grantee"),
+        text_field("permission"),
+        text_field("type"),
+    ]);
+
+    let mut rows = Vec::new();
+    let mut encoder = DataRowEncoder::new(schema.clone());
+
+    // Show owner.
+    if let Some(owner) = state
+        .permissions
+        .get_owner("collection", identity.tenant_id, collection)
+    {
+        encoder.encode_field(&owner).map_err(encode_err)?;
+        encoder.encode_field(&"ALL (owner)").map_err(encode_err)?;
+        encoder.encode_field(&"ownership").map_err(encode_err)?;
+        rows.push(Ok(encoder.take_row()));
+    }
+
+    // Show explicit grants.
+    let grants = state.permissions.grants_on(&target);
+    for grant in &grants {
+        encoder.encode_field(&grant.grantee).map_err(encode_err)?;
+        encoder
+            .encode_field(&format!("{:?}", grant.permission))
+            .map_err(encode_err)?;
+        encoder.encode_field(&"grant").map_err(encode_err)?;
+        rows.push(Ok(encoder.take_row()));
+    }
+
+    Ok(vec![Response::Query(QueryResponse::new(
+        schema,
+        stream::iter(rows),
+    ))])
+}
+
 /// Convert a pgwire encode error to a PgWireError.
 fn encode_err(e: pgwire::error::PgWireError) -> pgwire::error::PgWireError {
     e
