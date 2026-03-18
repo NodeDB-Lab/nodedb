@@ -95,6 +95,108 @@ pub fn make_raft_client_config() -> Result<quinn::ClientConfig> {
     Ok(client_config)
 }
 
+/// TLS credentials for a node (used for mTLS in production).
+pub struct TlsCredentials {
+    pub cert: rustls::pki_types::CertificateDer<'static>,
+    pub key: rustls::pki_types::PrivateKeyDer<'static>,
+    pub ca_cert: rustls::pki_types::CertificateDer<'static>,
+}
+
+/// Build a QUIC server config with mutual TLS (production mode).
+///
+/// Requires connecting clients to present a certificate signed by the cluster CA.
+pub fn make_raft_server_config_mtls(creds: &TlsCredentials) -> Result<quinn::ServerConfig> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(creds.ca_cert.clone())
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("add CA to root store: {e}"),
+        })?;
+
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("build client verifier: {e}"),
+        })?;
+
+    let provider = rustls::crypto::ring::default_provider();
+    let mut tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("server TLS protocol versions: {e}"),
+        })?
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(vec![creds.cert.clone()], creds.key.clone_key())
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("mTLS server config: {e}"),
+        })?;
+
+    tls_config.alpn_protocols = vec![ALPN_NODEDB_RAFT.to_vec()];
+
+    let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls_config))
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("QUIC mTLS server config: {e}"),
+        })?;
+
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
+    server_config.transport_config(Arc::new(raft_transport_config()));
+    Ok(server_config)
+}
+
+/// Build a QUIC client config with mutual TLS (production mode).
+///
+/// Verifies server cert and presents client cert, both signed by cluster CA.
+pub fn make_raft_client_config_mtls(creds: &TlsCredentials) -> Result<quinn::ClientConfig> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(creds.ca_cert.clone())
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("add CA to root store: {e}"),
+        })?;
+
+    let provider = rustls::crypto::ring::default_provider();
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("client TLS protocol versions: {e}"),
+        })?
+        .with_root_certificates(root_store)
+        .with_client_auth_cert(vec![creds.cert.clone()], creds.key.clone_key())
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("mTLS client config: {e}"),
+        })?;
+
+    tls_config.alpn_protocols = vec![ALPN_NODEDB_RAFT.to_vec()];
+
+    let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(tls_config))
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("QUIC mTLS client config: {e}"),
+        })?;
+
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
+    client_config.transport_config(Arc::new(raft_transport_config()));
+    Ok(client_config)
+}
+
+/// Generate a cluster CA and issue a node certificate.
+///
+/// Called during bootstrap. The CA cert is stored in the catalog and
+/// distributed to joining nodes via the JoinResponse.
+pub fn generate_node_credentials(
+    node_san: &str,
+) -> Result<(nexar::transport::tls::ClusterCa, TlsCredentials)> {
+    let ca = nexar::transport::tls::ClusterCa::generate().map_err(|e| ClusterError::Transport {
+        detail: format!("generate cluster CA: {e}"),
+    })?;
+    let ca_cert = ca.cert_der();
+    let (cert, key) = ca
+        .issue_cert(node_san)
+        .map_err(|e| ClusterError::Transport {
+            detail: format!("issue node cert: {e}"),
+        })?;
+    Ok((ca, TlsCredentials { cert, key, ca_cert }))
+}
+
 /// Certificate verifier that accepts any server certificate (dev/bootstrap only).
 #[derive(Debug)]
 struct SkipServerVerification;
