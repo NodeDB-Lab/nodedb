@@ -23,6 +23,9 @@ pub struct TenantQuota {
     pub max_vector_dim: u32,
     /// Maximum graph traversal depth.
     pub max_graph_depth: u32,
+    /// Maximum active connections per tenant (0 = unlimited).
+    #[serde(default)]
+    pub max_connections: u32,
 }
 
 impl Default for TenantQuota {
@@ -34,6 +37,7 @@ impl Default for TenantQuota {
             max_qps: 1000,
             max_vector_dim: 4096,
             max_graph_depth: 10,
+            max_connections: 0, // Unlimited by default.
         }
     }
 }
@@ -53,6 +57,8 @@ pub struct TenantUsage {
     pub total_requests: u64,
     /// Total requests rejected due to quota.
     pub rejected_requests: u64,
+    /// Current active connections.
+    pub active_connections: u32,
 }
 
 /// Quota check result.
@@ -182,6 +188,39 @@ impl TenantIsolation {
     pub fn reset_rate_counters(&mut self) {
         for usage in self.usage.values_mut() {
             usage.requests_this_second = 0;
+        }
+    }
+
+    /// Check if a new connection is allowed for this tenant.
+    pub fn check_connection(&self, tenant_id: TenantId) -> QuotaCheck {
+        let quota = self.quota(tenant_id);
+        if quota.max_connections == 0 {
+            return QuotaCheck::Allowed; // Unlimited.
+        }
+        let usage = match self.usage.get(&tenant_id) {
+            Some(u) => u,
+            None => return QuotaCheck::Allowed,
+        };
+        if usage.active_connections >= quota.max_connections {
+            QuotaCheck::ConcurrencyExceeded {
+                active: usage.active_connections,
+                limit: quota.max_connections,
+            }
+        } else {
+            QuotaCheck::Allowed
+        }
+    }
+
+    /// Record a new connection.
+    pub fn connection_start(&mut self, tenant_id: TenantId) {
+        let usage = self.usage.entry(tenant_id).or_default();
+        usage.active_connections += 1;
+    }
+
+    /// Record a connection close.
+    pub fn connection_end(&mut self, tenant_id: TenantId) {
+        if let Some(usage) = self.usage.get_mut(&tenant_id) {
+            usage.active_connections = usage.active_connections.saturating_sub(1);
         }
     }
 

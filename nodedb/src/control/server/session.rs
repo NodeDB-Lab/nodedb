@@ -91,10 +91,27 @@ impl Session {
     /// Run the session loop: read frames, parse, dispatch, respond.
     #[instrument(skip(self), fields(peer = %self.peer_addr))]
     pub async fn run(mut self) -> crate::Result<()> {
+        let idle_timeout_secs = self.state.idle_timeout_secs();
         loop {
-            // Read length prefix (4 bytes, big-endian u32).
+            // Read length prefix with idle timeout.
             let mut len_buf = [0u8; 4];
-            match self.stream.read_exact(&mut len_buf).await {
+            let read_result = if idle_timeout_secs > 0 {
+                match tokio::time::timeout(
+                    Duration::from_secs(idle_timeout_secs),
+                    self.stream.read_exact(&mut len_buf),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        debug!("session idle timeout ({}s)", idle_timeout_secs);
+                        return Ok(());
+                    }
+                }
+            } else {
+                self.stream.read_exact(&mut len_buf).await
+            };
+            match read_result {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     debug!("client disconnected");

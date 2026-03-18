@@ -1,13 +1,25 @@
 use std::sync::Arc;
 
 use futures::stream;
-use pgwire::api::results::{DataRowEncoder, QueryResponse, Response};
+use pgwire::api::results::{DataRowEncoder, FieldInfo, QueryResponse, Response};
 use pgwire::error::PgWireResult;
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
 use super::super::types::{int8_field, sqlstate_error, text_field};
+
+/// Shared schema for both `show_audit_log` and `show_audit_log_memory`.
+fn audit_schema() -> Arc<Vec<FieldInfo>> {
+    Arc::new(vec![
+        int8_field("seq"),
+        int8_field("timestamp_us"),
+        text_field("event"),
+        int8_field("tenant_id"),
+        text_field("source"),
+        text_field("detail"),
+    ])
+}
 
 /// SHOW USERS — list all active users.
 ///
@@ -33,20 +45,16 @@ pub fn show_users(
             continue;
         }
 
-        encoder.encode_field(&user.username).map_err(encode_err)?;
-        encoder
-            .encode_field(&(user.tenant_id.as_u32() as i64))
-            .map_err(encode_err)?;
+        encoder.encode_field(&user.username)?;
+        encoder.encode_field(&(user.tenant_id.as_u32() as i64))?;
         let roles_str: String = user
             .roles
             .iter()
             .map(|r| r.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        encoder.encode_field(&roles_str).map_err(encode_err)?;
-        encoder
-            .encode_field(&if user.is_superuser { "t" } else { "f" })
-            .map_err(encode_err)?;
+        encoder.encode_field(&roles_str)?;
+        encoder.encode_field(&if user.is_superuser { "t" } else { "f" })?;
         rows.push(Ok(encoder.take_row()));
     }
 
@@ -98,18 +106,10 @@ pub fn show_tenants(
         }
 
         let usage = tenants.usage(tid);
-        encoder
-            .encode_field(&(tid.as_u32() as i64))
-            .map_err(encode_err)?;
-        encoder
-            .encode_field(&(usage.map_or(0, |u| u.active_requests as i64)))
-            .map_err(encode_err)?;
-        encoder
-            .encode_field(&(usage.map_or(0, |u| u.total_requests as i64)))
-            .map_err(encode_err)?;
-        encoder
-            .encode_field(&(usage.map_or(0, |u| u.rejected_requests as i64)))
-            .map_err(encode_err)?;
+        encoder.encode_field(&(tid.as_u32() as i64))?;
+        encoder.encode_field(&(usage.map_or(0, |u| u.active_requests as i64)))?;
+        encoder.encode_field(&(usage.map_or(0, |u| u.total_requests as i64)))?;
+        encoder.encode_field(&(usage.map_or(0, |u| u.rejected_requests as i64)))?;
         rows.push(Ok(encoder.take_row()));
     }
 
@@ -140,20 +140,12 @@ pub fn show_session(identity: &AuthenticatedIdentity) -> PgWireResult<Vec<Respon
     let auth_method = format!("{:?}", identity.auth_method);
 
     let mut encoder = DataRowEncoder::new(schema.clone());
-    encoder
-        .encode_field(&identity.username)
-        .map_err(encode_err)?;
-    encoder
-        .encode_field(&(identity.user_id as i64))
-        .map_err(encode_err)?;
-    encoder
-        .encode_field(&(identity.tenant_id.as_u32() as i64))
-        .map_err(encode_err)?;
-    encoder.encode_field(&roles_str).map_err(encode_err)?;
-    encoder.encode_field(&auth_method).map_err(encode_err)?;
-    encoder
-        .encode_field(&if identity.is_superuser { "t" } else { "f" })
-        .map_err(encode_err)?;
+    encoder.encode_field(&identity.username)?;
+    encoder.encode_field(&(identity.user_id as i64))?;
+    encoder.encode_field(&(identity.tenant_id.as_u32() as i64))?;
+    encoder.encode_field(&roles_str)?;
+    encoder.encode_field(&auth_method)?;
+    encoder.encode_field(&if identity.is_superuser { "t" } else { "f" })?;
 
     let row = encoder.take_row();
     Ok(vec![Response::Query(QueryResponse::new(
@@ -197,10 +189,8 @@ pub fn show_grants(
 
     if let Some(user) = user {
         for role in &user.roles {
-            encoder.encode_field(&user.username).map_err(encode_err)?;
-            encoder
-                .encode_field(&role.to_string())
-                .map_err(encode_err)?;
+            encoder.encode_field(&user.username)?;
+            encoder.encode_field(&role.to_string())?;
             rows.push(Ok(encoder.take_row()));
         }
     }
@@ -247,20 +237,18 @@ pub fn show_permissions(
         .permissions
         .get_owner("collection", identity.tenant_id, collection)
     {
-        encoder.encode_field(&owner).map_err(encode_err)?;
-        encoder.encode_field(&"ALL (owner)").map_err(encode_err)?;
-        encoder.encode_field(&"ownership").map_err(encode_err)?;
+        encoder.encode_field(&owner)?;
+        encoder.encode_field(&"ALL (owner)")?;
+        encoder.encode_field(&"ownership")?;
         rows.push(Ok(encoder.take_row()));
     }
 
     // Show explicit grants.
     let grants = state.permissions.grants_on(&target);
     for grant in &grants {
-        encoder.encode_field(&grant.grantee).map_err(encode_err)?;
-        encoder
-            .encode_field(&format!("{:?}", grant.permission))
-            .map_err(encode_err)?;
-        encoder.encode_field(&"grant").map_err(encode_err)?;
+        encoder.encode_field(&grant.grantee)?;
+        encoder.encode_field(&format!("{:?}", grant.permission))?;
+        encoder.encode_field(&"grant")?;
         rows.push(Ok(encoder.take_row()));
     }
 
@@ -270,7 +258,92 @@ pub fn show_permissions(
     ))])
 }
 
-/// Convert a pgwire encode error to a PgWireError.
-fn encode_err(e: pgwire::error::PgWireError) -> pgwire::error::PgWireError {
-    e
+/// SHOW AUDIT LOG [LIMIT <n>]
+///
+/// Shows recent persisted audit entries. Superuser only.
+pub fn show_audit_log(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    parts: &[&str],
+) -> PgWireResult<Vec<Response>> {
+    if !identity.is_superuser {
+        return Err(sqlstate_error(
+            "42501",
+            "permission denied: only superuser can view audit log",
+        ));
+    }
+
+    let limit = if parts.len() >= 5 && parts[3].eq_ignore_ascii_case("LIMIT") {
+        parts[4].parse::<usize>().unwrap_or(100)
+    } else {
+        100
+    };
+
+    let catalog = match state.credentials.catalog() {
+        Some(c) => c,
+        None => {
+            // No persistent catalog — show in-memory entries only.
+            return show_audit_log_memory(state, limit);
+        }
+    };
+
+    let entries = catalog
+        .load_recent_audit_entries(limit)
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+
+    let schema = audit_schema();
+
+    let mut rows = Vec::with_capacity(entries.len());
+    let mut encoder = DataRowEncoder::new(schema.clone());
+
+    for entry in entries.iter().rev() {
+        // Most recent first.
+        encoder.encode_field(&(entry.seq as i64))?;
+        encoder.encode_field(&(entry.timestamp_us as i64))?;
+        encoder.encode_field(&entry.event)?;
+        encoder.encode_field(&(entry.tenant_id.unwrap_or(0) as i64))?;
+        encoder.encode_field(&entry.source)?;
+        encoder.encode_field(&entry.detail)?;
+        rows.push(Ok(encoder.take_row()));
+    }
+
+    Ok(vec![Response::Query(QueryResponse::new(
+        schema,
+        stream::iter(rows),
+    ))])
+}
+
+/// Show in-memory audit entries (when no persistent catalog).
+fn show_audit_log_memory(state: &SharedState, limit: usize) -> PgWireResult<Vec<Response>> {
+    let log = match state.audit.lock() {
+        Ok(l) => l,
+        Err(p) => p.into_inner(),
+    };
+
+    let schema = audit_schema();
+
+    let all = log.all();
+    let skip = if all.len() > limit {
+        all.len() - limit
+    } else {
+        0
+    };
+
+    let mut rows = Vec::new();
+    let mut encoder = DataRowEncoder::new(schema.clone());
+
+    for entry in all.iter().skip(skip).rev() {
+        encoder.encode_field(&(entry.seq as i64))?;
+        encoder.encode_field(&(entry.timestamp_us as i64))?;
+        encoder.encode_field(&format!("{:?}", entry.event))?;
+        encoder.encode_field(&(entry.tenant_id.map_or(0i64, |t| t.as_u32() as i64)))?;
+        encoder.encode_field(&entry.source)?;
+        encoder.encode_field(&entry.detail)?;
+        rows.push(Ok(encoder.take_row()));
+    }
+
+    Ok(vec![Response::Query(QueryResponse::new(
+        schema,
+        stream::iter(rows),
+    ))])
 }

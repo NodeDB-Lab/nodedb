@@ -50,6 +50,9 @@ pub struct SharedState {
     /// Audit retention in days (0 = keep forever).
     audit_retention_days: u32,
 
+    /// Idle session timeout in seconds (0 = no timeout).
+    idle_timeout_secs: u64,
+
     /// Cluster topology (None in single-node mode).
     pub cluster_topology: Option<Arc<RwLock<nodedb_cluster::ClusterTopology>>>,
 
@@ -98,6 +101,7 @@ impl SharedState {
             raft_status_fn: None,
             migration_tracker: None,
             audit_retention_days: 0,
+            idle_timeout_secs: 0,
         })
     }
 
@@ -151,7 +155,13 @@ impl SharedState {
             raft_status_fn: None,
             migration_tracker: None,
             audit_retention_days: auth_config.audit_retention_days,
+            idle_timeout_secs: auth_config.idle_timeout_secs,
         }))
+    }
+
+    /// Get the idle session timeout in seconds (0 = no timeout).
+    pub fn idle_timeout_secs(&self) -> u64 {
+        self.idle_timeout_secs
     }
 
     /// Check tenant quota before dispatching a request. Returns Ok if allowed.

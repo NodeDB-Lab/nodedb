@@ -224,17 +224,48 @@ pub fn drop_user(
         return Err(sqlstate_error("42501", "cannot drop your own user"));
     }
 
+    // Look up user's tenant before dropping (for ownership reassignment).
+    let user_tenant = state
+        .credentials
+        .get_user(username)
+        .map(|u| u.tenant_id)
+        .unwrap_or(identity.tenant_id);
+
     let dropped = state
         .credentials
         .deactivate_user(username)
         .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     if dropped {
+        // Reassign owned collections to the tenant_admin of the user's tenant.
+        let admin_name = format!("{}_admin", user_tenant.as_u32());
+        let grants = state.permissions.grants_for(&format!("user:{username}"));
+        let catalog = state.credentials.catalog();
+        for grant in &grants {
+            // Find collections owned by this user and reassign.
+            if let Some(owner) = extract_collection_from_target(&grant.target) {
+                if state
+                    .permissions
+                    .get_owner("collection", user_tenant, owner)
+                    .as_deref()
+                    == Some(username)
+                {
+                    let _ = state.permissions.set_owner(
+                        "collection",
+                        user_tenant,
+                        owner,
+                        &admin_name,
+                        catalog.as_ref(),
+                    );
+                }
+            }
+        }
+
         state.audit_record(
             AuditEvent::PrivilegeChange,
             Some(identity.tenant_id),
             &identity.username,
-            &format!("dropped user '{username}'"),
+            &format!("dropped user '{username}' (ownership reassigned to '{admin_name}')"),
         );
         Ok(vec![Response::Execution(Tag::new("DROP USER"))])
     } else {
@@ -242,5 +273,15 @@ pub fn drop_user(
             "42704",
             &format!("user '{username}' does not exist"),
         ))
+    }
+}
+
+/// Extract collection name from a permission target like "collection:1:users".
+fn extract_collection_from_target(target: &str) -> Option<&str> {
+    let parts: Vec<&str> = target.splitn(3, ':').collect();
+    if parts.len() == 3 && parts[0] == "collection" {
+        Some(parts[2])
+    } else {
+        None
     }
 }

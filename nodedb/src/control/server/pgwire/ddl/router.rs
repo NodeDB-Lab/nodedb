@@ -129,6 +129,9 @@ pub fn dispatch(
     if upper.starts_with("SHOW SESSION") {
         return Some(super::inspect::show_session(identity));
     }
+    if upper.starts_with("SHOW AUDIT LOG") || upper.starts_with("SHOW AUDIT_LOG") {
+        return Some(super::inspect::show_audit_log(state, identity, &parts));
+    }
     if upper.starts_with("SHOW PERMISSIONS") {
         return Some(super::inspect::show_permissions(state, identity, &parts));
     }

@@ -119,6 +119,36 @@ impl SystemCatalog {
         Ok(max_seq)
     }
 
+    /// Load audit entries, most recent first, up to `limit`.
+    pub fn load_recent_audit_entries(&self, limit: usize) -> crate::Result<Vec<StoredAuditEntry>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("read txn", e))?;
+        let table = read_txn
+            .open_table(AUDIT_LOG)
+            .map_err(|e| catalog_err("open audit_log", e))?;
+
+        // Read all entries, then take the last `limit` (since redb iterates in key order = seq order).
+        let mut all = Vec::new();
+        for entry in table
+            .range::<&[u8]>(..)
+            .map_err(|e| catalog_err("range audit", e))?
+        {
+            let (_, value) = entry.map_err(|e| catalog_err("read audit", e))?;
+            let stored: StoredAuditEntry =
+                rmp_serde::from_slice(value.value()).map_err(|e| catalog_err("deser audit", e))?;
+            all.push(stored);
+        }
+
+        // Return most recent entries (last N).
+        if all.len() > limit {
+            Ok(all.split_off(all.len() - limit))
+        } else {
+            Ok(all)
+        }
+    }
+
     /// Count total audit entries (for diagnostics).
     pub fn audit_entry_count(&self) -> crate::Result<u64> {
         let read_txn = self
