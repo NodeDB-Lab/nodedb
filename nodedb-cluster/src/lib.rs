@@ -10,6 +10,7 @@ pub mod migration;
 pub mod migration_executor;
 pub mod multi_raft;
 pub mod raft_loop;
+pub mod rebalance;
 pub mod routing;
 pub mod rpc_codec;
 pub mod topology;
@@ -24,9 +25,12 @@ pub use forward::{NoopForwarder, RequestForwarder};
 pub use ghost::{GhostStub, GhostTable};
 pub use health::{HealthConfig, HealthMonitor};
 pub use migration::{MigrationPhase, MigrationState};
-pub use migration_executor::{MigrationExecutor, MigrationRequest, MigrationResult, MigrationTracker, MigrationSnapshot};
+pub use migration_executor::{
+    MigrationExecutor, MigrationRequest, MigrationResult, MigrationSnapshot, MigrationTracker,
+};
 pub use multi_raft::{GroupStatus, MultiRaft};
 pub use raft_loop::{CommitApplier, RaftLoop};
+pub use rebalance::{RebalancePlan, compute_plan, plan_to_requests};
 pub use routing::RoutingTable;
 pub use rpc_codec::RaftRpc;
 pub use topology::{ClusterTopology, NodeInfo, NodeState};
