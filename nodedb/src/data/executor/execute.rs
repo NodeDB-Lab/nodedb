@@ -182,6 +182,17 @@ impl CoreLoop {
                 dim,
             } => {
                 debug!(core = self.core_id, %collection, dim, "vector insert");
+                if vector.len() != *dim {
+                    return self.response_error(
+                        task,
+                        ErrorCode::RejectedConstraint {
+                            constraint: format!(
+                                "vector dimension mismatch: expected {dim}, got {}",
+                                vector.len()
+                            ),
+                        },
+                    );
+                }
                 match self.get_or_create_vector_index(tid, collection, *dim) {
                     Ok(index) => {
                         index.insert(vector.clone());
@@ -241,6 +252,37 @@ impl CoreLoop {
                     self.response_ok(task)
                 } else {
                     self.response_error(task, ErrorCode::NotFound)
+                }
+            }
+
+            PhysicalPlan::DocumentBatchInsert {
+                collection,
+                documents,
+            } => {
+                debug!(core = self.core_id, %collection, count = documents.len(), "document batch insert");
+                let refs: Vec<(&str, &[u8])> = documents
+                    .iter()
+                    .map(|(id, val)| (id.as_str(), val.as_slice()))
+                    .collect();
+                match self.sparse.batch_put(tid, collection, &refs) {
+                    Ok(()) => {
+                        let payload = serde_json::json!({"inserted": documents.len()});
+                        match serde_json::to_vec(&payload) {
+                            Ok(bytes) => self.response_with_payload(task, bytes),
+                            Err(e) => self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!("batch insert response serialization: {e}"),
+                                },
+                            ),
+                        }
+                    }
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
                 }
             }
 

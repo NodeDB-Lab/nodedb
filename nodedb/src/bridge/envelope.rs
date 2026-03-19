@@ -127,6 +127,13 @@ pub enum PhysicalPlan {
     /// Soft-delete a vector by internal node ID.
     VectorDelete { collection: String, vector_id: u32 },
 
+    /// Batch insert documents into the sparse engine in a single redb transaction.
+    DocumentBatchInsert {
+        collection: String,
+        /// (document_id, value_bytes) pairs.
+        documents: Vec<(String, Vec<u8>)>,
+    },
+
     /// Point write: insert/update a document in the sparse engine.
     PointPut {
         collection: String,

@@ -135,6 +135,52 @@ impl SparseEngine {
         })
     }
 
+    /// Batch insert or update multiple documents in a single redb transaction.
+    ///
+    /// Amortizes the write transaction overhead: one `begin_write()` + one
+    /// `commit()` for all documents, instead of one per document. Critical
+    /// for bulk ingestion and sync endpoint delta application.
+    pub fn batch_put(
+        &self,
+        tenant_id: u32,
+        collection: &str,
+        documents: &[(&str, &[u8])],
+    ) -> crate::Result<()> {
+        if documents.is_empty() {
+            return Ok(());
+        }
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("batch write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(DOCUMENTS)
+                .map_err(|e| redb_err("open table", e))?;
+
+            for (document_id, value) in documents {
+                with_tenant_key(
+                    tenant_id,
+                    collection,
+                    document_id,
+                    |key| -> crate::Result<()> {
+                        table
+                            .insert(key, *value)
+                            .map_err(|e| redb_err("batch insert", e))?;
+                        Ok(())
+                    },
+                )?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| redb_err("batch commit", e))?;
+
+        debug!(collection, count = documents.len(), "batch document put");
+        Ok(())
+    }
+
     /// Point lookup: retrieve a document by collection + document_id (tenant-scoped).
     pub fn get(
         &self,

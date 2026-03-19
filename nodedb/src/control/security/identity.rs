@@ -167,6 +167,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         | PhysicalPlan::VectorInsert { .. }
         | PhysicalPlan::VectorBatchInsert { .. }
         | PhysicalPlan::VectorDelete { .. }
+        | PhysicalPlan::DocumentBatchInsert { .. }
         | PhysicalPlan::PointPut { .. }
         | PhysicalPlan::PointDelete { .. }
         | PhysicalPlan::PointUpdate { .. }
