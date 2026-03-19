@@ -27,12 +27,18 @@ pub(super) fn convert_join(join: &Join, tenant_id: TenantId) -> crate::Result<Ve
             detail: "JOIN right side must be a table scan".into(),
         })?;
 
-    // Only inner join supported currently.
-    if !matches!(join.join_type, JoinType::Inner) {
-        return Err(crate::Error::PlanError {
-            detail: format!("only INNER JOIN is supported, got {:?}", join.join_type),
-        });
-    }
+    // Map DataFusion JoinType to our string representation.
+    let join_type_str = match join.join_type {
+        JoinType::Inner => "inner",
+        JoinType::Left => "left",
+        JoinType::Right => "right",
+        JoinType::Full => "full",
+        other => {
+            return Err(crate::Error::PlanError {
+                detail: format!("{other:?} JOIN is not supported"),
+            });
+        }
+    };
 
     // Extract join keys from ON clause.
     let mut on_keys = Vec::with_capacity(join.on.len());
@@ -72,6 +78,7 @@ pub(super) fn convert_join(join: &Join, tenant_id: TenantId) -> crate::Result<Ve
             left_collection,
             right_collection,
             on: on_keys,
+            join_type: join_type_str.to_string(),
             limit: 1000,
         },
     }])

@@ -329,8 +329,7 @@ impl CoreLoop {
                 collection,
                 limit,
                 offset,
-                sort_field,
-                sort_asc,
+                sort_keys,
                 filters,
             } => {
                 debug!(
@@ -338,7 +337,7 @@ impl CoreLoop {
                     %collection,
                     limit,
                     offset,
-                    sort = %sort_field,
+                    sort_fields = sort_keys.len(),
                     "document scan"
                 );
 
@@ -380,18 +379,26 @@ impl CoreLoop {
                                 .collect()
                         };
 
-                        // Sort if requested.
+                        // Multi-field sort: compare by each key in order,
+                        // breaking ties with subsequent keys.
                         let mut sorted = filtered;
-                        if !sort_field.is_empty() {
+                        if !sort_keys.is_empty() {
                             sorted.sort_by(|(_, a_bytes), (_, b_bytes)| {
                                 let a_doc: serde_json::Value = serde_json::from_slice(a_bytes)
                                     .unwrap_or(serde_json::Value::Null);
                                 let b_doc: serde_json::Value = serde_json::from_slice(b_bytes)
                                     .unwrap_or(serde_json::Value::Null);
-                                let a_val = a_doc.get(sort_field.as_str());
-                                let b_val = b_doc.get(sort_field.as_str());
-                                let cmp = compare_json_values(a_val, b_val);
-                                if *sort_asc { cmp } else { cmp.reverse() }
+
+                                for (field, asc) in sort_keys {
+                                    let a_val = a_doc.get(field.as_str());
+                                    let b_val = b_doc.get(field.as_str());
+                                    let cmp = compare_json_values(a_val, b_val);
+                                    let ordered = if *asc { cmp } else { cmp.reverse() };
+                                    if ordered != std::cmp::Ordering::Equal {
+                                        return ordered;
+                                    }
+                                }
+                                std::cmp::Ordering::Equal
                             });
                         }
 
@@ -433,8 +440,17 @@ impl CoreLoop {
                 left_collection,
                 right_collection,
                 on,
+                join_type,
                 limit,
-            } => self.execute_hash_join(task, tid, left_collection, right_collection, on, *limit),
+            } => self.execute_hash_join(
+                task,
+                tid,
+                left_collection,
+                right_collection,
+                on,
+                join_type,
+                *limit,
+            ),
 
             PhysicalPlan::Aggregate {
                 collection,

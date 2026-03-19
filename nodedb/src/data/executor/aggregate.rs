@@ -24,12 +24,12 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u32,
         collection: &str,
-        group_by: &str,
+        group_by: &[String],
         aggregates: &[(String, String)],
         filters: &[u8],
         limit: usize,
     ) -> Response {
-        debug!(core = self.core_id, %collection, %group_by, aggs = aggregates.len(), "aggregate");
+        debug!(core = self.core_id, %collection, group_fields = group_by.len(), aggs = aggregates.len(), "aggregate");
 
         // Scan all documents.
         let fetch_limit = limit.max(10000);
@@ -55,7 +55,7 @@ impl CoreLoop {
                         .collect()
                 };
 
-                // Group documents.
+                // Group documents by composite key.
                 let mut groups: std::collections::HashMap<String, Vec<serde_json::Value>> =
                     std::collections::HashMap::new();
 
@@ -67,12 +67,17 @@ impl CoreLoop {
                     let key = if group_by.is_empty() {
                         "__all__".to_string()
                     } else {
-                        doc.get(group_by)
-                            .map(|v| match v {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
+                        // Composite group key: serialize field values as a JSON array
+                        // for collision-free grouping (avoids separator ambiguity).
+                        let key_parts: Vec<serde_json::Value> = group_by
+                            .iter()
+                            .map(|field| {
+                                doc.get(field.as_str())
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null)
                             })
-                            .unwrap_or_else(|| "null".to_string())
+                            .collect();
+                        serde_json::to_string(&key_parts).unwrap_or_else(|_| "[]".into())
                     };
                     groups.entry(key).or_default().push(doc);
                 }
@@ -81,11 +86,16 @@ impl CoreLoop {
                 let mut results: Vec<serde_json::Value> = Vec::new();
                 for (group_key, group_docs) in &groups {
                     let mut row = serde_json::Map::new();
+
+                    // Reconstruct GROUP BY fields from the JSON array key.
                     if !group_by.is_empty() {
-                        row.insert(
-                            group_by.to_string(),
-                            serde_json::Value::String(group_key.clone()),
-                        );
+                        if let Ok(parts) = serde_json::from_str::<Vec<serde_json::Value>>(group_key)
+                        {
+                            for (i, field) in group_by.iter().enumerate() {
+                                let val = parts.get(i).cloned().unwrap_or(serde_json::Value::Null);
+                                row.insert(field.clone(), val);
+                            }
+                        }
                     }
 
                     for (op, field) in aggregates {
@@ -132,6 +142,7 @@ impl CoreLoop {
         left_collection: &str,
         right_collection: &str,
         on: &[(String, String)],
+        join_type: &str,
         limit: usize,
     ) -> Response {
         debug!(
@@ -139,6 +150,7 @@ impl CoreLoop {
             %left_collection,
             %right_collection,
             keys = on.len(),
+            %join_type,
             "hash join"
         );
 
@@ -172,27 +184,64 @@ impl CoreLoop {
             }
         };
 
-        // Build hash map on right side (first join key).
-        let right_key = on.first().map(|(_, r)| r.as_str()).unwrap_or("id");
-        let left_key = on.first().map(|(l, _)| l.as_str()).unwrap_or("id");
+        // Build composite key extraction closure using ALL join keys.
+        let extract_key = |doc: &serde_json::Value, keys: &[&str], doc_id: &str| -> String {
+            if keys.len() == 1 {
+                doc.get(keys[0])
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_else(|| doc_id.to_string())
+            } else {
+                let parts: Vec<serde_json::Value> = keys
+                    .iter()
+                    .map(|k| doc.get(*k).cloned().unwrap_or(serde_json::Value::Null))
+                    .collect();
+                serde_json::to_string(&parts).unwrap_or_else(|_| "[]".into())
+            }
+        };
 
+        let right_keys: Vec<&str> = on.iter().map(|(_, r)| r.as_str()).collect();
+        let left_keys: Vec<&str> = on.iter().map(|(l, _)| l.as_str()).collect();
+
+        // Build hash map on right side using composite key.
         let mut right_index: std::collections::HashMap<String, Vec<serde_json::Value>> =
             std::collections::HashMap::new();
+        let mut right_matched: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for (doc_id, value) in &right_docs {
             let doc: serde_json::Value = match serde_json::from_slice(value) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let key_val = doc
-                .get(right_key)
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_else(|| doc_id.clone());
+            let key_val = extract_key(&doc, &right_keys, doc_id);
             right_index.entry(key_val).or_default().push(doc);
         }
+
+        let merge_docs = |left_doc: &serde_json::Value,
+                          right_doc: Option<&serde_json::Value>,
+                          left_coll: &str,
+                          right_coll: &str|
+         -> serde_json::Value {
+            let mut merged = serde_json::Map::new();
+            if let Some(obj) = left_doc.as_object() {
+                for (k, v) in obj {
+                    merged.insert(format!("{left_coll}.{k}"), v.clone());
+                }
+            }
+            if let Some(right) = right_doc {
+                if let Some(obj) = right.as_object() {
+                    for (k, v) in obj {
+                        merged.insert(format!("{right_coll}.{k}"), v.clone());
+                    }
+                }
+            }
+            serde_json::Value::Object(merged)
+        };
+
+        let is_left = join_type == "left" || join_type == "full";
+        let is_right = join_type == "right" || join_type == "full";
 
         // Probe with left side.
         let mut results = Vec::new();
@@ -204,29 +253,54 @@ impl CoreLoop {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let probe_key = left_doc
-                .get(left_key)
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .unwrap_or_else(|| doc_id.clone());
+            let probe_key = extract_key(&left_doc, &left_keys, doc_id);
 
             if let Some(right_matches) = right_index.get(&probe_key) {
+                if is_right {
+                    right_matched.insert(probe_key.clone());
+                }
                 for right_doc in right_matches {
                     if results.len() >= limit {
                         break;
                     }
-                    // Merge left + right documents.
-                    let mut merged = serde_json::Map::new();
-                    if let Some(obj) = left_doc.as_object() {
-                        for (k, v) in obj {
-                            merged.insert(format!("{}.{}", left_collection, k), v.clone());
-                        }
+                    results.push(merge_docs(
+                        &left_doc,
+                        Some(right_doc),
+                        left_collection,
+                        right_collection,
+                    ));
+                }
+            } else if is_left {
+                // LEFT/FULL: emit left row with NULL right columns.
+                results.push(merge_docs(
+                    &left_doc,
+                    None,
+                    left_collection,
+                    right_collection,
+                ));
+            }
+            // INNER: no match = no output (default).
+        }
+
+        // RIGHT/FULL: emit unmatched right rows with NULL left columns.
+        if is_right {
+            for (key, right_docs_group) in &right_index {
+                if results.len() >= limit {
+                    break;
+                }
+                if right_matched.contains(key) {
+                    continue;
+                }
+                for right_doc in right_docs_group {
+                    if results.len() >= limit {
+                        break;
                     }
+                    // Swap: right doc is the "present" side, left is NULL.
+                    let mut merged = serde_json::Map::new();
+                    // Left columns are NULL (omitted — absent keys = NULL in JSON).
                     if let Some(obj) = right_doc.as_object() {
                         for (k, v) in obj {
-                            merged.insert(format!("{}.{}", right_collection, k), v.clone());
+                            merged.insert(format!("{right_collection}.{k}"), v.clone());
                         }
                     }
                     results.push(serde_json::Value::Object(merged));

@@ -167,10 +167,9 @@ pub enum PhysicalPlan {
         limit: usize,
         /// Documents to skip before returning (OFFSET).
         offset: usize,
-        /// Sort field (empty = no sort, return in storage order).
-        sort_field: String,
-        /// Sort direction: true = ascending, false = descending.
-        sort_asc: bool,
+        /// Sort keys: `[(field_name, ascending)]`. Empty = no sort.
+        /// Multiple keys give multi-column ORDER BY (first key is primary).
+        sort_keys: Vec<(String, bool)>,
         /// Filter predicates serialized as JSON:
         /// `[{"field": "age", "op": "gt", "value": 25}, {"field": "city", "op": "eq", "value": "NYC"}]`
         /// Empty = no filter (return all documents up to limit).
@@ -184,8 +183,10 @@ pub enum PhysicalPlan {
     HashJoin {
         left_collection: String,
         right_collection: String,
-        /// Join key: (left_field, right_field).
+        /// Join keys: `[(left_field, right_field)]`.
         on: Vec<(String, String)>,
+        /// Join type: "inner", "left", "right", "full".
+        join_type: String,
         /// Maximum output rows.
         limit: usize,
     },
@@ -196,8 +197,9 @@ pub enum PhysicalPlan {
     /// and computes aggregate functions (COUNT, SUM, AVG, MIN, MAX).
     Aggregate {
         collection: String,
-        /// Field to group by (empty = no grouping, single aggregate over all).
-        group_by: String,
+        /// Fields to group by. Empty = no grouping (single aggregate over all).
+        /// Multiple fields give composite group key.
+        group_by: Vec<String>,
         /// Aggregate operations: `[("count", "*"), ("sum", "price"), ("avg", "age")]`
         aggregates: Vec<(String, String)>,
         /// Filter predicates (same format as DocumentScan).

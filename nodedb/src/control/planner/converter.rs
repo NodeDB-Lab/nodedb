@@ -56,7 +56,14 @@ impl PlanConverter {
                         return Ok(vec![task]);
                     }
 
-                    // Not a point get — emit DocumentScan with filters.
+                    // Try secondary index: equality on a non-id field → RangeScan.
+                    if let Some(task) =
+                        try_range_scan_from_eq(&collection, &filter.predicate, tenant_id, vshard)
+                    {
+                        return Ok(vec![task]);
+                    }
+
+                    // Not a point get or indexed scan — emit DocumentScan with filters.
                     let filters = expr_to_scan_filters(&filter.predicate);
                     let filter_bytes =
                         serde_json::to_vec(&filters).map_err(|e| crate::Error::Serialization {
@@ -72,8 +79,7 @@ impl PlanConverter {
                             collection,
                             limit,
                             offset: 0,
-                            sort_field: String::new(),
-                            sort_asc: true,
+                            sort_keys: Vec::new(),
                             filters: filter_bytes,
                         },
                     }]);
@@ -129,8 +135,7 @@ impl PlanConverter {
                         collection,
                         limit,
                         offset: 0,
-                        sort_field: String::new(),
-                        sort_asc: true,
+                        sort_keys: Vec::new(),
                         filters: filter_bytes,
                     },
                 }])
@@ -189,21 +194,17 @@ impl PlanConverter {
 
                 let mut tasks = self.convert(&sort.input, tenant_id)?;
 
-                // Extract sort field and direction from the first sort expression.
-                if let Some(sort_expr) = sort.expr.first() {
+                // Extract all sort expressions as (field, ascending) pairs.
+                let mut extracted_keys = Vec::new();
+                for sort_expr in &sort.expr {
                     if let Expr::Column(col) = &sort_expr.expr {
-                        let field = col.name.clone();
-                        let asc = sort_expr.asc;
-                        for task in &mut tasks {
-                            if let PhysicalPlan::DocumentScan {
-                                sort_field,
-                                sort_asc,
-                                ..
-                            } = &mut task.plan
-                            {
-                                *sort_field = field.clone();
-                                *sort_asc = asc;
-                            }
+                        extracted_keys.push((col.name.clone(), sort_expr.asc));
+                    }
+                }
+                if !extracted_keys.is_empty() {
+                    for task in &mut tasks {
+                        if let PhysicalPlan::DocumentScan { sort_keys, .. } = &mut task.plan {
+                            *sort_keys = extracted_keys.clone();
                         }
                     }
                 }
@@ -228,18 +229,18 @@ impl PlanConverter {
                     })?;
                 let vshard = VShardId::from_collection(&collection);
 
-                // Extract GROUP BY field (first group expression).
-                let group_by = agg
+                // Extract GROUP BY fields (all group expressions).
+                let group_by: Vec<String> = agg
                     .group_expr
-                    .first()
-                    .and_then(|e| {
+                    .iter()
+                    .filter_map(|e| {
                         if let Expr::Column(col) = e {
                             Some(col.name.clone())
                         } else {
                             None
                         }
                     })
-                    .unwrap_or_default();
+                    .collect();
 
                 // Extract aggregate functions.
                 let mut aggregates = Vec::new();
@@ -440,6 +441,54 @@ impl PlanConverter {
         Ok(None)
     }
 }
+
+/// Try to convert a single equality predicate on a non-id field into a RangeScan.
+///
+/// This generates an index-backed scan when the WHERE clause is `field = value`
+/// for a field that might have a secondary index. The Data Plane's RangeScan
+/// scans the INDEXES table (`{tenant}:{collection}:{field}:{value}:*`) and
+/// returns matching document IDs directly — much faster than scanning all
+/// documents and filtering post-fetch.
+///
+/// Only fires for simple equality predicates. Compound WHERE clauses
+/// (AND/OR with multiple fields) fall through to DocumentScan.
+fn try_range_scan_from_eq(
+    collection: &str,
+    predicate: &Expr,
+    tenant_id: TenantId,
+    vshard: VShardId,
+) -> Option<PhysicalTask> {
+    if let Expr::BinaryExpr(binary) = predicate {
+        if binary.op == Operator::Eq {
+            let (col_name, value) = match (&*binary.left, &*binary.right) {
+                (Expr::Column(col), Expr::Literal(lit)) => (col.name.as_str(), lit.to_string()),
+                (Expr::Literal(lit), Expr::Column(col)) => (col.name.as_str(), lit.to_string()),
+                _ => return None,
+            };
+
+            // id/document_id equality is handled by try_point_get, not here.
+            if col_name == "id" || col_name == "document_id" {
+                return None;
+            }
+
+            let value_clean = value.trim_matches('\'').trim_matches('"').to_string();
+
+            return Some(PhysicalTask {
+                tenant_id,
+                vshard_id: vshard,
+                plan: PhysicalPlan::RangeScan {
+                    collection: collection.to_string(),
+                    field: col_name.to_string(),
+                    lower: Some(value_clean.as_bytes().to_vec()),
+                    upper: Some(format!("{value_clean}\x00").as_bytes().to_vec()),
+                    limit: 1000,
+                },
+            });
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
