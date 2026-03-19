@@ -323,6 +323,13 @@ impl CoreLoop {
                 }
             }
 
+            PhysicalPlan::HashJoin {
+                left_collection,
+                right_collection,
+                on,
+                limit,
+            } => self.execute_hash_join(task, tid, left_collection, right_collection, on, *limit),
+
             PhysicalPlan::Aggregate {
                 collection,
                 group_by,

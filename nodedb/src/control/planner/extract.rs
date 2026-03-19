@@ -192,3 +192,64 @@ pub(super) fn expr_to_json_value(expr: &Expr) -> serde_json::Value {
         _ => serde_json::Value::String(format!("{expr}")),
     }
 }
+
+/// Extract (document_id, value_bytes) pairs from an INSERT input plan.
+///
+/// DataFusion represents `INSERT INTO t VALUES (...)` as a projection of
+/// literal values. The first column is the document ID; remaining columns
+/// are serialized as a JSON object.
+pub(super) fn extract_insert_values(plan: &LogicalPlan) -> crate::Result<Vec<(String, Vec<u8>)>> {
+    match plan {
+        LogicalPlan::Values(values) => {
+            let schema = values.schema.fields();
+            let mut results = Vec::with_capacity(values.values.len());
+            for row in &values.values {
+                let doc_id = if let Some(first) = row.first() {
+                    expr_to_string(first)
+                } else {
+                    continue;
+                };
+                let mut obj = serde_json::Map::new();
+                for (i, expr) in row.iter().enumerate() {
+                    let field_name = if i < schema.len() {
+                        schema[i].name().clone()
+                    } else {
+                        format!("column{i}")
+                    };
+                    let val = expr_to_json_value(expr);
+                    obj.insert(field_name, val);
+                }
+                let value_bytes =
+                    serde_json::to_vec(&obj).map_err(|e| crate::Error::PlanError {
+                        detail: format!("failed to serialize insert values: {e}"),
+                    })?;
+                results.push((doc_id, value_bytes));
+            }
+            Ok(results)
+        }
+        LogicalPlan::Projection(proj) => extract_insert_values(&proj.input),
+        _ => Err(crate::Error::PlanError {
+            detail: format!("unsupported INSERT input plan type: {}", plan.display()),
+        }),
+    }
+}
+
+/// Extract document IDs to delete from a DELETE plan's filter.
+pub(super) fn extract_delete_targets(
+    plan: &LogicalPlan,
+    _collection: &str,
+) -> crate::Result<Vec<String>> {
+    match plan {
+        LogicalPlan::Filter(filter) => {
+            let mut ids = Vec::new();
+            collect_eq_ids(&filter.predicate, &mut ids);
+            Ok(ids)
+        }
+        LogicalPlan::TableScan(_) => Err(crate::Error::PlanError {
+            detail: "DELETE without WHERE clause is not supported. Use DROP COLLECTION to remove all data.".into(),
+        }),
+        _ => Err(crate::Error::PlanError {
+            detail: format!("unsupported DELETE input plan: {}", plan.display()),
+        }),
+    }
+}

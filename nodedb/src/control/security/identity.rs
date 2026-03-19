@@ -159,7 +159,8 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         | PhysicalPlan::GraphSubgraph { .. }
         | PhysicalPlan::GraphRagFusion { .. }
         | PhysicalPlan::DocumentScan { .. }
-        | PhysicalPlan::Aggregate { .. } => Permission::Read,
+        | PhysicalPlan::Aggregate { .. }
+        | PhysicalPlan::HashJoin { .. } => Permission::Read,
 
         // Write operations.
         PhysicalPlan::CrdtApply { .. }

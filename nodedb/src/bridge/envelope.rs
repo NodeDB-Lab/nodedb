@@ -157,6 +157,19 @@ pub enum PhysicalPlan {
         filters: Vec<u8>,
     },
 
+    /// Hash join: inner join two collections on matching fields.
+    ///
+    /// Scans both collections, builds a hash map on the right side,
+    /// probes with the left side. Returns merged documents.
+    HashJoin {
+        left_collection: String,
+        right_collection: String,
+        /// Join key: (left_field, right_field).
+        on: Vec<(String, String)>,
+        /// Maximum output rows.
+        limit: usize,
+    },
+
     /// Aggregate query: GROUP BY + aggregate functions on documents.
     ///
     /// Scans all documents in the collection, groups by the specified field,

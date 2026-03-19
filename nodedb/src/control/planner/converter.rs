@@ -6,7 +6,7 @@ use crate::control::planner::physical::PhysicalTask;
 use crate::types::{TenantId, VShardId};
 
 use super::extract::{
-    collect_eq_ids, expr_to_json_value, expr_to_scan_filters, expr_to_string, expr_to_usize,
+    expr_to_scan_filters, expr_to_usize, extract_delete_targets, extract_insert_values,
     extract_update_assignments,
 };
 use super::search::{extract_table_name, try_extract_vector_search};
@@ -283,6 +283,17 @@ impl PlanConverter {
 
             LogicalPlan::Dml(dml) => self.convert_dml(dml, tenant_id),
 
+            LogicalPlan::Join(join) => super::join::convert_join(join, tenant_id),
+
+            // Pass through — deduplication happens post-scan.
+            LogicalPlan::Distinct(distinct) => self.convert(distinct.input(), tenant_id),
+
+            // Scalar subqueries are handled by DataFusion's optimizer.
+            // If we reach here, the subquery wasn't optimized away.
+            LogicalPlan::Subquery(_) => Err(crate::Error::PlanError {
+                detail: "correlated subqueries are not yet supported. Use JOIN instead.".into(),
+            }),
+
             _ => Err(crate::Error::PlanError {
                 detail: format!("unsupported logical plan type: {}", plan.display()),
             }),
@@ -304,7 +315,7 @@ impl PlanConverter {
             WriteOp::Insert(_) | WriteOp::Ctas => {
                 // Extract values from the input plan.
                 // DataFusion represents INSERT VALUES as a projection of literals.
-                let values = self.extract_insert_values(&dml.input)?;
+                let values = extract_insert_values(&dml.input)?;
 
                 let mut tasks = Vec::with_capacity(values.len());
                 for (doc_id, value_bytes) in values {
@@ -329,7 +340,7 @@ impl PlanConverter {
             }
             WriteOp::Delete => {
                 // DELETE FROM <collection> WHERE id = '<value>'
-                let doc_ids = self.extract_delete_targets(&dml.input, &collection)?;
+                let doc_ids = extract_delete_targets(&dml.input, &collection)?;
 
                 if doc_ids.is_empty() {
                     return Err(crate::Error::PlanError {
@@ -353,7 +364,7 @@ impl PlanConverter {
             WriteOp::Update => {
                 // UPDATE <collection> SET field = value WHERE id = '<value>'
                 // Extract SET assignments and WHERE targets.
-                let doc_ids = self.extract_delete_targets(&dml.input, &collection)?;
+                let doc_ids = extract_delete_targets(&dml.input, &collection)?;
 
                 if doc_ids.is_empty() {
                     return Err(crate::Error::PlanError {
@@ -386,76 +397,7 @@ impl PlanConverter {
         }
     }
 
-    /// Extract (document_id, value_bytes) pairs from an INSERT input plan.
-    ///
-    /// DataFusion represents `INSERT INTO t VALUES (...)` as a projection of
-    /// literal values. We extract the first column as the document ID and
-    /// serialize the remaining columns as a JSON object.
-    fn extract_insert_values(&self, plan: &LogicalPlan) -> crate::Result<Vec<(String, Vec<u8>)>> {
-        match plan {
-            LogicalPlan::Values(values) => {
-                let schema = values.schema.fields();
-                let mut results = Vec::with_capacity(values.values.len());
-
-                for row in &values.values {
-                    // First column is the ID. Remaining columns are data fields.
-                    let doc_id = if let Some(first) = row.first() {
-                        expr_to_string(first)
-                    } else {
-                        continue;
-                    };
-
-                    let mut obj = serde_json::Map::new();
-                    for (i, expr) in row.iter().enumerate() {
-                        let field_name = if i < schema.len() {
-                            schema[i].name().clone()
-                        } else {
-                            format!("column{i}")
-                        };
-                        let val = expr_to_json_value(expr);
-                        obj.insert(field_name, val);
-                    }
-
-                    let value_bytes =
-                        serde_json::to_vec(&obj).map_err(|e| crate::Error::PlanError {
-                            detail: format!("failed to serialize insert values: {e}"),
-                        })?;
-
-                    results.push((doc_id, value_bytes));
-                }
-
-                Ok(results)
-            }
-            LogicalPlan::Projection(proj) => self.extract_insert_values(&proj.input),
-            _ => Err(crate::Error::PlanError {
-                detail: format!("unsupported INSERT input plan type: {}", plan.display()),
-            }),
-        }
-    }
-
-    /// Extract document IDs to delete from a DELETE plan's filter.
-    fn extract_delete_targets(
-        &self,
-        plan: &LogicalPlan,
-        _collection: &str,
-    ) -> crate::Result<Vec<String>> {
-        match plan {
-            LogicalPlan::Filter(filter) => {
-                let mut ids = Vec::new();
-                collect_eq_ids(&filter.predicate, &mut ids);
-                Ok(ids)
-            }
-            LogicalPlan::TableScan(_) => {
-                // DELETE without WHERE — not supported (too dangerous).
-                Err(crate::Error::PlanError {
-                    detail: "DELETE without WHERE clause is not supported. Use DROP COLLECTION to remove all data.".into(),
-                })
-            }
-            _ => Err(crate::Error::PlanError {
-                detail: format!("unsupported DELETE input plan: {}", plan.display()),
-            }),
-        }
-    }
+    // extract_insert_values and extract_delete_targets live in extract.rs
 
     /// Try to convert equality filters into a point get.
     ///
