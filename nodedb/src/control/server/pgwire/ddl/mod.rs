@@ -1,5 +1,6 @@
 pub mod apikey;
 pub mod cluster;
+pub mod collection;
 pub mod grant;
 pub mod inspect;
 pub mod ownership;

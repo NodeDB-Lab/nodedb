@@ -235,6 +235,48 @@ impl SharedState {
         }
     }
 
+    /// Update per-tenant memory estimates.
+    ///
+    /// Called periodically (e.g. every 30 seconds). Uses jemalloc stats
+    /// to estimate global memory, then distributes proportionally across
+    /// tenants based on their request activity.
+    pub fn update_tenant_memory_estimates(&self) {
+        // Get total allocated from jemalloc.
+        let total_allocated = tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0) as u64;
+
+        let mut tenants = match self.tenants.lock() {
+            Ok(t) => t,
+            Err(p) => p.into_inner(),
+        };
+
+        // Distribute proportionally by total_requests per tenant.
+        let tenant_requests: Vec<(crate::types::TenantId, u64)> = {
+            let users = self.credentials.list_user_details();
+            let mut seen = std::collections::HashSet::new();
+            let mut result = Vec::new();
+            for user in &users {
+                if seen.insert(user.tenant_id) {
+                    let total = tenants
+                        .usage(user.tenant_id)
+                        .map_or(0, |u| u.total_requests);
+                    result.push((user.tenant_id, total));
+                }
+            }
+            result
+        };
+
+        let total_reqs: u64 = tenant_requests.iter().map(|(_, r)| *r).sum();
+        if total_reqs == 0 {
+            return;
+        }
+
+        for (tid, reqs) in &tenant_requests {
+            let proportion = *reqs as f64 / total_reqs as f64;
+            let estimated_bytes = (total_allocated as f64 * proportion) as u64;
+            tenants.update_memory(*tid, estimated_bytes);
+        }
+    }
+
     /// Flush in-memory audit entries to the persistent catalog.
     /// Called periodically (e.g. every 10 seconds) by a background task.
     pub fn flush_audit_log(&self) {

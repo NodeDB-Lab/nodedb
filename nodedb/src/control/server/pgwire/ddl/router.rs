@@ -69,6 +69,19 @@ pub fn dispatch(
         return Some(super::role::drop_role(state, identity, &parts));
     }
 
+    // Collection management.
+    if upper.starts_with("CREATE COLLECTION ") {
+        return Some(super::collection::create_collection(
+            state, identity, &parts,
+        ));
+    }
+    if upper.starts_with("DROP COLLECTION ") {
+        return Some(super::collection::drop_collection(state, identity, &parts));
+    }
+    if upper == "SHOW COLLECTIONS" || upper.starts_with("SHOW COLLECTIONS") {
+        return Some(super::collection::show_collections(state, identity));
+    }
+
     // Ownership transfer.
     if upper.starts_with("ALTER COLLECTION ") && upper.contains("OWNER TO") {
         return Some(super::ownership::alter_collection_owner(

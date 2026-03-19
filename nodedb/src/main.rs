@@ -166,6 +166,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Tenant memory estimation (30-second timer).
+    let shared_mem = Arc::clone(&shared);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            shared_mem.update_tenant_memory_estimates();
+        }
+    });
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Bind both listeners before starting accept loops.
