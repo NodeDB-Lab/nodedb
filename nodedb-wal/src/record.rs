@@ -135,6 +135,9 @@ pub enum RecordType {
     /// Vector engine: soft-delete a vector by internal ID.
     VectorDelete = 11 | 0x8000,
 
+    /// Vector engine: set HNSW index parameters for a collection.
+    VectorParams = 12 | 0x8000,
+
     /// CRDT engine: delta application.
     CrdtDelta = 20 | 0x8000,
 
@@ -162,6 +165,7 @@ impl RecordType {
             x if x == 2 | 0x8000 => Some(Self::Delete),
             x if x == 10 | 0x8000 => Some(Self::VectorPut),
             x if x == 11 | 0x8000 => Some(Self::VectorDelete),
+            x if x == 12 | 0x8000 => Some(Self::VectorParams),
             x if x == 20 | 0x8000 => Some(Self::CrdtDelta),
             30 => Some(Self::TimeseriesBatch),
             31 => Some(Self::LogBatch),

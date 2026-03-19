@@ -218,6 +218,25 @@ impl WalManager {
         Ok(Lsn::new(lsn))
     }
 
+    /// Append a Vector params record. Returns the assigned LSN.
+    pub fn append_vector_params(
+        &self,
+        tenant_id: TenantId,
+        vshard_id: VShardId,
+        payload: &[u8],
+    ) -> crate::Result<Lsn> {
+        let mut writer = self.writer.lock().unwrap();
+        let lsn = writer
+            .append(
+                RecordType::VectorParams as u16,
+                tenant_id.as_u32(),
+                vshard_id.as_u16(),
+                payload,
+            )
+            .map_err(crate::Error::Wal)?;
+        Ok(Lsn::new(lsn))
+    }
+
     /// Append a CRDT delta record. Returns the assigned LSN.
     pub fn append_crdt_delta(
         &self,

@@ -274,7 +274,9 @@ impl NodeDbPgHandler {
                             detail: format!("wal set vector params: {e}"),
                         }
                     })?;
-                self.state.wal.append_put(tenant_id, vshard_id, &entry)?;
+                self.state
+                    .wal
+                    .append_vector_params(tenant_id, vshard_id, &entry)?;
                 return Ok(());
             }
             // Read operations and control commands: no WAL needed.

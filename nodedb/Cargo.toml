@@ -40,6 +40,7 @@ redb = { workspace = true }
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 roaring = { workspace = true }
+tempfile = { workspace = true }
 numr = { workspace = true }
 nexar = { workspace = true }
 

@@ -72,6 +72,9 @@ rmpv = "1"
 redb = "2"
 roaring = "0.10"
 
+# Temp files (external sort spill)
+tempfile = "3"
+
 # Random
 rand = "0.9"
 
