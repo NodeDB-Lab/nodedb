@@ -48,12 +48,15 @@ pub fn create_collection(
         .unwrap_or_default()
         .as_secs();
 
+    // Parse optional FIELDS clause: CREATE COLLECTION name FIELDS (field type, ...)
+    let fields = parse_fields_clause(parts);
+
     let coll = StoredCollection {
         tenant_id: tenant_id.as_u32(),
         name: name.to_string(),
         owner: identity.username.clone(),
         created_at: now,
-        fields: Vec::new(), // TODO: parse FIELDS clause
+        fields,
         is_active: true,
     };
 
@@ -377,4 +380,94 @@ pub fn show_indexes(
         schema,
         stream::iter(rows),
     ))])
+}
+
+/// Parse FIELDS clause from CREATE COLLECTION parts.
+///
+/// Syntax: `CREATE COLLECTION name FIELDS (field1 type1, field2 type2, ...)`
+/// Returns empty vec if no FIELDS clause.
+fn parse_fields_clause(parts: &[&str]) -> Vec<(String, String)> {
+    let fields_idx = parts.iter().position(|p| p.eq_ignore_ascii_case("FIELDS"));
+    let fields_idx = match fields_idx {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+
+    let rest = parts[fields_idx + 1..].join(" ");
+    let rest = rest.trim();
+    let inner = if rest.starts_with('(') && rest.ends_with(')') {
+        &rest[1..rest.len() - 1]
+    } else {
+        rest
+    };
+
+    inner
+        .split(',')
+        .filter_map(|pair| {
+            let pair = pair.trim();
+            let mut tokens = pair.split_whitespace();
+            let name = tokens.next()?.to_string();
+            let type_name = tokens.next().unwrap_or("text").to_uppercase();
+            Some((name, type_name))
+        })
+        .collect()
+}
+
+/// Validate a JSON document against a collection's declared schema.
+///
+/// Returns Ok(()) if valid, or Err with a descriptive message.
+/// Empty fields = schemaless (always valid).
+pub fn validate_document_schema(
+    fields: &[(String, String)],
+    doc: &serde_json::Value,
+) -> Result<(), String> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+
+    let obj = match doc.as_object() {
+        Some(o) => o,
+        None => return Err("document must be a JSON object".into()),
+    };
+
+    for (field_name, type_name) in fields {
+        if let Some(val) = obj.get(field_name) {
+            if !val.is_null() && !type_matches(type_name, val) {
+                return Err(format!(
+                    "field '{}' expected type {}, got {}",
+                    field_name,
+                    type_name,
+                    json_type_name(val)
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn type_matches(type_name: &str, val: &serde_json::Value) -> bool {
+    match type_name {
+        "VARCHAR" | "TEXT" | "STRING" => val.is_string(),
+        "INT" | "INT4" | "INTEGER" | "INT2" | "SMALLINT" | "INT8" | "BIGINT" => {
+            val.is_i64() || val.is_u64()
+        }
+        "FLOAT" | "FLOAT4" | "REAL" | "FLOAT8" | "DOUBLE" => val.is_f64() || val.is_i64(),
+        "BOOL" | "BOOLEAN" => val.is_boolean(),
+        "JSON" | "JSONB" => val.is_object() || val.is_array(),
+        "BYTEA" | "BYTES" => val.is_string(),
+        "TIMESTAMP" | "TIMESTAMPTZ" => val.is_string(),
+        _ => true,
+    }
+}
+
+fn json_type_name(val: &serde_json::Value) -> &'static str {
+    match val {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
