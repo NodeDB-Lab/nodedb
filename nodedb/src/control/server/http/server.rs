@@ -39,6 +39,10 @@ fn build_router(state: AppState) -> Router {
             "/collections/{name}/search",
             post(routes::search::vector_search),
         )
+        .route(
+            "/collections/{name}/crdt/apply",
+            post(routes::crdt::crdt_apply),
+        )
         .with_state(state)
 }
 

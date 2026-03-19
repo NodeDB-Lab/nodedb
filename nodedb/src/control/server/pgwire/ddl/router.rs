@@ -181,5 +181,13 @@ pub fn dispatch(
         return Some(super::inspect::show_grants(state, identity, &parts));
     }
 
+    // CRDT operations via SQL-like syntax.
+    if upper.starts_with("SELECT CRDT_STATE(") || upper.starts_with("SELECT CRDT_STATE (") {
+        return Some(super::crdt_ops::crdt_state(state, identity, sql));
+    }
+    if upper.starts_with("SELECT CRDT_APPLY(") || upper.starts_with("SELECT CRDT_APPLY (") {
+        return Some(super::crdt_ops::crdt_apply(state, identity, sql));
+    }
+
     None
 }

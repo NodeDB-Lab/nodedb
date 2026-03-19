@@ -1,3 +1,4 @@
+pub mod crdt;
 pub mod document;
 pub mod health;
 pub mod metrics;
