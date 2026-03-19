@@ -100,6 +100,9 @@ pub struct TlsCredentials {
     pub cert: rustls::pki_types::CertificateDer<'static>,
     pub key: rustls::pki_types::PrivateKeyDer<'static>,
     pub ca_cert: rustls::pki_types::CertificateDer<'static>,
+    /// Optional CRL (Certificate Revocation List) in DER format.
+    /// When present, revoked peer certificates are rejected during handshake.
+    pub crls: Vec<rustls::pki_types::CertificateRevocationListDer<'static>>,
 }
 
 /// Build a QUIC server config with mutual TLS (production mode).
@@ -113,7 +116,14 @@ pub fn make_raft_server_config_mtls(creds: &TlsCredentials) -> Result<quinn::Ser
             detail: format!("add CA to root store: {e}"),
         })?;
 
-    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+    let mut verifier_builder = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store));
+
+    // Add CRLs for certificate revocation checking.
+    for crl in &creds.crls {
+        verifier_builder = verifier_builder.with_crls(vec![crl.clone()]);
+    }
+
+    let client_verifier = verifier_builder
         .build()
         .map_err(|e| ClusterError::Transport {
             detail: format!("build client verifier: {e}"),
@@ -194,7 +204,35 @@ pub fn generate_node_credentials(
         .map_err(|e| ClusterError::Transport {
             detail: format!("issue node cert: {e}"),
         })?;
-    Ok((ca, TlsCredentials { cert, key, ca_cert }))
+    Ok((
+        ca,
+        TlsCredentials {
+            cert,
+            key,
+            ca_cert,
+            crls: Vec::new(),
+        },
+    ))
+}
+
+/// Load CRLs from a PEM file.
+///
+/// Returns a list of CRL DER blobs parsed from the PEM-encoded file.
+/// The file may contain multiple CRLs.
+pub fn load_crls_from_pem(
+    path: &std::path::Path,
+) -> Result<Vec<rustls::pki_types::CertificateRevocationListDer<'static>>> {
+    let pem_data = std::fs::read(path).map_err(|e| ClusterError::Transport {
+        detail: format!("read CRL file {}: {e}", path.display()),
+    })?;
+
+    let mut reader = std::io::BufReader::new(&pem_data[..]);
+    let crls: std::result::Result<Vec<_>, _> = rustls_pemfile::crls(&mut reader).collect();
+    let crls = crls.map_err(|e| ClusterError::Transport {
+        detail: format!("parse CRL from {}: {e}", path.display()),
+    })?;
+
+    Ok(crls)
 }
 
 /// Certificate verifier that accepts any server certificate (dev/bootstrap only).

@@ -21,6 +21,10 @@ pub struct TlsConfig {
     pub require_client_cert: bool,
     /// Certificate reload interval (seconds). Enables hot rotation.
     pub cert_reload_interval_secs: u64,
+    /// Path to CRL (Certificate Revocation List) file in PEM format.
+    /// When set, revoked certificates will be rejected during mTLS handshake.
+    #[serde(default)]
+    pub crl_path: Option<PathBuf>,
 }
 
 /// Supported TLS versions.
@@ -39,6 +43,7 @@ impl Default for TlsConfig {
             min_tls_version: TlsVersion::Tls13,
             require_client_cert: true,
             cert_reload_interval_secs: 3600,
+            crl_path: None,
         }
     }
 }
