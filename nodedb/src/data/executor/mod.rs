@@ -1,3 +1,4 @@
+mod aggregate;
 pub mod core_loop;
 mod execute;
 mod graph_exec;

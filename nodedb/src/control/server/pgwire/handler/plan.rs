@@ -29,6 +29,7 @@ pub(super) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         | PhysicalPlan::PointDelete { collection, .. }
         | PhysicalPlan::PointUpdate { collection, .. }
         | PhysicalPlan::DocumentScan { collection, .. }
+        | PhysicalPlan::Aggregate { collection, .. }
         | PhysicalPlan::GraphRagFusion { collection, .. }
         | PhysicalPlan::SetCollectionPolicy { collection, .. } => Some(collection.as_str()),
         PhysicalPlan::EdgePut { .. }
@@ -52,7 +53,8 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         | PhysicalPlan::GraphPath { .. }
         | PhysicalPlan::GraphSubgraph { .. }
         | PhysicalPlan::GraphRagFusion { .. }
-        | PhysicalPlan::DocumentScan { .. } => PlanKind::MultiRow,
+        | PhysicalPlan::DocumentScan { .. }
+        | PhysicalPlan::Aggregate { .. } => PlanKind::MultiRow,
         _ => PlanKind::Execution,
     }
 }

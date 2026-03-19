@@ -85,3 +85,61 @@ pub(super) fn compare_json_values(
         }
     }
 }
+
+/// Compute an aggregate function over a group of JSON documents.
+///
+/// Supported operations: count, sum, avg, min, max.
+pub(super) fn compute_aggregate(
+    op: &str,
+    field: &str,
+    docs: &[serde_json::Value],
+) -> serde_json::Value {
+    match op {
+        "count" => serde_json::json!(docs.len()),
+
+        "sum" => {
+            let total: f64 = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_f64()))
+                .sum();
+            serde_json::json!(total)
+        }
+
+        "avg" => {
+            let values: Vec<f64> = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_f64()))
+                .collect();
+            if values.is_empty() {
+                serde_json::Value::Null
+            } else {
+                let avg = values.iter().sum::<f64>() / values.len() as f64;
+                serde_json::json!(avg)
+            }
+        }
+
+        "min" => {
+            let min = docs
+                .iter()
+                .filter_map(|d| d.get(field))
+                .min_by(|a, b| compare_json_values(Some(a), Some(b)));
+            match min {
+                Some(v) => v.clone(),
+                None => serde_json::Value::Null,
+            }
+        }
+
+        "max" => {
+            let max = docs
+                .iter()
+                .filter_map(|d| d.get(field))
+                .max_by(|a, b| compare_json_values(Some(a), Some(b)));
+            match max {
+                Some(v) => v.clone(),
+                None => serde_json::Value::Null,
+            }
+        }
+
+        _ => serde_json::Value::Null,
+    }
+}

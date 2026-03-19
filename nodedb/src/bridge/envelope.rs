@@ -157,6 +157,22 @@ pub enum PhysicalPlan {
         filters: Vec<u8>,
     },
 
+    /// Aggregate query: GROUP BY + aggregate functions on documents.
+    ///
+    /// Scans all documents in the collection, groups by the specified field,
+    /// and computes aggregate functions (COUNT, SUM, AVG, MIN, MAX).
+    Aggregate {
+        collection: String,
+        /// Field to group by (empty = no grouping, single aggregate over all).
+        group_by: String,
+        /// Aggregate operations: `[("count", "*"), ("sum", "price"), ("avg", "age")]`
+        aggregates: Vec<(String, String)>,
+        /// Filter predicates (same format as DocumentScan).
+        filters: Vec<u8>,
+        /// Maximum groups to return.
+        limit: usize,
+    },
+
     /// Insert a graph edge with properties.
     EdgePut {
         src_id: String,

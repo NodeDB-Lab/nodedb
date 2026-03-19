@@ -217,74 +217,7 @@ impl CoreLoop {
                 collection,
                 document_id,
                 updates,
-            } => {
-                debug!(core = self.core_id, %collection, %document_id, fields = updates.len(), "point update");
-                // Read-modify-write: get current doc, merge updates, put back.
-                match self.sparse.get(tid, collection, document_id) {
-                    Ok(Some(current_bytes)) => {
-                        // Parse current document as JSON.
-                        let mut doc: serde_json::Value =
-                            match serde_json::from_slice(&current_bytes) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return self.response_error(
-                                        task,
-                                        ErrorCode::Internal {
-                                            detail: format!(
-                                                "failed to parse document for update: {e}"
-                                            ),
-                                        },
-                                    );
-                                }
-                            };
-
-                        // Apply field updates.
-                        if let Some(obj) = doc.as_object_mut() {
-                            for (field, value_bytes) in updates {
-                                let val: serde_json::Value =
-                                    match serde_json::from_slice(value_bytes) {
-                                        Ok(v) => v,
-                                        Err(_) => serde_json::Value::String(
-                                            String::from_utf8_lossy(value_bytes).into_owned(),
-                                        ),
-                                    };
-                                obj.insert(field.clone(), val);
-                            }
-                        }
-
-                        // Write back.
-                        match serde_json::to_vec(&doc) {
-                            Ok(updated_bytes) => {
-                                match self
-                                    .sparse
-                                    .put(tid, collection, document_id, &updated_bytes)
-                                {
-                                    Ok(()) => self.response_ok(task),
-                                    Err(e) => self.response_error(
-                                        task,
-                                        ErrorCode::Internal {
-                                            detail: e.to_string(),
-                                        },
-                                    ),
-                                }
-                            }
-                            Err(e) => self.response_error(
-                                task,
-                                ErrorCode::Internal {
-                                    detail: format!("failed to serialize updated document: {e}"),
-                                },
-                            ),
-                        }
-                    }
-                    Ok(None) => self.response_error(task, ErrorCode::NotFound),
-                    Err(e) => self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    ),
-                }
-            }
+            } => self.execute_point_update(task, tid, collection, document_id, updates),
 
             PhysicalPlan::DocumentScan {
                 collection,
@@ -388,6 +321,16 @@ impl CoreLoop {
                         },
                     ),
                 }
+            }
+
+            PhysicalPlan::Aggregate {
+                collection,
+                group_by,
+                aggregates,
+                filters,
+                limit,
+            } => {
+                self.execute_aggregate(task, tid, collection, group_by, aggregates, filters, *limit)
             }
 
             PhysicalPlan::EdgePut {
