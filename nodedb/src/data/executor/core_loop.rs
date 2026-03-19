@@ -364,7 +364,7 @@ mod tests {
         let (mut core, mut req_tx, mut resp_rx) = make_core();
 
         // Insert data directly via the sparse engine.
-        core.sparse.put("users", "u1", b"alice-data").unwrap();
+        core.sparse.put(1, "users", "u1", b"alice-data").unwrap();
 
         req_tx
             .try_push(BridgeRequest {
@@ -385,8 +385,12 @@ mod tests {
     fn range_scan_returns_json() {
         let (mut core, mut req_tx, mut resp_rx) = make_core();
 
-        core.sparse.index_put("users", "age", "025", "u1").unwrap();
-        core.sparse.index_put("users", "age", "030", "u2").unwrap();
+        core.sparse
+            .index_put(1, "users", "age", "025", "u1")
+            .unwrap();
+        core.sparse
+            .index_put(1, "users", "age", "030", "u2")
+            .unwrap();
 
         req_tx
             .try_push(BridgeRequest {
@@ -446,7 +450,7 @@ mod tests {
     fn watermark_in_response() {
         let (mut core, mut req_tx, mut resp_rx) = make_core();
         core.advance_watermark(Lsn::new(99));
-        core.sparse.put("x", "y", b"data").unwrap();
+        core.sparse.put(1, "x", "y", b"data").unwrap();
 
         req_tx
             .try_push(BridgeRequest {
@@ -832,7 +836,7 @@ mod tests {
     fn point_delete_removes() {
         let (mut core, mut req_tx, mut resp_rx) = make_core();
 
-        core.sparse.put("docs", "d1", b"data").unwrap();
+        core.sparse.put(1, "docs", "d1", b"data").unwrap();
 
         req_tx
             .try_push(BridgeRequest {

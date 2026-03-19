@@ -26,13 +26,14 @@ impl CoreLoop {
 
     /// Execute a physical plan. Dispatches to the appropriate engine.
     pub(super) fn execute(&mut self, task: &ExecutionTask) -> Response {
+        let tid = task.request.tenant_id.as_u32();
         match task.plan() {
             PhysicalPlan::PointGet {
                 collection,
                 document_id,
             } => {
                 debug!(core = self.core_id, %collection, %document_id, "point get");
-                match self.sparse.get(collection, document_id) {
+                match self.sparse.get(tid, collection, document_id) {
                     Ok(Some(data)) => self.response_with_payload(task, data),
                     Ok(None) => self.response_error(task, ErrorCode::NotFound),
                     Err(e) => {
@@ -94,6 +95,7 @@ impl CoreLoop {
             } => {
                 debug!(core = self.core_id, %collection, %field, limit, "range scan");
                 match self.sparse.range_scan(
+                    tid,
                     collection,
                     field,
                     lower.as_deref(),
@@ -196,7 +198,7 @@ impl CoreLoop {
                 value,
             } => {
                 debug!(core = self.core_id, %collection, %document_id, "point put");
-                match self.sparse.put(collection, document_id, value) {
+                match self.sparse.put(tid, collection, document_id, value) {
                     Ok(()) => self.response_ok(task),
                     Err(e) => self.response_error(
                         task,
@@ -212,7 +214,7 @@ impl CoreLoop {
                 document_id,
             } => {
                 debug!(core = self.core_id, %collection, %document_id, "point delete");
-                match self.sparse.delete(collection, document_id) {
+                match self.sparse.delete(tid, collection, document_id) {
                     Ok(_) => self.response_ok(task),
                     Err(e) => self.response_error(
                         task,

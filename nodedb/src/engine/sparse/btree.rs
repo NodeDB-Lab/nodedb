@@ -5,11 +5,11 @@ use redb::{Database, TableDefinition};
 use tracing::{debug, info};
 
 /// Table definition for the primary document store.
-/// Key: "{collection}:{document_id}" → Value: document bytes.
+/// Key: "{tenant_id}:{collection}:{document_id}" → Value: document bytes.
 const DOCUMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("documents");
 
 /// Table definition for secondary indexes.
-/// Key: "{collection}:{field}:{value}:{document_id}" → Value: empty (existence index).
+/// Key: "{tenant_id}:{collection}:{field}:{value}:{document_id}" → Value: empty (existence index).
 const INDEXES: TableDefinition<&str, &[u8]> = TableDefinition::new("indexes");
 
 /// Map a redb error into our crate error with context.
@@ -27,11 +27,15 @@ std::thread_local! {
     static KEY_BUF: std::cell::RefCell<String> = std::cell::RefCell::new(String::with_capacity(256));
 }
 
-/// Build a composite key `"{a}:{b}"` using thread-local buffer, call `f` with the result.
-fn with_key2<R>(a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
+/// Build a tenant-scoped composite key `"{tenant}:{a}:{b}"` using thread-local buffer.
+fn with_tenant_key<R>(tenant_id: u32, a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
     KEY_BUF.with(|buf| {
         let mut buf = buf.borrow_mut();
         buf.clear();
+        // Use itoa-style formatting to avoid heap allocation for the u32.
+        use std::fmt::Write;
+        let _ = write!(buf, "{tenant_id}");
+        buf.push(':');
         buf.push_str(a);
         buf.push(':');
         buf.push_str(b);
@@ -39,11 +43,21 @@ fn with_key2<R>(a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
     })
 }
 
-/// Build a composite key `"{a}:{b}:{c}:{d}"` using thread-local buffer, call `f` with the result.
-fn with_key4<R>(a: &str, b: &str, c: &str, d: &str, f: impl FnOnce(&str) -> R) -> R {
+/// Build a tenant-scoped index key `"{tenant}:{a}:{b}:{c}:{d}"`.
+fn with_tenant_key4<R>(
+    tenant_id: u32,
+    a: &str,
+    b: &str,
+    c: &str,
+    d: &str,
+    f: impl FnOnce(&str) -> R,
+) -> R {
     KEY_BUF.with(|buf| {
         let mut buf = buf.borrow_mut();
         buf.clear();
+        use std::fmt::Write;
+        let _ = write!(buf, "{tenant_id}");
+        buf.push(':');
         buf.push_str(a);
         buf.push(':');
         buf.push_str(b);
@@ -93,9 +107,15 @@ impl SparseEngine {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Insert or update a document.
-    pub fn put(&self, collection: &str, document_id: &str, value: &[u8]) -> crate::Result<()> {
-        with_key2(collection, document_id, |key| {
+    /// Insert or update a document (tenant-scoped).
+    pub fn put(
+        &self,
+        tenant_id: u32,
+        collection: &str,
+        document_id: &str,
+        value: &[u8],
+    ) -> crate::Result<()> {
+        with_tenant_key(tenant_id, collection, document_id, |key| {
             let write_txn = self
                 .db
                 .begin_write()
@@ -115,9 +135,14 @@ impl SparseEngine {
         })
     }
 
-    /// Point lookup: retrieve a document by collection + document_id.
-    pub fn get(&self, collection: &str, document_id: &str) -> crate::Result<Option<Vec<u8>>> {
-        with_key2(collection, document_id, |key| {
+    /// Point lookup: retrieve a document by collection + document_id (tenant-scoped).
+    pub fn get(
+        &self,
+        tenant_id: u32,
+        collection: &str,
+        document_id: &str,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        with_tenant_key(tenant_id, collection, document_id, |key| {
             let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
             let table = read_txn
                 .open_table(DOCUMENTS)
@@ -131,9 +156,14 @@ impl SparseEngine {
         })
     }
 
-    /// Delete a document.
-    pub fn delete(&self, collection: &str, document_id: &str) -> crate::Result<bool> {
-        with_key2(collection, document_id, |key| {
+    /// Delete a document (tenant-scoped).
+    pub fn delete(
+        &self,
+        tenant_id: u32,
+        collection: &str,
+        document_id: &str,
+    ) -> crate::Result<bool> {
+        with_tenant_key(tenant_id, collection, document_id, |key| {
             let write_txn = self
                 .db
                 .begin_write()
@@ -159,13 +189,14 @@ impl SparseEngine {
     /// The `field` parameter scopes the scan prefix. Returns up to `limit` results.
     pub fn range_scan(
         &self,
+        tenant_id: u32,
         collection: &str,
         field: &str,
         lower: Option<&[u8]>,
         upper: Option<&[u8]>,
         limit: usize,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
-        let prefix = format!("{collection}:{field}:");
+        let prefix = format!("{tenant_id}:{collection}:{field}:");
 
         let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let table = read_txn
@@ -205,15 +236,16 @@ impl SparseEngine {
         Ok(results)
     }
 
-    /// Insert a secondary index entry for range scan support.
+    /// Insert a secondary index entry for range scan support (tenant-scoped).
     pub fn index_put(
         &self,
+        tenant_id: u32,
         collection: &str,
         field: &str,
         value: &str,
         document_id: &str,
     ) -> crate::Result<()> {
-        with_key4(collection, field, value, document_id, |key| {
+        with_tenant_key4(tenant_id, collection, field, value, document_id, |key| {
             let write_txn = self
                 .db
                 .begin_write()
@@ -326,33 +358,39 @@ mod tests {
     fn put_and_get() {
         let (engine, _dir) = open_temp();
 
-        engine.put("users", "u1", b"alice").unwrap();
-        engine.put("users", "u2", b"bob").unwrap();
+        engine.put(1, "users", "u1", b"alice").unwrap();
+        engine.put(1, "users", "u2", b"bob").unwrap();
 
-        assert_eq!(engine.get("users", "u1").unwrap(), Some(b"alice".to_vec()));
-        assert_eq!(engine.get("users", "u2").unwrap(), Some(b"bob".to_vec()));
-        assert_eq!(engine.get("users", "u3").unwrap(), None);
+        assert_eq!(
+            engine.get(1, "users", "u1").unwrap(),
+            Some(b"alice".to_vec())
+        );
+        assert_eq!(engine.get(1, "users", "u2").unwrap(), Some(b"bob".to_vec()));
+        assert_eq!(engine.get(1, "users", "u3").unwrap(), None);
     }
 
     #[test]
     fn put_overwrites() {
         let (engine, _dir) = open_temp();
 
-        engine.put("users", "u1", b"alice").unwrap();
-        engine.put("users", "u1", b"ALICE").unwrap();
+        engine.put(1, "users", "u1", b"alice").unwrap();
+        engine.put(1, "users", "u1", b"ALICE").unwrap();
 
-        assert_eq!(engine.get("users", "u1").unwrap(), Some(b"ALICE".to_vec()));
+        assert_eq!(
+            engine.get(1, "users", "u1").unwrap(),
+            Some(b"ALICE".to_vec())
+        );
     }
 
     #[test]
     fn delete_removes() {
         let (engine, _dir) = open_temp();
 
-        engine.put("users", "u1", b"alice").unwrap();
-        assert!(engine.delete("users", "u1").unwrap());
-        assert_eq!(engine.get("users", "u1").unwrap(), None);
+        engine.put(1, "users", "u1", b"alice").unwrap();
+        assert!(engine.delete(1, "users", "u1").unwrap());
+        assert_eq!(engine.get(1, "users", "u1").unwrap(), None);
         // Double delete returns false.
-        assert!(!engine.delete("users", "u1").unwrap());
+        assert!(!engine.delete(1, "users", "u1").unwrap());
     }
 
     #[test]
@@ -360,14 +398,14 @@ mod tests {
         let (engine, _dir) = open_temp();
 
         // Insert index entries: users by age.
-        engine.index_put("users", "age", "025", "u1").unwrap();
-        engine.index_put("users", "age", "030", "u2").unwrap();
-        engine.index_put("users", "age", "035", "u3").unwrap();
-        engine.index_put("users", "age", "040", "u4").unwrap();
+        engine.index_put(1, "users", "age", "025", "u1").unwrap();
+        engine.index_put(1, "users", "age", "030", "u2").unwrap();
+        engine.index_put(1, "users", "age", "035", "u3").unwrap();
+        engine.index_put(1, "users", "age", "040", "u4").unwrap();
 
         // Scan age [025, 036).
         let results = engine
-            .range_scan("users", "age", Some(b"025"), Some(b"036"), 10)
+            .range_scan(1, "users", "age", Some(b"025"), Some(b"036"), 10)
             .unwrap();
         assert_eq!(results.len(), 3);
         assert!(results[0].0.contains("025"));
@@ -380,11 +418,11 @@ mod tests {
 
         for i in 0..20 {
             engine
-                .index_put("logs", "ts", &format!("{i:04}"), &format!("doc{i}"))
+                .index_put(1, "logs", "ts", &format!("{i:04}"), &format!("doc{i}"))
                 .unwrap();
         }
 
-        let results = engine.range_scan("logs", "ts", None, None, 5).unwrap();
+        let results = engine.range_scan(1, "logs", "ts", None, None, 5).unwrap();
         assert_eq!(results.len(), 5);
     }
 
@@ -392,12 +430,15 @@ mod tests {
     fn collections_are_isolated() {
         let (engine, _dir) = open_temp();
 
-        engine.put("users", "u1", b"alice").unwrap();
-        engine.put("orders", "u1", b"order-1").unwrap();
+        engine.put(1, "users", "u1", b"alice").unwrap();
+        engine.put(1, "orders", "u1", b"order-1").unwrap();
 
-        assert_eq!(engine.get("users", "u1").unwrap(), Some(b"alice".to_vec()));
         assert_eq!(
-            engine.get("orders", "u1").unwrap(),
+            engine.get(1, "users", "u1").unwrap(),
+            Some(b"alice".to_vec())
+        );
+        assert_eq!(
+            engine.get(1, "orders", "u1").unwrap(),
             Some(b"order-1".to_vec())
         );
     }

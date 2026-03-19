@@ -60,13 +60,15 @@ impl CollectionConfig {
 /// and stored in redb B-Trees as `(collection, path, value) -> doc_id`.
 pub struct DocumentEngine<'a> {
     sparse: &'a SparseEngine,
+    tenant_id: u32,
     configs: std::collections::HashMap<String, CollectionConfig>,
 }
 
 impl<'a> DocumentEngine<'a> {
-    pub fn new(sparse: &'a SparseEngine) -> Self {
+    pub fn new(sparse: &'a SparseEngine, tenant_id: u32) -> Self {
         Self {
             sparse,
+            tenant_id,
             configs: std::collections::HashMap::new(),
         }
     }
@@ -95,15 +97,20 @@ impl<'a> DocumentEngine<'a> {
         })?;
 
         // Store the document blob.
-        self.sparse.put(collection, doc_id, &buf)?;
+        self.sparse.put(self.tenant_id, collection, doc_id, &buf)?;
 
         // Extract and write secondary indexes.
         if let Some(config) = self.configs.get(collection) {
             for index_path in &config.index_paths {
                 let values = extract_index_values(document, &index_path.path, index_path.is_array);
                 for value in values {
-                    self.sparse
-                        .index_put(collection, &index_path.path, &value, doc_id)?;
+                    self.sparse.index_put(
+                        self.tenant_id,
+                        collection,
+                        &index_path.path,
+                        &value,
+                        doc_id,
+                    )?;
                 }
             }
         }
@@ -120,7 +127,8 @@ impl<'a> DocumentEngine<'a> {
         doc_id: &str,
         msgpack_bytes: &[u8],
     ) -> crate::Result<()> {
-        self.sparse.put(collection, doc_id, msgpack_bytes)?;
+        self.sparse
+            .put(self.tenant_id, collection, doc_id, msgpack_bytes)?;
 
         // Extract indexes from the MessagePack blob.
         if let Some(config) = self.configs.get(collection) {
@@ -129,8 +137,13 @@ impl<'a> DocumentEngine<'a> {
                     let values =
                         extract_index_values_rmpv(&value, &index_path.path, index_path.is_array);
                     for v in values {
-                        self.sparse
-                            .index_put(collection, &index_path.path, &v, doc_id)?;
+                        self.sparse.index_put(
+                            self.tenant_id,
+                            collection,
+                            &index_path.path,
+                            &v,
+                            doc_id,
+                        )?;
                     }
                 }
             }
@@ -141,7 +154,7 @@ impl<'a> DocumentEngine<'a> {
 
     /// Get a document and deserialize from MessagePack to JSON.
     pub fn get(&self, collection: &str, doc_id: &str) -> crate::Result<Option<serde_json::Value>> {
-        match self.sparse.get(collection, doc_id)? {
+        match self.sparse.get(self.tenant_id, collection, doc_id)? {
             Some(bytes) => {
                 let rmpv_val = rmpv::decode::read_value(&mut bytes.as_slice()).map_err(|e| {
                     crate::Error::Serialization {
@@ -157,14 +170,14 @@ impl<'a> DocumentEngine<'a> {
 
     /// Get raw MessagePack bytes (zero-copy path for DataFusion UDFs).
     pub fn get_raw(&self, collection: &str, doc_id: &str) -> crate::Result<Option<Vec<u8>>> {
-        self.sparse.get(collection, doc_id)
+        self.sparse.get(self.tenant_id, collection, doc_id)
     }
 
     /// Delete a document and its secondary index entries.
     pub fn delete(&self, collection: &str, doc_id: &str) -> crate::Result<bool> {
         // TODO: When we add index_delete to SparseEngine, clean up index entries.
         // For now, stale index entries are harmless — lookups verify the doc still exists.
-        self.sparse.delete(collection, doc_id)
+        self.sparse.delete(self.tenant_id, collection, doc_id)
     }
 
     /// Lookup documents by a secondary index value.
@@ -178,6 +191,7 @@ impl<'a> DocumentEngine<'a> {
     ) -> crate::Result<Vec<String>> {
         let prefix_with_value = format!("{value}:");
         let results = self.sparse.range_scan(
+            self.tenant_id,
             collection,
             path,
             Some(prefix_with_value.as_bytes()),
@@ -187,11 +201,11 @@ impl<'a> DocumentEngine<'a> {
 
         let mut doc_ids = Vec::new();
         for (key, _) in results {
-            // Key format: "collection:path:value:doc_id"
+            // Key format: "{tenant_id}:{collection}:{path}:{value}:{doc_id}"
             // After range_scan, we get the full key; extract doc_id.
             if let Some(doc_id) = key.rsplit(':').next() {
                 // Verify the value portion matches exactly (not just prefix).
-                let expected_prefix = format!("{collection}:{path}:{value}:");
+                let expected_prefix = format!("{}:{collection}:{path}:{value}:", self.tenant_id);
                 if key.starts_with(&expected_prefix) {
                     doc_ids.push(doc_id.to_string());
                 }
@@ -392,7 +406,7 @@ mod tests {
     #[test]
     fn put_and_get_document() {
         let (sparse, _dir) = make_engine();
-        let doc_engine = DocumentEngine::new(&sparse);
+        let doc_engine = DocumentEngine::new(&sparse, 1);
 
         let doc = serde_json::json!({
             "name": "Alice",
@@ -411,14 +425,14 @@ mod tests {
     #[test]
     fn get_nonexistent_returns_none() {
         let (sparse, _dir) = make_engine();
-        let doc_engine = DocumentEngine::new(&sparse);
+        let doc_engine = DocumentEngine::new(&sparse, 1);
         assert!(doc_engine.get("users", "missing").unwrap().is_none());
     }
 
     #[test]
     fn delete_document() {
         let (sparse, _dir) = make_engine();
-        let doc_engine = DocumentEngine::new(&sparse);
+        let doc_engine = DocumentEngine::new(&sparse, 1);
 
         let doc = serde_json::json!({"name": "Bob"});
         doc_engine.put("users", "u1", &doc).unwrap();
@@ -429,7 +443,7 @@ mod tests {
     #[test]
     fn overwrite_document() {
         let (sparse, _dir) = make_engine();
-        let doc_engine = DocumentEngine::new(&sparse);
+        let doc_engine = DocumentEngine::new(&sparse, 1);
 
         doc_engine
             .put("users", "u1", &serde_json::json!({"v": 1}))
@@ -445,7 +459,7 @@ mod tests {
     #[test]
     fn secondary_index_extraction() {
         let (sparse, _dir) = make_engine();
-        let mut doc_engine = DocumentEngine::new(&sparse);
+        let mut doc_engine = DocumentEngine::new(&sparse, 1);
 
         doc_engine.register_collection(CollectionConfig::new("users").with_index("$.email"));
 
@@ -474,7 +488,7 @@ mod tests {
     #[test]
     fn array_index_extraction() {
         let (sparse, _dir) = make_engine();
-        let mut doc_engine = DocumentEngine::new(&sparse);
+        let mut doc_engine = DocumentEngine::new(&sparse, 1);
 
         doc_engine.register_collection(CollectionConfig::new("users").with_index("$.tags[]"));
 
@@ -498,7 +512,7 @@ mod tests {
     #[test]
     fn nested_field_index() {
         let (sparse, _dir) = make_engine();
-        let mut doc_engine = DocumentEngine::new(&sparse);
+        let mut doc_engine = DocumentEngine::new(&sparse, 1);
 
         doc_engine.register_collection(CollectionConfig::new("docs").with_index("$.metadata.lang"));
 
@@ -519,7 +533,7 @@ mod tests {
     #[test]
     fn raw_msgpack_roundtrip() {
         let (sparse, _dir) = make_engine();
-        let doc_engine = DocumentEngine::new(&sparse);
+        let doc_engine = DocumentEngine::new(&sparse, 1);
 
         let doc = serde_json::json!({"key": "value", "num": 42});
         let rmpv_val = json_to_msgpack(&doc);
@@ -562,7 +576,7 @@ mod tests {
     #[test]
     fn collections_are_isolated() {
         let (sparse, _dir) = make_engine();
-        let doc_engine = DocumentEngine::new(&sparse);
+        let doc_engine = DocumentEngine::new(&sparse, 1);
 
         doc_engine
             .put("users", "id1", &serde_json::json!({"type": "user"}))
@@ -580,7 +594,7 @@ mod tests {
     #[test]
     fn put_raw_with_index_extraction() {
         let (sparse, _dir) = make_engine();
-        let mut doc_engine = DocumentEngine::new(&sparse);
+        let mut doc_engine = DocumentEngine::new(&sparse, 1);
 
         doc_engine.register_collection(CollectionConfig::new("items").with_index("$.category"));
 
