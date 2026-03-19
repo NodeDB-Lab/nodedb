@@ -1,3 +1,4 @@
+pub mod http;
 pub mod listener;
 pub mod pgwire;
 pub mod session;

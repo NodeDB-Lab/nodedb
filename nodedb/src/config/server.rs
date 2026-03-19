@@ -13,6 +13,10 @@ pub struct ServerConfig {
     /// Defaults to 127.0.0.1:5432.
     pub pg_listen: SocketAddr,
 
+    /// Address to bind the HTTP API (health, metrics, REST).
+    /// Defaults to 127.0.0.1:8080.
+    pub http_listen: SocketAddr,
+
     /// Data directory for WAL, segments, and indexes.
     pub data_dir: PathBuf,
 
@@ -65,6 +69,7 @@ impl Default for ServerConfig {
         Self {
             listen: SocketAddr::from(([127, 0, 0, 1], 5433)),
             pg_listen: SocketAddr::from(([127, 0, 0, 1], 5432)),
+            http_listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
             data_dir: default_data_dir(),
             data_plane_cores: cores,
             memory_limit: 1024 * 1024 * 1024, // 1 GiB default

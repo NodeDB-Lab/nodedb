@@ -202,6 +202,24 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Run HTTP API server.
+    let shared_http = Arc::clone(&shared);
+    let http_auth_mode = config.auth.mode.clone();
+    let http_listen = config.http_listen;
+    let shutdown_rx_http = shutdown_rx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = nodedb::control::server::http::server::run(
+            http_listen,
+            shared_http,
+            http_auth_mode,
+            shutdown_rx_http,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "HTTP API server failed");
+        }
+    });
+
     // Run native listener on main task.
     let native_auth_mode = config.auth.mode.clone();
     listener.run(shared, native_auth_mode, shutdown_rx).await?;

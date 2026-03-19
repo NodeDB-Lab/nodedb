@@ -15,6 +15,42 @@ use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, Role
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
+/// Verify an API key token and build an authenticated identity.
+///
+/// Shared by native protocol and HTTP API authentication paths.
+/// Returns `None` if the token is invalid or the owner user is not found.
+pub fn verify_api_key_identity(
+    state: &SharedState,
+    token: &str,
+    peer_addr: &str,
+    protocol: &str,
+) -> Option<AuthenticatedIdentity> {
+    let key_record = state.api_keys.verify_key(token)?;
+
+    let user = state.credentials.get_user(&key_record.username)?;
+
+    let identity = AuthenticatedIdentity {
+        user_id: key_record.user_id,
+        username: key_record.username.clone(),
+        tenant_id: key_record.tenant_id,
+        auth_method: AuthMethod::ApiKey,
+        roles: user.roles,
+        is_superuser: user.is_superuser,
+    };
+
+    state.audit_record(
+        AuditEvent::AuthSuccess,
+        Some(identity.tenant_id),
+        peer_addr,
+        &format!(
+            "{protocol} api_key auth: {} (key {})",
+            identity.username, key_record.key_id
+        ),
+    );
+
+    Some(identity)
+}
+
 /// Build a default trust-mode identity for a given username.
 ///
 /// Used by both explicit auth requests and auto-auth on first frame.
@@ -127,47 +163,18 @@ pub fn authenticate(
                     detail: "missing 'token' for api_key auth".into(),
                 })?;
 
-            let key_record = state.api_keys.verify_key(token).ok_or_else(|| {
+            verify_api_key_identity(state, token, peer_addr, "native").ok_or_else(|| {
                 state.audit_record(
                     AuditEvent::AuthFailure,
                     None,
                     peer_addr,
-                    "native api_key auth failed: invalid token",
+                    "native api_key auth failed: invalid token or owner not found",
                 );
                 crate::Error::RejectedAuthz {
                     tenant_id: TenantId::new(0),
                     resource: "invalid API key".into(),
                 }
-            })?;
-
-            // Look up the user to get current roles.
-            let user = state
-                .credentials
-                .get_user(&key_record.username)
-                .ok_or_else(|| crate::Error::BadRequest {
-                    detail: format!("API key owner '{}' not found", key_record.username),
-                })?;
-
-            let identity = AuthenticatedIdentity {
-                user_id: key_record.user_id,
-                username: key_record.username.clone(),
-                tenant_id: key_record.tenant_id,
-                auth_method: AuthMethod::ApiKey,
-                roles: user.roles,
-                is_superuser: user.is_superuser,
-            };
-
-            state.audit_record(
-                AuditEvent::AuthSuccess,
-                Some(identity.tenant_id),
-                peer_addr,
-                &format!(
-                    "native api_key auth: {} (key {})",
-                    identity.username, key_record.key_id
-                ),
-            );
-
-            Ok(identity)
+            })
         }
 
         other => Err(crate::Error::BadRequest {

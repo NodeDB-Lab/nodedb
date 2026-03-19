@@ -98,6 +98,11 @@ argon2 = "0.5"
 # Encryption at rest
 aes-gcm = "0.10"
 
+# HTTP API
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
 # TLS
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 rustls-pemfile = "2"

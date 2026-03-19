@@ -59,6 +59,9 @@ pgwire = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 
+# HTTP API
+axum = { workspace = true }
+
 # Compression
 zstd = { workspace = true }
 
