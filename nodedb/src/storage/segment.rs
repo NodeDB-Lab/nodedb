@@ -115,6 +115,73 @@ impl SegmentFooter {
     }
 }
 
+/// Write a segment file with optional encryption.
+///
+/// Layout: [encrypted_data | footer(58B plaintext)]
+/// If `key` is provided, data is AES-256-GCM encrypted with the footer's
+/// min_lsn as the nonce (deterministic, unique per segment).
+pub fn write_encrypted_segment(
+    path: &Path,
+    data: &[u8],
+    footer: &SegmentFooter,
+    key: Option<&nodedb_wal::crypto::WalEncryptionKey>,
+) -> crate::Result<()> {
+    let final_data = if let Some(key) = key {
+        let mut aad = [0u8; nodedb_wal::record::HEADER_SIZE];
+        aad[..4].copy_from_slice(b"SEGM");
+        key.encrypt(footer.min_lsn.as_u64(), &aad, data)
+            .map_err(|e| crate::Error::Storage {
+                engine: "segment".into(),
+                detail: format!("segment encryption failed: {e}"),
+            })?
+    } else {
+        data.to_vec()
+    };
+
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(&final_data)?;
+    file.write_all(&footer.to_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
+/// Read and decrypt a segment file's data portion.
+///
+/// Returns the plaintext data (footer is stripped and validated separately).
+pub fn read_encrypted_segment(
+    path: &Path,
+    key: Option<&nodedb_wal::crypto::WalEncryptionKey>,
+) -> crate::Result<Vec<u8>> {
+    let raw = std::fs::read(path)?;
+    if raw.len() < FOOTER_SIZE {
+        return Err(crate::Error::SegmentCorrupted {
+            detail: "file too small".into(),
+        });
+    }
+
+    let data = &raw[..raw.len() - FOOTER_SIZE];
+    let footer_bytes: [u8; FOOTER_SIZE] =
+        raw[raw.len() - FOOTER_SIZE..]
+            .try_into()
+            .map_err(|_| crate::Error::SegmentCorrupted {
+                detail: "footer size mismatch".into(),
+            })?;
+
+    let footer = SegmentFooter::from_bytes(&footer_bytes)?;
+
+    if let Some(key) = key {
+        let mut aad = [0u8; nodedb_wal::record::HEADER_SIZE];
+        aad[..4].copy_from_slice(b"SEGM");
+        key.decrypt(footer.min_lsn.as_u64(), &aad, data)
+            .map_err(|e| crate::Error::Storage {
+                engine: "segment".into(),
+                detail: format!("segment decryption failed: {e}"),
+            })
+    } else {
+        Ok(data.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
