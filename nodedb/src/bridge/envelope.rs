@@ -127,6 +127,36 @@ pub enum PhysicalPlan {
         document_id: String,
     },
 
+    /// Point update: read-modify-write a document with field-level changes.
+    ///
+    /// Reads the current document, merges the field updates, writes back.
+    /// This is the UPDATE ... SET ... WHERE id = '...' path.
+    PointUpdate {
+        collection: String,
+        document_id: String,
+        /// Field name → new JSON value.
+        updates: Vec<(String, Vec<u8>)>,
+    },
+
+    /// Full collection scan: reads from DOCUMENTS table with post-scan
+    /// filtering, sorting, and pagination. Used for SELECT with compound
+    /// WHERE predicates.
+    DocumentScan {
+        collection: String,
+        /// Maximum documents to return (after filtering).
+        limit: usize,
+        /// Documents to skip before returning (OFFSET).
+        offset: usize,
+        /// Sort field (empty = no sort, return in storage order).
+        sort_field: String,
+        /// Sort direction: true = ascending, false = descending.
+        sort_asc: bool,
+        /// Filter predicates serialized as JSON:
+        /// `[{"field": "age", "op": "gt", "value": 25}, {"field": "city", "op": "eq", "value": "NYC"}]`
+        /// Empty = no filter (return all documents up to limit).
+        filters: Vec<u8>,
+    },
+
     /// Insert a graph edge with properties.
     EdgePut {
         src_id: String,

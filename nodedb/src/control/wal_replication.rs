@@ -46,6 +46,11 @@ pub enum ReplicatedWrite {
         collection: String,
         document_id: String,
     },
+    PointUpdate {
+        collection: String,
+        document_id: String,
+        updates: Vec<(String, Vec<u8>)>,
+    },
     VectorInsert {
         collection: String,
         vector: Vec<f32>,
@@ -114,6 +119,15 @@ pub fn to_replicated_entry(
         } => ReplicatedWrite::PointDelete {
             collection: collection.clone(),
             document_id: document_id.clone(),
+        },
+        PhysicalPlan::PointUpdate {
+            collection,
+            document_id,
+            updates,
+        } => ReplicatedWrite::PointUpdate {
+            collection: collection.clone(),
+            document_id: document_id.clone(),
+            updates: updates.clone(),
         },
         PhysicalPlan::VectorInsert {
             collection,
@@ -184,6 +198,15 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
         } => PhysicalPlan::PointDelete {
             collection: collection.clone(),
             document_id: document_id.clone(),
+        },
+        ReplicatedWrite::PointUpdate {
+            collection,
+            document_id,
+            updates,
+        } => PhysicalPlan::PointUpdate {
+            collection: collection.clone(),
+            document_id: document_id.clone(),
+            updates: updates.clone(),
         },
         ReplicatedWrite::VectorInsert {
             collection,

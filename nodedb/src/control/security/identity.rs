@@ -157,13 +157,15 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         | PhysicalPlan::GraphNeighbors { .. }
         | PhysicalPlan::GraphPath { .. }
         | PhysicalPlan::GraphSubgraph { .. }
-        | PhysicalPlan::GraphRagFusion { .. } => Permission::Read,
+        | PhysicalPlan::GraphRagFusion { .. }
+        | PhysicalPlan::DocumentScan { .. } => Permission::Read,
 
         // Write operations.
         PhysicalPlan::CrdtApply { .. }
         | PhysicalPlan::VectorInsert { .. }
         | PhysicalPlan::PointPut { .. }
         | PhysicalPlan::PointDelete { .. }
+        | PhysicalPlan::PointUpdate { .. }
         | PhysicalPlan::EdgePut { .. }
         | PhysicalPlan::EdgeDelete { .. }
         | PhysicalPlan::WalAppend { .. } => Permission::Write,
