@@ -56,8 +56,60 @@ const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 ///   "error_code": null | "deadline_exceeded" | ...
 /// }
 /// ```
+/// A connection stream — either plain TCP or TLS-wrapped.
+enum ConnStream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+}
+
+impl tokio::io::AsyncRead for ConnStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            ConnStream::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ConnStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            ConnStream::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            ConnStream::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            ConnStream::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
 pub struct Session {
-    stream: TcpStream,
+    stream: ConnStream,
     peer_addr: SocketAddr,
     next_request_id: AtomicU64,
     state: Arc<SharedState>,
@@ -67,6 +119,7 @@ pub struct Session {
 }
 
 impl Session {
+    /// Create a session from a plain TCP stream.
     pub fn new(
         stream: TcpStream,
         peer_addr: SocketAddr,
@@ -74,7 +127,24 @@ impl Session {
         auth_mode: crate::config::auth::AuthMode,
     ) -> Self {
         Self {
-            stream,
+            stream: ConnStream::Plain(stream),
+            peer_addr,
+            next_request_id: AtomicU64::new(1),
+            state,
+            auth_mode,
+            identity: None,
+        }
+    }
+
+    /// Create a session from a TLS-wrapped stream.
+    pub fn new_tls(
+        stream: tokio_rustls::server::TlsStream<TcpStream>,
+        peer_addr: SocketAddr,
+        state: Arc<SharedState>,
+        auth_mode: crate::config::auth::AuthMode,
+    ) -> Self {
+        Self {
+            stream: ConnStream::Tls(Box::new(stream)),
             peer_addr,
             next_request_id: AtomicU64::new(1),
             state,
@@ -95,7 +165,7 @@ impl Session {
         loop {
             // Read length prefix with idle timeout.
             let mut len_buf = [0u8; 4];
-            let read_result = if idle_timeout_secs > 0 {
+            let read_result: std::io::Result<usize> = if idle_timeout_secs > 0 {
                 match tokio::time::timeout(
                     Duration::from_secs(idle_timeout_secs),
                     self.stream.read_exact(&mut len_buf),

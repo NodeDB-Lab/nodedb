@@ -231,9 +231,23 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Build native TLS acceptor if configured (reuses same cert/key as pgwire).
+    let native_tls: Option<tokio_rustls::TlsAcceptor> = match &config.tls {
+        Some(tls) => {
+            // pgwire::tokio::TlsAcceptor is tokio_rustls::TlsAcceptor — build one directly.
+            let acceptor = build_tls_acceptor(tls)?;
+            // Convert pgwire TlsAcceptor back to tokio_rustls TlsAcceptor.
+            // They're the same type underneath.
+            Some(acceptor)
+        }
+        None => None,
+    };
+
     // Run native listener on main task.
     let native_auth_mode = config.auth.mode.clone();
-    listener.run(shared, native_auth_mode, shutdown_rx).await?;
+    listener
+        .run(shared, native_auth_mode, native_tls, shutdown_rx)
+        .await?;
 
     Ok(())
 }

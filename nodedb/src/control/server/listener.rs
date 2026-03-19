@@ -33,30 +33,56 @@ impl Listener {
         self.addr
     }
 
-    /// Run the accept loop. Spawns a Tokio task per connection.
+    /// Run the accept loop, spawning a Tokio task per connection.
     ///
     /// Each session receives a reference to the shared state for dispatching
     /// requests to the Data Plane and accessing the WAL.
+    /// Supports optional TLS if a `tls_acceptor` is provided.
     pub async fn run(
         self,
         state: Arc<SharedState>,
         auth_mode: crate::config::auth::AuthMode,
+        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> crate::Result<()> {
-        info!(addr = %self.addr, "accepting connections");
+        let tls_label = if tls_acceptor.is_some() {
+            "tls"
+        } else {
+            "plain"
+        };
+        info!(addr = %self.addr, tls = tls_label, "accepting native connections");
 
         loop {
             tokio::select! {
                 result = self.tcp.accept() => {
                     match result {
                         Ok((stream, peer_addr)) => {
-                            info!(%peer_addr, "new client connection");
-                            let session = Session::new(stream, peer_addr, Arc::clone(&state), auth_mode.clone());
-                            tokio::spawn(async move {
-                                if let Err(e) = session.run().await {
-                                    warn!(%peer_addr, error = %e, "session terminated with error");
-                                }
-                            });
+                            info!(%peer_addr, "new native connection");
+                            let state_clone = Arc::clone(&state);
+                            let mode = auth_mode.clone();
+                            if let Some(ref acceptor) = tls_acceptor {
+                                let acceptor = acceptor.clone();
+                                tokio::spawn(async move {
+                                    match acceptor.accept(stream).await {
+                                        Ok(tls_stream) => {
+                                            let session = Session::new_tls(tls_stream, peer_addr, state_clone, mode);
+                                            if let Err(e) = session.run().await {
+                                                warn!(%peer_addr, error = %e, "TLS session terminated with error");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(%peer_addr, error = %e, "native TLS handshake failed");
+                                        }
+                                    }
+                                });
+                            } else {
+                                let session = Session::new(stream, peer_addr, state_clone, mode);
+                                tokio::spawn(async move {
+                                    if let Err(e) = session.run().await {
+                                        warn!(%peer_addr, error = %e, "session terminated with error");
+                                    }
+                                });
+                            }
                         }
                         Err(e) => {
                             warn!(error = %e, "accept failed, retrying");
