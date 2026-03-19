@@ -22,6 +22,7 @@
 //! `free -m` cached memory must not move during the benchmark.
 
 pub mod align;
+pub mod crypto;
 pub mod error;
 pub mod group_commit;
 pub mod reader;

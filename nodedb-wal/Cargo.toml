@@ -16,6 +16,7 @@ tracing = { workspace = true }
 crc32c = { workspace = true }
 libc = { workspace = true }
 io-uring = { workspace = true, optional = true }
+aes-gcm = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

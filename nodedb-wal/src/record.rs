@@ -176,12 +176,16 @@ pub struct WalRecord {
 
 impl WalRecord {
     /// Create a new WAL record with computed CRC32C.
+    ///
+    /// If `encryption_key` is provided, the payload is encrypted before
+    /// CRC computation. The ciphertext includes a 16-byte auth tag.
     pub fn new(
         record_type: u16,
         lsn: u64,
         tenant_id: u32,
         vshard_id: u16,
         payload: Vec<u8>,
+        encryption_key: Option<&crate::crypto::WalEncryptionKey>,
     ) -> Result<Self> {
         if payload.len() > MAX_PAYLOAD_SIZE {
             return Err(WalError::PayloadTooLarge {
@@ -190,6 +194,33 @@ impl WalRecord {
             });
         }
 
+        // Encrypt if key provided.
+        let (final_payload, encrypted) = if let Some(key) = encryption_key {
+            // Build a temporary header for AAD (crc32c is 0 during encryption).
+            let temp_header = RecordHeader {
+                magic: WAL_MAGIC,
+                format_version: WAL_FORMAT_VERSION,
+                record_type,
+                lsn,
+                tenant_id,
+                vshard_id,
+                payload_len: 0, // Will be updated after encryption.
+                crc32c: 0,
+            };
+            let header_bytes = temp_header.to_bytes();
+            let ciphertext = key.encrypt(lsn, &header_bytes, &payload)?;
+            (ciphertext, true)
+        } else {
+            (payload, false)
+        };
+
+        // Set bit 14 in record_type to indicate encryption.
+        let record_type = if encrypted {
+            record_type | ENCRYPTED_FLAG
+        } else {
+            record_type
+        };
+
         let mut header = RecordHeader {
             magic: WAL_MAGIC,
             format_version: WAL_FORMAT_VERSION,
@@ -197,13 +228,52 @@ impl WalRecord {
             lsn,
             tenant_id,
             vshard_id,
-            payload_len: payload.len() as u32,
-            crc32c: 0, // computed below
+            payload_len: final_payload.len() as u32,
+            crc32c: 0,
         };
 
-        header.crc32c = header.compute_checksum(&payload);
+        header.crc32c = header.compute_checksum(&final_payload);
 
-        Ok(Self { header, payload })
+        Ok(Self {
+            header,
+            payload: final_payload,
+        })
+    }
+
+    /// Decrypt the payload if the record is encrypted.
+    ///
+    /// Returns the plaintext payload. If not encrypted, returns the payload as-is.
+    pub fn decrypt_payload(
+        &self,
+        encryption_key: Option<&crate::crypto::WalEncryptionKey>,
+    ) -> Result<Vec<u8>> {
+        if !self.is_encrypted() {
+            return Ok(self.payload.clone());
+        }
+
+        let key = encryption_key.ok_or_else(|| WalError::EncryptionError {
+            detail: "record is encrypted but no decryption key provided".into(),
+        })?;
+
+        // Reconstruct the header bytes used as AAD (with the encrypted flag stripped
+        // from record_type, and payload_len=0, crc32c=0 — same as during encryption).
+        let mut aad_header = self.header;
+        aad_header.record_type &= !ENCRYPTED_FLAG;
+        aad_header.payload_len = 0;
+        aad_header.crc32c = 0;
+        let header_bytes = aad_header.to_bytes();
+
+        key.decrypt(self.header.lsn, &header_bytes, &self.payload)
+    }
+
+    /// Whether this record's payload is encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        self.header.record_type & ENCRYPTED_FLAG != 0
+    }
+
+    /// Get the logical record type (with encryption flag stripped).
+    pub fn logical_record_type(&self) -> u16 {
+        self.header.record_type & !ENCRYPTED_FLAG
     }
 
     /// Verify the CRC32C checksum.
@@ -225,6 +295,10 @@ impl WalRecord {
         HEADER_SIZE + self.payload.len()
     }
 }
+
+/// Bit 14 in record_type signals that the payload is AES-256-GCM encrypted.
+/// This is separate from bit 15 (required flag).
+const ENCRYPTED_FLAG: u16 = 0x4000;
 
 #[cfg(test)]
 mod tests {
@@ -251,7 +325,8 @@ mod tests {
     #[test]
     fn checksum_roundtrip() {
         let payload = b"hello nodedb";
-        let record = WalRecord::new(RecordType::Put as u16, 1, 0, 0, payload.to_vec()).unwrap();
+        let record =
+            WalRecord::new(RecordType::Put as u16, 1, 0, 0, payload.to_vec(), None).unwrap();
 
         record.verify_checksum().unwrap();
     }
@@ -259,7 +334,8 @@ mod tests {
     #[test]
     fn checksum_detects_corruption() {
         let payload = b"hello nodedb";
-        let mut record = WalRecord::new(RecordType::Put as u16, 1, 0, 0, payload.to_vec()).unwrap();
+        let mut record =
+            WalRecord::new(RecordType::Put as u16, 1, 0, 0, payload.to_vec(), None).unwrap();
 
         // Corrupt one byte.
         record.payload[0] ^= 0xFF;
@@ -293,7 +369,7 @@ mod tests {
     fn payload_too_large_rejected() {
         let big_payload = vec![0u8; MAX_PAYLOAD_SIZE + 1];
         assert!(matches!(
-            WalRecord::new(RecordType::Put as u16, 1, 0, 0, big_payload),
+            WalRecord::new(RecordType::Put as u16, 1, 0, 0, big_payload, None),
             Err(WalError::PayloadTooLarge { .. })
         ));
     }

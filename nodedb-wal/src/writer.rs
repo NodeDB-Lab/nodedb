@@ -76,6 +76,9 @@ pub struct WalWriter {
 
     /// Configuration.
     config: WalWriterConfig,
+
+    /// Optional encryption key for payload encryption.
+    encryption_key: Option<crate::crypto::WalEncryptionKey>,
 }
 
 impl WalWriter {
@@ -108,7 +111,14 @@ impl WalWriter {
             next_lsn: AtomicU64::new(next_lsn),
             sealed: false,
             config,
+            encryption_key: None,
         })
+    }
+
+    /// Set the encryption key. When set, all subsequent records will have
+    /// their payloads encrypted with AES-256-GCM.
+    pub fn set_encryption_key(&mut self, key: crate::crypto::WalEncryptionKey) {
+        self.encryption_key = Some(key);
     }
 
     /// Open a WAL writer with O_DIRECT disabled (for testing on tmpfs, etc.).
@@ -138,7 +148,14 @@ impl WalWriter {
         }
 
         let lsn = self.next_lsn.fetch_add(1, Ordering::Relaxed);
-        let record = WalRecord::new(record_type, lsn, tenant_id, vshard_id, payload.to_vec())?;
+        let record = WalRecord::new(
+            record_type,
+            lsn,
+            tenant_id,
+            vshard_id,
+            payload.to_vec(),
+            self.encryption_key.as_ref(),
+        )?;
 
         let header_bytes = record.header.to_bytes();
         let total_size = HEADER_SIZE + record.payload.len();

@@ -95,6 +95,9 @@ futures = "0.3"
 # Password hashing
 argon2 = "0.5"
 
+# Encryption at rest
+aes-gcm = "0.10"
+
 # TLS
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 rustls-pemfile = "2"

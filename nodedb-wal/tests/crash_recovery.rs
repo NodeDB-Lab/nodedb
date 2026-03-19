@@ -94,8 +94,15 @@ fn torn_write_mid_payload() {
 
     // Manually construct a valid header but truncate the payload.
     {
-        let record =
-            WalRecord::new(RecordType::Put as u16, 99, 1, 0, b"full-payload".to_vec()).unwrap();
+        let record = WalRecord::new(
+            RecordType::Put as u16,
+            99,
+            1,
+            0,
+            b"full-payload".to_vec(),
+            None,
+        )
+        .unwrap();
         let header_bytes = record.header.to_bytes();
 
         let mut file = std::fs::OpenOptions::new()

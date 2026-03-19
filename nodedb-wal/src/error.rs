@@ -49,6 +49,10 @@ pub enum WalError {
     /// A mutex was poisoned (another thread panicked while holding the lock).
     #[error("WAL lock poisoned: {context}")]
     LockPoisoned { context: &'static str },
+
+    /// Encryption or decryption failed.
+    #[error("WAL encryption error: {detail}")]
+    EncryptionError { detail: String },
 }
 
 pub type Result<T> = std::result::Result<T, WalError>;

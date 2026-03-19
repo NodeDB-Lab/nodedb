@@ -71,8 +71,16 @@ async fn main() -> anyhow::Result<()> {
     let byte_budgets = config.engines.to_byte_budgets(config.memory_limit);
     let _governor = nodedb::memory::init_governor(config.memory_limit, &byte_budgets)?;
 
-    // Open WAL.
-    let wal = Arc::new(WalManager::open(&config.wal_dir(), false)?);
+    // Open WAL (with optional encryption at rest).
+    let wal = if let Some(ref enc) = config.encryption {
+        Arc::new(WalManager::open_encrypted(
+            &config.wal_dir(),
+            false,
+            &enc.key_path,
+        )?)
+    } else {
+        Arc::new(WalManager::open(&config.wal_dir(), false)?)
+    };
     info!(next_lsn = %wal.next_lsn(), "WAL ready");
 
     // Create SPSC bridge: Dispatcher (Control Plane) + CoreChannelDataSide (Data Plane).

@@ -24,6 +24,23 @@ pub struct WalManager {
 }
 
 impl WalManager {
+    /// Open with encryption key loaded from a file.
+    pub fn open_encrypted(
+        path: &Path,
+        use_direct_io: bool,
+        key_path: &Path,
+    ) -> crate::Result<Self> {
+        let key =
+            nodedb_wal::crypto::WalEncryptionKey::from_file(key_path).map_err(crate::Error::Wal)?;
+        let mgr = Self::open(path, use_direct_io)?;
+        {
+            let mut writer = mgr.writer.lock().unwrap();
+            writer.set_encryption_key(key);
+        }
+        info!(key_path = %key_path.display(), "WAL encryption enabled");
+        Ok(mgr)
+    }
+
     /// Open or create a WAL at the given path.
     pub fn open(path: &Path, use_direct_io: bool) -> crate::Result<Self> {
         // Ensure parent directory exists.

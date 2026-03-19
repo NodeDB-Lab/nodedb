@@ -66,6 +66,8 @@ pub struct UringWriter {
     sealed: bool,
     /// Config.
     config: UringWriterConfig,
+    /// Optional encryption key for WAL-at-rest encryption.
+    encryption_key: Option<crate::crypto::WalEncryptionKey>,
 }
 
 impl UringWriter {
@@ -99,6 +101,7 @@ impl UringWriter {
             ring,
             sealed: false,
             config,
+            encryption_key: None,
         })
     }
 
@@ -111,6 +114,11 @@ impl UringWriter {
                 ..Default::default()
             },
         )
+    }
+
+    /// Set the encryption key for WAL-at-rest encryption.
+    pub fn set_encryption_key(&mut self, key: crate::crypto::WalEncryptionKey) {
+        self.encryption_key = Some(key);
     }
 
     /// Append a record to the in-memory buffer. Returns the assigned LSN.
@@ -128,7 +136,14 @@ impl UringWriter {
         }
 
         let lsn = self.next_lsn.fetch_add(1, Ordering::Relaxed);
-        let record = WalRecord::new(record_type, lsn, tenant_id, vshard_id, payload.to_vec())?;
+        let record = WalRecord::new(
+            record_type,
+            lsn,
+            tenant_id,
+            vshard_id,
+            payload.to_vec(),
+            self.encryption_key.as_ref(),
+        )?;
 
         let header_bytes = record.header.to_bytes();
         let total_size = HEADER_SIZE + record.payload.len();

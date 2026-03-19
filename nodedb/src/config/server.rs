@@ -33,6 +33,18 @@ pub struct ServerConfig {
     /// Client TLS configuration. If present, pgwire connections support SSL.
     #[serde(default)]
     pub tls: Option<super::server::TlsSettings>,
+
+    /// Encryption at rest configuration. If present, WAL payloads are encrypted.
+    #[serde(default)]
+    pub encryption: Option<super::server::EncryptionSettings>,
+}
+
+/// Encryption at rest settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionSettings {
+    /// Path to the 32-byte AES-256-GCM key file.
+    /// Generate with: `head -c 32 /dev/urandom > /etc/nodedb/keys/wal.key`
+    pub key_path: PathBuf,
 }
 
 /// Client-facing TLS settings (distinct from inter-node mTLS in mtls.rs).
@@ -59,6 +71,7 @@ impl Default for ServerConfig {
             engines: EngineConfig::default(),
             auth: super::AuthConfig::default(),
             tls: None,
+            encryption: None,
         }
     }
 }
