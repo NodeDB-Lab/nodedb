@@ -36,7 +36,8 @@ impl CoreLoop {
                 collection,
                 vector,
                 dim,
-            } => self.execute_vector_insert(task, tid, collection, vector, *dim),
+                field_name,
+            } => self.execute_vector_insert(task, tid, collection, vector, *dim, field_name),
 
             PhysicalPlan::VectorBatchInsert {
                 collection,
@@ -55,6 +56,7 @@ impl CoreLoop {
                 top_k,
                 ef_search,
                 filter_bitmap,
+                field_name,
             } => self.execute_vector_search(
                 task,
                 tid,
@@ -63,6 +65,7 @@ impl CoreLoop {
                 *top_k,
                 *ef_search,
                 filter_bitmap.as_ref(),
+                field_name,
             ),
 
             PhysicalPlan::SetVectorParams {

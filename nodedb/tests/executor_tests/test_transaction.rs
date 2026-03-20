@@ -90,6 +90,7 @@ fn transaction_batch_rollback_on_failure() {
             collection: "emb".into(),
             vector: vec![1.0, 2.0, 3.0],
             dim: 3,
+            field_name: String::new(),
         },
     );
 
@@ -110,6 +111,7 @@ fn transaction_batch_rollback_on_failure() {
                     collection: "emb".into(),
                     vector: vec![1.0, 2.0],
                     dim: 3,
+                    field_name: String::new(),
                 },
             ],
         },

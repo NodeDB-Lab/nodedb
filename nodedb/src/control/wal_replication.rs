@@ -148,6 +148,7 @@ pub fn to_replicated_entry(
             collection,
             vector,
             dim,
+            field_name: _,
         } => ReplicatedWrite::VectorInsert {
             collection: collection.clone(),
             vector: vector.clone(),
@@ -259,6 +260,7 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             collection: collection.clone(),
             vector: vector.clone(),
             dim: *dim,
+            field_name: String::new(),
         },
         ReplicatedWrite::VectorBatchInsert {
             collection,

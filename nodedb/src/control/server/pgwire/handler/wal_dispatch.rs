@@ -47,6 +47,7 @@ impl NodeDbPgHandler {
                 collection,
                 vector,
                 dim,
+                field_name: _,
             } => {
                 let entry = rmp_serde::to_vec(&(collection, vector, dim)).map_err(|e| {
                     crate::Error::Serialization {

@@ -88,6 +88,7 @@ pub fn search_vector(
         top_k,
         ef_search: 0,
         filter_bitmap,
+        field_name: String::new(),
     };
 
     let payload =

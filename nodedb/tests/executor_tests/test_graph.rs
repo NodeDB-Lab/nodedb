@@ -180,6 +180,7 @@ fn graph_rag_fusion_pipeline() {
                     collection: "docs".into(),
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
+                    field_name: String::new(),
                 },
             ),
         })

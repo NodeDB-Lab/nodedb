@@ -222,8 +222,9 @@ impl CoreLoop {
                 collection,
                 vector,
                 dim,
+                field_name,
             } => {
-                let index_key = Self::vector_index_key(tid, collection);
+                let index_key = Self::vector_index_key(tid, collection, field_name);
                 let index = self
                     .vector_indexes
                     .entry(index_key.clone())
@@ -259,7 +260,7 @@ impl CoreLoop {
                 collection,
                 vector_id,
             } => {
-                let index_key = Self::vector_index_key(tid, collection);
+                let index_key = Self::vector_index_key(tid, collection, "");
                 if let Some(index) = self.vector_indexes.get_mut(&index_key) {
                     if index.delete(*vector_id) {
                         undo_log.push(UndoEntry::DeleteVector {

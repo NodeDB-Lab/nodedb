@@ -161,6 +161,8 @@ pub enum PhysicalPlan {
         ef_search: usize,
         /// Pre-computed bitmap of eligible document IDs (from filter evaluation).
         filter_bitmap: Option<Arc<[u8]>>,
+        /// Named vector field to search. Empty string = default field.
+        field_name: String,
     },
 
     /// Point lookup by document ID.
@@ -201,6 +203,10 @@ pub enum PhysicalPlan {
         collection: String,
         vector: Vec<f32>,
         dim: usize,
+        /// Named vector field (e.g., "title_embedding", "body_embedding").
+        /// Empty string = default (unnamed) field. Each named field gets
+        /// its own HNSW index with independent params and metric.
+        field_name: String,
     },
 
     /// Batch insert vectors into the HNSW index (write path).

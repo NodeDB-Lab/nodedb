@@ -47,7 +47,7 @@ impl CoreLoop {
                 if let Ok((collection, m, ef_construction, metric)) =
                     rmp_serde::from_slice::<(String, usize, usize, String)>(&record.payload)
                 {
-                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection);
+                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection, "");
                     let metric_enum = match metric.as_str() {
                         "l2" | "euclidean" => crate::engine::vector::distance::DistanceMetric::L2,
                         "cosine" => crate::engine::vector::distance::DistanceMetric::Cosine,
@@ -89,7 +89,7 @@ impl CoreLoop {
                         );
                         continue;
                     }
-                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection);
+                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection, "");
                     let params = self
                         .vector_params
                         .get(&index_key)
@@ -120,7 +120,7 @@ impl CoreLoop {
                 } else if let Ok((collection, vectors, dim)) =
                     rmp_serde::from_slice::<(String, Vec<Vec<f32>>, usize)>(&record.payload)
                 {
-                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection);
+                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection, "");
                     let params = self
                         .vector_params
                         .get(&index_key)
@@ -145,7 +145,7 @@ impl CoreLoop {
                 if let Ok((collection, vector_id)) =
                     rmp_serde::from_slice::<(String, u32)>(&record.payload)
                 {
-                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection);
+                    let index_key = CoreLoop::vector_index_key(tenant_id, &collection, "");
                     if let Some(index) = self.vector_indexes.get_mut(&index_key) {
                         index.delete(vector_id);
                         deleted += 1;

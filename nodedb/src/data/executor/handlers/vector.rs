@@ -17,8 +17,9 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         dim: usize,
+        field_name: &str,
     ) -> Result<&mut HnswIndex, ErrorCode> {
-        let index_key = CoreLoop::vector_index_key(tid, collection);
+        let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
         if let Some(existing) = self.vector_indexes.get(&index_key) {
             if existing.dim() != dim {
                 return Err(ErrorCode::RejectedConstraint {
@@ -48,6 +49,7 @@ impl CoreLoop {
         collection: &str,
         vector: &[f32],
         dim: usize,
+        field_name: &str,
     ) -> Response {
         debug!(core = self.core_id, %collection, dim, "vector insert");
         if vector.len() != dim {
@@ -61,7 +63,7 @@ impl CoreLoop {
                 },
             );
         }
-        match self.get_or_create_vector_index(tid, collection, dim) {
+        match self.get_or_create_vector_index(tid, collection, dim, field_name) {
             Ok(index) => {
                 index.insert(vector.to_vec());
                 self.response_ok(task)
@@ -70,6 +72,8 @@ impl CoreLoop {
         }
     }
 
+    /// Execute batch vector insert (always to the default/unnamed field).
+    /// Named fields require separate VectorInsert requests.
     pub(in crate::data::executor) fn execute_vector_batch_insert(
         &mut self,
         task: &ExecutionTask,
@@ -79,7 +83,7 @@ impl CoreLoop {
         dim: usize,
     ) -> Response {
         debug!(core = self.core_id, %collection, dim, count = vectors.len(), "vector batch insert");
-        match self.get_or_create_vector_index(tid, collection, dim) {
+        match self.get_or_create_vector_index(tid, collection, dim, "") {
             Ok(index) => {
                 for vector in vectors {
                     if vector.len() != dim {
@@ -112,7 +116,7 @@ impl CoreLoop {
         vector_id: u32,
     ) -> Response {
         debug!(core = self.core_id, %collection, vector_id, "vector delete");
-        let index_key = CoreLoop::vector_index_key(tid, collection);
+        let index_key = CoreLoop::vector_index_key(tid, collection, "");
         let Some(index) = self.vector_indexes.get_mut(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
@@ -133,9 +137,10 @@ impl CoreLoop {
         top_k: usize,
         ef_search: usize,
         filter_bitmap: Option<&std::sync::Arc<[u8]>>,
+        field_name: &str,
     ) -> Response {
         debug!(core = self.core_id, %collection, top_k, ef_search, "vector search");
-        let index_key = CoreLoop::vector_index_key(tid, collection);
+        let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
         let Some(index) = self.vector_indexes.get(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
@@ -179,7 +184,7 @@ impl CoreLoop {
         metric: &str,
     ) -> Response {
         debug!(core = self.core_id, %collection, m, ef_construction, %metric, "set vector params");
-        let index_key = CoreLoop::vector_index_key(tid, collection);
+        let index_key = CoreLoop::vector_index_key(tid, collection, "");
 
         if self.vector_indexes.contains_key(&index_key) {
             return self.response_error(

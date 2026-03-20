@@ -53,7 +53,7 @@ impl CoreLoop {
             "graph rag fusion"
         );
 
-        let index_key = CoreLoop::vector_index_key(tenant_id, collection);
+        let index_key = CoreLoop::vector_index_key(tenant_id, collection, "");
         let Some(index) = self.vector_indexes.get(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
@@ -140,6 +140,7 @@ impl CoreLoop {
                 vector_candidates: vector_results.len(),
                 graph_expanded: expanded_nodes.len(),
                 truncated: bfs_truncated,
+                watermark_lsn: self.watermark.as_u64(),
             },
         };
 

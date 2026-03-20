@@ -19,6 +19,7 @@ fn vector_insert_and_search() {
                     collection: "embeddings".into(),
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
+                    field_name: String::new(),
                 },
             ),
         })
@@ -42,6 +43,7 @@ fn vector_insert_and_search() {
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,
+            field_name: String::new(),
         },
     );
 
@@ -63,6 +65,7 @@ fn vector_search_no_index_returns_not_found() {
             top_k: 5,
             ef_search: 0,
             filter_bitmap: None,
+            field_name: String::new(),
         },
     );
     assert_eq!(resp.status, Status::Error);

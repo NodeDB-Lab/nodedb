@@ -287,8 +287,20 @@ impl CoreLoop {
     }
 
     /// Build a tenant-scoped vector index key.
-    pub(in crate::data::executor) fn vector_index_key(tenant_id: u32, collection: &str) -> String {
-        format!("{tenant_id}:{collection}")
+    ///
+    /// When `field_name` is non-empty, the key incorporates it to support
+    /// multiple named vector fields per collection. An empty `field_name`
+    /// produces the backward-compatible `{tenant_id}:{collection}` key.
+    pub(in crate::data::executor) fn vector_index_key(
+        tenant_id: u32,
+        collection: &str,
+        field_name: &str,
+    ) -> String {
+        if field_name.is_empty() {
+            format!("{tenant_id}:{collection}")
+        } else {
+            format!("{tenant_id}:{collection}:{field_name}")
+        }
     }
 
     /// Get or create a CRDT engine for the given tenant.

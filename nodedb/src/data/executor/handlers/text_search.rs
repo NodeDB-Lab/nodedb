@@ -83,7 +83,7 @@ impl CoreLoop {
         let fetch_k = top_k.saturating_mul(3).max(20);
 
         // 1. Vector search.
-        let index_key = CoreLoop::vector_index_key(tid, collection);
+        let index_key = CoreLoop::vector_index_key(tid, collection, "");
         let vector_results = if let Some(index) = self.vector_indexes.get(&index_key) {
             if index.is_empty() {
                 Vec::new()

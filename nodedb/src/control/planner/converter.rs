@@ -260,6 +260,7 @@ impl PlanConverter {
                                 top_k,
                                 ef_search: 0,
                                 filter_bitmap: None,
+                                field_name: String::new(),
                             },
                         }]);
                     }
