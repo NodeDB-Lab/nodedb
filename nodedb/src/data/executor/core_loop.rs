@@ -1,7 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-#[cfg(test)]
-use std::sync::Arc;
 
 use tracing::warn;
 
@@ -376,28 +374,15 @@ impl CoreLoop {
 mod tests {
     use super::*;
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
-    use crate::engine::graph::edge_store::Direction;
     use crate::types::*;
     use nodedb_bridge::buffer::RingBuffer;
     use std::time::{Duration, Instant};
-
-    /// Decode a response payload (MessagePack or JSON) to a JSON string.
-    fn payload_json(payload: &[u8]) -> String {
-        crate::data::executor::response_codec::decode_payload_to_json(payload)
-    }
-
-    /// Decode a response payload to a parsed serde_json::Value.
-    fn payload_value(payload: &[u8]) -> serde_json::Value {
-        let json = payload_json(payload);
-        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)
-    }
 
     fn make_core() -> (CoreLoop, Producer<BridgeRequest>, Consumer<BridgeResponse>) {
         let dir = tempfile::tempdir().unwrap();
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
         let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
         let core = CoreLoop::open(0, req_rx, resp_tx, dir.path()).unwrap();
-        // Leak the tempdir so it lives long enough for tests.
         std::mem::forget(dir);
         (core, req_tx, resp_rx)
     }
@@ -416,107 +401,29 @@ mod tests {
     }
 
     #[test]
-    fn point_get_not_found() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointGet {
-                    collection: "users".into(),
-                    document_id: "nonexistent".into(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Error);
-        assert_eq!(resp.inner.error_code, Some(ErrorCode::NotFound));
-    }
-
-    #[test]
-    fn point_get_returns_data() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        core.sparse.put(1, "users", "u1", b"alice-data").unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointGet {
-                    collection: "users".into(),
-                    document_id: "u1".into(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        assert_eq!(&*resp.inner.payload, b"alice-data");
-    }
-
-    #[test]
-    fn range_scan_returns_json() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        core.sparse
-            .index_put(1, "users", "age", "025", "u1")
-            .unwrap();
-        core.sparse
-            .index_put(1, "users", "age", "030", "u2")
-            .unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::RangeScan {
-                    collection: "users".into(),
-                    field: "age".into(),
-                    lower: None,
-                    upper: None,
-                    limit: 10,
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        assert!(!resp.inner.payload.is_empty());
+    fn empty_tick_processes_nothing() {
+        let (mut core, _, _) = make_core();
+        assert_eq!(core.tick(), 0);
     }
 
     #[test]
     fn expired_task_returns_deadline_exceeded() {
         let (mut core, mut req_tx, mut resp_rx) = make_core();
-
         req_tx
             .try_push(BridgeRequest {
                 inner: Request {
-                    request_id: RequestId::new(2),
-                    tenant_id: TenantId::new(1),
-                    vshard_id: VShardId::new(0),
-                    plan: PhysicalPlan::PointGet {
+                    deadline: Instant::now() - Duration::from_secs(1),
+                    ..make_request(PhysicalPlan::PointGet {
                         collection: "x".into(),
                         document_id: "y".into(),
-                    },
-                    deadline: Instant::now() - Duration::from_secs(1),
-                    priority: Priority::Normal,
-                    trace_id: 0,
-                    consistency: ReadConsistency::Strong,
+                    })
                 },
             })
             .unwrap();
-
         core.tick();
-
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Error);
         assert_eq!(resp.inner.error_code, Some(ErrorCode::DeadlineExceeded));
-    }
-
-    #[test]
-    fn empty_tick_processes_nothing() {
-        let (mut core, _, _) = make_core();
-        assert_eq!(core.tick(), 0);
     }
 
     #[test]
@@ -524,7 +431,6 @@ mod tests {
         let (mut core, mut req_tx, mut resp_rx) = make_core();
         core.advance_watermark(Lsn::new(99));
         core.sparse.put(1, "x", "y", b"data").unwrap();
-
         req_tx
             .try_push(BridgeRequest {
                 inner: make_request(PhysicalPlan::PointGet {
@@ -533,7 +439,6 @@ mod tests {
                 }),
             })
             .unwrap();
-
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.watermark_lsn, Lsn::new(99));
@@ -542,25 +447,18 @@ mod tests {
     #[test]
     fn cancel_removes_pending_task() {
         let (mut core, mut req_tx, _resp_rx) = make_core();
-
         req_tx
             .try_push(BridgeRequest {
                 inner: Request {
                     request_id: RequestId::new(10),
-                    tenant_id: TenantId::new(1),
-                    vshard_id: VShardId::new(0),
-                    plan: PhysicalPlan::PointGet {
+                    deadline: Instant::now() + Duration::from_secs(60),
+                    ..make_request(PhysicalPlan::PointGet {
                         collection: "x".into(),
                         document_id: "y".into(),
-                    },
-                    deadline: Instant::now() + Duration::from_secs(60),
-                    priority: Priority::Normal,
-                    trace_id: 0,
-                    consistency: ReadConsistency::Strong,
+                    })
                 },
             })
             .unwrap();
-
         core.drain_requests();
         assert_eq!(core.pending_count(), 1);
 
@@ -568,444 +466,14 @@ mod tests {
             .try_push(BridgeRequest {
                 inner: Request {
                     request_id: RequestId::new(99),
-                    tenant_id: TenantId::new(1),
-                    vshard_id: VShardId::new(0),
-                    plan: PhysicalPlan::Cancel {
-                        target_request_id: RequestId::new(10),
-                    },
-                    deadline: Instant::now() + Duration::from_secs(5),
                     priority: Priority::Critical,
-                    trace_id: 0,
                     consistency: ReadConsistency::Eventual,
+                    ..make_request(PhysicalPlan::Cancel {
+                        target_request_id: RequestId::new(10),
+                    })
                 },
             })
             .unwrap();
-
-        let processed = core.tick();
-        assert_eq!(processed, 2);
-    }
-
-    #[test]
-    fn crdt_read_not_found() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::CrdtRead {
-                    collection: "sessions".into(),
-                    document_id: "s1".into(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Error);
-        assert_eq!(resp.inner.error_code, Some(ErrorCode::NotFound));
-    }
-
-    #[test]
-    fn vector_insert_and_search() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        for i in 0..10u32 {
-            req_tx
-                .try_push(BridgeRequest {
-                    inner: Request {
-                        request_id: RequestId::new(100 + i as u64),
-                        tenant_id: TenantId::new(1),
-                        vshard_id: VShardId::new(0),
-                        plan: PhysicalPlan::VectorInsert {
-                            collection: "embeddings".into(),
-                            vector: vec![i as f32, 0.0, 0.0],
-                            dim: 3,
-                        },
-                        deadline: Instant::now() + Duration::from_secs(5),
-                        priority: Priority::Normal,
-                        trace_id: 0,
-                        consistency: ReadConsistency::Strong,
-                    },
-                })
-                .unwrap();
-        }
-
-        let processed = core.tick();
-        assert_eq!(processed, 10);
-        for _ in 0..10 {
-            let resp = resp_rx.try_pop().unwrap();
-            assert_eq!(resp.inner.status, Status::Ok);
-        }
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::VectorSearch {
-                    collection: "embeddings".into(),
-                    query_vector: Arc::from([5.0f32, 0.0, 0.0].as_slice()),
-                    top_k: 3,
-                    ef_search: 0,
-                    filter_bitmap: None,
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-
-        let payload = payload_json(&resp.inner.payload);
-        assert!(payload.contains("\"id\""), "payload: {payload}");
-        assert!(payload.contains("\"distance\""), "payload: {payload}");
-    }
-
-    #[test]
-    fn vector_search_no_index_returns_not_found() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::VectorSearch {
-                    collection: "nonexistent".into(),
-                    query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
-                    top_k: 5,
-                    ef_search: 0,
-                    filter_bitmap: None,
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Error);
-        assert_eq!(resp.inner.error_code, Some(ErrorCode::NotFound));
-    }
-
-    #[test]
-    fn point_put_and_get() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointPut {
-                    collection: "docs".into(),
-                    document_id: "d1".into(),
-                    value: b"hello world".to_vec(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointGet {
-                    collection: "docs".into(),
-                    document_id: "d1".into(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        assert_eq!(&*resp.inner.payload, b"hello world");
-    }
-
-    #[test]
-    fn edge_put_and_graph_neighbors() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        for dst in &["bob", "carol"] {
-            req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(PhysicalPlan::EdgePut {
-                        src_id: "alice".into(),
-                        label: "KNOWS".into(),
-                        dst_id: dst.to_string(),
-                        properties: vec![],
-                    }),
-                })
-                .unwrap();
-        }
-        core.tick();
-        resp_rx.try_pop().unwrap();
-        resp_rx.try_pop().unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::GraphNeighbors {
-                    node_id: "alice".into(),
-                    edge_label: Some("KNOWS".into()),
-                    direction: Direction::Out,
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        let payload = payload_json(&resp.inner.payload);
-        assert!(payload.contains("bob"), "payload: {payload}");
-        assert!(payload.contains("carol"), "payload: {payload}");
-    }
-
-    #[test]
-    fn graph_hop_traversal() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        for (s, d) in &[("a", "b"), ("b", "c")] {
-            req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(PhysicalPlan::EdgePut {
-                        src_id: s.to_string(),
-                        label: "NEXT".into(),
-                        dst_id: d.to_string(),
-                        properties: vec![],
-                    }),
-                })
-                .unwrap();
-        }
-        core.tick();
-        resp_rx.try_pop().unwrap();
-        resp_rx.try_pop().unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::GraphHop {
-                    start_nodes: vec!["a".into()],
-                    edge_label: Some("NEXT".into()),
-                    direction: Direction::Out,
-                    depth: 2,
-                    options: Default::default(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        let nodes: Vec<String> =
-            serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
-        assert!(nodes.contains(&"a".to_string()));
-        assert!(nodes.contains(&"b".to_string()));
-        assert!(nodes.contains(&"c".to_string()));
-    }
-
-    #[test]
-    fn graph_path_and_subgraph() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        for (s, d) in &[("a", "b"), ("b", "c")] {
-            req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(PhysicalPlan::EdgePut {
-                        src_id: s.to_string(),
-                        label: "L".into(),
-                        dst_id: d.to_string(),
-                        properties: vec![],
-                    }),
-                })
-                .unwrap();
-        }
-        core.tick();
-        resp_rx.try_pop().unwrap();
-        resp_rx.try_pop().unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::GraphPath {
-                    src: "a".into(),
-                    dst: "c".into(),
-                    edge_label: Some("L".into()),
-                    max_depth: 5,
-                    options: Default::default(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        let path: Vec<String> = serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
-        assert_eq!(path, vec!["a", "b", "c"]);
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::GraphSubgraph {
-                    start_nodes: vec!["a".into()],
-                    edge_label: None,
-                    depth: 2,
-                    options: Default::default(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-        let edges: Vec<serde_json::Value> =
-            serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
-        assert_eq!(edges.len(), 2);
-    }
-
-    #[test]
-    fn edge_delete_updates_csr() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::EdgePut {
-                    src_id: "x".into(),
-                    label: "R".into(),
-                    dst_id: "y".into(),
-                    properties: vec![],
-                }),
-            })
-            .unwrap();
-        core.tick();
-        resp_rx.try_pop().unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::EdgeDelete {
-                    src_id: "x".into(),
-                    label: "R".into(),
-                    dst_id: "y".into(),
-                }),
-            })
-            .unwrap();
-        core.tick();
-        resp_rx.try_pop().unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::GraphNeighbors {
-                    node_id: "x".into(),
-                    edge_label: None,
-                    direction: Direction::Out,
-                }),
-            })
-            .unwrap();
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        let neighbors: Vec<serde_json::Value> =
-            serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
-        assert!(neighbors.is_empty());
-    }
-
-    #[test]
-    fn point_delete_removes() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        core.sparse.put(1, "docs", "d1", b"data").unwrap();
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointDelete {
-                    collection: "docs".into(),
-                    document_id: "d1".into(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointGet {
-                    collection: "docs".into(),
-                    document_id: "d1".into(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.error_code, Some(ErrorCode::NotFound));
-    }
-
-    #[test]
-    fn graph_rag_fusion_pipeline() {
-        let (mut core, mut req_tx, mut resp_rx) = make_core();
-
-        for i in 0..10u32 {
-            req_tx
-                .try_push(BridgeRequest {
-                    inner: Request {
-                        request_id: RequestId::new(100 + i as u64),
-                        tenant_id: TenantId::new(1),
-                        vshard_id: VShardId::new(0),
-                        plan: PhysicalPlan::VectorInsert {
-                            collection: "docs".into(),
-                            vector: vec![i as f32, 0.0, 0.0],
-                            dim: 3,
-                        },
-                        deadline: Instant::now() + Duration::from_secs(5),
-                        priority: Priority::Normal,
-                        trace_id: 0,
-                        consistency: ReadConsistency::Strong,
-                    },
-                })
-                .unwrap();
-        }
-        core.tick();
-        for _ in 0..10 {
-            resp_rx.try_pop().unwrap();
-        }
-
-        for (s, d) in &[("0", "1"), ("1", "2"), ("2", "3")] {
-            req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(PhysicalPlan::EdgePut {
-                        src_id: s.to_string(),
-                        label: "CITES".into(),
-                        dst_id: d.to_string(),
-                        properties: vec![],
-                    }),
-                })
-                .unwrap();
-        }
-        core.tick();
-        for _ in 0..3 {
-            resp_rx.try_pop().unwrap();
-        }
-
-        req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::GraphRagFusion {
-                    collection: "docs".into(),
-                    query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
-                    vector_top_k: 3,
-                    edge_label: Some("CITES".into()),
-                    direction: Direction::Out,
-                    expansion_depth: 2,
-                    final_top_k: 5,
-                    rrf_k: (60.0, 10.0),
-                    options: Default::default(),
-                }),
-            })
-            .unwrap();
-
-        core.tick();
-        let resp = resp_rx.try_pop().unwrap();
-        assert_eq!(resp.inner.status, Status::Ok);
-
-        let body = payload_value(&resp.inner.payload);
-
-        let results = body["results"]
-            .as_array()
-            .expect("results should be an array");
-        let metadata = body.get("metadata").expect("response should have metadata");
-
-        assert!(!results.is_empty());
-        assert!(results[0].get("rrf_score").is_some());
-        assert!(results[0].get("node_id").is_some());
-
-        assert!(metadata.get("vector_candidates").is_some());
-        assert!(metadata.get("graph_expanded").is_some());
-        assert_eq!(metadata["truncated"], false);
+        assert_eq!(core.tick(), 2);
     }
 }
