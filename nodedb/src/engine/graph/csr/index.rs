@@ -28,13 +28,13 @@ pub struct CsrIndex {
     // ── Dense CSR (read-only between compactions) ──
     /// `out_offsets[i]..out_offsets[i+1]` = range in `out_targets`/`out_labels`.
     /// Length: `num_nodes + 1`.
-    out_offsets: Vec<u32>,
-    out_targets: Vec<u32>,
-    out_labels: Vec<u16>,
+    pub(super) out_offsets: Vec<u32>,
+    pub(super) out_targets: Vec<u32>,
+    pub(super) out_labels: Vec<u16>,
 
-    in_offsets: Vec<u32>,
-    in_targets: Vec<u32>,
-    in_labels: Vec<u16>,
+    pub(super) in_offsets: Vec<u32>,
+    pub(super) in_targets: Vec<u32>,
+    pub(super) in_labels: Vec<u16>,
 
     // ── Mutable write buffer ──
     /// Per-node outbound buffer: `buffer_out[node_id]` = `[(label_id, dst_id)]`.
@@ -48,9 +48,9 @@ pub struct CsrIndex {
     /// Per-node access counter: incremented on each neighbor/BFS/path query.
     /// Uses `Cell<u32>` so access can be tracked through `&self` references
     /// (traversal methods are `&self` for shared read access).
-    access_counts: Vec<std::cell::Cell<u32>>,
+    pub(super) access_counts: Vec<std::cell::Cell<u32>>,
     /// Total queries served since last access counter reset.
-    query_epoch: u64,
+    pub(super) query_epoch: u64,
 }
 
 impl Default for CsrIndex {
@@ -244,45 +244,6 @@ impl CsrIndex {
 
     pub fn contains_node(&self, node: &str) -> bool {
         self.node_to_id.contains_key(node)
-    }
-
-    /// Record an access to a node (callable through `&self` via Cell).
-    pub(super) fn record_access(&self, node_id: u32) {
-        if let Some(cell) = self.access_counts.get(node_id as usize) {
-            cell.set(cell.get().saturating_add(1));
-        }
-    }
-
-    /// Identify cold nodes: nodes with access count at or below threshold.
-    ///
-    /// Returns node IDs that have not been accessed frequently. These are
-    /// candidates for eviction to mmap-backed cold storage (L1 NVMe).
-    pub fn cold_nodes(&self, threshold: u32) -> Vec<u32> {
-        self.access_counts
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.get() <= threshold)
-            .map(|(id, _)| id as u32)
-            .collect()
-    }
-
-    /// Number of hot nodes (accessed above threshold).
-    pub fn hot_node_count(&self, threshold: u32) -> usize {
-        self.access_counts
-            .iter()
-            .filter(|c| c.get() > threshold)
-            .count()
-    }
-
-    /// Current query epoch.
-    pub fn query_epoch(&self) -> u64 {
-        self.query_epoch
-    }
-
-    /// Reset access counters (called during compaction or periodically).
-    pub fn reset_access_counts(&mut self) {
-        self.access_counts.iter().for_each(|c| c.set(0));
-        self.query_epoch = 0;
     }
 
     /// Merge the mutable buffer into the dense CSR arrays.

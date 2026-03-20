@@ -40,12 +40,16 @@ impl CsrIndex {
                 continue;
             }
 
+            // Track access for hot/cold partition decisions.
+            self.record_access(node_id);
+
             if matches!(direction, Direction::Out | Direction::Both) {
                 for (lid, dst) in self.iter_out_edges(node_id) {
                     if label_id.is_none_or(|f| f == lid)
                         && visited.len() < DEFAULT_MAX_VISITED
                         && visited.insert(dst)
                     {
+                        self.prefetch_node(dst); // Predictive prefetch.
                         queue.push_back((dst, depth + 1));
                     }
                 }
@@ -56,6 +60,7 @@ impl CsrIndex {
                         && visited.len() < DEFAULT_MAX_VISITED
                         && visited.insert(src)
                     {
+                        self.prefetch_node(src); // Predictive prefetch.
                         queue.push_back((src, depth + 1));
                     }
                 }
@@ -98,6 +103,7 @@ impl CsrIndex {
 
             let mut next_fwd = Vec::new();
             for &node in &fwd_frontier {
+                self.record_access(node);
                 for (lid, neighbor) in self.iter_out_edges(node) {
                     if label_id.is_none_or(|f| f == lid) {
                         if let Entry::Vacant(e) = fwd_parent.entry(neighbor) {
@@ -114,6 +120,7 @@ impl CsrIndex {
 
             let mut next_bwd = Vec::new();
             for &node in &bwd_frontier {
+                self.record_access(node);
                 for (lid, neighbor) in self.iter_in_edges(node) {
                     if label_id.is_none_or(|f| f == lid) {
                         if let Entry::Vacant(e) = bwd_parent.entry(neighbor) {
@@ -195,6 +202,7 @@ impl CsrIndex {
             if depth >= max_depth || visited.len() >= DEFAULT_MAX_VISITED {
                 continue;
             }
+            self.record_access(node_id);
             for (lid, dst) in self.iter_out_edges(node_id) {
                 if label_id.is_none_or(|f| f == lid) {
                     edges.push((
