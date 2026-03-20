@@ -81,6 +81,10 @@ pub struct CoreLoop {
     /// whether they succeeded (true) or failed (false). Bounded to prevent
     /// unbounded memory growth — oldest entries evicted when capacity exceeded.
     pub(in crate::data::executor) idempotency_cache: HashMap<u64, bool>,
+
+    /// Column statistics store for CBO. Shares redb with sparse engine.
+    /// Updated incrementally on PointPut. Read by DataFusion optimizer.
+    pub(in crate::data::executor) stats_store: crate::engine::sparse::stats::StatsStore,
 }
 
 impl CoreLoop {
@@ -104,6 +108,9 @@ impl CoreLoop {
         // Inverted index shares the sparse engine's redb database.
         let inverted = InvertedIndex::open(sparse.db().clone())?;
 
+        // Column statistics store shares the sparse engine's redb database.
+        let stats_store = crate::engine::sparse::stats::StatsStore::open(sparse.db().clone())?;
+
         Ok(Self {
             core_id,
             request_rx,
@@ -121,6 +128,7 @@ impl CoreLoop {
             paused_vshards: std::collections::HashSet::new(),
             deleted_nodes: std::collections::HashSet::new(),
             idempotency_cache: HashMap::new(),
+            stats_store,
         })
     }
 

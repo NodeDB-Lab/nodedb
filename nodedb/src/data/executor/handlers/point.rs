@@ -65,6 +65,11 @@ impl CoreLoop {
                             }
                         }
                     }
+
+                    // Update column statistics for CBO.
+                    if let Err(e) = self.stats_store.observe_document(tid, collection, &doc) {
+                        warn!(core = self.core_id, %collection, error = %e, "column stats update failed");
+                    }
                 }
                 self.response_ok(task)
             }
