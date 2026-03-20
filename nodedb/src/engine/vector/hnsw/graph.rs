@@ -221,11 +221,11 @@ impl HnswIndex {
     /// Returns `true` if the node was found and un-deleted, `false` if the
     /// ID is out of range or wasn't deleted.
     pub fn undelete(&mut self, id: u32) -> bool {
-        if let Some(node) = self.nodes.get_mut(id as usize) {
-            if node.deleted {
-                node.deleted = false;
-                return true;
-            }
+        if let Some(node) = self.nodes.get_mut(id as usize)
+            && node.deleted
+        {
+            node.deleted = false;
+            return true;
         }
         false
     }

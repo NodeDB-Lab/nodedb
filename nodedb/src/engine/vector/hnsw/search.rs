@@ -17,7 +17,10 @@ impl HnswIndex {
         }
 
         let ef = ef.max(k);
-        let ep = self.entry_point.unwrap();
+        // Safe: is_empty() check above guarantees entry_point is Some.
+        let Some(ep) = self.entry_point else {
+            return Vec::new();
+        };
 
         // Phase 1: Greedy descent from top layer to layer 1.
         let mut current_ep = ep;
@@ -64,7 +67,9 @@ impl HnswIndex {
         }
 
         let ef = ef.max(k);
-        let ep = self.entry_point.unwrap();
+        let Some(ep) = self.entry_point else {
+            return Vec::new();
+        };
 
         let mut current_ep = ep;
         for layer in (1..=self.max_layer).rev() {
@@ -158,10 +163,11 @@ pub(super) fn search_layer(
     while let Some(Reverse(current)) = candidates.pop() {
         // Termination: if the closest unexplored candidate is further than
         // the worst result, no improvement is possible.
-        if let Some(worst) = results.peek() {
-            if current.dist > worst.dist && results.len() >= ef {
-                break;
-            }
+        if let Some(worst) = results.peek()
+            && current.dist > worst.dist
+            && results.len() >= ef
+        {
+            break;
         }
 
         // Expand neighbors at this layer.
@@ -202,7 +208,7 @@ pub(super) fn search_layer(
 
     // Drain the max-heap into a sorted vec (ascending by distance).
     let mut result_vec: Vec<Candidate> = results.into_vec();
-    result_vec.sort_unstable_by(|a, b| a.dist.partial_cmp(&b.dist).unwrap());
+    result_vec.sort_unstable_by(|a, b| a.dist.total_cmp(&b.dist));
     result_vec
 }
 
