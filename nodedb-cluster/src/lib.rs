@@ -3,11 +3,13 @@ pub mod catalog;
 pub mod circuit_breaker;
 pub mod conf_change;
 pub mod cross_shard_txn;
+pub mod distributed_join;
 pub mod error;
 pub mod forward;
 pub mod ghost;
 pub mod ghost_sweeper;
 pub mod health;
+pub mod lifecycle;
 pub mod metadata_group;
 pub mod migration;
 pub mod migration_executor;
@@ -16,6 +18,7 @@ pub mod quic_transport;
 pub mod raft_loop;
 pub mod raft_storage;
 pub mod rebalance;
+pub mod rebalance_scheduler;
 pub mod routing;
 pub mod rpc_codec;
 pub mod topology;
@@ -47,3 +50,9 @@ pub use cross_shard_txn::{
 };
 pub use metadata_group::{METADATA_GROUP_ID, MetadataCache, MetadataEntry};
 pub use quic_transport::{QuicTransport, QuicTransportConfig};
+
+pub use distributed_join::{BroadcastJoinRequest, JoinStrategy, ShufflePartition, select_strategy};
+pub use lifecycle::{
+    DecommissionResult, handle_learner_promotion, handle_node_join, plan_decommission,
+};
+pub use rebalance_scheduler::{NodeMetrics, RebalanceScheduler, RebalanceTrigger, SchedulerConfig};
