@@ -237,6 +237,31 @@ impl WalManager {
         Ok(Lsn::new(lsn))
     }
 
+    /// Append an atomic transaction record wrapping multiple sub-records.
+    ///
+    /// All sub-records share one CRC boundary and one fsync. On replay,
+    /// either all sub-records apply or none.
+    ///
+    /// Payload: MessagePack-encoded `Vec<(u16, Vec<u8>)>` — each tuple is
+    /// (record_type, sub-payload).
+    pub fn append_transaction(
+        &self,
+        tenant_id: TenantId,
+        vshard_id: VShardId,
+        payload: &[u8],
+    ) -> crate::Result<Lsn> {
+        let mut writer = self.writer.lock().unwrap();
+        let lsn = writer
+            .append(
+                RecordType::Transaction as u16,
+                tenant_id.as_u32(),
+                vshard_id.as_u16(),
+                payload,
+            )
+            .map_err(crate::Error::Wal)?;
+        Ok(Lsn::new(lsn))
+    }
+
     /// Append a CRDT delta record. Returns the assigned LSN.
     pub fn append_crdt_delta(
         &self,

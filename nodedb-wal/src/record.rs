@@ -147,6 +147,11 @@ pub enum RecordType {
     /// Timeseries engine: log entry batch.
     LogBatch = 31,
 
+    /// Atomic transaction: wraps multiple sub-records into a single WAL
+    /// group. On replay, either all sub-records apply or none.
+    /// Payload: MessagePack-encoded `Vec<(record_type: u16, payload: Vec<u8>)>`.
+    Transaction = 50 | 0x8000,
+
     /// Checkpoint marker — indicates a consistent snapshot point.
     Checkpoint = 100 | 0x8000,
 }
@@ -167,6 +172,7 @@ impl RecordType {
             x if x == 11 | 0x8000 => Some(Self::VectorDelete),
             x if x == 12 | 0x8000 => Some(Self::VectorParams),
             x if x == 20 | 0x8000 => Some(Self::CrdtDelta),
+            x if x == 50 | 0x8000 => Some(Self::Transaction),
             30 => Some(Self::TimeseriesBatch),
             31 => Some(Self::LogBatch),
             x if x == 100 | 0x8000 => Some(Self::Checkpoint),
