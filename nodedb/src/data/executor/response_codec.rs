@@ -16,6 +16,12 @@
 //! would be 5-10x but at the cost of schema rigidity and significant type
 //! boilerplate across 13 handler files.
 
+use std::sync::Arc;
+
+use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::ipc::writer::StreamWriter;
+use datafusion::arrow::record_batch::RecordBatch;
 use serde::Serialize;
 
 /// Serialize a response payload as MessagePack bytes.
@@ -28,6 +34,142 @@ pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     // Without this, rmp_serde uses integer indices (compact mode) which
     // produces `{0: value}` instead of `{"field": value}` on decode.
     rmp_serde::to_vec_named(value).map_err(|e| format!("response serialization: {e}"))
+}
+
+/// Encode document rows as Arrow IPC bytes for columnar transport.
+///
+/// Converts `Vec<(doc_id, serde_json::Value)>` into an Arrow RecordBatch
+/// serialized as IPC stream bytes. Schema is inferred from the first row.
+/// The Control Plane receives native Arrow batches for DataFusion processing.
+///
+/// Returns `None` if rows are empty or schema inference fails.
+pub fn encode_as_arrow_ipc(
+    rows: &[(String, serde_json::Value)],
+    projection: &[String],
+) -> Option<Vec<u8>> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    // Determine fields from projection or first row.
+    let first_obj = rows[0].1.as_object()?;
+    let field_names: Vec<&str> = if projection.is_empty() {
+        first_obj.keys().map(|k| k.as_str()).collect()
+    } else {
+        projection.iter().map(|s| s.as_str()).collect()
+    };
+
+    if field_names.is_empty() {
+        return None;
+    }
+
+    // Build schema: id + projected fields.
+    let mut fields = vec![Field::new("id", DataType::Utf8, false)];
+    for &name in &field_names {
+        let dt = first_obj
+            .get(name)
+            .map(infer_type)
+            .unwrap_or(DataType::Utf8);
+        fields.push(Field::new(name, dt, true));
+    }
+    let schema = Arc::new(Schema::new(fields));
+
+    // Build column arrays.
+    let mut ids: Vec<String> = Vec::with_capacity(rows.len());
+    let mut builders: Vec<ColBuilder> = field_names
+        .iter()
+        .map(|&name| {
+            let dt = first_obj
+                .get(name)
+                .map(infer_type)
+                .unwrap_or(DataType::Utf8);
+            ColBuilder::new(dt, rows.len())
+        })
+        .collect();
+
+    for (doc_id, data) in rows {
+        ids.push(doc_id.clone());
+        let obj = data.as_object();
+        for (i, &name) in field_names.iter().enumerate() {
+            match obj.and_then(|o| o.get(name)) {
+                Some(v) => builders[i].push(v),
+                None => builders[i].push_null(),
+            }
+        }
+    }
+
+    let mut arrays: Vec<ArrayRef> = vec![Arc::new(StringArray::from(ids))];
+    for b in builders {
+        arrays.push(b.finish());
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays).ok()?;
+
+    // Serialize as Arrow IPC stream.
+    let mut buf = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut buf, &schema).ok()?;
+        writer.write(&batch).ok()?;
+        writer.finish().ok()?;
+    }
+    Some(buf)
+}
+
+/// Maximum rows per Arrow batch to prevent OOM.
+pub const ARROW_BATCH_MAX_ROWS: usize = 65_536;
+/// Maximum bytes per Arrow batch.
+pub const ARROW_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+fn infer_type(v: &serde_json::Value) -> DataType {
+    match v {
+        serde_json::Value::Number(n) if n.is_i64() => DataType::Int64,
+        serde_json::Value::Number(_) => DataType::Float64,
+        serde_json::Value::Bool(_) => DataType::Boolean,
+        _ => DataType::Utf8,
+    }
+}
+
+enum ColBuilder {
+    Str(Vec<Option<String>>),
+    I64(Vec<Option<i64>>),
+    F64(Vec<Option<f64>>),
+}
+
+impl ColBuilder {
+    fn new(dt: DataType, cap: usize) -> Self {
+        match dt {
+            DataType::Int64 => Self::I64(Vec::with_capacity(cap)),
+            DataType::Float64 => Self::F64(Vec::with_capacity(cap)),
+            _ => Self::Str(Vec::with_capacity(cap)),
+        }
+    }
+
+    fn push(&mut self, v: &serde_json::Value) {
+        match self {
+            Self::Str(vec) => vec.push(Some(match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })),
+            Self::I64(vec) => vec.push(v.as_i64()),
+            Self::F64(vec) => vec.push(v.as_f64()),
+        }
+    }
+
+    fn push_null(&mut self) {
+        match self {
+            Self::Str(v) => v.push(None),
+            Self::I64(v) => v.push(None),
+            Self::F64(v) => v.push(None),
+        }
+    }
+
+    fn finish(self) -> ArrayRef {
+        match self {
+            Self::Str(v) => Arc::new(StringArray::from(v)) as ArrayRef,
+            Self::I64(v) => Arc::new(Int64Array::from(v)) as ArrayRef,
+            Self::F64(v) => Arc::new(Float64Array::from(v)) as ArrayRef,
+        }
+    }
 }
 
 /// Encode a simple `{"key": count}` response (for insert confirmations).

@@ -172,6 +172,63 @@ pub fn arrow_sum(batch: &RecordBatch, column_name: &str) -> Option<f64> {
     }
 }
 
+/// Compute MIN of a numeric column using Arrow SIMD kernels.
+pub fn arrow_min(batch: &RecordBatch, column_name: &str) -> Option<f64> {
+    let idx = batch.schema().index_of(column_name).ok()?;
+    let array = batch.column(idx);
+
+    if let Some(f64_arr) = array.as_any().downcast_ref::<Float64Array>() {
+        datafusion::arrow::compute::kernels::aggregate::min(f64_arr)
+    } else if let Some(i64_arr) = array.as_any().downcast_ref::<Int64Array>() {
+        datafusion::arrow::compute::kernels::aggregate::min(i64_arr).map(|v| v as f64)
+    } else {
+        None
+    }
+}
+
+/// Compute MAX of a numeric column using Arrow SIMD kernels.
+pub fn arrow_max(batch: &RecordBatch, column_name: &str) -> Option<f64> {
+    let idx = batch.schema().index_of(column_name).ok()?;
+    let array = batch.column(idx);
+
+    if let Some(f64_arr) = array.as_any().downcast_ref::<Float64Array>() {
+        datafusion::arrow::compute::kernels::aggregate::max(f64_arr)
+    } else if let Some(i64_arr) = array.as_any().downcast_ref::<Int64Array>() {
+        datafusion::arrow::compute::kernels::aggregate::max(i64_arr).map(|v| v as f64)
+    } else {
+        None
+    }
+}
+
+/// Compute COUNT of non-null values in a column.
+pub fn arrow_count(batch: &RecordBatch, column_name: &str) -> Option<usize> {
+    let idx = batch.schema().index_of(column_name).ok()?;
+    let array = batch.column(idx);
+    Some(array.len() - array.null_count())
+}
+
+/// Compute AVG of a numeric column (SUM / COUNT).
+pub fn arrow_avg(batch: &RecordBatch, column_name: &str) -> Option<f64> {
+    let sum = arrow_sum(batch, column_name)?;
+    let count = arrow_count(batch, column_name)?;
+    if count == 0 {
+        None
+    } else {
+        Some(sum / count as f64)
+    }
+}
+
+/// Decode Arrow IPC stream bytes back into a RecordBatch.
+///
+/// Used by the Control Plane to receive Arrow data from the Data Plane
+/// across the SPSC bridge.
+pub fn decode_arrow_ipc(bytes: &[u8]) -> Option<RecordBatch> {
+    use datafusion::arrow::ipc::reader::StreamReader;
+    let cursor = std::io::Cursor::new(bytes);
+    let mut reader = StreamReader::try_new(cursor, None).ok()?;
+    reader.next()?.ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
