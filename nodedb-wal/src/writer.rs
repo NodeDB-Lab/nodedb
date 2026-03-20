@@ -79,6 +79,10 @@ pub struct WalWriter {
 
     /// Optional key ring for payload encryption (supports key rotation).
     encryption_ring: Option<crate::crypto::KeyRing>,
+
+    /// Optional double-write buffer for torn write protection.
+    /// Records are written here before the WAL for crash recovery.
+    double_write: Option<crate::double_write::DoubleWriteBuffer>,
 }
 
 impl WalWriter {
@@ -104,6 +108,10 @@ impl WalWriter {
             (0, 1)
         };
 
+        // Open double-write buffer alongside the WAL file.
+        let dwb_path = path.with_extension("dwb");
+        let double_write = crate::double_write::DoubleWriteBuffer::open(&dwb_path).ok();
+
         Ok(Self {
             file,
             buffer,
@@ -112,6 +120,7 @@ impl WalWriter {
             sealed: false,
             config,
             encryption_ring: None,
+            double_write,
         })
     }
 
@@ -166,6 +175,13 @@ impl WalWriter {
             payload.to_vec(),
             self.encryption_ring.as_ref().map(|r| r.current()),
         )?;
+
+        // Write to double-write buffer first (torn write protection).
+        // If the process crashes after DWB write but before WAL write,
+        // recovery can reconstruct the record from the DWB.
+        if let Some(dwb) = &mut self.double_write {
+            let _ = dwb.write_record(&record); // Best-effort — DWB failure is non-fatal.
+        }
 
         let header_bytes = record.header.to_bytes();
         let total_size = HEADER_SIZE + record.payload.len();

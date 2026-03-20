@@ -23,6 +23,7 @@
 
 pub mod align;
 pub mod crypto;
+pub mod double_write;
 pub mod error;
 pub mod group_commit;
 pub mod reader;
