@@ -95,15 +95,9 @@ impl CoreLoop {
                     }
                     index.insert(vector.clone());
                 }
-                let payload = serde_json::json!({"inserted": vectors.len()});
-                match serde_json::to_vec(&payload) {
+                match super::super::response_codec::encode_count("inserted", vectors.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
-                    Err(e) => self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("batch insert response serialization: {e}"),
-                        },
-                    ),
+                    Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
                 }
             }
             Err(err) => self.response_error(task, err),
@@ -159,20 +153,18 @@ impl CoreLoop {
             }
             None => index.search(query_vector, top_k, ef),
         };
-        let serializable: Vec<_> = results
+        let hits: Vec<_> = results
             .iter()
-            .map(|r| serde_json::json!({"id": r.id, "distance": r.distance}))
+            .map(|r| super::super::response_codec::VectorSearchHit {
+                id: r.id,
+                distance: r.distance,
+            })
             .collect();
-        match serde_json::to_vec(&serializable) {
+        match super::super::response_codec::encode(&hits) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "vector search serialization failed");
-                self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                )
+                self.response_error(task, ErrorCode::Internal { detail: e })
             }
         }
     }

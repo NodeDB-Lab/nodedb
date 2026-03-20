@@ -74,7 +74,7 @@ impl CoreLoop {
         let result = self
             .csr
             .traverse_bfs(&refs, edge_label.as_deref(), direction, depth);
-        match serde_json::to_vec(&result) {
+        match super::super::response_codec::encode(&result) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "graph hop serialization failed");
@@ -99,11 +99,16 @@ impl CoreLoop {
         let neighbors = self
             .csr
             .neighbors(node_id, edge_label.as_deref(), direction);
-        let result: Vec<serde_json::Value> = neighbors
+        let result: Vec<_> = neighbors
             .iter()
-            .map(|(label, node)| serde_json::json!({"label": label, "node": node}))
+            .map(
+                |(label, node)| super::super::response_codec::NeighborEntry {
+                    label: label.as_str(),
+                    node: node.as_str(),
+                },
+            )
             .collect();
-        match serde_json::to_vec(&result) {
+        match super::super::response_codec::encode(&result) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "graph neighbors serialization failed");
@@ -130,7 +135,7 @@ impl CoreLoop {
             .csr
             .shortest_path(src, dst, edge_label.as_deref(), max_depth)
         {
-            Some(path) => match serde_json::to_vec(&path) {
+            Some(path) => match super::super::response_codec::encode(&path) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => {
                     warn!(core = self.core_id, error = %e, "graph path serialization failed");
@@ -162,11 +167,15 @@ impl CoreLoop {
         );
         let refs: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
         let edges = self.csr.subgraph(&refs, edge_label.as_deref(), depth);
-        let result: Vec<serde_json::Value> = edges
+        let result: Vec<_> = edges
             .iter()
-            .map(|(s, l, d)| serde_json::json!({"src": s, "label": l, "dst": d}))
+            .map(|(s, l, d)| super::super::response_codec::SubgraphEdge {
+                src: s.as_str(),
+                label: l.as_str(),
+                dst: d.as_str(),
+            })
             .collect();
-        match serde_json::to_vec(&result) {
+        match super::super::response_codec::encode(&result) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "graph subgraph serialization failed");

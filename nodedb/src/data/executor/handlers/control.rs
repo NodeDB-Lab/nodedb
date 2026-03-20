@@ -74,7 +74,7 @@ impl CoreLoop {
             .sparse
             .range_scan(tid, collection, field, lower, upper, limit)
         {
-            Ok(results) => match serde_json::to_vec(&results) {
+            Ok(results) => match super::super::response_codec::encode(&results) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => {
                     warn!(core = self.core_id, error = %e, "range scan serialization failed");

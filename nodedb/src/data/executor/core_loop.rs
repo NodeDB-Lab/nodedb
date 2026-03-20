@@ -263,6 +263,17 @@ mod tests {
     use nodedb_bridge::buffer::RingBuffer;
     use std::time::{Duration, Instant};
 
+    /// Decode a response payload (MessagePack or JSON) to a JSON string.
+    fn payload_json(payload: &[u8]) -> String {
+        crate::data::executor::response_codec::decode_payload_to_json(payload)
+    }
+
+    /// Decode a response payload to a parsed serde_json::Value.
+    fn payload_value(payload: &[u8]) -> serde_json::Value {
+        let json = payload_json(payload);
+        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)
+    }
+
     fn make_core() -> (CoreLoop, Producer<BridgeRequest>, Consumer<BridgeResponse>) {
         let dir = tempfile::tempdir().unwrap();
         let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
@@ -523,7 +534,7 @@ mod tests {
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Ok);
 
-        let payload = String::from_utf8(resp.inner.payload.to_vec()).unwrap();
+        let payload = payload_json(&resp.inner.payload);
         assert!(payload.contains("\"id\""), "payload: {payload}");
         assert!(payload.contains("\"distance\""), "payload: {payload}");
     }
@@ -616,7 +627,7 @@ mod tests {
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Ok);
-        let payload = String::from_utf8(resp.inner.payload.to_vec()).unwrap();
+        let payload = payload_json(&resp.inner.payload);
         assert!(payload.contains("bob"), "payload: {payload}");
         assert!(payload.contains("carol"), "payload: {payload}");
     }
@@ -656,7 +667,8 @@ mod tests {
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Ok);
-        let nodes: Vec<String> = serde_json::from_slice(&resp.inner.payload).unwrap();
+        let nodes: Vec<String> =
+            serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
         assert!(nodes.contains(&"a".to_string()));
         assert!(nodes.contains(&"b".to_string()));
         assert!(nodes.contains(&"c".to_string()));
@@ -697,7 +709,7 @@ mod tests {
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Ok);
-        let path: Vec<String> = serde_json::from_slice(&resp.inner.payload).unwrap();
+        let path: Vec<String> = serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
         assert_eq!(path, vec!["a", "b", "c"]);
 
         req_tx
@@ -714,7 +726,8 @@ mod tests {
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Ok);
-        let edges: Vec<serde_json::Value> = serde_json::from_slice(&resp.inner.payload).unwrap();
+        let edges: Vec<serde_json::Value> =
+            serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
         assert_eq!(edges.len(), 2);
     }
 
@@ -759,7 +772,7 @@ mod tests {
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
         let neighbors: Vec<serde_json::Value> =
-            serde_json::from_slice(&resp.inner.payload).unwrap();
+            serde_json::from_value(payload_value(&resp.inner.payload)).unwrap();
         assert!(neighbors.is_empty());
     }
 
@@ -862,7 +875,7 @@ mod tests {
         let resp = resp_rx.try_pop().unwrap();
         assert_eq!(resp.inner.status, Status::Ok);
 
-        let body: serde_json::Value = serde_json::from_slice(&resp.inner.payload).unwrap();
+        let body = payload_value(&resp.inner.payload);
 
         let results = body["results"]
             .as_array()

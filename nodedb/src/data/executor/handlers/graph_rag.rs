@@ -113,43 +113,41 @@ impl CoreLoop {
         fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         fused.truncate(final_top_k);
 
-        let results: Vec<serde_json::Value> = fused
+        use super::super::response_codec::*;
+
+        let results: Vec<GraphRagResult> = fused
             .iter()
             .map(|(node_id, rrf_score)| {
-                let mut entry = serde_json::json!({
-                    "node_id": node_id,
-                    "rrf_score": rrf_score,
-                });
-                if let Some((rank, distance)) = vector_scores.get(*node_id) {
-                    entry["vector_rank"] = serde_json::json!(rank);
-                    entry["vector_distance"] = serde_json::json!(distance);
+                let (vector_rank, vector_distance) = vector_scores
+                    .get(*node_id)
+                    .map(|(rank, dist)| (Some(*rank), Some(*dist)))
+                    .unwrap_or((None, None));
+                let hop_distance = hop_distances.get(*node_id).copied();
+
+                GraphRagResult {
+                    node_id: node_id.to_string(),
+                    rrf_score: *rrf_score,
+                    vector_rank,
+                    vector_distance,
+                    hop_distance,
                 }
-                if let Some(&hops) = hop_distances.get(*node_id) {
-                    entry["hop_distance"] = serde_json::json!(hops);
-                }
-                entry
             })
             .collect();
 
-        let response_body = serde_json::json!({
-            "results": results,
-            "metadata": {
-                "vector_candidates": vector_results.len(),
-                "graph_expanded": expanded_nodes.len(),
-                "truncated": bfs_truncated,
-            }
-        });
+        let response_body = GraphRagResponse {
+            results,
+            metadata: GraphRagMetadata {
+                vector_candidates: vector_results.len(),
+                graph_expanded: expanded_nodes.len(),
+                truncated: bfs_truncated,
+            },
+        };
 
-        match serde_json::to_vec(&response_body) {
+        match encode(&response_body) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "graph rag fusion serialization failed");
-                self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                )
+                self.response_error(task, ErrorCode::Internal { detail: e })
             }
         }
     }

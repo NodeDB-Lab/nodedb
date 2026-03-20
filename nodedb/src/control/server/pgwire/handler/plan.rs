@@ -81,7 +81,7 @@ pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> Response {
             if payload.is_empty() {
                 Response::Query(QueryResponse::new(schema, stream::empty()))
             } else {
-                let text = String::from_utf8_lossy(payload).into_owned();
+                let text = crate::data::executor::response_codec::decode_payload_to_json(payload);
                 let mut encoder = DataRowEncoder::new(schema.clone());
                 if let Err(e) = encoder.encode_field(&text) {
                     tracing::error!(error = %e, "failed to encode field");

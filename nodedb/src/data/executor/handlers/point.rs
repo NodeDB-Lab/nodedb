@@ -17,14 +17,10 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, %document_id, "point get");
         match self.sparse.get(tid, collection, document_id) {
             Ok(Some(data)) => {
-                let json_bytes = match super::super::doc_format::decode_document(&data) {
-                    Some(value) => match serde_json::to_vec(&value) {
-                        Ok(bytes) => bytes,
-                        Err(_) => data,
-                    },
-                    None => data,
-                };
-                self.response_with_payload(task, json_bytes)
+                // Document is stored as MessagePack (or legacy JSON).
+                // Pass through directly — the Control Plane's
+                // decode_payload_to_json() handles format conversion.
+                self.response_with_payload(task, data)
             }
             Ok(None) => self.response_error(task, ErrorCode::NotFound),
             Err(e) => {

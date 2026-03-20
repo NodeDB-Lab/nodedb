@@ -35,15 +35,9 @@ impl CoreLoop {
             .collect();
         match self.sparse.batch_put(tid, collection, &refs) {
             Ok(()) => {
-                let payload = serde_json::json!({"inserted": documents.len()});
-                match serde_json::to_vec(&payload) {
+                match super::super::response_codec::encode_count("inserted", documents.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
-                    Err(e) => self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("batch insert response serialization: {e}"),
-                        },
-                    ),
+                    Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
                 }
             }
             Err(e) => self.response_error(
@@ -164,11 +158,14 @@ impl CoreLoop {
                             data
                         };
 
-                        serde_json::json!({"id": doc_id, "data": projected})
+                        super::super::response_codec::DocumentRow {
+                            id: doc_id,
+                            data: projected,
+                        }
                     })
                     .collect();
 
-                match serde_json::to_vec(&result) {
+                match super::super::response_codec::encode(&result) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(
                         task,
@@ -376,14 +373,10 @@ impl CoreLoop {
 
                 results.truncate(limit);
 
-                match serde_json::to_vec(&results) {
+                // Aggregate results are serde_json::Value objects — serialize as MessagePack.
+                match super::super::response_codec::encode(&results) {
                     Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    ),
+                    Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
                 }
             }
             Err(e) => self.response_error(
