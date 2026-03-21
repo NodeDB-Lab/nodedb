@@ -5,3 +5,4 @@ pub mod metrics;
 pub mod query;
 pub mod search;
 pub mod status;
+pub mod subscribe;

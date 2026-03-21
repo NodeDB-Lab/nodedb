@@ -46,6 +46,27 @@ pub struct SystemMetrics {
     pub text_searches: AtomicU64,
     /// Checkpoint count.
     pub checkpoints: AtomicU64,
+
+    // ── Contention metrics ──
+    /// mmap major page faults observed across all cores.
+    pub mmap_major_faults: AtomicU64,
+    /// NVMe queue depth (pending io_uring submissions).
+    pub nvme_queue_depth: AtomicU64,
+    /// Throttle activation count (backpressure engaged).
+    pub throttle_activations: AtomicU64,
+    /// Cache contention events (L3 miss proxy — estimated from
+    /// SPSC bridge latency spikes above p95 threshold).
+    pub cache_contention_events: AtomicU64,
+
+    // ── Subscription metrics ──
+    /// Active WebSocket subscriptions.
+    pub active_subscriptions: AtomicU64,
+    /// Active LISTEN channels across all pgwire connections.
+    pub active_listen_channels: AtomicU64,
+    /// Change events delivered to subscribers.
+    pub change_events_delivered: AtomicU64,
+    /// Change events dropped (slow consumer backpressure).
+    pub change_events_dropped: AtomicU64,
 }
 
 impl SystemMetrics {
@@ -88,6 +109,26 @@ impl SystemMetrics {
     /// Record a query error.
     pub fn record_query_error(&self) {
         self.query_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a mmap major page fault.
+    pub fn record_mmap_fault(&self) {
+        self.mmap_major_faults.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a throttle activation (backpressure engaged).
+    pub fn record_throttle(&self) {
+        self.throttle_activations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a cache contention event.
+    pub fn record_cache_contention(&self) {
+        self.cache_contention_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Update NVMe queue depth.
+    pub fn update_nvme_queue_depth(&self, depth: u64) {
+        self.nvme_queue_depth.store(depth, Ordering::Relaxed);
     }
 
     /// Serialize all metrics as a Prometheus-compatible text format.
@@ -140,6 +181,42 @@ impl SystemMetrics {
              # TYPE nodedb_active_connections gauge\n\
              nodedb_active_connections {}\n",
             self.active_connections.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP nodedb_mmap_major_faults mmap major page faults\n\
+             # TYPE nodedb_mmap_major_faults counter\n\
+             nodedb_mmap_major_faults {}\n",
+            self.mmap_major_faults.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP nodedb_nvme_queue_depth NVMe io_uring queue depth\n\
+             # TYPE nodedb_nvme_queue_depth gauge\n\
+             nodedb_nvme_queue_depth {}\n",
+            self.nvme_queue_depth.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP nodedb_throttle_activations Backpressure throttle activations\n\
+             # TYPE nodedb_throttle_activations counter\n\
+             nodedb_throttle_activations {}\n",
+            self.throttle_activations.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP nodedb_cache_contention_events Cache contention (L3 miss proxy)\n\
+             # TYPE nodedb_cache_contention_events counter\n\
+             nodedb_cache_contention_events {}\n",
+            self.cache_contention_events.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP nodedb_active_subscriptions Active WebSocket/LISTEN subscriptions\n\
+             # TYPE nodedb_active_subscriptions gauge\n\
+             nodedb_active_subscriptions {}\n",
+            self.active_subscriptions.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP nodedb_change_events_delivered Change events delivered\n\
+             # TYPE nodedb_change_events_delivered counter\n\
+             nodedb_change_events_delivered {}\n",
+            self.change_events_delivered.load(Ordering::Relaxed)
         ));
         out
     }
