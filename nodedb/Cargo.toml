@@ -54,6 +54,10 @@ loro = { workspace = true }
 argon2 = { workspace = true }
 sha2 = "0.10"
 md5 = { workspace = true }
+hmac = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+aes-gcm = { workspace = true }
 
 # TLS
 tokio-rustls = { workspace = true }
