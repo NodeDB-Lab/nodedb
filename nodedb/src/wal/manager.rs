@@ -37,7 +37,7 @@ impl WalManager {
         let ring = nodedb_wal::crypto::KeyRing::new(key);
         let mut mgr = Self::open(path, use_direct_io)?;
         {
-            let mut writer = mgr.writer.lock().unwrap();
+            let mut writer = mgr.writer.lock().unwrap_or_else(|p| p.into_inner());
             writer.set_encryption_ring(ring.clone());
         }
         mgr.encryption_ring = Some(ring);
@@ -62,7 +62,7 @@ impl WalManager {
         let ring = nodedb_wal::crypto::KeyRing::with_previous(current, previous);
         let mut mgr = Self::open(path, use_direct_io)?;
         {
-            let mut writer = mgr.writer.lock().unwrap();
+            let mut writer = mgr.writer.lock().unwrap_or_else(|p| p.into_inner());
             writer.set_encryption_ring(ring.clone());
         }
         mgr.encryption_ring = Some(ring);
@@ -82,7 +82,7 @@ impl WalManager {
         let new_key = nodedb_wal::crypto::WalEncryptionKey::from_file(new_key_path)
             .map_err(crate::Error::Wal)?;
 
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let new_ring = if let Some(ring) = writer.encryption_ring() {
             // Current key becomes previous; new key becomes current.
             nodedb_wal::crypto::KeyRing::with_previous(new_key, ring.current().clone())
@@ -145,7 +145,7 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::Put as u16,
@@ -164,7 +164,7 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::Delete as u16,
@@ -185,7 +185,7 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::VectorPut as u16,
@@ -206,7 +206,7 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::VectorDelete as u16,
@@ -225,7 +225,7 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::VectorParams as u16,
@@ -250,7 +250,7 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::Transaction as u16,
@@ -269,7 +269,7 @@ impl WalManager {
         vshard_id: VShardId,
         delta: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = writer
             .append(
                 RecordType::CrdtDelta as u16,
@@ -282,14 +282,64 @@ impl WalManager {
     }
 
     /// Flush all buffered records to disk (group commit / fsync).
+    /// Append a checkpoint marker to the WAL.
+    ///
+    /// Records the LSN at which a consistent checkpoint was taken.
+    /// WAL entries before this LSN are safe to truncate after all
+    /// engines have confirmed their dirty pages are flushed.
+    pub fn append_checkpoint(
+        &self,
+        tenant_id: TenantId,
+        vshard_id: VShardId,
+        checkpoint_lsn: u64,
+    ) -> crate::Result<Lsn> {
+        let payload =
+            rmp_serde::to_vec(&checkpoint_lsn).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("checkpoint: {e}"),
+            })?;
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = writer
+            .append(
+                nodedb_wal::record::RecordType::Checkpoint as u16,
+                tenant_id.as_u32(),
+                vshard_id.as_u16(),
+                &payload,
+            )
+            .map_err(crate::Error::Wal)?;
+        Ok(Lsn::new(lsn))
+    }
+
+    /// Truncate the WAL up to (but not including) the given LSN.
+    ///
+    /// Safe to call only after a checkpoint has been confirmed —
+    /// all engines have flushed their dirty pages, and the checkpoint
+    /// LSN has been persisted.
+    ///
+    /// Currently a no-op placeholder: actual truncation requires
+    /// segment-level WAL file management (deleting old segment files
+    /// while the writer continues in the active segment).
+    pub fn truncate_before(&self, _checkpoint_lsn: Lsn) -> crate::Result<()> {
+        // TODO: implement WAL segment file deletion.
+        // For now, the WAL grows unbounded. Checkpointing reduces
+        // the amount of replay needed on crash recovery even without
+        // truncation — WAL replay starts from the checkpoint LSN
+        // instead of the beginning.
+        tracing::debug!(
+            _checkpoint_lsn = _checkpoint_lsn.as_u64(),
+            "WAL truncation requested (not yet implemented)"
+        );
+        Ok(())
+    }
+
     pub fn sync(&self) -> crate::Result<()> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         writer.sync().map_err(crate::Error::Wal)
     }
 
     /// Next LSN that will be assigned.
     pub fn next_lsn(&self) -> Lsn {
-        let writer = self.writer.lock().unwrap();
+        let writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         Lsn::new(writer.next_lsn())
     }
 
