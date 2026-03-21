@@ -104,9 +104,10 @@ impl WalReader {
             return Ok(None);
         }
 
-        // Check if the record type is known.
-        if RecordType::from_raw(header.record_type).is_none() {
-            if RecordType::is_required(header.record_type) {
+        // Check if the record type is known (strip encrypted flag for lookup).
+        let logical_type = record.logical_record_type();
+        if RecordType::from_raw(logical_type).is_none() {
+            if RecordType::is_required(logical_type) {
                 return Err(WalError::UnknownRequiredRecordType {
                     record_type: header.record_type,
                     lsn: header.lsn,

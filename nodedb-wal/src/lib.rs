@@ -29,6 +29,8 @@ pub mod group_commit;
 pub mod reader;
 pub mod record;
 pub mod recovery;
+pub mod segment;
+pub mod segmented;
 #[cfg(feature = "io-uring")]
 pub mod uring_writer;
 pub mod writer;
@@ -37,4 +39,5 @@ pub use error::{Result, WalError};
 pub use group_commit::GroupCommitter;
 pub use record::{RecordHeader, RecordType, WalRecord};
 pub use recovery::{RecoveryInfo, recover};
+pub use segmented::{SegmentedWal, SegmentedWalConfig};
 pub use writer::WalWriter;

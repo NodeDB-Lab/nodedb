@@ -140,6 +140,41 @@ impl WalWriter {
         self.encryption_ring.as_ref()
     }
 
+    /// Open a new WAL segment file with a specific starting LSN.
+    ///
+    /// Used by `SegmentedWal` when rolling to a new segment. The file must
+    /// not already exist (or be empty). The writer will assign LSNs starting
+    /// from `start_lsn`.
+    pub fn open_with_start_lsn(
+        path: &Path,
+        config: WalWriterConfig,
+        start_lsn: u64,
+    ) -> Result<Self> {
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true).append(false);
+
+        if config.use_direct_io {
+            opts.custom_flags(libc::O_DIRECT);
+        }
+
+        let file = opts.open(path)?;
+        let buffer = AlignedBuf::new(config.write_buffer_size, config.alignment)?;
+
+        let dwb_path = path.with_extension("dwb");
+        let double_write = crate::double_write::DoubleWriteBuffer::open(&dwb_path).ok();
+
+        Ok(Self {
+            file,
+            buffer,
+            file_offset: 0,
+            next_lsn: AtomicU64::new(start_lsn),
+            sealed: false,
+            config,
+            encryption_ring: None,
+            double_write,
+        })
+    }
+
     /// Open a WAL writer with O_DIRECT disabled (for testing on tmpfs, etc.).
     pub fn open_without_direct_io(path: &Path) -> Result<Self> {
         Self::open(

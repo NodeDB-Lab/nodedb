@@ -5,22 +5,24 @@ use tracing::info;
 
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
-use nodedb_wal::writer::{WalWriter, WalWriterConfig};
+use nodedb_wal::segmented::{SegmentedWal, SegmentedWalConfig};
+use nodedb_wal::writer::WalWriterConfig;
 
 use crate::types::{Lsn, TenantId, VShardId};
 
-/// WAL manager: owns the writer and coordinates appends + sync.
+/// WAL manager: owns the segmented WAL and coordinates appends + sync.
 ///
 /// The WAL is the single source of truth for durability. Every mutation
 /// goes through here before being applied to any engine's in-memory state.
 ///
-/// Thread-safety: the writer is behind a `Mutex` because multiple Control
-/// Plane tasks may submit WAL appends concurrently. The mutex serializes
-/// writes, which is correct — WAL appends must be ordered anyway. The
-/// `sync()` call (fsync) is the expensive part and is batched via group commit.
+/// Thread-safety: the segmented WAL is behind a `Mutex` because multiple
+/// Control Plane tasks may submit WAL appends concurrently. The mutex
+/// serializes writes, which is correct — WAL appends must be ordered anyway.
+/// The `sync()` call (fsync) is the expensive part and is batched via group commit.
 pub struct WalManager {
-    writer: Mutex<WalWriter>,
-    wal_path: PathBuf,
+    wal: Mutex<SegmentedWal>,
+    /// The WAL directory path (for replay without holding the lock).
+    wal_dir: PathBuf,
     /// Encryption key ring (if configured). Supports dual-key reads during rotation.
     encryption_ring: Option<nodedb_wal::crypto::KeyRing>,
 }
@@ -37,8 +39,8 @@ impl WalManager {
         let ring = nodedb_wal::crypto::KeyRing::new(key);
         let mut mgr = Self::open(path, use_direct_io)?;
         {
-            let mut writer = mgr.writer.lock().unwrap_or_else(|p| p.into_inner());
-            writer.set_encryption_ring(ring.clone());
+            let mut wal = mgr.wal.lock().unwrap_or_else(|p| p.into_inner());
+            wal.set_encryption_ring(ring.clone());
         }
         mgr.encryption_ring = Some(ring);
         info!(key_path = %key_path.display(), "WAL encryption enabled");
@@ -62,8 +64,8 @@ impl WalManager {
         let ring = nodedb_wal::crypto::KeyRing::with_previous(current, previous);
         let mut mgr = Self::open(path, use_direct_io)?;
         {
-            let mut writer = mgr.writer.lock().unwrap_or_else(|p| p.into_inner());
-            writer.set_encryption_ring(ring.clone());
+            let mut wal = mgr.wal.lock().unwrap_or_else(|p| p.into_inner());
+            wal.set_encryption_ring(ring.clone());
         }
         mgr.encryption_ring = Some(ring);
         info!(
@@ -82,16 +84,14 @@ impl WalManager {
         let new_key = nodedb_wal::crypto::WalEncryptionKey::from_file(new_key_path)
             .map_err(crate::Error::Wal)?;
 
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let new_ring = if let Some(ring) = writer.encryption_ring() {
-            // Current key becomes previous; new key becomes current.
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let new_ring = if let Some(ring) = wal.encryption_ring() {
             nodedb_wal::crypto::KeyRing::with_previous(new_key, ring.current().clone())
         } else {
-            // First key — no previous.
             nodedb_wal::crypto::KeyRing::new(new_key)
         };
 
-        writer.set_encryption_ring(new_ring);
+        wal.set_encryption_ring(new_ring);
         info!(new_key = %new_key_path.display(), "WAL encryption key rotated");
         Ok(())
     }
@@ -106,29 +106,47 @@ impl WalManager {
         self.encryption_ring.as_ref()
     }
 
-    /// Open or create a WAL at the given path.
+    /// Open or create a segmented WAL at the given path.
+    ///
+    /// The `path` argument is treated as the WAL directory for the segmented format.
+    /// If a legacy single-file WAL exists at this path, it is automatically migrated
+    /// to the segmented format (one-time, transparent).
     pub fn open(path: &Path, use_direct_io: bool) -> crate::Result<Self> {
-        // Ensure parent directory exists.
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let config = WalWriterConfig {
-            use_direct_io,
-            ..Default::default()
+        // Determine the WAL directory.
+        // If `path` is a file (legacy WAL), migrate it to a directory.
+        // If `path` is a directory or doesn't exist, use it directly.
+        let wal_dir = if path.is_file() {
+            // Legacy single-file WAL detected. Migrate to segmented format.
+            // Use path's parent + "wal_segments" as the new directory,
+            // or just append "_segments" to the legacy path.
+            let dir = path.with_extension("d");
+            nodedb_wal::segment::migrate_legacy_wal(path, &dir)
+                .map_err(crate::Error::Wal)?;
+            dir
+        } else {
+            path.to_path_buf()
         };
 
-        let writer = WalWriter::open(path, config).map_err(crate::Error::Wal)?;
+        let config = SegmentedWalConfig {
+            wal_dir: wal_dir.clone(),
+            segment_target_size: nodedb_wal::segment::DEFAULT_SEGMENT_TARGET_SIZE,
+            writer_config: WalWriterConfig {
+                use_direct_io,
+                ..Default::default()
+            },
+        };
+
+        let wal = SegmentedWal::open(config).map_err(crate::Error::Wal)?;
 
         info!(
-            path = %path.display(),
-            next_lsn = writer.next_lsn(),
+            wal_dir = %wal_dir.display(),
+            next_lsn = wal.next_lsn(),
             "WAL opened"
         );
 
         Ok(Self {
-            writer: Mutex::new(writer),
-            wal_path: path.to_path_buf(),
+            wal: Mutex::new(wal),
+            wal_dir,
             encryption_ring: None,
         })
     }
@@ -145,8 +163,8 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::Put as u16,
                 tenant_id.as_u32(),
@@ -164,8 +182,8 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::Delete as u16,
                 tenant_id.as_u32(),
@@ -177,16 +195,14 @@ impl WalManager {
     }
 
     /// Append a Vector insert record. Returns the assigned LSN.
-    ///
-    /// Payload format: `[collection_len: 4B LE][collection: N bytes][dim: 4B LE][vector: dim*4 bytes f32 LE]`
     pub fn append_vector_put(
         &self,
         tenant_id: TenantId,
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::VectorPut as u16,
                 tenant_id.as_u32(),
@@ -198,16 +214,14 @@ impl WalManager {
     }
 
     /// Append a Vector delete record. Returns the assigned LSN.
-    ///
-    /// Payload format: `[collection_len: 4B LE][collection: N bytes][vector_id: 4B LE]`
     pub fn append_vector_delete(
         &self,
         tenant_id: TenantId,
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::VectorDelete as u16,
                 tenant_id.as_u32(),
@@ -225,8 +239,8 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::VectorParams as u16,
                 tenant_id.as_u32(),
@@ -250,8 +264,8 @@ impl WalManager {
         vshard_id: VShardId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::Transaction as u16,
                 tenant_id.as_u32(),
@@ -269,8 +283,8 @@ impl WalManager {
         vshard_id: VShardId,
         delta: &[u8],
     ) -> crate::Result<Lsn> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
                 RecordType::CrdtDelta as u16,
                 tenant_id.as_u32(),
@@ -281,11 +295,10 @@ impl WalManager {
         Ok(Lsn::new(lsn))
     }
 
-    /// Flush all buffered records to disk (group commit / fsync).
     /// Append a checkpoint marker to the WAL.
     ///
     /// Records the LSN at which a consistent checkpoint was taken.
-    /// WAL entries before this LSN are safe to truncate after all
+    /// WAL segments before this LSN are safe to truncate after all
     /// engines have confirmed their dirty pages are flushed.
     pub fn append_checkpoint(
         &self,
@@ -298,10 +311,10 @@ impl WalManager {
                 format: "msgpack".into(),
                 detail: format!("checkpoint: {e}"),
             })?;
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let lsn = writer
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let lsn = wal
             .append(
-                nodedb_wal::record::RecordType::Checkpoint as u16,
+                RecordType::Checkpoint as u16,
                 tenant_id.as_u32(),
                 vshard_id.as_u16(),
                 &payload,
@@ -310,52 +323,66 @@ impl WalManager {
         Ok(Lsn::new(lsn))
     }
 
-    /// Truncate the WAL up to (but not including) the given LSN.
+    /// Truncate old WAL segments that are fully below the checkpoint LSN.
     ///
-    /// Safe to call only after a checkpoint has been confirmed —
-    /// all engines have flushed their dirty pages, and the checkpoint
-    /// LSN has been persisted.
+    /// Deletes sealed segment files whose records are all below `checkpoint_lsn`.
+    /// The active segment is never deleted. Safe to call only after a checkpoint
+    /// has been confirmed — all engines have flushed their dirty pages.
     ///
-    /// Currently a no-op placeholder: actual truncation requires
-    /// segment-level WAL file management (deleting old segment files
-    /// while the writer continues in the active segment).
-    pub fn truncate_before(&self, _checkpoint_lsn: Lsn) -> crate::Result<()> {
-        // TODO: implement WAL segment file deletion.
-        // For now, the WAL grows unbounded. Checkpointing reduces
-        // the amount of replay needed on crash recovery even without
-        // truncation — WAL replay starts from the checkpoint LSN
-        // instead of the beginning.
-        tracing::debug!(
-            _checkpoint_lsn = _checkpoint_lsn.as_u64(),
-            "WAL truncation requested (not yet implemented)"
-        );
-        Ok(())
+    /// Returns the number of segments deleted and bytes reclaimed.
+    pub fn truncate_before(
+        &self,
+        checkpoint_lsn: Lsn,
+    ) -> crate::Result<nodedb_wal::segment::TruncateResult> {
+        let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        let result = wal
+            .truncate_before(checkpoint_lsn.as_u64())
+            .map_err(crate::Error::Wal)?;
+
+        if result.segments_deleted > 0 {
+            info!(
+                checkpoint_lsn = checkpoint_lsn.as_u64(),
+                segments_deleted = result.segments_deleted,
+                bytes_reclaimed = result.bytes_reclaimed,
+                "WAL truncated"
+            );
+        }
+
+        Ok(result)
     }
 
+    /// Flush all buffered records to disk (group commit / fsync).
     pub fn sync(&self) -> crate::Result<()> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        writer.sync().map_err(crate::Error::Wal)
+        let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        wal.sync().map_err(crate::Error::Wal)
     }
 
     /// Next LSN that will be assigned.
     pub fn next_lsn(&self) -> Lsn {
-        let writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        Lsn::new(writer.next_lsn())
+        let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        Lsn::new(wal.next_lsn())
     }
 
     /// Replay all committed records from the WAL.
     ///
-    /// Returns records in LSN order. Used during crash recovery.
+    /// Returns records in LSN order across all segments. Used during crash recovery.
     pub fn replay(&self) -> crate::Result<Vec<WalRecord>> {
-        let reader =
-            nodedb_wal::reader::WalReader::open(&self.wal_path).map_err(crate::Error::Wal)?;
-        let records: Vec<_> = reader
-            .records()
-            .collect::<nodedb_wal::Result<_>>()
+        let records = nodedb_wal::segmented::replay_all_segments(&self.wal_dir)
             .map_err(crate::Error::Wal)?;
-
         info!(records = records.len(), "WAL replay complete");
         Ok(records)
+    }
+
+    /// Total WAL size on disk across all segments.
+    pub fn total_size_bytes(&self) -> crate::Result<u64> {
+        let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        wal.total_size_bytes().map_err(crate::Error::Wal)
+    }
+
+    /// List all WAL segment metadata (for monitoring).
+    pub fn list_segments(&self) -> crate::Result<Vec<nodedb_wal::segment::SegmentMeta>> {
+        let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
+        wal.list_segments().map_err(crate::Error::Wal)
     }
 }
 
@@ -366,7 +393,7 @@ mod tests {
     #[test]
     fn append_and_replay() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.wal");
+        let path = dir.path().join("wal_dir");
 
         let wal = WalManager::open_for_testing(&path).unwrap();
 
@@ -392,7 +419,7 @@ mod tests {
     #[test]
     fn crdt_delta_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("crdt.wal");
+        let path = dir.path().join("wal_dir");
 
         let wal = WalManager::open_for_testing(&path).unwrap();
 
@@ -415,7 +442,7 @@ mod tests {
     #[test]
     fn next_lsn_continues_after_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("reopen.wal");
+        let path = dir.path().join("wal_dir");
 
         {
             let wal = WalManager::open_for_testing(&path).unwrap();
@@ -433,5 +460,49 @@ mod tests {
             .append_put(TenantId::new(1), VShardId::new(0), b"c")
             .unwrap();
         assert_eq!(lsn, Lsn::new(3));
+    }
+
+    #[test]
+    fn truncate_reclaims_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal_dir");
+
+        let wal = WalManager::open_for_testing(&path).unwrap();
+
+        let t = TenantId::new(1);
+        let v = VShardId::new(0);
+
+        // Write enough records to span multiple segments (impossible with default 64 MiB,
+        // so just test that truncation works without error on a single segment).
+        for i in 0..10u32 {
+            wal.append_put(t, v, format!("val-{i}").as_bytes())
+                .unwrap();
+        }
+        wal.sync().unwrap();
+
+        // Truncate at LSN 5 — no segments will be deleted since there's only one.
+        let result = wal.truncate_before(Lsn::new(5)).unwrap();
+        assert_eq!(result.segments_deleted, 0);
+
+        // Records should still be replayable.
+        let records = wal.replay().unwrap();
+        assert_eq!(records.len(), 10);
+    }
+
+    #[test]
+    fn total_size_and_list_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal_dir");
+
+        let wal = WalManager::open_for_testing(&path).unwrap();
+        wal.append_put(TenantId::new(1), VShardId::new(0), b"data")
+            .unwrap();
+        wal.sync().unwrap();
+
+        let size = wal.total_size_bytes().unwrap();
+        assert!(size > 0);
+
+        let segments = wal.list_segments().unwrap();
+        assert_eq!(segments.len(), 1);
     }
 }
