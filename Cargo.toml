@@ -81,6 +81,9 @@ rmpv = "1"
 # Zero-copy serialization
 rkyv = { version = "0.8", features = ["alloc"] }
 
+# WebSocket
+tokio-tungstenite = "0.29"
+
 # Storage
 redb = "2"
 roaring = "0.10"
