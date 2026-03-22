@@ -16,6 +16,7 @@ use nodedb_types::id::{EdgeId, NodeId};
 use nodedb_types::result::{QueryResult, SearchResult, SubGraph, SubGraphEdge, SubGraphNode};
 use nodedb_types::value::Value;
 
+use super::LockExt;
 use super::NodeDbLite;
 use super::convert::{loro_value_to_document, value_to_loro};
 use crate::engine::graph::index::Direction;
@@ -30,12 +31,28 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         k: usize,
         _filter: Option<&MetadataFilter>,
     ) -> NodeDbResult<Vec<SearchResult>> {
-        let indices = self
-            .hnsw_indices
-            .lock()
-            .map_err(|_| NodeDbError::Internal {
-                detail: "HNSW lock poisoned".into(),
-            })?;
+        // Try to reload evicted collection from storage lazily.
+        {
+            let has_it = self.hnsw_indices.lock_or_recover().contains_key(collection);
+
+            if !has_it {
+                let key = format!("hnsw:{collection}");
+                if let Some(checkpoint) = self
+                    .storage
+                    .get(nodedb_types::Namespace::Vector, key.as_bytes())
+                    .await?
+                    && let Some(index) =
+                        crate::engine::vector::graph::HnswIndex::from_checkpoint(&checkpoint)
+                {
+                    tracing::info!(collection, "lazy-loaded HNSW collection from storage");
+                    self.hnsw_indices
+                        .lock_or_recover()
+                        .insert(collection.to_string(), index);
+                }
+            }
+        }
+
+        let indices = self.hnsw_indices.lock_or_recover();
 
         let Some(index) = indices.get(collection) else {
             return Ok(Vec::new());
@@ -43,12 +60,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
 
         let raw_results = index.search(query, k, self.search_ef);
 
-        let id_map = self
-            .vector_id_map
-            .lock()
-            .map_err(|_| NodeDbError::Internal {
-                detail: "vector ID map lock poisoned".into(),
-            })?;
+        let id_map = self.vector_id_map.lock_or_recover();
 
         Ok(raw_results
             .into_iter()
@@ -78,12 +90,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     ) -> NodeDbResult<()> {
         // ── Insert into HNSW ──
         let internal_id = {
-            let mut indices = self
-                .hnsw_indices
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "HNSW lock poisoned".into(),
-                })?;
+            let mut indices = self.hnsw_indices.lock_or_recover();
             let index = Self::ensure_hnsw(&mut indices, collection, embedding.len());
             let id_before = index.len() as u32;
             index
@@ -94,12 +101,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
 
         // ── Track ID mapping ──
         {
-            let mut id_map = self
-                .vector_id_map
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "vector ID map lock poisoned".into(),
-                })?;
+            let mut id_map = self.vector_id_map.lock_or_recover();
             id_map.insert(
                 format!("{collection}:{internal_id}"),
                 (id.to_string(), internal_id),
@@ -108,9 +110,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
 
         // ── Record in CRDT ──
         {
-            let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let mut crdt = self.crdt.lock_or_recover();
             let mut fields = vec![("embedding_dim", LoroValue::I64(embedding.len() as i64))];
             if let Some(meta) = &metadata {
                 for (k, v) in &meta.fields {
@@ -130,12 +130,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     async fn vector_delete(&self, collection: &str, id: &str) -> NodeDbResult<()> {
         // Find internal ID from the map.
         let internal_id = {
-            let id_map = self
-                .vector_id_map
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "vector ID map lock poisoned".into(),
-                })?;
+            let id_map = self.vector_id_map.lock_or_recover();
             id_map
                 .iter()
                 .find(|(_, (doc_id, _))| doc_id == id)
@@ -143,12 +138,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         };
 
         if let Some(iid) = internal_id {
-            let mut indices = self
-                .hnsw_indices
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "HNSW lock poisoned".into(),
-                })?;
+            let mut indices = self.hnsw_indices.lock_or_recover();
             if let Some(index) = indices.get_mut(collection) {
                 index.delete(iid);
             }
@@ -156,9 +146,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
 
         // ── Record in CRDT ──
         {
-            let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let mut crdt = self.crdt.lock_or_recover();
             crdt.delete(collection, id)
                 .map_err(|e| NodeDbError::Storage {
                     detail: e.to_string(),
@@ -174,9 +162,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         depth: u8,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<SubGraph> {
-        let csr = self.csr.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CSR lock poisoned".into(),
-        })?;
+        let csr = self.csr.lock_or_recover();
 
         let label_filter = edge_filter
             .and_then(|f| f.labels.first())
@@ -224,18 +210,14 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         _properties: Option<Document>,
     ) -> NodeDbResult<EdgeId> {
         {
-            let mut csr = self.csr.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CSR lock poisoned".into(),
-            })?;
+            let mut csr = self.csr.lock_or_recover();
             csr.add_edge(from.as_str(), edge_type, to.as_str());
         }
 
         // ── Record in CRDT ──
         {
             let edge_id = EdgeId::from_components(from.as_str(), to.as_str(), edge_type);
-            let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let mut crdt = self.crdt.lock_or_recover();
             crdt.upsert(
                 "__edges",
                 edge_id.as_str(),
@@ -264,16 +246,12 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
         if let Some((src, rest)) = id_str.split_once("--")
             && let Some((label, dst)) = rest.split_once("-->")
         {
-            let mut csr = self.csr.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CSR lock poisoned".into(),
-            })?;
+            let mut csr = self.csr.lock_or_recover();
             csr.remove_edge(src, label, dst);
         }
 
         {
-            let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let mut crdt = self.crdt.lock_or_recover();
             crdt.delete("__edges", id_str)
                 .map_err(|e| NodeDbError::Storage {
                     detail: e.to_string(),
@@ -284,9 +262,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     }
 
     async fn document_get(&self, collection: &str, id: &str) -> NodeDbResult<Option<Document>> {
-        let crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let crdt = self.crdt.lock_or_recover();
 
         let Some(value) = crdt.read(collection, id) else {
             return Ok(None);
@@ -296,9 +272,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     }
 
     async fn document_put(&self, collection: &str, doc: Document) -> NodeDbResult<()> {
-        let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let mut crdt = self.crdt.lock_or_recover();
 
         let fields: Vec<(&str, LoroValue)> = doc
             .fields
@@ -315,9 +289,7 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     }
 
     async fn document_delete(&self, collection: &str, id: &str) -> NodeDbResult<()> {
-        let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let mut crdt = self.crdt.lock_or_recover();
 
         crdt.delete(collection, id)
             .map_err(|e| NodeDbError::Storage {

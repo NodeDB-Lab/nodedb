@@ -22,6 +22,23 @@ use crate::engine::crdt::CrdtEngine;
 use crate::engine::graph::index::CsrIndex;
 use crate::engine::vector::graph::{HnswIndex, HnswParams};
 use crate::memory::{EngineId, MemoryGovernor};
+
+/// Extension trait for graceful mutex lock recovery.
+///
+/// Recovers from poisoned mutexes (a thread panicked while holding the lock)
+/// by extracting the inner guard. Logs at error level for observability.
+pub(crate) trait LockExt<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|p| {
+            tracing::error!("mutex poisoned, recovering guard");
+            p.into_inner()
+        })
+    }
+}
 use crate::storage::engine::{StorageEngine, WriteOp};
 
 /// Storage key constants.
@@ -136,9 +153,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Persist CRDT snapshot ──
         {
-            let crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let crdt = self.crdt.lock_or_recover();
             let snapshot = crdt.export_snapshot().map_err(|e| NodeDbError::Storage {
                 detail: e.to_string(),
             })?;
@@ -162,9 +177,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Persist CSR ──
         {
-            let csr = self.csr.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CSR lock poisoned".into(),
-            })?;
+            let csr = self.csr.lock_or_recover();
             let checkpoint = csr.checkpoint_to_bytes();
             ops.push(WriteOp::Put {
                 ns: Namespace::Graph,
@@ -175,12 +188,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Persist HNSW indices ──
         {
-            let indices = self
-                .hnsw_indices
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "HNSW lock poisoned".into(),
-                })?;
+            let indices = self.hnsw_indices.lock_or_recover();
             let names: Vec<String> = indices.keys().cloned().collect();
             let names_bytes =
                 rmp_serde::to_vec_named(&names).map_err(|e| NodeDbError::Serialization {
@@ -226,7 +234,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
     }
 
     /// Update memory governor with current engine usage.
-    pub(crate) fn update_memory_stats(&self) {
+    pub fn update_memory_stats(&self) {
         if let Ok(indices) = self.hnsw_indices.lock() {
             let hnsw_bytes: usize = indices
                 .values()
@@ -265,19 +273,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Insert all vectors into HNSW ──
         {
-            let mut indices = self
-                .hnsw_indices
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "HNSW lock poisoned".into(),
-                })?;
+            let mut indices = self.hnsw_indices.lock_or_recover();
             let index = Self::ensure_hnsw(&mut indices, collection, dim);
-            let mut id_map = self
-                .vector_id_map
-                .lock()
-                .map_err(|_| NodeDbError::Internal {
-                    detail: "vector ID map lock poisoned".into(),
-                })?;
+            let mut id_map = self.vector_id_map.lock_or_recover();
 
             for &(id, embedding) in vectors {
                 let internal_id = index.len() as u32;
@@ -293,9 +291,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Single CRDT batch ──
         {
-            let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let mut crdt = self.crdt.lock_or_recover();
 
             use crate::engine::crdt::engine::{CrdtBatchOp, CrdtField};
 
@@ -331,9 +327,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Insert all edges into CSR ──
         {
-            let mut csr = self.csr.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CSR lock poisoned".into(),
-            })?;
+            let mut csr = self.csr.lock_or_recover();
             for &(src, dst, label) in edges {
                 csr.add_edge(src, label, dst);
             }
@@ -341,9 +335,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Single CRDT batch ──
         {
-            let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-                detail: "CRDT lock poisoned".into(),
-            })?;
+            let mut crdt = self.crdt.lock_or_recover();
 
             use crate::engine::crdt::engine::{CrdtBatchOp, CrdtField};
 
@@ -378,11 +370,83 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// Call after bulk edge insertion for optimal traversal performance.
     pub fn compact_graph(&self) -> NodeDbResult<()> {
-        let mut csr = self.csr.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CSR lock poisoned".into(),
-        })?;
+        let mut csr = self.csr.lock_or_recover();
         csr.compact();
         Ok(())
+    }
+
+    /// Evict HNSW collections to reduce memory usage.
+    ///
+    /// Persists each evicted collection to storage first, then drops
+    /// it from memory. The data is reloaded lazily on next `vector_search`.
+    ///
+    /// `max_to_evict` limits how many collections to drop in one pass.
+    /// Collections are evicted smallest-first (least data = cheapest to reload).
+    pub async fn evict_collections(&self, max_to_evict: usize) -> NodeDbResult<usize> {
+        let mut evicted = 0;
+
+        // Identify candidates.
+        let candidates: Vec<(String, usize)> = {
+            let indices = self.hnsw_indices.lock_or_recover();
+            let mut sorted: Vec<(String, usize)> = indices
+                .iter()
+                .map(|(name, idx)| (name.clone(), idx.len()))
+                .collect();
+            sorted.sort_by_key(|(_, size)| *size);
+            sorted
+        };
+
+        for (name, _) in candidates.into_iter().take(max_to_evict) {
+            // Persist before evicting.
+            let checkpoint = {
+                let indices = self.hnsw_indices.lock_or_recover();
+                match indices.get(&name) {
+                    Some(idx) => idx.checkpoint_to_bytes(),
+                    None => continue,
+                }
+            };
+
+            let key = format!("hnsw:{name}");
+            self.storage
+                .put(Namespace::Vector, key.as_bytes(), &checkpoint)
+                .await
+                .map_err(|e| NodeDbError::Storage {
+                    detail: e.to_string(),
+                })?;
+
+            // Remove from memory.
+            {
+                let mut indices = self.hnsw_indices.lock_or_recover();
+                indices.remove(&name);
+            }
+
+            tracing::info!(collection = %name, "HNSW collection evicted from memory");
+            evicted += 1;
+        }
+
+        self.update_memory_stats();
+        Ok(evicted)
+    }
+
+    /// Check memory pressure and evict if needed.
+    ///
+    /// Call periodically (e.g., after batch inserts or on a timer).
+    /// Returns the number of collections evicted.
+    pub async fn check_and_evict(&self) -> NodeDbResult<usize> {
+        use crate::memory::PressureLevel;
+
+        self.update_memory_stats();
+        match self.governor.pressure() {
+            PressureLevel::Critical => self.evict_collections(2).await,
+            PressureLevel::Warning => self.evict_collections(1).await,
+            PressureLevel::Normal => Ok(0),
+        }
+    }
+
+    /// List currently loaded HNSW collections.
+    pub fn loaded_collections(&self) -> NodeDbResult<Vec<String>> {
+        let indices = self.hnsw_indices.lock_or_recover();
+        Ok(indices.keys().cloned().collect())
     }
 
     /// Access the memory governor.
@@ -394,26 +458,20 @@ impl<S: StorageEngine> NodeDbLite<S> {
     pub fn pending_crdt_deltas(
         &self,
     ) -> NodeDbResult<Vec<crate::engine::crdt::engine::PendingDelta>> {
-        let crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let crdt = self.crdt.lock_or_recover();
         Ok(crdt.pending_deltas().to_vec())
     }
 
     /// Acknowledge synced deltas (called after Origin ACK).
     pub fn acknowledge_deltas(&self, acked_id: u64) -> NodeDbResult<()> {
-        let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let mut crdt = self.crdt.lock_or_recover();
         crdt.acknowledge(acked_id);
         Ok(())
     }
 
     /// Import remote deltas from Origin.
     pub fn import_remote_deltas(&self, data: &[u8]) -> NodeDbResult<()> {
-        let crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let crdt = self.crdt.lock_or_recover();
         crdt.import_remote(data).map_err(|e| NodeDbError::Storage {
             detail: e.to_string(),
         })
@@ -421,9 +479,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
     /// Reject a specific delta (rollback optimistic local state).
     pub fn reject_delta(&self, mutation_id: u64) -> NodeDbResult<()> {
-        let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
-            detail: "CRDT lock poisoned".into(),
-        })?;
+        let mut crdt = self.crdt.lock_or_recover();
         crdt.reject_delta(mutation_id);
         Ok(())
     }
