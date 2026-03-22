@@ -13,11 +13,13 @@ sqlite = ["rusqlite"]
 [dependencies]
 nodedb-types = { workspace = true }
 nodedb-client = { workspace = true }
+nodedb-crdt = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 rmp-serde = { workspace = true }
+loro = { workspace = true }
 
 # Storage backend (feature-gated)
 rusqlite = { workspace = true, optional = true }
