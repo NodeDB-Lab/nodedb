@@ -83,10 +83,13 @@ pub struct CoreLoop {
     /// with `RejectedDanglingEdge`. Cleared periodically or on compaction.
     pub(in crate::data::executor) deleted_nodes: std::collections::HashSet<String>,
 
-    /// Idempotency key deduplication map: maps processed idempotency keys to
-    /// whether they succeeded (true) or failed (false). Bounded to prevent
-    /// unbounded memory growth — oldest entries evicted when capacity exceeded.
+    /// Idempotency key deduplication: maps processed idempotency keys to
+    /// whether they succeeded (true) or failed (false). Uses `VecDeque`
+    /// for FIFO eviction order alongside `HashMap` for O(1) lookup.
+    /// Bounded to 16,384 entries.
     pub(in crate::data::executor) idempotency_cache: HashMap<u64, bool>,
+    /// FIFO order of idempotency keys for correct eviction (oldest first).
+    pub(in crate::data::executor) idempotency_order: std::collections::VecDeque<u64>,
 
     /// Column statistics store for CBO. Shares redb with sparse engine.
     /// Updated incrementally on PointPut. Read by DataFusion optimizer.
@@ -163,6 +166,7 @@ impl CoreLoop {
             paused_vshards: std::collections::HashSet::new(),
             deleted_nodes: std::collections::HashSet::new(),
             idempotency_cache: HashMap::new(),
+            idempotency_order: std::collections::VecDeque::new(),
             stats_store,
             aggregate_cache: HashMap::new(),
             last_maintenance: None,
@@ -297,13 +301,14 @@ impl CoreLoop {
         // Record idempotency key result for future dedup.
         if let Some(key) = task.request.idempotency_key {
             let succeeded = response.status == Status::Ok;
-            // Evict oldest entries if cache grows too large (16K entries).
+            // Evict oldest entry (FIFO) if cache grows too large (16K entries).
             if self.idempotency_cache.len() >= 16_384
-                && let Some(&first_key) = self.idempotency_cache.keys().next()
+                && let Some(oldest_key) = self.idempotency_order.pop_front()
             {
-                self.idempotency_cache.remove(&first_key);
+                self.idempotency_cache.remove(&oldest_key);
             }
             self.idempotency_cache.insert(key, succeeded);
+            self.idempotency_order.push_back(key);
         }
 
         // Cap deleted_nodes to prevent unbounded memory growth.

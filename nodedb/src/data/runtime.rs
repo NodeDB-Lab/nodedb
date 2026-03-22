@@ -50,6 +50,13 @@ const MAX_CONSECUTIVE_PANICS: u32 = 3;
 /// Panics separated by more than this duration reset the counter.
 const PANIC_WINDOW_SECS: u64 = 60;
 
+/// How long a degraded core stays in degraded mode before attempting
+/// recovery. After this cool-down, the core resets its panic counter
+/// and resumes accepting requests. If the poison-pill request is still
+/// in the queue, it will panic again and re-enter degraded mode — but
+/// by then the offending request has been drained and rejected.
+const DEGRADED_COOLDOWN_SECS: u64 = 30;
+
 /// Tracks core health across panics for the watchdog.
 struct CoreHealthWatchdog {
     /// Number of panics in the current window.
@@ -58,6 +65,8 @@ struct CoreHealthWatchdog {
     window_start: Option<Instant>,
     /// Whether this core has been marked degraded.
     degraded: bool,
+    /// When the core entered degraded mode (for cool-down recovery).
+    degraded_at: Option<Instant>,
 }
 
 impl CoreHealthWatchdog {
@@ -66,6 +75,7 @@ impl CoreHealthWatchdog {
             consecutive_panics: 0,
             window_start: None,
             degraded: false,
+            degraded_at: None,
         }
     }
 
@@ -87,6 +97,7 @@ impl CoreHealthWatchdog {
 
         if self.consecutive_panics >= MAX_CONSECUTIVE_PANICS {
             self.degraded = true;
+            self.degraded_at = Some(Instant::now());
         }
 
         self.degraded
@@ -100,7 +111,23 @@ impl CoreHealthWatchdog {
         }
     }
 
-    fn is_degraded(&self) -> bool {
+    /// Check if the core is degraded. If the cool-down period has elapsed,
+    /// auto-recover: reset panic counters and exit degraded mode.
+    fn is_degraded(&mut self) -> bool {
+        if self.degraded
+            && let Some(degraded_at) = self.degraded_at
+            && degraded_at.elapsed().as_secs() >= DEGRADED_COOLDOWN_SECS
+        {
+            info!(
+                cooldown_secs = DEGRADED_COOLDOWN_SECS,
+                "core recovered from degraded mode after cool-down"
+            );
+            self.degraded = false;
+            self.degraded_at = None;
+            self.consecutive_panics = 0;
+            self.window_start = None;
+            return false;
+        }
         self.degraded
     }
 }
@@ -179,6 +206,11 @@ pub fn spawn_core(
             /// Checkpoint interval: 5 minutes.
             const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
+            /// Maximum requests to process per event loop iteration before
+            /// yielding to maintenance tasks. Prevents maintenance starvation
+            /// under sustained high write load.
+            const MAX_TASKS_PER_ITERATION: usize = 256;
+
             // 5. Event loop: poll → drain → tick → checkpoint → repeat.
             loop {
                 // Block until signaled or timeout.
@@ -193,7 +225,10 @@ pub fn spawn_core(
                     continue;
                 }
 
-                // Process all pending requests with panic isolation.
+                // Process pending requests with panic isolation.
+                // Bounded to MAX_TASKS_PER_ITERATION to prevent maintenance
+                // starvation under sustained high load.
+                let mut tasks_processed = 0usize;
                 loop {
                     // catch_unwind requires FnOnce: &mut core is not UnwindSafe
                     // by default, but we explicitly opt in. The CoreLoop state
@@ -211,6 +246,10 @@ pub fn spawn_core(
                         Ok(0) => break, // No more pending requests.
                         Ok(_) => {
                             watchdog.record_success();
+                            tasks_processed += 1;
+                            if tasks_processed >= MAX_TASKS_PER_ITERATION {
+                                break; // Yield to maintenance.
+                            }
                         }
                         Err(panic_payload) => {
                             // Extract panic message for logging.
