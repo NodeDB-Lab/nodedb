@@ -1,3 +1,4 @@
+pub mod async_dispatch;
 pub mod dlq;
 pub mod listener;
 pub mod rate_limit;
