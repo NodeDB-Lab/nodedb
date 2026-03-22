@@ -1,11 +1,7 @@
 //! WebSocket listener for NodeDB-Lite sync connections.
 //!
-//! Accepts `wss://` (or `ws://` for dev) connections on the Tokio Control
-//! Plane. Each connection spawns a sync session that handles the rkyv wire
-//! protocol (handshake, delta push, vector clock sync, ping/pong).
-//!
-//! The listener runs alongside the pgwire and HTTP listeners on the same
-//! Tokio runtime. It does NOT run on the Data Plane.
+//! Accepts `ws://` connections on the Tokio Control Plane. Each connection
+//! spawns a sync session with full RLS, audit, DLQ, and rate limiting.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,21 +11,17 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::control::security::jwt::JwtConfig;
+use crate::control::state::SharedState;
 
 use super::rate_limit::RateLimitConfig;
 
 /// Configuration for the sync WebSocket listener.
 #[derive(Debug, Clone)]
 pub struct SyncListenerConfig {
-    /// Address to listen on for sync connections.
     pub listen_addr: SocketAddr,
-    /// Maximum concurrent sync sessions.
     pub max_sessions: usize,
-    /// Session idle timeout in seconds.
     pub idle_timeout_secs: u64,
-    /// JWT configuration for authenticating sync clients.
     pub jwt_config: JwtConfig,
-    /// Per-session rate limiting configuration.
     pub rate_limit: RateLimitConfig,
 }
 
@@ -47,13 +39,9 @@ impl Default for SyncListenerConfig {
 
 /// Sync listener state (shared across all sessions).
 pub struct SyncListenerState {
-    /// Active session count.
     pub active_sessions: AtomicU64,
-    /// Total connections accepted.
     pub connections_accepted: AtomicU64,
-    /// Total connections rejected (max sessions exceeded).
     pub connections_rejected: AtomicU64,
-    /// Configuration.
     pub config: SyncListenerConfig,
 }
 
@@ -67,37 +55,28 @@ impl SyncListenerState {
         }
     }
 
-    /// Whether a new session can be accepted.
     pub fn can_accept(&self) -> bool {
         self.active_sessions.load(Ordering::Relaxed) < self.config.max_sessions as u64
     }
 
-    /// Record a new session.
     pub fn session_opened(&self) {
         self.active_sessions.fetch_add(1, Ordering::Relaxed);
         self.connections_accepted.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a session closed.
     pub fn session_closed(&self) {
         self.active_sessions.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Record a rejected connection.
     pub fn session_rejected(&self) {
         self.connections_rejected.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Start the sync WebSocket listener.
-///
-/// This is an async function that runs on the Tokio Control Plane.
-/// It accepts TCP connections, upgrades them to WebSocket, and spawns
-/// a sync session task for each.
-///
-/// Returns a handle to the listener state for monitoring.
+/// Start the sync WebSocket listener with full security context.
 pub async fn start_sync_listener(
     config: SyncListenerConfig,
+    shared: Option<Arc<SharedState>>,
 ) -> Result<Arc<SyncListenerState>, String> {
     let listener = TcpListener::bind(&config.listen_addr)
         .await
@@ -109,14 +88,17 @@ pub async fn start_sync_listener(
 
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
-        accept_loop(listener, state_clone).await;
+        accept_loop(listener, state_clone, shared).await;
     });
 
     Ok(state)
 }
 
-/// Accept loop: accepts TCP connections and spawns session tasks.
-async fn accept_loop(listener: TcpListener, state: Arc<SyncListenerState>) {
+async fn accept_loop(
+    listener: TcpListener,
+    state: Arc<SyncListenerState>,
+    shared: Option<Arc<SharedState>>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
@@ -128,12 +110,14 @@ async fn accept_loop(listener: TcpListener, state: Arc<SyncListenerState>) {
 
                 state.session_opened();
                 let state_clone = Arc::clone(&state);
+                let shared_clone = shared.clone();
 
                 tokio::spawn(async move {
                     match tokio_tungstenite::accept_async(stream).await {
                         Ok(ws) => {
                             info!(%addr, "sync: WebSocket connection established");
-                            handle_sync_session(ws, addr, &state_clone).await;
+                            handle_sync_session(ws, addr, &state_clone, shared_clone.as_deref())
+                                .await;
                         }
                         Err(e) => {
                             warn!(%addr, error = %e, "sync: WebSocket upgrade failed");
@@ -149,11 +133,12 @@ async fn accept_loop(listener: TcpListener, state: Arc<SyncListenerState>) {
     }
 }
 
-/// Handle one sync session over WebSocket.
+/// Handle one sync session with full RLS, audit, DLQ wired in.
 async fn handle_sync_session(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     addr: SocketAddr,
     state: &SyncListenerState,
+    shared: Option<&SharedState>,
 ) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -173,11 +158,23 @@ async fn handle_sync_session(
         match msg_result {
             Ok(Message::Binary(data)) => {
                 if let Some(frame) = super::wire::SyncFrame::from_bytes(&data) {
-                    // process_frame with no security context in listener
-                    // (security context injected at higher level when wired).
-                    if let Some(response) =
+                    // Wire RLS, audit, DLQ from SharedState.
+                    let response = if let Some(shared) = shared {
+                        let rls_store = &shared.rls;
+                        let mut audit = shared.audit.lock().unwrap_or_else(|p| p.into_inner());
+                        let mut dlq = shared.sync_dlq.lock().unwrap_or_else(|p| p.into_inner());
+                        session.process_frame(
+                            &frame,
+                            &jwt_validator,
+                            Some(rls_store),
+                            Some(&mut audit),
+                            Some(&mut dlq),
+                        )
+                    } else {
                         session.process_frame(&frame, &jwt_validator, None, None, None)
-                    {
+                    };
+
+                    if let Some(response) = response {
                         let response_bytes = response.to_bytes();
                         if ws
                             .send(Message::Binary(response_bytes.into()))
@@ -199,10 +196,9 @@ async fn handle_sync_session(
                 warn!(session = %session_id, error = %e, "sync: WebSocket error");
                 break;
             }
-            _ => {} // Ignore text messages, pongs, etc.
+            _ => {}
         }
 
-        // Check idle timeout.
         if session.idle_secs() > state.config.idle_timeout_secs {
             info!(session = %session_id, "sync: idle timeout, closing");
             break;

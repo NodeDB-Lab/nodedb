@@ -318,6 +318,26 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Start sync WebSocket listener for NodeDB-Lite clients.
+    let sync_config = nodedb::control::server::sync::listener::SyncListenerConfig::default();
+    match nodedb::control::server::sync::listener::start_sync_listener(
+        sync_config,
+        Some(Arc::clone(&shared)),
+    )
+    .await
+    {
+        Ok(sync_state) => {
+            info!(
+                addr = %sync_state.config.listen_addr,
+                max_sessions = sync_state.config.max_sessions,
+                "sync WebSocket listener started"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "sync listener failed to start (non-fatal)");
+        }
+    }
+
     // Build native TLS acceptor if configured (reuses same cert/key as pgwire).
     let native_tls: Option<tokio_rustls::TlsAcceptor> = match &config.tls {
         Some(tls) => {

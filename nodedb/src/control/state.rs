@@ -9,8 +9,10 @@ use crate::control::security::apikey::ApiKeyStore;
 use crate::control::security::audit::AuditLog;
 use crate::control::security::credential::CredentialStore;
 use crate::control::security::permission::PermissionStore;
+use crate::control::security::rls::RlsPolicyStore;
 use crate::control::security::role::RoleStore;
 use crate::control::security::tenant::{QuotaCheck, TenantIsolation, TenantQuota};
+use crate::control::server::sync::dlq::{DlqConfig, SyncDlq};
 use crate::types::TenantId;
 use crate::wal::WalManager;
 
@@ -47,6 +49,12 @@ pub struct SharedState {
 
     /// Per-tenant quota enforcement.
     pub tenants: Mutex<TenantIsolation>,
+
+    /// Row-Level Security policy store for sync delta enforcement.
+    pub rls: RlsPolicyStore,
+
+    /// Dead-Letter Queue for sync-rejected deltas.
+    pub sync_dlq: Mutex<SyncDlq>,
 
     /// Audit retention in days (0 = keep forever).
     audit_retention_days: u32,
@@ -111,6 +119,8 @@ impl SharedState {
             raft_proposer: None,
             raft_status_fn: None,
             migration_tracker: None,
+            rls: RlsPolicyStore::new(),
+            sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
             audit_retention_days: 0,
             idle_timeout_secs: 0,
             connections_rejected: AtomicU64::new(0),
@@ -168,6 +178,8 @@ impl SharedState {
             raft_proposer: None,
             raft_status_fn: None,
             migration_tracker: None,
+            rls: RlsPolicyStore::new(),
+            sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
             audit_retention_days: auth_config.audit_retention_days,
             idle_timeout_secs: auth_config.idle_timeout_secs,
             connections_rejected: AtomicU64::new(0),

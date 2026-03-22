@@ -91,6 +91,40 @@ impl SyncSession {
     ) -> SyncFrame {
         self.last_activity = Instant::now();
 
+        // Trust mode: empty token auto-authenticates as default identity.
+        if msg.jwt_token.is_empty() {
+            let identity = AuthenticatedIdentity {
+                user_id: 0,
+                username: "sync-client".into(),
+                tenant_id: TenantId::new(0),
+                auth_method: crate::control::security::identity::AuthMethod::Trust,
+                roles: vec![crate::control::security::identity::Role::ReadWrite],
+                is_superuser: false,
+            };
+            self.tenant_id = Some(identity.tenant_id);
+            self.username = Some(identity.username.clone());
+            self.identity = Some(identity);
+            self.authenticated = true;
+            self.client_clock = msg.vector_clock.clone();
+            self.subscribed_shapes = msg.subscribed_shapes.clone();
+            self.server_clock = current_server_clock.clone();
+            self.device_metadata = DeviceMetadata {
+                client_version: msg.client_version.clone(),
+                remote_addr: String::new(),
+                peer_id: 0,
+            };
+
+            info!(session = %self.session_id, "sync handshake OK (trust mode)");
+
+            let ack = HandshakeAckMsg {
+                success: true,
+                session_id: self.session_id.clone(),
+                server_clock: current_server_clock,
+                error: None,
+            };
+            return SyncFrame::encode_or_empty(SyncMessageType::HandshakeAck, &ack);
+        }
+
         // Validate JWT.
         match jwt_validator.validate(&msg.jwt_token) {
             Ok(identity) => {
@@ -353,10 +387,31 @@ impl SyncSession {
                 let msg: VectorClockSyncMsg = frame.decode_body()?;
                 Some(self.handle_vector_clock_sync(&msg))
             }
+            SyncMessageType::ShapeSubscribe => {
+                let msg: super::shape::handler::ShapeSubscribeMsg = frame.decode_body()?;
+                let registry = super::shape::registry::ShapeRegistry::new();
+                let tenant_id = self.tenant_id.map(|t| t.as_u32()).unwrap_or(0);
+                let current_lsn = 0u64; // TODO: get from WAL when wired
+                let response = super::shape::handler::handle_subscribe(
+                    &self.session_id,
+                    tenant_id,
+                    &msg,
+                    &registry,
+                    current_lsn,
+                    |_shape, _lsn| super::shape::handler::ShapeSnapshotData::empty(),
+                );
+                Some(response)
+            }
+            SyncMessageType::ShapeUnsubscribe => {
+                let msg: super::shape::handler::ShapeUnsubscribeMsg = frame.decode_body()?;
+                let registry = super::shape::registry::ShapeRegistry::new();
+                super::shape::handler::handle_unsubscribe(&self.session_id, &msg, &registry);
+                None // No response to client.
+            }
             SyncMessageType::PingPong => {
                 let msg: PingPongMsg = frame.decode_body()?;
                 if msg.is_pong {
-                    None // Pong is a response, no reply needed.
+                    None
                 } else {
                     Some(self.handle_ping(&msg))
                 }
