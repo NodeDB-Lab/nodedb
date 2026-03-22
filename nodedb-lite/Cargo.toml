@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 rmp-serde = { workspace = true }
+serde_json = { workspace = true }
 loro = { workspace = true }
 
 # Storage backend (feature-gated)
