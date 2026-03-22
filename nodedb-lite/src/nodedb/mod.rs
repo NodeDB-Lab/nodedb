@@ -86,7 +86,10 @@ impl<S: StorageEngine> NodeDbLite<S> {
 
         // ── Restore CSR ──
         let csr = match storage.get(Namespace::Graph, META_CSR).await? {
-            Some(bytes) => CsrIndex::from_checkpoint(&bytes).unwrap_or_default(),
+            Some(bytes) => CsrIndex::from_checkpoint(&bytes).unwrap_or_else(|| {
+                tracing::warn!("CSR checkpoint corrupted, starting with empty graph index");
+                CsrIndex::new()
+            }),
             None => CsrIndex::new(),
         };
 
@@ -414,6 +417,61 @@ impl<S: StorageEngine> NodeDbLite<S> {
         crdt.import_remote(data).map_err(|e| NodeDbError::Storage {
             detail: e.to_string(),
         })
+    }
+
+    /// Reject a specific delta (rollback optimistic local state).
+    pub fn reject_delta(&self, mutation_id: u64) -> NodeDbResult<()> {
+        let mut crdt = self.crdt.lock().map_err(|_| NodeDbError::Internal {
+            detail: "CRDT lock poisoned".into(),
+        })?;
+        crdt.reject_delta(mutation_id);
+        Ok(())
+    }
+
+    /// Start background sync to Origin.
+    ///
+    /// Spawns a Tokio task that connects to the Origin WebSocket endpoint,
+    /// pushes pending deltas, and receives shape updates. Runs forever
+    /// with auto-reconnect.
+    ///
+    /// Returns immediately — the sync runs in the background.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start_sync(
+        self: &Arc<Self>,
+        config: crate::sync::SyncConfig,
+    ) -> Arc<crate::sync::SyncClient> {
+        let client = Arc::new(crate::sync::SyncClient::new(config, self.peer_id()));
+        let delegate: Arc<dyn crate::sync::SyncDelegate> = Arc::clone(self) as _;
+        let client_clone = Arc::clone(&client);
+        tokio::spawn(async move {
+            crate::sync::run_sync_loop(client_clone, delegate).await;
+        });
+        client
+    }
+
+    /// Get the peer ID (from the CRDT engine).
+    pub fn peer_id(&self) -> u64 {
+        self.crdt.lock().map(|c| c.peer_id()).unwrap_or(0)
+    }
+}
+
+/// `SyncDelegate` implementation — bridges the sync transport to NodeDbLite's engines.
+#[cfg(not(target_arch = "wasm32"))]
+impl<S: StorageEngine> crate::sync::SyncDelegate for NodeDbLite<S> {
+    fn pending_deltas(&self) -> Vec<crate::engine::crdt::engine::PendingDelta> {
+        self.pending_crdt_deltas().unwrap_or_default()
+    }
+
+    fn acknowledge(&self, mutation_id: u64) {
+        let _ = self.acknowledge_deltas(mutation_id);
+    }
+
+    fn reject(&self, mutation_id: u64) {
+        let _ = self.reject_delta(mutation_id);
+    }
+
+    fn import_remote(&self, data: &[u8]) {
+        let _ = self.import_remote_deltas(data);
     }
 }
 
