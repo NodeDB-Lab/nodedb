@@ -186,6 +186,11 @@ pub struct TlsSettings {
     pub cert_path: PathBuf,
     /// Path to server private key (PEM).
     pub key_path: PathBuf,
+    /// Certificate hot-reload check interval (seconds). The server watches
+    /// cert/key files for mtime changes and atomically swaps the TLS config.
+    /// Default: 3600 (1 hour). Set to 0 to disable hot rotation.
+    #[serde(default)]
+    pub cert_reload_interval_secs: Option<u64>,
 }
 
 impl Default for ServerConfig {

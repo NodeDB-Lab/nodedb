@@ -139,6 +139,7 @@ mod tests {
         let tls = TlsSettings {
             cert_path: "/nonexistent/cert.pem".into(),
             key_path: "/nonexistent/key.pem".into(),
+            cert_reload_interval_secs: None,
         };
         assert!(load_server_config(&tls).is_err());
     }

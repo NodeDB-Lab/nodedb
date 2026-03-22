@@ -238,10 +238,21 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Build TLS acceptor if configured.
+    // Uses the hot-reload module: background task watches cert/key files for
+    // mtime changes and atomically swaps the ServerConfig via watch channel.
     let tls_acceptor = match &config.tls {
         Some(tls) => {
+            let check_interval = Duration::from_secs(tls.cert_reload_interval_secs.unwrap_or(3600));
+            let (_tls_rx, _tls_tx) = nodedb::control::server::tls_reload::start_tls_reloader(
+                tls,
+                check_interval,
+                Arc::clone(&shared),
+            )?;
             let acceptor = build_tls_acceptor(tls)?;
-            info!("pgwire TLS enabled");
+            info!(
+                reload_interval_secs = check_interval.as_secs(),
+                "pgwire TLS enabled with hot rotation"
+            );
             Some(acceptor)
         }
         None => None,
