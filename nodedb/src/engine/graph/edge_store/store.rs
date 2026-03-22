@@ -270,6 +270,42 @@ impl EdgeStore {
 
         Ok(edges)
     }
+
+    /// Insert by raw pre-formed key into the forward edge table (snapshot restore).
+    pub fn put_raw(&self, key: &str, value: &[u8]) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("raw write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(EDGES)
+                .map_err(|e| redb_err("open edges", e))?;
+            table
+                .insert(key, value)
+                .map_err(|e| redb_err("raw insert", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
+    /// Insert by raw pre-formed key into the reverse edge table (snapshot restore).
+    pub fn put_raw_reverse(&self, key: &str, value: &[u8]) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("raw write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(REVERSE_EDGES)
+                .map_err(|e| redb_err("open reverse_edges", e))?;
+            table
+                .insert(key, value)
+                .map_err(|e| redb_err("raw insert reverse", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -408,6 +408,42 @@ impl SparseEngine {
         Ok(results)
     }
 
+    /// Insert a document by raw pre-formed key (snapshot restore).
+    ///
+    /// The key already includes the `{tenant_id}:{collection}:{doc_id}` prefix.
+    pub fn put_raw(&self, key: &str, value: &[u8]) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("raw write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(DOCUMENTS)
+                .map_err(|e| redb_err("open table", e))?;
+            table
+                .insert(key, value)
+                .map_err(|e| redb_err("raw insert", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
+    /// Point lookup by raw pre-formed key (snapshot restore verification).
+    pub fn get_raw(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| redb_err("raw read txn", e))?;
+        let table = read_txn
+            .open_table(DOCUMENTS)
+            .map_err(|e| redb_err("open table", e))?;
+        match table.get(key) {
+            Ok(Some(v)) => Ok(Some(v.value().to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(redb_err("raw get", e)),
+        }
+    }
+
     /// Get the underlying database handle (for advanced use / shared access).
     pub fn db(&self) -> &Arc<Database> {
         &self.db
