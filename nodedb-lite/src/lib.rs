@@ -11,6 +11,4 @@ pub use error::LiteError;
 pub use memory::MemoryGovernor;
 pub use nodedb::NodeDbLite;
 pub use storage::engine::{StorageEngine, WriteOp};
-
-#[cfg(feature = "sqlite")]
-pub use storage::sqlite::SqliteStorage;
+pub use storage::redb_storage::RedbStorage;

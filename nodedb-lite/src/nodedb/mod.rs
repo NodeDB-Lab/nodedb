@@ -488,12 +488,12 @@ mod tests {
     use nodedb_types::id::NodeId;
     use nodedb_types::value::Value;
 
-    use crate::SqliteStorage;
+    use crate::RedbStorage;
 
     use super::*;
 
-    async fn make_db() -> NodeDbLite<SqliteStorage> {
-        let storage = SqliteStorage::open_in_memory().unwrap();
+    async fn make_db() -> NodeDbLite<RedbStorage> {
+        let storage = RedbStorage::open_in_memory().unwrap();
         NodeDbLite::open(storage, 1).await.unwrap()
     }
 
@@ -611,7 +611,7 @@ mod tests {
     async fn flush_and_reopen() {
         // Write data and verify flush persists state.
         {
-            let s = SqliteStorage::open_in_memory().unwrap();
+            let s = RedbStorage::open_in_memory().unwrap();
             let db = NodeDbLite::open(s, 1).await.unwrap();
 
             let mut doc = Document::new("d1");

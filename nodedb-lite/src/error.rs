@@ -19,9 +19,32 @@ pub enum LiteError {
     InvalidNamespace { ns: u8 },
 }
 
-#[cfg(feature = "sqlite")]
-impl From<rusqlite::Error> for LiteError {
-    fn from(e: rusqlite::Error) -> Self {
+impl From<redb::Error> for LiteError {
+    fn from(e: redb::Error) -> Self {
+        Self::Storage {
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::DatabaseError> for LiteError {
+    fn from(e: redb::DatabaseError) -> Self {
+        Self::Storage {
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::TransactionError> for LiteError {
+    fn from(e: redb::TransactionError) -> Self {
+        Self::Storage {
+            detail: e.to_string(),
+        }
+    }
+}
+
+impl From<redb::StorageError> for LiteError {
+    fn from(e: redb::StorageError) -> Self {
         Self::Storage {
             detail: e.to_string(),
         }

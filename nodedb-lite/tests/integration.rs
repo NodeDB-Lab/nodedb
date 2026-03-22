@@ -7,13 +7,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nodedb_client::NodeDb;
-use nodedb_lite::{NodeDbLite, SqliteStorage};
+use nodedb_lite::{NodeDbLite, RedbStorage};
 use nodedb_types::document::Document;
 use nodedb_types::id::NodeId;
 use nodedb_types::value::Value;
 
-async fn open_test_db() -> NodeDbLite<SqliteStorage> {
-    let storage = SqliteStorage::open_in_memory().unwrap();
+async fn open_test_db() -> NodeDbLite<RedbStorage> {
+    let storage = RedbStorage::open_in_memory().unwrap();
     NodeDbLite::open(storage, 1).await.unwrap()
 }
 
@@ -167,7 +167,7 @@ async fn flush_and_reopen_persists_all() {
     let path = dir.path().join("persist.db");
 
     {
-        let storage = SqliteStorage::open(&path).unwrap();
+        let storage = RedbStorage::open(&path).unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         db.batch_vector_insert("vecs", &[("v1", &[1.0, 2.0, 3.0][..])])
@@ -181,7 +181,7 @@ async fn flush_and_reopen_persists_all() {
     }
 
     {
-        let storage = SqliteStorage::open(&path).unwrap();
+        let storage = RedbStorage::open(&path).unwrap();
         let db = NodeDbLite::open(storage, 1).await.unwrap();
 
         let doc = db.document_get("docs", "d1").await.unwrap();
@@ -223,7 +223,7 @@ async fn all_operations_generate_deltas() {
 
 #[tokio::test]
 async fn arc_dyn_nodedb_pattern() {
-    let storage = SqliteStorage::open_in_memory().unwrap();
+    let storage = RedbStorage::open_in_memory().unwrap();
     let db: Arc<dyn NodeDb> = Arc::new(NodeDbLite::open(storage, 1).await.unwrap());
 
     db.vector_insert("coll", "v1", &[1.0, 0.0], None)
