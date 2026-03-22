@@ -17,7 +17,6 @@ use std::io;
 use std::sync::Mutex;
 
 use js_sys::Uint8Array;
-use wasm_bindgen::prelude::*;
 use web_sys::FileSystemSyncAccessHandle;
 
 /// OPFS storage backend for redb.
@@ -54,10 +53,10 @@ impl redb::StorageBackend for OpfsBackend {
         let handle = self
             .handle
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "OPFS handle lock poisoned"))?;
-        let size = handle.get_size().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("OPFS getSize failed: {e:?}"))
-        })?;
+            .map_err(|_| io::Error::other("OPFS handle lock poisoned"))?;
+        let size = handle
+            .get_size()
+            .map_err(|e| io::Error::other(format!("OPFS getSize failed: {e:?}")))?;
         Ok(size as u64)
     }
 
@@ -65,7 +64,7 @@ impl redb::StorageBackend for OpfsBackend {
         let handle = self
             .handle
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "OPFS handle lock poisoned"))?;
+            .map_err(|_| io::Error::other("OPFS handle lock poisoned"))?;
 
         let buffer = Uint8Array::new_with_length(len as u32);
         let opts = web_sys::FileSystemReadWriteOptions::new();
@@ -73,7 +72,7 @@ impl redb::StorageBackend for OpfsBackend {
 
         let bytes_read = handle
             .read_with_buffer_source_and_options(&buffer, &opts)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("OPFS read failed: {e:?}")))?
+            .map_err(|e| io::Error::other(format!("OPFS read failed: {e:?}")))?
             as usize;
 
         let mut result = vec![0u8; bytes_read];
@@ -85,29 +84,29 @@ impl redb::StorageBackend for OpfsBackend {
         let handle = self
             .handle
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "OPFS handle lock poisoned"))?;
+            .map_err(|_| io::Error::other("OPFS handle lock poisoned"))?;
 
-        handle.truncate_with_u32(len as u32).map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("OPFS truncate failed: {e:?}"))
-        })
+        handle
+            .truncate_with_u32(len as u32)
+            .map_err(|e| io::Error::other(format!("OPFS truncate failed: {e:?}")))
     }
 
     fn sync_data(&self, _eventual: bool) -> Result<(), io::Error> {
         let handle = self
             .handle
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "OPFS handle lock poisoned"))?;
+            .map_err(|_| io::Error::other("OPFS handle lock poisoned"))?;
 
         handle
             .flush()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("OPFS flush failed: {e:?}")))
+            .map_err(|e| io::Error::other(format!("OPFS flush failed: {e:?}")))
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
         let handle = self
             .handle
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "OPFS handle lock poisoned"))?;
+            .map_err(|_| io::Error::other("OPFS handle lock poisoned"))?;
 
         let buffer = Uint8Array::from(data);
         let opts = web_sys::FileSystemReadWriteOptions::new();
@@ -115,9 +114,7 @@ impl redb::StorageBackend for OpfsBackend {
 
         handle
             .write_with_buffer_source_and_options(&buffer, &opts)
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("OPFS write failed: {e:?}"))
-            })?;
+            .map_err(|e| io::Error::other(format!("OPFS write failed: {e:?}")))?;
 
         Ok(())
     }
