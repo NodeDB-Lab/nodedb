@@ -140,27 +140,21 @@ pub fn start_raft(
         shared: shared.clone(),
     };
 
-    // Create the Raft loop.
-    let raft_loop = Arc::new(nodedb_cluster::RaftLoop::new(
+    // Create the ClusterForwarder for executing forwarded queries locally.
+    let query_ctx = Arc::new(crate::control::planner::context::QueryContext::new());
+    let forwarder = Arc::new(crate::control::cluster_forwarder::ClusterForwarder::new(
+        shared.clone(),
+        query_ctx,
+    ));
+
+    // Create the Raft loop with real forwarder (handles ForwardRequest RPCs).
+    let raft_loop = Arc::new(nodedb_cluster::RaftLoop::with_forwarder(
         multi_raft,
         handle.transport.clone(),
         handle.topology.clone(),
         applier,
+        forwarder,
     ));
-
-    // Wire Raft proposer into SharedState for distributed writes.
-    // This is done by setting the raft_proposer and propose_tracker fields.
-    // The Raft proposer and topology/routing are already wired into SharedState
-    // via the fields set during SharedState construction. The RaftLoop is started
-    // here and runs independently — it drives Raft consensus and dispatches
-    // committed entries via the SpscCommitApplier.
-    //
-    // In the current architecture, SharedState's raft_proposer/cluster_* fields
-    // are set at construction time. When cluster mode is enabled, SharedState
-    // should be constructed with these values. For now, we log that the Raft loop
-    // is ready — the distributed write path works through the pgwire handler's
-    // existing dispatch_replicated_write() which checks raft_proposer.
-    let _ = &shared;
 
     // Start the Raft tick loop.
     let rl_run = raft_loop.clone();
