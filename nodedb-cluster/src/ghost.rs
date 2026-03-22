@@ -1,6 +1,14 @@
 use std::collections::HashMap;
 use tracing::{debug, info};
 
+/// Serializable ghost stub for persistence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedGhostStub {
+    target_shard: u16,
+    refcount: u32,
+    created_at_ms: u64,
+}
+
 /// Ghost edge stub.
 ///
 /// When vShard rebalancing moves a node to a new shard, a ghost stub
@@ -28,7 +36,7 @@ impl GhostStub {
             refcount: initial_refcount,
             created_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
+                .unwrap_or_else(|e| e.duration())
                 .as_millis() as u64,
         }
     }
@@ -204,6 +212,61 @@ impl GhostTable {
     /// for scatter-gather. Otherwise return None.
     pub fn resolve(&self, node_id: &str) -> Option<u16> {
         self.stubs.get(node_id).map(|s| s.target_shard)
+    }
+}
+
+impl GhostTable {
+    /// Serialize all ghost stubs for persistence.
+    ///
+    /// Returns MessagePack bytes that can be stored in the cluster catalog.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let persisted: HashMap<String, PersistedGhostStub> = self
+            .stubs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    PersistedGhostStub {
+                        target_shard: v.target_shard,
+                        refcount: v.refcount,
+                        created_at_ms: v.created_at_ms,
+                    },
+                )
+            })
+            .collect();
+        match rmp_serde::to_vec(&persisted) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "ghost table serialization failed — state will not persist");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Restore ghost stubs from persisted bytes.
+    ///
+    /// Called on startup to recover ghost state from the cluster catalog.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let persisted: HashMap<String, PersistedGhostStub> = rmp_serde::from_slice(data).ok()?;
+        let stubs: HashMap<String, GhostStub> = persisted
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    GhostStub {
+                        node_id: k,
+                        target_shard: v.target_shard,
+                        refcount: v.refcount,
+                        created_at_ms: v.created_at_ms,
+                    },
+                )
+            })
+            .collect();
+        Some(Self {
+            stubs,
+            purge_count: 0,
+            last_sweep_ms: 0,
+        })
     }
 }
 
