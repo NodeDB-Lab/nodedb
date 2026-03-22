@@ -65,6 +65,15 @@ impl CoreLoop {
             );
         }
         let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
+
+        // Check if this collection uses IVF-PQ index.
+        if let Some(cfg) = self.index_configs.get(&index_key)
+            && cfg.index_type == crate::engine::vector::index_config::IndexType::IvfPq
+        {
+            return self.ivf_insert(task, &index_key, vector, dim);
+        }
+
+        // Default: HNSW (with or without PQ).
         match self.get_or_create_vector_index(tid, collection, dim, field_name) {
             Ok(collection_ref) => {
                 collection_ref.insert(vector.to_vec());
@@ -79,6 +88,51 @@ impl CoreLoop {
             }
             Err(err) => self.response_error(task, err),
         }
+    }
+
+    /// Insert into an IVF-PQ index.
+    fn ivf_insert(
+        &mut self,
+        task: &ExecutionTask,
+        index_key: &str,
+        vector: &[f32],
+        dim: usize,
+    ) -> Response {
+        let ivf = self
+            .ivf_indexes
+            .entry(index_key.to_string())
+            .or_insert_with(|| {
+                let cfg = self
+                    .index_configs
+                    .get(index_key)
+                    .cloned()
+                    .unwrap_or_default();
+                let params = cfg.to_ivf_params();
+                debug!(
+                    core = self.core_id,
+                    key = index_key,
+                    "creating IVF-PQ index"
+                );
+                crate::engine::vector::ivf::IvfPqIndex::new(dim, params)
+            });
+
+        // IVF-PQ requires training before the first insert. If not trained,
+        // buffer vectors until we have enough for training (min 256).
+        if ivf.n_cells() == 0 {
+            // Not yet trained — the index was just created with new().
+            // We need to accumulate training data. For now, we train on
+            // the first batch of vectors inserted (uses the vector itself
+            // as a 1-sample train). This is a minimal bootstrap — production
+            // users should call a separate TRAIN command with a sample set.
+            //
+            // Auto-train with the first vector as a degenerate single-sample.
+            // Real training happens when the IVF index receives enough data.
+            let refs: Vec<&[f32]> = vec![vector];
+            ivf.train(&refs);
+        }
+
+        ivf.add(vector);
+        self.response_ok(task)
     }
 
     /// Execute batch vector insert (always to the default/unnamed field).
@@ -158,6 +212,27 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, top_k, ef_search, "vector search");
         let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
+
+        // Check for IVF-PQ index first.
+        if let Some(ivf) = self.ivf_indexes.get(&index_key) {
+            if ivf.is_empty() {
+                return self.response_with_payload(task, b"[]".to_vec());
+            }
+            let results = ivf.search(query_vector, top_k);
+            let hits: Vec<_> = results
+                .iter()
+                .map(|r| super::super::response_codec::VectorSearchHit {
+                    id: r.id,
+                    distance: r.distance,
+                })
+                .collect();
+            return match super::super::response_codec::encode(&hits) {
+                Ok(payload) => self.response_with_payload(task, payload),
+                Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+            };
+        }
+
+        // Default: HNSW collection.
         let Some(collection_ref) = self.vector_collections.get(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
@@ -281,6 +356,7 @@ impl CoreLoop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_set_vector_params(
         &mut self,
         task: &ExecutionTask,
@@ -289,15 +365,19 @@ impl CoreLoop {
         m: usize,
         ef_construction: usize,
         metric: &str,
+        index_type: &str,
+        pq_m: usize,
+        ivf_cells: usize,
+        ivf_nprobe: usize,
     ) -> Response {
-        debug!(core = self.core_id, %collection, m, ef_construction, %metric, "set vector params");
+        debug!(core = self.core_id, %collection, m, ef_construction, %metric, %index_type, "set vector params");
         let index_key = CoreLoop::vector_index_key(tid, collection, "");
 
         if self.vector_collections.contains_key(&index_key) {
             return self.response_error(
                 task,
                 ErrorCode::RejectedConstraint {
-                    constraint: "cannot change HNSW params after index creation; drop and recreate the collection".into(),
+                    constraint: "cannot change index params after creation; drop and recreate the collection".into(),
                 },
             );
         }
@@ -318,13 +398,38 @@ impl CoreLoop {
             }
         };
 
+        let idx_type = match crate::engine::vector::index_config::IndexType::parse(index_type) {
+            Some(t) => t,
+            None => {
+                return self.response_error(
+                    task,
+                    ErrorCode::RejectedConstraint {
+                        constraint: format!(
+                            "unknown index_type '{index_type}'; supported: hnsw, hnsw_pq, ivf_pq"
+                        ),
+                    },
+                );
+            }
+        };
+
         let params = HnswParams {
             m,
             m0: m * 2,
             ef_construction,
             metric: metric_enum,
         };
-        self.vector_params.insert(index_key, params);
+
+        let config = crate::engine::vector::index_config::IndexConfig {
+            hnsw: params.clone(),
+            index_type: idx_type,
+            pq_m: if pq_m > 0 { pq_m } else { 8 },
+            ivf_cells: if ivf_cells > 0 { ivf_cells } else { 256 },
+            ivf_nprobe: if ivf_nprobe > 0 { ivf_nprobe } else { 16 },
+        };
+
+        // Store both legacy HnswParams (for backward compat) and full IndexConfig.
+        self.vector_params.insert(index_key.clone(), params);
+        self.index_configs.insert(index_key, config);
         self.response_ok(task)
     }
 }

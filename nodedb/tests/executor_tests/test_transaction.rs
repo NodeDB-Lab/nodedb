@@ -79,6 +79,10 @@ fn transaction_batch_rollback_on_failure() {
             m: 16,
             ef_construction: 200,
             metric: "cosine".into(),
+            index_type: String::new(),
+            pq_m: 0,
+            ivf_cells: 0,
+            ivf_nprobe: 0,
         },
     );
     // Insert one vector to create the index with dim=3.

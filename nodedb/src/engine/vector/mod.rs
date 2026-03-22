@@ -6,6 +6,7 @@ mod collection_checkpoint;
 pub mod distance;
 pub mod flat;
 pub mod hnsw;
+pub mod index_config;
 pub mod ivf;
 pub mod mmap_segment;
 pub mod quantize;

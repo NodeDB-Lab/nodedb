@@ -126,14 +126,25 @@ pub fn wal_append_if_write(
             m,
             ef_construction,
             metric,
+            index_type,
+            pq_m,
+            ivf_cells,
+            ivf_nprobe,
         } => {
-            let entry =
-                rmp_serde::to_vec(&(collection, m, ef_construction, metric)).map_err(|e| {
-                    crate::Error::Serialization {
-                        format: "msgpack".into(),
-                        detail: format!("wal set vector params: {e}"),
-                    }
-                })?;
+            let entry = rmp_serde::to_vec(&(
+                collection,
+                m,
+                ef_construction,
+                metric,
+                index_type,
+                pq_m,
+                ivf_cells,
+                ivf_nprobe,
+            ))
+            .map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("wal set vector params: {e}"),
+            })?;
             wal.append_vector_params(tenant_id, vshard_id, &entry)?;
         }
         // Read operations and control commands: no WAL needed.

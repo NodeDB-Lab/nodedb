@@ -100,13 +100,30 @@ pub enum PhysicalPlan {
     /// Soft-delete a vector by internal node ID.
     VectorDelete { collection: String, vector_id: u32 },
 
-    /// Set HNSW index parameters for a collection. Must be called before
+    /// Set vector index parameters for a collection. Must be called before
     /// the first insert — parameters cannot be changed after index creation.
+    ///
+    /// `index_type`:
+    /// - `"hnsw"` (default) — HNSW graph, FP32 vectors
+    /// - `"hnsw_pq"` — HNSW graph with PQ-compressed traversal (lower memory, ~95% recall)
+    /// - `"ivf_pq"` — IVF-PQ flat index (lowest memory, ~85-95% recall, best for >10M vectors)
     SetVectorParams {
         collection: String,
         m: usize,
         ef_construction: usize,
         metric: String,
+        /// Index type: "hnsw" (default), "hnsw_pq", or "ivf_pq".
+        #[allow(dead_code)]
+        index_type: String,
+        /// PQ subvectors (for hnsw_pq and ivf_pq). Must divide dim evenly. Default: 8.
+        #[allow(dead_code)]
+        pq_m: usize,
+        /// IVF cells (for ivf_pq only). Typical: sqrt(N). Default: 256.
+        #[allow(dead_code)]
+        ivf_cells: usize,
+        /// IVF probe count (for ivf_pq only). Higher = better recall. Default: 16.
+        #[allow(dead_code)]
+        ivf_nprobe: usize,
     },
 
     /// Batch insert documents into the sparse engine in a single redb transaction.

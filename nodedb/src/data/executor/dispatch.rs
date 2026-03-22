@@ -89,9 +89,22 @@ impl CoreLoop {
                 m,
                 ef_construction,
                 metric,
-            } => {
-                self.execute_set_vector_params(task, tid, collection, *m, *ef_construction, metric)
-            }
+                index_type,
+                pq_m,
+                ivf_cells,
+                ivf_nprobe,
+            } => self.execute_set_vector_params(
+                task,
+                tid,
+                collection,
+                *m,
+                *ef_construction,
+                metric,
+                index_type,
+                *pq_m,
+                *ivf_cells,
+                *ivf_nprobe,
+            ),
 
             PhysicalPlan::DocumentScan {
                 collection,

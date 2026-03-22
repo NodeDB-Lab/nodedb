@@ -104,6 +104,15 @@ pub struct CoreLoop {
     /// Last time periodic maintenance (compaction, edge sweep) was run.
     pub(in crate::data::executor) last_maintenance: Option<std::time::Instant>,
 
+    /// Per-collection full index config (includes index_type, PQ params, IVF params).
+    /// Stored alongside vector_params for collections that use non-default index types.
+    pub(in crate::data::executor) index_configs:
+        HashMap<String, crate::engine::vector::index_config::IndexConfig>,
+
+    /// IVF-PQ indexes for collections configured with `index_type = "ivf_pq"`.
+    pub(in crate::data::executor) ivf_indexes:
+        HashMap<String, crate::engine::vector::ivf::IvfPqIndex>,
+
     /// Compaction interval (how often `maybe_run_maintenance` triggers).
     pub(in crate::data::executor) compaction_interval: std::time::Duration,
 
@@ -159,6 +168,8 @@ impl CoreLoop {
             last_maintenance: None,
             compaction_interval: std::time::Duration::from_secs(600),
             compaction_tombstone_threshold: 0.2,
+            index_configs: HashMap::new(),
+            ivf_indexes: HashMap::new(),
         })
     }
 
