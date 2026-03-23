@@ -1,6 +1,7 @@
 pub mod dispatch_utils;
 pub mod http;
 pub mod listener;
+pub mod native;
 pub mod pgwire;
 pub mod session;
 pub mod session_auth;

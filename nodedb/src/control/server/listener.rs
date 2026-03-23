@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use super::session::Session;
+use super::native::session::NativeSession;
 use crate::control::state::SharedState;
 
 /// TCP accept loop for the Control Plane.
@@ -102,7 +102,7 @@ impl Listener {
                                 connections.spawn(async move {
                                     match acceptor.accept(stream).await {
                                         Ok(tls_stream) => {
-                                            let session = Session::new_tls(tls_stream, peer_addr, state_clone, mode);
+                                            let session = NativeSession::new_tls(tls_stream, peer_addr, state_clone, mode);
                                             if let Err(e) = session.run().await {
                                                 warn!(%peer_addr, error = %e, "TLS session terminated with error");
                                             }
@@ -117,7 +117,7 @@ impl Listener {
                                     peer_addr
                                 });
                             } else {
-                                let session = Session::new(stream, peer_addr, state_clone, mode);
+                                let session = NativeSession::new(stream, peer_addr, state_clone, mode);
                                 connections.spawn(async move {
                                     if let Err(e) = session.run().await {
                                         warn!(%peer_addr, error = %e, "session terminated with error");
