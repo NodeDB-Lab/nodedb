@@ -12,6 +12,7 @@ members = [
   "nodedb-lite",
   "nodedb-lite-ffi",
   "nodedb-lite-wasm",
+  "nodedb-cli",
 ]
 resolver = "2"
 
@@ -145,6 +146,12 @@ rustls-pemfile = "2"
 
 # Benchmarking
 fluxbench = "0.1"
+
+# CLI / TUI
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+dirs = "6"
 
 # WASM bindings
 wasm-bindgen = "0.2"
