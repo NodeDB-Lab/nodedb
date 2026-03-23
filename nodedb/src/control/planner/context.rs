@@ -1,7 +1,13 @@
+use std::sync::Arc;
+
+use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider};
 use datafusion::execution::context::SessionContext;
 use datafusion::prelude::*;
 
 use crate::control::planner::converter::PlanConverter;
+use crate::control::security::credential::CredentialStore;
+
+use super::catalog::NodeDbSchemaProvider;
 
 /// DataFusion session context for the Control Plane.
 ///
@@ -16,26 +22,47 @@ pub struct QueryContext {
 }
 
 impl QueryContext {
-    /// Create a new query context with default DataFusion configuration.
+    /// Create a new query context without catalog integration.
+    ///
+    /// Collections won't be resolvable by name. Use `with_catalog()` for
+    /// production use where `SELECT * FROM <collection>` should work.
     pub fn new() -> Self {
         let config = SessionConfig::new()
             .with_information_schema(false)
             .with_default_catalog_and_schema("nodedb", "public");
 
         let session = SessionContext::new_with_config(config);
+        register_udfs(&session);
 
-        // Register all NodeDB UDFs.
-        use super::udf::{
-            Bm25Score, DocArrayContains, DocExists, DocGet, RrfScore, TextMatch, VectorDistance,
-        };
-        use datafusion::logical_expr::ScalarUDF;
-        session.register_udf(ScalarUDF::new_from_impl(DocGet::new()));
-        session.register_udf(ScalarUDF::new_from_impl(DocExists::new()));
-        session.register_udf(ScalarUDF::new_from_impl(DocArrayContains::new()));
-        session.register_udf(ScalarUDF::new_from_impl(VectorDistance::new()));
-        session.register_udf(ScalarUDF::new_from_impl(RrfScore::new()));
-        session.register_udf(ScalarUDF::new_from_impl(Bm25Score::new()));
-        session.register_udf(ScalarUDF::new_from_impl(TextMatch::new()));
+        Self {
+            session,
+            converter: PlanConverter::new(),
+        }
+    }
+
+    /// Create a query context with catalog integration.
+    ///
+    /// Collections stored in the system catalog will be visible to DataFusion,
+    /// enabling `SELECT * FROM <collection>` to resolve correctly.
+    pub fn with_catalog(credentials: Arc<CredentialStore>, tenant_id: u32) -> Self {
+        let config = SessionConfig::new()
+            .with_information_schema(false)
+            .with_default_catalog_and_schema("nodedb", "public");
+
+        let session = SessionContext::new_with_config(config);
+        register_udfs(&session);
+
+        // Register our custom schema provider so DataFusion can resolve
+        // collection names during SQL planning.
+        let schema_provider = Arc::new(NodeDbSchemaProvider::new(
+            Arc::clone(&credentials),
+            tenant_id,
+        ));
+        let catalog = MemoryCatalogProvider::new();
+        catalog
+            .register_schema("public", schema_provider)
+            .expect("register schema");
+        session.register_catalog("nodedb", Arc::new(catalog));
 
         Self {
             session,
@@ -91,6 +118,20 @@ impl Default for QueryContext {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn register_udfs(session: &SessionContext) {
+    use super::udf::{
+        Bm25Score, DocArrayContains, DocExists, DocGet, RrfScore, TextMatch, VectorDistance,
+    };
+    use datafusion::logical_expr::ScalarUDF;
+    session.register_udf(ScalarUDF::new_from_impl(DocGet::new()));
+    session.register_udf(ScalarUDF::new_from_impl(DocExists::new()));
+    session.register_udf(ScalarUDF::new_from_impl(DocArrayContains::new()));
+    session.register_udf(ScalarUDF::new_from_impl(VectorDistance::new()));
+    session.register_udf(ScalarUDF::new_from_impl(RrfScore::new()));
+    session.register_udf(ScalarUDF::new_from_impl(Bm25Score::new()));
+    session.register_udf(ScalarUDF::new_from_impl(TextMatch::new()));
 }
 
 #[cfg(test)]

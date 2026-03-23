@@ -98,6 +98,10 @@ impl NativeSession {
         state: Arc<SharedState>,
         auth_mode: AuthMode,
     ) -> Self {
+        let query_ctx = QueryContext::with_catalog(
+            Arc::clone(&state.credentials),
+            1, // default tenant for name resolution
+        );
         Self {
             stream: ConnStream::Plain(stream),
             peer_addr,
@@ -105,7 +109,7 @@ impl NativeSession {
             auth_mode,
             identity: None,
             format: None,
-            query_ctx: QueryContext::new(),
+            query_ctx,
             sessions: SessionStore::new(),
         }
     }
@@ -117,6 +121,10 @@ impl NativeSession {
         state: Arc<SharedState>,
         auth_mode: AuthMode,
     ) -> Self {
+        let query_ctx = QueryContext::with_catalog(
+            Arc::clone(&state.credentials),
+            1, // default tenant for name resolution
+        );
         Self {
             stream: ConnStream::Tls(Box::new(stream)),
             peer_addr,
@@ -124,7 +132,7 @@ impl NativeSession {
             auth_mode,
             identity: None,
             format: None,
-            query_ctx: QueryContext::new(),
+            query_ctx,
             sessions: SessionStore::new(),
         }
     }
