@@ -6,6 +6,7 @@ pub mod collection;
 pub mod crdt_ops;
 pub mod dsl;
 pub mod grant;
+pub mod graph_ops;
 pub mod inspect;
 pub mod ownership;
 pub mod rls;

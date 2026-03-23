@@ -229,9 +229,35 @@ pub async fn dispatch(
         return Some(super::crdt_ops::crdt_apply(state, identity, sql).await);
     }
 
+    // DSL: Graph operations (async — dispatches to Data Plane).
+    if upper.starts_with("GRAPH INSERT EDGE ") {
+        return Some(super::graph_ops::insert_edge(state, identity, &parts, sql).await);
+    }
+    if upper.starts_with("GRAPH DELETE EDGE ") {
+        return Some(super::graph_ops::delete_edge(state, identity, &parts, sql).await);
+    }
+    if upper.starts_with("GRAPH TRAVERSE ") {
+        return Some(super::graph_ops::traverse(state, identity, &parts, sql).await);
+    }
+    if upper.starts_with("GRAPH NEIGHBORS ") {
+        return Some(super::graph_ops::neighbors(state, identity, &parts, sql).await);
+    }
+    if upper.starts_with("GRAPH PATH ") {
+        return Some(super::graph_ops::shortest_path(state, identity, &parts, sql).await);
+    }
+
     // COPY FROM file.
     if upper.starts_with("COPY ") && upper.contains(" FROM ") {
         return Some(super::bulk::copy_from(state, identity, &parts).await);
+    }
+
+    // INSERT INTO — intercept for schemaless collections (DataFusion rejects
+    // columns not in the Arrow schema, but NodeDB collections are document stores).
+    if upper.starts_with("INSERT INTO ")
+        && upper.contains("VALUES")
+        && let Some(result) = super::collection::insert_document(state, identity, sql).await
+    {
+        return Some(result);
     }
 
     None
