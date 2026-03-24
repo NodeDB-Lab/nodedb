@@ -79,6 +79,7 @@ impl CoreLoop {
         filters: &[u8],
         distinct: bool,
         projection: &[String],
+        computed_columns_bytes: &[u8],
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -88,6 +89,14 @@ impl CoreLoop {
             sort_fields = sort_keys.len(),
             "document scan"
         );
+
+        // Parse computed column expressions.
+        let computed_cols: Vec<crate::bridge::expr_eval::ComputedColumn> =
+            if computed_columns_bytes.is_empty() {
+                Vec::new()
+            } else {
+                rmp_serde::from_slice(computed_columns_bytes).unwrap_or_default()
+            };
 
         let fetch_limit = (limit + offset).saturating_mul(2).max(1000);
 
@@ -166,17 +175,26 @@ impl CoreLoop {
                         let data = super::super::doc_format::decode_document(&value)
                             .unwrap_or(serde_json::Value::Null);
 
-                        // Apply column projection: return only requested fields.
-                        let projected = if projection.is_empty() {
-                            data
-                        } else if let serde_json::Value::Object(obj) = &data {
-                            let mut out = serde_json::Map::with_capacity(projection.len());
-                            for col in projection {
-                                if let Some(val) = obj.get(col) {
-                                    out.insert(col.clone(), val.clone());
-                                }
+                        // Apply projection: computed columns or simple column selection.
+                        let projected = if !computed_cols.is_empty() {
+                            // Evaluate computed expressions against the document.
+                            let mut out = serde_json::Map::with_capacity(computed_cols.len());
+                            for cc in &computed_cols {
+                                out.insert(cc.alias.clone(), cc.expr.eval(&data));
                             }
                             serde_json::Value::Object(out)
+                        } else if !projection.is_empty() {
+                            if let serde_json::Value::Object(obj) = &data {
+                                let mut out = serde_json::Map::with_capacity(projection.len());
+                                for col in projection {
+                                    if let Some(val) = obj.get(col) {
+                                        out.insert(col.clone(), val.clone());
+                                    }
+                                }
+                                serde_json::Value::Object(out)
+                            } else {
+                                data
+                            }
                         } else {
                             data
                         };

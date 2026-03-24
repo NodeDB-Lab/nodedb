@@ -141,6 +141,7 @@ fn range_scan_returns_results() {
             filters: Vec::new(),
             distinct: false,
             projection: Vec::new(),
+            computed_columns: Vec::new(),
         },
     );
     let json = payload_json(&payload);

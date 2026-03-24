@@ -123,8 +123,18 @@ impl CoreLoop {
                 filters,
                 distinct,
                 projection,
+                computed_columns,
             } => self.execute_document_scan(
-                task, tid, collection, *limit, *offset, sort_keys, filters, *distinct, projection,
+                task,
+                tid,
+                collection,
+                *limit,
+                *offset,
+                sort_keys,
+                filters,
+                *distinct,
+                projection,
+                computed_columns,
             ),
 
             PhysicalPlan::DocumentBatchInsert {

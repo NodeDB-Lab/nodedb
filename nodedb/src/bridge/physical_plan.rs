@@ -177,6 +177,13 @@ pub enum PhysicalPlan {
         /// Column projection: only return these fields from each document.
         /// Empty = return all fields (SELECT *).
         projection: Vec<String>,
+        /// Computed column expressions (serialized `Vec<ComputedColumn>`).
+        ///
+        /// When non-empty, the Data Plane evaluates these expressions against
+        /// each document and returns the computed values instead of raw fields.
+        /// Enables `SELECT price * qty AS total, UPPER(name) AS name_upper`.
+        /// Empty = no computed columns (use `projection` for column selection).
+        computed_columns: Vec<u8>,
     },
 
     /// Hash join: inner join two collections on matching fields.

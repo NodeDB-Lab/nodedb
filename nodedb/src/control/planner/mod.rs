@@ -8,4 +8,5 @@ pub mod hints;
 mod join;
 pub mod physical;
 mod search;
+pub mod sql_expr_convert;
 pub mod udf;

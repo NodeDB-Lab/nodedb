@@ -10,6 +10,7 @@ use super::search::{
     extract_table_name, try_extract_hybrid_search, try_extract_text_match_predicate,
     try_extract_text_search, try_extract_vector_search,
 };
+use super::sql_expr_convert::try_convert_projection;
 
 /// Converts DataFusion logical plans into NodeDB physical tasks.
 ///
@@ -41,12 +42,30 @@ impl PlanConverter {
             LogicalPlan::Projection(proj) => {
                 let mut tasks = self.convert(&proj.input, tenant_id)?;
 
-                // Extract projected column names and propagate to DocumentScan.
+                // Try to convert computed expressions (e.g., price * qty AS total).
+                if let Some(computed) = try_convert_projection(&proj.expr) {
+                    let computed_bytes = rmp_serde::to_vec_named(&computed).unwrap_or_default();
+                    for task in &mut tasks {
+                        if let PhysicalPlan::DocumentScan {
+                            computed_columns, ..
+                        } = &mut task.plan
+                        {
+                            *computed_columns = computed_bytes.clone();
+                        }
+                    }
+                    return Ok(tasks);
+                }
+
+                // Simple column projection (no computed expressions).
                 let columns: Vec<String> = proj
                     .expr
                     .iter()
                     .filter_map(|e| {
                         if let Expr::Column(col) = e {
+                            Some(col.name.clone())
+                        } else if let Expr::Alias(a) = e
+                            && let Expr::Column(col) = &*a.expr
+                        {
                             Some(col.name.clone())
                         } else {
                             None
@@ -54,8 +73,6 @@ impl PlanConverter {
                     })
                     .collect();
 
-                // Only set projection if we extracted at least one column
-                // (aggregates, function calls, etc. don't reduce to columns).
                 if !columns.is_empty() {
                     for task in &mut tasks {
                         if let PhysicalPlan::DocumentScan { projection, .. } = &mut task.plan {
@@ -131,6 +148,7 @@ impl PlanConverter {
                             filters: filter_bytes,
                             distinct: false,
                             projection: Vec::new(),
+                            computed_columns: Vec::new(),
                         },
                     }]);
                 }
@@ -209,6 +227,7 @@ impl PlanConverter {
                         filters: filter_bytes,
                         distinct: false,
                         projection: Vec::new(),
+                        computed_columns: Vec::new(),
                     },
                 }])
             }
@@ -392,7 +411,7 @@ impl PlanConverter {
                 let mut aggregates = Vec::new();
                 for expr in &agg.aggr_expr {
                     if let Expr::AggregateFunction(func) = expr {
-                        let op = func.func.name().to_lowercase();
+                        let mut op = func.func.name().to_lowercase();
                         let field = func
                             .params
                             .args
@@ -407,6 +426,12 @@ impl PlanConverter {
                                 }
                             })
                             .unwrap_or_else(|| "*".into());
+
+                        // Handle DISTINCT modifier: COUNT(DISTINCT col) → "count_distinct".
+                        if func.params.distinct {
+                            op = format!("{op}_distinct");
+                        }
+
                         aggregates.push((op, field));
                     }
                 }

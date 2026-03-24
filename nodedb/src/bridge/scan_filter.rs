@@ -226,6 +226,111 @@ pub fn compute_aggregate(op: &str, field: &str, docs: &[serde_json::Value]) -> s
             }
         }
 
+        "count_distinct" => {
+            let mut seen = std::collections::HashSet::new();
+            for d in docs {
+                if let Some(v) = d.get(field) {
+                    seen.insert(v.to_string());
+                }
+            }
+            serde_json::json!(seen.len())
+        }
+
+        "stddev" | "stddev_pop" => {
+            let values: Vec<f64> = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_f64()))
+                .collect();
+            if values.len() < 2 {
+                return serde_json::Value::Null;
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+            serde_json::json!(variance.sqrt())
+        }
+
+        "stddev_samp" => {
+            let values: Vec<f64> = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_f64()))
+                .collect();
+            if values.len() < 2 {
+                return serde_json::Value::Null;
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+            serde_json::json!(variance.sqrt())
+        }
+
+        "variance" | "var_pop" => {
+            let values: Vec<f64> = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_f64()))
+                .collect();
+            if values.len() < 2 {
+                return serde_json::Value::Null;
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+            serde_json::json!(variance)
+        }
+
+        "var_samp" => {
+            let values: Vec<f64> = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_f64()))
+                .collect();
+            if values.len() < 2 {
+                return serde_json::Value::Null;
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+            serde_json::json!(variance)
+        }
+
+        "array_agg" => {
+            let values: Vec<serde_json::Value> =
+                docs.iter().filter_map(|d| d.get(field).cloned()).collect();
+            serde_json::Value::Array(values)
+        }
+
+        "string_agg" | "group_concat" => {
+            let values: Vec<String> = docs
+                .iter()
+                .filter_map(|d| d.get(field).and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            serde_json::Value::String(values.join(","))
+        }
+
+        "percentile_cont" => {
+            // Expects field format "percentile:field_name" (e.g., "0.5:salary").
+            // Falls back to median (p=0.5) if no percentile specified.
+            let (pct, actual_field) = if let Some(idx) = field.find(':') {
+                let p: f64 = field[..idx].parse().unwrap_or(0.5);
+                (p, &field[idx + 1..])
+            } else {
+                (0.5, field)
+            };
+            let mut values: Vec<f64> = docs
+                .iter()
+                .filter_map(|d| d.get(actual_field).and_then(|v| v.as_f64()))
+                .collect();
+            if values.is_empty() {
+                return serde_json::Value::Null;
+            }
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let idx = (pct * (values.len() - 1) as f64).clamp(0.0, (values.len() - 1) as f64);
+            let lower = idx.floor() as usize;
+            let upper = idx.ceil() as usize;
+            let frac = idx - lower as f64;
+            let result = values[lower] * (1.0 - frac) + values[upper] * frac;
+            serde_json::json!(result)
+        }
+
         _ => serde_json::Value::Null,
     }
 }
