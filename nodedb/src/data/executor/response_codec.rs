@@ -222,6 +222,8 @@ pub fn decode_payload_to_json(payload: &[u8]) -> String {
 pub(super) struct VectorSearchHit {
     pub id: u32,
     pub distance: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -298,10 +300,12 @@ mod tests {
             VectorSearchHit {
                 id: 1,
                 distance: 0.5,
+                doc_id: None,
             },
             VectorSearchHit {
                 id: 2,
                 distance: 0.8,
+                doc_id: None,
             },
         ];
         let bytes = encode(&hits).unwrap();

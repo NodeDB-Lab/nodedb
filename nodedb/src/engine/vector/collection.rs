@@ -97,6 +97,9 @@ pub struct VectorCollection {
     pub(super) mmap_fallback_count: u32,
     /// Count of segments currently backed by mmap files.
     pub(super) mmap_segment_count: u32,
+    /// Mapping from internal vector ID → user-facing document ID.
+    /// Populated when vectors are inserted with an associated document ID.
+    pub doc_id_map: std::collections::HashMap<u32, String>,
 }
 
 impl VectorCollection {
@@ -115,6 +118,7 @@ impl VectorCollection {
             ram_budget_bytes: 0,
             mmap_fallback_count: 0,
             mmap_segment_count: 0,
+            doc_id_map: std::collections::HashMap::new(),
         }
     }
 
@@ -129,6 +133,20 @@ impl VectorCollection {
         self.growing.insert(vector);
         self.next_id += 1;
         id
+    }
+
+    /// Insert a vector with an associated document ID.
+    /// The doc_id is stored in the mapping so search results can return
+    /// human-readable IDs instead of internal numeric indices.
+    pub fn insert_with_doc_id(&mut self, vector: Vec<f32>, doc_id: String) -> u32 {
+        let id = self.insert(vector);
+        self.doc_id_map.insert(id, doc_id);
+        id
+    }
+
+    /// Look up the document ID for a vector ID, if one was provided at insert time.
+    pub fn get_doc_id(&self, vector_id: u32) -> Option<&str> {
+        self.doc_id_map.get(&vector_id).map(|s| s.as_str())
     }
 
     /// Soft-delete a vector by global ID.

@@ -157,6 +157,7 @@ impl VectorCollection {
             ram_budget_bytes: 0,
             mmap_fallback_count: 0,
             mmap_segment_count: 0,
+            doc_id_map: std::collections::HashMap::new(),
         })
     }
 }

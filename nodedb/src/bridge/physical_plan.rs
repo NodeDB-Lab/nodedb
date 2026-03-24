@@ -72,6 +72,9 @@ pub enum PhysicalPlan {
         /// Empty string = default (unnamed) field. Each named field gets
         /// its own HNSW index with independent params and metric.
         field_name: String,
+        /// Optional document ID to associate with this vector.
+        /// When set, search results include the doc_id for human-readable output.
+        doc_id: Option<String>,
     },
 
     /// Batch insert vectors into the HNSW index (write path).

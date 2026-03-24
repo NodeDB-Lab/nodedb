@@ -4,12 +4,22 @@
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
+use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::task::ExecutionTask;
 use crate::engine::vector::collection::VectorCollection;
 use crate::engine::vector::distance::DistanceMetric;
 use crate::engine::vector::hnsw::HnswParams;
 
-use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::task::ExecutionTask;
+/// Parameters for a vector insert operation.
+pub(in crate::data::executor) struct VectorInsertParams<'a> {
+    pub task: &'a ExecutionTask,
+    pub tid: u32,
+    pub collection: &'a str,
+    pub vector: &'a [f32],
+    pub dim: usize,
+    pub field_name: &'a str,
+    pub doc_id: Option<String>,
+}
 
 impl CoreLoop {
     /// Get or create a vector collection, validating dimension compatibility.
@@ -45,13 +55,17 @@ impl CoreLoop {
 
     pub(in crate::data::executor) fn execute_vector_insert(
         &mut self,
-        task: &ExecutionTask,
-        tid: u32,
-        collection: &str,
-        vector: &[f32],
-        dim: usize,
-        field_name: &str,
+        params: VectorInsertParams<'_>,
     ) -> Response {
+        let VectorInsertParams {
+            task,
+            tid,
+            collection,
+            vector,
+            dim,
+            field_name,
+            doc_id,
+        } = params;
         debug!(core = self.core_id, %collection, dim, "vector insert");
         if vector.len() != dim {
             return self.response_error(
@@ -76,7 +90,11 @@ impl CoreLoop {
         // Default: HNSW (with or without PQ).
         match self.get_or_create_vector_index(tid, collection, dim, field_name) {
             Ok(collection_ref) => {
-                collection_ref.insert(vector.to_vec());
+                if let Some(did) = doc_id {
+                    collection_ref.insert_with_doc_id(vector.to_vec(), did);
+                } else {
+                    collection_ref.insert(vector.to_vec());
+                }
                 if collection_ref.needs_seal()
                     && let Some(req) = collection_ref.seal(&index_key)
                     && let Some(tx) = &self.build_tx
@@ -224,6 +242,7 @@ impl CoreLoop {
                 .map(|r| super::super::response_codec::VectorSearchHit {
                     id: r.id,
                     distance: r.distance,
+                    doc_id: None,
                 })
                 .collect();
             return match super::super::response_codec::encode(&hits) {
@@ -255,6 +274,7 @@ impl CoreLoop {
             .map(|r| super::super::response_codec::VectorSearchHit {
                 id: r.id,
                 distance: r.distance,
+                doc_id: collection_ref.get_doc_id(r.id).map(String::from),
             })
             .collect();
         match super::super::response_codec::encode(&hits) {
@@ -320,6 +340,7 @@ impl CoreLoop {
                 .map(|r| super::super::response_codec::VectorSearchHit {
                     id: r.id,
                     distance: r.distance,
+                    doc_id: None,
                 })
                 .collect();
             return match super::super::response_codec::encode(&hits) {
@@ -347,6 +368,7 @@ impl CoreLoop {
                 |&(id, score)| super::super::response_codec::VectorSearchHit {
                     id,
                     distance: score as f32,
+                    doc_id: None,
                 },
             )
             .collect();
