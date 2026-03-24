@@ -6,3 +6,4 @@ pub mod query;
 pub mod search;
 pub mod status;
 pub mod subscribe;
+pub mod ws_rpc;

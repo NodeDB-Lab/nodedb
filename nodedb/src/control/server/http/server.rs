@@ -43,6 +43,7 @@ fn build_router(state: AppState) -> Router {
             "/collections/{name}/crdt/apply",
             post(routes::crdt::crdt_apply),
         )
+        .route("/ws", get(routes::ws_rpc::ws_handler))
         .with_state(state)
 }
 
