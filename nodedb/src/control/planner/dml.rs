@@ -6,10 +6,62 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::planner::physical::PhysicalTask;
 use crate::types::{TenantId, VShardId};
 
+use datafusion::logical_expr::LogicalPlan;
+
 use super::converter::PlanConverter;
 use super::extract::{
-    extract_insert_values, extract_point_targets, extract_update_assignments, extract_where_filters,
+    expr_to_scan_filters, extract_insert_values, extract_point_targets, extract_update_assignments,
+    extract_where_filters,
 };
+
+/// Extract source table, filters, and limit from a SELECT plan for INSERT...SELECT.
+fn extract_select_source(plan: &LogicalPlan) -> crate::Result<(String, Vec<u8>, usize)> {
+    match plan {
+        LogicalPlan::TableScan(scan) => {
+            let source = scan.table_name.to_string().to_lowercase();
+            let limit = scan.fetch.unwrap_or(100_000);
+            let filter_bytes = if !scan.filters.is_empty() {
+                let mut all_filters = Vec::new();
+                for f in &scan.filters {
+                    all_filters.extend(expr_to_scan_filters(f));
+                }
+                rmp_serde::to_vec_named(&all_filters).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            Ok((source, filter_bytes, limit))
+        }
+        LogicalPlan::Filter(filter) => {
+            let (source, _, limit) = extract_select_source(&filter.input)?;
+            let scan_filters = expr_to_scan_filters(&filter.predicate);
+            let filter_bytes = rmp_serde::to_vec_named(&scan_filters).unwrap_or_default();
+            Ok((source, filter_bytes, limit))
+        }
+        LogicalPlan::Projection(proj) => extract_select_source(&proj.input),
+        LogicalPlan::Limit(limit_plan) => {
+            let (source, filters, _) = extract_select_source(&limit_plan.input)?;
+            let fetch = limit_plan
+                .fetch
+                .as_ref()
+                .and_then(|f| {
+                    if let Expr::Literal(lit, _) = f.as_ref() {
+                        lit.to_string().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(100_000);
+            Ok((source, filters, fetch))
+        }
+        LogicalPlan::SubqueryAlias(alias) => extract_select_source(&alias.input),
+        _ => Err(crate::Error::PlanError {
+            detail: format!(
+                "INSERT ... SELECT: unsupported source plan: {}",
+                plan.display()
+            ),
+        }),
+    }
+}
 
 impl PlanConverter {
     /// Convert DML operations (INSERT, UPDATE, DELETE) to physical plans.
@@ -25,28 +77,41 @@ impl PlanConverter {
 
         match &dml.op {
             WriteOp::Insert(_) | WriteOp::Ctas => {
-                let values = extract_insert_values(&dml.input)?;
-
-                let mut tasks = Vec::with_capacity(values.len());
-                for (doc_id, value_bytes) in values {
-                    tasks.push(PhysicalTask {
-                        tenant_id,
-                        vshard_id: vshard,
-                        plan: PhysicalPlan::PointPut {
-                            collection: collection.clone(),
-                            document_id: doc_id,
-                            value: value_bytes,
-                        },
-                    });
+                // Try VALUES-based INSERT first.
+                match extract_insert_values(&dml.input) {
+                    Ok(values) if !values.is_empty() => {
+                        let mut tasks = Vec::with_capacity(values.len());
+                        for (doc_id, value_bytes) in values {
+                            tasks.push(PhysicalTask {
+                                tenant_id,
+                                vshard_id: vshard,
+                                plan: PhysicalPlan::PointPut {
+                                    collection: collection.clone(),
+                                    document_id: doc_id,
+                                    value: value_bytes,
+                                },
+                            });
+                        }
+                        return Ok(tasks);
+                    }
+                    _ => {}
                 }
 
-                if tasks.is_empty() {
-                    return Err(crate::Error::PlanError {
-                        detail: "INSERT requires at least one row".into(),
-                    });
-                }
+                // INSERT ... SELECT: extract source table and filters from
+                // the SELECT plan and create an InsertSelect physical plan.
+                let (source_collection, source_filters, source_limit) =
+                    extract_select_source(&dml.input)?;
 
-                Ok(tasks)
+                Ok(vec![PhysicalTask {
+                    tenant_id,
+                    vshard_id: vshard,
+                    plan: PhysicalPlan::InsertSelect {
+                        target_collection: collection,
+                        source_collection,
+                        source_filters,
+                        source_limit,
+                    },
+                }])
             }
             WriteOp::Delete => {
                 // Try point delete (WHERE id = 'value') first.

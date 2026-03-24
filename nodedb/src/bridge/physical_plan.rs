@@ -132,6 +132,18 @@ pub enum PhysicalPlan {
         documents: Vec<(String, Vec<u8>)>,
     },
 
+    /// INSERT ... SELECT: copy documents from source scan into target collection.
+    ///
+    /// The source_filters/source_collection define a DocumentScan on the source.
+    /// Each matched document is inserted into target_collection with auto-generated IDs.
+    InsertSelect {
+        target_collection: String,
+        source_collection: String,
+        /// ScanFilter predicates for the source (same format as DocumentScan).
+        source_filters: Vec<u8>,
+        source_limit: usize,
+    },
+
     /// Point write: insert/update a document in the sparse engine.
     PointPut {
         collection: String,

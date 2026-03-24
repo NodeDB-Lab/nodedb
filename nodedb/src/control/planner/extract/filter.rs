@@ -21,9 +21,26 @@ pub(in crate::control::planner) fn expr_to_scan_filters(expr: &Expr) -> Vec<Scan
             let left_filters = expr_to_scan_filters(&binary.left);
             let right_filters = expr_to_scan_filters(&binary.right);
 
+            // If either branch is unsupported, the OR as a whole can't be
+            // converted to a ScanFilter. Emit a "match_all" filter so the
+            // Data Plane scans all documents. This is correct (superset of
+            // matches) because the unsupported branch might match anything.
+            //
+            // SAFETY: Previously this returned Vec::new() which meant "no
+            // filters" — same as match_all — but callers in AND chains would
+            // silently DROP the entire WHERE clause. Now we return an explicit
+            // match_all ScanFilter that always evaluates to true, preserving
+            // any sibling AND filters.
             if left_filters.is_empty() || right_filters.is_empty() {
-                warn!("OR predicate has unsupported branch; falling back to unfiltered scan");
-                return Vec::new();
+                warn!(
+                    "OR predicate has unsupported branch (left={}, right={}); emitting match_all for this OR",
+                    left_filters.len(),
+                    right_filters.len()
+                );
+                return vec![ScanFilter {
+                    op: "match_all".into(),
+                    ..Default::default()
+                }];
             }
 
             vec![ScanFilter {

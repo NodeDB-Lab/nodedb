@@ -396,6 +396,20 @@ impl CoreLoop {
                 value,
             } => self.execute_upsert(task, tid, collection, document_id, value),
 
+            PhysicalPlan::InsertSelect {
+                target_collection,
+                source_collection,
+                source_filters,
+                source_limit,
+            } => self.execute_insert_select(
+                task,
+                tid,
+                target_collection,
+                source_collection,
+                source_filters,
+                *source_limit,
+            ),
+
             PhysicalPlan::CreateSnapshot => self.execute_create_snapshot(task),
 
             PhysicalPlan::Compact => self.execute_compact(task),

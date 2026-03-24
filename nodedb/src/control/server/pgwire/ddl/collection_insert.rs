@@ -1,8 +1,8 @@
-//! INSERT INTO dispatch for schemaless collections.
+//! INSERT/UPSERT dispatch for schemaless collections.
 //!
-//! Intercepts INSERT for collections without typed schemas, parses
+//! Intercepts INSERT/UPSERT for collections without typed schemas, parses
 //! column names and values manually, serializes as JSON, and dispatches
-//! as PointPut + optional VectorInsert.
+//! as PointPut (INSERT) or Upsert (UPSERT) + optional VectorInsert.
 
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::PgWireResult;
@@ -13,40 +13,48 @@ use crate::control::state::SharedState;
 use super::super::types::sqlstate_error;
 use super::sql_parse::{parse_array_literal, parse_sql_value, split_values};
 
-/// INSERT INTO <collection> (col1, col2, ...) VALUES (val1, val2, ...)
+/// Parsed INSERT/UPSERT statement fields.
+struct ParsedInsert {
+    coll_name: String,
+    doc_id: String,
+    fields: serde_json::Map<String, serde_json::Value>,
+    vector_fields: Vec<(String, Vec<f32>)>,
+    value_bytes: Vec<u8>,
+    has_returning: bool,
+}
+
+/// Parse an INSERT/UPSERT SQL statement into structured fields.
 ///
-/// Intercepts INSERT for schemaless collections. Parses column names
-/// and values manually, serializes as JSON, dispatches as PointPut.
+/// `keyword` is the SQL prefix to match (e.g., "INSERT INTO " or "UPSERT INTO ").
 /// Returns `None` if the collection has a typed schema (let DataFusion handle it).
-pub async fn insert_document(
+fn parse_write_statement(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     sql: &str,
-) -> Option<PgWireResult<Vec<Response>>> {
+    keyword: &str,
+) -> Option<PgWireResult<ParsedInsert>> {
     let upper = sql.to_uppercase();
-    let into_pos = upper.find("INSERT INTO ")?;
-    let after_into = sql[into_pos + 12..].trim_start();
+    let kw_pos = upper.find(keyword)?;
+    let after_into = sql[kw_pos + keyword.len()..].trim_start();
     let coll_name_str = after_into.split_whitespace().next()?;
-    let coll_name_lower = coll_name_str.to_lowercase();
-    let coll_name = coll_name_lower.as_str();
+    let coll_name = coll_name_str.to_lowercase();
 
-    // Check if collection is schemaless (no declared fields).
+    // Check if collection is schemaless.
     let tenant_id = identity.tenant_id;
     if let Some(catalog) = state.credentials.catalog()
-        && let Ok(Some(coll)) = catalog.get_collection(tenant_id.as_u32(), coll_name)
+        && let Ok(Some(coll)) = catalog.get_collection(tenant_id.as_u32(), &coll_name)
         && !coll.fields.is_empty()
     {
-        // Typed collection — let DataFusion handle it.
         return None;
     }
 
-    // Find the column list: first (...) in the SQL.
+    // Parse column list.
     let first_open = match sql.find('(') {
         Some(p) => p,
         None => {
             return Some(Err(sqlstate_error(
                 "42601",
-                "missing column list in INSERT",
+                &format!("missing column list in {}", keyword.trim()),
             )));
         }
     };
@@ -66,7 +74,7 @@ pub async fn insert_document(
     let cols_str = &sql[first_open + 1..first_close];
     let columns: Vec<&str> = cols_str.split(',').map(|c| c.trim()).collect();
 
-    // Find VALUES (...).
+    // Parse VALUES (...).
     let after_values = sql[values_kw + 6..].trim_start();
     let vals_open = match after_values.find('(') {
         Some(p) => p,
@@ -90,7 +98,7 @@ pub async fn insert_document(
         )));
     }
 
-    // First column should be 'id'. Build JSON document from the rest.
+    // Build document fields and extract doc_id.
     let mut doc_id = String::new();
     let mut fields = serde_json::Map::new();
 
@@ -100,13 +108,11 @@ pub async fn insert_document(
         if col.eq_ignore_ascii_case("id") {
             doc_id = val.trim_matches('\'').to_string();
         } else {
-            let json_val = parse_sql_value(val);
-            fields.insert(col.to_string(), json_val);
+            fields.insert(col.to_string(), parse_sql_value(val));
         }
     }
 
     if doc_id.is_empty() {
-        // Auto-generate ID.
         doc_id = format!(
             "{:016x}",
             std::time::SystemTime::now()
@@ -116,7 +122,7 @@ pub async fn insert_document(
         );
     }
 
-    // Detect vector fields (ARRAY[...] values) and extract them for VectorInsert.
+    // Detect vector fields.
     let mut vector_fields: Vec<(String, Vec<f32>)> = Vec::new();
     for (col, val) in columns.iter().zip(values.iter()) {
         let col = col.trim().trim_matches('"');
@@ -127,13 +133,62 @@ pub async fn insert_document(
     }
 
     let value_bytes = serde_json::to_vec(&fields).unwrap_or_default();
-    let vshard_id = crate::types::VShardId::from_key(doc_id.as_bytes());
+    let has_returning = upper.contains("RETURNING");
 
-    // 1. Store the document via PointPut.
+    Some(Ok(ParsedInsert {
+        coll_name,
+        doc_id,
+        fields,
+        vector_fields,
+        value_bytes,
+        has_returning,
+    }))
+}
+
+/// Format a RETURNING response from parsed fields.
+fn returning_response(
+    doc_id: &str,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> PgWireResult<Vec<Response>> {
+    use futures::stream;
+    use pgwire::api::results::{DataRowEncoder, QueryResponse};
+
+    let mut result_doc = fields.clone();
+    result_doc.insert(
+        "id".to_string(),
+        serde_json::Value::String(doc_id.to_string()),
+    );
+    let json_str =
+        serde_json::to_string(&serde_json::Value::Object(result_doc)).unwrap_or_default();
+    let schema = std::sync::Arc::new(vec![super::super::types::text_field("result")]);
+    let mut encoder = DataRowEncoder::new(schema.clone());
+    let _ = encoder.encode_field(&json_str);
+    let row = encoder.take_row();
+    Ok(vec![Response::Query(QueryResponse::new(
+        schema,
+        stream::iter(vec![Ok(row)]),
+    ))])
+}
+
+/// INSERT INTO <collection> (col1, col2, ...) VALUES (val1, val2, ...)
+pub async fn insert_document(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    sql: &str,
+) -> Option<PgWireResult<Vec<Response>>> {
+    let parsed = match parse_write_statement(state, identity, sql, "INSERT INTO ")? {
+        Ok(p) => p,
+        Err(e) => return Some(Err(e)),
+    };
+
+    let tenant_id = identity.tenant_id;
+    let vshard_id = crate::types::VShardId::from_key(parsed.doc_id.as_bytes());
+
+    // Store document via PointPut.
     let plan = crate::bridge::envelope::PhysicalPlan::PointPut {
-        collection: coll_name.to_string(),
-        document_id: doc_id.clone(),
-        value: value_bytes,
+        collection: parsed.coll_name.clone(),
+        document_id: parsed.doc_id.clone(),
+        value: parsed.value_bytes,
     };
 
     if let Err(e) = crate::control::server::dispatch_utils::wal_append_if_write(
@@ -141,7 +196,6 @@ pub async fn insert_document(
     ) {
         return Some(Err(sqlstate_error("XX000", &e.to_string())));
     }
-
     if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
         state, tenant_id, vshard_id, plan, 0,
     )
@@ -150,16 +204,16 @@ pub async fn insert_document(
         return Some(Err(sqlstate_error("XX000", &e.to_string())));
     }
 
-    // 2. For each vector field, dispatch VectorInsert to HNSW index.
-    let vec_vshard = crate::types::VShardId::from_collection(coll_name);
-    for (_field_name, vector) in &vector_fields {
+    // Dispatch VectorInsert for vector fields.
+    let vec_vshard = crate::types::VShardId::from_collection(&parsed.coll_name);
+    for (_field_name, vector) in &parsed.vector_fields {
         let dim = vector.len();
         let vec_plan = crate::bridge::envelope::PhysicalPlan::VectorInsert {
-            collection: coll_name.to_string(),
+            collection: parsed.coll_name.clone(),
             vector: vector.clone(),
             dim,
             field_name: String::new(),
-            doc_id: Some(doc_id.clone()),
+            doc_id: Some(parsed.doc_id.clone()),
         };
 
         if let Err(e) = crate::control::server::dispatch_utils::wal_append_if_write(
@@ -167,7 +221,6 @@ pub async fn insert_document(
         ) {
             return Some(Err(sqlstate_error("XX000", &e.to_string())));
         }
-
         if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
             state, tenant_id, vec_vshard, vec_plan, 0,
         )
@@ -177,114 +230,34 @@ pub async fn insert_document(
         }
     }
 
+    if parsed.has_returning {
+        return Some(returning_response(&parsed.doc_id, &parsed.fields));
+    }
+
     Some(Ok(vec![Response::Execution(Tag::new("INSERT"))]))
 }
 
 /// UPSERT INTO <collection> (col1, col2, ...) VALUES (val1, val2, ...)
 ///
-/// Same as INSERT but uses the `Upsert` plan variant: if a document with the
-/// given ID already exists, its fields are merged (not overwritten).
+/// Same parsing as INSERT but dispatches the `Upsert` plan variant:
+/// if a document with the given ID exists, its fields are merged.
 pub async fn upsert_document(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Option<PgWireResult<Vec<Response>>> {
-    // Rewrite "UPSERT INTO" → "INSERT INTO" and parse with the same logic,
-    // then swap the plan variant.
-    let upper = sql.to_uppercase();
-    let upsert_pos = upper.find("UPSERT INTO ")?;
-    let after_into = sql[upsert_pos + 12..].trim_start();
-    let coll_name_str = after_into.split_whitespace().next()?;
-    let coll_name_lower = coll_name_str.to_lowercase();
-    let coll_name = coll_name_lower.as_str();
+    let parsed = match parse_write_statement(state, identity, sql, "UPSERT INTO ")? {
+        Ok(p) => p,
+        Err(e) => return Some(Err(e)),
+    };
 
     let tenant_id = identity.tenant_id;
-    if let Some(catalog) = state.credentials.catalog()
-        && let Ok(Some(coll)) = catalog.get_collection(tenant_id.as_u32(), coll_name)
-        && !coll.fields.is_empty()
-    {
-        return None;
-    }
-
-    let first_open = match sql.find('(') {
-        Some(p) => p,
-        None => {
-            return Some(Err(sqlstate_error(
-                "42601",
-                "missing column list in UPSERT",
-            )));
-        }
-    };
-    let values_kw = match upper.find("VALUES") {
-        Some(p) => p,
-        None => return Some(Err(sqlstate_error("42601", "missing VALUES clause"))),
-    };
-    let first_close = match sql[first_open..values_kw].rfind(')') {
-        Some(p) => first_open + p,
-        None => {
-            return Some(Err(sqlstate_error(
-                "42601",
-                "missing closing ) for column list",
-            )));
-        }
-    };
-    let cols_str = &sql[first_open + 1..first_close];
-    let columns: Vec<&str> = cols_str.split(',').map(|c| c.trim()).collect();
-
-    let after_values = sql[values_kw + 6..].trim_start();
-    let vals_open = match after_values.find('(') {
-        Some(p) => p,
-        None => return Some(Err(sqlstate_error("42601", "missing VALUES (...)"))),
-    };
-    let vals_close = match after_values.rfind(')') {
-        Some(p) => p,
-        None => return Some(Err(sqlstate_error("42601", "missing closing ) for VALUES"))),
-    };
-    let vals_str = &after_values[vals_open + 1..vals_close];
-    let values: Vec<&str> = split_values(vals_str);
-
-    if columns.len() != values.len() {
-        return Some(Err(sqlstate_error(
-            "42601",
-            &format!(
-                "column count ({}) doesn't match value count ({})",
-                columns.len(),
-                values.len()
-            ),
-        )));
-    }
-
-    let mut doc_id = String::new();
-    let mut fields = serde_json::Map::new();
-
-    for (col, val) in columns.iter().zip(values.iter()) {
-        let col = col.trim().trim_matches('"');
-        let val = val.trim();
-        if col.eq_ignore_ascii_case("id") {
-            doc_id = val.trim_matches('\'').to_string();
-        } else {
-            let json_val = parse_sql_value(val);
-            fields.insert(col.to_string(), json_val);
-        }
-    }
-
-    if doc_id.is_empty() {
-        doc_id = format!(
-            "{:016x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-    }
-
-    let value_bytes = serde_json::to_vec(&fields).unwrap_or_default();
-    let vshard_id = crate::types::VShardId::from_key(doc_id.as_bytes());
+    let vshard_id = crate::types::VShardId::from_key(parsed.doc_id.as_bytes());
 
     let plan = crate::bridge::envelope::PhysicalPlan::Upsert {
-        collection: coll_name.to_string(),
-        document_id: doc_id.clone(),
-        value: value_bytes,
+        collection: parsed.coll_name.clone(),
+        document_id: parsed.doc_id.clone(),
+        value: parsed.value_bytes,
     };
 
     if let Err(e) = crate::control::server::dispatch_utils::wal_append_if_write(
@@ -292,7 +265,6 @@ pub async fn upsert_document(
     ) {
         return Some(Err(sqlstate_error("XX000", &e.to_string())));
     }
-
     if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
         state, tenant_id, vshard_id, plan, 0,
     )

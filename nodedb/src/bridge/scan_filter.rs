@@ -33,6 +33,11 @@ pub struct ScanFilter {
 impl ScanFilter {
     /// Evaluate this filter against a JSON document.
     pub fn matches(&self, doc: &serde_json::Value) -> bool {
+        // match_all: always true (unsupported expression fallback).
+        if self.op == "match_all" {
+            return true;
+        }
+
         // OR predicate: document matches if ANY clause group fully matches.
         if self.op == "or" {
             return self
