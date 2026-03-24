@@ -196,17 +196,26 @@ impl NodeDbLiteWasm {
     }
 
     /// Put (insert or update) a document. Takes a JSON string of fields.
+    ///
+    /// If `id` is empty, a UUIDv7 is auto-generated.
+    /// Returns the document ID (useful when auto-generated).
     #[wasm_bindgen(js_name = "documentPut")]
     pub async fn document_put(
         &self,
         collection: &str,
         id: &str,
         fields_json: &str,
-    ) -> Result<(), JsError> {
+    ) -> Result<String, JsError> {
         let fields: std::collections::HashMap<String, Value> =
             serde_json::from_str(fields_json).map_err(|e| JsError::new(&e.to_string()))?;
 
-        let mut doc = Document::new(id);
+        let doc_id = if id.is_empty() {
+            nodedb_types::id_gen::uuid_v7()
+        } else {
+            id.to_string()
+        };
+
+        let mut doc = Document::new(&doc_id);
         for (k, v) in fields {
             doc.set(k, v);
         }
@@ -214,7 +223,9 @@ impl NodeDbLiteWasm {
         self.db
             .document_put(collection, doc)
             .await
-            .map_err(|e| JsError::new(&e.to_string()))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(doc_id)
     }
 
     /// Delete a document by ID.
@@ -233,5 +244,25 @@ impl NodeDbLiteWasm {
             .flush()
             .await
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    // ─── ID Generation ──────────────────────────────────────────────
+
+    /// Generate a UUIDv7 (time-sortable, recommended for primary keys).
+    #[wasm_bindgen(js_name = "generateId")]
+    pub fn generate_id() -> String {
+        nodedb_types::id_gen::uuid_v7()
+    }
+
+    /// Generate an ID of the specified type.
+    ///
+    /// Supported types: "uuidv7", "uuidv4", "ulid", "cuid2", "nanoid".
+    #[wasm_bindgen(js_name = "generateIdTyped")]
+    pub fn generate_id_typed(id_type: &str) -> Result<String, JsError> {
+        nodedb_types::id_gen::generate_by_type(id_type).ok_or_else(|| {
+            JsError::new(&format!(
+                "unknown ID type '{id_type}': use uuidv7, uuidv4, ulid, cuid2, or nanoid"
+            ))
+        })
     }
 }

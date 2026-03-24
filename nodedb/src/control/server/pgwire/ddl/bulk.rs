@@ -83,7 +83,7 @@ pub async fn copy_from(
                         serde_json::Value::Number(n) => Some(n.to_string()),
                         _ => None,
                     })
-                    .unwrap_or_else(|| format!("copy_{count}"));
+                    .unwrap_or_else(nodedb_types::id_gen::uuid_v7);
 
                 let value = serde_json::to_vec(&doc).unwrap_or_default();
 
@@ -153,7 +153,7 @@ pub async fn copy_from(
                         serde_json::Value::Number(n) => Some(n.to_string()),
                         _ => None,
                     })
-                    .unwrap_or_else(|| format!("copy_{count}"));
+                    .unwrap_or_else(nodedb_types::id_gen::uuid_v7);
 
                 let value = serde_json::to_vec(&obj).unwrap_or_default();
 

@@ -126,16 +126,7 @@ pub async fn insert_document(
     // Extract document ID (required or auto-generated).
     let document_id = match body.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => {
-            // Auto-generate a simple unique ID.
-            format!(
-                "{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            )
-        }
+        None => nodedb_types::id_gen::uuid_v7(),
     };
 
     // Extract document data.

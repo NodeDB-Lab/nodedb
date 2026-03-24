@@ -274,13 +274,19 @@ impl<S: StorageEngine> NodeDb for NodeDbLite<S> {
     async fn document_put(&self, collection: &str, doc: Document) -> NodeDbResult<()> {
         let mut crdt = self.crdt.lock_or_recover();
 
+        let doc_id = if doc.id.is_empty() {
+            nodedb_types::id_gen::uuid_v7()
+        } else {
+            doc.id.clone()
+        };
+
         let fields: Vec<(&str, LoroValue)> = doc
             .fields
             .iter()
             .map(|(k, v)| (k.as_str(), value_to_loro(v)))
             .collect();
 
-        crdt.upsert(collection, &doc.id, &fields)
+        crdt.upsert(collection, &doc_id, &fields)
             .map_err(|e| NodeDbError::Storage {
                 detail: e.to_string(),
             })?;

@@ -113,13 +113,7 @@ fn parse_write_statement(
     }
 
     if doc_id.is_empty() {
-        doc_id = format!(
-            "{:016x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        doc_id = nodedb_types::id_gen::uuid_v7();
     }
 
     // Detect vector fields.

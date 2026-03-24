@@ -305,10 +305,14 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeDocumentPut(
         Err(_) => return NODEDB_ERR_FAILED,
     };
 
-    let doc: nodedb_types::Document = match serde_json::from_str(&json_str) {
+    let mut doc: nodedb_types::Document = match serde_json::from_str(&json_str) {
         Ok(d) => d,
         Err(_) => return NODEDB_ERR_FAILED,
     };
+
+    if doc.id.is_empty() {
+        doc.id = nodedb_types::id_gen::uuid_v7();
+    }
 
     use nodedb_client::NodeDb;
     match h.rt.block_on(h.db.document_put(&collection, doc)) {
@@ -340,5 +344,41 @@ pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_nativeDocumentDelete(
     match h.rt.block_on(h.db.document_delete(&collection, &id)) {
         Ok(()) => NODEDB_OK,
         Err(_) => NODEDB_ERR_FAILED,
+    }
+}
+
+/// Generate a UUIDv7 (time-sortable, recommended for primary keys).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_00024Companion_nativeGenerateId(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let id = nodedb_types::id_gen::uuid_v7();
+    match env.new_string(&id) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Generate an ID of the specified type.
+///
+/// Supported types: "uuidv7", "uuidv4", "ulid", "cuid2", "nanoid".
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_nodedb_lite_NodeDbLite_00024Companion_nativeGenerateIdTyped(
+    mut env: JNIEnv,
+    _class: JClass,
+    id_type: JString,
+) -> jstring {
+    let id_type_str: String = match env.get_string(&id_type) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let id = match nodedb_types::id_gen::generate_by_type(&id_type_str) {
+        Some(id) => id,
+        None => return std::ptr::null_mut(),
+    };
+    match env.new_string(&id) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }

@@ -142,6 +142,21 @@ pub fn detect_id_type(s: &str) -> &'static str {
     }
 }
 
+/// Generate an ID by type name.
+///
+/// Supported types: `"uuidv7"`, `"uuidv4"`, `"ulid"`, `"cuid2"`, `"nanoid"`.
+/// Returns `None` for unknown types.
+pub fn generate_by_type(id_type: &str) -> Option<String> {
+    match id_type {
+        "uuidv7" => Some(uuid_v7()),
+        "uuidv4" => Some(uuid_v4()),
+        "ulid" => Some(ulid()),
+        "cuid2" => Some(cuid2()),
+        "nanoid" => Some(nanoid()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -129,14 +129,17 @@ int32_t nodedb_document_get(struct NodeDbNodeDbHandle *handle,
 /**
  * Put (insert or update) a document. Body is a JSON string.
  *
- * The JSON must have an `"id"` field.
+ * If the JSON has no `"id"` field or it is empty, a UUIDv7 is auto-generated.
+ * If `out_id` is non-NULL, the document ID (auto-generated or provided) is
+ * written as a malloc'd C string that the caller must free via `nodedb_free_string`.
  *
  * # Safety
- * All pointer parameters must be valid.
+ * All pointer parameters must be valid. `out_id` may be NULL.
  */
 int32_t nodedb_document_put(struct NodeDbNodeDbHandle *handle,
                             const char *collection,
-                            const char *json_body);
+                            const char *json_body,
+                            char **out_id);
 
 /**
  * Delete a document by ID.
@@ -147,6 +150,27 @@ int32_t nodedb_document_put(struct NodeDbNodeDbHandle *handle,
 int32_t nodedb_document_delete(struct NodeDbNodeDbHandle *handle,
                                const char *collection,
                                const char *id);
+
+/**
+ * Generate a UUIDv7 (time-sortable, recommended for primary keys).
+ *
+ * Returns a malloc'd C string that the caller must free via `nodedb_free_string`.
+ *
+ * # Safety
+ * `out` must be a valid pointer to a `*mut c_char`.
+ */
+int32_t nodedb_generate_id(char **out);
+
+/**
+ * Generate an ID of the specified type.
+ *
+ * Supported types: "uuidv7", "uuidv4", "ulid", "cuid2", "nanoid".
+ * Returns a malloc'd C string that the caller must free via `nodedb_free_string`.
+ *
+ * # Safety
+ * `id_type` must be a valid null-terminated UTF-8 string. `out` must be a valid pointer.
+ */
+int32_t nodedb_generate_id_typed(const char *id_type, char **out);
 
 /**
  * Free a string returned by nodedb_* functions.

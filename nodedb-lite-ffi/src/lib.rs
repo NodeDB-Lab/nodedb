@@ -344,15 +344,18 @@ pub unsafe extern "C" fn nodedb_document_get(
 
 /// Put (insert or update) a document. Body is a JSON string.
 ///
-/// The JSON must have an `"id"` field.
+/// If the JSON has no `"id"` field or it is empty, a UUIDv7 is auto-generated.
+/// If `out_id` is non-NULL, the document ID (auto-generated or provided) is
+/// written as a malloc'd C string that the caller must free via `nodedb_free_string`.
 ///
 /// # Safety
-/// All pointer parameters must be valid.
+/// All pointer parameters must be valid. `out_id` may be NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nodedb_document_put(
     handle: *mut NodeDbHandle,
     collection: *const c_char,
     json_body: *const c_char,
+    out_id: *mut *mut c_char,
 ) -> i32 {
     let Some(h) = handle_ref(handle) else {
         return NODEDB_ERR_NULL;
@@ -364,10 +367,21 @@ pub unsafe extern "C" fn nodedb_document_put(
         return NODEDB_ERR_UTF8;
     };
 
-    let doc: nodedb_types::Document = match serde_json::from_str(json_str) {
+    let mut doc: nodedb_types::Document = match serde_json::from_str(json_str) {
         Ok(d) => d,
         Err(_) => return NODEDB_ERR_FAILED,
     };
+
+    if doc.id.is_empty() {
+        doc.id = nodedb_types::id_gen::uuid_v7();
+    }
+
+    // Write the document ID to out_id if requested.
+    if !out_id.is_null()
+        && let Ok(cs) = CString::new(doc.id.clone())
+    {
+        unsafe { *out_id = cs.into_raw() };
+    }
 
     match h.rt.block_on(h.db.document_put(collection, doc)) {
         Ok(()) => NODEDB_OK,
@@ -396,6 +410,60 @@ pub unsafe extern "C" fn nodedb_document_delete(
     };
     match h.rt.block_on(h.db.document_delete(collection, id)) {
         Ok(()) => NODEDB_OK,
+        Err(_) => NODEDB_ERR_FAILED,
+    }
+}
+
+// ─── ID Generation ──────────────────────────────────────────────────
+
+/// Generate a UUIDv7 (time-sortable, recommended for primary keys).
+///
+/// Returns a malloc'd C string that the caller must free via `nodedb_free_string`.
+///
+/// # Safety
+/// `out` must be a valid pointer to a `*mut c_char`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nodedb_generate_id(out: *mut *mut c_char) -> i32 {
+    if out.is_null() {
+        return NODEDB_ERR_NULL;
+    }
+    let id = nodedb_types::id_gen::uuid_v7();
+    match CString::new(id) {
+        Ok(cs) => {
+            unsafe { *out = cs.into_raw() };
+            NODEDB_OK
+        }
+        Err(_) => NODEDB_ERR_FAILED,
+    }
+}
+
+/// Generate an ID of the specified type.
+///
+/// Supported types: "uuidv7", "uuidv4", "ulid", "cuid2", "nanoid".
+/// Returns a malloc'd C string that the caller must free via `nodedb_free_string`.
+///
+/// # Safety
+/// `id_type` must be a valid null-terminated UTF-8 string. `out` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nodedb_generate_id_typed(
+    id_type: *const c_char,
+    out: *mut *mut c_char,
+) -> i32 {
+    if out.is_null() {
+        return NODEDB_ERR_NULL;
+    }
+    let Some(id_type_str) = ptr_to_str(id_type) else {
+        return NODEDB_ERR_UTF8;
+    };
+    let id = match nodedb_types::id_gen::generate_by_type(id_type_str) {
+        Some(id) => id,
+        None => return NODEDB_ERR_FAILED,
+    };
+    match CString::new(id) {
+        Ok(cs) => {
+            unsafe { *out = cs.into_raw() };
+            NODEDB_OK
+        }
         Err(_) => NODEDB_ERR_FAILED,
     }
 }
@@ -530,7 +598,8 @@ mod tests {
             let body =
                 CString::new(r#"{"id":"n1","fields":{"title":{"String":"Hello"}}}"#).unwrap();
 
-            let rc = nodedb_document_put(handle, coll.as_ptr(), body.as_ptr());
+            let rc =
+                nodedb_document_put(handle, coll.as_ptr(), body.as_ptr(), std::ptr::null_mut());
             assert_eq!(rc, NODEDB_OK);
 
             let id = CString::new("n1").unwrap();
