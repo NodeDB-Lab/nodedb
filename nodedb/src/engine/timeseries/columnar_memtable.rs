@@ -97,6 +97,16 @@ impl ColumnData {
         }
     }
 
+    /// Deep clone the column data.
+    pub fn clone_data(&self) -> Self {
+        match self {
+            Self::Timestamp(v) => Self::Timestamp(v.clone()),
+            Self::Float64(v) => Self::Float64(v.clone()),
+            Self::Int64(v) => Self::Int64(v.clone()),
+            Self::Symbol(v) => Self::Symbol(v.clone()),
+        }
+    }
+
     /// Get timestamp column as slice. Panics if wrong type.
     pub fn as_timestamps(&self) -> &[i64] {
         match self {
