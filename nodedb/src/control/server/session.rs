@@ -69,6 +69,22 @@ pub struct Session {
 }
 
 impl Session {
+    fn with_stream(
+        stream: ConnStream,
+        peer_addr: SocketAddr,
+        state: Arc<SharedState>,
+        auth_mode: crate::config::auth::AuthMode,
+    ) -> Self {
+        Self {
+            stream,
+            peer_addr,
+            next_request_id: AtomicU64::new(1),
+            state,
+            auth_mode,
+            identity: None,
+        }
+    }
+
     /// Create a session from a plain TCP stream.
     pub fn new(
         stream: TcpStream,
@@ -76,14 +92,7 @@ impl Session {
         state: Arc<SharedState>,
         auth_mode: crate::config::auth::AuthMode,
     ) -> Self {
-        Self {
-            stream: ConnStream::plain(stream),
-            peer_addr,
-            next_request_id: AtomicU64::new(1),
-            state,
-            auth_mode,
-            identity: None,
-        }
+        Self::with_stream(ConnStream::plain(stream), peer_addr, state, auth_mode)
     }
 
     /// Create a session from a TLS-wrapped stream.
@@ -93,14 +102,7 @@ impl Session {
         state: Arc<SharedState>,
         auth_mode: crate::config::auth::AuthMode,
     ) -> Self {
-        Self {
-            stream: ConnStream::tls(stream),
-            peer_addr,
-            next_request_id: AtomicU64::new(1),
-            state,
-            auth_mode,
-            identity: None,
-        }
+        Self::with_stream(ConnStream::tls(stream), peer_addr, state, auth_mode)
     }
 
     /// Allocate a monotonically increasing request ID for this connection.

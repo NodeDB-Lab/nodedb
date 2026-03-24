@@ -39,9 +39,8 @@ pub struct NativeSession {
 }
 
 impl NativeSession {
-    /// Create a session from a plain TCP stream.
-    pub fn new(
-        stream: TcpStream,
+    fn with_stream(
+        stream: ConnStream,
         peer_addr: SocketAddr,
         state: Arc<SharedState>,
         auth_mode: AuthMode,
@@ -51,7 +50,7 @@ impl NativeSession {
             1, // default tenant for name resolution
         );
         Self {
-            stream: ConnStream::plain(stream),
+            stream,
             peer_addr,
             state,
             auth_mode,
@@ -62,6 +61,16 @@ impl NativeSession {
         }
     }
 
+    /// Create a session from a plain TCP stream.
+    pub fn new(
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+        state: Arc<SharedState>,
+        auth_mode: AuthMode,
+    ) -> Self {
+        Self::with_stream(ConnStream::plain(stream), peer_addr, state, auth_mode)
+    }
+
     /// Create a session from a TLS-wrapped stream.
     pub fn new_tls(
         stream: tokio_rustls::server::TlsStream<TcpStream>,
@@ -69,20 +78,7 @@ impl NativeSession {
         state: Arc<SharedState>,
         auth_mode: AuthMode,
     ) -> Self {
-        let query_ctx = QueryContext::with_catalog(
-            Arc::clone(&state.credentials),
-            1, // default tenant for name resolution
-        );
-        Self {
-            stream: ConnStream::tls(stream),
-            peer_addr,
-            state,
-            auth_mode,
-            identity: None,
-            format: None,
-            query_ctx,
-            sessions: SessionStore::new(),
-        }
+        Self::with_stream(ConnStream::tls(stream), peer_addr, state, auth_mode)
     }
 
     /// Run the session loop: read frames, route by opcode, write responses.
@@ -118,7 +114,12 @@ impl NativeSession {
             if self.format.is_none() {
                 self.format = Some(FrameFormat::detect(payload[0]));
             }
-            let format = self.format.unwrap();
+            // Safety: format is always Some after the check above.
+            let Some(format) = self.format else {
+                return Err(crate::Error::BadRequest {
+                    detail: "internal error: format detection failed".into(),
+                });
+            };
 
             // Decode and handle.
             let response = match codec::decode_request(&payload, format) {
