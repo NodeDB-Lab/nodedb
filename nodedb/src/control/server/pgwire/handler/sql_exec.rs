@@ -211,7 +211,7 @@ impl NodeDbPgHandler {
                     return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                         "ERROR".to_owned(),
                         "34000".to_owned(),
-                        msg,
+                        msg.to_string(),
                     ))));
                 }
             }
@@ -238,7 +238,7 @@ impl NodeDbPgHandler {
                 return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
                     "3B001".to_owned(),
-                    msg,
+                    msg.to_string(),
                 ))));
             }
             return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);

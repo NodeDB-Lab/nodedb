@@ -96,7 +96,7 @@ pub fn dry_run_restore(target: &PitrTarget) -> RestoreDryRun {
 /// - Unix epoch microseconds: `"1710509400000000"`
 /// - Unix epoch seconds: `"1710509400"`
 /// - ISO 8601: `"2024-03-15T14:30:00Z"` (basic parsing, no full chrono dependency)
-pub fn parse_utc_timestamp(input: &str) -> Result<u64, String> {
+pub fn parse_utc_timestamp(input: &str) -> crate::Result<u64> {
     let trimmed = input.trim();
 
     // Try parsing as integer (epoch micros or seconds).
@@ -143,9 +143,11 @@ pub fn parse_utc_timestamp(input: &str) -> Result<u64, String> {
         }
     }
 
-    Err(format!(
-        "cannot parse UTC timestamp: '{trimmed}'. Expected epoch micros, epoch seconds, or ISO 8601"
-    ))
+    Err(crate::Error::BadRequest {
+        detail: format!(
+            "cannot parse UTC timestamp: '{trimmed}'. Expected epoch micros, epoch seconds, or ISO 8601"
+        ),
+    })
 }
 
 /// Approximate days from Jan 1 to the start of the given month (non-leap year).

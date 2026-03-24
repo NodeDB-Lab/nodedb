@@ -123,7 +123,7 @@ pub fn create_rls_policy(
     state
         .rls
         .create_policy(policy)
-        .map_err(|e| sqlstate_error("23505", &e))?;
+        .map_err(|e| sqlstate_error("23505", &e.to_string()))?;
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

@@ -136,7 +136,8 @@ pub(super) async fn validate_delta_constraints(
             // Constraint check passed — send the original DeltaAck.
             ack_frame
         }
-        Err(error_detail) => {
+        Err(e) => {
+            let error_detail = e.to_string();
             // Constraint check failed — convert to DeltaReject.
             warn!(
                 collection = %delta_msg.collection,

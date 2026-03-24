@@ -35,7 +35,12 @@ impl CoreLoop {
                     .collect();
                 match super::super::response_codec::encode(&hits) {
                     Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
                 }
             }
             Err(e) => self.response_error(
@@ -176,7 +181,12 @@ impl CoreLoop {
 
         match super::super::response_codec::encode(&results) {
             Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
         }
     }
 }

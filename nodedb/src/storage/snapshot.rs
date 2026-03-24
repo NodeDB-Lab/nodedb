@@ -181,17 +181,18 @@ impl SnapshotCatalog {
         &self,
         utc_input: &str,
         lsn_for_timestamp: F,
-    ) -> Result<PitrTarget, String>
+    ) -> crate::Result<PitrTarget>
     where
         F: Fn(u64) -> Option<Lsn>,
     {
         let timestamp_us = parse_utc_timestamp(utc_input)?;
         self.resolve_pitr(timestamp_us, lsn_for_timestamp)
-            .ok_or_else(|| {
-                format!(
+            .ok_or_else(|| crate::Error::Storage {
+                engine: "snapshot".into(),
+                detail: format!(
                     "no snapshot available for PITR target timestamp {utc_input} \
                      (resolved to {timestamp_us}µs)"
-                )
+                ),
             })
     }
 }

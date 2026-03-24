@@ -96,15 +96,20 @@ impl NodeDbPgHandler {
                 watermark_lsn: Lsn::new(log_index),
                 error_code: None,
             }),
-            Err(err_msg) => Ok(Response {
-                request_id,
-                status: crate::bridge::envelope::Status::Error,
-                attempt: 1,
-                partial: false,
-                payload: Payload::from_arc(Arc::from(err_msg.as_bytes())),
-                watermark_lsn: Lsn::new(0),
-                error_code: Some(crate::bridge::envelope::ErrorCode::Internal { detail: err_msg }),
-            }),
+            Err(err_msg) => {
+                let err_str = err_msg.to_string();
+                Ok(Response {
+                    request_id,
+                    status: crate::bridge::envelope::Status::Error,
+                    attempt: 1,
+                    partial: false,
+                    payload: Payload::from_arc(Arc::from(err_str.as_bytes())),
+                    watermark_lsn: Lsn::new(0),
+                    error_code: Some(crate::bridge::envelope::ErrorCode::Internal {
+                        detail: err_str,
+                    }),
+                })
+            }
         }
     }
 

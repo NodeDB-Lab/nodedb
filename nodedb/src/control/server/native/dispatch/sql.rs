@@ -250,17 +250,22 @@ async fn dispatch_task(ctx: &DispatchCtx<'_>, task: PhysicalTask) -> crate::Resu
                 watermark_lsn: crate::types::Lsn::new(log_index),
                 error_code: None,
             }),
-            Err(err_msg) => Ok(Response {
-                request_id: crate::types::RequestId::new(0),
-                status: Status::Error,
-                attempt: 1,
-                partial: false,
-                payload: crate::bridge::envelope::Payload::from_arc(Arc::from(err_msg.as_bytes())),
-                watermark_lsn: crate::types::Lsn::new(0),
-                error_code: Some(crate::bridge::envelope::ErrorCode::Internal {
-                    detail: err_msg.clone(),
-                }),
-            }),
+            Err(err_msg) => {
+                let err_str = err_msg.to_string();
+                Ok(Response {
+                    request_id: crate::types::RequestId::new(0),
+                    status: Status::Error,
+                    attempt: 1,
+                    partial: false,
+                    payload: crate::bridge::envelope::Payload::from_arc(Arc::from(
+                        err_str.as_bytes(),
+                    )),
+                    watermark_lsn: crate::types::Lsn::new(0),
+                    error_code: Some(crate::bridge::envelope::ErrorCode::Internal {
+                        detail: err_str,
+                    }),
+                })
+            }
         };
     }
 

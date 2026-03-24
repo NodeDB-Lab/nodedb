@@ -130,7 +130,7 @@ pub enum SchemaChange {
 pub fn apply_schema_changes(
     current: &ColumnarSchema,
     changes: &[SchemaChange],
-) -> Result<ColumnarSchema, String> {
+) -> crate::Result<ColumnarSchema> {
     let mut columns = current.columns.clone();
     let mut timestamp_idx = current.timestamp_idx;
 
@@ -138,17 +138,22 @@ pub fn apply_schema_changes(
         match change {
             SchemaChange::AddColumn { name, col_type } => {
                 if columns.iter().any(|(n, _)| n == name) {
-                    return Err(format!("column '{name}' already exists"));
+                    return Err(crate::Error::BadRequest {
+                        detail: format!("column '{name}' already exists"),
+                    });
                 }
                 columns.push((name.clone(), *col_type));
             }
             SchemaChange::DropColumn { name } => {
-                let idx = columns
-                    .iter()
-                    .position(|(n, _)| n == name)
-                    .ok_or_else(|| format!("column '{name}' not found"))?;
+                let idx = columns.iter().position(|(n, _)| n == name).ok_or_else(|| {
+                    crate::Error::BadRequest {
+                        detail: format!("column '{name}' not found"),
+                    }
+                })?;
                 if idx == timestamp_idx {
-                    return Err("cannot drop the designated timestamp column".into());
+                    return Err(crate::Error::BadRequest {
+                        detail: "cannot drop the designated timestamp column".into(),
+                    });
                 }
                 columns.remove(idx);
                 if idx < timestamp_idx {
@@ -159,9 +164,13 @@ pub fn apply_schema_changes(
                 let idx = columns
                     .iter()
                     .position(|(n, _)| n == old_name)
-                    .ok_or_else(|| format!("column '{old_name}' not found"))?;
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: format!("column '{old_name}' not found"),
+                    })?;
                 if columns.iter().any(|(n, _)| n == new_name) {
-                    return Err(format!("column '{new_name}' already exists"));
+                    return Err(crate::Error::BadRequest {
+                        detail: format!("column '{new_name}' already exists"),
+                    });
                 }
                 columns[idx].0 = new_name.clone();
             }

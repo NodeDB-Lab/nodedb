@@ -252,7 +252,7 @@ async fn process_message(
 
             let response = match execute_sql(shared, query_ctx, tenant_id, sql, trace_id).await {
                 Ok(result) => serde_json::json!({"id": id, "result": result}).to_string(),
-                Err(e) => error_response(id, &e),
+                Err(e) => error_response(id, &e.to_string()),
             };
             (response, None)
         }
@@ -315,11 +315,8 @@ async fn execute_sql(
     tenant_id: TenantId,
     sql: &str,
     trace_id: u64,
-) -> Result<serde_json::Value, String> {
-    let tasks = query_ctx
-        .plan_sql(sql, tenant_id)
-        .await
-        .map_err(|e| e.to_string())?;
+) -> crate::Result<serde_json::Value> {
+    let tasks = query_ctx.plan_sql(sql, tenant_id).await?;
 
     let mut results = Vec::new();
     for task in tasks {
@@ -330,8 +327,7 @@ async fn execute_sql(
             task.plan,
             trace_id,
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
         if !resp.payload.is_empty() {
             let json = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);

@@ -16,7 +16,7 @@ use crate::types::{TenantId, VShardId};
 ///
 /// Takes `(vshard_id, serialized_entry)` and returns `(group_id, log_index)`.
 pub type RaftProposer =
-    dyn Fn(u16, Vec<u8>) -> std::result::Result<(u64, u64), String> + Send + Sync;
+    dyn Fn(u16, Vec<u8>) -> std::result::Result<(u64, u64), crate::Error> + Send + Sync;
 
 fn default_pq_m() -> usize {
     crate::engine::vector::index_config::DEFAULT_PQ_M

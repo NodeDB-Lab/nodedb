@@ -126,21 +126,23 @@ impl VolumeEncryption {
     }
 
     /// Load the master key from the configured key file.
-    pub fn load_master_key(&mut self) -> Result<(), String> {
-        let path = self
-            .config
-            .master_key_path
-            .as_ref()
-            .ok_or("no master key path configured")?;
+    pub fn load_master_key(&mut self) -> crate::Result<()> {
+        let path =
+            self.config
+                .master_key_path
+                .as_ref()
+                .ok_or_else(|| crate::Error::Encryption {
+                    detail: "no master key path configured".into(),
+                })?;
 
-        let key_bytes = std::fs::read(path)
-            .map_err(|e| format!("failed to read master key from {}: {e}", path.display()))?;
+        let key_bytes = std::fs::read(path).map_err(|e| crate::Error::Encryption {
+            detail: format!("failed to read master key from {}: {e}", path.display()),
+        })?;
 
         if key_bytes.len() < 32 {
-            return Err(format!(
-                "master key too short: {} bytes (need 32)",
-                key_bytes.len()
-            ));
+            return Err(crate::Error::Encryption {
+                detail: format!("master key too short: {} bytes (need 32)", key_bytes.len()),
+            });
         }
 
         let mut key = [0u8; 32];
@@ -161,23 +163,36 @@ impl VolumeEncryption {
     /// Returns the raw DEK (for data encryption) and the encrypted DEK
     /// (for storage in the file header). The DEK is encrypted using
     /// AES-256-GCM with the master key for authenticated key wrapping.
-    pub fn generate_dek(&self) -> Result<([u8; 32], Vec<u8>), String> {
-        let master = self.master_key.as_ref().ok_or("master key not loaded")?;
+    pub fn generate_dek(&self) -> crate::Result<([u8; 32], Vec<u8>)> {
+        let master = self
+            .master_key
+            .as_ref()
+            .ok_or_else(|| crate::Error::Encryption {
+                detail: "master key not loaded".into(),
+            })?;
 
         let mut dek = [0u8; 32];
-        getrandom::fill(&mut dek).map_err(|e| format!("failed to generate DEK: {e}"))?;
+        getrandom::fill(&mut dek).map_err(|e| crate::Error::Encryption {
+            detail: format!("failed to generate DEK: {e}"),
+        })?;
 
         // Encrypt DEK with master key using AES-256-GCM (authenticated encryption).
         let mut nonce_bytes = [0u8; 12];
-        getrandom::fill(&mut nonce_bytes).map_err(|e| format!("failed to generate nonce: {e}"))?;
+        getrandom::fill(&mut nonce_bytes).map_err(|e| crate::Error::Encryption {
+            detail: format!("failed to generate nonce: {e}"),
+        })?;
 
-        let cipher = Aes256Gcm::new_from_slice(master)
-            .map_err(|e| format!("AES-GCM key init failed: {e}"))?;
+        let cipher = Aes256Gcm::new_from_slice(master).map_err(|e| crate::Error::Encryption {
+            detail: format!("AES-GCM key init failed: {e}"),
+        })?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher
-            .encrypt(nonce, dek.as_ref())
-            .map_err(|e| format!("DEK encryption failed: {e}"))?;
+        let ciphertext =
+            cipher
+                .encrypt(nonce, dek.as_ref())
+                .map_err(|e| crate::Error::Encryption {
+                    detail: format!("DEK encryption failed: {e}"),
+                })?;
 
         // Prepend nonce to ciphertext for storage: [nonce:12B][ciphertext+tag]
         let mut encrypted_dek = Vec::with_capacity(12 + ciphertext.len());
@@ -193,31 +208,44 @@ impl VolumeEncryption {
     /// Decrypt a DEK from a file header using the master key.
     ///
     /// Expects the encrypted DEK format: `[nonce:12B][ciphertext+tag]`.
-    pub fn decrypt_dek(&self, encrypted_dek: &[u8]) -> Result<[u8; 32], String> {
-        let master = self.master_key.as_ref().ok_or("master key not loaded")?;
+    pub fn decrypt_dek(&self, encrypted_dek: &[u8]) -> crate::Result<[u8; 32]> {
+        let master = self
+            .master_key
+            .as_ref()
+            .ok_or_else(|| crate::Error::Encryption {
+                detail: "master key not loaded".into(),
+            })?;
 
         if encrypted_dek.len() < 12 + 32 + 16 {
             // 12B nonce + 32B DEK + 16B GCM tag
-            return Err(format!(
-                "encrypted DEK too short: {} bytes (need at least 60)",
-                encrypted_dek.len()
-            ));
+            return Err(crate::Error::Encryption {
+                detail: format!(
+                    "encrypted DEK too short: {} bytes (need at least 60)",
+                    encrypted_dek.len()
+                ),
+            });
         }
 
         let (nonce_bytes, ciphertext) = encrypted_dek.split_at(12);
-        let cipher = Aes256Gcm::new_from_slice(master)
-            .map_err(|e| format!("AES-GCM key init failed: {e}"))?;
+        let cipher = Aes256Gcm::new_from_slice(master).map_err(|e| crate::Error::Encryption {
+            detail: format!("AES-GCM key init failed: {e}"),
+        })?;
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| "DEK decryption failed: authentication tag mismatch".to_string())?;
+        let plaintext =
+            cipher
+                .decrypt(nonce, ciphertext)
+                .map_err(|_| crate::Error::Encryption {
+                    detail: "DEK decryption failed: authentication tag mismatch".into(),
+                })?;
 
         if plaintext.len() != 32 {
-            return Err(format!(
-                "decrypted DEK wrong size: {} bytes (expected 32)",
-                plaintext.len()
-            ));
+            return Err(crate::Error::Encryption {
+                detail: format!(
+                    "decrypted DEK wrong size: {} bytes (expected 32)",
+                    plaintext.len()
+                ),
+            });
         }
 
         let mut dek = [0u8; 32];
@@ -230,11 +258,14 @@ impl VolumeEncryption {
     /// This is a metadata-only operation — no data needs to be rewritten.
     /// Each file's DEK is decrypted with the old key and re-encrypted
     /// with the new key, then the header is updated in place.
-    pub fn rotate_master_key(&mut self, new_key_path: &Path) -> Result<(), String> {
-        let new_bytes =
-            std::fs::read(new_key_path).map_err(|e| format!("failed to read new key: {e}"))?;
+    pub fn rotate_master_key(&mut self, new_key_path: &Path) -> crate::Result<()> {
+        let new_bytes = std::fs::read(new_key_path).map_err(|e| crate::Error::Encryption {
+            detail: format!("failed to read new key: {e}"),
+        })?;
         if new_bytes.len() < 32 {
-            return Err("new master key too short".into());
+            return Err(crate::Error::Encryption {
+                detail: "new master key too short".into(),
+            });
         }
 
         let mut new_key = [0u8; 32];

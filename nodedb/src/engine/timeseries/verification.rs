@@ -352,7 +352,7 @@ mod tests {
             ],
         );
         assert!(r.is_err());
-        let err = r.unwrap_err();
+        let err = r.unwrap_err().to_string();
         assert!(
             err.contains("cardinality limit"),
             "error should mention cardinality: {err}"

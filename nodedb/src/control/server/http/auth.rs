@@ -79,3 +79,18 @@ impl IntoResponse for ApiError {
         (status, axum::Json(body)).into_response()
     }
 }
+
+impl From<crate::Error> for ApiError {
+    fn from(e: crate::Error) -> Self {
+        match &e {
+            crate::Error::RejectedAuthz { .. } => Self::Forbidden(e.to_string()),
+            crate::Error::BadRequest { .. }
+            | crate::Error::PlanError { .. }
+            | crate::Error::Config { .. } => Self::BadRequest(e.to_string()),
+            crate::Error::CollectionNotFound { .. } | crate::Error::DocumentNotFound { .. } => {
+                Self::BadRequest(e.to_string())
+            }
+            _ => Self::Internal(e.to_string()),
+        }
+    }
+}

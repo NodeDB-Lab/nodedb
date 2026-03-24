@@ -38,9 +38,11 @@ impl DictionaryRegistry {
     }
 
     /// Register a dictionary. Returns error if ID is already taken.
-    pub fn register(&mut self, dict: LogDictionary) -> Result<(), String> {
+    pub fn register(&mut self, dict: LogDictionary) -> crate::Result<()> {
         if self.by_id.contains_key(&dict.id) {
-            return Err(format!("dictionary ID {} already registered", dict.id));
+            return Err(crate::Error::BadRequest {
+                detail: format!("dictionary ID {} already registered", dict.id),
+            });
         }
         self.by_name.insert(dict.name.clone(), dict.id);
         self.by_id.insert(dict.id, dict);

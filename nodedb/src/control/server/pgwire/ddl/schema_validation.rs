@@ -40,14 +40,18 @@ pub(super) fn parse_fields_clause(parts: &[&str]) -> Vec<(String, String)> {
 pub fn validate_document_schema(
     fields: &[(String, String)],
     doc: &serde_json::Value,
-) -> Result<(), String> {
+) -> crate::Result<()> {
     if fields.is_empty() {
         return Ok(());
     }
 
     let obj = match doc.as_object() {
         Some(o) => o,
-        None => return Err("document must be a JSON object".into()),
+        None => {
+            return Err(crate::Error::BadRequest {
+                detail: "document must be a JSON object".into(),
+            });
+        }
     };
 
     for (field_name, type_name) in fields {
@@ -55,12 +59,14 @@ pub fn validate_document_schema(
             && !val.is_null()
             && !type_matches(type_name, val)
         {
-            return Err(format!(
-                "field '{}' expected type {}, got {}",
-                field_name,
-                type_name,
-                json_type_name(val)
-            ));
+            return Err(crate::Error::BadRequest {
+                detail: format!(
+                    "field '{}' expected type {}, got {}",
+                    field_name,
+                    type_name,
+                    json_type_name(val)
+                ),
+            });
         }
     }
 

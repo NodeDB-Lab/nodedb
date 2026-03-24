@@ -110,18 +110,26 @@ fn default_replication_factor() -> usize {
 
 impl ClusterSettings {
     /// Validate cluster configuration.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> crate::Result<()> {
         if self.node_id == 0 {
-            return Err("cluster.node_id must be non-zero".into());
+            return Err(crate::Error::Config {
+                detail: "cluster.node_id must be non-zero".into(),
+            });
         }
         if self.seed_nodes.is_empty() {
-            return Err("cluster.seed_nodes must contain at least one address".into());
+            return Err(crate::Error::Config {
+                detail: "cluster.seed_nodes must contain at least one address".into(),
+            });
         }
         if self.num_groups == 0 {
-            return Err("cluster.num_groups must be at least 1".into());
+            return Err(crate::Error::Config {
+                detail: "cluster.num_groups must be at least 1".into(),
+            });
         }
         if self.replication_factor == 0 {
-            return Err("cluster.replication_factor must be at least 1".into());
+            return Err(crate::Error::Config {
+                detail: "cluster.replication_factor must be at least 1".into(),
+            });
         }
         Ok(())
     }

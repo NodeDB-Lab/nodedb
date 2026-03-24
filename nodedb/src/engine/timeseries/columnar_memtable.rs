@@ -253,7 +253,7 @@ impl ColumnarMemtable {
         &mut self,
         series_id: SeriesId,
         values: &[ColumnValue<'_>],
-    ) -> Result<IngestResult, String> {
+    ) -> crate::Result<IngestResult> {
         if self.memory_bytes >= self.config.hard_memory_limit {
             return Ok(IngestResult::Rejected);
         }
@@ -261,11 +261,9 @@ impl ColumnarMemtable {
         let col_types: Vec<(String, ColumnType)> = self.schema.columns.clone();
 
         if values.len() != col_types.len() {
-            return Err(format!(
-                "expected {} columns, got {}",
-                col_types.len(),
-                values.len()
-            ));
+            return Err(crate::Error::BadRequest {
+                detail: format!("expected {} columns, got {}", col_types.len(), values.len()),
+            });
         }
 
         let mut ts = 0i64;
@@ -294,9 +292,14 @@ impl ColumnarMemtable {
                     row_bytes += 8;
                 }
                 (ColumnValue::Symbol(s), ColumnType::Symbol) => {
-                    let dict = self.symbol_dicts.get_mut(&i).ok_or_else(|| {
-                        format!("internal error: symbol dict missing for column {i}")
-                    })?;
+                    let dict =
+                        self.symbol_dicts
+                            .get_mut(&i)
+                            .ok_or_else(|| crate::Error::BadRequest {
+                                detail: format!(
+                                    "internal error: symbol dict missing for column {i}"
+                                ),
+                            })?;
                     match dict.resolve(s, max_card) {
                         Some(sym_id) => {
                             if let ColumnData::Symbol(ref mut v) = self.columns[i] {
@@ -305,18 +308,20 @@ impl ColumnarMemtable {
                         }
                         None => {
                             self.rollback_partial_row(i);
-                            return Err(format!(
-                                "tag cardinality limit ({max_card}) exceeded for column '{col_name}'"
-                            ));
+                            return Err(crate::Error::BadRequest {
+                                detail: format!(
+                                    "tag cardinality limit ({max_card}) exceeded for column '{col_name}'"
+                                ),
+                            });
                         }
                     }
                     row_bytes += 4;
                 }
                 _ => {
                     self.rollback_partial_row(i);
-                    return Err(format!(
-                        "type mismatch at column {i}: expected {col_type:?}"
-                    ));
+                    return Err(crate::Error::BadRequest {
+                        detail: format!("type mismatch at column {i}: expected {col_type:?}"),
+                    });
                 }
             }
         }

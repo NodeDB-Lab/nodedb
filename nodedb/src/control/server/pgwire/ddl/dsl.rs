@@ -94,7 +94,7 @@ pub async fn search_vector(
     let payload =
         super::sync_dispatch::dispatch_async(state, tenant_id, collection, plan, DSL_DEADLINE)
             .await
-            .map_err(|e| sqlstate_error("XX000", &e))?;
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     let schema = Arc::new(vec![text_field("result")]);
     let text = crate::data::executor::response_codec::decode_payload_to_json(&payload);
@@ -178,7 +178,7 @@ pub async fn search_fusion(
     let payload =
         super::sync_dispatch::dispatch_async(state, tenant_id, collection, plan, DSL_DEADLINE)
             .await
-            .map_err(|e| sqlstate_error("XX000", &e))?;
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     let schema = Arc::new(vec![text_field("result")]);
     let text = crate::data::executor::response_codec::decode_payload_to_json(&payload);
@@ -346,7 +346,7 @@ pub async fn crdt_merge(
         DSL_DEADLINE,
     )
     .await
-    .map_err(|e| sqlstate_error("XX000", &e))?;
+    .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
     if source_bytes.is_empty() {
         return Err(sqlstate_error(
             "02000",
@@ -365,7 +365,7 @@ pub async fn crdt_merge(
 
     super::sync_dispatch::dispatch_async(state, tenant_id, collection, apply_plan, DSL_DEADLINE)
         .await
-        .map_err(|e| sqlstate_error("XX000", &e))?;
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

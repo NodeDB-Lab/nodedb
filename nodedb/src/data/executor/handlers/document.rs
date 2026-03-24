@@ -55,7 +55,12 @@ impl CoreLoop {
 
                 match super::super::response_codec::encode_count("inserted", documents.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
-                    Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
                 }
             }
             Err(e) => self.response_error(
@@ -310,15 +315,17 @@ impl CoreLoop {
         rows: Vec<(String, Vec<u8>)>,
         sort_keys: &[(String, bool)],
         output_limit: usize,
-    ) -> Result<Vec<(String, Vec<u8>)>, String> {
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         // Spill directory for temporary sort run files. Temp files are
         // auto-deleted on Drop; the directory persists but is cleaned up
         // on the next external_sort call or server restart.
         let spill_dir = self
             .data_dir
             .join(format!("sort-spill/core-{}", self.core_id));
-        std::fs::create_dir_all(&spill_dir)
-            .map_err(|e| format!("failed to create sort spill dir: {e}"))?;
+        std::fs::create_dir_all(&spill_dir).map_err(|e| crate::Error::Storage {
+            engine: "sort".into(),
+            detail: format!("failed to create sort spill dir: {e}"),
+        })?;
 
         let total_rows = rows.len();
 
@@ -327,39 +334,59 @@ impl CoreLoop {
             let mut run: Vec<(String, Vec<u8>)> = chunk.to_vec();
             sort_rows(&mut run, sort_keys);
 
-            let file = tempfile::tempfile_in(&spill_dir)
-                .map_err(|e| format!("failed to create sort temp file: {e}"))?;
+            let file = tempfile::tempfile_in(&spill_dir).map_err(|e| crate::Error::Storage {
+                engine: "sort".into(),
+                detail: format!("failed to create sort temp file: {e}"),
+            })?;
             let mut writer = BufWriter::new(file);
 
             let count = run.len() as u32;
             writer
                 .write_all(&count.to_le_bytes())
-                .map_err(|e| format!("sort spill write: {e}"))?;
+                .map_err(|e| crate::Error::Storage {
+                    engine: "sort".into(),
+                    detail: format!("sort spill write: {e}"),
+                })?;
             for (id, val) in &run {
                 let id_bytes = id.as_bytes();
                 writer
                     .write_all(&(id_bytes.len() as u32).to_le_bytes())
-                    .map_err(|e| format!("sort spill write: {e}"))?;
+                    .map_err(|e| crate::Error::Storage {
+                        engine: "sort".into(),
+                        detail: format!("sort spill write: {e}"),
+                    })?;
                 writer
                     .write_all(id_bytes)
-                    .map_err(|e| format!("sort spill write: {e}"))?;
+                    .map_err(|e| crate::Error::Storage {
+                        engine: "sort".into(),
+                        detail: format!("sort spill write: {e}"),
+                    })?;
                 writer
                     .write_all(&(val.len() as u32).to_le_bytes())
-                    .map_err(|e| format!("sort spill write: {e}"))?;
-                writer
-                    .write_all(val)
-                    .map_err(|e| format!("sort spill write: {e}"))?;
+                    .map_err(|e| crate::Error::Storage {
+                        engine: "sort".into(),
+                        detail: format!("sort spill write: {e}"),
+                    })?;
+                writer.write_all(val).map_err(|e| crate::Error::Storage {
+                    engine: "sort".into(),
+                    detail: format!("sort spill write: {e}"),
+                })?;
             }
-            writer
-                .flush()
-                .map_err(|e| format!("sort spill flush: {e}"))?;
+            writer.flush().map_err(|e| crate::Error::Storage {
+                engine: "sort".into(),
+                detail: format!("sort spill flush: {e}"),
+            })?;
 
-            let mut file = writer
-                .into_inner()
-                .map_err(|e| format!("sort spill into_inner: {e}"))?;
+            let mut file = writer.into_inner().map_err(|e| crate::Error::Storage {
+                engine: "sort".into(),
+                detail: format!("sort spill into_inner: {e}"),
+            })?;
             use std::io::Seek;
             file.seek(std::io::SeekFrom::Start(0))
-                .map_err(|e| format!("sort spill seek: {e}"))?;
+                .map_err(|e| crate::Error::Storage {
+                    engine: "sort".into(),
+                    detail: format!("sort spill seek: {e}"),
+                })?;
 
             run_files.push(file);
         }
@@ -445,12 +472,15 @@ struct RunReader {
 }
 
 impl RunReader {
-    fn new(file: std::fs::File, run_idx: usize) -> Result<Self, String> {
+    fn new(file: std::fs::File, run_idx: usize) -> crate::Result<Self> {
         let mut reader = BufReader::new(file);
         let mut buf4 = [0u8; 4];
         reader
             .read_exact(&mut buf4)
-            .map_err(|e| format!("run reader init: {e}"))?;
+            .map_err(|e| crate::Error::Storage {
+                engine: "sort".into(),
+                detail: format!("run reader init: {e}"),
+            })?;
         let count = u32::from_le_bytes(buf4);
         Ok(Self {
             reader,

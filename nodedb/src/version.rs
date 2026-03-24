@@ -20,16 +20,20 @@ pub const MIN_WIRE_FORMAT_VERSION: u16 = 1;
 /// Check if a remote node's wire version is compatible.
 ///
 /// Returns `Ok(())` if compatible, `Err(reason)` if not.
-pub fn check_wire_compatibility(remote_version: u16) -> Result<(), String> {
+pub fn check_wire_compatibility(remote_version: u16) -> crate::Result<()> {
     if remote_version > WIRE_FORMAT_VERSION {
-        return Err(format!(
-            "remote wire version {remote_version} is newer than local {WIRE_FORMAT_VERSION}; upgrade this node"
-        ));
+        return Err(crate::Error::VersionCompat {
+            detail: format!(
+                "remote wire version {remote_version} is newer than local {WIRE_FORMAT_VERSION}; upgrade this node"
+            ),
+        });
     }
     if remote_version < MIN_WIRE_FORMAT_VERSION {
-        return Err(format!(
-            "remote wire version {remote_version} is too old (minimum {MIN_WIRE_FORMAT_VERSION}); upgrade the remote node"
-        ));
+        return Err(crate::Error::VersionCompat {
+            detail: format!(
+                "remote wire version {remote_version} is too old (minimum {MIN_WIRE_FORMAT_VERSION}); upgrade the remote node"
+            ),
+        });
     }
     Ok(())
 }

@@ -94,18 +94,19 @@ impl ColdStorage {
     ///
     /// Connects to the configured S3-compatible endpoint, or uses
     /// local filesystem if no endpoint is configured.
-    pub fn new(config: ColdStorageConfig) -> Result<Self, String> {
+    pub fn new(config: ColdStorageConfig) -> crate::Result<Self> {
         let store: Arc<dyn ObjectStore> = if config.endpoint.is_empty() {
             // Local filesystem (dev/testing).
             let dir = config
                 .local_dir
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("/tmp/nodedb/cold"));
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create cold dir: {e}"))?;
-            Arc::new(
-                LocalFileSystem::new_with_prefix(&dir)
-                    .map_err(|e| format!("local cold storage: {e}"))?,
-            )
+            std::fs::create_dir_all(&dir)?;
+            Arc::new(LocalFileSystem::new_with_prefix(&dir).map_err(|e| {
+                crate::Error::ColdStorage {
+                    detail: format!("local cold storage: {e}"),
+                }
+            })?)
         } else {
             // S3-compatible object store.
             let mut builder = AmazonS3Builder::new()
@@ -120,9 +121,9 @@ impl ColdStorage {
                     .with_secret_access_key(&config.secret_key);
             }
 
-            let s3 = builder
-                .build()
-                .map_err(|e| format!("S3 client init: {e}"))?;
+            let s3 = builder.build().map_err(|e| crate::Error::ColdStorage {
+                detail: format!("S3 client init: {e}"),
+            })?;
             Arc::new(s3)
         };
 
@@ -144,13 +145,20 @@ impl ColdStorage {
         rows: &[(String, serde_json::Value)],
         min_lsn: u64,
         max_lsn: u64,
-    ) -> Result<String, String> {
+    ) -> crate::Result<String> {
         if rows.is_empty() {
-            return Err("no rows to encode".into());
+            return Err(crate::Error::BadRequest {
+                detail: "no rows to encode".into(),
+            });
         }
 
         // Build Arrow schema from first row.
-        let first_obj = rows[0].1.as_object().ok_or("first row is not an object")?;
+        let first_obj = rows[0]
+            .1
+            .as_object()
+            .ok_or_else(|| crate::Error::ColdStorage {
+                detail: "first row is not an object".into(),
+            })?;
 
         let mut fields = vec![Field::new("_id", DataType::Utf8, false)];
         for (key, value) in first_obj {
@@ -207,8 +215,11 @@ impl ColdStorage {
             arrays.push(arr);
         }
 
-        let batch = RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| format!("build RecordBatch: {e}"))?;
+        let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(|e| {
+            crate::Error::ColdStorage {
+                detail: format!("build RecordBatch: {e}"),
+            }
+        })?;
 
         // Write Parquet — CPU-intensive compression runs off the async executor.
         let compression = match self.config.compression {
@@ -225,16 +236,25 @@ impl ColdStorage {
                 .set_max_row_group_size(row_group_size)
                 .build();
             let mut buf: Vec<u8> = Vec::new();
-            let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))
-                .map_err(|e| format!("parquet writer init: {e}"))?;
+            let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props)).map_err(|e| {
+                crate::Error::ColdStorage {
+                    detail: format!("parquet writer init: {e}"),
+                }
+            })?;
             writer
                 .write(&batch)
-                .map_err(|e| format!("parquet write: {e}"))?;
-            writer.close().map_err(|e| format!("parquet close: {e}"))?;
-            Ok::<_, String>(buf)
+                .map_err(|e| crate::Error::ColdStorage {
+                    detail: format!("parquet write: {e}"),
+                })?;
+            writer.close().map_err(|e| crate::Error::ColdStorage {
+                detail: format!("parquet close: {e}"),
+            })?;
+            Ok::<_, crate::Error>(buf)
         })
         .await
-        .map_err(|e| format!("parquet encoding task: {e}"))??;
+        .map_err(|e| crate::Error::ColdStorage {
+            detail: format!("parquet encoding task: {e}"),
+        })??;
 
         let file_size = buf.len();
 
@@ -252,7 +272,9 @@ impl ColdStorage {
                 object_store::PutOptions::default(),
             )
             .await
-            .map_err(|e| format!("upload to {object_path}: {e}"))?;
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("upload to {object_path}: {e}"),
+            })?;
 
         self.bytes_uploaded
             .fetch_add(file_size as u64, std::sync::atomic::Ordering::Relaxed);
@@ -279,12 +301,17 @@ impl ColdStorage {
         &self,
         segment_path: &Path,
         segment_name: &str,
-    ) -> Result<String, String> {
+    ) -> crate::Result<String> {
         let path_buf = segment_path.to_path_buf();
+        let segment_display = segment_path.display().to_string();
         let data = tokio::task::spawn_blocking(move || std::fs::read(&path_buf))
             .await
-            .map_err(|e| format!("spawn_blocking join: {e}"))?
-            .map_err(|e| format!("read WAL segment {}: {e}", segment_path.display()))?;
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("spawn_blocking join: {e}"),
+            })?
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("read WAL segment {segment_display}: {e}"),
+            })?;
 
         let object_path = format!("{}wal/{}", self.config.prefix, segment_name);
         let path = object_store::path::Path::from(object_path.clone());
@@ -296,7 +323,9 @@ impl ColdStorage {
                 object_store::PutOptions::default(),
             )
             .await
-            .map_err(|e| format!("upload WAL segment: {e}"))?;
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("upload WAL segment: {e}"),
+            })?;
 
         info!(segment_name, path = %object_path, "WAL segment archived to cold storage");
         Ok(object_path)

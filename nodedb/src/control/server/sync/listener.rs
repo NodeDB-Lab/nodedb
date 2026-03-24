@@ -79,10 +79,13 @@ impl SyncListenerState {
 pub async fn start_sync_listener(
     config: SyncListenerConfig,
     shared: Option<Arc<SharedState>>,
-) -> Result<Arc<SyncListenerState>, String> {
-    let listener = TcpListener::bind(&config.listen_addr)
-        .await
-        .map_err(|e| format!("bind sync listener to {}: {e}", config.listen_addr))?;
+) -> crate::Result<Arc<SyncListenerState>> {
+    let listener =
+        TcpListener::bind(&config.listen_addr)
+            .await
+            .map_err(|e| crate::Error::Config {
+                detail: format!("bind sync listener to {}: {e}", config.listen_addr),
+            })?;
 
     let state = Arc::new(SyncListenerState::new(config));
 

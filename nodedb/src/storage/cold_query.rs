@@ -13,17 +13,21 @@ use super::cold::ColdStorage;
 
 impl ColdStorage {
     /// Download a Parquet file from cold storage for query.
-    pub async fn download_parquet(&self, object_path: &str) -> Result<Bytes, String> {
+    pub async fn download_parquet(&self, object_path: &str) -> crate::Result<Bytes> {
         let path = object_store::path::Path::from(object_path.to_string());
         let result = self
             .store()
             .get_opts(&path, object_store::GetOptions::default())
             .await
-            .map_err(|e| format!("download {object_path}: {e}"))?;
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("download {object_path}: {e}"),
+            })?;
         let bytes = result
             .bytes()
             .await
-            .map_err(|e| format!("read bytes: {e}"))?;
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("read bytes: {e}"),
+            })?;
         Ok(bytes)
     }
 
@@ -32,7 +36,7 @@ impl ColdStorage {
         &self,
         tenant_id: u32,
         collection: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> crate::Result<Vec<String>> {
         let prefix = format!("{}{}/{}/", self.prefix(), tenant_id, collection);
         let path = object_store::path::Path::from(prefix);
 
@@ -63,15 +67,19 @@ impl ColdStorage {
 pub fn read_parquet_with_predicate(
     parquet_bytes: &[u8],
     projection: &[String],
-) -> Result<Vec<RecordBatch>, String> {
+) -> crate::Result<Vec<RecordBatch>> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(parquet_bytes))
-        .map_err(|e| format!("parquet reader init: {e}"))?;
+        .map_err(|e| crate::Error::ColdStorage {
+            detail: format!("parquet reader init: {e}"),
+        })?;
 
     // Apply column projection if specified.
     let reader = if projection.is_empty() {
-        reader.build().map_err(|e| format!("build reader: {e}"))?
+        reader.build().map_err(|e| crate::Error::ColdStorage {
+            detail: format!("build reader: {e}"),
+        })?
     } else {
         let schema = reader.schema();
         let indices: Vec<usize> = projection
@@ -82,11 +90,16 @@ pub fn read_parquet_with_predicate(
         reader
             .with_projection(mask)
             .build()
-            .map_err(|e| format!("build projected reader: {e}"))?
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("build projected reader: {e}"),
+            })?
     };
 
-    let batches: Vec<RecordBatch> = reader
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("read batches: {e}"))?;
+    let batches: Vec<RecordBatch> =
+        reader
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("read batches: {e}"),
+            })?;
     Ok(batches)
 }

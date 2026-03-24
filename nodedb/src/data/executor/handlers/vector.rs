@@ -190,7 +190,12 @@ impl CoreLoop {
                 }
                 match super::super::response_codec::encode_count("inserted", vectors.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
-                    Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
                 }
             }
             Err(err) => self.response_error(task, err),
@@ -247,7 +252,12 @@ impl CoreLoop {
                 .collect();
             return match super::super::response_codec::encode(&hits) {
                 Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+                Err(e) => self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                ),
             };
         }
 
@@ -281,7 +291,12 @@ impl CoreLoop {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "vector search serialization failed");
-                self.response_error(task, ErrorCode::Internal { detail: e })
+                self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                )
             }
         }
     }
@@ -345,7 +360,12 @@ impl CoreLoop {
                 .collect();
             return match super::super::response_codec::encode(&hits) {
                 Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+                Err(e) => self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                ),
             };
         }
 
@@ -374,7 +394,12 @@ impl CoreLoop {
             .collect();
         match super::super::response_codec::encode(&hits) {
             Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::Internal { detail: e }),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
         }
     }
 

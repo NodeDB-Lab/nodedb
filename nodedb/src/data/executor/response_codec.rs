@@ -29,11 +29,13 @@ use serde::Serialize;
 /// Drop-in replacement for `serde_json::to_vec(&value)` in handler code.
 /// Returns MessagePack bytes that are 30-50% smaller and 2-3x faster to
 /// produce than JSON.
-pub(super) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+pub(super) fn encode<T: Serialize>(value: &T) -> crate::Result<Vec<u8>> {
     // Use `to_vec_named` to preserve struct field names as string map keys.
     // Without this, rmp_serde uses integer indices (compact mode) which
     // produces `{0: value}` instead of `{"field": value}` on decode.
-    rmp_serde::to_vec_named(value).map_err(|e| format!("response serialization: {e}"))
+    rmp_serde::to_vec_named(value).map_err(|e| crate::Error::Codec {
+        detail: format!("response serialization: {e}"),
+    })
 }
 
 /// Encode document rows as Arrow IPC bytes for columnar transport.
@@ -173,10 +175,12 @@ impl ColBuilder {
 }
 
 /// Encode a simple `{"key": count}` response (for insert confirmations).
-pub(super) fn encode_count(key: &str, count: usize) -> Result<Vec<u8>, String> {
+pub(super) fn encode_count(key: &str, count: usize) -> crate::Result<Vec<u8>> {
     let mut map = std::collections::BTreeMap::new();
     map.insert(key, count);
-    rmp_serde::to_vec_named(&map).map_err(|e| format!("count response serialization: {e}"))
+    rmp_serde::to_vec_named(&map).map_err(|e| crate::Error::Codec {
+        detail: format!("count response serialization: {e}"),
+    })
 }
 
 /// Decode a MessagePack or JSON payload to a JSON string for pgwire/HTTP output.

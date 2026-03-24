@@ -322,7 +322,10 @@ pub async fn dispatch(
                 match super::sql_parse::parse_since_timestamp(since_str) {
                     Ok(ms) => ms,
                     Err(msg) => {
-                        return Some(Err(super::super::types::sqlstate_error("22007", &msg)));
+                        return Some(Err(super::super::types::sqlstate_error(
+                            "22007",
+                            &msg.to_string(),
+                        )));
                     }
                 }
             } else {

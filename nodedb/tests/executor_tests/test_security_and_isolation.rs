@@ -84,7 +84,7 @@ fn security_rls_policy_enforcement() {
     let doc_bad = serde_json::json!({"status": "pending", "amount": 200});
     let err = store.check_write(1, "orders", &doc_bad, "user1");
     assert!(err.is_err());
-    assert!(err.unwrap_err().contains("require_approved"));
+    assert!(err.unwrap_err().to_string().contains("require_approved"));
 
     // Different tenant has no policies — allowed.
     assert!(store.check_write(99, "orders", &doc_bad, "user1").is_ok());

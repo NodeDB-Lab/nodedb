@@ -423,7 +423,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn response_error(
         &self,
         task: &ExecutionTask,
-        error_code: ErrorCode,
+        error_code: impl Into<ErrorCode>,
     ) -> Response {
         Response {
             request_id: task.request_id(),
@@ -432,7 +432,7 @@ impl CoreLoop {
             partial: false,
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
-            error_code: Some(error_code),
+            error_code: Some(error_code.into()),
         }
     }
 

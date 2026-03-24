@@ -79,7 +79,7 @@ impl RlsPolicyStore {
     }
 
     /// Create or replace an RLS policy.
-    pub fn create_policy(&self, policy: RlsPolicy) -> Result<(), String> {
+    pub fn create_policy(&self, policy: RlsPolicy) -> crate::Result<()> {
         let key = format!("{}:{}", policy.tenant_id, policy.collection);
         let mut policies = self.policies.write().unwrap_or_else(|p| p.into_inner());
         let list = policies.entry(key).or_default();
@@ -156,7 +156,7 @@ impl RlsPolicyStore {
         collection: &str,
         document: &serde_json::Value,
         username: &str,
-    ) -> Result<(), String> {
+    ) -> crate::Result<()> {
         let policies = self.write_policies(tenant_id, collection);
         if policies.is_empty() {
             return Ok(()); // No write policies → allow.
@@ -187,10 +187,13 @@ impl RlsPolicyStore {
                         %collection,
                         "RLS write policy rejected"
                     );
-                    return Err(format!(
-                        "write rejected by RLS policy '{}' on collection '{}'",
-                        policy.name, collection
-                    ));
+                    return Err(crate::Error::RejectedAuthz {
+                        tenant_id: crate::types::TenantId::new(tenant_id),
+                        resource: format!(
+                            "RLS policy '{}' on collection '{}'",
+                            policy.name, collection
+                        ),
+                    });
                 }
             }
         }

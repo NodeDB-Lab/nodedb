@@ -21,7 +21,7 @@ use crate::types::{ReadConsistency, RequestId};
 // ── Propose tracker ─────────────────────────────────────────────────
 
 /// Response payload sent back to the proposer after commit + execution.
-pub type ProposeResult = std::result::Result<Vec<u8>, String>;
+pub type ProposeResult = std::result::Result<Vec<u8>, crate::Error>;
 
 /// Tracks pending proposals awaiting Raft commit.
 ///
@@ -194,7 +194,9 @@ pub async fn run_apply_loop(
                 tracker.complete(
                     batch.group_id,
                     entry.index,
-                    Err(format!("dispatch failed: {e}")),
+                    Err(crate::Error::Internal {
+                        detail: format!("dispatch failed: {e}"),
+                    }),
                 );
                 continue;
             }
@@ -209,7 +211,11 @@ pub async fn run_apply_loop(
                             .as_ref()
                             .map(|c| format!("{c:?}"))
                             .unwrap_or_else(|| "execution error".into());
-                        tracker.complete(batch.group_id, entry.index, Err(err_msg));
+                        tracker.complete(
+                            batch.group_id,
+                            entry.index,
+                            Err(crate::Error::Internal { detail: err_msg }),
+                        );
                     } else {
                         tracker.complete(batch.group_id, entry.index, Ok(payload));
                     }
@@ -218,14 +224,18 @@ pub async fn run_apply_loop(
                     tracker.complete(
                         batch.group_id,
                         entry.index,
-                        Err("response channel closed".into()),
+                        Err(crate::Error::Internal {
+                            detail: "response channel closed".to_string(),
+                        }),
                     );
                 }
                 Err(_) => {
                     tracker.complete(
                         batch.group_id,
                         entry.index,
-                        Err("deadline exceeded applying committed write".into()),
+                        Err(crate::Error::Internal {
+                            detail: "deadline exceeded applying committed write".to_string(),
+                        }),
                     );
                 }
             }

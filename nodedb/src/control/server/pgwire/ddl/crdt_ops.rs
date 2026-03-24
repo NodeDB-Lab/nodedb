@@ -70,7 +70,7 @@ pub async fn crdt_state(
     let result =
         super::sync_dispatch::dispatch_async(state, tenant_id, collection, plan, CRDT_DEADLINE)
             .await
-            .map_err(|e| sqlstate_error("XX000", &e))?;
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     let schema = Arc::new(vec![text_field("crdt_state")]);
     let mut encoder = DataRowEncoder::new(schema.clone());
@@ -129,7 +129,7 @@ pub async fn crdt_apply(
 
     super::sync_dispatch::dispatch_async(state, tenant_id, collection, plan, CRDT_DEADLINE)
         .await
-        .map_err(|e| sqlstate_error("XX000", &e))?;
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     let schema = Arc::new(vec![text_field("result")]);
     let mut encoder = DataRowEncoder::new(schema.clone());

@@ -20,23 +20,29 @@ pub fn time_bucket(interval_ms: i64, timestamp_ms: i64) -> i64 {
 }
 
 /// Parse an interval string like "5m", "1h", "1d" into milliseconds.
-pub fn parse_interval_ms(s: &str) -> Result<i64, String> {
+pub fn parse_interval_ms(s: &str) -> crate::Result<i64> {
     let s = s.trim();
     if s.is_empty() {
-        return Err("empty interval".into());
+        return Err(crate::Error::BadRequest {
+            detail: "empty interval".into(),
+        });
     }
 
     let (num_str, unit) = if s.len() > 1 && s.as_bytes()[s.len() - 1].is_ascii_alphabetic() {
         (&s[..s.len() - 1], &s[s.len() - 1..])
     } else {
-        return Err(format!("invalid interval '{s}'"));
+        return Err(crate::Error::BadRequest {
+            detail: format!("invalid interval '{s}'"),
+        });
     };
 
-    let n: i64 = num_str
-        .parse()
-        .map_err(|e| format!("invalid number in interval: {e}"))?;
+    let n: i64 = num_str.parse().map_err(|e| crate::Error::BadRequest {
+        detail: format!("invalid number in interval: {e}"),
+    })?;
     if n <= 0 {
-        return Err("interval must be > 0".into());
+        return Err(crate::Error::BadRequest {
+            detail: "interval must be > 0".into(),
+        });
     }
 
     match unit {
@@ -45,7 +51,9 @@ pub fn parse_interval_ms(s: &str) -> Result<i64, String> {
         "h" => Ok(n * 3_600_000),
         "d" => Ok(n * 86_400_000),
         "w" => Ok(n * 604_800_000),
-        _ => Err(format!("unknown unit '{unit}'")),
+        _ => Err(crate::Error::BadRequest {
+            detail: format!("unknown unit '{unit}'"),
+        }),
     }
 }
 

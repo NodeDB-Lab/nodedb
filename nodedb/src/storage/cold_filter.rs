@@ -36,10 +36,13 @@ pub fn read_parquet_filtered(
     parquet_bytes: &[u8],
     filters: &[ScanFilter],
     projection: &[String],
-) -> Result<Vec<RecordBatch>, String> {
-    let reader_builder =
-        ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(parquet_bytes))
-            .map_err(|e| format!("parquet reader init: {e}"))?;
+) -> crate::Result<Vec<RecordBatch>> {
+    let reader_builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(
+        parquet_bytes,
+    ))
+    .map_err(|e| crate::Error::ColdStorage {
+        detail: format!("parquet reader init: {e}"),
+    })?;
 
     let file_metadata = reader_builder.metadata().clone();
     let schema = reader_builder.schema().clone();
@@ -61,7 +64,9 @@ pub fn read_parquet_filtered(
     // Step 2: Build reader with only surviving row groups and optional projection.
     let reader_builder =
         ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(parquet_bytes))
-            .map_err(|e| format!("parquet reader reinit: {e}"))?
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("parquet reader reinit: {e}"),
+            })?
             .with_row_groups(row_groups);
 
     let reader_builder = if projection.is_empty() {
@@ -79,7 +84,9 @@ pub fn read_parquet_filtered(
     let reader = if filters.is_empty() {
         reader_builder
             .build()
-            .map_err(|e| format!("build reader: {e}"))?
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("build reader: {e}"),
+            })?
     } else {
         let filter_schema = schema.clone();
         let filters_owned: Vec<ScanFilter> = filters.to_vec();
@@ -100,12 +107,17 @@ pub fn read_parquet_filtered(
         reader_builder
             .with_row_filter(row_filter)
             .build()
-            .map_err(|e| format!("build filtered reader: {e}"))?
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("build filtered reader: {e}"),
+            })?
     };
 
-    let batches: Vec<RecordBatch> = reader
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("read batches: {e}"))?;
+    let batches: Vec<RecordBatch> =
+        reader
+            .collect::<Result<_, _>>()
+            .map_err(|e| crate::Error::ColdStorage {
+                detail: format!("read batches: {e}"),
+            })?;
     Ok(batches)
 }
 

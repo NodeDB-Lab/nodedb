@@ -28,7 +28,7 @@ pub(crate) async fn handle_direct_op(
 
     let plan = match build_plan(op, fields, &collection) {
         Ok(p) => p,
-        Err(e) => return NativeResponse::error(seq, "42601", e),
+        Err(e) => return NativeResponse::error(seq, "42601", e.to_string()),
     };
 
     // WAL append for writes.
@@ -43,13 +43,15 @@ pub(crate) async fn handle_direct_op(
     }
 }
 
-fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<PhysicalPlan, String> {
+fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
     match op {
         OpCode::PointGet => {
             let document_id = fields
                 .document_id
                 .as_ref()
-                .ok_or("missing 'document_id'")?
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'document_id'".to_string(),
+                })?
                 .clone();
             Ok(PhysicalPlan::PointGet {
                 collection: collection.to_string(),
@@ -60,7 +62,9 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             let document_id = fields
                 .document_id
                 .as_ref()
-                .ok_or("missing 'document_id'")?
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'document_id'".to_string(),
+                })?
                 .clone();
             let value = fields.data.clone().unwrap_or_default();
             Ok(PhysicalPlan::PointPut {
@@ -73,7 +77,9 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             let document_id = fields
                 .document_id
                 .as_ref()
-                .ok_or("missing 'document_id'")?
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'document_id'".to_string(),
+                })?
                 .clone();
             Ok(PhysicalPlan::PointDelete {
                 collection: collection.to_string(),
@@ -81,10 +87,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::VectorSearch => {
-            let query_vector = fields
-                .query_vector
-                .as_ref()
-                .ok_or("missing 'query_vector'")?;
+            let query_vector =
+                fields
+                    .query_vector
+                    .as_ref()
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: "missing 'query_vector'".to_string(),
+                    })?;
             let top_k = fields.top_k.unwrap_or(10) as usize;
             Ok(PhysicalPlan::VectorSearch {
                 collection: collection.to_string(),
@@ -96,7 +105,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::RangeScan => {
-            let field = fields.field.as_ref().ok_or("missing 'field'")?.clone();
+            let field = fields
+                .field
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'field'".to_string(),
+                })?
+                .clone();
             let limit = fields.limit.unwrap_or(100) as usize;
             Ok(PhysicalPlan::RangeScan {
                 collection: collection.to_string(),
@@ -110,7 +125,9 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             let document_id = fields
                 .document_id
                 .as_ref()
-                .ok_or("missing 'document_id'")?
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'document_id'".to_string(),
+                })?
                 .clone();
             Ok(PhysicalPlan::CrdtRead {
                 collection: collection.to_string(),
@@ -121,9 +138,17 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             let document_id = fields
                 .document_id
                 .as_ref()
-                .ok_or("missing 'document_id'")?
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'document_id'".to_string(),
+                })?
                 .clone();
-            let delta = fields.delta.as_ref().ok_or("missing 'delta'")?.clone();
+            let delta = fields
+                .delta
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'delta'".to_string(),
+                })?
+                .clone();
             let peer_id = fields.peer_id.unwrap_or(0);
             Ok(PhysicalPlan::CrdtApply {
                 collection: collection.to_string(),
@@ -134,10 +159,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::GraphRagFusion => {
-            let query_vector = fields
-                .query_vector
-                .as_ref()
-                .ok_or("missing 'query_vector'")?;
+            let query_vector =
+                fields
+                    .query_vector
+                    .as_ref()
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: "missing 'query_vector'".to_string(),
+                    })?;
             let vector_top_k = fields.vector_top_k.unwrap_or(20) as usize;
             let edge_label = fields.edge_label.clone();
             let direction = parse_direction(fields.direction.as_deref());
@@ -158,16 +186,28 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::AlterCollectionPolicy => {
-            let policy = fields.policy.as_ref().ok_or("missing 'policy'")?;
+            let policy = fields
+                .policy
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'policy'".to_string(),
+                })?;
             let policy_json =
-                serde_json::to_string(policy).map_err(|e| format!("invalid policy: {e}"))?;
+                serde_json::to_string(policy).map_err(|e| crate::Error::BadRequest {
+                    detail: format!("invalid policy: {e}"),
+                })?;
             Ok(PhysicalPlan::SetCollectionPolicy {
                 collection: collection.to_string(),
                 policy_json,
             })
         }
         OpCode::GraphHop => {
-            let start = fields.start_node.as_ref().ok_or("missing 'start_node'")?;
+            let start = fields
+                .start_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'start_node'".to_string(),
+                })?;
             let depth = fields.depth.unwrap_or(2) as usize;
             let direction = parse_direction(fields.direction.as_deref());
             Ok(PhysicalPlan::GraphHop {
@@ -179,7 +219,12 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::GraphNeighbors => {
-            let start = fields.start_node.as_ref().ok_or("missing 'start_node'")?;
+            let start = fields
+                .start_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'start_node'".to_string(),
+                })?;
             let direction = parse_direction(fields.direction.as_deref());
             Ok(PhysicalPlan::GraphNeighbors {
                 node_id: start.clone(),
@@ -188,8 +233,18 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::GraphPath => {
-            let from = fields.start_node.as_ref().ok_or("missing 'start_node'")?;
-            let to = fields.end_node.as_ref().ok_or("missing 'end_node'")?;
+            let from = fields
+                .start_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'start_node'".to_string(),
+                })?;
+            let to = fields
+                .end_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'end_node'".to_string(),
+                })?;
             let max_depth = fields.depth.unwrap_or(10) as usize;
             Ok(PhysicalPlan::GraphPath {
                 src: from.clone(),
@@ -200,7 +255,12 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::GraphSubgraph => {
-            let start = fields.start_node.as_ref().ok_or("missing 'start_node'")?;
+            let start = fields
+                .start_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'start_node'".to_string(),
+                })?;
             let depth = fields.depth.unwrap_or(2) as usize;
             Ok(PhysicalPlan::GraphSubgraph {
                 start_nodes: vec![start.clone()],
@@ -210,9 +270,24 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::EdgePut => {
-            let src = fields.from_node.as_ref().ok_or("missing 'from_node'")?;
-            let dst = fields.to_node.as_ref().ok_or("missing 'to_node'")?;
-            let label = fields.edge_type.as_ref().ok_or("missing 'edge_type'")?;
+            let src = fields
+                .from_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'from_node'".to_string(),
+                })?;
+            let dst = fields
+                .to_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'to_node'".to_string(),
+                })?;
+            let label = fields
+                .edge_type
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'edge_type'".to_string(),
+                })?;
             let props = fields
                 .properties
                 .as_ref()
@@ -226,9 +301,24 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::EdgeDelete => {
-            let src = fields.from_node.as_ref().ok_or("missing 'from_node'")?;
-            let dst = fields.to_node.as_ref().ok_or("missing 'to_node'")?;
-            let label = fields.edge_type.as_ref().ok_or("missing 'edge_type'")?;
+            let src = fields
+                .from_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'from_node'".to_string(),
+                })?;
+            let dst = fields
+                .to_node
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'to_node'".to_string(),
+                })?;
+            let label = fields
+                .edge_type
+                .as_ref()
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: "missing 'edge_type'".to_string(),
+                })?;
             Ok(PhysicalPlan::EdgeDelete {
                 src_id: src.clone(),
                 label: label.clone(),
@@ -236,7 +326,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::TextSearch => {
-            let query_text = fields.query_text.as_ref().ok_or("missing 'query_text'")?;
+            let query_text =
+                fields
+                    .query_text
+                    .as_ref()
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: "missing 'query_text'".to_string(),
+                    })?;
             let top_k = fields.top_k.unwrap_or(10) as usize;
             Ok(PhysicalPlan::TextSearch {
                 collection: collection.to_string(),
@@ -246,11 +342,20 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
             })
         }
         OpCode::HybridSearch => {
-            let query_vector = fields
-                .query_vector
-                .as_ref()
-                .ok_or("missing 'query_vector'")?;
-            let query_text = fields.query_text.as_ref().ok_or("missing 'query_text'")?;
+            let query_vector =
+                fields
+                    .query_vector
+                    .as_ref()
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: "missing 'query_vector'".to_string(),
+                    })?;
+            let query_text =
+                fields
+                    .query_text
+                    .as_ref()
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: "missing 'query_text'".to_string(),
+                    })?;
             let top_k = fields.top_k.unwrap_or(10) as usize;
             let vector_weight = fields.vector_weight.unwrap_or(0.5) as f32;
             Ok(PhysicalPlan::HybridSearch {
@@ -264,7 +369,9 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> Result<Physi
                 filter_bitmap: None,
             })
         }
-        _ => Err(format!("operation {op:?} not supported as direct dispatch")),
+        _ => Err(crate::Error::BadRequest {
+            detail: format!("operation {op:?} not supported as direct dispatch"),
+        }),
     }
 }
 

@@ -18,7 +18,7 @@ pub async fn dispatch_async(
     collection: &str,
     plan: PhysicalPlan,
     timeout: Duration,
-) -> Result<Vec<u8>, String> {
+) -> crate::Result<Vec<u8>> {
     let vshard_id = VShardId::from_collection(collection);
     let request_id = RequestId::new(
         std::time::SystemTime::now()
@@ -42,18 +42,26 @@ pub async fn dispatch_async(
     let rx = state.tracker.register_oneshot(request_id);
 
     match state.dispatcher.lock() {
-        Ok(mut d) => d.dispatch(request).map_err(|e| e.to_string())?,
+        Ok(mut d) => d.dispatch(request).map_err(|e| crate::Error::Internal {
+            detail: e.to_string(),
+        })?,
         Err(p) => p
             .into_inner()
             .dispatch(request)
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| crate::Error::Internal {
+                detail: e.to_string(),
+            })?,
     };
 
     // Await with timeout — yields the thread so the response poller can run.
     let resp = tokio::time::timeout(timeout, rx)
         .await
-        .map_err(|_| format!("dispatch timeout after {}ms", timeout.as_millis()))?
-        .map_err(|_| "response channel closed".to_string())?;
+        .map_err(|_| crate::Error::Internal {
+            detail: format!("dispatch timeout after {}ms", timeout.as_millis()),
+        })?
+        .map_err(|_| crate::Error::Internal {
+            detail: "response channel closed".into(),
+        })?;
 
     if resp.status != Status::Ok {
         let detail = resp
@@ -61,7 +69,7 @@ pub async fn dispatch_async(
             .as_ref()
             .map(|c| format!("{c:?}"))
             .unwrap_or_else(|| String::from_utf8_lossy(&resp.payload).into_owned());
-        return Err(detail);
+        return Err(crate::Error::Internal { detail });
     }
 
     Ok(resp.payload.to_vec())

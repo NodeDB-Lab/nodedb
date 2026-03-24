@@ -137,16 +137,20 @@ impl SessionStore {
     /// Rollback to a savepoint: truncate tx_buffer to the saved position.
     ///
     /// Returns `Err` if the savepoint does not exist (matches PostgreSQL behavior).
-    pub fn rollback_to_savepoint(&self, addr: &SocketAddr, name: &str) -> Result<(), String> {
+    pub fn rollback_to_savepoint(&self, addr: &SocketAddr, name: &str) -> crate::Result<()> {
         let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
         let session = sessions
             .get_mut(addr)
-            .ok_or_else(|| "no active session".to_string())?;
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: "no active session".to_string(),
+            })?;
         let pos = session
             .savepoints
             .iter()
             .rposition(|(n, _)| n == name)
-            .ok_or_else(|| format!("savepoint \"{name}\" does not exist"))?;
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: format!("savepoint \"{name}\" does not exist"),
+            })?;
         let buffer_pos = session.savepoints[pos].1;
         session.tx_buffer.truncate(buffer_pos);
         session.savepoints.truncate(pos + 1);
@@ -169,15 +173,19 @@ impl SessionStore {
         addr: &SocketAddr,
         name: &str,
         count: usize,
-    ) -> Result<(Vec<String>, bool), String> {
+    ) -> crate::Result<(Vec<String>, bool)> {
         let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
         let session = sessions
             .get_mut(addr)
-            .ok_or_else(|| "no active session".to_string())?;
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: "no active session".to_string(),
+            })?;
         let cursor = session
             .cursors
             .get_mut(name)
-            .ok_or_else(|| format!("cursor \"{name}\" does not exist"))?;
+            .ok_or_else(|| crate::Error::BadRequest {
+                detail: format!("cursor \"{name}\" does not exist"),
+            })?;
 
         let start = cursor.position;
         let end = (start + count).min(cursor.rows.len());
