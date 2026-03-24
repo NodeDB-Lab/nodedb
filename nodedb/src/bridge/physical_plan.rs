@@ -132,6 +132,20 @@ pub enum PhysicalPlan {
         documents: Vec<(String, Vec<u8>)>,
     },
 
+    /// Estimate count: return approximate row count from HLL cardinality stats.
+    ///
+    /// Reads the HyperLogLog registers from the StatsStore for the specified
+    /// field and returns the cardinality estimate. Much faster than COUNT(*)
+    /// for large collections (~6.5% error with 256 registers).
+    EstimateCount { collection: String, field: String },
+
+    /// Truncate: delete ALL documents in a collection without filter scanning.
+    ///
+    /// Faster than BulkDelete — iterates the DOCUMENTS table prefix directly
+    /// and deletes every key. Cascades to inverted index, secondary indexes,
+    /// graph edges, and document cache.
+    Truncate { collection: String },
+
     /// INSERT ... SELECT: copy documents from source scan into target collection.
     ///
     /// The source_filters/source_collection define a DocumentScan on the source.

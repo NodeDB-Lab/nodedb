@@ -396,6 +396,12 @@ impl CoreLoop {
                 value,
             } => self.execute_upsert(task, tid, collection, document_id, value),
 
+            PhysicalPlan::Truncate { collection } => self.execute_truncate(task, tid, collection),
+
+            PhysicalPlan::EstimateCount { collection, field } => {
+                self.execute_estimate_count(task, tid, collection, field)
+            }
+
             PhysicalPlan::InsertSelect {
                 target_collection,
                 source_collection,

@@ -104,8 +104,10 @@ pub async fn dispatch(
     if upper == "SHOW COLLECTIONS" || upper.starts_with("SHOW COLLECTIONS") {
         return Some(super::collection::show_collections(state, identity));
     }
-    if upper.starts_with("CREATE INDEX ") {
-        return Some(super::collection::create_index(state, identity, &parts));
+    if upper.starts_with("CREATE INDEX ") || upper.starts_with("CREATE UNIQUE INDEX ") {
+        return Some(super::collection::create_index(
+            state, identity, &parts, sql,
+        ));
     }
     if upper.starts_with("DROP INDEX ") {
         return Some(super::collection::drop_index(state, identity, &parts));
@@ -273,6 +275,93 @@ pub async fn dispatch(
         && let Some(result) = super::collection_insert::upsert_document(state, identity, sql).await
     {
         return Some(result);
+    }
+
+    // ESTIMATE_COUNT('collection', 'field') — fast approximate count from HLL stats.
+    if upper.starts_with("SELECT ESTIMATE_COUNT(") || upper.starts_with("SELECT ESTIMATE_COUNT (") {
+        // Parse: SELECT ESTIMATE_COUNT('collection', 'field')
+        let inner = sql
+            .find('(')
+            .and_then(|start| sql.rfind(')').map(|end| &sql[start + 1..end]));
+        if let Some(args_str) = inner {
+            let args: Vec<&str> = args_str
+                .split(',')
+                .map(|s| s.trim().trim_matches('\''))
+                .collect();
+            if args.len() >= 2 {
+                let coll = args[0].to_lowercase();
+                let field = args[1].to_string();
+                let tenant_id = identity.tenant_id;
+                let vshard = crate::types::VShardId::from_collection(&coll);
+                let plan = crate::bridge::envelope::PhysicalPlan::EstimateCount {
+                    collection: coll,
+                    field,
+                };
+                match crate::control::server::dispatch_utils::dispatch_to_data_plane(
+                    state, tenant_id, vshard, plan, 0,
+                )
+                .await
+                {
+                    Ok(resp) => {
+                        let payload_text =
+                            crate::data::executor::response_codec::decode_payload_to_json(
+                                &resp.payload,
+                            );
+                        use futures::stream;
+                        use pgwire::api::results::{DataRowEncoder, QueryResponse, Response};
+                        let schema = std::sync::Arc::new(vec![super::super::types::text_field(
+                            "estimate_count",
+                        )]);
+                        let mut encoder = DataRowEncoder::new(schema.clone());
+                        let _ = encoder.encode_field(&payload_text);
+                        let row = encoder.take_row();
+                        return Some(Ok(vec![Response::Query(QueryResponse::new(
+                            schema,
+                            stream::iter(vec![Ok(row)]),
+                        ))]));
+                    }
+                    Err(e) => {
+                        return Some(Err(super::super::types::sqlstate_error(
+                            "XX000",
+                            &e.to_string(),
+                        )));
+                    }
+                }
+            }
+        }
+        return Some(Err(super::super::types::sqlstate_error(
+            "42601",
+            "usage: SELECT ESTIMATE_COUNT('collection', 'field')",
+        )));
+    }
+
+    // TRUNCATE <collection> — fast delete-all without filter scan.
+    if upper.starts_with("TRUNCATE ") {
+        let coll_name = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+        if coll_name.is_empty() {
+            return Some(Err(super::super::types::sqlstate_error(
+                "42601",
+                "TRUNCATE requires a collection name",
+            )));
+        }
+        let tenant_id = identity.tenant_id;
+        let vshard = crate::types::VShardId::from_collection(&coll_name);
+        let plan = crate::bridge::envelope::PhysicalPlan::Truncate {
+            collection: coll_name,
+        };
+        if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
+            state, tenant_id, vshard, plan, 0,
+        )
+        .await
+        {
+            return Some(Err(super::super::types::sqlstate_error(
+                "XX000",
+                &e.to_string(),
+            )));
+        }
+        return Some(Ok(vec![pgwire::api::results::Response::Execution(
+            pgwire::api::results::Tag::new("TRUNCATE"),
+        )]));
     }
 
     None

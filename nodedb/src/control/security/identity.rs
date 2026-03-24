@@ -183,7 +183,11 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         | PhysicalPlan::BulkUpdate { .. }
         | PhysicalPlan::BulkDelete { .. }
         | PhysicalPlan::Upsert { .. }
-        | PhysicalPlan::InsertSelect { .. } => Permission::Write,
+        | PhysicalPlan::InsertSelect { .. }
+        | PhysicalPlan::Truncate { .. } => Permission::Write,
+
+        // EstimateCount is a read operation.
+        PhysicalPlan::EstimateCount { .. } => Permission::Read,
 
         // DDL / schema changes.
         PhysicalPlan::SetCollectionPolicy { .. } | PhysicalPlan::SetVectorParams { .. } => {

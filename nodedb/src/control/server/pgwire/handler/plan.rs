@@ -62,7 +62,9 @@ pub(super) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         | PhysicalPlan::InsertSelect {
             target_collection: collection,
             ..
-        } => Some(collection.as_str()),
+        }
+        | PhysicalPlan::Truncate { collection }
+        | PhysicalPlan::EstimateCount { collection, .. } => Some(collection.as_str()),
         PhysicalPlan::EdgePut { .. }
         | PhysicalPlan::EdgeDelete { .. }
         | PhysicalPlan::GraphHop { .. }
