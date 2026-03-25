@@ -214,6 +214,62 @@ impl ColumnarSegmentReader {
         }
         Ok(result)
     }
+
+    /// Memory-map a column file for zero-copy SIMD access.
+    ///
+    /// Returns the raw mmap'd bytes. The caller can cast the pointer
+    /// to `&[f64]` or `&[i64]` for direct SIMD aggregation without
+    /// any deserialization or copy.
+    ///
+    /// For Gorilla-encoded columns (timestamp, f64), the caller must
+    /// still decode. For raw LE columns (i64, symbol u32), the mmap'd
+    /// bytes can be reinterpreted directly.
+    ///
+    /// # Safety
+    /// The returned `Mmap` must outlive any references to its data.
+    /// The underlying file must not be modified while mapped.
+    pub fn mmap_column(
+        partition_dir: &Path,
+        col_name: &str,
+    ) -> Result<memmap2::Mmap, SegmentError> {
+        let col_path = partition_dir.join(format!("{col_name}.col"));
+        let file = std::fs::File::open(&col_path)
+            .map_err(|e| SegmentError::Io(format!("open {}: {e}", col_path.display())))?;
+        // SAFETY: We require the file not be modified while mapped.
+        // Data Plane partitions are immutable once sealed.
+        unsafe {
+            memmap2::MmapOptions::new()
+                .map(&file)
+                .map_err(|e| SegmentError::Io(format!("mmap {}: {e}", col_path.display())))
+        }
+    }
+
+    /// Interpret mmap'd raw LE bytes as an i64 slice (zero-copy).
+    ///
+    /// For columns stored as raw little-endian i64 (Int64 type).
+    /// The caller must ensure the mmap'd data was written as LE i64.
+    pub fn mmap_as_i64(mmap: &memmap2::Mmap) -> Result<&[i64], SegmentError> {
+        if !mmap.len().is_multiple_of(8) {
+            return Err(SegmentError::Corrupt(
+                "i64 mmap not aligned to 8 bytes".into(),
+            ));
+        }
+        // SAFETY: mmap is aligned by the OS, and we verified length alignment.
+        // The data was written as LE i64 by encode_i64_values.
+        Ok(unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const i64, mmap.len() / 8) })
+    }
+
+    /// Interpret mmap'd raw LE bytes as a u32 slice (zero-copy).
+    ///
+    /// For symbol columns stored as raw little-endian u32.
+    pub fn mmap_as_u32(mmap: &memmap2::Mmap) -> Result<&[u32], SegmentError> {
+        if !mmap.len().is_multiple_of(4) {
+            return Err(SegmentError::Corrupt(
+                "u32 mmap not aligned to 4 bytes".into(),
+            ));
+        }
+        Ok(unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const u32, mmap.len() / 4) })
+    }
 }
 
 // ---------------------------------------------------------------------------

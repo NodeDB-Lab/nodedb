@@ -62,6 +62,9 @@ hmac = "0.12"
 base64 = "0.22"
 getrandom = { version = "0.3", features = ["std"] }
 
+# Memory-mapped I/O
+memmap2 = "0.9"
+
 # Cold storage
 parquet = "58"
 object_store = { version = "0.13", features = ["aws"] }
