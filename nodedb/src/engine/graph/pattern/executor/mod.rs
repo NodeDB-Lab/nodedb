@@ -16,7 +16,23 @@ use crate::engine::graph::edge_store::EdgeStore;
 pub type BindingRow = HashMap<String, String>;
 
 /// Execute a MATCH query on a CSR index and edge store.
+///
+/// Applies join order optimization before execution: triples within each
+/// PatternChain are reordered by selectivity (lowest edge count first,
+/// bound variables preferred).
 pub fn execute(
+    query: &MatchQuery,
+    csr: &CsrIndex,
+    edge_store: &EdgeStore,
+) -> Result<Vec<BindingRow>, crate::Error> {
+    // Optimize query before execution (reorder triples by selectivity).
+    let mut optimized = query.clone();
+    super::optimizer::optimize(&mut optimized, csr);
+    execute_query(&optimized, csr, edge_store)
+}
+
+/// Execute a pre-optimized MATCH query (internal, skip optimizer).
+fn execute_query(
     query: &MatchQuery,
     csr: &CsrIndex,
     edge_store: &EdgeStore,
