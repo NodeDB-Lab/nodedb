@@ -47,7 +47,6 @@ roaring = { workspace = true }
 rust-stemmers = { workspace = true }
 unicode-normalization = { workspace = true }
 tempfile = { workspace = true }
-numr = { workspace = true }
 nexar = { workspace = true }
 
 # CRDTs (needed for LoroValue in engine layer)

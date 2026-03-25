@@ -63,7 +63,7 @@ base64 = "0.22"
 getrandom = { version = "0.3", features = ["std"] }
 
 # Cold storage
-parquet = "57"
+parquet = "58"
 object_store = { version = "0.13", features = ["aws"] }
 bytes = "1"
 
@@ -74,11 +74,11 @@ io-uring = "0.7"
 loro = "1"
 
 # Query engine
-datafusion = "52"
-datafusion-common = "52"
-datafusion-execution = "52"
-datafusion-expr = "52"
-datafusion-physical-plan = "52"
+datafusion = "53"
+datafusion-common = "53"
+datafusion-execution = "53"
+datafusion-expr = "53"
+datafusion-physical-plan = "53"
 
 # Config & serialization
 toml = "0.8"
@@ -121,7 +121,6 @@ rust_decimal = { version = "1", features = ["serde-with-str"] }
 quinn = "0.11"
 
 # Ecosystem
-numr = "0.5"
 nexar = "0.1"
 
 # Compression
