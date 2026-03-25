@@ -45,6 +45,9 @@ pub struct CrdtEngine {
     pending_deltas: Vec<PendingDelta>,
     /// Per-collection version: highest mutation_id that's been ACK'd by Origin.
     acked_versions: HashMap<String, u64>,
+    /// Conflict resolution policies per collection.
+    /// Evaluated on sync when Origin rejects a delta.
+    policies: nodedb_crdt::PolicyRegistry,
 }
 
 /// A pending (unsent) delta waiting to be synced to Origin.
@@ -72,6 +75,7 @@ impl CrdtEngine {
             next_mutation_id: AtomicU64::new(1),
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
+            policies: nodedb_crdt::PolicyRegistry::new(),
         })
     }
 
@@ -89,6 +93,7 @@ impl CrdtEngine {
             next_mutation_id: AtomicU64::new(1),
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
+            policies: nodedb_crdt::PolicyRegistry::new(),
         })
     }
 
@@ -224,6 +229,16 @@ impl CrdtEngine {
     /// List all collection names (top-level Loro map keys).
     pub fn collection_names(&self) -> Vec<String> {
         self.state.collection_names()
+    }
+
+    /// Set conflict resolution policy for a collection.
+    pub fn set_policy(&mut self, collection: &str, policy: nodedb_crdt::CollectionPolicy) {
+        self.policies.set(collection, policy);
+    }
+
+    /// Get the policy registry (for sync conflict resolution).
+    pub fn policies(&self) -> &nodedb_crdt::PolicyRegistry {
+        &self.policies
     }
 
     // ─── Sync: Delta Management ──────────────────────────────────────
