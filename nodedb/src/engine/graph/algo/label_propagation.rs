@@ -65,13 +65,17 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
 
             // Find the most frequent label. Ties broken by smallest label ID
             // for determinism.
-            let max_count = *label_counts.values().max().unwrap();
-            let best_label = label_counts
+            let Some(&max_count) = label_counts.values().max() else {
+                continue;
+            };
+            let Some(best_label) = label_counts
                 .iter()
                 .filter(|&(_, count)| *count == max_count)
                 .map(|(&label, _)| label)
                 .min()
-                .unwrap();
+            else {
+                continue;
+            };
 
             if labels[node] != best_label {
                 labels[node] = best_label;

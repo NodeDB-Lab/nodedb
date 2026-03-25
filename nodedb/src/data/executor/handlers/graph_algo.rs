@@ -35,28 +35,29 @@ impl CoreLoop {
             );
         }
 
+        use crate::engine::graph::algo;
+
         let result: Result<Vec<u8>, crate::Error> = match algorithm {
-            GraphAlgorithm::PageRank => {
-                let batch = crate::engine::graph::algo::pagerank::run(&self.csr, params);
-                batch.to_json()
-            }
-            GraphAlgorithm::Wcc => {
-                let batch = crate::engine::graph::algo::wcc::run(&self.csr);
-                batch.to_json()
-            }
+            // ── Graphalytics (5 core algorithms) ──
+            GraphAlgorithm::PageRank => algo::pagerank::run(&self.csr, params).to_json(),
+            GraphAlgorithm::Wcc => algo::wcc::run(&self.csr).to_json(),
             GraphAlgorithm::LabelPropagation => {
-                let batch = crate::engine::graph::algo::label_propagation::run(&self.csr, params);
-                batch.to_json()
+                algo::label_propagation::run(&self.csr, params).to_json()
             }
-            GraphAlgorithm::Lcc => {
-                let batch = crate::engine::graph::algo::lcc::run(&self.csr);
-                batch.to_json()
+            GraphAlgorithm::Lcc => algo::lcc::run(&self.csr).to_json(),
+            GraphAlgorithm::Sssp => {
+                algo::sssp::run(&self.csr, params).and_then(|batch| batch.to_json())
             }
-            GraphAlgorithm::Sssp => crate::engine::graph::algo::sssp::run(&self.csr, params)
-                .and_then(|batch| batch.to_json()),
-            _ => Err(crate::Error::BadRequest {
-                detail: format!("graph algorithm '{}' not yet implemented", algorithm.name()),
-            }),
+            // ── Centrality suite ──
+            GraphAlgorithm::Betweenness => algo::betweenness::run(&self.csr, params).to_json(),
+            GraphAlgorithm::Closeness => algo::closeness::run(&self.csr).to_json(),
+            GraphAlgorithm::Harmonic => algo::harmonic::run(&self.csr).to_json(),
+            GraphAlgorithm::Degree => algo::degree::run(&self.csr, params).to_json(),
+            // ── Extended algorithms ──
+            GraphAlgorithm::Louvain => algo::louvain::run(&self.csr, params).to_json(),
+            GraphAlgorithm::Triangles => algo::triangles::run(&self.csr, params).to_json(),
+            GraphAlgorithm::Diameter => algo::diameter::run(&self.csr, params).to_json(),
+            GraphAlgorithm::KCore => algo::kcore::run(&self.csr).to_json(),
         };
 
         match result {
