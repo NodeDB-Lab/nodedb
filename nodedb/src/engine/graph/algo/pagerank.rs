@@ -5,12 +5,17 @@
 //! max_iterations reached. Dangling nodes (zero out-degree) redistribute
 //! their rank uniformly across all nodes.
 //!
-//! Uses two rank vectors (current + next) to avoid allocation per iteration.
+//! SIMD-accelerated hot loops:
+//! - `simd_fill_f64`: broadcast base rank into next_rank vector
+//! - `simd_dangling_sum`: sum ranks of dangling nodes
+//! - `simd_l1_norm_delta`: L1 convergence check
+//!
 //! Performance target: 633K vertices / 34M edges in < 10s for 20 iterations.
 
 use super::params::AlgoParams;
 use super::progress::ProgressReporter;
 use super::result::AlgoResultBatch;
+use super::simd;
 use crate::engine::graph::algo::GraphAlgorithm;
 use crate::engine::graph::csr::CsrIndex;
 
@@ -36,33 +41,24 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
     let mut rank = vec![init_rank; n];
     let mut next_rank = vec![0.0f64; n];
 
-    // Precompute out-degrees for all nodes. A node with out_degree 0 is a
-    // dangling node — its rank mass is redistributed uniformly.
+    // Precompute out-degrees and dangling mask for SIMD dangling sum.
     let out_degrees: Vec<usize> = (0..n).map(|i| csr.out_degree(i as u32)).collect();
+    let is_dangling: Vec<bool> = out_degrees.iter().map(|&d| d == 0).collect();
 
     let teleport = (1.0 - damping) / n as f64;
 
     for iter in 1..=max_iter {
-        // Accumulate dangling node rank mass.
-        let dangling_sum: f64 = (0..n)
-            .filter(|&i| out_degrees[i] == 0)
-            .map(|i| rank[i])
-            .sum();
-
+        // ── SIMD: dangling node rank sum ──
+        let dangling_sum = simd::simd_dangling_sum(&rank, &is_dangling);
         let dangling_contrib = damping * dangling_sum / n as f64;
+        let base_rank = teleport + dangling_contrib;
 
-        // Base rank: teleport + dangling redistribution.
-        for r in next_rank.iter_mut() {
-            *r = teleport + dangling_contrib;
-        }
+        // ── SIMD: broadcast fill next_rank with base_rank ──
+        simd::simd_fill_f64(&mut next_rank, base_rank);
 
-        // Contribution from in-neighbors: for each node v, accumulate
-        // rank[u] / out_degree[u] for each in-neighbor u.
-        //
-        // Iterate via outbound edges: for each node u with out_degree > 0,
-        // distribute rank[u] / out_degree[u] to each outbound neighbor.
-        // This is cache-friendlier than iterating inbound edges because the
-        // CSR outbound arrays are contiguous.
+        // ── Scatter: distribute rank contributions via outbound edges ──
+        // This is inherently scatter (random write) — not SIMD-able per se,
+        // but the fill + dangling_sum above are the dominant SIMD wins.
         for u in 0..n {
             let deg = out_degrees[u];
             if deg == 0 {
@@ -74,12 +70,8 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
             }
         }
 
-        // Compute L1 norm of rank delta for convergence check.
-        let delta: f64 = rank
-            .iter()
-            .zip(next_rank.iter())
-            .map(|(old, new)| (old - new).abs())
-            .sum();
+        // ── SIMD: L1 norm convergence check ──
+        let delta = simd::simd_l1_norm_delta(&rank, &next_rank);
 
         // Swap rank vectors (avoids allocation).
         std::mem::swap(&mut rank, &mut next_rank);
@@ -136,7 +128,6 @@ mod tests {
 
     #[test]
     fn pagerank_star_topology() {
-        // Hub a points to b, c, d. No one points to a.
         let mut csr = CsrIndex::new();
         csr.add_edge("a", "L", "b");
         csr.add_edge("a", "L", "c");
@@ -156,9 +147,6 @@ mod tests {
             .map(|r| (r["node_id"].as_str().unwrap(), r["rank"].as_f64().unwrap()))
             .collect();
 
-        // b, c, d should have higher rank than a (they receive links).
-        // a is a dangling-target: no one links to a, but dangling redistribution
-        // from b/c/d (which have zero out-degree) gives a some rank.
         assert!(
             ranks["b"] > ranks["a"],
             "b={} should > a={}",
@@ -186,7 +174,6 @@ mod tests {
 
     #[test]
     fn pagerank_dangling_nodes() {
-        // a -> b, c is dangling (no outbound edges).
         let mut csr = CsrIndex::new();
         csr.add_edge("a", "L", "b");
         csr.add_node("c"); // dangling
@@ -195,7 +182,6 @@ mod tests {
         let batch = run(&csr, &AlgoParams::default());
         assert_eq!(batch.len(), 3);
 
-        // All ranks should sum to ~1.0.
         let json = batch.to_json().unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap();
         let total: f64 = rows.iter().map(|r| r["rank"].as_f64().unwrap()).sum();
@@ -211,7 +197,6 @@ mod tests {
             ..Default::default()
         };
         let batch = run(&csr, &params);
-        // Should converge before 100 iterations on a 3-node cycle.
         assert_eq!(batch.len(), 3);
     }
 

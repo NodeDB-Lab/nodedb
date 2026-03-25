@@ -22,7 +22,9 @@ use crate::engine::graph::algo::GraphAlgorithm;
 use crate::engine::graph::csr::CsrIndex;
 
 /// Maximum neighbor count before switching to sampling approximation.
-const HIGH_DEGREE_THRESHOLD: usize = 1000;
+/// Below this threshold, exact pairwise triangle counting is used.
+/// Above it, random sampling avoids O(k²) cost on high-degree hubs.
+const HIGH_DEGREE_THRESHOLD: usize = 2_000;
 
 /// Number of neighbor pairs to sample for high-degree approximation.
 const SAMPLE_PAIRS: usize = 10_000;

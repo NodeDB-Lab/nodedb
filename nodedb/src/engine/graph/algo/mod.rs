@@ -11,6 +11,7 @@ pub mod pagerank;
 pub mod params;
 pub mod progress;
 pub mod result;
+pub mod simd;
 pub mod sssp;
 pub mod triangles;
 pub(crate) mod util;

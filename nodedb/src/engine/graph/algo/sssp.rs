@@ -40,6 +40,23 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> Result<AlgoResultBatch, crate
             detail: format!("source node '{source}' not found in graph"),
         })?;
 
+    // Dijkstra requires non-negative edge weights. Pre-scan for negatives
+    // to fail fast with a clear error rather than silently producing wrong results.
+    if csr.has_weights() {
+        for node in 0..n {
+            for (_lid, _dst, w) in csr.iter_out_edges_weighted(node as u32) {
+                if w < 0.0 {
+                    return Err(crate::Error::BadRequest {
+                        detail: format!(
+                            "SSSP (Dijkstra) requires non-negative edge weights, found {w} on edge from '{}'",
+                            csr.node_name(node as u32)
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     let mut dist = vec![f64::INFINITY; n];
     dist[source_id as usize] = 0.0;
 
@@ -268,5 +285,21 @@ mod tests {
         assert_eq!(dists["b"], 1.0);
         assert_eq!(dists["c"], 4.0);
         assert_eq!(dists["d"], 3.0); // via b
+    }
+
+    #[test]
+    fn sssp_rejects_negative_weights() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "R", "b", -1.0);
+        csr.compact();
+
+        let params = AlgoParams {
+            source_node: Some("a".into()),
+            ..Default::default()
+        };
+        let result = run(&csr, &params);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("non-negative"), "error: {err}");
     }
 }

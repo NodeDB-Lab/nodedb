@@ -16,6 +16,7 @@ use super::params::{AlgoColumnType, GraphAlgorithm};
 ///
 /// Results are stored column-major: each column is a `Vec` of typed values.
 /// `to_record_batch()` converts to an Arrow `RecordBatch`.
+#[derive(Debug)]
 pub struct AlgoResultBatch {
     algorithm: GraphAlgorithm,
     text_columns: Vec<Vec<String>>,
