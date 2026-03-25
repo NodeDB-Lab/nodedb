@@ -1,5 +1,5 @@
-//! Vector operation handlers: VectorInsert, VectorBatchInsert, VectorDelete,
-//! VectorSearch, SetVectorParams.
+//! Vector write handlers: VectorInsert, VectorBatchInsert, VectorDelete,
+//! SetVectorParams.
 
 use tracing::{debug, warn};
 
@@ -9,6 +9,20 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::vector::collection::VectorCollection;
 use crate::engine::vector::distance::DistanceMetric;
 use crate::engine::vector::hnsw::HnswParams;
+
+/// Parameters for configuring vector index settings.
+pub(in crate::data::executor) struct SetVectorParamsInput<'a> {
+    pub task: &'a ExecutionTask,
+    pub tid: u32,
+    pub collection: &'a str,
+    pub m: usize,
+    pub ef_construction: usize,
+    pub metric: &'a str,
+    pub index_type: &'a str,
+    pub pq_m: usize,
+    pub ivf_cells: usize,
+    pub ivf_nprobe: usize,
+}
 
 /// Parameters for a vector insert operation.
 pub(in crate::data::executor) struct VectorInsertParams<'a> {
@@ -84,7 +98,7 @@ impl CoreLoop {
         if let Some(cfg) = self.index_configs.get(&index_key)
             && cfg.index_type == crate::engine::vector::index_config::IndexType::IvfPq
         {
-            return self.ivf_insert(task, &index_key, vector, dim);
+            return self.ivf_insert(task, &index_key, vector, dim, doc_id);
         }
 
         // Default: HNSW (with or without PQ).
@@ -108,13 +122,14 @@ impl CoreLoop {
         }
     }
 
-    /// Insert into an IVF-PQ index.
+    /// Insert into an IVF-PQ index, returning the assigned vector ID.
     fn ivf_insert(
         &mut self,
         task: &ExecutionTask,
         index_key: &str,
         vector: &[f32],
         dim: usize,
+        doc_id: Option<String>,
     ) -> Response {
         let ivf = self
             .ivf_indexes
@@ -134,27 +149,27 @@ impl CoreLoop {
                 crate::engine::vector::ivf::IvfPqIndex::new(dim, params)
             });
 
-        // IVF-PQ requires training before the first insert. If not trained,
-        // buffer vectors until we have enough for training (min 256).
+        // IVF-PQ requires training before the first insert.
         if ivf.n_cells() == 0 {
-            // Not yet trained — the index was just created with new().
-            // We need to accumulate training data. For now, we train on
-            // the first batch of vectors inserted (uses the vector itself
-            // as a 1-sample train). This is a minimal bootstrap — production
-            // users should call a separate TRAIN command with a sample set.
-            //
-            // Auto-train with the first vector as a degenerate single-sample.
-            // Real training happens when the IVF index receives enough data.
             let refs: Vec<&[f32]> = vec![vector];
             ivf.train(&refs);
         }
 
-        ivf.add(vector);
+        let vector_id = ivf.add(vector);
+
+        // Register doc_id mapping using the actual IVF-assigned vector ID.
+        if let Some(did) = doc_id {
+            let coll = self
+                .vector_collections
+                .entry(index_key.to_string())
+                .or_insert_with(|| VectorCollection::new(dim, Default::default()));
+            coll.doc_id_map.insert(vector_id, did);
+        }
+
         self.response_ok(task)
     }
 
     /// Execute batch vector insert (always to the default/unnamed field).
-    /// Named fields require separate VectorInsert requests.
     pub(in crate::data::executor) fn execute_vector_batch_insert(
         &mut self,
         task: &ExecutionTask,
@@ -221,202 +236,22 @@ impl CoreLoop {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::data::executor) fn execute_vector_search(
-        &self,
-        task: &ExecutionTask,
-        tid: u32,
-        collection: &str,
-        query_vector: &[f32],
-        top_k: usize,
-        ef_search: usize,
-        filter_bitmap: Option<&std::sync::Arc<[u8]>>,
-        field_name: &str,
-    ) -> Response {
-        debug!(core = self.core_id, %collection, top_k, ef_search, "vector search");
-        let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
-
-        // Check for IVF-PQ index first.
-        if let Some(ivf) = self.ivf_indexes.get(&index_key) {
-            if ivf.is_empty() {
-                return self.response_with_payload(task, b"[]".to_vec());
-            }
-            let results = ivf.search(query_vector, top_k);
-            let hits: Vec<_> = results
-                .iter()
-                .map(|r| super::super::response_codec::VectorSearchHit {
-                    id: r.id,
-                    distance: r.distance,
-                    doc_id: None,
-                })
-                .collect();
-            return match super::super::response_codec::encode(&hits) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                ),
-            };
-        }
-
-        // Default: HNSW collection.
-        let Some(collection_ref) = self.vector_collections.get(&index_key) else {
-            return self.response_error(task, ErrorCode::NotFound);
-        };
-        if collection_ref.is_empty() {
-            return self.response_with_payload(task, b"[]".to_vec());
-        }
-        let ef = if ef_search > 0 {
-            ef_search.max(top_k)
-        } else {
-            top_k.saturating_mul(4).max(64)
-        };
-        let results = match filter_bitmap {
-            Some(bitmap_bytes) => {
-                collection_ref.search_with_bitmap_bytes(query_vector, top_k, ef, bitmap_bytes)
-            }
-            None => collection_ref.search(query_vector, top_k, ef),
-        };
-        let hits: Vec<_> = results
-            .iter()
-            .map(|r| super::super::response_codec::VectorSearchHit {
-                id: r.id,
-                distance: r.distance,
-                doc_id: collection_ref.get_doc_id(r.id).map(String::from),
-            })
-            .collect();
-        match super::super::response_codec::encode(&hits) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => {
-                warn!(core = self.core_id, error = %e, "vector search serialization failed");
-                self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                )
-            }
-        }
-    }
-
-    /// Multi-vector search: query all named vector fields in a collection,
-    /// fuse results via RRF.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::data::executor) fn execute_vector_multi_search(
-        &self,
-        task: &ExecutionTask,
-        tid: u32,
-        collection: &str,
-        query_vector: &[f32],
-        top_k: usize,
-        ef_search: usize,
-        filter_bitmap: Option<&std::sync::Arc<[u8]>>,
-    ) -> Response {
-        debug!(core = self.core_id, %collection, top_k, "vector multi-search");
-
-        // Find all indexes matching this tenant:collection pattern.
-        let prefix = format!("{tid}:{collection}:");
-        let plain_key = CoreLoop::vector_index_key(tid, collection, "");
-
-        let mut all_results: Vec<Vec<crate::engine::vector::hnsw::SearchResult>> = Vec::new();
-
-        for (key, coll) in &self.vector_collections {
-            if key == &plain_key || key.starts_with(&prefix) {
-                if coll.is_empty() || coll.dim() != query_vector.len() {
-                    continue;
-                }
-                let ef = if ef_search > 0 {
-                    ef_search.max(top_k)
-                } else {
-                    top_k.saturating_mul(4).max(64)
-                };
-                let results = match filter_bitmap {
-                    Some(bm) => coll.search_with_bitmap_bytes(query_vector, top_k, ef, bm),
-                    None => coll.search(query_vector, top_k, ef),
-                };
-                all_results.push(results);
-            }
-        }
-
-        if all_results.is_empty() {
-            return self.response_error(task, ErrorCode::NotFound);
-        }
-
-        // Single field — return directly.
-        if all_results.len() == 1 {
-            // Safety: len() == 1 checked above; use expect-free path anyway.
-            let Some(results) = all_results.into_iter().next() else {
-                return self.response_error(task, ErrorCode::NotFound);
-            };
-            let hits: Vec<_> = results
-                .iter()
-                .map(|r| super::super::response_codec::VectorSearchHit {
-                    id: r.id,
-                    distance: r.distance,
-                    doc_id: None,
-                })
-                .collect();
-            return match super::super::response_codec::encode(&hits) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                ),
-            };
-        }
-
-        // RRF fusion across fields.
-        let rrf_k = 60.0_f64;
-        let mut fused: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-        for results in &all_results {
-            for (rank, r) in results.iter().enumerate() {
-                *fused.entry(r.id).or_default() += 1.0 / (rrf_k + rank as f64 + 1.0);
-            }
-        }
-
-        let mut ranked: Vec<(u32, f64)> = fused.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        ranked.truncate(top_k);
-
-        let hits: Vec<_> = ranked
-            .iter()
-            .map(
-                |&(id, score)| super::super::response_codec::VectorSearchHit {
-                    id,
-                    distance: score as f32,
-                    doc_id: None,
-                },
-            )
-            .collect();
-        match super::super::response_codec::encode(&hits) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: e.to_string(),
-                },
-            ),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_set_vector_params(
         &mut self,
-        task: &ExecutionTask,
-        tid: u32,
-        collection: &str,
-        m: usize,
-        ef_construction: usize,
-        metric: &str,
-        index_type: &str,
-        pq_m: usize,
-        ivf_cells: usize,
-        ivf_nprobe: usize,
+        params: SetVectorParamsInput<'_>,
     ) -> Response {
+        let SetVectorParamsInput {
+            task,
+            tid,
+            collection,
+            m,
+            ef_construction,
+            metric,
+            index_type,
+            pq_m,
+            ivf_cells,
+            ivf_nprobe,
+        } = params;
         debug!(core = self.core_id, %collection, m, ef_construction, %metric, %index_type, "set vector params");
         let index_key = CoreLoop::vector_index_key(tid, collection, "");
 
@@ -479,7 +314,6 @@ impl CoreLoop {
             ivf_nprobe: if ivf_nprobe > 0 { ivf_nprobe } else { 16 },
         };
 
-        // Store both legacy HnswParams (for backward compat) and full IndexConfig.
         self.vector_params.insert(index_key.clone(), params);
         self.index_configs.insert(index_key, config);
         self.response_ok(task)

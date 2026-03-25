@@ -61,13 +61,15 @@ impl CoreLoop {
                 ef_search,
                 filter_bitmap,
             } => self.execute_vector_multi_search(
-                task,
-                tid,
-                collection,
-                query_vector,
-                *top_k,
-                *ef_search,
-                filter_bitmap.as_ref(),
+                super::handlers::vector_search::VectorMultiSearchParams {
+                    task,
+                    tid,
+                    collection,
+                    query_vector,
+                    top_k: *top_k,
+                    ef_search: *ef_search,
+                    filter_bitmap: filter_bitmap.as_ref(),
+                },
             ),
 
             PhysicalPlan::VectorDelete {
@@ -82,16 +84,16 @@ impl CoreLoop {
                 ef_search,
                 filter_bitmap,
                 field_name,
-            } => self.execute_vector_search(
+            } => self.execute_vector_search(super::handlers::vector_search::VectorSearchParams {
                 task,
                 tid,
                 collection,
                 query_vector,
-                *top_k,
-                *ef_search,
-                filter_bitmap.as_ref(),
+                top_k: *top_k,
+                ef_search: *ef_search,
+                filter_bitmap: filter_bitmap.as_ref(),
                 field_name,
-            ),
+            }),
 
             PhysicalPlan::SetVectorParams {
                 collection,
@@ -102,18 +104,18 @@ impl CoreLoop {
                 pq_m,
                 ivf_cells,
                 ivf_nprobe,
-            } => self.execute_set_vector_params(
+            } => self.execute_set_vector_params(super::handlers::vector::SetVectorParamsInput {
                 task,
                 tid,
                 collection,
-                *m,
-                *ef_construction,
+                m: *m,
+                ef_construction: *ef_construction,
                 metric,
                 index_type,
-                *pq_m,
-                *ivf_cells,
-                *ivf_nprobe,
-            ),
+                pq_m: *pq_m,
+                ivf_cells: *ivf_cells,
+                ivf_nprobe: *ivf_nprobe,
+            }),
 
             PhysicalPlan::DocumentScan {
                 collection,
