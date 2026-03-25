@@ -36,6 +36,10 @@ pub enum SyncMessageType {
     ShapeDelta = 0x22,
     ShapeUnsubscribe = 0x23,
     VectorClockSync = 0x30,
+    /// Timeseries metric batch push (client → server, 0x40).
+    TimeseriesPush = 0x40,
+    /// Timeseries push acknowledgment (server → client, 0x41).
+    TimeseriesAck = 0x41,
     PingPong = 0xFF,
 }
 
@@ -52,6 +56,8 @@ impl SyncMessageType {
             0x22 => Some(Self::ShapeDelta),
             0x23 => Some(Self::ShapeUnsubscribe),
             0x30 => Some(Self::VectorClockSync),
+            0x40 => Some(Self::TimeseriesPush),
+            0x41 => Some(Self::TimeseriesAck),
             0xFF => Some(Self::PingPong),
             _ => None,
         }
@@ -130,6 +136,12 @@ pub struct HandshakeMsg {
     pub subscribed_shapes: Vec<String>,
     /// Client version string.
     pub client_version: String,
+    /// Lite instance identity (UUID v7). Empty for legacy clients.
+    #[serde(default)]
+    pub lite_id: String,
+    /// Monotonic epoch counter (incremented on every open). 0 for legacy clients.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 /// Handshake acknowledgment (server → client, 0x02).
@@ -143,6 +155,9 @@ pub struct HandshakeAckMsg {
     pub server_clock: HashMap<String, u64>,
     /// Error message (if !success).
     pub error: Option<String>,
+    /// Fork detection: if true, client must regenerate LiteId and reconnect.
+    #[serde(default)]
+    pub fork_detected: bool,
 }
 
 /// Delta push message (client → server, 0x10).
@@ -241,6 +256,43 @@ pub struct PingPongMsg {
     pub is_pong: bool,
 }
 
+/// Timeseries metric batch push (client → server, 0x40).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeseriesPushMsg {
+    /// Source Lite instance ID (UUID v7).
+    pub lite_id: String,
+    /// Collection name.
+    pub collection: String,
+    /// Gorilla-encoded timestamp block.
+    pub ts_block: Vec<u8>,
+    /// Gorilla-encoded value block.
+    pub val_block: Vec<u8>,
+    /// Raw LE u64 series ID block.
+    pub series_block: Vec<u8>,
+    /// Number of samples in this batch.
+    pub sample_count: u64,
+    /// Min timestamp in this batch.
+    pub min_ts: i64,
+    /// Max timestamp in this batch.
+    pub max_ts: i64,
+    /// Per-series sync watermark: highest LSN already synced for each series.
+    /// Only samples after these watermarks are included.
+    pub watermarks: HashMap<u64, u64>,
+}
+
+/// Timeseries push acknowledgment (server → client, 0x41).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeseriesAckMsg {
+    /// Collection acknowledged.
+    pub collection: String,
+    /// Number of samples accepted.
+    pub accepted: u64,
+    /// Number of samples rejected (duplicates, out-of-retention, etc.)
+    pub rejected: u64,
+    /// Server-assigned LSN for this batch (used as sync watermark).
+    pub lsn: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +319,8 @@ mod tests {
             vector_clock: HashMap::new(),
             subscribed_shapes: vec!["shape1".into()],
             client_version: "0.1.0".into(),
+            lite_id: String::new(),
+            epoch: 0,
         };
         let frame = SyncFrame::new_msgpack(SyncMessageType::Handshake, &msg).unwrap();
         let bytes = frame.to_bytes();
@@ -299,7 +353,7 @@ mod tests {
     #[test]
     fn message_type_roundtrip() {
         for v in [
-            0x01, 0x02, 0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x23, 0x30, 0xFF,
+            0x01, 0x02, 0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x23, 0x30, 0x40, 0x41, 0xFF,
         ] {
             let mt = SyncMessageType::from_u8(v).unwrap();
             assert_eq!(mt as u8, v);

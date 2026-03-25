@@ -8,7 +8,7 @@
 pub use nodedb_types::sync::wire::{
     DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, PingPongMsg,
     ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg, SyncFrame,
-    SyncMessageType, VectorClockSyncMsg,
+    SyncMessageType, TimeseriesAckMsg, TimeseriesPushMsg, VectorClockSyncMsg,
 };
 
 // ── Re-export CompensationHint (used by dlq.rs and session.rs) ──
@@ -40,6 +40,8 @@ mod tests {
             vector_clock: std::collections::HashMap::new(),
             subscribed_shapes: vec!["shape1".into()],
             client_version: "0.1.0".into(),
+            lite_id: String::new(),
+            epoch: 0,
         };
         let frame = SyncFrame::new_msgpack(SyncMessageType::Handshake, &msg).unwrap();
         let bytes = frame.to_bytes();
@@ -72,7 +74,7 @@ mod tests {
     #[test]
     fn message_type_roundtrip() {
         for v in [
-            0x01, 0x02, 0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x23, 0x30, 0xFF,
+            0x01, 0x02, 0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x23, 0x30, 0x40, 0x41, 0xFF,
         ] {
             let mt = SyncMessageType::from_u8(v).unwrap();
             assert_eq!(mt as u8, v);
