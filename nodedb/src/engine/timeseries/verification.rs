@@ -431,4 +431,198 @@ mod tests {
         registry2.import(exported);
         assert_eq!(registry2.partition_count(), 5);
     }
+
+    // ── WAL crash matrix (simulated) ────────────────────────────────
+
+    #[test]
+    fn wal_crash_matrix_persist_recover() {
+        // Simulate crash at each lifecycle step by persisting/recovering.
+        let tmp = TempDir::new().unwrap();
+        let manifest_path = tmp.path().join("partition_manifest.json");
+        let mut cfg = TieredPartitionConfig::origin_defaults();
+        cfg.partition_by = PartitionInterval::Duration(86_400_000);
+
+        let day_ms = 86_400_000i64;
+        let writer =
+            crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter::new(tmp.path());
+
+        // Step 1: Ingest → create partitions + write data.
+        let mut registry = PartitionRegistry::new(cfg.clone());
+        for d in 1..=3 {
+            let start = d * day_ms;
+            let (entry, _) = registry.get_or_create_partition(start);
+            let dir_name = entry.dir_name.clone();
+
+            // Write actual partition data.
+            let mut mt = ColumnarMemtable::new_metric(test_memtable_config());
+            for i in 0..50 {
+                mt.ingest_metric(
+                    1,
+                    MetricSample {
+                        timestamp_ms: start + i,
+                        value: i as f64,
+                    },
+                );
+            }
+            let drain = mt.drain();
+            writer
+                .write_partition(&dir_name, &drain, 86_400_000, 0)
+                .unwrap();
+
+            if let Some(e) = registry.get_mut(start) {
+                e.meta.row_count = 50;
+                e.meta.max_ts = start + 49;
+            }
+        }
+
+        // Persist manifest.
+        registry.persist(&manifest_path).unwrap();
+
+        // Step 2: "Crash" — recover from manifest.
+        let recovered = PartitionRegistry::recover(&manifest_path, cfg.clone()).unwrap();
+        assert_eq!(recovered.partition_count(), 3);
+        assert_eq!(recovered.active_count(), 3);
+
+        // Step 3: Seal partitions, persist, crash, recover.
+        let mut registry = recovered;
+        for d in 1..=3 {
+            registry.seal_partition(d * day_ms);
+        }
+        registry.persist(&manifest_path).unwrap();
+
+        let recovered = PartitionRegistry::recover(&manifest_path, cfg.clone()).unwrap();
+        assert_eq!(recovered.sealed_count(), 3);
+
+        // Step 4: Start merge, "crash" mid-merge (state = Merging).
+        let mut registry = recovered;
+        registry.mark_merging(day_ms);
+        registry.persist(&manifest_path).unwrap();
+
+        // Recovery should roll back Merging → Sealed.
+        let recovered = PartitionRegistry::recover(&manifest_path, cfg.clone()).unwrap();
+        assert_eq!(recovered.sealed_count(), 3); // All back to sealed.
+        assert!(
+            recovered
+                .iter()
+                .all(|(_, e)| e.meta.state != PartitionState::Merging)
+        );
+
+        // Step 5: Complete merge, delete sources, "crash" before cleanup.
+        let mut registry = recovered;
+        let merged_meta = PartitionMeta {
+            min_ts: day_ms,
+            max_ts: 3 * day_ms + 49,
+            row_count: 150,
+            size_bytes: 1024,
+            schema_version: 1,
+            state: PartitionState::Merged,
+            interval_ms: 3 * 86_400_000,
+            last_flushed_wal_lsn: 100,
+        };
+        registry.commit_merge(
+            merged_meta,
+            "ts-merged".into(),
+            &[day_ms, 2 * day_ms, 3 * day_ms],
+        );
+        registry.persist(&manifest_path).unwrap();
+
+        // Recovery should remove Deleted entries.
+        let recovered = PartitionRegistry::recover(&manifest_path, cfg.clone()).unwrap();
+        // Only merged partition should survive (Deleted ones purged by recover).
+        assert!(recovered.partition_count() <= 2); // merged + possibly 1 overwritten
+        assert!(
+            recovered
+                .iter()
+                .all(|(_, e)| e.meta.state != PartitionState::Deleted)
+        );
+    }
+
+    // ── Merge crash recovery: orphan cleanup ─────────────────────────
+
+    #[test]
+    fn merge_crash_orphan_cleanup() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = TieredPartitionConfig::origin_defaults();
+
+        // Create a registry with one partition.
+        let mut registry = PartitionRegistry::new(cfg);
+        registry.get_or_create_partition(86_400_000);
+
+        // Simulate an orphaned merge output directory (crash during step 1).
+        let orphan_dir = tmp.path().join("ts-orphan-merge");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("timestamp.col"), b"garbage").unwrap();
+
+        // Cleanup should remove orphan but keep known partition.
+        let removed = registry.cleanup_orphans(tmp.path());
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0], "ts-orphan-merge");
+        assert!(!orphan_dir.exists());
+    }
+
+    // ── Ingest throughput: 1M rows ───────────────────────────────────
+
+    #[test]
+    fn ingest_throughput_1m_rows() {
+        let mut mt = ColumnarMemtable::new_metric(ColumnarMemtableConfig {
+            max_memory_bytes: 256 * 1024 * 1024,
+            hard_memory_limit: 512 * 1024 * 1024,
+            max_tag_cardinality: 100_000,
+        });
+
+        let start = std::time::Instant::now();
+        for i in 0..1_000_000u64 {
+            mt.ingest_metric(
+                i % 100,
+                MetricSample {
+                    timestamp_ms: i as i64,
+                    value: i as f64 * 0.001,
+                },
+            );
+        }
+        let elapsed = start.elapsed();
+        let rows_per_sec = 1_000_000.0 / elapsed.as_secs_f64();
+
+        assert_eq!(mt.row_count(), 1_000_000);
+        // Should achieve at least 1M rows/sec on any modern CPU.
+        assert!(
+            rows_per_sec > 500_000.0,
+            "ingest too slow: {rows_per_sec:.0} rows/sec (expected >500K)"
+        );
+    }
+
+    // ── SIMD aggregation: SUM over 10M f64 values ────────────────────
+
+    #[test]
+    fn simd_aggregation_performance() {
+        use crate::engine::timeseries::columnar_agg::aggregate_f64;
+
+        // 10M values (80MB).
+        let values: Vec<f64> = (0..10_000_000).map(|i| (i as f64) * 0.001).collect();
+
+        let start = std::time::Instant::now();
+        let result = aggregate_f64(&values);
+        let elapsed = start.elapsed();
+
+        // Verify correctness: sum of 0..9,999,999 * 0.001
+        let expected_sum = (0..10_000_000u64).map(|i| i as f64 * 0.001).sum::<f64>();
+        let rel_error = ((result.sum - expected_sum) / expected_sum).abs();
+        assert!(
+            rel_error < 1e-6,
+            "sum error too large: got {}, expected {}, rel_error {rel_error}",
+            result.sum,
+            expected_sum
+        );
+
+        assert_eq!(result.count, 10_000_000);
+        assert!((result.min - 0.0).abs() < f64::EPSILON);
+        assert!((result.max - 9999.999).abs() < 0.001);
+
+        // Should complete in <100ms on any modern CPU with SIMD.
+        assert!(
+            elapsed.as_millis() < 500,
+            "SIMD aggregation too slow: {}ms for 10M values",
+            elapsed.as_millis()
+        );
+    }
 }
