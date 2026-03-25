@@ -61,6 +61,9 @@ crc32c = "0.6"
 hmac = "0.12"
 base64 = "0.22"
 getrandom = { version = "0.3", features = ["std"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
 
 # Memory-mapped I/O
 memmap2 = "0.9"
@@ -138,11 +141,6 @@ async-trait = "0.1"
 futures = "0.3"
 async-stream = "0.3"
 
-# Password hashing
-argon2 = "0.5"
-
-# Encryption at rest
-aes-gcm = "0.10"
 
 # MD5 (for pgwire MD5 auth compatibility)
 md5 = "0.8"
