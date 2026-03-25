@@ -4,7 +4,7 @@
 //! implementation in `engine::graph::algo::*`. Each algorithm runs
 //! on the in-memory CSR index and returns JSON-serialized results.
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -35,16 +35,29 @@ impl CoreLoop {
             );
         }
 
-        // Dispatch to algorithm implementation.
-        // Each algorithm operates on `self.csr` and returns JSON bytes.
-        // Individual algorithms are wired here as they are implemented.
-        warn!(
-            algorithm = algorithm.name(),
-            "graph algorithm not yet implemented"
-        );
-        let result: Result<Vec<u8>, crate::Error> = Err(crate::Error::BadRequest {
-            detail: format!("graph algorithm '{}' not yet implemented", algorithm.name()),
-        });
+        let result: Result<Vec<u8>, crate::Error> = match algorithm {
+            GraphAlgorithm::PageRank => {
+                let batch = crate::engine::graph::algo::pagerank::run(&self.csr, params);
+                batch.to_json()
+            }
+            GraphAlgorithm::Wcc => {
+                let batch = crate::engine::graph::algo::wcc::run(&self.csr);
+                batch.to_json()
+            }
+            GraphAlgorithm::LabelPropagation => {
+                let batch = crate::engine::graph::algo::label_propagation::run(&self.csr, params);
+                batch.to_json()
+            }
+            GraphAlgorithm::Lcc => {
+                let batch = crate::engine::graph::algo::lcc::run(&self.csr);
+                batch.to_json()
+            }
+            GraphAlgorithm::Sssp => crate::engine::graph::algo::sssp::run(&self.csr, params)
+                .and_then(|batch| batch.to_json()),
+            _ => Err(crate::Error::BadRequest {
+                detail: format!("graph algorithm '{}' not yet implemented", algorithm.name()),
+            }),
+        };
 
         match result {
             Ok(payload) => self.response_with_payload(task, payload),

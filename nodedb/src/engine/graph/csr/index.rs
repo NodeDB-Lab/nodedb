@@ -361,6 +361,22 @@ impl CsrIndex {
         self.node_to_id.contains_key(node)
     }
 
+    /// Get the string node ID for a dense node index.
+    pub fn node_name(&self, dense_id: u32) -> &str {
+        &self.id_to_node[dense_id as usize]
+    }
+
+    /// Look up the dense node ID for a string node ID.
+    pub fn node_id(&self, name: &str) -> Option<u32> {
+        self.node_to_id.get(name).copied()
+    }
+
+    /// Add a node without any edges (used for isolated/dangling nodes).
+    /// Returns the dense node ID. Idempotent — returns existing ID if present.
+    pub fn add_node(&mut self, name: &str) -> u32 {
+        self.ensure_node(name)
+    }
+
     // ── Internal helpers ──
 
     /// Build contiguous offset/target/label arrays from per-node edge lists.
@@ -426,7 +442,7 @@ impl CsrIndex {
     }
 
     /// Iterate all outbound edges for a node (dense + buffer, minus deleted).
-    pub(super) fn iter_out_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
+    pub fn iter_out_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
         let idx = node as usize;
         let dense = self
             .dense_out_edges(node)
@@ -456,7 +472,7 @@ impl CsrIndex {
     }
 
     /// Iterate all inbound edges for a node (dense + buffer, minus deleted).
-    pub(super) fn iter_in_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
+    pub fn iter_in_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
         let idx = node as usize;
         let dense = self
             .dense_in_edges(node)
