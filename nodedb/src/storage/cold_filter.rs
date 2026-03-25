@@ -385,7 +385,7 @@ mod tests {
 
         let props = parquet::file::properties::WriterProperties::builder()
             .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page)
-            .set_max_row_group_size(2) // Small row groups for testing pruning.
+            .set_max_row_group_row_count(Some(2)) // Small row groups for testing pruning.
             .build();
 
         let mut buf: Vec<u8> = Vec::new();

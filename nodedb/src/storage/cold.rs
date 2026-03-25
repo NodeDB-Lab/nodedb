@@ -233,7 +233,7 @@ impl ColdStorage {
         let buf = tokio::task::spawn_blocking(move || {
             let props = WriterProperties::builder()
                 .set_compression(compression)
-                .set_max_row_group_size(row_group_size)
+                .set_max_row_group_row_count(Some(row_group_size))
                 .build();
             let mut buf: Vec<u8> = Vec::new();
             let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props)).map_err(|e| {
