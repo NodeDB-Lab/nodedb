@@ -68,34 +68,73 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ///
     /// First line is the header (column names). Each subsequent line is a row.
     /// An "id" column is used as document ID; if missing, UUIDs are generated.
+    /// Import documents from CSV text.
+    ///
+    /// Two-pass: first pass infers column types (int/float/bool/string) from
+    /// ALL rows. Second pass coerces every value to the column's dominant type.
+    /// This ensures type consistency within each column.
     pub async fn copy_from_csv(&self, collection: &str, csv_text: &str) -> NodeDbResult<u64> {
-        let mut lines = csv_text.lines();
-        let header = lines
+        let mut lines_iter = csv_text.lines();
+        let header = lines_iter
             .next()
             .ok_or_else(|| NodeDbError::bad_request("CSV has no header"))?;
         let columns: Vec<&str> = header.split(',').map(|s| s.trim()).collect();
         let id_col = columns.iter().position(|c| *c == "id");
 
+        // Collect all data rows.
+        let rows: Vec<Vec<String>> = lines_iter
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.split(',').map(|s| s.trim().to_string()).collect())
+            .collect();
+
+        // Pass 1: infer column types. A column is "int" only if ALL values parse
+        // as int. "float" if all parse as float. "bool" if all are true/false.
+        // Otherwise "string".
+        let col_types: Vec<&str> = (0..columns.len())
+            .map(|ci| {
+                let all_int = rows
+                    .iter()
+                    .all(|r| r.get(ci).map(|v| v.parse::<i64>().is_ok()).unwrap_or(true));
+                if all_int {
+                    return "int";
+                }
+                let all_float = rows
+                    .iter()
+                    .all(|r| r.get(ci).map(|v| v.parse::<f64>().is_ok()).unwrap_or(true));
+                if all_float {
+                    return "float";
+                }
+                let all_bool = rows.iter().all(|r| {
+                    r.get(ci)
+                        .map(|v| v == "true" || v == "false")
+                        .unwrap_or(true)
+                });
+                if all_bool {
+                    return "bool";
+                }
+                "string"
+            })
+            .collect();
+
+        // Pass 2: build NDJSON with consistent types.
         let mut ndjson = String::new();
-        for line in lines {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let values: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+        for row in &rows {
             let mut obj = serde_json::Map::new();
             for (i, &col) in columns.iter().enumerate() {
-                if let Some(val) = values.get(i) {
-                    let json_val = if let Ok(n) = val.parse::<i64>() {
-                        serde_json::Value::Number(n.into())
-                    } else if let Ok(f) = val.parse::<f64>() {
-                        serde_json::Number::from_f64(f)
+                if let Some(val) = row.get(i) {
+                    let json_val = match col_types[i] {
+                        "int" => val
+                            .parse::<i64>()
+                            .map(|n| serde_json::Value::Number(n.into()))
+                            .unwrap_or(serde_json::Value::Null),
+                        "float" => val
+                            .parse::<f64>()
+                            .ok()
+                            .and_then(serde_json::Number::from_f64)
                             .map(serde_json::Value::Number)
-                            .unwrap_or(serde_json::Value::String(val.to_string()))
-                    } else if *val == "true" || *val == "false" {
-                        serde_json::Value::Bool(*val == "true")
-                    } else {
-                        serde_json::Value::String(val.to_string())
+                            .unwrap_or(serde_json::Value::Null),
+                        "bool" => serde_json::Value::Bool(val == "true"),
+                        _ => serde_json::Value::String(val.clone()),
                     };
                     obj.insert(col.to_string(), json_val);
                 }
