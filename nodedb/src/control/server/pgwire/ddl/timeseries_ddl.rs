@@ -313,29 +313,87 @@ pub fn rewrite_partitions(
         }
     }
 
-    // Schedule async rewrite via the partition registry.
-    // In production, this spawns a background tokio task that reads
-    // each sealed partition, re-encodes with current compression settings,
-    // and atomically swaps the output. For now, we acknowledge the command
-    // and log the intent.
-    tracing::info!(
-        collection = name,
-        tenant = tenant_id.as_u32(),
-        "REWRITE PARTITIONS scheduled (async, non-blocking)"
-    );
-
-    // Spawn the background rewrite task if registry exists.
-    if let Some(registries) = state.timeseries_registries() {
+    // Collect partition directories to rewrite.
+    let partitions_to_rewrite: Vec<String> = if let Some(registries) = state.timeseries_registries()
+    {
         let key = format!("{}:{}", tenant_id.as_u32(), name);
         let regs = crate::control::lock_utils::lock_or_recover(registries.lock(), "ts_registries");
         if let Some(registry) = regs.get(&key) {
-            let sealed_count = registry.sealed_count();
-            tracing::info!(
-                collection = name,
-                sealed_partitions = sealed_count,
-                "rewrite target: {sealed_count} sealed partitions"
-            );
+            registry
+                .iter()
+                .filter(|(_, e)| {
+                    e.meta.state == nodedb_types::timeseries::PartitionState::Sealed
+                        || e.meta.state == nodedb_types::timeseries::PartitionState::Merged
+                })
+                .map(|(_, e)| e.dir_name.clone())
+                .collect()
+        } else {
+            Vec::new()
         }
+    } else {
+        Vec::new()
+    };
+
+    let sealed_count = partitions_to_rewrite.len();
+    tracing::info!(
+        collection = name,
+        sealed_partitions = sealed_count,
+        "REWRITE PARTITIONS scheduled (async, non-blocking)"
+    );
+
+    if sealed_count > 0 {
+        let wal_dir = state.wal.wal_dir();
+        let ts_base = wal_dir
+            .parent()
+            .unwrap_or(wal_dir)
+            .join("timeseries")
+            .to_path_buf();
+        let collection_name = name.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut rewritten = 0usize;
+            for dir_name in &partitions_to_rewrite {
+                let partition_dir = ts_base.join(dir_name);
+                if !partition_dir.exists() {
+                    continue;
+                }
+                match crate::engine::timeseries::merge::merge_partitions(
+                    &ts_base,
+                    std::slice::from_ref(&partition_dir),
+                    &format!("{dir_name}.rewrite"),
+                ) {
+                    Ok(result) => {
+                        let rewrite_dir = ts_base.join(format!("{dir_name}.rewrite"));
+                        let backup_dir = ts_base.join(format!("{dir_name}.old"));
+                        if std::fs::rename(&partition_dir, &backup_dir).is_ok()
+                            && std::fs::rename(&rewrite_dir, &partition_dir).is_ok()
+                        {
+                            let _ = std::fs::remove_dir_all(&backup_dir);
+                            // Write updated metadata to partition.meta (on-disk source of truth).
+                            let meta_path = partition_dir.join("partition.meta");
+                            let _ = std::fs::write(
+                                &meta_path,
+                                serde_json::to_vec_pretty(&result.meta).unwrap_or_default(),
+                            );
+                            rewritten += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            partition = dir_name,
+                            error = %e,
+                            "rewrite failed for partition"
+                        );
+                    }
+                }
+            }
+            tracing::info!(
+                collection = collection_name,
+                rewritten,
+                total = sealed_count,
+                "REWRITE PARTITIONS completed"
+            );
+        });
     }
 
     Ok(vec![Response::Execution(pgwire::api::results::Tag::new(
