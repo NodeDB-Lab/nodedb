@@ -1,7 +1,8 @@
 //! Distance metrics for vector similarity search.
 //!
 //! Re-exports shared scalar implementations from `nodedb-types` and adds
-//! SIMD-accelerated dispatch for L2, cosine, and inner product via `numr`.
+//! SIMD-accelerated dispatch for L2, cosine, and inner product via
+//! hand-written AVX-512 / AVX2+FMA / NEON intrinsics in `simd.rs`.
 
 // Re-export scalar functions and DistanceMetric enum from shared crate.
 pub use nodedb_types::vector_distance::{
