@@ -170,6 +170,7 @@ async fn run_client(
             delta: delta.delta_bytes.clone(),
             peer_id: 1000 + id as u64,
             mutation_id: 1,
+            checksum: 0,
         };
         if ws
             .send(Message::Binary(

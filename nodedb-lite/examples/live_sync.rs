@@ -144,6 +144,7 @@ async fn test_delta_push() -> Result<(), String> {
             .map_err(|e| format!("serialize: {e}"))?,
         peer_id: 42,
         mutation_id: 1,
+        checksum: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &delta)
@@ -317,6 +318,7 @@ async fn test_real_loro_delta() -> Result<(), String> {
         delta: deltas[0].delta_bytes.clone(),
         peer_id: 100,
         mutation_id: 1,
+        checksum: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &delta_msg)
@@ -379,6 +381,7 @@ async fn test_concurrent_deltas() -> Result<(), String> {
             delta: deltas[0].delta_bytes.clone(),
             peer_id: 200 + i as u64 + 1,
             mutation_id: i as u64 + 1,
+            checksum: 0,
         };
         ws.send(Message::Binary(
             SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
@@ -427,6 +430,7 @@ async fn test_rls_violation() -> Result<(), String> {
         delta: delta_bytes,
         peer_id: 500,
         mutation_id: 99,
+        checksum: 0,
     };
     ws.send(Message::Binary(
         SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)
@@ -474,6 +478,7 @@ async fn test_shape_snapshot_lsn() -> Result<(), String> {
             delta: d.delta_bytes.clone(),
             peer_id: 300,
             mutation_id: 1,
+            checksum: 0,
         };
         ws.send(Message::Binary(
             SyncFrame::encode_or_empty(SyncMessageType::DeltaPush, &msg)

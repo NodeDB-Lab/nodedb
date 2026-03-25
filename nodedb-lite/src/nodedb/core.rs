@@ -59,13 +59,29 @@ impl<S: StorageEngine> NodeDbLite<S> {
     ) -> NodeDbResult<Self> {
         let storage = Arc::new(storage);
 
-        // ── Restore CRDT state ──
+        // ── Restore CRDT state (with CRC32C validation) ──
         let mut crdt = match storage
             .get(Namespace::LoroState, META_CRDT_SNAPSHOT)
             .await?
         {
-            Some(snapshot) => CrdtEngine::from_snapshot(peer_id, &snapshot)
-                .map_err(|e| NodeDbError::storage(format!("CRDT restore failed: {e}")))?,
+            Some(envelope) => {
+                match crate::storage::checksum::unwrap(&envelope) {
+                    Some(snapshot) => CrdtEngine::from_snapshot(peer_id, &snapshot)
+                        .map_err(|e| NodeDbError::storage(format!("CRDT restore failed: {e}")))?,
+                    None => {
+                        tracing::error!(
+                            "CRDT snapshot CRC32C mismatch — discarding corrupted snapshot. \
+                             Will start with empty state. A full re-sync from Origin is needed."
+                        );
+                        // Delete the corrupted snapshot so we don't re-read it.
+                        let _ = storage
+                            .delete(Namespace::LoroState, META_CRDT_SNAPSHOT)
+                            .await;
+                        CrdtEngine::new(peer_id)
+                            .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?
+                    }
+                }
+            }
             None => CrdtEngine::new(peer_id)
                 .map_err(|e| NodeDbError::storage(format!("CRDT init failed: {e}")))?,
         };
@@ -75,12 +91,24 @@ impl<S: StorageEngine> NodeDbLite<S> {
             crdt.restore_pending_deltas(&delta_bytes);
         }
 
-        // ── Restore CSR ──
+        // ── Restore CSR (with CRC32C validation) ──
         let csr = match storage.get(Namespace::Graph, META_CSR).await? {
-            Some(bytes) => CsrIndex::from_checkpoint(&bytes).unwrap_or_else(|| {
-                tracing::warn!("CSR checkpoint corrupted, starting with empty graph index");
-                CsrIndex::new()
-            }),
+            Some(envelope) => match crate::storage::checksum::unwrap(&envelope) {
+                Some(bytes) => CsrIndex::from_checkpoint(&bytes).unwrap_or_else(|| {
+                    tracing::warn!(
+                        "CSR checkpoint deserialization failed, rebuilding from CRDT edges"
+                    );
+                    CsrIndex::new()
+                }),
+                None => {
+                    tracing::error!(
+                        "CSR checkpoint CRC32C mismatch — discarding corrupted checkpoint. \
+                         Graph index will be rebuilt from CRDT edge documents."
+                    );
+                    let _ = storage.delete(Namespace::Graph, META_CSR).await;
+                    CsrIndex::new()
+                }
+            },
             None => CsrIndex::new(),
         };
 
@@ -122,10 +150,27 @@ impl<S: StorageEngine> NodeDbLite<S> {
         };
         for name in &names {
             let key = format!("hnsw:{name}");
-            if let Some(checkpoint) = storage.get(Namespace::Vector, key.as_bytes()).await?
-                && let Some(index) = HnswIndex::from_checkpoint(&checkpoint)
-            {
-                hnsw_indices.insert(name.clone(), index);
+            if let Some(envelope) = storage.get(Namespace::Vector, key.as_bytes()).await? {
+                match crate::storage::checksum::unwrap(&envelope) {
+                    Some(checkpoint) => {
+                        if let Some(index) = HnswIndex::from_checkpoint(&checkpoint) {
+                            hnsw_indices.insert(name.clone(), index);
+                        } else {
+                            tracing::warn!(
+                                collection = %name,
+                                "HNSW checkpoint deserialization failed, will rebuild from CRDT"
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::error!(
+                            collection = %name,
+                            "HNSW checkpoint CRC32C mismatch — discarding. \
+                             Will rebuild from CRDT document vectors on next vector insert."
+                        );
+                        let _ = storage.delete(Namespace::Vector, key.as_bytes()).await;
+                    }
+                }
             }
         }
         Ok(hnsw_indices)
@@ -135,16 +180,17 @@ impl<S: StorageEngine> NodeDbLite<S> {
     pub async fn flush(&self) -> NodeDbResult<()> {
         let mut ops = Vec::new();
 
-        // ── Persist CRDT snapshot ──
+        // ── Persist CRDT snapshot (CRC32C wrapped) ──
         {
             let crdt = self.crdt.lock_or_recover();
             let snapshot = crdt.export_snapshot().map_err(NodeDbError::storage)?;
             ops.push(WriteOp::Put {
                 ns: Namespace::LoroState,
                 key: META_CRDT_SNAPSHOT.to_vec(),
-                value: snapshot,
+                value: crate::storage::checksum::wrap(&snapshot),
             });
 
+            // Pending deltas are transient — not checksummed (they're re-exportable from Loro).
             let deltas = crdt
                 .serialize_pending_deltas()
                 .map_err(NodeDbError::storage)?;
@@ -155,14 +201,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
             });
         }
 
-        // ── Persist CSR ──
+        // ── Persist CSR (CRC32C wrapped) ──
         {
             let csr = self.csr.lock_or_recover();
             let checkpoint = csr.checkpoint_to_bytes();
             ops.push(WriteOp::Put {
                 ns: Namespace::Graph,
                 key: META_CSR.to_vec(),
-                value: checkpoint,
+                value: crate::storage::checksum::wrap(&checkpoint),
             });
         }
 
@@ -184,7 +230,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                 ops.push(WriteOp::Put {
                     ns: Namespace::Vector,
                     key: key.into_bytes(),
-                    value: checkpoint,
+                    value: crate::storage::checksum::wrap(&checkpoint),
                 });
             }
         }

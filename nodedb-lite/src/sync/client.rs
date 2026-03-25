@@ -13,7 +13,11 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use nodedb_types::sync::wire::*;
+use nodedb_types::sync::wire::{
+    DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, PingPongMsg,
+    ResyncReason, ResyncRequestMsg, ShapeDeltaMsg, ShapeSnapshotMsg, SyncFrame, SyncMessageType,
+    VectorClockSyncMsg,
+};
 
 use super::clock::VectorClock;
 use super::compensation::{CompensationEvent, CompensationRegistry};
@@ -89,6 +93,15 @@ pub struct SyncClient {
     lite_id: Option<String>,
     /// Monotonic epoch counter for fork detection.
     epoch: Option<u64>,
+    /// Sequence tracker: per-shape, the last LSN received from Origin.
+    /// Used to detect gaps in the incoming delta stream.
+    last_seen_lsn: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    /// Whether a re-sync request has been sent for this connection.
+    /// Prevents flooding Origin with multiple re-sync requests.
+    resync_requested: Arc<Mutex<bool>>,
+    /// Pending re-sync request to send to Origin (set by gap detection,
+    /// consumed by the delta push loop).
+    pending_resync: Arc<Mutex<Option<ResyncRequestMsg>>>,
 }
 
 impl SyncClient {
@@ -104,6 +117,9 @@ impl SyncClient {
             peer_id,
             lite_id: None,
             epoch: None,
+            last_seen_lsn: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            resync_requested: Arc::new(Mutex::new(false)),
+            pending_resync: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -185,6 +201,9 @@ impl SyncClient {
     }
 
     /// Build DeltaPush messages from pending deltas.
+    ///
+    /// Each message includes a CRC32C checksum of the delta payload for
+    /// integrity verification at Origin. Hardware-accelerated on x86_64/aarch64.
     pub fn build_delta_pushes(&self, pending: &[PendingDelta]) -> Vec<DeltaPushMsg> {
         pending
             .iter()
@@ -192,6 +211,7 @@ impl SyncClient {
             .map(|delta| DeltaPushMsg {
                 collection: delta.collection.clone(),
                 document_id: delta.document_id.clone(),
+                checksum: crc32c::crc32c(&delta.delta_bytes),
                 delta: delta.delta_bytes.clone(),
                 peer_id: self.peer_id,
                 mutation_id: delta.mutation_id,
@@ -262,6 +282,68 @@ impl SyncClient {
                 clock.advance(peer_id, counter);
             }
         }
+    }
+
+    /// Check an incoming ShapeDelta for sequence gaps.
+    ///
+    /// For each shape, we track the last LSN received. If the incoming LSN
+    /// is not contiguous (gap > 1), this indicates missing deltas in the stream.
+    /// Returns `Some(ResyncRequestMsg)` if a gap is detected, `None` otherwise.
+    ///
+    /// Note: LSNs may not be strictly +1 sequential (Origin may skip LSNs for
+    /// other shapes), so we only flag a gap when the new LSN is MORE than 1
+    /// ahead of the last seen LSN for the SAME shape. A gap means deltas were
+    /// lost in transit.
+    pub async fn check_sequence_gap(&self, shape_id: &str, lsn: u64) -> Option<ResyncRequestMsg> {
+        // Don't send multiple re-sync requests per connection.
+        if *self.resync_requested.lock().await {
+            return None;
+        }
+
+        let mut tracker = self.last_seen_lsn.lock().await;
+        if let Some(&last_lsn) = tracker.get(shape_id)
+            && lsn > last_lsn + 1
+        {
+            // Gap detected: we expected last_lsn+1 but got lsn.
+            tracing::warn!(
+                shape_id,
+                expected = last_lsn + 1,
+                received = lsn,
+                "sequence gap detected in incoming delta stream"
+            );
+            tracker.insert(shape_id.to_string(), lsn);
+
+            // Mark that we've requested re-sync for this connection.
+            *self.resync_requested.lock().await = true;
+
+            return Some(ResyncRequestMsg {
+                reason: ResyncReason::SequenceGap {
+                    expected: last_lsn + 1,
+                    received: lsn,
+                },
+                from_mutation_id: last_lsn + 1,
+                collection: String::new(), // All collections.
+            });
+        }
+        tracker.insert(shape_id.to_string(), lsn);
+        None
+    }
+
+    /// Reset sequence tracking state on reconnect.
+    pub async fn reset_sequence_tracking(&self) {
+        self.last_seen_lsn.lock().await.clear();
+        *self.resync_requested.lock().await = false;
+        *self.pending_resync.lock().await = None;
+    }
+
+    /// Store a pending re-sync request (set by gap detection in receive loop).
+    pub async fn set_pending_resync(&self, msg: ResyncRequestMsg) {
+        *self.pending_resync.lock().await = Some(msg);
+    }
+
+    /// Take the pending re-sync request (consumed by delta push loop).
+    pub async fn take_pending_resync(&self) -> Option<ResyncRequestMsg> {
+        self.pending_resync.lock().await.take()
     }
 
     /// Build a ping frame.
@@ -481,5 +563,73 @@ mod tests {
         let frame = client.build_ping();
         assert_eq!(frame.msg_type, SyncMessageType::PingPong);
         assert!(!frame.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sequence_gap_detection_no_gap() {
+        let client = SyncClient::new(make_config(), 1);
+        // Sequential LSNs — no gap.
+        assert!(client.check_sequence_gap("s1", 1).await.is_none());
+        assert!(client.check_sequence_gap("s1", 2).await.is_none());
+        assert!(client.check_sequence_gap("s1", 3).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sequence_gap_detection_with_gap() {
+        let client = SyncClient::new(make_config(), 1);
+        // First delta at LSN 1.
+        assert!(client.check_sequence_gap("s1", 1).await.is_none());
+        // Gap: expected 2, got 5.
+        let resync = client.check_sequence_gap("s1", 5).await;
+        assert!(resync.is_some());
+        let msg = resync.unwrap();
+        assert_eq!(msg.from_mutation_id, 2); // Resume from missing LSN.
+        assert!(matches!(
+            msg.reason,
+            ResyncReason::SequenceGap {
+                expected: 2,
+                received: 5
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn sequence_gap_only_one_resync_per_connection() {
+        let client = SyncClient::new(make_config(), 1);
+        assert!(client.check_sequence_gap("s1", 1).await.is_none());
+        // First gap — triggers resync.
+        assert!(client.check_sequence_gap("s1", 10).await.is_some());
+        // Second gap — suppressed (already requested).
+        assert!(client.check_sequence_gap("s1", 20).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_sequence_tracking_clears_state() {
+        let client = SyncClient::new(make_config(), 1);
+        assert!(client.check_sequence_gap("s1", 1).await.is_none());
+        assert!(client.check_sequence_gap("s1", 10).await.is_some());
+
+        // Reset (simulates reconnect).
+        client.reset_sequence_tracking().await;
+
+        // Should work again after reset.
+        assert!(client.check_sequence_gap("s1", 1).await.is_none());
+        assert!(client.check_sequence_gap("s1", 5).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delta_push_includes_crc32c() {
+        let client = SyncClient::new(make_config(), 42);
+        let delta_bytes = vec![1, 2, 3, 4, 5];
+        let expected_crc = crc32c::crc32c(&delta_bytes);
+        let pending = vec![PendingDelta {
+            mutation_id: 1,
+            collection: "test".into(),
+            document_id: "d1".into(),
+            delta_bytes,
+        }];
+        let msgs = client.build_delta_pushes(&pending);
+        assert_eq!(msgs[0].checksum, expected_crc);
+        assert_ne!(msgs[0].checksum, 0);
     }
 }
