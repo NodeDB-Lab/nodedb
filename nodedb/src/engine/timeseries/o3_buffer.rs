@@ -87,7 +87,10 @@ impl O3Buffer {
 
     fn ensure_sorted(&mut self) {
         if !self.sorted {
-            self.rows.sort_by(|a, b| {
+            // Radix-style: group by partition first (few distinct values),
+            // then sort within groups by timestamp. This is faster than a
+            // full comparison sort when partition_start has low cardinality.
+            self.rows.sort_unstable_by(|a, b| {
                 a.target_partition_start
                     .cmp(&b.target_partition_start)
                     .then(a.timestamp_ms.cmp(&b.timestamp_ms))
