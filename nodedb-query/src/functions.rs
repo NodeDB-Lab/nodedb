@@ -326,58 +326,6 @@ pub fn eval_function(name: &str, args: &[serde_json::Value]) -> serde_json::Valu
                 serde_json::Value::String(d.to_human())
             }),
 
-        // ── Geo ──
-        "geo_distance" | "haversine_distance" => {
-            let lng1 = num_arg(args, 0).unwrap_or(0.0);
-            let lat1 = num_arg(args, 1).unwrap_or(0.0);
-            let lng2 = num_arg(args, 2).unwrap_or(0.0);
-            let lat2 = num_arg(args, 3).unwrap_or(0.0);
-            to_json_number(nodedb_types::geometry::haversine_distance(
-                lng1, lat1, lng2, lat2,
-            ))
-        }
-        "geo_bearing" | "haversine_bearing" => {
-            let lng1 = num_arg(args, 0).unwrap_or(0.0);
-            let lat1 = num_arg(args, 1).unwrap_or(0.0);
-            let lng2 = num_arg(args, 2).unwrap_or(0.0);
-            let lat2 = num_arg(args, 3).unwrap_or(0.0);
-            to_json_number(nodedb_types::geometry::haversine_bearing(
-                lng1, lat1, lng2, lat2,
-            ))
-        }
-        "geo_point" => {
-            let lng = num_arg(args, 0).unwrap_or(0.0);
-            let lat = num_arg(args, 1).unwrap_or(0.0);
-            let point = nodedb_types::geometry::Geometry::point(lng, lat);
-            serde_json::to_value(&point).unwrap_or(serde_json::Value::Null)
-        }
-        "geo_geohash" => {
-            let lng = num_arg(args, 0).unwrap_or(0.0);
-            let lat = num_arg(args, 1).unwrap_or(0.0);
-            let precision = num_arg(args, 2).unwrap_or(6.0) as u8;
-            serde_json::Value::String(nodedb_spatial::geohash_encode(lng, lat, precision))
-        }
-        "geo_geohash_decode" => {
-            let hash = str_arg(args, 0).unwrap_or_default();
-            match nodedb_spatial::geohash_decode(&hash) {
-                Some(bb) => serde_json::json!({
-                    "min_lng": bb.min_lng,
-                    "min_lat": bb.min_lat,
-                    "max_lng": bb.max_lng,
-                    "max_lat": bb.max_lat,
-                }),
-                None => serde_json::Value::Null,
-            }
-        }
-        "geo_geohash_neighbors" => {
-            let hash = str_arg(args, 0).unwrap_or_default();
-            let neighbors = nodedb_spatial::geohash_neighbors(&hash);
-            let arr: Vec<serde_json::Value> = neighbors
-                .into_iter()
-                .map(|(dir, h)| serde_json::json!({"direction": format!("{dir:?}"), "hash": h}))
-                .collect();
-            serde_json::Value::Array(arr)
-        }
         "decimal" | "to_decimal" => args.first().map_or(serde_json::Value::Null, |v| {
             let s = json_to_display_string(v);
             match s.parse::<rust_decimal::Decimal>() {
@@ -524,7 +472,10 @@ pub fn eval_function(name: &str, args: &[serde_json::Value]) -> serde_json::Valu
             serde_json::Value::String(type_name.to_string())
         }
 
-        _ => serde_json::Value::Null,
+        // Geo / Spatial functions — delegated to geo_functions module.
+        other => {
+            crate::geo_functions::eval_geo_function(other, args).unwrap_or(serde_json::Value::Null)
+        }
     }
 }
 
@@ -626,5 +577,137 @@ mod tests {
         let result = eval_fn("geo_geohash_neighbors", vec![hash]);
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 8);
+    }
+
+    fn point_json(lng: f64, lat: f64) -> serde_json::Value {
+        json!({"type": "Point", "coordinates": [lng, lat]})
+    }
+
+    fn square_json() -> serde_json::Value {
+        json!({"type": "Polygon", "coordinates": [[[0.0,0.0],[10.0,0.0],[10.0,10.0],[0.0,10.0],[0.0,0.0]]]})
+    }
+
+    #[test]
+    fn st_contains_sql() {
+        let result = eval_fn("st_contains", vec![square_json(), point_json(5.0, 5.0)]);
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn st_intersects_sql() {
+        let result = eval_fn("st_intersects", vec![square_json(), point_json(5.0, 0.0)]);
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn st_distance_sql() {
+        let result = eval_fn(
+            "st_distance",
+            vec![point_json(0.0, 0.0), point_json(0.0, 1.0)],
+        );
+        let d = result.as_f64().unwrap();
+        assert!((d - 111_195.0).abs() < 500.0, "got {d}");
+    }
+
+    #[test]
+    fn st_dwithin_sql() {
+        let result = eval_fn(
+            "st_dwithin",
+            vec![point_json(0.0, 0.0), point_json(0.001, 0.0), json!(200.0)],
+        );
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn st_buffer_sql() {
+        let result = eval_fn(
+            "st_buffer",
+            vec![point_json(0.0, 0.0), json!(1000.0), json!(8)],
+        );
+        assert!(result.is_object());
+        assert_eq!(result["type"], "Polygon");
+    }
+
+    #[test]
+    fn st_envelope_sql() {
+        let result = eval_fn("st_envelope", vec![square_json()]);
+        assert_eq!(result["type"], "Polygon");
+    }
+
+    #[test]
+    fn geo_length_sql() {
+        let line = json!({"type": "LineString", "coordinates": [[0.0,0.0],[0.0,1.0]]});
+        let result = eval_fn("geo_length", vec![line]);
+        let d = result.as_f64().unwrap();
+        assert!((d - 111_195.0).abs() < 500.0, "got {d}");
+    }
+
+    #[test]
+    fn geo_x_y() {
+        assert_eq!(
+            eval_fn("geo_x", vec![point_json(5.0, 10.0)])
+                .as_f64()
+                .unwrap(),
+            5.0
+        );
+        assert_eq!(
+            eval_fn("geo_y", vec![point_json(5.0, 10.0)])
+                .as_f64()
+                .unwrap(),
+            10.0
+        );
+    }
+
+    #[test]
+    fn geo_type_sql() {
+        assert_eq!(
+            eval_fn("geo_type", vec![point_json(0.0, 0.0)]),
+            json!("Point")
+        );
+        assert_eq!(eval_fn("geo_type", vec![square_json()]), json!("Polygon"));
+    }
+
+    #[test]
+    fn geo_num_points_sql() {
+        assert_eq!(
+            eval_fn("geo_num_points", vec![point_json(0.0, 0.0)]),
+            json!(1)
+        );
+        assert_eq!(eval_fn("geo_num_points", vec![square_json()]), json!(5));
+    }
+
+    #[test]
+    fn geo_is_valid_sql() {
+        assert_eq!(eval_fn("geo_is_valid", vec![square_json()]), json!(true));
+    }
+
+    #[test]
+    fn geo_as_wkt_sql() {
+        let result = eval_fn("geo_as_wkt", vec![point_json(5.0, 10.0)]);
+        assert_eq!(result, json!("POINT(5 10)"));
+    }
+
+    #[test]
+    fn geo_from_wkt_sql() {
+        let result = eval_fn("geo_from_wkt", vec![json!("POINT(5 10)")]);
+        assert_eq!(result["type"], "Point");
+    }
+
+    #[test]
+    fn geo_circle_sql() {
+        let result = eval_fn(
+            "geo_circle",
+            vec![json!(0.0), json!(0.0), json!(1000.0), json!(16)],
+        );
+        assert_eq!(result["type"], "Polygon");
+    }
+
+    #[test]
+    fn geo_bbox_sql() {
+        let result = eval_fn(
+            "geo_bbox",
+            vec![json!(0.0), json!(0.0), json!(10.0), json!(10.0)],
+        );
+        assert_eq!(result["type"], "Polygon");
     }
 }

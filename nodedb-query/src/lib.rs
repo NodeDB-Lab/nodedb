@@ -1,6 +1,7 @@
 pub mod cast;
 pub mod expr;
 pub mod functions;
+pub mod geo_functions;
 pub mod json_ops;
 pub mod metadata_filter;
 pub mod scan_filter;
