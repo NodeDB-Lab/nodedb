@@ -5,6 +5,7 @@ pub mod columnar_agg;
 pub mod columnar_memtable;
 pub mod columnar_segment;
 pub mod compress;
+pub mod continuous_agg;
 pub mod gorilla;
 pub mod ilp;
 pub mod ilp_ingest;

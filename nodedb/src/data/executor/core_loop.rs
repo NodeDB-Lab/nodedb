@@ -134,6 +134,10 @@ pub struct CoreLoop {
     /// Per-collection timeseries partition registries for this core.
     pub(in crate::data::executor) ts_registries:
         HashMap<String, crate::engine::timeseries::partition_registry::PartitionRegistry>,
+
+    /// Continuous aggregate manager for this core. Fires on memtable flush.
+    pub(in crate::data::executor) continuous_agg_mgr:
+        crate::engine::timeseries::continuous_agg::ContinuousAggregateManager,
 }
 
 impl CoreLoop {
@@ -190,6 +194,8 @@ impl CoreLoop {
             doc_cache: DocCache::new(4096),
             ts_memtables: HashMap::new(),
             ts_registries: HashMap::new(),
+            continuous_agg_mgr:
+                crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),
         })
     }
 

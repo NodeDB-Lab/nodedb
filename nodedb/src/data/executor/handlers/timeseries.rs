@@ -218,6 +218,12 @@ impl CoreLoop {
                 let (accepted, rejected) =
                     ilp_ingest::ingest_batch(mt, &lines, &mut series_keys, now_ms);
 
+                // Check if memtable needs flushing.
+                let mt = self.ts_memtables.get(collection).unwrap();
+                if mt.memory_bytes() >= 64 * 1024 * 1024 {
+                    self.flush_ts_collection(collection, now_ms);
+                }
+
                 let result = serde_json::json!({
                     "accepted": accepted,
                     "rejected": rejected,
@@ -240,6 +246,55 @@ impl CoreLoop {
                     detail: format!("unknown ingest format: {format}"),
                 },
             ),
+        }
+    }
+
+    /// Flush a timeseries collection's memtable to L1 segments.
+    ///
+    /// Drains the columnar memtable, writes segments via `ColumnarSegmentWriter`,
+    /// and fires the continuous aggregate hook with the flushed data.
+    fn flush_ts_collection(&mut self, collection: &str, now_ms: i64) {
+        let Some(mt) = self.ts_memtables.get_mut(collection) else {
+            return;
+        };
+        if mt.is_empty() {
+            return;
+        }
+
+        let drain = mt.drain();
+
+        // Write to L1 segments.
+        let segment_dir = self.data_dir.join(format!("ts/{collection}"));
+        let writer =
+            crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter::new(&segment_dir);
+        let partition_name = format!("ts-{}_{}", drain.min_ts, drain.max_ts);
+
+        match writer.write_partition(&partition_name, &drain, 0, 0) {
+            Ok(meta) => {
+                tracing::info!(
+                    collection,
+                    rows = meta.row_count,
+                    "timeseries columnar flush complete"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    collection,
+                    error = %e,
+                    "timeseries columnar flush failed"
+                );
+                return;
+            }
+        }
+
+        // Fire continuous aggregate hook.
+        let refreshed = self.continuous_agg_mgr.on_flush(collection, &drain, now_ms);
+        if !refreshed.is_empty() {
+            tracing::debug!(
+                collection,
+                aggregates = ?refreshed,
+                "continuous aggregates refreshed on flush"
+            );
         }
     }
 }
