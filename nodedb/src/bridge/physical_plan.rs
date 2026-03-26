@@ -10,6 +10,19 @@ use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
 use crate::types::RequestId;
 
+/// Spatial predicate type for R-tree index scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialPredicate {
+    /// ST_DWithin: geometry within distance (meters). R-tree search bbox = query bbox expanded by distance.
+    DWithin,
+    /// ST_Contains: query geometry contains document geometry.
+    Contains,
+    /// ST_Intersects: query geometry intersects document geometry.
+    Intersects,
+    /// ST_Within: document geometry is within query geometry (reverse of Contains).
+    Within,
+}
+
 /// Physical plan dispatched to the Data Plane.
 ///
 /// This enum will grow as engines are integrated. Each variant carries
@@ -545,6 +558,33 @@ pub enum PhysicalPlan {
         /// time_bucket interval in milliseconds for GROUP BY time_bucket().
         /// 0 = no bucketing.
         bucket_interval_ms: i64,
+    },
+
+    /// Spatial index scan: use R-tree to find candidate documents matching
+    /// a spatial predicate, then refine with exact geometry test.
+    ///
+    /// The Data Plane:
+    /// 1. Expands the query geometry into a search bounding box
+    /// 2. R-tree range search → candidate RIDs
+    /// 3. Load candidate geometries, apply exact predicate (ST_DWithin, ST_Contains, etc.)
+    /// 4. Return matching documents (with optional attribute filters applied)
+    SpatialScan {
+        collection: String,
+        /// Geometry field being queried.
+        field: String,
+        /// Spatial predicate type.
+        predicate: SpatialPredicate,
+        /// Query geometry serialized as GeoJSON bytes.
+        query_geometry: Vec<u8>,
+        /// Distance threshold in meters (for ST_DWithin). 0 for non-distance predicates.
+        distance_meters: f64,
+        /// Additional attribute filters (same format as DocumentScan filters).
+        /// Applied after spatial candidates are identified.
+        attribute_filters: Vec<u8>,
+        /// Maximum documents to return.
+        limit: usize,
+        /// Column projection (empty = all fields).
+        projection: Vec<String>,
     },
 
     /// Timeseries ingest: write a batch of samples to the columnar memtable.

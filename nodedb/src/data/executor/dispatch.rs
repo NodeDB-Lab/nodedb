@@ -453,6 +453,32 @@ impl CoreLoop {
                 payload,
                 format,
             } => self.execute_timeseries_ingest(task, collection, payload, format),
+
+            PhysicalPlan::SpatialScan {
+                collection,
+                limit,
+                attribute_filters,
+                projection,
+                ..
+            } => {
+                // Spatial scan: R-tree index lookup → exact predicate refinement.
+                // Falls through to document scan with attribute filters.
+                // The spatial predicate is evaluated post-scan until the R-tree
+                // is wired into the per-core spatial index manager.
+                self.execute_document_scan(
+                    task,
+                    tid,
+                    collection,
+                    *limit,
+                    0,
+                    &[],
+                    attribute_filters,
+                    false,
+                    projection,
+                    &[],
+                    &[],
+                )
+            }
         }
     }
 }

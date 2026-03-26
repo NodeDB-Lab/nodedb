@@ -263,6 +263,11 @@ pub async fn dispatch(
     if upper.starts_with("CREATE FULLTEXT INDEX ") {
         return Some(super::dsl::create_fulltext_index(state, identity, &parts));
     }
+    if upper.starts_with("CREATE SPATIAL INDEX ") {
+        return Some(super::spatial_ddl::create_spatial_index(
+            state, identity, &parts,
+        ));
+    }
 
     // DSL: CRDT MERGE INTO (async — dispatches to Data Plane).
     if upper.starts_with("CRDT MERGE ") {

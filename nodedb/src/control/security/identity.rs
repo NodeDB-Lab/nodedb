@@ -167,6 +167,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         | PhysicalPlan::PartialAggregate { .. }
         | PhysicalPlan::BroadcastJoin { .. }
         | PhysicalPlan::ShuffleJoin { .. }
+        | PhysicalPlan::SpatialScan { .. }
         | PhysicalPlan::TimeseriesScan { .. } => Permission::Read,
 
         // Write operations.

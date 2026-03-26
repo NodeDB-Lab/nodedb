@@ -3,6 +3,9 @@
 mod dml;
 mod filter;
 mod index_scan;
+// Integration pending: wired when per-core R-tree spatial index manager is available.
+#[allow(dead_code)]
+pub(crate) mod spatial_filter;
 
 pub(super) use dml::{extract_insert_values, extract_point_targets, extract_update_assignments};
 pub(super) use filter::{expr_to_scan_filters, extract_where_filters};

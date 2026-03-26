@@ -66,7 +66,8 @@ pub(super) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         | PhysicalPlan::Truncate { collection }
         | PhysicalPlan::EstimateCount { collection, .. }
         | PhysicalPlan::TimeseriesScan { collection, .. }
-        | PhysicalPlan::TimeseriesIngest { collection, .. } => Some(collection.as_str()),
+        | PhysicalPlan::TimeseriesIngest { collection, .. }
+        | PhysicalPlan::SpatialScan { collection, .. } => Some(collection.as_str()),
         PhysicalPlan::EdgePut { .. }
         | PhysicalPlan::EdgeDelete { .. }
         | PhysicalPlan::GraphHop { .. }
