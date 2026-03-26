@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod circuit_breaker;
 pub mod conf_change;
 pub mod cross_shard_txn;
+pub mod distributed_document;
 pub mod distributed_graph;
 pub mod distributed_join;
 pub mod distributed_timeseries;
