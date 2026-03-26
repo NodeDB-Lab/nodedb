@@ -1,3 +1,4 @@
+pub mod approx_agg;
 pub mod asof_join;
 pub mod bitmap_index;
 pub mod bucket;
@@ -13,9 +14,13 @@ pub mod manager;
 pub mod memtable;
 pub mod merge;
 pub mod o3_buffer;
+pub mod parallel_scan;
 pub mod partition_registry;
+pub mod projection;
 pub mod query;
+pub mod query_cache;
 pub mod reader;
+pub mod recent_cache;
 pub mod s3_archive;
 pub mod schema_evolution;
 pub mod segment_index;
@@ -23,6 +28,7 @@ pub mod simd_agg;
 pub mod sparse_index;
 pub mod time_bucket;
 pub mod ts_detect;
+pub mod vectorized_scan;
 #[cfg(test)]
 mod verification;
 
