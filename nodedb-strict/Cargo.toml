@@ -1,0 +1,15 @@
+[package]
+name = "nodedb-strict"
+description = "Binary Tuple serialization for NodeDB strict document mode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nodedb-types = { workspace = true }
+arrow = { version = "58", default-features = false, features = ["ffi"] }
+thiserror = { workspace = true }
+rust_decimal = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
