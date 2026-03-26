@@ -1,5 +1,6 @@
 pub mod geohash;
 pub mod operations;
+pub mod persist;
 pub mod predicates;
 pub mod rtree;
 pub mod validate;
@@ -8,6 +9,10 @@ pub mod wkt;
 
 pub use geohash::{geohash_decode, geohash_encode, geohash_neighbors};
 pub use operations::{st_buffer, st_envelope, st_union};
+pub use persist::{
+    RTreeCheckpointError, RTreeSnapshot, SpatialIndexMeta, SpatialIndexType, deserialize_meta,
+    meta_storage_key, rtree_storage_key, serialize_meta,
+};
 pub use predicates::{st_contains, st_disjoint, st_distance, st_dwithin, st_intersects, st_within};
 pub use rtree::{RTree, RTreeEntry};
 pub use validate::{is_valid, validate_geometry};
