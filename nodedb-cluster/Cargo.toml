@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 # Workspace crates
 nodedb-raft = { workspace = true }
+nodedb-types = { workspace = true }
 
 # Workspace deps
 serde = { workspace = true }

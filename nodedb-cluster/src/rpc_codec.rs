@@ -48,6 +48,7 @@ const RPC_TOPOLOGY_UPDATE: u8 = 11;
 const RPC_TOPOLOGY_ACK: u8 = 12;
 const RPC_FORWARD_REQ: u8 = 13;
 const RPC_FORWARD_RESP: u8 = 14;
+const RPC_VSHARD_ENVELOPE: u8 = 15;
 
 // ── Cluster management wire types ───────────────────────────────────
 
@@ -171,6 +172,10 @@ pub enum RaftRpc {
     // Query forwarding
     ForwardRequest(ForwardRequest),
     ForwardResponse(ForwardResponse),
+    // VShardEnvelope — carries graph BSP, timeseries scatter-gather, migration,
+    // retention, and archival messages. The inner VShardMessageType determines
+    // the handler.
+    VShardEnvelope(Vec<u8>), // Serialized VShardEnvelope bytes.
 }
 
 impl RaftRpc {
@@ -190,6 +195,7 @@ impl RaftRpc {
             Self::TopologyAck(_) => RPC_TOPOLOGY_ACK,
             Self::ForwardRequest(_) => RPC_FORWARD_REQ,
             Self::ForwardResponse(_) => RPC_FORWARD_RESP,
+            Self::VShardEnvelope(_) => RPC_VSHARD_ENVELOPE,
         }
     }
 }
@@ -292,6 +298,7 @@ fn serialize_payload(rpc: &RaftRpc) -> Result<Vec<u8>> {
         RaftRpc::TopologyAck(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
         RaftRpc::ForwardRequest(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
         RaftRpc::ForwardResponse(msg) => rkyv::to_bytes::<rkyv::rancor::Error>(msg),
+        RaftRpc::VShardEnvelope(bytes) => return Ok(bytes.clone()), // Already serialized.
     };
     bytes.map(|b| b.to_vec()).map_err(|e| ClusterError::Codec {
         detail: format!("rkyv serialize failed: {e}"),
@@ -417,6 +424,10 @@ fn deserialize_payload(rpc_type: u8, payload: &[u8]) -> Result<RaftRpc> {
                 },
             )?;
             Ok(RaftRpc::ForwardResponse(msg))
+        }
+        RPC_VSHARD_ENVELOPE => {
+            // VShardEnvelope is already in its own binary format — pass through raw.
+            Ok(RaftRpc::VShardEnvelope(payload.to_vec()))
         }
         _ => Err(ClusterError::Codec {
             detail: format!("unknown rpc_type: {rpc_type}"),

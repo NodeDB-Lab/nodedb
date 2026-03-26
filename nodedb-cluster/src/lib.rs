@@ -5,6 +5,7 @@ pub mod conf_change;
 pub mod cross_shard_txn;
 pub mod distributed_graph;
 pub mod distributed_join;
+pub mod distributed_timeseries;
 pub mod error;
 pub mod forward;
 pub mod ghost;
@@ -26,6 +27,7 @@ pub mod rpc_codec;
 pub mod shard_split;
 pub mod topology;
 pub mod transport;
+pub mod vshard_handler;
 pub mod wire;
 
 pub use bootstrap::{ClusterConfig, ClusterState, start_cluster};

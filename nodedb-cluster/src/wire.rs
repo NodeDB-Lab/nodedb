@@ -69,6 +69,20 @@ pub enum VShardMessageType {
     /// Algorithm complete: coordinator broadcasts final signal with
     /// global convergence status.
     GraphAlgoComplete = 33,
+
+    // ── Timeseries Distributed Aggregation ──
+    /// Scatter: coordinator sends aggregation query to a shard.
+    TsScatterRequest = 40,
+    /// Gather: shard responds with partial aggregates.
+    TsScatterResponse = 41,
+    /// Coordinator broadcasts retention command to all shards.
+    TsRetentionCommand = 42,
+    /// Shard acknowledges retention execution.
+    TsRetentionAck = 43,
+    /// S3 archival command: coordinator tells shard to archive partitions.
+    TsArchiveCommand = 44,
+    /// S3 archival acknowledgement.
+    TsArchiveAck = 45,
 }
 
 /// Current wire protocol version.
@@ -142,6 +156,12 @@ impl VShardEnvelope {
             31 => VShardMessageType::GraphAlgoContributions,
             32 => VShardMessageType::GraphAlgoSuperstepAck,
             33 => VShardMessageType::GraphAlgoComplete,
+            40 => VShardMessageType::TsScatterRequest,
+            41 => VShardMessageType::TsScatterResponse,
+            42 => VShardMessageType::TsRetentionCommand,
+            43 => VShardMessageType::TsRetentionAck,
+            44 => VShardMessageType::TsArchiveCommand,
+            45 => VShardMessageType::TsArchiveAck,
             _ => return None,
         };
 
@@ -190,6 +210,12 @@ mod tests {
             VShardMessageType::GraphAlgoContributions,
             VShardMessageType::GraphAlgoSuperstepAck,
             VShardMessageType::GraphAlgoComplete,
+            VShardMessageType::TsScatterRequest,
+            VShardMessageType::TsScatterResponse,
+            VShardMessageType::TsRetentionCommand,
+            VShardMessageType::TsRetentionAck,
+            VShardMessageType::TsArchiveCommand,
+            VShardMessageType::TsArchiveAck,
         ];
 
         for msg_type in types {
