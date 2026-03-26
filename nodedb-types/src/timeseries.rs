@@ -146,6 +146,35 @@ impl SeriesCatalog {
 pub type LiteId = String;
 
 // ---------------------------------------------------------------------------
+// Battery state (Lite-B mobile)
+// ---------------------------------------------------------------------------
+
+/// Battery state reported by the host application for battery-aware flushing.
+///
+/// The Lite engine uses this to defer disk I/O when battery is low.
+/// The application provides this via a callback — NodeDB doesn't read
+/// battery state directly (platform-specific API).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatteryState {
+    /// Battery level is sufficient (>50%) or device is on AC power.
+    Normal,
+    /// Battery is low (<20%) and not charging. Defer non-critical I/O.
+    Low,
+    /// Device is currently charging. Safe to flush.
+    Charging,
+    /// Battery state unknown (desktop, non-mobile). Treat as Normal.
+    #[default]
+    Unknown,
+}
+
+impl BatteryState {
+    /// Whether flushing should be deferred in battery-aware mode.
+    pub fn should_defer_flush(&self) -> bool {
+        matches!(self, Self::Low)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ingest types
 // ---------------------------------------------------------------------------
 
@@ -540,12 +569,28 @@ pub struct TieredPartitionConfig {
     pub cdc_enabled: bool,
 
     // -- Sync (Lite only) --
-    /// Pre-sync downsampling resolution. 0 = send raw samples.
+    /// Pre-sync downsampling resolution in milliseconds.
+    /// 0 = send raw samples. >0 = average samples within each window before
+    /// writing to memtable. E.g., 10000 = 10-second resolution.
     pub sync_resolution_ms: u64,
     /// Sync batch interval in milliseconds.
     pub sync_interval_ms: u64,
     /// Whether to retain unsynced data past the retention period.
     pub retain_until_synced: bool,
+
+    // -- Battery (Lite-B mobile only) --
+    /// Whether to defer flushes on low battery. Default: false.
+    /// When true and battery < 20%, memtable limit is doubled to defer I/O.
+    /// Flush resumes when charging or battery > 50%.
+    #[serde(default)]
+    pub battery_aware: bool,
+
+    // -- Burst ingestion (Lite-C) --
+    /// Maximum rows to accumulate before flushing in bulk import mode.
+    /// 0 = disabled (use normal memtable limits). When burst ingestion is
+    /// detected (rate > 10x normal for > 30s), this overrides memtable_max_memory_bytes.
+    #[serde(default)]
+    pub bulk_import_threshold_rows: u64,
 }
 
 /// Compression codec for archived (cold) partitions.
@@ -576,6 +621,8 @@ impl TieredPartitionConfig {
             sync_resolution_ms: 0,
             sync_interval_ms: 0,
             retain_until_synced: false,
+            battery_aware: false,
+            bulk_import_threshold_rows: 0,
         }
     }
 
@@ -597,6 +644,8 @@ impl TieredPartitionConfig {
             sync_resolution_ms: 0,    // raw by default
             sync_interval_ms: 30_000, // 30s
             retain_until_synced: false,
+            battery_aware: false,                  // opt-in on mobile
+            bulk_import_threshold_rows: 1_000_000, // 1M rows for Lite bulk import
         }
     }
 
