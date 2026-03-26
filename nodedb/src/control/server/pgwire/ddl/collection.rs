@@ -51,6 +51,23 @@ pub fn create_collection(
         .unwrap_or_default()
         .as_secs();
 
+    // Detect storage mode: WITH storage = 'strict' | 'columnar'.
+    let upper = sql_upper_from_parts(parts);
+    let collection_type = if upper.contains("STORAGE") && upper.contains("STRICT") {
+        nodedb_types::CollectionType::strict(
+            // Schema will be parsed below and stored in timeseries_config
+            // as JSON until StoredCollection gets a proper strict_schema field.
+            nodedb_types::columnar::StrictSchema {
+                columns: Vec::new(),
+                version: 1,
+            },
+        )
+    } else if upper.contains("STORAGE") && upper.contains("COLUMNAR") {
+        nodedb_types::CollectionType::columnar()
+    } else {
+        nodedb_types::CollectionType::document()
+    };
+
     // Parse optional FIELDS clause: CREATE COLLECTION name FIELDS (field type, ...)
     let fields = parse_fields_clause(parts);
 
@@ -62,7 +79,7 @@ pub fn create_collection(
         fields,
         field_defs: Vec::new(),
         event_defs: Vec::new(),
-        collection_type: nodedb_types::CollectionType::document(),
+        collection_type,
         timeseries_config: None,
         is_active: true,
     };
@@ -404,6 +421,20 @@ pub fn describe_collection(
         }
     }
 
+    // Show storage mode info.
+    if coll.collection_type.is_strict() || coll.collection_type.is_columnar() {
+        encoder
+            .encode_field(&"__storage")
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+        encoder
+            .encode_field(&coll.collection_type.as_str())
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+        encoder
+            .encode_field(&"false")
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+        rows.push(Ok(encoder.take_row()));
+    }
+
     // Timeseries-specific info: show collection_type and config.
     if coll.collection_type.is_timeseries() {
         encoder
@@ -560,4 +591,9 @@ pub fn show_indexes(
         schema,
         stream::iter(rows),
     ))])
+}
+
+/// Reconstruct uppercase SQL from split parts for keyword detection.
+fn sql_upper_from_parts(parts: &[&str]) -> String {
+    parts.join(" ").to_uppercase()
 }
