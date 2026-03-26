@@ -16,6 +16,7 @@ use crate::storage::engine::{StorageEngine, WriteOp};
 /// Storage key constants.
 pub(crate) const META_HNSW_COLLECTIONS: &[u8] = b"meta:hnsw_collections";
 pub(crate) const META_CSR: &[u8] = b"meta:csr_checkpoint";
+pub(crate) const META_SPATIAL_INDEXES: &[u8] = b"meta:spatial_indexes";
 pub(crate) const META_CRDT_SNAPSHOT: &[u8] = b"crdt:snapshot";
 pub(crate) const META_CRDT_DELTAS: &[u8] = b"crdt:pending_deltas";
 /// Last flushed mutation_id — used for partial flush safety.
@@ -47,6 +48,8 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// Per-collection in-memory inverted index for full-text search.
     /// Updated incrementally on `document_put` and `document_delete`.
     pub(crate) text_indices: Mutex<HashMap<String, nodedb_query::text_search::InvertedIndex>>,
+    /// Spatial R-tree indexes for geometry fields.
+    pub(crate) spatial: Mutex<crate::engine::spatial::SpatialIndexManager>,
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -150,6 +153,9 @@ impl<S: StorageEngine> NodeDbLite<S> {
         // ── Restore HNSW indices ──
         let hnsw_indices = Self::restore_hnsw_indices(&storage).await?;
 
+        // ── Restore spatial indices ──
+        let spatial = Self::restore_spatial_indices(&storage).await;
+
         let governor = MemoryGovernor::new(memory_budget);
 
         let crdt = Arc::new(Mutex::new(crdt));
@@ -165,10 +171,22 @@ impl<S: StorageEngine> NodeDbLite<S> {
             vector_id_map: Mutex::new(HashMap::new()),
             query_engine,
             text_indices: Mutex::new(HashMap::new()),
+            spatial: Mutex::new(spatial),
         };
 
         // Rebuild text indices from CRDT state (cold start).
         db.rebuild_text_indices();
+
+        // Rebuild spatial indices if restore produced empty trees.
+        // The R-tree checkpoint only stores bounding boxes, not doc IDs.
+        // A full rebuild from CRDT documents ensures doc_to_entry is correct.
+        {
+            let spatial = db.spatial.lock_or_recover();
+            if spatial.is_empty() {
+                drop(spatial);
+                db.rebuild_spatial_indices();
+            }
+        }
 
         Ok(db)
     }
@@ -209,6 +227,45 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
         }
         Ok(hnsw_indices)
+    }
+
+    /// Restore spatial indices from storage.
+    async fn restore_spatial_indices(
+        storage: &Arc<S>,
+    ) -> crate::engine::spatial::SpatialIndexManager {
+        let Some(index_list_bytes) = storage
+            .get(Namespace::Meta, META_SPATIAL_INDEXES)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return crate::engine::spatial::SpatialIndexManager::new();
+        };
+
+        let Ok(index_keys) = rmp_serde::from_slice::<Vec<(String, String)>>(&index_list_bytes)
+        else {
+            return crate::engine::spatial::SpatialIndexManager::new();
+        };
+
+        let mut checkpoints = Vec::new();
+        for (collection, field) in &index_keys {
+            let key = format!("spatial:{collection}:{field}");
+            if let Ok(Some(envelope)) = storage.get(Namespace::Spatial, key.as_bytes()).await {
+                match crate::storage::checksum::unwrap(&envelope) {
+                    Some(bytes) => checkpoints.push((collection.clone(), field.clone(), bytes)),
+                    None => {
+                        tracing::error!(
+                            collection = %collection,
+                            field = %field,
+                            "spatial index CRC32C mismatch — discarding"
+                        );
+                        let _ = storage.delete(Namespace::Spatial, key.as_bytes()).await;
+                    }
+                }
+            }
+        }
+
+        crate::engine::spatial::SpatialIndexManager::restore_all(&checkpoints)
     }
 
     /// Persist all in-memory state to storage (call before shutdown).
@@ -293,6 +350,32 @@ impl<S: StorageEngine> NodeDbLite<S> {
             }
         }
 
+        // ── Persist spatial indices ──
+        {
+            let spatial = self.spatial.lock_or_recover();
+            let checkpoints = spatial.checkpoint_all();
+            let index_keys: Vec<(String, String)> = checkpoints
+                .iter()
+                .map(|(c, f, _)| (c.clone(), f.clone()))
+                .collect();
+            let keys_bytes = rmp_serde::to_vec_named(&index_keys)
+                .map_err(|e| NodeDbError::serialization("msgpack", e))?;
+            ops.push(WriteOp::Put {
+                ns: Namespace::Meta,
+                key: META_SPATIAL_INDEXES.to_vec(),
+                value: keys_bytes,
+            });
+
+            for (collection, field, bytes) in &checkpoints {
+                let key = format!("spatial:{collection}:{field}");
+                ops.push(WriteOp::Put {
+                    ns: Namespace::Spatial,
+                    key: key.into_bytes(),
+                    value: crate::storage::checksum::wrap(bytes),
+                });
+            }
+        }
+
         self.storage
             .batch_write(&ops)
             .await
@@ -337,6 +420,37 @@ impl<S: StorageEngine> NodeDbLite<S> {
                         .join(" ");
                     if !text.is_empty() {
                         idx.index_document(id, &text);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rebuild spatial indices from CRDT state (cold start fallback).
+    ///
+    /// Scans all collections for geometry-valued fields and indexes them.
+    /// Called when checkpoint restore produces empty spatial indices.
+    fn rebuild_spatial_indices(&self) {
+        let crdt = self.crdt.lock_or_recover();
+        let collections = crdt.collection_names();
+        let mut spatial = self.spatial.lock_or_recover();
+
+        for collection in &collections {
+            if collection.starts_with("__") {
+                continue;
+            }
+            let ids = crdt.list_ids(collection);
+            for id in &ids {
+                if let Some(loro_val) = crdt.read(collection, id) {
+                    let doc = crate::nodedb::convert::loro_value_to_document(id, &loro_val);
+                    for (field, value) in &doc.fields {
+                        // Geometry fields are stored as GeoJSON strings.
+                        if let nodedb_types::Value::String(s) = value
+                            && let Ok(geom) =
+                                serde_json::from_str::<nodedb_types::geometry::Geometry>(s)
+                        {
+                            spatial.index_document(collection, field, id, &geom);
+                        }
                     }
                 }
             }

@@ -1,4 +1,5 @@
 pub mod geohash;
+pub mod hybrid;
 pub mod operations;
 pub mod persist;
 pub mod predicates;
@@ -8,6 +9,7 @@ pub mod wkb;
 pub mod wkt;
 
 pub use geohash::{geohash_decode, geohash_encode, geohash_neighbors};
+pub use hybrid::{SpatialPreFilterResult, bitmap_contains, ids_to_bitmap, spatial_prefilter};
 pub use operations::{st_buffer, st_envelope, st_union};
 pub use persist::{
     RTreeCheckpointError, RTreeSnapshot, SpatialIndexMeta, SpatialIndexType, deserialize_meta,

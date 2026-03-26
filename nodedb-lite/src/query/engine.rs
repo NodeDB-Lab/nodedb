@@ -35,6 +35,7 @@ impl LiteQueryEngine {
             .with_default_catalog_and_schema("nodedb", "public");
 
         let ctx = SessionContext::new_with_config(config);
+        super::spatial_udf::register_spatial_udfs(&ctx);
         Self { ctx, crdt }
     }
 
