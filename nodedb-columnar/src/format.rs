@@ -118,21 +118,6 @@ impl BlockStats {
             row_count,
         }
     }
-
-    /// Whether this block can be skipped for a `> value` predicate.
-    pub fn can_skip_gt(&self, threshold: f64) -> bool {
-        !self.max.is_nan() && self.max <= threshold
-    }
-
-    /// Whether this block can be skipped for a `< value` predicate.
-    pub fn can_skip_lt(&self, threshold: f64) -> bool {
-        !self.min.is_nan() && self.min >= threshold
-    }
-
-    /// Whether this block can be skipped for an `= value` predicate.
-    pub fn can_skip_eq(&self, value: f64) -> bool {
-        !self.min.is_nan() && !self.max.is_nan() && (value < self.min || value > self.max)
-    }
 }
 
 /// Metadata for a single column within the segment footer.
@@ -387,15 +372,17 @@ mod tests {
             row_count: 1024,
         };
 
+        use crate::predicate::ScanPredicate;
+
         // WHERE x > 60 → can skip (max=50 ≤ 60).
-        assert!(stats.can_skip_gt(60.0));
+        assert!(ScanPredicate::gt(0, 60.0).can_skip_block(&stats));
         // WHERE x > 40 → cannot skip (max=50 > 40).
-        assert!(!stats.can_skip_gt(40.0));
+        assert!(!ScanPredicate::gt(0, 40.0).can_skip_block(&stats));
         // WHERE x < 5 → can skip (min=10 ≥ 5).
-        assert!(stats.can_skip_lt(5.0));
+        assert!(ScanPredicate::lt(0, 5.0).can_skip_block(&stats));
         // WHERE x = 100 → can skip (100 > max=50).
-        assert!(stats.can_skip_eq(100.0));
+        assert!(ScanPredicate::eq(0, 100.0).can_skip_block(&stats));
         // WHERE x = 30 → cannot skip (10 ≤ 30 ≤ 50).
-        assert!(!stats.can_skip_eq(30.0));
+        assert!(!ScanPredicate::eq(0, 30.0).can_skip_block(&stats));
     }
 }

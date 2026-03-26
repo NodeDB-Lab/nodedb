@@ -15,6 +15,8 @@
 pub mod error;
 pub mod format;
 pub mod memtable;
+pub mod predicate;
+pub mod reader;
 pub mod writer;
 
 pub use error::ColumnarError;
@@ -23,4 +25,6 @@ pub use format::{
     VERSION_MINOR,
 };
 pub use memtable::ColumnarMemtable;
+pub use predicate::ScanPredicate;
+pub use reader::SegmentReader;
 pub use writer::SegmentWriter;

@@ -569,12 +569,14 @@ mod tests {
             .expect("write");
         let footer = SegmentFooter::from_segment_tail(&segment).expect("valid");
 
+        use crate::predicate::ScanPredicate;
+
         let id_stats = &footer.columns[0].block_stats[0];
         // id: min=100, max=149.
-        assert!(id_stats.can_skip_gt(200.0)); // WHERE id > 200 → skip.
-        assert!(!id_stats.can_skip_gt(120.0)); // WHERE id > 120 → cannot skip.
-        assert!(id_stats.can_skip_lt(50.0)); // WHERE id < 50 → skip.
-        assert!(id_stats.can_skip_eq(200.0)); // WHERE id = 200 → skip.
-        assert!(!id_stats.can_skip_eq(125.0)); // WHERE id = 125 → cannot skip.
+        assert!(ScanPredicate::gt(0, 200.0).can_skip_block(id_stats)); // WHERE id > 200 → skip.
+        assert!(!ScanPredicate::gt(0, 120.0).can_skip_block(id_stats)); // WHERE id > 120 → cannot skip.
+        assert!(ScanPredicate::lt(0, 50.0).can_skip_block(id_stats)); // WHERE id < 50 → skip.
+        assert!(ScanPredicate::eq(0, 200.0).can_skip_block(id_stats)); // WHERE id = 200 → skip.
+        assert!(!ScanPredicate::eq(0, 125.0).can_skip_block(id_stats)); // WHERE id = 125 → cannot skip.
     }
 }
