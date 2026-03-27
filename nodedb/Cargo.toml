@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 # Internal foundation crates
 nodedb-types = { workspace = true }
+nodedb-columnar = { workspace = true }
 nodedb-bridge = { workspace = true }
 rust_decimal = { workspace = true }
 nodedb-cluster = { workspace = true }

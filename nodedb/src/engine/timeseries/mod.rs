@@ -3,6 +3,7 @@ pub mod asof_join;
 pub mod bitmap_index;
 pub mod bucket;
 pub mod columnar_agg;
+pub mod columnar_bridge;
 pub mod columnar_memtable;
 pub mod columnar_segment;
 pub mod compound_filter;
