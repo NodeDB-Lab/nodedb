@@ -49,6 +49,7 @@ impl CoreLoop {
                 } else {
                     self.csr.add_edge(src_id, label, dst_id);
                 }
+                self.checkpoint_coordinator.mark_dirty("sparse", 1);
                 self.response_ok(task)
             }
             Err(e) => self.response_error(
@@ -71,6 +72,7 @@ impl CoreLoop {
         match self.edge_store.delete_edge(src_id, label, dst_id) {
             Ok(_) => {
                 self.csr.remove_edge(src_id, label, dst_id);
+                self.checkpoint_coordinator.mark_dirty("sparse", 1);
                 self.response_ok(task)
             }
             Err(e) => self.response_error(

@@ -116,6 +116,7 @@ impl CoreLoop {
                 {
                     warn!(core = self.core_id, error = %e, "failed to send HNSW build request");
                 }
+                self.checkpoint_coordinator.mark_dirty("vector", 1);
                 self.response_ok(task)
             }
             Err(err) => self.response_error(task, err),
@@ -166,6 +167,7 @@ impl CoreLoop {
             coll.doc_id_map.insert(vector_id, did);
         }
 
+        self.checkpoint_coordinator.mark_dirty("vector", 1);
         self.response_ok(task)
     }
 
@@ -203,6 +205,8 @@ impl CoreLoop {
                 {
                     warn!(core = self.core_id, error = %e, "failed to send HNSW build request");
                 }
+                self.checkpoint_coordinator
+                    .mark_dirty("vector", vectors.len());
                 match super::super::response_codec::encode_count("inserted", vectors.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
                     Err(e) => self.response_error(
@@ -230,6 +234,7 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::NotFound);
         };
         if collection_ref.delete(vector_id) {
+            self.checkpoint_coordinator.mark_dirty("vector", 1);
             self.response_ok(task)
         } else {
             self.response_error(task, ErrorCode::NotFound)

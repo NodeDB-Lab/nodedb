@@ -138,6 +138,15 @@ pub struct CoreLoop {
     /// Continuous aggregate manager for this core. Fires on memtable flush.
     pub(in crate::data::executor) continuous_agg_mgr:
         crate::engine::timeseries::continuous_agg::ContinuousAggregateManager,
+
+    /// Checkpoint coordinator: incremental dirty page flushing across engines.
+    /// Replaces timer-based checkpoint with I/O-budget-aware progressive flush.
+    pub(in crate::data::executor) checkpoint_coordinator:
+        crate::storage::checkpoint::CheckpointCoordinator,
+
+    /// L1 segment compaction config for the storage layer.
+    pub(in crate::data::executor) segment_compaction_config:
+        crate::storage::compaction::CompactionConfig,
 }
 
 impl CoreLoop {
@@ -196,6 +205,17 @@ impl CoreLoop {
             ts_registries: HashMap::new(),
             continuous_agg_mgr:
                 crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),
+            checkpoint_coordinator: {
+                let mut coord = crate::storage::checkpoint::CheckpointCoordinator::new(
+                    crate::storage::checkpoint::CheckpointConfig::default(),
+                );
+                coord.register_engine("sparse");
+                coord.register_engine("vector");
+                coord.register_engine("crdt");
+                coord.register_engine("timeseries");
+                coord
+            },
+            segment_compaction_config: crate::storage::compaction::CompactionConfig::default(),
         })
     }
 
@@ -207,6 +227,24 @@ impl CoreLoop {
     ) {
         self.compaction_interval = interval;
         self.compaction_tombstone_threshold = tombstone_threshold;
+    }
+
+    /// Set checkpoint coordinator config (called after open, before event loop).
+    pub fn set_checkpoint_config(&mut self, config: crate::storage::checkpoint::CheckpointConfig) {
+        self.checkpoint_coordinator =
+            crate::storage::checkpoint::CheckpointCoordinator::new(config);
+        self.checkpoint_coordinator.register_engine("sparse");
+        self.checkpoint_coordinator.register_engine("vector");
+        self.checkpoint_coordinator.register_engine("crdt");
+        self.checkpoint_coordinator.register_engine("timeseries");
+    }
+
+    /// Set L1 segment compaction config.
+    pub fn set_segment_compaction_config(
+        &mut self,
+        config: crate::storage::compaction::CompactionConfig,
+    ) {
+        self.segment_compaction_config = config;
     }
 
     pub fn core_id(&self) -> usize {

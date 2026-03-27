@@ -210,9 +210,22 @@ impl CoreLoop {
         // 3. Compact CSR write buffers into dense arrays for clean state.
         self.csr.compact();
 
+        // 4. Record completed flushes in the checkpoint coordinator
+        //    and advance the checkpoint LSN for WAL truncation safety.
+        self.checkpoint_coordinator
+            .record_flush("vector", vectors_checkpointed);
+        self.checkpoint_coordinator
+            .record_flush("crdt", crdts_checkpointed);
+        self.checkpoint_coordinator
+            .complete_checkpoint(checkpoint_lsn);
+
         info!(
             core = self.core_id,
-            checkpoint_lsn, vectors_checkpointed, crdts_checkpointed, "core checkpoint complete"
+            checkpoint_lsn,
+            vectors_checkpointed,
+            crdts_checkpointed,
+            dirty_pages = self.checkpoint_coordinator.total_dirty_pages(),
+            "core checkpoint complete"
         );
 
         // Return the checkpoint LSN as the response payload.
@@ -224,7 +237,10 @@ impl CoreLoop {
     ///
     /// Each tenant's Loro state is exported as a snapshot and written to
     /// `{data_dir}/crdt-ckpt/tenant-{id}.ckpt` with atomic temp+rename.
-    fn checkpoint_crdt_engines(&self) -> usize {
+    ///
+    /// Called from both `control.rs` (explicit checkpoint command) and
+    /// `compact.rs` (periodic maintenance via `maybe_run_maintenance`).
+    pub(in crate::data::executor) fn checkpoint_crdt_engines(&self) -> usize {
         if self.crdt_engines.is_empty() {
             return 0;
         }
@@ -291,7 +307,10 @@ impl CoreLoop {
             }
         };
         match engine.apply_committed_delta(delta) {
-            Ok(()) => self.response_ok(task),
+            Ok(()) => {
+                self.checkpoint_coordinator.mark_dirty("crdt", 1);
+                self.response_ok(task)
+            }
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "crdt apply failed");
                 self.response_error(

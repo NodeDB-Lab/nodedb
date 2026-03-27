@@ -224,6 +224,8 @@ impl CoreLoop {
                     self.flush_ts_collection(collection, now_ms);
                 }
 
+                self.checkpoint_coordinator
+                    .mark_dirty("timeseries", accepted);
                 let result = serde_json::json!({
                     "accepted": accepted,
                     "rejected": rejected,

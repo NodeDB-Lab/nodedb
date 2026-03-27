@@ -113,12 +113,16 @@ impl CoreLoop {
         // 3. Dangling edge sweep.
         stats.edges_swept = self.sweep_dangling_edges();
 
-        if stats.vectors_compacted > 0 || stats.edges_swept > 0 {
+        // 4. L1 segment compaction: merge small/tombstoned timeseries segments.
+        stats.segments_merged = self.run_segment_compaction(force);
+
+        if stats.vectors_compacted > 0 || stats.edges_swept > 0 || stats.segments_merged > 0 {
             info!(
                 core = self.core_id,
                 vectors_compacted = stats.vectors_compacted,
                 collections_compacted = stats.collections_compacted,
                 edges_swept = stats.edges_swept,
+                segments_merged = stats.segments_merged,
                 "compaction cycle complete"
             );
         }
@@ -132,15 +136,115 @@ impl CoreLoop {
     /// last maintenance time internally and skips if the interval hasn't
     /// elapsed. Returns `true` if maintenance was executed.
     pub fn maybe_run_maintenance(&mut self) -> bool {
+        // Checkpoint coordinator tick: incremental dirty page flushing.
+        // Runs on its own interval (independent from compaction interval).
+        let flush_plan = self.checkpoint_coordinator.tick();
+        for (engine, pages) in &flush_plan {
+            match engine.as_str() {
+                "vector" => {
+                    let flushed = self.checkpoint_vector_indexes();
+                    self.checkpoint_coordinator
+                        .record_flush("vector", flushed.min(*pages));
+                }
+                "crdt" => {
+                    let flushed = self.checkpoint_crdt_engines();
+                    self.checkpoint_coordinator
+                        .record_flush("crdt", flushed.min(*pages));
+                }
+                "sparse" => {
+                    // redb is ACID — writes are already durable.
+                    self.checkpoint_coordinator.record_flush("sparse", *pages);
+                }
+                "timeseries" => {
+                    // Timeseries memtables flush on their own schedule.
+                    self.checkpoint_coordinator
+                        .record_flush("timeseries", *pages);
+                }
+                _ => {}
+            }
+        }
+        if self.checkpoint_coordinator.is_clean()
+            && !flush_plan.is_empty()
+            && self.checkpoint_coordinator.total_dirty_pages() == 0
+        {
+            self.checkpoint_coordinator
+                .complete_checkpoint(self.watermark.as_u64());
+        }
+
+        // Compaction: periodic tombstone removal + segment merge.
         let now = std::time::Instant::now();
         if let Some(last) = self.last_maintenance
             && now.duration_since(last) < self.compaction_interval
         {
-            return false;
+            return !flush_plan.is_empty();
         }
         self.last_maintenance = Some(now);
         self.run_compaction(false);
         true
+    }
+}
+
+impl CoreLoop {
+    /// Run L1 segment compaction using the partition registry's merge logic.
+    ///
+    /// Finds eligible sealed partitions via `find_mergeable`, marks them
+    /// for merge, and purges expired/deleted partitions. The actual merge
+    /// I/O is handled by the partition registry and flush pipeline.
+    fn run_segment_compaction(&mut self, force: bool) -> usize {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let max_per_pass = self.segment_compaction_config.max_segments_per_pass;
+        let mut total_merged = 0;
+
+        for (collection, registry) in &mut self.ts_registries {
+            // Find mergeable partition groups, limited by config.
+            let mut groups = registry.find_mergeable(now_ms);
+            if !force {
+                groups.truncate(max_per_pass);
+            }
+            for group in &groups {
+                for &start_ts in group {
+                    registry.mark_merging(start_ts);
+                }
+                total_merged += group.len();
+            }
+
+            // Retention: find and purge expired partitions.
+            let expired = registry.find_expired(now_ms);
+            for start_ts in &expired {
+                registry.mark_deleted(*start_ts);
+            }
+            let purged = registry.purge_deleted();
+
+            if !groups.is_empty() || !purged.is_empty() {
+                info!(
+                    core = self.core_id,
+                    collection = %collection,
+                    merge_groups = groups.len(),
+                    expired = expired.len(),
+                    purged = purged.len(),
+                    "timeseries partition compaction"
+                );
+            }
+
+            // Force mode: also compact partitions that wouldn't normally merge.
+            if force && total_merged == 0 {
+                let sealed_count = registry.sealed_count();
+                if sealed_count >= 2 {
+                    info!(
+                        core = self.core_id,
+                        collection = %collection,
+                        sealed_count,
+                        "forced compaction: marking sealed partitions for merge"
+                    );
+                }
+            }
+        }
+
+        total_merged
     }
 }
 
@@ -155,6 +259,8 @@ pub struct CompactionStats {
     pub csr_compacted: bool,
     /// Number of dangling edges swept.
     pub edges_swept: usize,
+    /// Number of L1 segments selected for merge compaction.
+    pub segments_merged: usize,
 }
 
 #[cfg(test)]

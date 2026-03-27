@@ -87,6 +87,7 @@ impl CoreLoop {
             );
         }
 
+        self.checkpoint_coordinator.mark_dirty("sparse", 1);
         self.response_ok(task)
     }
 
@@ -131,6 +132,7 @@ impl CoreLoop {
                 // Invalidate document cache.
                 self.doc_cache.invalidate(tid, collection, document_id);
 
+                self.checkpoint_coordinator.mark_dirty("sparse", 1);
                 self.response_ok(task)
             }
             Err(e) => self.response_error(
