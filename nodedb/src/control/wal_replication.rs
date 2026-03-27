@@ -10,7 +10,7 @@
 //! 7. If a waiter exists (leader path), sends the response; otherwise just applies (follower)
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, VectorOp};
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, KvOp, VectorOp};
 use crate::types::{TenantId, VShardId};
 
 /// Type alias for the Raft propose callback.
@@ -95,6 +95,30 @@ pub enum ReplicatedWrite {
         src_id: String,
         label: String,
         dst_id: String,
+    },
+    KvPut {
+        collection: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_ms: u64,
+    },
+    KvDelete {
+        collection: String,
+        keys: Vec<Vec<u8>>,
+    },
+    KvBatchPut {
+        collection: String,
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+        ttl_ms: u64,
+    },
+    KvExpire {
+        collection: String,
+        key: Vec<u8>,
+        ttl_ms: u64,
+    },
+    KvPersist {
+        collection: String,
+        key: Vec<u8>,
     },
 }
 
@@ -230,6 +254,43 @@ pub fn to_replicated_entry(
             label: label.clone(),
             dst_id: dst_id.clone(),
         },
+        PhysicalPlan::Kv(KvOp::Put {
+            collection,
+            key,
+            value,
+            ttl_ms,
+        }) => ReplicatedWrite::KvPut {
+            collection: collection.clone(),
+            key: key.clone(),
+            value: value.clone(),
+            ttl_ms: *ttl_ms,
+        },
+        PhysicalPlan::Kv(KvOp::Delete { collection, keys }) => ReplicatedWrite::KvDelete {
+            collection: collection.clone(),
+            keys: keys.clone(),
+        },
+        PhysicalPlan::Kv(KvOp::BatchPut {
+            collection,
+            entries,
+            ttl_ms,
+        }) => ReplicatedWrite::KvBatchPut {
+            collection: collection.clone(),
+            entries: entries.clone(),
+            ttl_ms: *ttl_ms,
+        },
+        PhysicalPlan::Kv(KvOp::Expire {
+            collection,
+            key,
+            ttl_ms,
+        }) => ReplicatedWrite::KvExpire {
+            collection: collection.clone(),
+            key: key.clone(),
+            ttl_ms: *ttl_ms,
+        },
+        PhysicalPlan::Kv(KvOp::Persist { collection, key }) => ReplicatedWrite::KvPersist {
+            collection: collection.clone(),
+            key: key.clone(),
+        },
         // Not a write — reads, system ops, etc.
         _ => return None,
     };
@@ -359,6 +420,43 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             src_id: src_id.clone(),
             label: label.clone(),
             dst_id: dst_id.clone(),
+        }),
+        ReplicatedWrite::KvPut {
+            collection,
+            key,
+            value,
+            ttl_ms,
+        } => PhysicalPlan::Kv(KvOp::Put {
+            collection: collection.clone(),
+            key: key.clone(),
+            value: value.clone(),
+            ttl_ms: *ttl_ms,
+        }),
+        ReplicatedWrite::KvDelete { collection, keys } => PhysicalPlan::Kv(KvOp::Delete {
+            collection: collection.clone(),
+            keys: keys.clone(),
+        }),
+        ReplicatedWrite::KvBatchPut {
+            collection,
+            entries,
+            ttl_ms,
+        } => PhysicalPlan::Kv(KvOp::BatchPut {
+            collection: collection.clone(),
+            entries: entries.clone(),
+            ttl_ms: *ttl_ms,
+        }),
+        ReplicatedWrite::KvExpire {
+            collection,
+            key,
+            ttl_ms,
+        } => PhysicalPlan::Kv(KvOp::Expire {
+            collection: collection.clone(),
+            key: key.clone(),
+            ttl_ms: *ttl_ms,
+        }),
+        ReplicatedWrite::KvPersist { collection, key } => PhysicalPlan::Kv(KvOp::Persist {
+            collection: collection.clone(),
+            key: key.clone(),
         }),
     }
 }

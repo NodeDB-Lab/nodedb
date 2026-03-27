@@ -171,6 +171,21 @@ impl CoreLoop {
                 .complete_checkpoint(self.watermark.as_u64());
         }
 
+        // KV expiry wheel tick: process expired keys on every maintenance call.
+        // Bounded by the per-tick reap budget internally — safe for the reactor.
+        {
+            let now_ms = crate::engine::kv::current_ms();
+            let reaped = self.kv_engine.tick_expiry(now_ms);
+            if reaped > 0 {
+                tracing::debug!(
+                    core = self.core_id,
+                    reaped,
+                    backlog = self.kv_engine.expiry_backlog(),
+                    "kv expiry wheel tick"
+                );
+            }
+        }
+
         // Compaction: periodic tombstone removal + segment merge.
         let now = std::time::Instant::now();
         if let Some(last) = self.last_maintenance

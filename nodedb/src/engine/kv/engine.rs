@@ -10,6 +10,12 @@ use super::entry::NO_EXPIRY;
 use super::expiry_wheel::ExpiryWheel;
 use super::hash_table::KvHashTable;
 
+/// Result of a KV SCAN operation: `(entries, next_cursor_bytes)`.
+///
+/// Each entry is `(key_bytes, value_bytes)`. `next_cursor` is empty
+/// when the scan is complete, otherwise an opaque cursor for continuation.
+pub type ScanResult = (Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>);
+
 /// Per-core KV engine.
 ///
 /// Owns a hash table per collection and a shared expiry wheel.
@@ -253,6 +259,48 @@ impl KvEngine {
             }
         }
         new_count
+    }
+
+    /// SCAN: cursor-based iteration with optional key pattern matching.
+    ///
+    /// Returns `(entries, next_cursor_bytes)`. `next_cursor_bytes` is empty
+    /// when the scan is complete. Each entry is `(key, value)`.
+    pub fn scan(
+        &self,
+        tenant_id: u32,
+        collection: &str,
+        cursor: &[u8],
+        count: usize,
+        now_ms: u64,
+        match_pattern: Option<&str>,
+    ) -> ScanResult {
+        let tkey = table_key(tenant_id, collection);
+        let table = match self.tables.get(&tkey) {
+            Some(t) => t,
+            None => return (Vec::new(), Vec::new()),
+        };
+
+        // Decode cursor: 4 bytes big-endian u32 slot index, or 0 for start.
+        let cursor_idx = if cursor.len() >= 4 {
+            u32::from_be_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]) as usize
+        } else {
+            0
+        };
+
+        let (entries, next_cursor_idx) = table.scan(cursor_idx, count, now_ms, match_pattern);
+
+        let owned: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .into_iter()
+            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .collect();
+
+        let next_cursor = if next_cursor_idx == 0 {
+            Vec::new() // Scan complete.
+        } else {
+            (next_cursor_idx as u32).to_be_bytes().to_vec()
+        };
+
+        (owned, next_cursor)
     }
 
     // -----------------------------------------------------------------------

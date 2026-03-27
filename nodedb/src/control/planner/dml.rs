@@ -3,7 +3,7 @@
 use datafusion::prelude::*;
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::DocumentOp;
+use crate::bridge::physical_plan::{DocumentOp, KvOp};
 use crate::control::planner::physical::PhysicalTask;
 use crate::types::{TenantId, VShardId};
 
@@ -75,6 +75,11 @@ impl PlanConverter {
 
         let collection = dml.table_name.to_string().to_lowercase();
         let vshard = VShardId::from_collection(&collection);
+
+        // KV collection DML routing.
+        if self.is_kv(tenant_id, &collection) {
+            return self.convert_kv_dml(dml, tenant_id, &collection, vshard);
+        }
 
         match &dml.op {
             WriteOp::Insert(_) | WriteOp::Ctas => {
@@ -187,6 +192,88 @@ impl PlanConverter {
                 vshard_id: vshard,
                 plan: PhysicalPlan::Document(DocumentOp::Truncate { collection }),
             }]),
+        }
+    }
+
+    /// Convert DML for a KV collection.
+    ///
+    /// Routes INSERT → KvPut, DELETE → KvDelete. UPDATE and TRUNCATE fall
+    /// through to the standard Document path (which the Data Plane will
+    /// reject with a clear error if the collection type doesn't match).
+    fn convert_kv_dml(
+        &self,
+        dml: &datafusion::logical_expr::DmlStatement,
+        tenant_id: TenantId,
+        collection: &str,
+        vshard: VShardId,
+    ) -> crate::Result<Vec<PhysicalTask>> {
+        use datafusion::logical_expr::WriteOp;
+
+        match &dml.op {
+            WriteOp::Insert(_) | WriteOp::Ctas => {
+                // Extract inserted values: each (doc_id, value_bytes) maps to a KV PUT.
+                // The doc_id serves as the primary key, value_bytes are the serialized row.
+                match extract_insert_values(&dml.input) {
+                    Ok(values) if !values.is_empty() => {
+                        let mut tasks = Vec::with_capacity(values.len());
+                        for (key_str, value_bytes) in values {
+                            tasks.push(PhysicalTask {
+                                tenant_id,
+                                vshard_id: vshard,
+                                plan: PhysicalPlan::Kv(KvOp::Put {
+                                    collection: collection.to_string(),
+                                    key: key_str.into_bytes(),
+                                    value: value_bytes,
+                                    ttl_ms: 0, // Collection-default TTL applied by engine.
+                                }),
+                            });
+                        }
+                        return Ok(tasks);
+                    }
+                    _ => {}
+                }
+
+                Err(crate::Error::PlanError {
+                    detail: "KV INSERT requires VALUES clause".into(),
+                })
+            }
+            WriteOp::Delete => {
+                let doc_ids = extract_point_targets(&dml.input, collection).unwrap_or_default();
+                if !doc_ids.is_empty() {
+                    let keys: Vec<Vec<u8>> =
+                        doc_ids.into_iter().map(|id| id.into_bytes()).collect();
+                    return Ok(vec![PhysicalTask {
+                        tenant_id,
+                        vshard_id: vshard,
+                        plan: PhysicalPlan::Kv(KvOp::Delete {
+                            collection: collection.to_string(),
+                            keys,
+                        }),
+                    }]);
+                }
+
+                // Bulk KV delete not yet supported — fall back to error.
+                Err(crate::Error::PlanError {
+                    detail: "KV DELETE requires WHERE with primary key(s)".into(),
+                })
+            }
+            WriteOp::Update => {
+                // KV UPDATE would require read-modify-write on specific fields.
+                // For now, users can do DELETE + INSERT.
+                Err(crate::Error::PlanError {
+                    detail: "KV UPDATE not yet supported; use DELETE + INSERT".into(),
+                })
+            }
+            WriteOp::Truncate => {
+                // Route to standard Truncate which works for any collection.
+                Ok(vec![PhysicalTask {
+                    tenant_id,
+                    vshard_id: vshard,
+                    plan: PhysicalPlan::Document(DocumentOp::Truncate {
+                        collection: collection.to_string(),
+                    }),
+                }])
+            }
         }
     }
 

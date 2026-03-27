@@ -4,7 +4,7 @@
 //! WAL record type. Read operations are no-ops.
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, TimeseriesOp, VectorOp};
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, KvOp, TimeseriesOp, VectorOp};
 use crate::control::security::credential::CredentialStore;
 use crate::types::{TenantId, VShardId};
 use crate::wal::manager::WalManager;
@@ -175,6 +175,68 @@ pub fn wal_append_if_write_with_creds(
                 }
             })?;
             wal.append_timeseries_batch(tenant_id, vshard_id, &wal_payload)?;
+        }
+        // KV write operations.
+        PhysicalPlan::Kv(KvOp::Put {
+            collection,
+            key,
+            value,
+            ttl_ms,
+        }) => {
+            let entry =
+                rmp_serde::to_vec(&("kv_put", collection, key, value, ttl_ms)).map_err(|e| {
+                    crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!("wal kv put: {e}"),
+                    }
+                })?;
+            wal.append_put(tenant_id, vshard_id, &entry)?;
+        }
+        PhysicalPlan::Kv(KvOp::Delete { collection, keys }) => {
+            let entry = rmp_serde::to_vec(&("kv_delete", collection, keys)).map_err(|e| {
+                crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("wal kv delete: {e}"),
+                }
+            })?;
+            wal.append_delete(tenant_id, vshard_id, &entry)?;
+        }
+        PhysicalPlan::Kv(KvOp::BatchPut {
+            collection,
+            entries,
+            ttl_ms,
+        }) => {
+            let entry =
+                rmp_serde::to_vec(&("kv_batch_put", collection, entries, ttl_ms)).map_err(|e| {
+                    crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!("wal kv batch put: {e}"),
+                    }
+                })?;
+            wal.append_put(tenant_id, vshard_id, &entry)?;
+        }
+        PhysicalPlan::Kv(KvOp::Expire {
+            collection,
+            key,
+            ttl_ms,
+        }) => {
+            let entry =
+                rmp_serde::to_vec(&("kv_expire", collection, key, ttl_ms)).map_err(|e| {
+                    crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!("wal kv expire: {e}"),
+                    }
+                })?;
+            wal.append_put(tenant_id, vshard_id, &entry)?;
+        }
+        PhysicalPlan::Kv(KvOp::Persist { collection, key }) => {
+            let entry = rmp_serde::to_vec(&("kv_persist", collection, key)).map_err(|e| {
+                crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("wal kv persist: {e}"),
+                }
+            })?;
+            wal.append_put(tenant_id, vshard_id, &entry)?;
         }
         // Read operations and control commands: no WAL needed.
         _ => {}
