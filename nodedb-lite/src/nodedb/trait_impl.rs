@@ -62,12 +62,49 @@ impl<S: StorageEngine> NodeDbLite<S> {
             return Ok(Vec::new());
         };
 
-        // Over-fetch by 3x when filtering to maintain recall after post-filter.
-        let fetch_k = if filter.is_some() { k * 3 } else { k };
-        let raw_results = index.search(query, fetch_k, self.search_ef);
-
         let id_map = self.vector_id_map.lock_or_recover();
         let crdt = self.crdt.lock_or_recover();
+
+        // Pre-filter path: when a metadata filter is present, evaluate it
+        // against CRDT docs to build an allowed-set of vector IDs, then pass
+        // it to HNSW search_filtered for in-graph filtering (better recall
+        // than over-fetch + post-filter).
+        // Over-fetch by 3x when filtering to maintain recall after post-filter.
+        let fetch_k = if filter.is_some() { k * 3 } else { k };
+
+        // For small collections (< 10K vectors), use pre-filter for better recall.
+        // For large collections, over-fetch + post-filter is faster (avoids O(N) scan).
+        let collection_size = id_map
+            .keys()
+            .filter(|key| key.starts_with(index_key))
+            .count();
+
+        let raw_results = if let Some(f) = filter
+            && collection_size <= 10_000
+        {
+            let mut allowed = std::collections::HashSet::new();
+            for (composite_key, (doc_id, _)) in id_map.iter() {
+                if !composite_key.starts_with(index_key) {
+                    continue;
+                }
+                if let Some(loro_val) = crdt.read(collection, doc_id) {
+                    let doc = loro_value_to_document(doc_id, &loro_val);
+                    let json_doc = serde_json::to_value(&doc.fields).unwrap_or_default();
+                    if nodedb_query::metadata_filter::matches_metadata_filter(&json_doc, f)
+                        && let Some(vid_str) = composite_key.strip_prefix(&format!("{index_key}:"))
+                        && let Ok(vid) = vid_str.parse::<u32>()
+                    {
+                        allowed.insert(vid);
+                    }
+                }
+            }
+            if allowed.is_empty() {
+                return Ok(Vec::new());
+            }
+            index.search_filtered(query, k, self.search_ef, &allowed)
+        } else {
+            index.search(query, fetch_k, self.search_ef)
+        };
 
         let results: Vec<SearchResult> = raw_results
             .into_iter()
@@ -89,6 +126,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     HashMap::new()
                 };
 
+                // Post-filter for over-fetch path (large collections).
                 if let Some(f) = filter {
                     let json_doc = serde_json::to_value(&metadata).unwrap_or_default();
                     if !nodedb_query::metadata_filter::matches_metadata_filter(&json_doc, f) {
