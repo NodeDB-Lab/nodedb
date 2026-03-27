@@ -23,7 +23,7 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 
-const RRF_K: f64 = 60.0;
+use nodedb_query::DEFAULT_RRF_K;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct RrfScore {
@@ -112,7 +112,7 @@ impl ScalarUDFImpl for RrfScore {
                     let rank = rank_arr.value(i);
                     // RRF: 1 / (k + rank). Rank is treated as a distance/score
                     // where lower = better. The +1 makes it 1-based.
-                    *score += 1.0 / (RRF_K + rank.abs() + 1.0);
+                    *score += 1.0 / (DEFAULT_RRF_K + rank.abs() + 1.0);
                 }
             }
         }

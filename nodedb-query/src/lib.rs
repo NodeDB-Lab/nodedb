@@ -12,7 +12,8 @@ pub mod window;
 
 pub use expr::{BinaryOp, CastType, ComputedColumn, SqlExpr};
 pub use fusion::{
-    FusedResult, RankedResult, reciprocal_rank_fusion, reciprocal_rank_fusion_weighted,
+    DEFAULT_RRF_K, FusedResult, RankedResult, reciprocal_rank_fusion,
+    reciprocal_rank_fusion_weighted,
 };
 pub use scan_filter::{ScanFilter, compute_aggregate};
 pub use window::{FrameBound, WindowFrame, WindowFuncSpec, evaluate_window_functions};

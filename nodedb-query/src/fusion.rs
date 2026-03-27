@@ -6,7 +6,8 @@
 ///
 /// Formula: RRF_score(d) = Σ 1 / (k + rank_i(d))
 /// where k is a smoothing constant (default 60).
-const DEFAULT_K: f64 = 60.0;
+/// RRF smoothing constant. Standard value from Cormack et al. (2009).
+pub const DEFAULT_RRF_K: f64 = 60.0;
 
 /// A scored result from a single engine.
 #[derive(Debug, Clone)]
@@ -39,7 +40,7 @@ pub fn reciprocal_rank_fusion(
     k: Option<f64>,
     top_k: usize,
 ) -> Vec<FusedResult> {
-    let k = k.unwrap_or(DEFAULT_K);
+    let k = k.unwrap_or(DEFAULT_RRF_K);
 
     let mut scores: std::collections::HashMap<String, Vec<(&'static str, f64)>> =
         std::collections::HashMap::new();
