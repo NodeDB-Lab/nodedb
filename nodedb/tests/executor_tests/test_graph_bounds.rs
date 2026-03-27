@@ -4,6 +4,7 @@
 //! respect bounded depth and fan-out limits under adversarial queries.
 
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan};
+use nodedb::bridge::physical_plan::GraphOp;
 use nodedb::engine::graph::edge_store::Direction;
 
 use crate::helpers::*;
@@ -18,12 +19,12 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: "hub".into(),
                 label: "LINKS".into(),
                 dst_id: format!("n{i}"),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -33,12 +34,12 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: format!("c{i}"),
                 label: "NEXT".into(),
                 dst_id: format!("c{}", i + 1),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -48,13 +49,13 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphHop {
+        PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["hub".into()],
             edge_label: None,
             direction: Direction::Out,
             depth: 1,
             options: Default::default(),
-        },
+        }),
     );
     let hop1_nodes: Vec<String> = serde_json::from_value(payload_value(&hop1)).unwrap();
     assert!(
@@ -69,13 +70,13 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphHop {
+        PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["hub".into()],
             edge_label: None,
             direction: Direction::Out,
             depth: 0,
             options: Default::default(),
-        },
+        }),
     );
     let hop0_nodes: Vec<String> = serde_json::from_value(payload_value(&hop0)).unwrap();
     assert_eq!(hop0_nodes.len(), 1, "depth=0 should return only start node");
@@ -86,13 +87,13 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphHop {
+        PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["c0".into()],
             edge_label: Some("NEXT".into()),
             direction: Direction::Out,
             depth: 5,
             options: Default::default(),
-        },
+        }),
     );
     let chain_nodes: Vec<String> = serde_json::from_value(payload_value(&chain)).unwrap();
     assert!(
@@ -108,13 +109,13 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphPath {
+        PhysicalPlan::Graph(GraphOp::Path {
             src: "c0".into(),
             dst: "c50".into(),
             edge_label: Some("NEXT".into()),
             max_depth: 3,
             options: Default::default(),
-        },
+        }),
     );
     // c0→c50 is 50 hops, depth limit 3 should fail.
     assert_eq!(
@@ -128,12 +129,12 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphSubgraph {
+        PhysicalPlan::Graph(GraphOp::Subgraph {
             start_nodes: vec!["c0".into()],
             edge_label: Some("NEXT".into()),
             depth: 3,
             options: Default::default(),
-        },
+        }),
     );
     let edges: Vec<serde_json::Value> = serde_json::from_value(payload_value(&subgraph)).unwrap();
     // depth=3 from c0: edges c0→c1, c1→c2, c2→c3 = 3 edges.

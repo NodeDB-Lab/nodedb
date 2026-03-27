@@ -4,6 +4,7 @@ use datafusion::logical_expr::{BinaryExpr, Operator};
 use datafusion::prelude::*;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::DocumentOp;
 use crate::control::planner::physical::PhysicalTask;
 use crate::types::{TenantId, VShardId};
 
@@ -30,13 +31,13 @@ pub(in crate::control::planner) fn try_range_scan_from_predicate(
             Some(PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
-                plan: PhysicalPlan::RangeScan {
+                plan: PhysicalPlan::Document(DocumentOp::RangeScan {
                     collection: collection.to_string(),
                     field: col_name.to_string(),
                     lower: Some(value_clean.as_bytes().to_vec()),
                     upper: Some(format!("{value_clean}\x00").as_bytes().to_vec()),
                     limit: 1000,
-                },
+                }),
             })
         }
 
@@ -65,13 +66,13 @@ pub(in crate::control::planner) fn try_range_scan_from_predicate(
             Some(PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
-                plan: PhysicalPlan::RangeScan {
+                plan: PhysicalPlan::Document(DocumentOp::RangeScan {
                     collection: collection.to_string(),
                     field: col_name.to_string(),
                     lower,
                     upper,
                     limit: 1000,
-                },
+                }),
             })
         }
 
@@ -83,18 +84,18 @@ pub(in crate::control::planner) fn try_range_scan_from_predicate(
                 try_range_scan_from_predicate(collection, &binary.right, tenant_id, vshard)?;
 
             if let (
-                PhysicalPlan::RangeScan {
+                PhysicalPlan::Document(DocumentOp::RangeScan {
                     field: f1,
                     lower: l1,
                     upper: u1,
                     ..
-                },
-                PhysicalPlan::RangeScan {
+                }),
+                PhysicalPlan::Document(DocumentOp::RangeScan {
                     field: f2,
                     lower: l2,
                     upper: u2,
                     ..
-                },
+                }),
             ) = (&left_scan.plan, &right_scan.plan)
                 && f1 == f2
             {
@@ -103,13 +104,13 @@ pub(in crate::control::planner) fn try_range_scan_from_predicate(
                 return Some(PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::RangeScan {
+                    plan: PhysicalPlan::Document(DocumentOp::RangeScan {
                         collection: collection.to_string(),
                         field: f1.clone(),
                         lower: merged_lower,
                         upper: merged_upper,
                         limit: 1000,
-                    },
+                    }),
                 });
             }
             None

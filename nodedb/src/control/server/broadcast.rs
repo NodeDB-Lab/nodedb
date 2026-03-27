@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
+use crate::bridge::physical_plan::QueryOp;
 use crate::control::arrow_convert;
 use crate::control::state::SharedState;
 use crate::types::{Lsn, ReadConsistency, RequestId, TenantId, VShardId};
@@ -156,6 +157,7 @@ pub async fn broadcast_to_all_cores(
 fn is_aggregate_plan(plan: &PhysicalPlan) -> bool {
     matches!(
         plan,
-        PhysicalPlan::Aggregate { .. } | PhysicalPlan::PartialAggregate { .. }
+        PhysicalPlan::Query(QueryOp::Aggregate { .. })
+            | PhysicalPlan::Query(QueryOp::PartialAggregate { .. })
     )
 }

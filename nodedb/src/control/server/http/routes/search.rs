@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::VectorOp;
 use crate::control::server::http::auth::{ApiError, AppState, resolve_identity};
 
 use super::document::dispatch_plan;
@@ -80,14 +81,14 @@ pub async fn vector_search(
         ));
     }
 
-    let plan = PhysicalPlan::VectorSearch {
+    let plan = PhysicalPlan::Vector(VectorOp::Search {
         collection: collection.clone(),
         query_vector: Arc::from(query_vector.as_slice()),
         top_k,
         ef_search: 0,
         filter_bitmap: None,
         field_name: String::new(),
-    };
+    });
 
     state.shared.tenant_request_start(identity.tenant_id);
     let result = dispatch_plan(&state, identity.tenant_id, &collection, plan).await;

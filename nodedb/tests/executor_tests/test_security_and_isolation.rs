@@ -6,6 +6,7 @@
 //! 4. Mixed-engine isolation: protected-tier not evicted under budget
 
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
+use nodedb::bridge::physical_plan::{DocumentOp, GraphOp, VectorOp};
 
 use crate::helpers::*;
 
@@ -22,11 +23,11 @@ fn security_tenant_isolation() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "secrets".into(),
             document_id: "s1".into(),
             value: b"{\"data\":\"tenant1_secret\"}".to_vec(),
-        },
+        }),
     );
 
     // Tenant 1 can read it.
@@ -34,10 +35,10 @@ fn security_tenant_isolation() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "secrets".into(),
             document_id: "s1".into(),
-        },
+        }),
     );
     assert_eq!(resp.status, Status::Ok);
 
@@ -126,21 +127,21 @@ fn linearizability_read_after_write() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::PointPut {
+            PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: "linear".into(),
                 document_id: doc_id.clone(),
                 value: value.into_bytes(),
-            },
+            }),
         );
 
         let resp = send_raw(
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::PointGet {
+            PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: "linear".into(),
                 document_id: doc_id.clone(),
-            },
+            }),
         );
         assert_eq!(
             resp.status,
@@ -158,31 +159,31 @@ fn linearizability_delete_visibility() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "linear".into(),
             document_id: "del1".into(),
             value: b"{\"x\":1}".to_vec(),
-        },
+        }),
     );
 
     send_ok(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointDelete {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "linear".into(),
             document_id: "del1".into(),
-        },
+        }),
     );
 
     let resp = send_raw(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "linear".into(),
             document_id: "del1".into(),
-        },
+        }),
     );
     assert_eq!(resp.error_code, Some(ErrorCode::NotFound));
 }
@@ -209,11 +210,11 @@ fn wal_replay_deterministic() {
                 &mut core,
                 &mut tx,
                 &mut rx,
-                PhysicalPlan::PointPut {
+                PhysicalPlan::Document(DocumentOp::PointPut {
                     collection: "replay".into(),
                     document_id: doc_id.to_string(),
                     value: value.clone(),
-                },
+                }),
             );
         }
     }
@@ -223,10 +224,10 @@ fn wal_replay_deterministic() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "replay".into(),
             document_id: "d1".into(),
-        },
+        }),
     );
     assert_eq!(d1.status, Status::Ok);
     // d1 was overwritten to {"a":10}.
@@ -240,10 +241,10 @@ fn wal_replay_deterministic() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "replay".into(),
             document_id: "d2".into(),
-        },
+        }),
     );
     assert_eq!(d2.status, Status::Ok);
 
@@ -251,10 +252,10 @@ fn wal_replay_deterministic() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "replay".into(),
             document_id: "d3".into(),
-        },
+        }),
     );
     assert_eq!(d3.status, Status::Ok);
 }
@@ -273,11 +274,11 @@ fn mixed_engine_isolation_no_cross_eviction() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::PointPut {
+            PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: "mixed".into(),
                 document_id: format!("doc_{i}"),
                 value: format!("{{\"val\":{i}}}").into_bytes(),
-            },
+            }),
         );
     }
 
@@ -287,13 +288,13 @@ fn mixed_engine_isolation_no_cross_eviction() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::VectorInsert {
+            PhysicalPlan::Vector(VectorOp::Insert {
                 collection: "mixed".into(),
                 vector: vec![i as f32, 0.0, 0.0],
                 dim: 3,
                 field_name: String::new(),
                 doc_id: None,
-            },
+            }),
         );
     }
 
@@ -303,12 +304,12 @@ fn mixed_engine_isolation_no_cross_eviction() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: format!("doc_{i}"),
                 label: "NEXT".into(),
                 dst_id: format!("doc_{}", i + 1),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -318,10 +319,10 @@ fn mixed_engine_isolation_no_cross_eviction() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "mixed".into(),
             document_id: "doc_25".into(),
-        },
+        }),
     );
     assert_eq!(doc.status, Status::Ok, "sparse engine should be intact");
 
@@ -330,14 +331,14 @@ fn mixed_engine_isolation_no_cross_eviction() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::VectorSearch {
+        PhysicalPlan::Vector(VectorOp::Search {
             collection: "mixed".into(),
             query_vector: std::sync::Arc::from([25.0f32, 0.0, 0.0].as_slice()),
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,
             field_name: String::new(),
-        },
+        }),
     );
     assert_eq!(
         vec_resp.status,
@@ -350,11 +351,11 @@ fn mixed_engine_isolation_no_cross_eviction() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphNeighbors {
+        PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "doc_25".into(),
             edge_label: Some("NEXT".into()),
             direction: nodedb::engine::graph::edge_store::Direction::Out,
-        },
+        }),
     );
     assert_eq!(
         graph_resp.status,

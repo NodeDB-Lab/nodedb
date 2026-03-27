@@ -4,6 +4,7 @@ use redb::WriteTransaction;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
+use crate::bridge::physical_plan::DocumentOp;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
@@ -281,10 +282,12 @@ impl CoreLoop {
     /// back to `poll_one`).
     pub fn poll_write_batch(&mut self) -> usize {
         // Check if the front of the queue is a non-expired PointPut.
-        let front_is_put = self
-            .task_queue
-            .front()
-            .is_some_and(|t| matches!(t.plan(), PhysicalPlan::PointPut { .. }) && !t.is_expired());
+        let front_is_put = self.task_queue.front().is_some_and(|t| {
+            matches!(
+                t.plan(),
+                PhysicalPlan::Document(DocumentOp::PointPut { .. })
+            ) && !t.is_expired()
+        });
         if !front_is_put {
             return 0;
         }
@@ -293,7 +296,10 @@ impl CoreLoop {
         let mut batch: Vec<ExecutionTask> = Vec::with_capacity(64);
         while batch.len() < 64 {
             let is_put = self.task_queue.front().is_some_and(|t| {
-                matches!(t.plan(), PhysicalPlan::PointPut { .. }) && !t.is_expired()
+                matches!(
+                    t.plan(),
+                    PhysicalPlan::Document(DocumentOp::PointPut { .. })
+                ) && !t.is_expired()
             });
             if !is_put {
                 break;
@@ -330,11 +336,11 @@ impl CoreLoop {
         // Track per-task success/failure for individual responses.
         let mut results: Vec<Result<(), Response>> = Vec::with_capacity(batch.len());
         for task in &batch {
-            let PhysicalPlan::PointPut {
+            let PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
                 document_id,
                 value,
-            } = task.plan()
+            }) = task.plan()
             else {
                 unreachable!("batch only contains PointPut");
             };

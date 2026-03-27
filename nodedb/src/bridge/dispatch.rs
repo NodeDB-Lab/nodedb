@@ -203,6 +203,7 @@ impl Dispatcher {
 mod tests {
     use super::*;
     use crate::bridge::envelope::*;
+    use crate::bridge::physical_plan::DocumentOp;
     use crate::types::*;
     use std::time::{Duration, Instant};
 
@@ -211,10 +212,10 @@ mod tests {
             request_id: RequestId::new(1),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(vshard),
-            plan: PhysicalPlan::PointGet {
+            plan: PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: "users".into(),
                 document_id: "u1".into(),
-            },
+            }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
             trace_id: 0,

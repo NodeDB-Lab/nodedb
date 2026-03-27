@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::TimeseriesOp;
 use crate::control::state::SharedState;
 use crate::types::{TenantId, VShardId};
 
@@ -278,11 +279,11 @@ async fn flush_ilp_batch(
     for (shard_id, shard_batch) in &shard_batches {
         let vshard_id = VShardId::new(*shard_id);
 
-        let plan = PhysicalPlan::TimeseriesIngest {
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
             collection: collection.clone(),
             payload: shard_batch.as_bytes().to_vec(),
             format: "ilp".to_string(),
-        };
+        });
 
         crate::control::server::wal_dispatch::wal_append_if_write_with_creds(
             &state.wal,

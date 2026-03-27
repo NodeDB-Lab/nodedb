@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use nodedb::bridge::dispatch::BridgeRequest;
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
+use nodedb::bridge::physical_plan::{DocumentOp, GraphOp, TextOp, VectorOp};
 use nodedb::engine::graph::edge_store::Direction;
 
 use crate::helpers::*;
@@ -26,7 +27,7 @@ fn cross_model_query_vector_graph_relational() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::PointPut {
+            PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: "papers".into(),
                 document_id: format!("p{i}"),
                 value: serde_json::to_vec(&serde_json::json!({
@@ -35,7 +36,7 @@ fn cross_model_query_vector_graph_relational() {
                     "citations": i * 10,
                 }))
                 .unwrap(),
-            },
+            }),
         );
     }
 
@@ -44,13 +45,13 @@ fn cross_model_query_vector_graph_relational() {
         tx.try_push(BridgeRequest {
             inner: make_request_with_id(
                 100 + i as u64,
-                PhysicalPlan::VectorInsert {
+                PhysicalPlan::Vector(VectorOp::Insert {
                     collection: "papers".into(),
                     vector: vec![i as f32, (i as f32).sin(), (i as f32).cos()],
                     dim: 3,
                     field_name: String::new(),
                     doc_id: None,
-                },
+                }),
             ),
         })
         .unwrap();
@@ -66,12 +67,12 @@ fn cross_model_query_vector_graph_relational() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: format!("p{i}"),
                 label: "CITES".into(),
                 dst_id: format!("p{}", i + 1),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -80,14 +81,14 @@ fn cross_model_query_vector_graph_relational() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::VectorSearch {
+        PhysicalPlan::Vector(VectorOp::Search {
             collection: "papers".into(),
             query_vector: Arc::from([5.0f32, 5.0f32.sin(), 5.0f32.cos()].as_slice()),
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,
             field_name: String::new(),
-        },
+        }),
     );
     let vector_json = payload_json(&vector_payload);
     assert!(
@@ -100,13 +101,13 @@ fn cross_model_query_vector_graph_relational() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphHop {
+        PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["p0".into()],
             edge_label: Some("CITES".into()),
             direction: Direction::Out,
             depth: 3,
             options: Default::default(),
-        },
+        }),
     );
     let graph_nodes: Vec<String> = serde_json::from_value(payload_value(&graph_payload)).unwrap();
     assert!(graph_nodes.contains(&"p0".to_string()));
@@ -126,7 +127,7 @@ fn cross_model_query_vector_graph_relational() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::DocumentScan {
+        PhysicalPlan::Document(DocumentOp::Scan {
             collection: "papers".into(),
             limit: 100,
             offset: 0,
@@ -136,7 +137,7 @@ fn cross_model_query_vector_graph_relational() {
             projection: Vec::new(),
             computed_columns: Vec::new(),
             window_functions: Vec::new(),
-        },
+        }),
     );
     let scan_json = payload_json(&scan_payload);
     // Years cycle 2020-2024: papers with year>=2023 are p3(2023), p4(2024),
@@ -151,7 +152,7 @@ fn cross_model_query_vector_graph_relational() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphRagFusion {
+        PhysicalPlan::Graph(GraphOp::RagFusion {
             collection: "papers".into(),
             query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
             vector_top_k: 3,
@@ -161,7 +162,7 @@ fn cross_model_query_vector_graph_relational() {
             final_top_k: 5,
             rrf_k: (60.0, 10.0),
             options: Default::default(),
-        },
+        }),
     );
     let rag_body = payload_value(&rag_payload);
     assert!(
@@ -189,14 +190,14 @@ fn rrf_fusion_mathematically_correct() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::PointPut {
+            PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: "docs".into(),
                 document_id: format!("d{i}"),
                 value: serde_json::to_vec(&serde_json::json!({
                     "body": format!("document about database systems topic {i}"),
                 }))
                 .unwrap(),
-            },
+            }),
         );
     }
 
@@ -205,13 +206,13 @@ fn rrf_fusion_mathematically_correct() {
         tx.try_push(BridgeRequest {
             inner: make_request_with_id(
                 200 + i as u64,
-                PhysicalPlan::VectorInsert {
+                PhysicalPlan::Vector(VectorOp::Insert {
                     collection: "docs".into(),
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
                     field_name: String::new(),
                     doc_id: None,
-                },
+                }),
             ),
         })
         .unwrap();
@@ -226,7 +227,7 @@ fn rrf_fusion_mathematically_correct() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::HybridSearch {
+        PhysicalPlan::Text(TextOp::HybridSearch {
             collection: "docs".into(),
             query_vector: Arc::from([10.0f32, 0.0, 0.0].as_slice()),
             query_text: "database systems".into(),
@@ -235,7 +236,7 @@ fn rrf_fusion_mathematically_correct() {
             fuzzy: true,
             vector_weight: 0.5,
             filter_bitmap: None,
-        },
+        }),
     );
     assert_eq!(resp_equal.status, Status::Ok);
     let equal_results = payload_value(&resp_equal.payload);
@@ -246,7 +247,7 @@ fn rrf_fusion_mathematically_correct() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::HybridSearch {
+        PhysicalPlan::Text(TextOp::HybridSearch {
             collection: "docs".into(),
             query_vector: Arc::from([10.0f32, 0.0, 0.0].as_slice()),
             query_text: "database systems".into(),
@@ -255,7 +256,7 @@ fn rrf_fusion_mathematically_correct() {
             fuzzy: true,
             vector_weight: 0.9,
             filter_bitmap: None,
-        },
+        }),
     );
     assert_eq!(resp_vec_heavy.status, Status::Ok);
 
@@ -281,7 +282,7 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "articles".into(),
             document_id: "a1".into(),
             value: serde_json::to_vec(&serde_json::json!({
@@ -289,14 +290,14 @@ fn document_indexes_consistent_after_simulated_crash() {
                 "status": "published",
             }))
             .unwrap(),
-        },
+        }),
     );
 
     send_ok(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "articles".into(),
             document_id: "a2".into(),
             value: serde_json::to_vec(&serde_json::json!({
@@ -304,7 +305,7 @@ fn document_indexes_consistent_after_simulated_crash() {
                 "status": "draft",
             }))
             .unwrap(),
-        },
+        }),
     );
 
     // Text search should find both documents.
@@ -312,12 +313,12 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::TextSearch {
+        PhysicalPlan::Text(TextOp::Search {
             collection: "articles".into(),
             query: "database".into(),
             top_k: 10,
             fuzzy: true,
-        },
+        }),
     );
     let text_json = payload_json(&text_payload);
     assert!(
@@ -330,10 +331,10 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointDelete {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "articles".into(),
             document_id: "a1".into(),
-        },
+        }),
     );
 
     // Text search should NOT find a1 anymore (index cascaded).
@@ -341,12 +342,12 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::TextSearch {
+        PhysicalPlan::Text(TextOp::Search {
             collection: "articles".into(),
             query: "database".into(),
             top_k: 10,
             fuzzy: true,
-        },
+        }),
     );
     let text_after_json = payload_json(&text_after);
     assert!(
@@ -359,12 +360,12 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::TextSearch {
+        PhysicalPlan::Text(TextOp::Search {
             collection: "articles".into(),
             query: "vector search".into(),
             top_k: 10,
             fuzzy: true,
-        },
+        }),
     );
     let text_a2_json = payload_json(&text_a2);
     assert!(
@@ -377,10 +378,10 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "articles".into(),
             document_id: "a1".into(),
-        },
+        }),
     );
     assert_eq!(get_a1.error_code, Some(ErrorCode::NotFound));
 
@@ -388,10 +389,10 @@ fn document_indexes_consistent_after_simulated_crash() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "articles".into(),
             document_id: "a2".into(),
-        },
+        }),
     );
     assert_eq!(get_a2.status, Status::Ok);
 }

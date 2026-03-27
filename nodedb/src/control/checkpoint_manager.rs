@@ -28,6 +28,7 @@ use tracing::{debug, info, warn};
 
 use crate::bridge::dispatch::Dispatcher;
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
+use crate::bridge::physical_plan::MetaOp;
 use crate::control::request_tracker::RequestTracker;
 use crate::types::{Lsn, ReadConsistency, RequestId, TenantId, VShardId};
 use crate::wal::WalManager;
@@ -88,7 +89,7 @@ pub async fn run_checkpoint_cycle(
                 request_id,
                 tenant_id: TenantId::new(0), // System-level checkpoint.
                 vshard_id,
-                plan: PhysicalPlan::Checkpoint,
+                plan: PhysicalPlan::Meta(MetaOp::Checkpoint),
                 deadline: std::time::Instant::now() + timeout,
                 priority: Priority::Background,
                 trace_id: 0,

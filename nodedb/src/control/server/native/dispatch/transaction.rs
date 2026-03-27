@@ -3,6 +3,7 @@
 use nodedb_types::protocol::NativeResponse;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::MetaOp;
 use crate::control::planner::physical::PhysicalTask;
 
 use super::super::super::dispatch_utils;
@@ -85,7 +86,7 @@ pub(crate) async fn handle_commit(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResp
         let batch_task = PhysicalTask {
             tenant_id,
             vshard_id,
-            plan: PhysicalPlan::TransactionBatch { plans },
+            plan: PhysicalPlan::Meta(MetaOp::TransactionBatch { plans }),
         };
         if let Err(e) = dispatch_utils::dispatch_to_data_plane(
             ctx.state,

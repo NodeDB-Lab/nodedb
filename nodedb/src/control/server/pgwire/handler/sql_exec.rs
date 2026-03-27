@@ -118,7 +118,9 @@ impl NodeDbPgHandler {
                 let batch_task = crate::control::planner::physical::PhysicalTask {
                     tenant_id,
                     vshard_id,
-                    plan: crate::bridge::envelope::PhysicalPlan::TransactionBatch { plans },
+                    plan: crate::bridge::envelope::PhysicalPlan::Meta(
+                        crate::bridge::physical_plan::MetaOp::TransactionBatch { plans },
+                    ),
                 };
                 if let Err(e) = self.dispatch_task_no_wal(batch_task).await {
                     tracing::warn!(error = %e, "transaction batch dispatch failed");

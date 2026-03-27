@@ -10,6 +10,7 @@
 //! 7. If a waiter exists (leader path), sends the response; otherwise just applies (follower)
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, VectorOp};
 use crate::types::{TenantId, VShardId};
 
 /// Type alias for the Raft propose callback.
@@ -126,59 +127,59 @@ pub fn to_replicated_entry(
     plan: &PhysicalPlan,
 ) -> Option<ReplicatedEntry> {
     let write = match plan {
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection,
             document_id,
             value,
-        } => ReplicatedWrite::PointPut {
+        }) => ReplicatedWrite::PointPut {
             collection: collection.clone(),
             document_id: document_id.clone(),
             value: value.clone(),
         },
-        PhysicalPlan::PointDelete {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
             document_id,
-        } => ReplicatedWrite::PointDelete {
+        }) => ReplicatedWrite::PointDelete {
             collection: collection.clone(),
             document_id: document_id.clone(),
         },
-        PhysicalPlan::PointUpdate {
+        PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection,
             document_id,
             updates,
-        } => ReplicatedWrite::PointUpdate {
+        }) => ReplicatedWrite::PointUpdate {
             collection: collection.clone(),
             document_id: document_id.clone(),
             updates: updates.clone(),
         },
-        PhysicalPlan::VectorInsert {
+        PhysicalPlan::Vector(VectorOp::Insert {
             collection,
             vector,
             dim,
             field_name: _,
             doc_id: _,
-        } => ReplicatedWrite::VectorInsert {
+        }) => ReplicatedWrite::VectorInsert {
             collection: collection.clone(),
             vector: vector.clone(),
             dim: *dim,
         },
-        PhysicalPlan::VectorBatchInsert {
+        PhysicalPlan::Vector(VectorOp::BatchInsert {
             collection,
             vectors,
             dim,
-        } => ReplicatedWrite::VectorBatchInsert {
+        }) => ReplicatedWrite::VectorBatchInsert {
             collection: collection.clone(),
             vectors: vectors.clone(),
             dim: *dim,
         },
-        PhysicalPlan::VectorDelete {
+        PhysicalPlan::Vector(VectorOp::Delete {
             collection,
             vector_id,
-        } => ReplicatedWrite::VectorDelete {
+        }) => ReplicatedWrite::VectorDelete {
             collection: collection.clone(),
             vector_id: *vector_id,
         },
-        PhysicalPlan::SetVectorParams {
+        PhysicalPlan::Vector(VectorOp::SetParams {
             collection,
             m,
             ef_construction,
@@ -187,7 +188,7 @@ pub fn to_replicated_entry(
             pq_m,
             ivf_cells,
             ivf_nprobe,
-        } => ReplicatedWrite::SetVectorParams {
+        }) => ReplicatedWrite::SetVectorParams {
             collection: collection.clone(),
             m: *m,
             ef_construction: *ef_construction,
@@ -197,34 +198,34 @@ pub fn to_replicated_entry(
             ivf_cells: *ivf_cells,
             ivf_nprobe: *ivf_nprobe,
         },
-        PhysicalPlan::CrdtApply {
+        PhysicalPlan::Crdt(CrdtOp::Apply {
             collection,
             document_id,
             delta,
             peer_id,
             mutation_id: _,
-        } => ReplicatedWrite::CrdtApply {
+        }) => ReplicatedWrite::CrdtApply {
             collection: collection.clone(),
             document_id: document_id.clone(),
             delta: delta.clone(),
             peer_id: *peer_id,
         },
-        PhysicalPlan::EdgePut {
+        PhysicalPlan::Graph(GraphOp::EdgePut {
             src_id,
             label,
             dst_id,
             properties,
-        } => ReplicatedWrite::EdgePut {
+        }) => ReplicatedWrite::EdgePut {
             src_id: src_id.clone(),
             label: label.clone(),
             dst_id: dst_id.clone(),
             properties: properties.clone(),
         },
-        PhysicalPlan::EdgeDelete {
+        PhysicalPlan::Graph(GraphOp::EdgeDelete {
             src_id,
             label,
             dst_id,
-        } => ReplicatedWrite::EdgeDelete {
+        }) => ReplicatedWrite::EdgeDelete {
             src_id: src_id.clone(),
             label: label.clone(),
             dst_id: dst_id.clone(),
@@ -260,54 +261,54 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             collection,
             document_id,
             value,
-        } => PhysicalPlan::PointPut {
+        } => PhysicalPlan::Document(DocumentOp::PointPut {
             collection: collection.clone(),
             document_id: document_id.clone(),
             value: value.clone(),
-        },
+        }),
         ReplicatedWrite::PointDelete {
             collection,
             document_id,
-        } => PhysicalPlan::PointDelete {
+        } => PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: collection.clone(),
             document_id: document_id.clone(),
-        },
+        }),
         ReplicatedWrite::PointUpdate {
             collection,
             document_id,
             updates,
-        } => PhysicalPlan::PointUpdate {
+        } => PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection: collection.clone(),
             document_id: document_id.clone(),
             updates: updates.clone(),
-        },
+        }),
         ReplicatedWrite::VectorInsert {
             collection,
             vector,
             dim,
-        } => PhysicalPlan::VectorInsert {
+        } => PhysicalPlan::Vector(VectorOp::Insert {
             collection: collection.clone(),
             vector: vector.clone(),
             dim: *dim,
             field_name: String::new(),
             doc_id: None,
-        },
+        }),
         ReplicatedWrite::VectorBatchInsert {
             collection,
             vectors,
             dim,
-        } => PhysicalPlan::VectorBatchInsert {
+        } => PhysicalPlan::Vector(VectorOp::BatchInsert {
             collection: collection.clone(),
             vectors: vectors.clone(),
             dim: *dim,
-        },
+        }),
         ReplicatedWrite::VectorDelete {
             collection,
             vector_id,
-        } => PhysicalPlan::VectorDelete {
+        } => PhysicalPlan::Vector(VectorOp::Delete {
             collection: collection.clone(),
             vector_id: *vector_id,
-        },
+        }),
         ReplicatedWrite::SetVectorParams {
             collection,
             m,
@@ -317,7 +318,7 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             pq_m,
             ivf_cells,
             ivf_nprobe,
-        } => PhysicalPlan::SetVectorParams {
+        } => PhysicalPlan::Vector(VectorOp::SetParams {
             collection: collection.clone(),
             m: *m,
             ef_construction: *ef_construction,
@@ -326,39 +327,39 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             pq_m: *pq_m,
             ivf_cells: *ivf_cells,
             ivf_nprobe: *ivf_nprobe,
-        },
+        }),
         ReplicatedWrite::CrdtApply {
             collection,
             document_id,
             delta,
             peer_id,
-        } => PhysicalPlan::CrdtApply {
+        } => PhysicalPlan::Crdt(CrdtOp::Apply {
             collection: collection.clone(),
             document_id: document_id.clone(),
             delta: delta.clone(),
             peer_id: *peer_id,
             mutation_id: 0,
-        },
+        }),
         ReplicatedWrite::EdgePut {
             src_id,
             label,
             dst_id,
             properties,
-        } => PhysicalPlan::EdgePut {
+        } => PhysicalPlan::Graph(GraphOp::EdgePut {
             src_id: src_id.clone(),
             label: label.clone(),
             dst_id: dst_id.clone(),
             properties: properties.clone(),
-        },
+        }),
         ReplicatedWrite::EdgeDelete {
             src_id,
             label,
             dst_id,
-        } => PhysicalPlan::EdgeDelete {
+        } => PhysicalPlan::Graph(GraphOp::EdgeDelete {
             src_id: src_id.clone(),
             label: label.clone(),
             dst_id: dst_id.clone(),
-        },
+        }),
     }
 }
 
@@ -476,18 +477,18 @@ mod tests {
         let vshard = VShardId::new(0);
 
         // Write — should produce Some.
-        let plan = PhysicalPlan::PointPut {
+        let plan = PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "c".into(),
             document_id: "d".into(),
             value: vec![],
-        };
+        });
         assert!(to_replicated_entry(tenant, vshard, &plan).is_some());
 
         // Read — should produce None.
-        let plan = PhysicalPlan::PointGet {
+        let plan = PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "c".into(),
             document_id: "d".into(),
-        };
+        });
         assert!(to_replicated_entry(tenant, vshard, &plan).is_none());
     }
 }

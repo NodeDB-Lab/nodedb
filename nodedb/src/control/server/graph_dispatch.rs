@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 
 use crate::bridge::envelope::{PhysicalPlan, Response};
+use crate::bridge::physical_plan::GraphOp;
 use crate::control::scatter_gather;
 use crate::control::state::SharedState;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
@@ -79,11 +80,11 @@ pub async fn cross_core_bfs_with_options(
         let mut local_hop_results: Vec<String> = Vec::new();
 
         for node in &frontier {
-            let plan = PhysicalPlan::GraphNeighbors {
+            let plan = PhysicalPlan::Graph(GraphOp::Neighbors {
                 node_id: node.clone(),
                 edge_label: edge_label.clone(),
                 direction,
-            };
+            });
 
             let resp = super::broadcast::broadcast_to_all_cores(shared, tenant_id, plan, 0).await?;
 

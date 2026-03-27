@@ -3,6 +3,7 @@
 use datafusion::prelude::*;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::DocumentOp;
 use crate::control::planner::physical::PhysicalTask;
 use crate::types::{TenantId, VShardId};
 
@@ -85,11 +86,11 @@ impl PlanConverter {
                             tasks.push(PhysicalTask {
                                 tenant_id,
                                 vshard_id: vshard,
-                                plan: PhysicalPlan::PointPut {
+                                plan: PhysicalPlan::Document(DocumentOp::PointPut {
                                     collection: collection.clone(),
                                     document_id: doc_id,
                                     value: value_bytes,
-                                },
+                                }),
                             });
                         }
                         return Ok(tasks);
@@ -105,12 +106,12 @@ impl PlanConverter {
                 Ok(vec![PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::InsertSelect {
+                    plan: PhysicalPlan::Document(DocumentOp::InsertSelect {
                         target_collection: collection,
                         source_collection,
                         source_filters,
                         source_limit,
-                    },
+                    }),
                 }])
             }
             WriteOp::Delete => {
@@ -123,10 +124,10 @@ impl PlanConverter {
                         .map(|doc_id| PhysicalTask {
                             tenant_id,
                             vshard_id: vshard,
-                            plan: PhysicalPlan::PointDelete {
+                            plan: PhysicalPlan::Document(DocumentOp::PointDelete {
                                 collection: collection.clone(),
                                 document_id: doc_id,
-                            },
+                            }),
                         })
                         .collect());
                 }
@@ -136,10 +137,10 @@ impl PlanConverter {
                 Ok(vec![PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::BulkDelete {
+                    plan: PhysicalPlan::Document(DocumentOp::BulkDelete {
                         collection,
                         filters: filter_bytes,
-                    },
+                    }),
                 }])
             }
 
@@ -160,11 +161,11 @@ impl PlanConverter {
                         .map(|doc_id| PhysicalTask {
                             tenant_id,
                             vshard_id: vshard,
-                            plan: PhysicalPlan::PointUpdate {
+                            plan: PhysicalPlan::Document(DocumentOp::PointUpdate {
                                 collection: collection.clone(),
                                 document_id: doc_id,
                                 updates: updates.clone(),
-                            },
+                            }),
                         })
                         .collect());
                 }
@@ -174,17 +175,17 @@ impl PlanConverter {
                 Ok(vec![PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::BulkUpdate {
+                    plan: PhysicalPlan::Document(DocumentOp::BulkUpdate {
                         collection,
                         filters: filter_bytes,
                         updates,
-                    },
+                    }),
                 }])
             }
             WriteOp::Truncate => Ok(vec![PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
-                plan: PhysicalPlan::Truncate { collection },
+                plan: PhysicalPlan::Document(DocumentOp::Truncate { collection }),
             }]),
         }
     }
@@ -221,10 +222,10 @@ impl PlanConverter {
                     return Ok(Some(PhysicalTask {
                         tenant_id,
                         vshard_id: vshard,
-                        plan: PhysicalPlan::PointGet {
+                        plan: PhysicalPlan::Document(DocumentOp::PointGet {
                             collection: collection.to_string(),
                             document_id: doc_id,
-                        },
+                        }),
                     }));
                 }
             }

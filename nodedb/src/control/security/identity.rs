@@ -147,79 +147,111 @@ pub fn role_grants_permission(role: &Role, permission: Permission) -> bool {
 /// Map a PhysicalPlan to the Permission required to execute it.
 pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Permission {
     use crate::bridge::envelope::PhysicalPlan;
+    use crate::bridge::physical_plan::{
+        CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp, QueryOp, SpatialOp, TextOp, TimeseriesOp,
+        VectorOp,
+    };
     match plan {
         // Read operations.
-        PhysicalPlan::PointGet { .. }
-        | PhysicalPlan::RangeScan { .. }
-        | PhysicalPlan::VectorSearch { .. }
-        | PhysicalPlan::VectorMultiSearch { .. }
-        | PhysicalPlan::CrdtRead { .. }
-        | PhysicalPlan::GraphHop { .. }
-        | PhysicalPlan::GraphNeighbors { .. }
-        | PhysicalPlan::GraphPath { .. }
-        | PhysicalPlan::GraphSubgraph { .. }
-        | PhysicalPlan::GraphRagFusion { .. }
-        | PhysicalPlan::DocumentScan { .. }
-        | PhysicalPlan::Aggregate { .. }
-        | PhysicalPlan::HashJoin { .. }
-        | PhysicalPlan::TextSearch { .. }
-        | PhysicalPlan::HybridSearch { .. }
-        | PhysicalPlan::PartialAggregate { .. }
-        | PhysicalPlan::BroadcastJoin { .. }
-        | PhysicalPlan::ShuffleJoin { .. }
-        | PhysicalPlan::SpatialScan { .. }
-        | PhysicalPlan::TimeseriesScan { .. } => Permission::Read,
+        PhysicalPlan::Document(
+            DocumentOp::PointGet { .. }
+            | DocumentOp::RangeScan { .. }
+            | DocumentOp::Scan { .. }
+            | DocumentOp::IndexLookup { .. }
+            | DocumentOp::EstimateCount { .. },
+        ) => Permission::Read,
+
+        PhysicalPlan::Vector(VectorOp::Search { .. } | VectorOp::MultiSearch { .. }) => {
+            Permission::Read
+        }
+
+        PhysicalPlan::Crdt(CrdtOp::Read { .. }) => Permission::Read,
+
+        PhysicalPlan::Graph(
+            GraphOp::Hop { .. }
+            | GraphOp::Neighbors { .. }
+            | GraphOp::Path { .. }
+            | GraphOp::Subgraph { .. }
+            | GraphOp::RagFusion { .. }
+            | GraphOp::Algo { .. }
+            | GraphOp::Match { .. },
+        ) => Permission::Read,
+
+        PhysicalPlan::Query(
+            QueryOp::Aggregate { .. }
+            | QueryOp::HashJoin { .. }
+            | QueryOp::PartialAggregate { .. }
+            | QueryOp::BroadcastJoin { .. }
+            | QueryOp::ShuffleJoin { .. }
+            | QueryOp::NestedLoopJoin { .. },
+        ) => Permission::Read,
+
+        PhysicalPlan::Text(TextOp::Search { .. } | TextOp::HybridSearch { .. }) => Permission::Read,
+
+        PhysicalPlan::Spatial(SpatialOp::Scan { .. }) => Permission::Read,
+
+        PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. }) => Permission::Read,
 
         // Write operations.
-        PhysicalPlan::CrdtApply { .. }
-        | PhysicalPlan::VectorInsert { .. }
-        | PhysicalPlan::VectorBatchInsert { .. }
-        | PhysicalPlan::VectorDelete { .. }
-        | PhysicalPlan::DocumentBatchInsert { .. }
-        | PhysicalPlan::PointPut { .. }
-        | PhysicalPlan::PointDelete { .. }
-        | PhysicalPlan::PointUpdate { .. }
-        | PhysicalPlan::EdgePut { .. }
-        | PhysicalPlan::EdgeDelete { .. }
-        | PhysicalPlan::WalAppend { .. }
-        | PhysicalPlan::BulkUpdate { .. }
-        | PhysicalPlan::BulkDelete { .. }
-        | PhysicalPlan::Upsert { .. }
-        | PhysicalPlan::InsertSelect { .. }
-        | PhysicalPlan::Truncate { .. }
-        | PhysicalPlan::TimeseriesIngest { .. } => Permission::Write,
+        PhysicalPlan::Crdt(CrdtOp::Apply { .. }) => Permission::Write,
 
-        // Document index lookup is a read operation.
-        PhysicalPlan::DocumentIndexLookup { .. } => Permission::Read,
+        PhysicalPlan::Vector(
+            VectorOp::Insert { .. } | VectorOp::BatchInsert { .. } | VectorOp::Delete { .. },
+        ) => Permission::Write,
 
-        // RegisterDocumentCollection and DropDocumentIndex are DDL operations.
-        PhysicalPlan::RegisterDocumentCollection { .. }
-        | PhysicalPlan::DropDocumentIndex { .. } => Permission::Alter,
+        PhysicalPlan::Document(
+            DocumentOp::BatchInsert { .. }
+            | DocumentOp::PointPut { .. }
+            | DocumentOp::PointDelete { .. }
+            | DocumentOp::PointUpdate { .. }
+            | DocumentOp::BulkUpdate { .. }
+            | DocumentOp::BulkDelete { .. }
+            | DocumentOp::Upsert { .. }
+            | DocumentOp::InsertSelect { .. }
+            | DocumentOp::Truncate { .. },
+        ) => Permission::Write,
 
-        // EstimateCount is a read operation.
-        PhysicalPlan::EstimateCount { .. } => Permission::Read,
+        PhysicalPlan::Graph(GraphOp::EdgePut { .. } | GraphOp::EdgeDelete { .. }) => {
+            Permission::Write
+        }
+
+        PhysicalPlan::Meta(MetaOp::WalAppend { .. }) => Permission::Write,
+
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. }) => Permission::Write,
+
+        // Transaction batch: requires write (contains writes).
+        PhysicalPlan::Meta(MetaOp::TransactionBatch { .. }) => Permission::Write,
 
         // DDL / schema changes.
-        PhysicalPlan::SetCollectionPolicy { .. } | PhysicalPlan::SetVectorParams { .. } => {
+        PhysicalPlan::Document(DocumentOp::Register { .. } | DocumentOp::DropIndex { .. }) => {
             Permission::Alter
         }
 
+        PhysicalPlan::Crdt(CrdtOp::SetPolicy { .. }) => Permission::Alter,
+
+        PhysicalPlan::Vector(VectorOp::SetParams { .. }) => Permission::Alter,
+
         // Control operations.
-        PhysicalPlan::Cancel { .. } => Permission::Admin,
-
-        // Nested loop join: read-only join operation.
-        PhysicalPlan::NestedLoopJoin { .. } => Permission::Read,
-
-        // Transaction batch: requires write (contains writes).
-        PhysicalPlan::TransactionBatch { .. } => Permission::Write,
-
-        // Graph algorithms and pattern matching: read-only computation on CSR.
-        PhysicalPlan::GraphAlgo { .. } | PhysicalPlan::GraphMatch { .. } => Permission::Read,
+        PhysicalPlan::Meta(MetaOp::Cancel { .. }) => Permission::Admin,
 
         // System-level operations: require admin.
-        PhysicalPlan::CreateSnapshot | PhysicalPlan::Compact | PhysicalPlan::Checkpoint => {
+        PhysicalPlan::Meta(MetaOp::CreateSnapshot | MetaOp::Compact | MetaOp::Checkpoint) => {
             Permission::Admin
         }
+
+        // KV engine: read operations.
+        PhysicalPlan::Kv(KvOp::Get { .. } | KvOp::Scan { .. } | KvOp::BatchGet { .. }) => {
+            Permission::Read
+        }
+
+        // KV engine: write operations.
+        PhysicalPlan::Kv(
+            KvOp::Put { .. }
+            | KvOp::Delete { .. }
+            | KvOp::Expire { .. }
+            | KvOp::Persist { .. }
+            | KvOp::BatchPut { .. },
+        ) => Permission::Write,
     }
 }
 

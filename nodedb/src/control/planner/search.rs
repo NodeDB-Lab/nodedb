@@ -1,8 +1,7 @@
 //! Search pattern detection helpers for the plan converter.
 //! Handles both vector similarity and BM25 full-text search patterns.
 //!
-//! These are standalone functions extracted from `PlanConverter` to keep
-//! `converter.rs` under the 500-line limit. They handle the
+//! These are standalone functions extracted from `PlanConverter`. They handle the
 //! `ORDER BY vector_distance(...) LIMIT k` pattern detection and related
 //! utilities.
 

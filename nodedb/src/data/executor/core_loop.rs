@@ -592,6 +592,7 @@ impl CoreLoop {
 pub(crate) mod tests {
     use super::*;
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
+    use crate::bridge::physical_plan::{DocumentOp, MetaOp};
     use crate::types::*;
     use nodedb_bridge::buffer::RingBuffer;
     use std::time::{Duration, Instant};
@@ -641,10 +642,10 @@ pub(crate) mod tests {
             .try_push(BridgeRequest {
                 inner: Request {
                     deadline: Instant::now() - Duration::from_secs(1),
-                    ..make_request(PhysicalPlan::PointGet {
+                    ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
                         collection: "x".into(),
                         document_id: "y".into(),
-                    })
+                    }))
                 },
             })
             .unwrap();
@@ -661,10 +662,10 @@ pub(crate) mod tests {
         core.sparse.put(1, "x", "y", b"data").unwrap();
         req_tx
             .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::PointGet {
+                inner: make_request(PhysicalPlan::Document(DocumentOp::PointGet {
                     collection: "x".into(),
                     document_id: "y".into(),
-                }),
+                })),
             })
             .unwrap();
         core.tick();
@@ -680,10 +681,10 @@ pub(crate) mod tests {
                 inner: Request {
                     request_id: RequestId::new(10),
                     deadline: Instant::now() + Duration::from_secs(60),
-                    ..make_request(PhysicalPlan::PointGet {
+                    ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
                         collection: "x".into(),
                         document_id: "y".into(),
-                    })
+                    }))
                 },
             })
             .unwrap();
@@ -696,9 +697,9 @@ pub(crate) mod tests {
                     request_id: RequestId::new(99),
                     priority: Priority::Critical,
                     consistency: ReadConsistency::Eventual,
-                    ..make_request(PhysicalPlan::Cancel {
+                    ..make_request(PhysicalPlan::Meta(MetaOp::Cancel {
                         target_request_id: RequestId::new(10),
-                    })
+                    }))
                 },
             })
             .unwrap();

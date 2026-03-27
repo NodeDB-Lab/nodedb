@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
+use crate::bridge::physical_plan::DocumentOp;
 use crate::control::server::http::auth::{ApiError, AppState, resolve_identity};
 use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
 
@@ -149,11 +150,11 @@ pub async fn insert_document(
     let value =
         serde_json::to_vec(data).map_err(|e| ApiError::BadRequest(format!("invalid data: {e}")))?;
 
-    let plan = PhysicalPlan::PointPut {
+    let plan = PhysicalPlan::Document(DocumentOp::PointPut {
         collection: collection.clone(),
         document_id: document_id.clone(),
         value,
-    };
+    });
 
     let trace_id = extract_request_id(&headers);
     state.shared.tenant_request_start(identity.tenant_id);
@@ -180,10 +181,10 @@ pub async fn get_document(
 ) -> Result<impl IntoResponse, ApiError> {
     let identity = resolve_identity(&headers, &state, "http")?;
 
-    let plan = PhysicalPlan::PointGet {
+    let plan = PhysicalPlan::Document(DocumentOp::PointGet {
         collection: collection.clone(),
         document_id: document_id.clone(),
-    };
+    });
 
     state.shared.tenant_request_start(identity.tenant_id);
     let result = dispatch_plan(&state, identity.tenant_id, &collection, plan).await;
@@ -220,10 +221,10 @@ pub async fn delete_document(
 ) -> Result<impl IntoResponse, ApiError> {
     let identity = resolve_identity(&headers, &state, "http")?;
 
-    let plan = PhysicalPlan::PointDelete {
+    let plan = PhysicalPlan::Document(DocumentOp::PointDelete {
         collection: collection.clone(),
         document_id: document_id.clone(),
-    };
+    });
 
     state.shared.tenant_request_start(identity.tenant_id);
     let result = dispatch_plan(&state, identity.tenant_id, &collection, plan).await;

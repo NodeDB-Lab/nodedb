@@ -1,6 +1,5 @@
 //! Vector index checkpoint methods for [`CoreLoop`].
 //!
-//! Extracted from `core_loop.rs` to keep that file under the 500-line limit.
 //! Contains HNSW build completion polling and checkpoint load/save operations.
 
 use super::core_loop::CoreLoop;

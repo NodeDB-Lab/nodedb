@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::bridge::envelope::Payload;
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
+use crate::bridge::physical_plan::{DocumentOp, TimeseriesOp};
 use crate::control::state::SharedState;
 use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
 
@@ -41,7 +42,8 @@ pub async fn dispatch_to_data_plane(
     // Extract write metadata before the plan is moved into the request.
     let is_ts_collection = matches!(
         &plan,
-        PhysicalPlan::TimeseriesIngest { .. } | PhysicalPlan::TimeseriesScan { .. }
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. })
+            | PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. })
     );
     let change_meta = extract_write_metadata(&plan, tenant_id);
 
@@ -148,55 +150,55 @@ fn extract_write_metadata(
 )> {
     use crate::control::change_stream::ChangeOperation;
     match plan {
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection,
             document_id,
             ..
-        } => Some((
+        }) => Some((
             collection.clone(),
             document_id.clone(),
             ChangeOperation::Insert,
         )),
-        PhysicalPlan::PointDelete {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
             document_id,
-        } => Some((
+        }) => Some((
             collection.clone(),
             document_id.clone(),
             ChangeOperation::Delete,
         )),
-        PhysicalPlan::PointUpdate {
+        PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection,
             document_id,
             ..
-        } => Some((
+        }) => Some((
             collection.clone(),
             document_id.clone(),
             ChangeOperation::Update,
         )),
-        PhysicalPlan::Upsert {
+        PhysicalPlan::Document(DocumentOp::Upsert {
             collection,
             document_id,
             ..
-        } => Some((
+        }) => Some((
             collection.clone(),
             document_id.clone(),
             ChangeOperation::Insert,
         )),
-        PhysicalPlan::BulkUpdate { collection, .. } => {
+        PhysicalPlan::Document(DocumentOp::BulkUpdate { collection, .. }) => {
             Some((collection.clone(), "*".into(), ChangeOperation::Update))
         }
-        PhysicalPlan::BulkDelete { collection, .. } => {
+        PhysicalPlan::Document(DocumentOp::BulkDelete { collection, .. }) => {
             Some((collection.clone(), "*".into(), ChangeOperation::Delete))
         }
-        PhysicalPlan::Truncate { collection } => {
+        PhysicalPlan::Document(DocumentOp::Truncate { collection }) => {
             Some((collection.clone(), "*".into(), ChangeOperation::Delete))
         }
         // Timeseries ingest: batch write. CDC is opt-in for timeseries
         // collections (high-cardinality metrics would flood the bus).
         // The change event uses document_id="*" to indicate a batch.
         // Consumers can subscribe with collection_filter to get these events.
-        PhysicalPlan::TimeseriesIngest { collection, .. } => {
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. }) => {
             Some((collection.clone(), "*".into(), ChangeOperation::Insert))
         }
         _ => None,

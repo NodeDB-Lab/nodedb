@@ -19,6 +19,7 @@ pub(super) async fn handle_shape_subscribe_async(
     frame: &SyncFrame,
 ) -> Option<SyncFrame> {
     use crate::bridge::envelope::PhysicalPlan;
+    use crate::bridge::physical_plan::DocumentOp;
     use crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async;
     use crate::types::TenantId;
 
@@ -32,13 +33,13 @@ pub(super) async fn handle_shape_subscribe_async(
     let snapshot_data = match &msg.shape.shape_type {
         nodedb_types::sync::shape::ShapeType::Document { collection, .. } => {
             // Query the Data Plane for all documents in this collection.
-            let plan = PhysicalPlan::RangeScan {
+            let plan = PhysicalPlan::Document(DocumentOp::RangeScan {
                 collection: collection.clone(),
                 field: String::new(), // Empty = full collection scan.
                 lower: None,
                 upper: None,
                 limit: 10_000, // Cap for safety.
-            };
+            });
             match dispatch_async(
                 shared,
                 TenantId::new(tenant_id),
@@ -109,19 +110,20 @@ pub(super) async fn validate_delta_constraints(
     ack_frame: SyncFrame,
 ) -> SyncFrame {
     use crate::bridge::envelope::PhysicalPlan;
+    use crate::bridge::physical_plan::CrdtOp;
     use crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async;
     use crate::types::TenantId;
 
     // Dispatch a CrdtApply plan to the Data Plane. If the CRDT engine
     // rejects it (constraint violation), we get an error back.
     let tenant_id = TenantId::new(0); // Trust mode default tenant.
-    let plan = PhysicalPlan::CrdtApply {
+    let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: delta_msg.collection.clone(),
         document_id: delta_msg.document_id.clone(),
         delta: delta_msg.delta.clone(),
         peer_id: delta_msg.peer_id,
         mutation_id: delta_msg.mutation_id,
-    };
+    });
 
     match dispatch_async(
         shared,

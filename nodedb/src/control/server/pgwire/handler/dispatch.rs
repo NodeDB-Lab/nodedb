@@ -18,18 +18,31 @@ impl NodeDbPgHandler {
         // Broadcast scans to all cores — data is distributed across cores.
         if matches!(
             task.plan,
-            crate::bridge::envelope::PhysicalPlan::DocumentScan { .. }
-                | crate::bridge::envelope::PhysicalPlan::Aggregate { .. }
-                | crate::bridge::envelope::PhysicalPlan::PartialAggregate { .. }
-                | crate::bridge::envelope::PhysicalPlan::GraphHop { .. }
-                | crate::bridge::envelope::PhysicalPlan::GraphNeighbors { .. }
-                | crate::bridge::envelope::PhysicalPlan::GraphPath { .. }
-                | crate::bridge::envelope::PhysicalPlan::GraphSubgraph { .. }
-                | crate::bridge::envelope::PhysicalPlan::VectorSearch { .. }
-                | crate::bridge::envelope::PhysicalPlan::TextSearch { .. }
-                | crate::bridge::envelope::PhysicalPlan::HybridSearch { .. }
-                | crate::bridge::envelope::PhysicalPlan::GraphRagFusion { .. }
-                | crate::bridge::envelope::PhysicalPlan::GraphMatch { .. }
+            crate::bridge::envelope::PhysicalPlan::Document(
+                crate::bridge::physical_plan::DocumentOp::Scan { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Query(
+                crate::bridge::physical_plan::QueryOp::Aggregate { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Query(
+                crate::bridge::physical_plan::QueryOp::PartialAggregate { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Graph(
+                crate::bridge::physical_plan::GraphOp::Hop { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Graph(
+                crate::bridge::physical_plan::GraphOp::Neighbors { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Graph(
+                crate::bridge::physical_plan::GraphOp::Path { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Graph(
+                crate::bridge::physical_plan::GraphOp::Subgraph { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Vector(
+                crate::bridge::physical_plan::VectorOp::Search { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Text(
+                crate::bridge::physical_plan::TextOp::Search { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Text(
+                crate::bridge::physical_plan::TextOp::HybridSearch { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Graph(
+                crate::bridge::physical_plan::GraphOp::RagFusion { .. }
+            ) | crate::bridge::envelope::PhysicalPlan::Graph(
+                crate::bridge::physical_plan::GraphOp::Match { .. }
+            )
         ) {
             return crate::control::server::dispatch_utils::broadcast_to_all_cores(
                 &self.state,

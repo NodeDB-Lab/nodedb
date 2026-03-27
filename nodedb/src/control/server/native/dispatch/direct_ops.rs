@@ -5,6 +5,7 @@ use std::sync::Arc;
 use nodedb_types::protocol::{NativeResponse, OpCode, TextFields};
 
 use crate::bridge::envelope::{PhysicalPlan, Response, Status};
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, TextOp, VectorOp};
 use crate::data::executor::response_codec;
 
 use super::super::super::dispatch_utils;
@@ -53,10 +54,10 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     detail: "missing 'document_id'".to_string(),
                 })?
                 .clone();
-            Ok(PhysicalPlan::PointGet {
+            Ok(PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: collection.to_string(),
                 document_id,
-            })
+            }))
         }
         OpCode::PointPut => {
             let document_id = fields
@@ -67,11 +68,11 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 })?
                 .clone();
             let value = fields.data.clone().unwrap_or_default();
-            Ok(PhysicalPlan::PointPut {
+            Ok(PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: collection.to_string(),
                 document_id,
                 value,
-            })
+            }))
         }
         OpCode::PointDelete => {
             let document_id = fields
@@ -81,10 +82,10 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     detail: "missing 'document_id'".to_string(),
                 })?
                 .clone();
-            Ok(PhysicalPlan::PointDelete {
+            Ok(PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection: collection.to_string(),
                 document_id,
-            })
+            }))
         }
         OpCode::VectorSearch => {
             let query_vector =
@@ -95,14 +96,14 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                         detail: "missing 'query_vector'".to_string(),
                     })?;
             let top_k = fields.top_k.unwrap_or(10) as usize;
-            Ok(PhysicalPlan::VectorSearch {
+            Ok(PhysicalPlan::Vector(VectorOp::Search {
                 collection: collection.to_string(),
                 query_vector: Arc::from(query_vector.as_slice()),
                 top_k,
                 ef_search: 0,
                 filter_bitmap: None,
                 field_name: String::new(),
-            })
+            }))
         }
         OpCode::RangeScan => {
             let field = fields
@@ -113,13 +114,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 })?
                 .clone();
             let limit = fields.limit.unwrap_or(100) as usize;
-            Ok(PhysicalPlan::RangeScan {
+            Ok(PhysicalPlan::Document(DocumentOp::RangeScan {
                 collection: collection.to_string(),
                 field,
                 lower: None,
                 upper: None,
                 limit,
-            })
+            }))
         }
         OpCode::CrdtRead => {
             let document_id = fields
@@ -129,10 +130,10 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     detail: "missing 'document_id'".to_string(),
                 })?
                 .clone();
-            Ok(PhysicalPlan::CrdtRead {
+            Ok(PhysicalPlan::Crdt(CrdtOp::Read {
                 collection: collection.to_string(),
                 document_id,
-            })
+            }))
         }
         OpCode::CrdtApply => {
             let document_id = fields
@@ -150,13 +151,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 })?
                 .clone();
             let peer_id = fields.peer_id.unwrap_or(0);
-            Ok(PhysicalPlan::CrdtApply {
+            Ok(PhysicalPlan::Crdt(CrdtOp::Apply {
                 collection: collection.to_string(),
                 document_id,
                 delta,
                 peer_id,
                 mutation_id: 0,
-            })
+            }))
         }
         OpCode::GraphRagFusion => {
             let query_vector =
@@ -173,7 +174,7 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
             let final_top_k = fields.final_top_k.unwrap_or(10) as usize;
             let vector_k = fields.vector_k.unwrap_or(60.0);
             let graph_k = fields.graph_k.unwrap_or(10.0);
-            Ok(PhysicalPlan::GraphRagFusion {
+            Ok(PhysicalPlan::Graph(GraphOp::RagFusion {
                 collection: collection.to_string(),
                 query_vector: Arc::from(query_vector.as_slice()),
                 vector_top_k,
@@ -183,7 +184,7 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 final_top_k,
                 rrf_k: (vector_k, graph_k),
                 options: Default::default(),
-            })
+            }))
         }
         OpCode::AlterCollectionPolicy => {
             let policy = fields
@@ -196,10 +197,10 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 serde_json::to_string(policy).map_err(|e| crate::Error::BadRequest {
                     detail: format!("invalid policy: {e}"),
                 })?;
-            Ok(PhysicalPlan::SetCollectionPolicy {
+            Ok(PhysicalPlan::Crdt(CrdtOp::SetPolicy {
                 collection: collection.to_string(),
                 policy_json,
-            })
+            }))
         }
         OpCode::GraphHop => {
             let start = fields
@@ -210,13 +211,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 })?;
             let depth = fields.depth.unwrap_or(2) as usize;
             let direction = parse_direction(fields.direction.as_deref());
-            Ok(PhysicalPlan::GraphHop {
+            Ok(PhysicalPlan::Graph(GraphOp::Hop {
                 start_nodes: vec![start.clone()],
                 depth,
                 edge_label: fields.edge_label.clone(),
                 direction,
                 options: Default::default(),
-            })
+            }))
         }
         OpCode::GraphNeighbors => {
             let start = fields
@@ -226,11 +227,11 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     detail: "missing 'start_node'".to_string(),
                 })?;
             let direction = parse_direction(fields.direction.as_deref());
-            Ok(PhysicalPlan::GraphNeighbors {
+            Ok(PhysicalPlan::Graph(GraphOp::Neighbors {
                 node_id: start.clone(),
                 edge_label: fields.edge_label.clone(),
                 direction,
-            })
+            }))
         }
         OpCode::GraphPath => {
             let from = fields
@@ -246,13 +247,13 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     detail: "missing 'end_node'".to_string(),
                 })?;
             let max_depth = fields.depth.unwrap_or(10) as usize;
-            Ok(PhysicalPlan::GraphPath {
+            Ok(PhysicalPlan::Graph(GraphOp::Path {
                 src: from.clone(),
                 dst: to.clone(),
                 max_depth,
                 edge_label: fields.edge_label.clone(),
                 options: Default::default(),
-            })
+            }))
         }
         OpCode::GraphSubgraph => {
             let start = fields
@@ -262,12 +263,12 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     detail: "missing 'start_node'".to_string(),
                 })?;
             let depth = fields.depth.unwrap_or(2) as usize;
-            Ok(PhysicalPlan::GraphSubgraph {
+            Ok(PhysicalPlan::Graph(GraphOp::Subgraph {
                 start_nodes: vec![start.clone()],
                 depth,
                 edge_label: fields.edge_label.clone(),
                 options: Default::default(),
-            })
+            }))
         }
         OpCode::EdgePut => {
             let src = fields
@@ -293,12 +294,12 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 .as_ref()
                 .map(|v| serde_json::to_string(v).unwrap_or_default())
                 .unwrap_or_default();
-            Ok(PhysicalPlan::EdgePut {
+            Ok(PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: src.clone(),
                 label: label.clone(),
                 dst_id: dst.clone(),
                 properties: props.into_bytes(),
-            })
+            }))
         }
         OpCode::EdgeDelete => {
             let src = fields
@@ -319,11 +320,11 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 .ok_or_else(|| crate::Error::BadRequest {
                     detail: "missing 'edge_type'".to_string(),
                 })?;
-            Ok(PhysicalPlan::EdgeDelete {
+            Ok(PhysicalPlan::Graph(GraphOp::EdgeDelete {
                 src_id: src.clone(),
                 label: label.clone(),
                 dst_id: dst.clone(),
-            })
+            }))
         }
         OpCode::TextSearch => {
             let query_text =
@@ -334,12 +335,12 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                         detail: "missing 'query_text'".to_string(),
                     })?;
             let top_k = fields.top_k.unwrap_or(10) as usize;
-            Ok(PhysicalPlan::TextSearch {
+            Ok(PhysicalPlan::Text(TextOp::Search {
                 collection: collection.to_string(),
                 query: query_text.clone(),
                 top_k,
                 fuzzy: false,
-            })
+            }))
         }
         OpCode::HybridSearch => {
             let query_vector =
@@ -358,7 +359,7 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                     })?;
             let top_k = fields.top_k.unwrap_or(10) as usize;
             let vector_weight = fields.vector_weight.unwrap_or(0.5) as f32;
-            Ok(PhysicalPlan::HybridSearch {
+            Ok(PhysicalPlan::Text(TextOp::HybridSearch {
                 collection: collection.to_string(),
                 query_vector: Arc::from(query_vector.as_slice()),
                 query_text: query_text.clone(),
@@ -367,7 +368,7 @@ fn build_plan(op: OpCode, fields: &TextFields, collection: &str) -> crate::Resul
                 fuzzy: false,
                 vector_weight,
                 filter_bitmap: None,
-            })
+            }))
         }
         _ => Err(crate::Error::BadRequest {
             detail: format!("operation {op:?} not supported as direct dispatch"),

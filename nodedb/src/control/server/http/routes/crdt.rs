@@ -9,6 +9,7 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::CrdtOp;
 use crate::control::server::http::auth::{ApiError, AppState, resolve_identity};
 use crate::control::server::pgwire::types::hex_decode;
 
@@ -49,13 +50,13 @@ pub async fn crdt_apply(
 
     let _trace_id = extract_request_id(&headers);
 
-    let plan = PhysicalPlan::CrdtApply {
+    let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: collection.clone(),
         document_id: doc_id.to_string(),
         delta,
         peer_id: identity.user_id,
         mutation_id: 0,
-    };
+    });
 
     state.shared.tenant_request_start(identity.tenant_id);
     let result = dispatch_plan(&state, identity.tenant_id, &collection, plan).await;

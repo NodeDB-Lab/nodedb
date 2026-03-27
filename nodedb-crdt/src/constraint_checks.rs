@@ -1,7 +1,6 @@
 //! Constraint-checking methods for the [`Validator`].
 //!
-//! These are extracted from `validator.rs` to keep that file under the 500-line
-//! limit. All methods are `impl Validator` blocks and belong logically to the
+//! All methods are `impl Validator` blocks and belong logically to the
 //! validator, but live here to respect file-size guidelines.
 
 use crate::constraint::{Constraint, ConstraintKind};

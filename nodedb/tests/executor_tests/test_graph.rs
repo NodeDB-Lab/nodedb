@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use nodedb::bridge::dispatch::BridgeRequest;
 use nodedb::bridge::envelope::PhysicalPlan;
+use nodedb::bridge::physical_plan::{GraphOp, VectorOp};
 use nodedb::engine::graph::edge_store::Direction;
 
 use crate::helpers::*;
@@ -17,12 +18,12 @@ fn edge_put_and_graph_neighbors() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: "alice".into(),
                 label: "KNOWS".into(),
                 dst_id: dst.to_string(),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -30,11 +31,11 @@ fn edge_put_and_graph_neighbors() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphNeighbors {
+        PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "alice".into(),
             edge_label: Some("KNOWS".into()),
             direction: Direction::Out,
-        },
+        }),
     );
     let json = payload_json(&payload);
     assert!(json.contains("bob"), "payload: {json}");
@@ -50,12 +51,12 @@ fn graph_hop_traversal() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: s.to_string(),
                 label: "NEXT".into(),
                 dst_id: d.to_string(),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -63,13 +64,13 @@ fn graph_hop_traversal() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphHop {
+        PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["a".into()],
             edge_label: Some("NEXT".into()),
             direction: Direction::Out,
             depth: 2,
             options: Default::default(),
-        },
+        }),
     );
     let nodes: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
     assert!(nodes.contains(&"a".to_string()));
@@ -86,12 +87,12 @@ fn graph_path_and_subgraph() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: s.to_string(),
                 label: "L".into(),
                 dst_id: d.to_string(),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -99,13 +100,13 @@ fn graph_path_and_subgraph() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphPath {
+        PhysicalPlan::Graph(GraphOp::Path {
             src: "a".into(),
             dst: "c".into(),
             edge_label: Some("L".into()),
             max_depth: 5,
             options: Default::default(),
-        },
+        }),
     );
     let path: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
     assert_eq!(path, vec!["a", "b", "c"]);
@@ -114,12 +115,12 @@ fn graph_path_and_subgraph() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphSubgraph {
+        PhysicalPlan::Graph(GraphOp::Subgraph {
             start_nodes: vec!["a".into()],
             edge_label: None,
             depth: 2,
             options: Default::default(),
-        },
+        }),
     );
     let edges: Vec<serde_json::Value> = serde_json::from_value(payload_value(&payload)).unwrap();
     assert_eq!(edges.len(), 2);
@@ -133,34 +134,34 @@ fn edge_delete_updates_csr() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::EdgePut {
+        PhysicalPlan::Graph(GraphOp::EdgePut {
             src_id: "x".into(),
             label: "R".into(),
             dst_id: "y".into(),
             properties: vec![],
-        },
+        }),
     );
 
     send_ok(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::EdgeDelete {
+        PhysicalPlan::Graph(GraphOp::EdgeDelete {
             src_id: "x".into(),
             label: "R".into(),
             dst_id: "y".into(),
-        },
+        }),
     );
 
     let payload = send_ok(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphNeighbors {
+        PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "x".into(),
             edge_label: None,
             direction: Direction::Out,
-        },
+        }),
     );
     let neighbors: Vec<serde_json::Value> =
         serde_json::from_value(payload_value(&payload)).unwrap();
@@ -176,13 +177,13 @@ fn graph_rag_fusion_pipeline() {
         tx.try_push(BridgeRequest {
             inner: make_request_with_id(
                 100 + i as u64,
-                PhysicalPlan::VectorInsert {
+                PhysicalPlan::Vector(VectorOp::Insert {
                     collection: "docs".into(),
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
                     field_name: String::new(),
                     doc_id: None,
-                },
+                }),
             ),
         })
         .unwrap();
@@ -198,12 +199,12 @@ fn graph_rag_fusion_pipeline() {
             &mut core,
             &mut tx,
             &mut rx,
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id: s.to_string(),
                 label: "CITES".into(),
                 dst_id: d.to_string(),
                 properties: vec![],
-            },
+            }),
         );
     }
 
@@ -211,7 +212,7 @@ fn graph_rag_fusion_pipeline() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::GraphRagFusion {
+        PhysicalPlan::Graph(GraphOp::RagFusion {
             collection: "docs".into(),
             query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
             vector_top_k: 3,
@@ -221,7 +222,7 @@ fn graph_rag_fusion_pipeline() {
             final_top_k: 5,
             rrf_k: (60.0, 10.0),
             options: Default::default(),
-        },
+        }),
     );
 
     let body = payload_value(&payload);

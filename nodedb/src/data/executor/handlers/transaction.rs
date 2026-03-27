@@ -8,6 +8,7 @@
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, MetaOp, VectorOp};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
@@ -132,9 +133,9 @@ impl CoreLoop {
             request_id: crate::types::RequestId::new(0),
             tenant_id: crate::types::TenantId::new(tid),
             vshard_id: crate::types::VShardId::new(0),
-            plan: PhysicalPlan::Cancel {
+            plan: PhysicalPlan::Meta(MetaOp::Cancel {
                 target_request_id: crate::types::RequestId::new(0),
-            },
+            }),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
             priority: crate::bridge::envelope::Priority::Normal,
             trace_id: 0,
@@ -143,11 +144,11 @@ impl CoreLoop {
         });
 
         match plan {
-            PhysicalPlan::PointPut {
+            PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
                 document_id,
                 value,
-            } => {
+            }) => {
                 // Save old value for rollback.
                 let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
 
@@ -185,10 +186,10 @@ impl CoreLoop {
                 }
             }
 
-            PhysicalPlan::PointDelete {
+            PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection,
                 document_id,
-            } => {
+            }) => {
                 // Save old value for rollback.
                 let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
                 match self.sparse.delete(tid, collection, document_id) {
@@ -218,13 +219,13 @@ impl CoreLoop {
                 }
             }
 
-            PhysicalPlan::VectorInsert {
+            PhysicalPlan::Vector(VectorOp::Insert {
                 collection,
                 vector,
                 dim,
                 field_name,
                 doc_id,
-            } => {
+            }) => {
                 let index_key = Self::vector_index_key(tid, collection, field_name);
                 let index = self
                     .vector_collections
@@ -261,10 +262,10 @@ impl CoreLoop {
                 Ok(self.response_ok(&dummy_task))
             }
 
-            PhysicalPlan::VectorDelete {
+            PhysicalPlan::Vector(VectorOp::Delete {
                 collection,
                 vector_id,
-            } => {
+            }) => {
                 let index_key = Self::vector_index_key(tid, collection, "");
                 if let Some(index) = self.vector_collections.get_mut(&index_key)
                     && index.delete(*vector_id)
@@ -277,12 +278,12 @@ impl CoreLoop {
                 Ok(self.response_ok(&dummy_task))
             }
 
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id,
                 label,
                 dst_id,
                 properties,
-            } => {
+            }) => {
                 let resp = self.execute_edge_put(&dummy_task, src_id, label, dst_id, properties);
                 if resp.status == Status::Error {
                     return Err(resp.error_code.unwrap_or(ErrorCode::Internal {
@@ -294,7 +295,7 @@ impl CoreLoop {
                 Ok(resp)
             }
 
-            PhysicalPlan::CrdtApply { delta, peer_id, .. } => {
+            PhysicalPlan::Crdt(CrdtOp::Apply { delta, peer_id, .. }) => {
                 // Buffer the delta — don't apply to LoroDoc until commit.
                 crdt_deltas.push((delta.clone(), *peer_id));
                 Ok(self.response_ok(&dummy_task))

@@ -1,6 +1,7 @@
 //! Integration tests for document operations (PointGet/Put/Delete, RangeScan, CRDT).
 
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
+use nodedb::bridge::physical_plan::{CrdtOp, DocumentOp};
 
 use crate::helpers::*;
 
@@ -11,10 +12,10 @@ fn point_get_not_found() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "users".into(),
             document_id: "nonexistent".into(),
-        },
+        }),
     );
     assert_eq!(resp.status, Status::Error);
     assert_eq!(resp.error_code, Some(ErrorCode::NotFound));
@@ -28,21 +29,21 @@ fn point_put_and_get() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "docs".into(),
             document_id: "d1".into(),
             value: b"hello world".to_vec(),
-        },
+        }),
     );
 
     let resp = send_raw(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "docs".into(),
             document_id: "d1".into(),
-        },
+        }),
     );
     assert_eq!(resp.status, Status::Ok);
     assert_eq!(&*resp.payload, b"hello world");
@@ -57,31 +58,31 @@ fn point_delete_removes() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "docs".into(),
             document_id: "d1".into(),
             value: b"data".to_vec(),
-        },
+        }),
     );
 
     send_ok(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointDelete {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "docs".into(),
             document_id: "d1".into(),
-        },
+        }),
     );
 
     let resp = send_raw(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointGet {
+        PhysicalPlan::Document(DocumentOp::PointGet {
             collection: "docs".into(),
             document_id: "d1".into(),
-        },
+        }),
     );
     assert_eq!(resp.error_code, Some(ErrorCode::NotFound));
 }
@@ -93,10 +94,10 @@ fn crdt_read_not_found() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::CrdtRead {
+        PhysicalPlan::Crdt(CrdtOp::Read {
             collection: "sessions".into(),
             document_id: "s1".into(),
-        },
+        }),
     );
     assert_eq!(resp.status, Status::Error);
     assert_eq!(resp.error_code, Some(ErrorCode::NotFound));
@@ -111,21 +112,21 @@ fn range_scan_returns_results() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "users".into(),
             document_id: "u1".into(),
             value: b"{\"name\":\"alice\",\"age\":25}".to_vec(),
-        },
+        }),
     );
     send_ok(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection: "users".into(),
             document_id: "u2".into(),
             value: b"{\"name\":\"bob\",\"age\":30}".to_vec(),
-        },
+        }),
     );
 
     // DocumentScan should return both.
@@ -133,7 +134,7 @@ fn range_scan_returns_results() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::DocumentScan {
+        PhysicalPlan::Document(DocumentOp::Scan {
             collection: "users".into(),
             limit: 10,
             offset: 0,
@@ -143,7 +144,7 @@ fn range_scan_returns_results() {
             projection: Vec::new(),
             computed_columns: Vec::new(),
             window_functions: Vec::new(),
-        },
+        }),
     );
     let json = payload_json(&payload);
     assert!(json.contains("alice"), "payload: {json}");

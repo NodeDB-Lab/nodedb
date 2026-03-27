@@ -1,6 +1,10 @@
 //! Main execute() dispatch: matches on PhysicalPlan and delegates to handlers.
 
-use crate::bridge::envelope::{PhysicalPlan, Response};
+use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::physical_plan::{
+    CrdtOp, DocumentOp, GraphOp, MetaOp, PhysicalPlan, QueryOp, SpatialOp, TextOp, TimeseriesOp,
+    VectorOp,
+};
 
 use super::core_loop::CoreLoop;
 use super::task::ExecutionTask;
@@ -10,35 +14,35 @@ impl CoreLoop {
     pub(in crate::data::executor) fn execute(&mut self, task: &ExecutionTask) -> Response {
         let tid = task.request.tenant_id.as_u32();
         match task.plan() {
-            PhysicalPlan::PointGet {
+            PhysicalPlan::Document(DocumentOp::PointGet {
                 collection,
                 document_id,
-            } => self.execute_point_get(task, tid, collection, document_id),
+            }) => self.execute_point_get(task, tid, collection, document_id),
 
-            PhysicalPlan::PointPut {
+            PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
                 document_id,
                 value,
-            } => self.execute_point_put(task, tid, collection, document_id, value),
+            }) => self.execute_point_put(task, tid, collection, document_id, value),
 
-            PhysicalPlan::PointDelete {
+            PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection,
                 document_id,
-            } => self.execute_point_delete(task, tid, collection, document_id),
+            }) => self.execute_point_delete(task, tid, collection, document_id),
 
-            PhysicalPlan::PointUpdate {
+            PhysicalPlan::Document(DocumentOp::PointUpdate {
                 collection,
                 document_id,
                 updates,
-            } => self.execute_point_update(task, tid, collection, document_id, updates),
+            }) => self.execute_point_update(task, tid, collection, document_id, updates),
 
-            PhysicalPlan::VectorInsert {
+            PhysicalPlan::Vector(VectorOp::Insert {
                 collection,
                 vector,
                 dim,
                 field_name,
                 doc_id,
-            } => self.execute_vector_insert(super::handlers::vector::VectorInsertParams {
+            }) => self.execute_vector_insert(super::handlers::vector::VectorInsertParams {
                 task,
                 tid,
                 collection,
@@ -48,19 +52,19 @@ impl CoreLoop {
                 doc_id: doc_id.clone(),
             }),
 
-            PhysicalPlan::VectorBatchInsert {
+            PhysicalPlan::Vector(VectorOp::BatchInsert {
                 collection,
                 vectors,
                 dim,
-            } => self.execute_vector_batch_insert(task, tid, collection, vectors, *dim),
+            }) => self.execute_vector_batch_insert(task, tid, collection, vectors, *dim),
 
-            PhysicalPlan::VectorMultiSearch {
+            PhysicalPlan::Vector(VectorOp::MultiSearch {
                 collection,
                 query_vector,
                 top_k,
                 ef_search,
                 filter_bitmap,
-            } => self.execute_vector_multi_search(
+            }) => self.execute_vector_multi_search(
                 super::handlers::vector_search::VectorMultiSearchParams {
                     task,
                     tid,
@@ -72,19 +76,19 @@ impl CoreLoop {
                 },
             ),
 
-            PhysicalPlan::VectorDelete {
+            PhysicalPlan::Vector(VectorOp::Delete {
                 collection,
                 vector_id,
-            } => self.execute_vector_delete(task, tid, collection, *vector_id),
+            }) => self.execute_vector_delete(task, tid, collection, *vector_id),
 
-            PhysicalPlan::VectorSearch {
+            PhysicalPlan::Vector(VectorOp::Search {
                 collection,
                 query_vector,
                 top_k,
                 ef_search,
                 filter_bitmap,
                 field_name,
-            } => self.execute_vector_search(super::handlers::vector_search::VectorSearchParams {
+            }) => self.execute_vector_search(super::handlers::vector_search::VectorSearchParams {
                 task,
                 tid,
                 collection,
@@ -95,7 +99,7 @@ impl CoreLoop {
                 field_name,
             }),
 
-            PhysicalPlan::SetVectorParams {
+            PhysicalPlan::Vector(VectorOp::SetParams {
                 collection,
                 m,
                 ef_construction,
@@ -104,7 +108,7 @@ impl CoreLoop {
                 pq_m,
                 ivf_cells,
                 ivf_nprobe,
-            } => self.execute_set_vector_params(super::handlers::vector::SetVectorParamsInput {
+            }) => self.execute_set_vector_params(super::handlers::vector::SetVectorParamsInput {
                 task,
                 tid,
                 collection,
@@ -117,7 +121,7 @@ impl CoreLoop {
                 ivf_nprobe: *ivf_nprobe,
             }),
 
-            PhysicalPlan::DocumentScan {
+            PhysicalPlan::Document(DocumentOp::Scan {
                 collection,
                 limit,
                 offset,
@@ -127,7 +131,7 @@ impl CoreLoop {
                 projection,
                 computed_columns,
                 window_functions,
-            } => self.execute_document_scan(
+            }) => self.execute_document_scan(
                 task,
                 tid,
                 collection,
@@ -141,12 +145,12 @@ impl CoreLoop {
                 window_functions,
             ),
 
-            PhysicalPlan::DocumentBatchInsert {
+            PhysicalPlan::Document(DocumentOp::BatchInsert {
                 collection,
                 documents,
-            } => self.execute_document_batch_insert(task, tid, collection, documents),
+            }) => self.execute_document_batch_insert(task, tid, collection, documents),
 
-            PhysicalPlan::Aggregate {
+            PhysicalPlan::Query(QueryOp::Aggregate {
                 collection,
                 group_by,
                 aggregates,
@@ -155,7 +159,7 @@ impl CoreLoop {
                 limit,
                 sub_group_by,
                 sub_aggregates,
-            } => self.execute_aggregate(
+            }) => self.execute_aggregate(
                 task,
                 tid,
                 collection,
@@ -168,13 +172,13 @@ impl CoreLoop {
                 sub_aggregates,
             ),
 
-            PhysicalPlan::HashJoin {
+            PhysicalPlan::Query(QueryOp::HashJoin {
                 left_collection,
                 right_collection,
                 on,
                 join_type,
                 limit,
-            } => self.execute_hash_join(
+            }) => self.execute_hash_join(
                 task,
                 tid,
                 left_collection,
@@ -184,49 +188,49 @@ impl CoreLoop {
                 *limit,
             ),
 
-            PhysicalPlan::EdgePut {
+            PhysicalPlan::Graph(GraphOp::EdgePut {
                 src_id,
                 label,
                 dst_id,
                 properties,
-            } => self.execute_edge_put(task, src_id, label, dst_id, properties),
+            }) => self.execute_edge_put(task, src_id, label, dst_id, properties),
 
-            PhysicalPlan::EdgeDelete {
+            PhysicalPlan::Graph(GraphOp::EdgeDelete {
                 src_id,
                 label,
                 dst_id,
-            } => self.execute_edge_delete(task, src_id, label, dst_id),
+            }) => self.execute_edge_delete(task, src_id, label, dst_id),
 
-            PhysicalPlan::GraphHop {
+            PhysicalPlan::Graph(GraphOp::Hop {
                 start_nodes,
                 edge_label,
                 direction,
                 depth,
                 options: _,
-            } => self.execute_graph_hop(task, start_nodes, edge_label, *direction, *depth),
+            }) => self.execute_graph_hop(task, start_nodes, edge_label, *direction, *depth),
 
-            PhysicalPlan::GraphNeighbors {
+            PhysicalPlan::Graph(GraphOp::Neighbors {
                 node_id,
                 edge_label,
                 direction,
-            } => self.execute_graph_neighbors(task, node_id, edge_label, *direction),
+            }) => self.execute_graph_neighbors(task, node_id, edge_label, *direction),
 
-            PhysicalPlan::GraphPath {
+            PhysicalPlan::Graph(GraphOp::Path {
                 src,
                 dst,
                 edge_label,
                 max_depth,
                 options: _,
-            } => self.execute_graph_path(task, src, dst, edge_label, *max_depth),
+            }) => self.execute_graph_path(task, src, dst, edge_label, *max_depth),
 
-            PhysicalPlan::GraphSubgraph {
+            PhysicalPlan::Graph(GraphOp::Subgraph {
                 start_nodes,
                 edge_label,
                 depth,
                 options: _,
-            } => self.execute_graph_subgraph(task, start_nodes, edge_label, *depth),
+            }) => self.execute_graph_subgraph(task, start_nodes, edge_label, *depth),
 
-            PhysicalPlan::GraphRagFusion {
+            PhysicalPlan::Graph(GraphOp::RagFusion {
                 collection,
                 query_vector,
                 vector_top_k,
@@ -236,7 +240,7 @@ impl CoreLoop {
                 final_top_k,
                 rrf_k,
                 options,
-            } => self.execute_graph_rag_fusion(
+            }) => self.execute_graph_rag_fusion(
                 task,
                 tid,
                 collection,
@@ -250,13 +254,13 @@ impl CoreLoop {
                 options.max_visited,
             ),
 
-            PhysicalPlan::RangeScan {
+            PhysicalPlan::Document(DocumentOp::RangeScan {
                 collection,
                 field,
                 lower,
                 upper,
                 limit,
-            } => self.execute_range_scan(
+            }) => self.execute_range_scan(
                 task,
                 tid,
                 collection,
@@ -266,32 +270,32 @@ impl CoreLoop {
                 *limit,
             ),
 
-            PhysicalPlan::CrdtRead {
+            PhysicalPlan::Crdt(CrdtOp::Read {
                 collection,
                 document_id,
-            } => self.execute_crdt_read(task, collection, document_id),
+            }) => self.execute_crdt_read(task, collection, document_id),
 
-            PhysicalPlan::CrdtApply {
+            PhysicalPlan::Crdt(CrdtOp::Apply {
                 collection: _,
                 document_id: _,
                 delta,
                 peer_id: _,
                 mutation_id: _,
-            } => self.execute_crdt_apply(task, delta),
+            }) => self.execute_crdt_apply(task, delta),
 
-            PhysicalPlan::SetCollectionPolicy {
+            PhysicalPlan::Crdt(CrdtOp::SetPolicy {
                 collection,
                 policy_json,
-            } => self.execute_set_collection_policy(task, collection, policy_json),
+            }) => self.execute_set_collection_policy(task, collection, policy_json),
 
-            PhysicalPlan::TextSearch {
+            PhysicalPlan::Text(TextOp::Search {
                 collection,
                 query,
                 top_k,
                 fuzzy,
-            } => self.execute_text_search(task, tid, collection, query, *top_k, *fuzzy),
+            }) => self.execute_text_search(task, tid, collection, query, *top_k, *fuzzy),
 
-            PhysicalPlan::HybridSearch {
+            PhysicalPlan::Text(TextOp::HybridSearch {
                 collection,
                 query_vector,
                 query_text,
@@ -300,7 +304,7 @@ impl CoreLoop {
                 fuzzy,
                 vector_weight,
                 filter_bitmap,
-            } => self.execute_hybrid_search(
+            }) => self.execute_hybrid_search(
                 task,
                 tid,
                 collection,
@@ -313,25 +317,27 @@ impl CoreLoop {
                 filter_bitmap.as_ref(),
             ),
 
-            PhysicalPlan::GraphAlgo { algorithm, params } => {
+            PhysicalPlan::Graph(GraphOp::Algo { algorithm, params }) => {
                 self.execute_graph_algo(task, algorithm, params)
             }
 
-            PhysicalPlan::GraphMatch { query } => self.execute_graph_match(task, query),
+            PhysicalPlan::Graph(GraphOp::Match { query }) => self.execute_graph_match(task, query),
 
-            PhysicalPlan::WalAppend { payload } => self.execute_wal_append(task, payload),
+            PhysicalPlan::Meta(MetaOp::WalAppend { payload }) => {
+                self.execute_wal_append(task, payload)
+            }
 
-            PhysicalPlan::Cancel { target_request_id } => {
+            PhysicalPlan::Meta(MetaOp::Cancel { target_request_id }) => {
                 self.execute_cancel(task, *target_request_id)
             }
 
-            PhysicalPlan::NestedLoopJoin {
+            PhysicalPlan::Query(QueryOp::NestedLoopJoin {
                 left_collection,
                 right_collection,
                 condition,
                 join_type,
                 limit,
-            } => self.execute_nested_loop_join(
+            }) => self.execute_nested_loop_join(
                 task,
                 tid,
                 left_collection,
@@ -341,16 +347,16 @@ impl CoreLoop {
                 *limit,
             ),
 
-            PhysicalPlan::TransactionBatch { plans } => {
+            PhysicalPlan::Meta(MetaOp::TransactionBatch { plans }) => {
                 self.execute_transaction_batch(task, tid, plans)
             }
 
-            PhysicalPlan::PartialAggregate {
+            PhysicalPlan::Query(QueryOp::PartialAggregate {
                 collection,
                 group_by,
                 aggregates,
                 filters,
-            } => self.execute_aggregate(
+            }) => self.execute_aggregate(
                 task,
                 tid,
                 collection,
@@ -363,13 +369,13 @@ impl CoreLoop {
                 &[],
             ),
 
-            PhysicalPlan::BroadcastJoin {
+            PhysicalPlan::Query(QueryOp::BroadcastJoin {
                 large_collection,
                 broadcast_data,
                 on,
                 join_type,
                 limit,
-            } => self.execute_broadcast_join(
+            }) => self.execute_broadcast_join(
                 task,
                 tid,
                 large_collection,
@@ -379,45 +385,47 @@ impl CoreLoop {
                 *limit,
             ),
 
-            PhysicalPlan::ShuffleJoin { .. } => {
+            PhysicalPlan::Query(QueryOp::ShuffleJoin { .. }) => {
                 // Shuffle join phase 2 (local join on repartitioned data) — not yet wired.
                 self.response_error(
                     task,
-                    crate::bridge::envelope::ErrorCode::Internal {
+                    ErrorCode::Internal {
                         detail: "shuffle join not dispatched to this core".into(),
                     },
                 )
             }
 
-            PhysicalPlan::BulkUpdate {
+            PhysicalPlan::Document(DocumentOp::BulkUpdate {
                 collection,
                 filters,
                 updates,
-            } => self.execute_bulk_update(task, tid, collection, filters, updates),
+            }) => self.execute_bulk_update(task, tid, collection, filters, updates),
 
-            PhysicalPlan::BulkDelete {
+            PhysicalPlan::Document(DocumentOp::BulkDelete {
                 collection,
                 filters,
-            } => self.execute_bulk_delete(task, tid, collection, filters),
+            }) => self.execute_bulk_delete(task, tid, collection, filters),
 
-            PhysicalPlan::Upsert {
+            PhysicalPlan::Document(DocumentOp::Upsert {
                 collection,
                 document_id,
                 value,
-            } => self.execute_upsert(task, tid, collection, document_id, value),
+            }) => self.execute_upsert(task, tid, collection, document_id, value),
 
-            PhysicalPlan::Truncate { collection } => self.execute_truncate(task, tid, collection),
+            PhysicalPlan::Document(DocumentOp::Truncate { collection }) => {
+                self.execute_truncate(task, tid, collection)
+            }
 
-            PhysicalPlan::EstimateCount { collection, field } => {
+            PhysicalPlan::Document(DocumentOp::EstimateCount { collection, field }) => {
                 self.execute_estimate_count(task, tid, collection, field)
             }
 
-            PhysicalPlan::InsertSelect {
+            PhysicalPlan::Document(DocumentOp::InsertSelect {
                 target_collection,
                 source_collection,
                 source_filters,
                 source_limit,
-            } => self.execute_insert_select(
+            }) => self.execute_insert_select(
                 task,
                 tid,
                 target_collection,
@@ -426,20 +434,20 @@ impl CoreLoop {
                 *source_limit,
             ),
 
-            PhysicalPlan::CreateSnapshot => self.execute_create_snapshot(task),
+            PhysicalPlan::Meta(MetaOp::CreateSnapshot) => self.execute_create_snapshot(task),
 
-            PhysicalPlan::Compact => self.execute_compact(task),
+            PhysicalPlan::Meta(MetaOp::Compact) => self.execute_compact(task),
 
-            PhysicalPlan::Checkpoint => self.execute_checkpoint(task),
+            PhysicalPlan::Meta(MetaOp::Checkpoint) => self.execute_checkpoint(task),
 
-            PhysicalPlan::TimeseriesScan {
+            PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                 collection,
                 time_range,
                 limit,
                 filters,
                 bucket_interval_ms,
                 ..
-            } => self.execute_timeseries_scan(super::handlers::timeseries::TimeseriesScanParams {
+            }) => self.execute_timeseries_scan(super::handlers::timeseries::TimeseriesScanParams {
                 task,
                 collection,
                 time_range: *time_range,
@@ -448,19 +456,19 @@ impl CoreLoop {
                 bucket_interval_ms: *bucket_interval_ms,
             }),
 
-            PhysicalPlan::TimeseriesIngest {
+            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
                 collection,
                 payload,
                 format,
-            } => self.execute_timeseries_ingest(task, collection, payload, format),
+            }) => self.execute_timeseries_ingest(task, collection, payload, format),
 
-            PhysicalPlan::SpatialScan {
+            PhysicalPlan::Spatial(SpatialOp::Scan {
                 collection,
                 limit,
                 attribute_filters,
                 projection,
                 ..
-            } => {
+            }) => {
                 // Spatial scan: R-tree index lookup → exact predicate refinement.
                 // Falls through to document scan with attribute filters.
                 // The spatial predicate is evaluated post-scan until the R-tree
@@ -480,11 +488,11 @@ impl CoreLoop {
                 )
             }
 
-            PhysicalPlan::RegisterDocumentCollection {
+            PhysicalPlan::Document(DocumentOp::Register {
                 collection,
                 index_paths,
                 crdt_enabled,
-            } => self.execute_register_document_collection(
+            }) => self.execute_register_document_collection(
                 task,
                 tid,
                 collection,
@@ -492,15 +500,22 @@ impl CoreLoop {
                 *crdt_enabled,
             ),
 
-            PhysicalPlan::DocumentIndexLookup {
+            PhysicalPlan::Document(DocumentOp::IndexLookup {
                 collection,
                 path,
                 value,
-            } => self.execute_document_index_lookup(task, tid, collection, path, value),
+            }) => self.execute_document_index_lookup(task, tid, collection, path, value),
 
-            PhysicalPlan::DropDocumentIndex { collection, field } => {
+            PhysicalPlan::Document(DocumentOp::DropIndex { collection, field }) => {
                 self.execute_drop_document_index(task, tid, collection, field)
             }
+
+            PhysicalPlan::Kv(_) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: "KV engine not yet implemented".into(),
+                },
+            ),
         }
     }
 }

@@ -6,6 +6,7 @@ use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{PhysicalPlan, Response, Status};
+use crate::bridge::physical_plan::{DocumentOp, GraphOp, QueryOp, TextOp, VectorOp};
 use crate::control::planner::physical::PhysicalTask;
 use crate::control::server::pgwire::session::TransactionState;
 use crate::data::executor::response_codec;
@@ -192,17 +193,17 @@ async fn execute_planned(ctx: &DispatchCtx<'_>, seq: u64, sql: &str) -> NativeRe
 fn is_broadcast_scan(plan: &PhysicalPlan) -> bool {
     matches!(
         plan,
-        PhysicalPlan::DocumentScan { .. }
-            | PhysicalPlan::Aggregate { .. }
-            | PhysicalPlan::PartialAggregate { .. }
-            | PhysicalPlan::GraphHop { .. }
-            | PhysicalPlan::GraphNeighbors { .. }
-            | PhysicalPlan::GraphPath { .. }
-            | PhysicalPlan::GraphSubgraph { .. }
-            | PhysicalPlan::VectorSearch { .. }
-            | PhysicalPlan::TextSearch { .. }
-            | PhysicalPlan::HybridSearch { .. }
-            | PhysicalPlan::GraphRagFusion { .. }
+        PhysicalPlan::Document(DocumentOp::Scan { .. })
+            | PhysicalPlan::Query(QueryOp::Aggregate { .. })
+            | PhysicalPlan::Query(QueryOp::PartialAggregate { .. })
+            | PhysicalPlan::Graph(GraphOp::Hop { .. })
+            | PhysicalPlan::Graph(GraphOp::Neighbors { .. })
+            | PhysicalPlan::Graph(GraphOp::Path { .. })
+            | PhysicalPlan::Graph(GraphOp::Subgraph { .. })
+            | PhysicalPlan::Vector(VectorOp::Search { .. })
+            | PhysicalPlan::Text(TextOp::Search { .. })
+            | PhysicalPlan::Text(TextOp::HybridSearch { .. })
+            | PhysicalPlan::Graph(GraphOp::RagFusion { .. })
     )
 }
 

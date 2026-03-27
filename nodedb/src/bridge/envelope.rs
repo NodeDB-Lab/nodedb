@@ -223,6 +223,7 @@ impl From<crate::Error> for ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::physical_plan::{DocumentOp, MetaOp};
     use std::time::Duration;
 
     fn sample_request() -> Request {
@@ -230,10 +231,10 @@ mod tests {
             request_id: RequestId::new(1),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
-            plan: PhysicalPlan::PointGet {
+            plan: PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: "users".into(),
                 document_id: "doc-1".into(),
-            },
+            }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
             trace_id: 0xABCD,
@@ -293,9 +294,9 @@ mod tests {
             request_id: RequestId::new(99),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
-            plan: PhysicalPlan::Cancel {
+            plan: PhysicalPlan::Meta(MetaOp::Cancel {
                 target_request_id: RequestId::new(42),
-            },
+            }),
             deadline: Instant::now() + Duration::from_secs(1),
             priority: Priority::Critical,
             trace_id: 0,
@@ -303,7 +304,7 @@ mod tests {
             idempotency_key: None,
         };
         match req.plan {
-            PhysicalPlan::Cancel { target_request_id } => {
+            PhysicalPlan::Meta(MetaOp::Cancel { target_request_id }) => {
                 assert_eq!(target_request_id, RequestId::new(42));
             }
             _ => panic!("expected Cancel plan"),

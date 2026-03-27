@@ -2,6 +2,7 @@ use datafusion::logical_expr::{FetchType, LogicalPlan};
 use datafusion::prelude::*;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::{DocumentOp, QueryOp, TextOp, TimeseriesOp, VectorOp};
 use crate::control::planner::physical::PhysicalTask;
 use crate::control::security::credential::CredentialStore;
 use crate::types::{TenantId, VShardId};
@@ -68,9 +69,9 @@ impl PlanConverter {
                 if let Some(computed) = try_convert_projection(&proj.expr) {
                     let computed_bytes = rmp_serde::to_vec_named(&computed).unwrap_or_default();
                     for task in &mut tasks {
-                        if let PhysicalPlan::DocumentScan {
+                        if let PhysicalPlan::Document(DocumentOp::Scan {
                             computed_columns, ..
-                        } = &mut task.plan
+                        }) = &mut task.plan
                         {
                             *computed_columns = computed_bytes.clone();
                         }
@@ -97,7 +98,9 @@ impl PlanConverter {
 
                 if !columns.is_empty() {
                     for task in &mut tasks {
-                        if let PhysicalPlan::DocumentScan { projection, .. } = &mut task.plan {
+                        if let PhysicalPlan::Document(DocumentOp::Scan { projection, .. }) =
+                            &mut task.plan
+                        {
                             *projection = columns.clone();
                         }
                     }
@@ -115,12 +118,12 @@ impl PlanConverter {
                     return Ok(vec![PhysicalTask {
                         tenant_id,
                         vshard_id: vshard,
-                        plan: PhysicalPlan::TextSearch {
+                        plan: PhysicalPlan::Text(TextOp::Search {
                             collection,
                             query: query_text,
                             top_k: 1000,
                             fuzzy: true,
-                        },
+                        }),
                     }]);
                 }
 
@@ -162,7 +165,7 @@ impl PlanConverter {
                     return Ok(vec![PhysicalTask {
                         tenant_id,
                         vshard_id: vshard,
-                        plan: PhysicalPlan::DocumentScan {
+                        plan: PhysicalPlan::Document(DocumentOp::Scan {
                             collection,
                             limit,
                             offset: 0,
@@ -172,7 +175,7 @@ impl PlanConverter {
                             projection: Vec::new(),
                             computed_columns: Vec::new(),
                             window_functions: Vec::new(),
-                        },
+                        }),
                     }]);
                 }
                 // Filter wrapping Aggregate = HAVING clause.
@@ -186,7 +189,9 @@ impl PlanConverter {
                         }
                     })?;
                     for task in &mut tasks {
-                        if let PhysicalPlan::Aggregate { having, .. } = &mut task.plan {
+                        if let PhysicalPlan::Query(QueryOp::Aggregate { having, .. }) =
+                            &mut task.plan
+                        {
                             *having = having_bytes.clone();
                         }
                     }
@@ -202,7 +207,9 @@ impl PlanConverter {
                         detail: format!("filter serialization: {e}"),
                     })?;
                 for task in &mut tasks {
-                    if let PhysicalPlan::DocumentScan { filters, .. } = &mut task.plan {
+                    if let PhysicalPlan::Document(DocumentOp::Scan { filters, .. }) =
+                        &mut task.plan
+                    {
                         *filters = filter_bytes.clone();
                     }
                 }
@@ -221,14 +228,14 @@ impl PlanConverter {
                     return Ok(vec![PhysicalTask {
                         tenant_id,
                         vshard_id: vshard,
-                        plan: PhysicalPlan::TimeseriesScan {
+                        plan: PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                             collection,
                             time_range,
                             projection: Vec::new(),
                             limit,
                             filters: filter_bytes,
                             bucket_interval_ms: 0,
-                        },
+                        }),
                     }]);
                 }
 
@@ -261,7 +268,7 @@ impl PlanConverter {
                 Ok(vec![PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::DocumentScan {
+                    plan: PhysicalPlan::Document(DocumentOp::Scan {
                         collection,
                         limit,
                         offset: 0,
@@ -271,7 +278,7 @@ impl PlanConverter {
                         projection: Vec::new(),
                         computed_columns: Vec::new(),
                         window_functions: Vec::new(),
-                    },
+                    }),
                 }])
             }
 
@@ -282,8 +289,10 @@ impl PlanConverter {
                 if let Ok(FetchType::Literal(Some(n))) = limit_plan.get_fetch_type() {
                     for task in &mut tasks {
                         match &mut task.plan {
-                            PhysicalPlan::DocumentScan { limit, .. } => *limit = n,
-                            PhysicalPlan::RangeScan { limit, .. } => *limit = n,
+                            PhysicalPlan::Document(DocumentOp::Scan { limit, .. }) => *limit = n,
+                            PhysicalPlan::Document(DocumentOp::RangeScan { limit, .. }) => {
+                                *limit = n
+                            }
                             _ => {}
                         }
                     }
@@ -294,7 +303,9 @@ impl PlanConverter {
                     && let Ok(skip_n) = expr_to_usize(skip)
                 {
                     for task in &mut tasks {
-                        if let PhysicalPlan::DocumentScan { offset, .. } = &mut task.plan {
+                        if let PhysicalPlan::Document(DocumentOp::Scan { offset, .. }) =
+                            &mut task.plan
+                        {
                             *offset = skip_n;
                         }
                     }
@@ -316,14 +327,14 @@ impl PlanConverter {
                         return Ok(vec![PhysicalTask {
                             tenant_id,
                             vshard_id: vshard,
-                            plan: PhysicalPlan::VectorSearch {
+                            plan: PhysicalPlan::Vector(VectorOp::Search {
                                 collection,
                                 query_vector: std::sync::Arc::from(query_vector.as_slice()),
                                 top_k,
                                 ef_search: 0,
                                 filter_bitmap: None,
                                 field_name: String::new(),
-                            },
+                            }),
                         }]);
                     }
                 }
@@ -336,12 +347,12 @@ impl PlanConverter {
                     return Ok(vec![PhysicalTask {
                         tenant_id,
                         vshard_id: vshard,
-                        plan: PhysicalPlan::TextSearch {
+                        plan: PhysicalPlan::Text(TextOp::Search {
                             collection,
                             query: query_text,
                             top_k,
                             fuzzy: true,
-                        },
+                        }),
                     }]);
                 }
 
@@ -357,7 +368,7 @@ impl PlanConverter {
                     return Ok(vec![PhysicalTask {
                         tenant_id,
                         vshard_id: vshard,
-                        plan: PhysicalPlan::HybridSearch {
+                        plan: PhysicalPlan::Text(TextOp::HybridSearch {
                             collection,
                             query_vector: std::sync::Arc::from(query_vector.as_slice()),
                             query_text,
@@ -366,7 +377,7 @@ impl PlanConverter {
                             fuzzy: true,
                             vector_weight,
                             filter_bitmap: None,
-                        },
+                        }),
                     }]);
                 }
 
@@ -389,13 +400,13 @@ impl PlanConverter {
                         return Ok(vec![PhysicalTask {
                             tenant_id,
                             vshard_id: vshard,
-                            plan: PhysicalPlan::RangeScan {
+                            plan: PhysicalPlan::Document(DocumentOp::RangeScan {
                                 collection,
                                 field: sort_field.clone(),
                                 lower: None,
                                 upper: None,
                                 limit,
-                            },
+                            }),
                         }]);
                     }
                 }
@@ -411,7 +422,9 @@ impl PlanConverter {
                 }
                 if !extracted_keys.is_empty() {
                     for task in &mut tasks {
-                        if let PhysicalPlan::DocumentScan { sort_keys, .. } = &mut task.plan {
+                        if let PhysicalPlan::Document(DocumentOp::Scan { sort_keys, .. }) =
+                            &mut task.plan
+                        {
                             *sort_keys = extracted_keys.clone();
                         }
                     }
@@ -420,7 +433,9 @@ impl PlanConverter {
                 // Propagate sort's fetch as additional limit.
                 if let Some(fetch) = sort.fetch {
                     for task in &mut tasks {
-                        if let PhysicalPlan::DocumentScan { limit, .. } = &mut task.plan {
+                        if let PhysicalPlan::Document(DocumentOp::Scan { limit, .. }) =
+                            &mut task.plan
+                        {
                             *limit = fetch;
                         }
                     }
@@ -486,7 +501,7 @@ impl PlanConverter {
                 Ok(vec![PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::Aggregate {
+                    plan: PhysicalPlan::Query(QueryOp::Aggregate {
                         collection,
                         group_by,
                         aggregates,
@@ -495,7 +510,7 @@ impl PlanConverter {
                         limit: 10000,
                         sub_group_by: Vec::new(),
                         sub_aggregates: Vec::new(),
-                    },
+                    }),
                 }])
             }
 
@@ -507,7 +522,9 @@ impl PlanConverter {
             LogicalPlan::Distinct(distinct) => {
                 let mut tasks = self.convert(distinct.input(), tenant_id)?;
                 for task in &mut tasks {
-                    if let PhysicalPlan::DocumentScan { distinct, .. } = &mut task.plan {
+                    if let PhysicalPlan::Document(DocumentOp::Scan { distinct, .. }) =
+                        &mut task.plan
+                    {
                         *distinct = true;
                     }
                 }
@@ -523,9 +540,9 @@ impl PlanConverter {
                 if !specs.is_empty() {
                     let spec_bytes = rmp_serde::to_vec_named(&specs).unwrap_or_default();
                     for task in &mut tasks {
-                        if let PhysicalPlan::DocumentScan {
+                        if let PhysicalPlan::Document(DocumentOp::Scan {
                             window_functions, ..
-                        } = &mut task.plan
+                        }) = &mut task.plan
                         {
                             *window_functions = spec_bytes.clone();
                         }
@@ -668,7 +685,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
 
         match &tasks[0].plan {
-            PhysicalPlan::PointGet { document_id, .. } => {
+            PhysicalPlan::Document(DocumentOp::PointGet { document_id, .. }) => {
                 assert_eq!(document_id, "u1");
             }
             other => panic!("expected PointGet, got {other:?}"),
@@ -684,7 +701,10 @@ mod tests {
         let converter = PlanConverter::new();
         let tasks = converter.convert(&plan, TenantId::new(1)).unwrap();
         assert_eq!(tasks.len(), 1);
-        assert!(matches!(&tasks[0].plan, PhysicalPlan::DocumentScan { .. }));
+        assert!(matches!(
+            &tasks[0].plan,
+            PhysicalPlan::Document(DocumentOp::Scan { .. })
+        ));
     }
 
     #[tokio::test]
@@ -697,7 +717,7 @@ mod tests {
         let tasks = converter.convert(&plan, TenantId::new(1)).unwrap();
         assert_eq!(tasks.len(), 1);
         match &tasks[0].plan {
-            PhysicalPlan::DocumentScan { limit, .. } => assert_eq!(*limit, 5),
+            PhysicalPlan::Document(DocumentOp::Scan { limit, .. }) => assert_eq!(*limit, 5),
             other => panic!("expected DocumentScan, got {other:?}"),
         }
     }

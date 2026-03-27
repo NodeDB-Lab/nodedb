@@ -1,12 +1,12 @@
 //! Join conversion helpers for the plan converter.
 //!
-//! Extracted from `converter.rs` to keep that file under the 500-line limit.
 //! Handles `LogicalPlan::Join` conversion to `PhysicalPlan::HashJoin`.
 
 use datafusion::logical_expr::{Join, JoinType};
 use datafusion::prelude::*;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::QueryOp;
 use crate::control::planner::physical::PhysicalTask;
 use crate::types::{TenantId, VShardId};
 
@@ -82,13 +82,13 @@ pub(super) fn convert_join(join: &Join, tenant_id: TenantId) -> crate::Result<Ve
         return Ok(vec![PhysicalTask {
             tenant_id,
             vshard_id: vshard,
-            plan: PhysicalPlan::NestedLoopJoin {
+            plan: PhysicalPlan::Query(QueryOp::NestedLoopJoin {
                 left_collection,
                 right_collection,
                 condition,
                 join_type: join_type_str.to_string(),
                 limit: 1000,
-            },
+            }),
         }]);
     }
 
@@ -101,13 +101,13 @@ pub(super) fn convert_join(join: &Join, tenant_id: TenantId) -> crate::Result<Ve
         return Ok(vec![PhysicalTask {
             tenant_id,
             vshard_id: left_vshard,
-            plan: PhysicalPlan::HashJoin {
+            plan: PhysicalPlan::Query(QueryOp::HashJoin {
                 left_collection,
                 right_collection,
                 on: on_keys,
                 join_type: join_type_str.to_string(),
                 limit: 1000,
-            },
+            }),
         }]);
     }
 
@@ -117,12 +117,12 @@ pub(super) fn convert_join(join: &Join, tenant_id: TenantId) -> crate::Result<Ve
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: left_vshard,
-        plan: PhysicalPlan::HashJoin {
+        plan: PhysicalPlan::Query(QueryOp::HashJoin {
             left_collection,
             right_collection,
             on: on_keys,
             join_type: join_type_str.to_string(),
             limit: 1000,
-        },
+        }),
     }])
 }

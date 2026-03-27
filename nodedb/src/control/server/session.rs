@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, instrument, warn};
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, VectorOp};
 use crate::control::state::SharedState;
 use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
 
@@ -248,10 +249,10 @@ impl Session {
                         detail: "missing 'document_id'".into(),
                     })?
                     .to_string();
-                PhysicalPlan::PointGet {
+                PhysicalPlan::Document(DocumentOp::PointGet {
                     collection,
                     document_id,
-                }
+                })
             }
             "vector_search" => {
                 let query_vector: Vec<f32> = body["query_vector"]
@@ -263,14 +264,14 @@ impl Session {
                     .filter_map(|v| v.as_f64().map(|f| f as f32))
                     .collect();
                 let top_k = body["top_k"].as_u64().unwrap_or(10) as usize;
-                PhysicalPlan::VectorSearch {
+                PhysicalPlan::Vector(VectorOp::Search {
                     collection,
                     query_vector: Arc::from(query_vector.into_boxed_slice()),
                     top_k,
                     ef_search: 0,
                     filter_bitmap: None,
                     field_name: String::new(),
-                }
+                })
             }
             "range_scan" => {
                 let field = body["field"]
@@ -280,13 +281,13 @@ impl Session {
                     })?
                     .to_string();
                 let limit = body["limit"].as_u64().unwrap_or(100) as usize;
-                PhysicalPlan::RangeScan {
+                PhysicalPlan::Document(DocumentOp::RangeScan {
                     collection,
                     field,
                     lower: None,
                     upper: None,
                     limit,
-                }
+                })
             }
             "crdt_read" => {
                 let document_id = body["document_id"]
@@ -295,10 +296,10 @@ impl Session {
                         detail: "missing 'document_id'".into(),
                     })?
                     .to_string();
-                PhysicalPlan::CrdtRead {
+                PhysicalPlan::Crdt(CrdtOp::Read {
                     collection,
                     document_id,
-                }
+                })
             }
             "crdt_apply" => {
                 let document_id = body["document_id"]
@@ -315,13 +316,13 @@ impl Session {
                 // Decode base64 delta. For now accept raw bytes if not valid base64.
                 let delta = delta_b64.as_bytes().to_vec();
                 let peer_id = body["peer_id"].as_u64().unwrap_or(0);
-                PhysicalPlan::CrdtApply {
+                PhysicalPlan::Crdt(CrdtOp::Apply {
                     collection,
                     document_id,
                     delta,
                     peer_id,
                     mutation_id: 0,
-                }
+                })
             }
             "graph_rag_fusion" => {
                 let query_vector: Vec<f32> = body["query_vector"]
@@ -344,7 +345,7 @@ impl Session {
                 let final_top_k = body["final_top_k"].as_u64().unwrap_or(10) as usize;
                 let vector_k = body["vector_k"].as_f64().unwrap_or(60.0);
                 let graph_k = body["graph_k"].as_f64().unwrap_or(10.0);
-                PhysicalPlan::GraphRagFusion {
+                PhysicalPlan::Graph(GraphOp::RagFusion {
                     collection,
                     query_vector: Arc::from(query_vector.into_boxed_slice()),
                     vector_top_k,
@@ -354,7 +355,7 @@ impl Session {
                     final_top_k,
                     rrf_k: (vector_k, graph_k),
                     options: Default::default(),
-                }
+                })
             }
             "alter_collection_policy" => {
                 let policy = &body["policy"];
@@ -367,10 +368,10 @@ impl Session {
                     serde_json::to_string(policy).map_err(|e| crate::Error::BadRequest {
                         detail: format!("invalid policy JSON: {e}"),
                     })?;
-                PhysicalPlan::SetCollectionPolicy {
+                PhysicalPlan::Crdt(CrdtOp::SetPolicy {
                     collection,
                     policy_json,
-                }
+                })
             }
             _ => {
                 return Err(crate::Error::BadRequest {

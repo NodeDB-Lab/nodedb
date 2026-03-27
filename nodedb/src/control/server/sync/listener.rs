@@ -191,12 +191,13 @@ async fn handle_sync_session(
                                     session.tenant_id.unwrap_or(crate::types::TenantId::new(0));
                                 let vshard =
                                     crate::types::VShardId::from_collection(&ts_msg.collection);
-                                let plan =
-                                    crate::bridge::envelope::PhysicalPlan::TimeseriesIngest {
+                                let plan = crate::bridge::envelope::PhysicalPlan::Timeseries(
+                                    crate::bridge::physical_plan::TimeseriesOp::Ingest {
                                         collection: ingest.collection,
                                         payload: ingest.ilp_payload,
                                         format: "ilp".to_string(),
-                                    };
+                                    },
+                                );
                                 let _ =
                                     crate::control::server::dispatch_utils::dispatch_to_data_plane(
                                         shared, tenant_id, vshard, plan, 0,

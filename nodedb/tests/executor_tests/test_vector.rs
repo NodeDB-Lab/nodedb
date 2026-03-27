@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use nodedb::bridge::dispatch::BridgeRequest;
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
+use nodedb::bridge::physical_plan::VectorOp;
 
 use crate::helpers::*;
 
@@ -15,13 +16,13 @@ fn vector_insert_and_search() {
         tx.try_push(BridgeRequest {
             inner: make_request_with_id(
                 100 + i as u64,
-                PhysicalPlan::VectorInsert {
+                PhysicalPlan::Vector(VectorOp::Insert {
                     collection: "embeddings".into(),
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
                     field_name: String::new(),
                     doc_id: None,
-                },
+                }),
             ),
         })
         .unwrap();
@@ -38,14 +39,14 @@ fn vector_insert_and_search() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::VectorSearch {
+        PhysicalPlan::Vector(VectorOp::Search {
             collection: "embeddings".into(),
             query_vector: Arc::from([5.0f32, 0.0, 0.0].as_slice()),
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,
             field_name: String::new(),
-        },
+        }),
     );
 
     let json = payload_json(&payload);
@@ -60,14 +61,14 @@ fn vector_search_no_index_returns_not_found() {
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::VectorSearch {
+        PhysicalPlan::Vector(VectorOp::Search {
             collection: "nonexistent".into(),
             query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
             top_k: 5,
             ef_search: 0,
             filter_bitmap: None,
             field_name: String::new(),
-        },
+        }),
     );
     assert_eq!(resp.status, Status::Error);
     assert_eq!(resp.error_code, Some(ErrorCode::NotFound));

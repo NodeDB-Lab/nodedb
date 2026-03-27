@@ -4,6 +4,7 @@
 //! WAL record type. Read operations are no-ops.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, TimeseriesOp, VectorOp};
 use crate::control::security::credential::CredentialStore;
 use crate::types::{TenantId, VShardId};
 use crate::wal::manager::WalManager;
@@ -30,11 +31,11 @@ pub fn wal_append_if_write_with_creds(
     credentials: Option<&CredentialStore>,
 ) -> crate::Result<()> {
     match plan {
-        PhysicalPlan::PointPut {
+        PhysicalPlan::Document(DocumentOp::PointPut {
             collection,
             document_id,
             value,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(collection, document_id, value)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -43,10 +44,10 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_put(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::PointDelete {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
             document_id,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(collection, document_id)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -55,13 +56,13 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_delete(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::VectorInsert {
+        PhysicalPlan::Vector(VectorOp::Insert {
             collection,
             vector,
             dim,
             field_name: _,
             doc_id: _,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(collection, vector, dim)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -70,11 +71,11 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_vector_put(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::VectorBatchInsert {
+        PhysicalPlan::Vector(VectorOp::BatchInsert {
             collection,
             vectors,
             dim,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(collection, vectors, dim)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -83,10 +84,10 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_vector_put(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::VectorDelete {
+        PhysicalPlan::Vector(VectorOp::Delete {
             collection,
             vector_id,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(collection, vector_id)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -95,15 +96,15 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_vector_delete(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::CrdtApply { delta, .. } => {
+        PhysicalPlan::Crdt(CrdtOp::Apply { delta, .. }) => {
             wal.append_crdt_delta(tenant_id, vshard_id, delta)?;
         }
-        PhysicalPlan::EdgePut {
+        PhysicalPlan::Graph(GraphOp::EdgePut {
             src_id,
             label,
             dst_id,
             properties,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(src_id, label, dst_id, properties)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -112,11 +113,11 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_put(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::EdgeDelete {
+        PhysicalPlan::Graph(GraphOp::EdgeDelete {
             src_id,
             label,
             dst_id,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(src_id, label, dst_id)).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -125,7 +126,7 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_delete(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::SetVectorParams {
+        PhysicalPlan::Vector(VectorOp::SetParams {
             collection,
             m,
             ef_construction,
@@ -134,7 +135,7 @@ pub fn wal_append_if_write_with_creds(
             pq_m,
             ivf_cells,
             ivf_nprobe,
-        } => {
+        }) => {
             let entry = rmp_serde::to_vec(&(
                 collection,
                 m,
@@ -151,11 +152,11 @@ pub fn wal_append_if_write_with_creds(
             })?;
             wal.append_vector_params(tenant_id, vshard_id, &entry)?;
         }
-        PhysicalPlan::TimeseriesIngest {
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
             collection,
             payload,
             format: _,
-        } => {
+        }) => {
             // WAL bypass: skip WAL if collection has wal=false in timeseries_config.
             if let Some(creds) = credentials
                 && let Some(catalog) = creds.catalog()
