@@ -162,3 +162,80 @@ fn default_total_budget_bytes() -> usize {
 fn default_ts_block_size() -> usize {
     1024
 }
+
+/// KV engine tuning (hash table, expiry wheel, slab allocator).
+///
+/// Controls the per-core hash table parameters, incremental rehash behavior,
+/// expiry wheel tick rate, and the per-tick reap budget that prevents reactor
+/// stalls during mass-expiry events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvTuning {
+    /// Default initial hash table capacity per collection (number of slots).
+    /// Should be a power of two. Larger values reduce early rehash churn for
+    /// collections that will grow quickly. Default: 16384.
+    #[serde(default = "default_kv_capacity")]
+    pub default_capacity: usize,
+
+    /// Hash table load factor threshold that triggers incremental rehash.
+    /// When `entries / capacity > rehash_load_factor`, the table begins
+    /// doubling. Range: 0.5–0.9. Default: 0.75 (standard Robin Hood threshold).
+    #[serde(default = "default_kv_rehash_load_factor")]
+    pub rehash_load_factor: f32,
+
+    /// Number of entries rehashed per PUT during incremental rehash.
+    /// Higher values complete rehash faster but add per-PUT latency.
+    /// Default: 8.
+    #[serde(default = "default_kv_rehash_batch_size")]
+    pub rehash_batch_size: usize,
+
+    /// Default inline value threshold in bytes. Values at or below this size
+    /// are stored directly in the hash entry (no pointer chase). Larger values
+    /// overflow to slab-allocated Binary Tuples. Default: 64.
+    #[serde(default = "default_kv_inline_threshold")]
+    pub default_inline_threshold: usize,
+
+    /// Maximum expirations processed per reactor tick (event loop iteration).
+    /// Prevents mass-expiry events (e.g., 10M keys with identical TTL) from
+    /// stalling the TPC core. Expired-but-not-yet-reaped keys are invisible
+    /// to GET (lazy fallback). Default: 1024.
+    #[serde(default = "default_kv_expiry_reap_budget")]
+    pub expiry_reap_budget: usize,
+
+    /// Expiry wheel tick interval in milliseconds. Determines the granularity
+    /// of TTL expiration. Lower = more precise but more CPU overhead.
+    /// Default: 1000 (1 second).
+    #[serde(default = "default_kv_expiry_tick_ms")]
+    pub expiry_tick_ms: u64,
+}
+
+impl Default for KvTuning {
+    fn default() -> Self {
+        Self {
+            default_capacity: default_kv_capacity(),
+            rehash_load_factor: default_kv_rehash_load_factor(),
+            rehash_batch_size: default_kv_rehash_batch_size(),
+            default_inline_threshold: default_kv_inline_threshold(),
+            expiry_reap_budget: default_kv_expiry_reap_budget(),
+            expiry_tick_ms: default_kv_expiry_tick_ms(),
+        }
+    }
+}
+
+fn default_kv_capacity() -> usize {
+    16_384
+}
+fn default_kv_rehash_load_factor() -> f32 {
+    0.75
+}
+fn default_kv_rehash_batch_size() -> usize {
+    8
+}
+fn default_kv_inline_threshold() -> usize {
+    64
+}
+fn default_kv_expiry_reap_budget() -> usize {
+    1024
+}
+fn default_kv_expiry_tick_ms() -> u64 {
+    1000
+}

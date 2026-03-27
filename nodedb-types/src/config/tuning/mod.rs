@@ -5,7 +5,7 @@ mod network;
 
 pub use data_plane::{DataPlaneTuning, QueryTuning};
 pub use engines::{
-    DEFAULT_MAX_DEPTH, DEFAULT_MAX_VISITED, GraphTuning, SparseTuning, TimeseriesToning,
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_VISITED, GraphTuning, KvTuning, SparseTuning, TimeseriesToning,
     VectorTuning,
 };
 pub use memory::MemoryTuning;
@@ -31,6 +31,8 @@ pub struct TuningConfig {
     pub graph: GraphTuning,
     #[serde(default)]
     pub timeseries: TimeseriesToning,
+    #[serde(default)]
+    pub kv: KvTuning,
     #[serde(default)]
     pub bridge: BridgeTuning,
     #[serde(default)]
@@ -59,6 +61,9 @@ mod tests {
         assert_eq!(parsed.sparse.bm25_k1, 1.2);
         assert_eq!(parsed.graph.max_visited, 100_000);
         assert_eq!(parsed.timeseries.memtable_budget_bytes, 64 * 1024 * 1024);
+        assert_eq!(parsed.kv.default_capacity, 16_384);
+        assert_eq!(parsed.kv.rehash_load_factor, 0.75);
+        assert_eq!(parsed.kv.expiry_reap_budget, 1024);
         assert_eq!(parsed.bridge.slab_page_size, 64 * 1024);
         assert_eq!(parsed.network.default_deadline_secs, 30);
         assert_eq!(parsed.wal.write_buffer_size, 256 * 1024);

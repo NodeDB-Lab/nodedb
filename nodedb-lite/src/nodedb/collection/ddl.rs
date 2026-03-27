@@ -12,6 +12,10 @@ pub struct CollectionMeta {
     pub collection_type: String,
     pub created_at_ms: u64,
     pub fields: Vec<(String, String)>,
+    /// Optional JSON-serialized engine config (e.g., `KvConfig` for KV collections,
+    /// `StrictSchema` for strict collections). Empty for schemaless document collections.
+    #[serde(default)]
+    pub config_json: Option<String>,
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -29,6 +33,41 @@ impl<S: StorageEngine> NodeDbLite<S> {
             collection_type: "document".to_string(),
             created_at_ms: now_ms(),
             fields: fields.to_vec(),
+            config_json: None,
+        };
+        let key = format!("collection:{name}");
+        let bytes = serde_json::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
+        self.storage
+            .put(nodedb_types::Namespace::Meta, key.as_bytes(), &bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// Create a KV collection with typed schema and optional TTL.
+    ///
+    /// Stores the `KvConfig` as JSON in the collection metadata so that the
+    /// KV engine can reconstruct the schema on startup.
+    pub async fn create_kv_collection(
+        &self,
+        name: &str,
+        config: &nodedb_types::KvConfig,
+    ) -> NodeDbResult<()> {
+        let fields: Vec<(String, String)> = config
+            .schema
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), c.column_type.to_string()))
+            .collect();
+
+        let config_json =
+            serde_json::to_string(config).map_err(|e| NodeDbError::storage(e.to_string()))?;
+
+        let meta = CollectionMeta {
+            name: name.to_string(),
+            collection_type: "kv".to_string(),
+            created_at_ms: now_ms(),
+            fields,
+            config_json: Some(config_json),
         };
         let key = format!("collection:{name}");
         let bytes = serde_json::to_vec(&meta).map_err(|e| NodeDbError::storage(e.to_string()))?;
@@ -87,6 +126,7 @@ impl<S: StorageEngine> NodeDbLite<S> {
                     collection_type: "document".to_string(),
                     created_at_ms: 0,
                     fields: Vec::new(),
+                    config_json: None,
                 });
             }
         }

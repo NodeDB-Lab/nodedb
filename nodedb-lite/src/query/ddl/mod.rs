@@ -4,6 +4,7 @@ pub mod alter;
 pub mod columnar;
 pub mod convert;
 pub mod htap;
+pub mod kv;
 pub mod parser;
 pub mod strict;
 #[cfg(test)]
@@ -58,6 +59,14 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             && upper.contains("COLUMNAR")
         {
             return Some(self.handle_create_columnar(sql).await);
+        }
+
+        // CREATE COLLECTION ... WITH storage = 'kv'
+        if upper.starts_with("CREATE COLLECTION ")
+            && upper.contains("STORAGE")
+            && kv::is_kv_storage_mode(&upper)
+        {
+            return Some(self.handle_create_kv(sql).await);
         }
 
         // DROP COLLECTION <name> — check if it's strict, handle accordingly.
