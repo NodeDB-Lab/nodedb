@@ -11,7 +11,7 @@ use crate::control::state::SharedState;
 use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
 
 pub use super::broadcast::broadcast_to_all_cores;
-pub use super::graph_dispatch::cross_core_bfs;
+pub use super::graph_dispatch::{cross_core_bfs, cross_core_bfs_with_options};
 pub use super::wal_dispatch::wal_append_if_write;
 
 static DISPATCH_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);

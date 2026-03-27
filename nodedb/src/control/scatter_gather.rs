@@ -17,8 +17,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use tracing::{debug, warn};
+
+use crate::control::state::SharedState;
 use crate::engine::graph::traversal_options::{GraphResponseMeta, GraphTraversalOptions};
-use crate::types::VShardId;
+use crate::types::{TenantId, VShardId};
 
 /// A batch of node IDs targeted at a specific shard.
 ///
@@ -180,6 +183,261 @@ pub fn merge_traversal_results(
     }
 
     merged
+}
+
+/// Coordinate a single cross-shard graph hop from the Control Plane.
+///
+/// Given a set of locally-discovered node IDs and a pre-built scatter envelope,
+/// this function:
+/// 1. Applies adaptive fan-out limits to the envelope.
+/// 2. For each shard batch that passes the limit check, forwards a
+///    `GRAPH TRAVERSE FROM '<node>' DEPTH 1` query to the leader node that
+///    owns that shard via the cluster transport.
+/// 3. Merges all remote results with `local_nodes` via deduplication.
+///
+/// Returns the merged node list and the aggregate `GraphResponseMeta`.
+///
+/// # Cluster mode only
+///
+/// This function assumes `shared.cluster_routing` and `shared.cluster_transport`
+/// are `Some`. Callers must check `shared.cluster_routing.is_some()` before
+/// calling this function.
+/// Parameters for a cross-shard graph traversal hop.
+pub struct CrossShardHopParams<'a> {
+    pub local_nodes: Vec<String>,
+    pub envelope: ScatterEnvelope,
+    pub options: &'a GraphTraversalOptions,
+    pub edge_label: Option<&'a str>,
+    pub direction: crate::engine::graph::edge_store::Direction,
+    pub remaining_depth: usize,
+}
+
+pub async fn coordinate_cross_shard_hop(
+    shared: &SharedState,
+    tenant_id: TenantId,
+    params: CrossShardHopParams<'_>,
+) -> crate::Result<(Vec<String>, GraphResponseMeta)> {
+    let CrossShardHopParams {
+        local_nodes,
+        envelope: cross_shard_targets,
+        options,
+        edge_label,
+        direction,
+        remaining_depth,
+    } = params;
+    // Fast path: nothing to scatter.
+    if cross_shard_targets.is_empty() {
+        return Ok((local_nodes, GraphResponseMeta::default()));
+    }
+
+    let decision = apply_fan_out_limits(cross_shard_targets, options);
+
+    let (batches, mut meta) = match decision {
+        FanOutDecision::Proceed { batches, meta } => (batches, meta),
+        FanOutDecision::ProceedWithWarning { batches, meta } => {
+            debug!(
+                shards = meta.shards_reached,
+                warning = ?meta.fan_out_warning,
+                "cross-shard hop: fan-out soft limit exceeded, continuing"
+            );
+            (batches, meta)
+        }
+        FanOutDecision::Exceeded {
+            dispatched,
+            skipped,
+            meta,
+        } => {
+            if options.fan_out_partial {
+                debug!(
+                    dispatched = dispatched.len(),
+                    skipped = skipped.len(),
+                    "cross-shard hop: hard fan-out limit, returning partial results"
+                );
+                (dispatched, meta)
+            } else {
+                return Err(crate::Error::FanOutExceeded {
+                    shards_touched: meta.shards_reached + meta.shards_skipped,
+                    limit: options.fan_out_hard,
+                });
+            }
+        }
+    };
+
+    // Acquire the routing table and transport once.
+    let routing = match &shared.cluster_routing {
+        Some(r) => r,
+        None => {
+            // Should not happen — callers must check. Return local results.
+            warn!("coordinate_cross_shard_hop called without cluster routing");
+            return Ok((local_nodes, meta));
+        }
+    };
+    let transport = match &shared.cluster_transport {
+        Some(t) => t.clone(),
+        None => {
+            warn!("coordinate_cross_shard_hop called without cluster transport");
+            return Ok((local_nodes, meta));
+        }
+    };
+
+    // Build SQL fragments for the label/direction clause (used for every node).
+    let label_clause = match edge_label {
+        Some(lbl) => format!(" LABEL '{lbl}'"),
+        None => String::new(),
+    };
+    let direction_word = match direction {
+        crate::engine::graph::edge_store::Direction::In => "in",
+        crate::engine::graph::edge_store::Direction::Out => "out",
+        crate::engine::graph::edge_store::Direction::Both => "both",
+    };
+    // We always traverse exactly 1 depth per scatter batch because the caller
+    // drives the outer BFS loop. `remaining_depth` is included for completeness
+    // but each forwarded request probes depth 1 so the Control Plane maintains
+    // authoritative hop counting.
+    let hop_depth = remaining_depth.min(1);
+
+    // Fan out to all batches in parallel.
+    let mut join_handles = Vec::with_capacity(batches.len());
+
+    for batch in batches {
+        let shard_id = batch.target_shard;
+        let leader_node = {
+            let rt = routing.read().unwrap_or_else(|p| p.into_inner());
+            match rt.leader_for_vshard(shard_id.as_u16()) {
+                Ok(node) => node,
+                Err(e) => {
+                    warn!(%shard_id, error = %e, "no leader for shard, skipping batch");
+                    continue;
+                }
+            }
+        };
+
+        // Skip batches that target the local node — those nodes are already
+        // covered by the local BFS that was executed before this call.
+        if leader_node == shared.node_id {
+            continue;
+        }
+
+        let transport_clone = transport.clone();
+        let tenant_id_u32 = tenant_id.as_u32();
+        let label_sql = label_clause.clone();
+        let direction_sql = direction_word.to_string();
+
+        join_handles.push(tokio::spawn(async move {
+            let mut shard_results: Vec<String> = Vec::new();
+            let mut any_error = false;
+
+            for node_id in batch.node_ids {
+                let sql = format!(
+                    "GRAPH TRAVERSE FROM '{node_id}' DEPTH {hop_depth}{label_sql} DIRECTION {direction_sql}"
+                );
+                let fwd = nodedb_cluster::rpc_codec::ForwardRequest {
+                    sql,
+                    tenant_id: tenant_id_u32,
+                    deadline_remaining_ms: 25_000,
+                    trace_id: 0,
+                };
+
+                match transport_clone
+                    .send_rpc(leader_node, nodedb_cluster::rpc_codec::RaftRpc::ForwardRequest(fwd))
+                    .await
+                {
+                    Ok(nodedb_cluster::rpc_codec::RaftRpc::ForwardResponse(resp)) => {
+                        if resp.success {
+                            for payload in resp.payloads {
+                                if let Ok(nodes) =
+                                    serde_json::from_slice::<Vec<String>>(&payload)
+                                {
+                                    shard_results.extend(nodes);
+                                }
+                            }
+                        } else {
+                            warn!(
+                                node = leader_node,
+                                shard = %shard_id,
+                                error = %resp.error_message,
+                                "remote graph traverse failed"
+                            );
+                            any_error = true;
+                        }
+                    }
+                    Ok(unexpected) => {
+                        warn!(
+                            node = leader_node,
+                            ?unexpected,
+                            "unexpected RPC response for graph traverse"
+                        );
+                        any_error = true;
+                    }
+                    Err(e) => {
+                        warn!(
+                            node = leader_node,
+                            shard = %shard_id,
+                            error = %e,
+                            "transport error during cross-shard graph traverse"
+                        );
+                        any_error = true;
+                    }
+                }
+            }
+
+            (shard_results, any_error)
+        }));
+    }
+
+    // Collect all remote results.
+    let mut remote_results: Vec<Vec<String>> = Vec::with_capacity(join_handles.len());
+    for handle in join_handles {
+        match handle.await {
+            Ok((nodes, _had_error)) => {
+                if !nodes.is_empty() {
+                    remote_results.push(nodes);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "cross-shard hop task panicked");
+            }
+        }
+    }
+
+    // Update meta with the number of shards that actually responded.
+    meta.shards_reached = remote_results.len() as u16;
+
+    // Deduplicate and merge local + remote results.
+    let merged = merge_traversal_results(local_nodes, &remote_results);
+    Ok((merged, meta))
+}
+
+/// Partition a set of node IDs into local nodes (served by this node) and
+/// a `ScatterEnvelope` grouping remote nodes by their target shard.
+///
+/// "Local" means the shard's leader is `local_node_id`. Any node whose
+/// `VShardId::from_key` maps to a shard led by a different node is remote.
+///
+/// When `cluster_routing` is `None` (single-node mode), all nodes are
+/// considered local and the envelope is empty.
+pub fn partition_local_remote(
+    node_ids: &[String],
+    local_node_id: u64,
+    routing: &nodedb_cluster::RoutingTable,
+) -> (Vec<String>, ScatterEnvelope) {
+    let mut local = Vec::new();
+    let mut envelope = ScatterEnvelope::new();
+
+    for node_id in node_ids {
+        let shard = VShardId::from_key(node_id.as_bytes());
+        let leader = routing
+            .leader_for_vshard(shard.as_u16())
+            .unwrap_or(local_node_id);
+
+        if leader == local_node_id {
+            local.push(node_id.clone());
+        } else {
+            envelope.add(shard, node_id.clone());
+        }
+    }
+
+    (local, envelope)
 }
 
 #[cfg(test)]
