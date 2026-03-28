@@ -200,9 +200,10 @@ pub fn spawn_core(
             // 3. Load vector checkpoints (fast recovery).
             core.load_vector_checkpoints();
 
-            // 4. Replay WAL vector records (only entries after checkpoint).
+            // 4. Replay WAL records for crash recovery.
             if !wal_records.is_empty() {
                 core.replay_vector_wal(&wal_records, num_cores);
+                core.replay_kv_wal(&wal_records, num_cores);
             }
 
             info!(core_id, "data plane core started (eventfd-driven)");

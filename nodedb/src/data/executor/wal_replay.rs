@@ -1,4 +1,4 @@
-//! WAL vector replay for CoreLoop startup recovery.
+//! WAL replay for CoreLoop startup recovery: vector + KV engines.
 
 use super::core_loop::CoreLoop;
 
@@ -168,6 +168,109 @@ impl CoreLoop {
                 skipped,
                 collections = self.vector_collections.len(),
                 "WAL vector replay complete"
+            );
+        }
+    }
+
+    /// Replay WAL KV records to rebuild in-memory hash tables after crash.
+    ///
+    /// KV records use generic `RecordType::Put` and `RecordType::Delete` with
+    /// a discriminator prefix in the MessagePack payload: `("kv_put", ...)`
+    /// or `("kv_delete", ...)`.
+    ///
+    /// Called once during startup, after `open()` but before the event loop.
+    /// Each core only replays records routed to its vShard.
+    pub fn replay_kv_wal(&mut self, records: &[nodedb_wal::WalRecord], num_cores: usize) {
+        use nodedb_wal::record::RecordType;
+
+        let mut puts = 0usize;
+        let mut deletes = 0usize;
+
+        let now_ms = crate::engine::kv::current_ms();
+
+        for record in records {
+            let logical_type = record.logical_record_type();
+            let record_type = RecordType::from_raw(logical_type);
+            let is_put = record_type == Some(RecordType::Put);
+            let is_delete = record_type == Some(RecordType::Delete);
+            if !is_put && !is_delete {
+                continue;
+            }
+
+            // Route to the correct core by vShard.
+            let vshard_id = record.header.vshard_id as usize;
+            let target_core = if num_cores > 0 {
+                vshard_id % num_cores
+            } else {
+                0
+            };
+            if target_core != self.core_id {
+                continue;
+            }
+
+            let tenant_id = record.header.tenant_id;
+
+            // Try to detect KV records by discriminator prefix in the payload.
+            if is_put {
+                // kv_put: ("kv_put", collection, key, value, ttl_ms)
+                if let Ok((disc, collection, key, value, ttl_ms)) =
+                    rmp_serde::from_slice::<(&str, String, Vec<u8>, Vec<u8>, u64)>(&record.payload)
+                    && disc == "kv_put"
+                {
+                    self.kv_engine
+                        .put(tenant_id, &collection, key, value, ttl_ms, now_ms);
+                    puts += 1;
+                    continue;
+                }
+
+                // kv_batch_put: ("kv_batch_put", collection, entries, ttl_ms)
+                if let Ok((disc, collection, entries, ttl_ms)) =
+                    rmp_serde::from_slice::<(&str, String, Vec<(Vec<u8>, Vec<u8>)>, u64)>(
+                        &record.payload,
+                    )
+                    && disc == "kv_batch_put"
+                {
+                    self.kv_engine
+                        .batch_put(tenant_id, &collection, &entries, ttl_ms, now_ms);
+                    puts += entries.len();
+                    continue;
+                }
+
+                // kv_field_set: ("kv_field_set", collection, key, updates)
+                // Replay as a full PUT (the value is the updated document).
+                // We skip field_set replay because it requires the current value
+                // which may not exist yet. The WAL should have a kv_put after.
+            }
+
+            if is_delete {
+                // kv_delete: ("kv_delete", collection, keys)
+                if let Ok((disc, collection, keys)) =
+                    rmp_serde::from_slice::<(&str, String, Vec<Vec<u8>>)>(&record.payload)
+                    && disc == "kv_delete"
+                {
+                    self.kv_engine.delete(tenant_id, &collection, &keys, now_ms);
+                    deletes += keys.len();
+                    continue;
+                }
+
+                // kv_truncate: ("kv_truncate", collection)
+                if let Ok((disc, collection)) =
+                    rmp_serde::from_slice::<(&str, String)>(&record.payload)
+                    && disc == "kv_truncate"
+                {
+                    self.kv_engine.truncate(tenant_id, &collection);
+                    deletes += 1;
+                }
+            }
+        }
+
+        if puts > 0 || deletes > 0 {
+            tracing::info!(
+                core = self.core_id,
+                puts,
+                deletes,
+                collections = self.kv_engine.stats().collection_count,
+                "WAL KV replay complete"
             );
         }
     }

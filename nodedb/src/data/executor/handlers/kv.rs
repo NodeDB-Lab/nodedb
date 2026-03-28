@@ -113,6 +113,17 @@ impl CoreLoop {
         ttl_ms: u64,
     ) -> Response {
         debug!(core = self.core_id, %collection, "kv put");
+
+        // Memory budget check: reject new PUTs when over budget.
+        if self.kv_engine.is_over_budget() {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: "KV memory budget exceeded, retry later".into(),
+                },
+            );
+        }
+
         let now_ms = current_ms();
         let _old = self.kv_engine.put(
             tid,
