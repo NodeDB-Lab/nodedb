@@ -622,10 +622,13 @@ mod tests {
         assert!((result.min - 0.0).abs() < f64::EPSILON);
         assert!((result.max - 9999.999).abs() < 0.001);
 
-        // Should complete in <100ms on any modern CPU with SIMD.
+        // Should complete in <100ms on any modern CPU with SIMD (release mode).
+        // Debug builds are significantly slower due to no optimizations — use a
+        // generous threshold to avoid flaky test failures in CI debug runs.
+        let threshold_ms = if cfg!(debug_assertions) { 5000 } else { 500 };
         assert!(
-            elapsed.as_millis() < 500,
-            "SIMD aggregation too slow: {}ms for 10M values",
+            elapsed.as_millis() < threshold_ms,
+            "SIMD aggregation too slow: {}ms for 10M values (threshold {threshold_ms}ms)",
             elapsed.as_millis()
         );
     }
