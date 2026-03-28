@@ -8,11 +8,11 @@
 
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::info;
 
 use crate::control::security::catalog::{StoredScope, SystemCatalog};
+use crate::control::security::time::now_secs;
 
 /// In-memory scope definition.
 #[derive(Debug, Clone)]
@@ -185,13 +185,6 @@ impl Default for ScopeStore {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

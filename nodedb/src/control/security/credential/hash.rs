@@ -3,13 +3,6 @@ use argon2::password_hash::{
     PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
 
-pub(super) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 pub(super) fn generate_scram_salt() -> Vec<u8> {
     use argon2::password_hash::rand_core::RngCore;
     let mut salt = vec![0u8; 16];

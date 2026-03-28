@@ -11,6 +11,7 @@ use crate::types::TenantId;
 use super::catalog::{StoredOwner, StoredPermission, SystemCatalog};
 use super::identity::{AuthenticatedIdentity, Permission};
 use super::role::RoleStore;
+use super::time::now_secs;
 
 /// A permission grant record (in-memory).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -355,13 +356,6 @@ fn format_permission(p: Permission) -> String {
         Permission::Admin => "admin".into(),
         Permission::Monitor => "monitor".into(),
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

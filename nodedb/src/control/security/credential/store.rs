@@ -7,9 +7,10 @@ use crate::types::TenantId;
 
 use super::super::catalog::SystemCatalog;
 use super::super::identity::{AuthMethod, AuthenticatedIdentity, Role};
+use super::super::time::now_secs;
 use super::hash::{
     compute_md5_hash, compute_scram_salted_password, generate_scram_salt, hash_password_argon2,
-    now_secs, verify_argon2,
+    verify_argon2,
 };
 use super::lockout::LoginAttemptTracker;
 use super::record::UserRecord;
