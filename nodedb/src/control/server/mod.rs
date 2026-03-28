@@ -7,6 +7,7 @@ pub mod ilp_listener;
 pub mod listener;
 pub mod native;
 pub mod pgwire;
+pub mod resp;
 pub mod session;
 pub mod session_auth;
 pub mod sync;

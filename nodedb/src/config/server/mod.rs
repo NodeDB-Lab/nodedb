@@ -73,6 +73,12 @@ pub struct ServerConfig {
     #[serde(default)]
     pub checkpoint: CheckpointSettings,
 
+    /// Address to bind the RESP (Redis-compatible) KV protocol listener.
+    /// Disabled by default (None). Enable for Redis-compatible key-value access.
+    /// Default port: 6381 (distinct from Redis's 6379).
+    #[serde(default)]
+    pub resp_listen: Option<SocketAddr>,
+
     /// Address to bind the ILP (InfluxDB Line Protocol) TCP listener.
     /// Disabled by default (None). Enable for timeseries ingest.
     /// Standard InfluxDB port: 8086.
@@ -117,6 +123,7 @@ impl Default for ServerConfig {
             encryption: None,
             log_format: "text".into(),
             checkpoint: CheckpointSettings::default(),
+            resp_listen: None,
             ilp_listen: None,
             cluster: None,
             cold_storage: None,

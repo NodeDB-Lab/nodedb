@@ -336,6 +336,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let resp_listener = if let Some(resp_addr) = config.resp_listen {
+        Some(nodedb::control::server::resp::RespListener::bind(resp_addr).await?)
+    } else {
+        None
+    };
 
     // Startup banner.
     eprintln!();
@@ -344,6 +349,9 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("  Native protocol : {}", config.listen);
     eprintln!("  PostgreSQL wire : {}", config.pg_listen);
     eprintln!("  HTTP API        : {}", config.http_listen);
+    if let Some(addr) = config.resp_listen {
+        eprintln!("  RESP (KV)       : {addr}");
+    }
     if let Some(addr) = config.ilp_listen {
         eprintln!("  ILP ingest      : {addr}");
     }
@@ -454,6 +462,18 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = ilp.run(shared_ilp, conn_sem_ilp, shutdown_rx_ilp).await {
                 tracing::error!(error = %e, "ILP listener failed");
+            }
+        });
+    }
+
+    // Run RESP (Redis-compatible) listener for KV access (if configured).
+    if let Some(resp) = resp_listener {
+        let shared_resp = Arc::clone(&shared);
+        let conn_sem_resp = Arc::clone(&conn_semaphore);
+        let shutdown_rx_resp = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = resp.run(shared_resp, conn_sem_resp, shutdown_rx_resp).await {
+                tracing::error!(error = %e, "RESP listener failed");
             }
         });
     }
