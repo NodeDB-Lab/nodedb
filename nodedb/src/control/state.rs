@@ -70,6 +70,9 @@ pub struct SharedState {
     /// Scope grant store (who has what scope).
     pub scope_grants: crate::control::security::scope::grant::ScopeGrantStore,
 
+    /// Rate limiter (token bucket, per-user/org hierarchy).
+    pub rate_limiter: crate::control::security::ratelimit::limiter::RateLimiter,
+
     /// Dead-Letter Queue for sync-rejected deltas.
     pub sync_dlq: Mutex<SyncDlq>,
 
@@ -184,6 +187,7 @@ impl SharedState {
             orgs: crate::control::security::org::store::OrgStore::new(),
             scope_defs: crate::control::security::scope::store::ScopeStore::new(),
             scope_grants: crate::control::security::scope::grant::ScopeGrantStore::new(),
+            rate_limiter: crate::control::security::ratelimit::limiter::RateLimiter::default(),
             sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
             audit_retention_days: 0,
             idle_timeout_secs: 0,
@@ -260,6 +264,7 @@ impl SharedState {
             orgs: crate::control::security::org::store::OrgStore::new(),
             scope_defs: crate::control::security::scope::store::ScopeStore::new(),
             scope_grants: crate::control::security::scope::grant::ScopeGrantStore::new(),
+            rate_limiter: crate::control::security::ratelimit::limiter::RateLimiter::default(),
             sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
             audit_retention_days: auth_config.audit_retention_days,
             idle_timeout_secs: auth_config.idle_timeout_secs,

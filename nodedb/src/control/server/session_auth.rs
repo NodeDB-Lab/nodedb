@@ -302,3 +302,31 @@ pub fn check_blacklist(
 
     Ok(())
 }
+
+/// Check rate limit for a request.
+///
+/// Called after identity and blacklist checks, before query execution.
+/// Returns `Err(RateLimited)` if the request exceeds the rate limit.
+pub fn check_rate_limit(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    auth_ctx: &AuthContext,
+    operation: &str,
+) -> crate::Result<crate::control::security::ratelimit::limiter::RateLimitResult> {
+    let plan_tier = auth_ctx.metadata.get("plan").map(|s| s.as_str());
+    let result = state.rate_limiter.check(
+        &identity.user_id.to_string(),
+        &auth_ctx.org_ids,
+        plan_tier,
+        operation,
+    );
+
+    if !result.allowed {
+        return Err(crate::Error::RejectedAuthz {
+            tenant_id: identity.tenant_id,
+            resource: format!("rate limited: retry after {}s", result.retry_after_secs),
+        });
+    }
+
+    Ok(result)
+}

@@ -161,6 +161,10 @@ pub struct AuthConfig {
     /// If not present, JWT auth is disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwt: Option<JwtAuthConfig>,
+
+    /// Rate limiting configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<crate::control::security::ratelimit::config::RateLimitConfig>,
 }
 
 impl Default for AuthConfig {
@@ -177,6 +181,7 @@ impl Default for AuthConfig {
             password_expiry_days: 0,
             audit_retention_days: 0,
             jwt: None,
+            rate_limit: None,
         }
     }
 }
