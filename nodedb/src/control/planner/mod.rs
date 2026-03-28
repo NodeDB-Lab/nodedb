@@ -8,6 +8,7 @@ mod extract;
 pub mod hints;
 mod join;
 pub mod physical;
+pub mod rls_injection;
 mod search;
 pub mod sql_expr_convert;
 pub mod udf;

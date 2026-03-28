@@ -7,7 +7,13 @@
 #[derive(Debug, Clone)]
 pub enum KvOp {
     /// Point lookup by primary key. Returns Binary Tuple value or nil.
-    Get { collection: String, key: Vec<u8> },
+    Get {
+        collection: String,
+        key: Vec<u8>,
+        /// RLS post-fetch filters. Evaluated after fetching the value.
+        /// Returns nil on denial (no info leak).
+        rls_filters: Vec<u8>,
+    },
 
     /// Insert or update. Writes a Binary Tuple value keyed by primary key.
     ///

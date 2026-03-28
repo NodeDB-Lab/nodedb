@@ -31,6 +31,8 @@ pub enum GraphOp {
         direction: Direction,
         depth: usize,
         options: GraphTraversalOptions,
+        /// RLS filters applied to traversed nodes before returning.
+        rls_filters: Vec<u8>,
     },
 
     /// Immediate 1-hop neighbors lookup.
@@ -38,6 +40,8 @@ pub enum GraphOp {
         node_id: String,
         edge_label: Option<String>,
         direction: Direction,
+        /// RLS filters applied to neighbor nodes before returning.
+        rls_filters: Vec<u8>,
     },
 
     /// Shortest path between two nodes.
@@ -47,6 +51,8 @@ pub enum GraphOp {
         edge_label: Option<String>,
         max_depth: usize,
         options: GraphTraversalOptions,
+        /// RLS filters applied to path nodes before returning.
+        rls_filters: Vec<u8>,
     },
 
     /// Materialize a subgraph as edge tuples.
@@ -55,6 +61,8 @@ pub enum GraphOp {
         edge_label: Option<String>,
         depth: usize,
         options: GraphTraversalOptions,
+        /// RLS filters applied to subgraph nodes/edges before returning.
+        rls_filters: Vec<u8>,
     },
 
     /// GraphRAG fusion: vector search → graph expansion → RRF ranking.

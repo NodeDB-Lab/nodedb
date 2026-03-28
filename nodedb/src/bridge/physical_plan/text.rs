@@ -12,6 +12,10 @@ pub enum TextOp {
         top_k: usize,
         /// Enable fuzzy matching (Levenshtein) for typo tolerance.
         fuzzy: bool,
+        /// RLS post-score filters (serialized `Vec<ScanFilter>`).
+        /// Applied after BM25 scoring, before returning to client.
+        /// Result count may be less than requested `top_k`.
+        rls_filters: Vec<u8>,
     },
 
     /// Hybrid search: vector similarity + BM25 text, fused via RRF.
@@ -25,5 +29,7 @@ pub enum TextOp {
         /// Weight for vector results in RRF (0.0–1.0). Default: 0.5.
         vector_weight: f32,
         filter_bitmap: Option<Arc<[u8]>>,
+        /// RLS post-fusion filters.
+        rls_filters: Vec<u8>,
     },
 }

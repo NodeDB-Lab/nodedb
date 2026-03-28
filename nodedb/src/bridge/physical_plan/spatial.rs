@@ -29,5 +29,7 @@ pub enum SpatialOp {
         attribute_filters: Vec<u8>,
         limit: usize,
         projection: Vec<String>,
+        /// RLS post-candidate filters.
+        rls_filters: Vec<u8>,
     },
 }

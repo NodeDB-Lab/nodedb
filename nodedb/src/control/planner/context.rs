@@ -102,6 +102,27 @@ impl QueryContext {
         self.converter.convert(&logical, tenant_id)
     }
 
+    /// Parse SQL, convert to physical plan, and inject RLS predicates.
+    ///
+    /// This is the primary query entry point when RLS is active. It:
+    /// 1. Parses SQL → logical plan via DataFusion.
+    /// 2. Converts logical → physical plan(s).
+    /// 3. Injects RLS read predicates for each task's collection.
+    ///
+    /// Superusers bypass RLS (handled inside `inject_rls`).
+    pub async fn plan_sql_with_rls(
+        &self,
+        sql: &str,
+        tenant_id: crate::types::TenantId,
+        auth: &crate::control::security::auth_context::AuthContext,
+        rls_store: &crate::control::security::rls::RlsPolicyStore,
+    ) -> crate::Result<Vec<super::physical::PhysicalTask>> {
+        let logical = self.sql_to_logical(sql).await?;
+        let mut tasks = self.converter.convert(&logical, tenant_id)?;
+        super::rls_injection::inject_rls(&mut tasks, rls_store, auth)?;
+        Ok(tasks)
+    }
+
     /// Access the underlying DataFusion session for advanced configuration
     /// (e.g., registering UDFs, table providers).
     pub fn session(&self) -> &SessionContext {

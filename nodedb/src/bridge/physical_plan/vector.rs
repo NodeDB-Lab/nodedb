@@ -16,6 +16,10 @@ pub enum VectorOp {
         filter_bitmap: Option<Arc<[u8]>>,
         /// Named vector field to search. Empty string = default field.
         field_name: String,
+        /// RLS post-candidate filters (serialized `Vec<ScanFilter>`).
+        /// Applied after HNSW returns candidates, before returning to client.
+        /// Result count may be less than requested `top_k`.
+        rls_filters: Vec<u8>,
     },
 
     /// Insert a vector into the HNSW index (write path).
@@ -43,6 +47,8 @@ pub enum VectorOp {
         top_k: usize,
         ef_search: usize,
         filter_bitmap: Option<Arc<[u8]>>,
+        /// RLS post-candidate filters.
+        rls_filters: Vec<u8>,
     },
 
     /// Soft-delete a vector by internal node ID.
