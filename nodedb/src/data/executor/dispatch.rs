@@ -17,8 +17,8 @@ impl CoreLoop {
             PhysicalPlan::Document(DocumentOp::PointGet {
                 collection,
                 document_id,
-                rls_filters: _,
-            }) => self.execute_point_get(task, tid, collection, document_id),
+                rls_filters,
+            }) => self.execute_point_get(task, tid, collection, document_id, rls_filters),
             PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
                 document_id,
@@ -62,7 +62,7 @@ impl CoreLoop {
                 top_k,
                 ef_search,
                 filter_bitmap,
-                rls_filters: _,
+                rls_filters,
             }) => self.execute_vector_multi_search(
                 super::handlers::vector_search::VectorMultiSearchParams {
                     task,
@@ -72,6 +72,7 @@ impl CoreLoop {
                     top_k: *top_k,
                     ef_search: *ef_search,
                     filter_bitmap: filter_bitmap.as_ref(),
+                    rls_filters,
                 },
             ),
 
@@ -87,7 +88,7 @@ impl CoreLoop {
                 ef_search,
                 filter_bitmap,
                 field_name,
-                rls_filters: _,
+                rls_filters,
             }) => self.execute_vector_search(super::handlers::vector_search::VectorSearchParams {
                 task,
                 tid,
@@ -97,6 +98,7 @@ impl CoreLoop {
                 ef_search: *ef_search,
                 filter_bitmap: filter_bitmap.as_ref(),
                 field_name,
+                rls_filters,
             }),
 
             PhysicalPlan::Vector(VectorOp::SetParams {
@@ -297,8 +299,10 @@ impl CoreLoop {
                 query,
                 top_k,
                 fuzzy,
-                rls_filters: _,
-            }) => self.execute_text_search(task, tid, collection, query, *top_k, *fuzzy),
+                rls_filters,
+            }) => {
+                self.execute_text_search(task, tid, collection, query, *top_k, *fuzzy, rls_filters)
+            }
 
             PhysicalPlan::Text(TextOp::HybridSearch {
                 collection,
@@ -309,7 +313,7 @@ impl CoreLoop {
                 fuzzy,
                 vector_weight,
                 filter_bitmap,
-                rls_filters: _,
+                rls_filters,
             }) => self.execute_hybrid_search(
                 task,
                 tid,
@@ -321,6 +325,7 @@ impl CoreLoop {
                 *fuzzy,
                 *vector_weight,
                 filter_bitmap.as_ref(),
+                rls_filters,
             ),
 
             PhysicalPlan::Graph(GraphOp::Algo { algorithm, params }) => {

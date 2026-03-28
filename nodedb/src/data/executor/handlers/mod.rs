@@ -10,6 +10,7 @@ pub mod graph_rag;
 pub mod join;
 pub mod kv;
 pub mod point;
+pub mod rls_eval;
 pub mod text_search;
 pub mod timeseries;
 pub mod timeseries_wal;

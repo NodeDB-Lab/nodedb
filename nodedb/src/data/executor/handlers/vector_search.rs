@@ -55,6 +55,8 @@ pub(in crate::data::executor) struct VectorSearchParams<'a> {
     pub ef_search: usize,
     pub filter_bitmap: Option<&'a std::sync::Arc<[u8]>>,
     pub field_name: &'a str,
+    /// RLS post-candidate filters. Applied after HNSW/IVF returns candidates.
+    pub rls_filters: &'a [u8],
 }
 
 /// Parameters for multi-vector search (all named fields, RRF fusion).
@@ -66,6 +68,8 @@ pub(in crate::data::executor) struct VectorMultiSearchParams<'a> {
     pub top_k: usize,
     pub ef_search: usize,
     pub filter_bitmap: Option<&'a std::sync::Arc<[u8]>>,
+    /// RLS post-candidate filters (evaluated per-candidate after RRF fusion).
+    pub rls_filters: &'a [u8],
 }
 
 impl CoreLoop {
@@ -82,6 +86,7 @@ impl CoreLoop {
             ef_search,
             filter_bitmap,
             field_name,
+            rls_filters,
         } = params;
         debug!(core = self.core_id, %collection, top_k, ef_search, "vector search");
         let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
@@ -98,17 +103,45 @@ impl CoreLoop {
         if collection_ref.is_empty() {
             return self.response_with_payload(task, b"[]".to_vec());
         }
-        let ef = effective_ef(ef_search, top_k);
+        // Fetch extra candidates when RLS is active, since some will be filtered.
+        let fetch_k = if rls_filters.is_empty() {
+            top_k
+        } else {
+            top_k.saturating_mul(2).max(20)
+        };
+        let ef = effective_ef(ef_search, fetch_k);
         let results = match filter_bitmap {
             Some(bitmap_bytes) => {
-                collection_ref.search_with_bitmap_bytes(query_vector, top_k, ef, bitmap_bytes)
+                collection_ref.search_with_bitmap_bytes(query_vector, fetch_k, ef, bitmap_bytes)
             }
-            None => collection_ref.search(query_vector, top_k, ef),
+            None => collection_ref.search(query_vector, fetch_k, ef),
         };
-        let hits: Vec<_> = results
-            .iter()
-            .map(|r| build_search_hit(r.id, r.distance, collection_ref.get_doc_id(r.id)))
-            .collect();
+
+        // RLS post-candidate filtering: look up each candidate's document.
+        let hits: Vec<_> = if rls_filters.is_empty() {
+            results
+                .iter()
+                .map(|r| build_search_hit(r.id, r.distance, collection_ref.get_doc_id(r.id)))
+                .collect()
+        } else {
+            results
+                .iter()
+                .filter(|r| {
+                    let doc_id_str = match collection_ref.get_doc_id(r.id) {
+                        Some(id) if !id.is_empty() => id,
+                        _ => return false,
+                    };
+                    match self.sparse.get(tid, collection, doc_id_str) {
+                        Ok(Some(bytes)) => {
+                            super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
+                        }
+                        _ => false,
+                    }
+                })
+                .take(top_k)
+                .map(|r| build_search_hit(r.id, r.distance, collection_ref.get_doc_id(r.id)))
+                .collect()
+        };
         encode_hits_response(self, task, &hits)
     }
 
@@ -162,6 +195,7 @@ impl CoreLoop {
             top_k,
             ef_search,
             filter_bitmap,
+            rls_filters,
         } = params;
         debug!(core = self.core_id, %collection, top_k, "vector multi-search");
 
@@ -188,7 +222,7 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::NotFound);
         }
 
-        // Single field — return directly.
+        // Single field — return directly (with RLS filtering).
         if all_results.len() == 1 {
             let Some(results) = all_results.into_iter().next() else {
                 return self.response_error(task, ErrorCode::NotFound);
@@ -196,6 +230,22 @@ impl CoreLoop {
             let doc_source = self.vector_collections.get(&plain_key);
             let hits: Vec<_> = results
                 .iter()
+                .filter(|r| {
+                    if rls_filters.is_empty() {
+                        return true;
+                    }
+                    let doc_id_str = resolve_doc_id(doc_source, r.id).unwrap_or("");
+                    if doc_id_str.is_empty() {
+                        return false;
+                    }
+                    match self.sparse.get(tid, collection, doc_id_str) {
+                        Ok(Some(bytes)) => {
+                            super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
+                        }
+                        _ => false,
+                    }
+                })
+                .take(top_k)
                 .map(|r| build_search_hit(r.id, r.distance, resolve_doc_id(doc_source, r.id)))
                 .collect();
             return encode_hits_response(self, task, &hits);
@@ -222,7 +272,7 @@ impl CoreLoop {
 
         let fused = reciprocal_rank_fusion(&ranked_lists, None, top_k);
 
-        // Look up doc_id for each fused result from any matching collection.
+        // Look up doc_id for each fused result, apply RLS post-fusion filtering.
         let hits: Vec<_> = fused
             .iter()
             .filter_map(|f| {
@@ -237,6 +287,18 @@ impl CoreLoop {
                             .filter(|(k, _)| *k == &plain_key || k.starts_with(&prefix))
                             .find_map(|(_, c)| c.get_doc_id(id))
                     });
+                // RLS post-fusion: look up document and evaluate filters.
+                if !rls_filters.is_empty() {
+                    let doc_id_str = doc_id.unwrap_or("");
+                    if doc_id_str.is_empty() {
+                        return None;
+                    }
+                    match self.sparse.get(tid, collection, doc_id_str) {
+                        Ok(Some(bytes))
+                            if super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes) => {}
+                        _ => return None,
+                    }
+                }
                 Some(build_search_hit(id, f.rrf_score as f32, doc_id))
             })
             .collect();

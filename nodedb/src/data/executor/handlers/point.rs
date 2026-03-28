@@ -15,6 +15,7 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         document_id: &str,
+        rls_filters: &[u8],
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, "point get");
 
@@ -25,11 +26,19 @@ impl CoreLoop {
             .get(tid, collection, document_id)
             .map(|v| v.to_vec());
         if let Some(data) = cached {
+            // RLS post-fetch: evaluate filters, return NOT_FOUND on denial.
+            if !super::rls_eval::rls_check_msgpack_bytes(rls_filters, &data) {
+                return self.response_error(task, ErrorCode::NotFound);
+            }
             return self.response_with_payload(task, data);
         }
 
         match self.sparse.get(tid, collection, document_id) {
             Ok(Some(data)) => {
+                // RLS post-fetch: evaluate filters, return NOT_FOUND on denial.
+                if !super::rls_eval::rls_check_msgpack_bytes(rls_filters, &data) {
+                    return self.response_error(task, ErrorCode::NotFound);
+                }
                 // Populate cache on miss (write-through).
                 self.doc_cache.put(tid, collection, document_id, &data);
                 self.response_with_payload(task, data)

@@ -20,8 +20,8 @@ impl CoreLoop {
             KvOp::Get {
                 collection,
                 key,
-                rls_filters: _,
-            } => self.execute_kv_get(task, tid, collection, key),
+                rls_filters,
+            } => self.execute_kv_get(task, tid, collection, key, rls_filters),
             KvOp::Put {
                 collection,
                 key,
@@ -98,11 +98,18 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         key: &[u8],
+        rls_filters: &[u8],
     ) -> Response {
         debug!(core = self.core_id, %collection, "kv get");
         let now_ms = current_ms();
         match self.kv_engine.get(tid, collection, key, now_ms) {
-            Some(value) => self.response_with_payload(task, value),
+            Some(value) => {
+                // RLS post-fetch: evaluate filters against KV value.
+                if !super::rls_eval::rls_check_msgpack_bytes(rls_filters, &value) {
+                    return self.response_error(task, ErrorCode::NotFound);
+                }
+                self.response_with_payload(task, value)
+            }
             None => self.response_error(task, ErrorCode::NotFound),
         }
     }

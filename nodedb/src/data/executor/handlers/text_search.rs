@@ -12,21 +12,43 @@ const DEFAULT_VECTOR_WEIGHT: f32 = 0.5;
 
 impl CoreLoop {
     /// Execute a full-text search using BM25 + optional fuzzy matching.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_text_search(
         &self,
         task: &ExecutionTask,
-        _tid: u32,
+        tid: u32,
         collection: &str,
         query: &str,
         top_k: usize,
         fuzzy: bool,
+        rls_filters: &[u8],
     ) -> Response {
         debug!(core = self.core_id, %collection, %query, top_k, fuzzy, "text search");
 
-        match self.inverted.search(collection, query, top_k, fuzzy) {
+        // Fetch extra candidates when RLS is active.
+        let fetch_k = if rls_filters.is_empty() {
+            top_k
+        } else {
+            top_k.saturating_mul(2).max(20)
+        };
+
+        match self.inverted.search(collection, query, fetch_k, fuzzy) {
             Ok(results) => {
+                // RLS post-score filtering: look up each candidate's document.
                 let hits: Vec<_> = results
                     .iter()
+                    .filter(|r| {
+                        if rls_filters.is_empty() {
+                            return true;
+                        }
+                        match self.sparse.get(tid, collection, &r.doc_id) {
+                            Ok(Some(bytes)) => {
+                                super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
+                            }
+                            _ => false,
+                        }
+                    })
+                    .take(top_k)
                     .map(|r| super::super::response_codec::TextSearchHit {
                         doc_id: &r.doc_id,
                         score: r.score,
@@ -66,6 +88,7 @@ impl CoreLoop {
         fuzzy: bool,
         vector_weight: f32,
         filter_bitmap: Option<&std::sync::Arc<[u8]>>,
+        rls_filters: &[u8],
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -158,8 +181,20 @@ impl CoreLoop {
         );
 
         // Build response with per-engine rank diagnostics.
+        // RLS post-fusion: filter fused results by looking up each document.
         let results: Vec<_> = fused
             .iter()
+            .filter(|f| {
+                if rls_filters.is_empty() {
+                    return true;
+                }
+                match self.sparse.get(tid, collection, &f.document_id) {
+                    Ok(Some(bytes)) => {
+                        super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
+                    }
+                    _ => false,
+                }
+            })
             .map(|f| {
                 let vector_rank = vector_results
                     .iter()
