@@ -26,6 +26,15 @@ pub struct StoredScopeGrant {
     pub grantee_id: String,
     pub granted_by: String,
     pub granted_at: u64,
+    /// Unix timestamp when this grant expires. 0 = no expiry.
+    #[serde(default)]
+    pub expires_at: u64,
+    /// Grace period in seconds before hard cutoff after expiry.
+    #[serde(default)]
+    pub grace_period_secs: u64,
+    /// Action on expiry: "revoke_all", "grant:<scope_name>", or empty (just expire).
+    #[serde(default)]
+    pub on_expire_action: String,
 }
 
 impl SystemCatalog {

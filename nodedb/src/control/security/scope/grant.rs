@@ -4,13 +4,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::info;
 
 use crate::control::security::catalog::{StoredScopeGrant, SystemCatalog};
+use crate::control::security::time::now_secs;
 
-/// In-memory scope grant record.
+/// In-memory scope grant record with time-bound support.
 #[derive(Debug, Clone)]
 pub struct ScopeGrant {
     pub scope_name: String,
@@ -18,9 +18,59 @@ pub struct ScopeGrant {
     pub grantee_id: String,
     pub granted_by: String,
     pub granted_at: u64,
+    /// Unix timestamp when this grant expires. 0 = no expiry (permanent).
+    pub expires_at: u64,
+    /// Grace period in seconds after expiry before hard cutoff.
+    pub grace_period_secs: u64,
+    /// Action on expiry: "revoke_all", "grant:<scope_name>", or "" (just expire).
+    pub on_expire_action: String,
+}
+
+/// Status of a time-bound scope grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeStatus {
+    /// Grant is active (not expired, or no expiry set).
+    Active,
+    /// Grant is in grace period (expired but within grace window).
+    Grace,
+    /// Grant is fully expired (past grace period).
+    Expired,
+    /// Grant does not exist for this grantee.
+    None,
+}
+
+impl std::fmt::Display for ScopeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Grace => write!(f, "grace"),
+            Self::Expired => write!(f, "expired"),
+            Self::None => write!(f, "none"),
+        }
+    }
 }
 
 impl ScopeGrant {
+    /// Check the time-bound status of this grant.
+    pub fn status(&self) -> ScopeStatus {
+        if self.expires_at == 0 {
+            return ScopeStatus::Active; // No expiry = permanent.
+        }
+        let now = now_secs();
+        if now < self.expires_at {
+            ScopeStatus::Active
+        } else if now < self.expires_at + self.grace_period_secs {
+            ScopeStatus::Grace
+        } else {
+            ScopeStatus::Expired
+        }
+    }
+
+    /// Check if this grant is still effective (active or in grace period).
+    pub fn is_effective(&self) -> bool {
+        matches!(self.status(), ScopeStatus::Active | ScopeStatus::Grace)
+    }
+
     fn from_stored(s: &StoredScopeGrant) -> Self {
         Self {
             scope_name: s.scope_name.clone(),
@@ -28,6 +78,9 @@ impl ScopeGrant {
             grantee_id: s.grantee_id.clone(),
             granted_by: s.granted_by.clone(),
             granted_at: s.granted_at,
+            expires_at: s.expires_at,
+            grace_period_secs: s.grace_period_secs,
+            on_expire_action: s.on_expire_action.clone(),
         }
     }
 
@@ -38,6 +91,9 @@ impl ScopeGrant {
             grantee_id: self.grantee_id.clone(),
             granted_by: self.granted_by.clone(),
             granted_at: self.granted_at,
+            expires_at: self.expires_at,
+            grace_period_secs: self.grace_period_secs,
+            on_expire_action: self.on_expire_action.clone(),
         }
     }
 }
@@ -74,12 +130,20 @@ impl ScopeGrantStore {
     }
 
     /// Grant a scope to a user, role, org, or team.
+    ///
+    /// `expires_at` = 0 means permanent (no expiry).
+    /// `grace_period_secs` = seconds after expiry before hard cutoff.
+    /// `on_expire_action` = "revoke_all", "grant:<scope>", or "" (just expire).
+    #[allow(clippy::too_many_arguments)]
     pub fn grant(
         &self,
         scope_name: &str,
         grantee_type: &str,
         grantee_id: &str,
         granted_by: &str,
+        expires_at: u64,
+        grace_period_secs: u64,
+        on_expire_action: &str,
     ) -> crate::Result<()> {
         let record = ScopeGrant {
             scope_name: scope_name.into(),
@@ -87,6 +151,9 @@ impl ScopeGrantStore {
             grantee_id: grantee_id.into(),
             granted_by: granted_by.into(),
             granted_at: now_secs(),
+            expires_at,
+            grace_period_secs,
+            on_expire_action: on_expire_action.into(),
         };
 
         if let Some(ref catalog) = self.catalog {
@@ -115,25 +182,93 @@ impl ScopeGrantStore {
         Ok(grants.remove(&key).is_some())
     }
 
-    /// Get all scope names granted to a specific grantee.
+    /// Get all effective scope names granted to a specific grantee.
+    /// Filters out expired grants.
     pub fn scopes_for(&self, grantee_type: &str, grantee_id: &str) -> Vec<String> {
         let grants = self.grants.read().unwrap_or_else(|p| p.into_inner());
         grants
             .values()
-            .filter(|g| g.grantee_type == grantee_type && g.grantee_id == grantee_id)
+            .filter(|g| {
+                g.grantee_type == grantee_type && g.grantee_id == grantee_id && g.is_effective()
+            })
             .map(|g| g.scope_name.clone())
+            .collect()
+    }
+
+    /// Get the status of a specific scope grant.
+    pub fn scope_status(
+        &self,
+        scope_name: &str,
+        grantee_type: &str,
+        grantee_id: &str,
+    ) -> ScopeStatus {
+        let key = grant_key(scope_name, grantee_type, grantee_id);
+        let grants = self.grants.read().unwrap_or_else(|p| p.into_inner());
+        grants
+            .get(&key)
+            .map(|g| g.status())
+            .unwrap_or(ScopeStatus::None)
+    }
+
+    /// Get the expiry timestamp of a scope grant. Returns 0 if permanent or not found.
+    pub fn scope_expires_at(&self, scope_name: &str, grantee_type: &str, grantee_id: &str) -> u64 {
+        let key = grant_key(scope_name, grantee_type, grantee_id);
+        let grants = self.grants.read().unwrap_or_else(|p| p.into_inner());
+        grants.get(&key).map(|g| g.expires_at).unwrap_or(0)
+    }
+
+    /// Renew a scope grant by extending its expiry.
+    pub fn renew(
+        &self,
+        scope_name: &str,
+        grantee_type: &str,
+        grantee_id: &str,
+        extend_secs: u64,
+    ) -> crate::Result<bool> {
+        let key = grant_key(scope_name, grantee_type, grantee_id);
+        let mut grants = self.grants.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(g) = grants.get_mut(&key) {
+            if g.expires_at == 0 {
+                return Ok(true); // Already permanent.
+            }
+            let now = now_secs();
+            // Extend from current expiry or from now (whichever is later).
+            let base = g.expires_at.max(now);
+            g.expires_at = base + extend_secs;
+            if let Some(ref catalog) = self.catalog {
+                let _ = catalog.put_scope_grant(&g.to_stored());
+            }
+            info!(scope = %scope_name, grantee_type, grantee_id, new_expires = g.expires_at, "scope renewed");
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List grants expiring within the given window (seconds from now).
+    pub fn expiring_within(&self, window_secs: u64) -> Vec<ScopeGrant> {
+        let now = now_secs();
+        let deadline = now + window_secs;
+        let grants = self.grants.read().unwrap_or_else(|p| p.into_inner());
+        grants
+            .values()
+            .filter(|g| g.expires_at > 0 && g.expires_at <= deadline && g.is_effective())
+            .cloned()
             .collect()
     }
 
     /// Resolve effective scopes for a user.
     ///
     /// Collects: user's direct scopes + org scopes for each org membership.
-    /// `org_ids` = list of org IDs the user belongs to.
+    /// Filters out expired grants.
     pub fn effective_scopes(&self, user_id: &str, org_ids: &[String]) -> HashSet<String> {
         let grants = self.grants.read().unwrap_or_else(|p| p.into_inner());
         let mut effective = HashSet::new();
 
         for g in grants.values() {
+            if !g.is_effective() {
+                continue; // Skip expired grants.
+            }
             // Direct user grant.
             if g.grantee_type == "user" && g.grantee_id == user_id {
                 effective.insert(g.scope_name.clone());
@@ -177,13 +312,6 @@ fn grant_key(scope: &str, grantee_type: &str, grantee_id: &str) -> String {
     format!("{scope}:{grantee_type}:{grantee_id}")
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,7 +319,9 @@ mod tests {
     #[test]
     fn grant_and_check() {
         let store = ScopeGrantStore::new();
-        store.grant("profile:read", "user", "u1", "admin").unwrap();
+        store
+            .grant("profile:read", "user", "u1", "admin", 0, 0, "")
+            .unwrap();
 
         assert!(store.has_scope("u1", &[], "profile:read"));
         assert!(!store.has_scope("u1", &[], "orders:write"));
@@ -201,7 +331,9 @@ mod tests {
     #[test]
     fn org_scope_inheritance() {
         let store = ScopeGrantStore::new();
-        store.grant("pro:all", "org", "acme", "admin").unwrap();
+        store
+            .grant("pro:all", "org", "acme", "admin", 0, 0, "")
+            .unwrap();
 
         // User u1 is member of acme → inherits pro:all.
         assert!(store.has_scope("u1", &["acme".into()], "pro:all"));
@@ -212,9 +344,15 @@ mod tests {
     #[test]
     fn effective_scopes_union() {
         let store = ScopeGrantStore::new();
-        store.grant("scope_a", "user", "u1", "admin").unwrap();
-        store.grant("scope_b", "org", "acme", "admin").unwrap();
-        store.grant("scope_c", "org", "beta", "admin").unwrap();
+        store
+            .grant("scope_a", "user", "u1", "admin", 0, 0, "")
+            .unwrap();
+        store
+            .grant("scope_b", "org", "acme", "admin", 0, 0, "")
+            .unwrap();
+        store
+            .grant("scope_c", "org", "beta", "admin", 0, 0, "")
+            .unwrap();
 
         let effective = store.effective_scopes("u1", &["acme".into()]);
         assert!(effective.contains("scope_a")); // Direct user grant.
@@ -225,7 +363,7 @@ mod tests {
     #[test]
     fn revoke_removes_grant() {
         let store = ScopeGrantStore::new();
-        store.grant("s1", "user", "u1", "admin").unwrap();
+        store.grant("s1", "user", "u1", "admin", 0, 0, "").unwrap();
         assert!(store.has_scope("u1", &[], "s1"));
 
         store.revoke("s1", "user", "u1").unwrap();

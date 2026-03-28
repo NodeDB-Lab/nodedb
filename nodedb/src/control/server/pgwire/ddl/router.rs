@@ -233,6 +233,12 @@ pub async fn dispatch(
     if upper.starts_with("REVOKE SCOPE ") {
         return Some(super::scope_ddl::revoke_scope(state, identity, &parts));
     }
+    if upper.starts_with("RENEW SCOPE ") {
+        return Some(super::scope_ddl::renew_scope(state, identity, &parts));
+    }
+    if upper.starts_with("SHOW SCOPE GRANTS") {
+        return Some(super::scope_ddl::show_scope_grants(state, identity, &parts));
+    }
     if upper.starts_with("SHOW SCOPE") {
         return Some(super::scope_ddl::show_scopes(state, identity, &parts));
     }

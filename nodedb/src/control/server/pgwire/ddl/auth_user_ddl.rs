@@ -225,6 +225,11 @@ pub fn show_auth_users(
     ))])
 }
 
+/// Public re-export of duration parser for use by other DDL modules.
+pub fn parse_duration_public(s: &str) -> Option<u64> {
+    parse_duration_secs(s)
+}
+
 /// Parse a duration string like "90d", "24h", "3600s" to seconds.
 fn parse_duration_secs(s: &str) -> Option<u64> {
     let s = s.trim();
