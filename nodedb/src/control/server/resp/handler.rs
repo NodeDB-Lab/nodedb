@@ -39,6 +39,7 @@ pub async fn execute(
         "HMGET" => super::handler_hash::handle_hmget(cmd, session, state).await,
         "HSET" => super::handler_hash::handle_hset(cmd, session, state).await,
         "FLUSHDB" => super::handler_hash::handle_flushdb(session, state).await,
+        "PUBLISH" => super::handler_pubsub::handle_publish(cmd, session, state).await,
         "INFO" => handle_info(cmd, session, state).await,
         "COMMAND" => RespValue::ok(), // Stub: redis-cli sends COMMAND on connect.
         "QUIT" => RespValue::ok(),
@@ -179,9 +180,10 @@ async fn handle_scan(cmd: &RespCommand, session: &RespSession, state: &SharedSta
             .unwrap_or_default()
     };
 
-    // Parse MATCH and COUNT options.
+    // Parse MATCH, COUNT, and FILTER options.
     let mut match_pattern: Option<String> = None;
     let mut count: usize = 10;
+    let mut filter_bytes: Vec<u8> = Vec::new();
     let mut i = 1;
     while i < cmd.argc() {
         match cmd.arg_str(i).map(|s| s.to_uppercase()) {
@@ -193,6 +195,29 @@ async fn handle_scan(cmd: &RespCommand, session: &RespSession, state: &SharedSta
                 count = cmd.arg_i64(i + 1).unwrap_or(10) as usize;
                 i += 2;
             }
+            // NodeDB extension: SCAN 0 FILTER <field> = <value>
+            Some(ref flag) if flag == "FILTER" => {
+                // Parse simple "field = value" predicate (needs 4 args: FILTER field = value).
+                if i + 4 <= cmd.argc() {
+                    let field = cmd.arg_str(i + 1).unwrap_or("");
+                    let _op = cmd.arg_str(i + 2).unwrap_or(""); // "=" expected
+                    let value = cmd.arg_str(i + 3).unwrap_or("");
+                    let scan_filter = serde_json::json!([{
+                        "field": field,
+                        "op": "eq",
+                        "value": value,
+                    }]);
+                    match rmp_serde::to_vec(&scan_filter) {
+                        Ok(bytes) => filter_bytes = bytes,
+                        Err(_) => {
+                            return RespValue::err("ERR filter serialization failed");
+                        }
+                    }
+                    i += 4;
+                } else {
+                    i += 1;
+                }
+            }
             _ => {
                 i += 1;
             }
@@ -203,7 +228,7 @@ async fn handle_scan(cmd: &RespCommand, session: &RespSession, state: &SharedSta
         collection: session.collection.clone(),
         cursor,
         count,
-        filters: Vec::new(),
+        filters: filter_bytes,
         match_pattern,
     });
 

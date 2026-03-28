@@ -170,8 +170,33 @@ async fn handle_connection(
                         return Ok(());
                     }
 
-                    // Execute the command.
+                    // SUBSCRIBE takes over the connection (enters push mode).
+                    if cmd.name == "SUBSCRIBE" || cmd.name == "PSUBSCRIBE" {
+                        return super::handler_pubsub::handle_subscribe(
+                            &cmd,
+                            &session,
+                            state,
+                            &mut stream,
+                        )
+                        .await;
+                    }
+
+                    // Execute the command with timing for slow-log.
+                    let start = std::time::Instant::now();
                     let resp = handler::execute(&cmd, &mut session, state).await;
+                    let elapsed = start.elapsed();
+
+                    // Slow-log: commands exceeding 10ms threshold.
+                    if elapsed.as_millis() > 10 {
+                        tracing::warn!(
+                            target: "nodedb::kv::slowlog",
+                            %peer,
+                            command = %cmd.name,
+                            collection = %session.collection,
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            "slow KV command"
+                        );
+                    }
 
                     // Write response.
                     write_buf.clear();

@@ -3,6 +3,7 @@ pub mod command;
 pub mod handler;
 mod handler_hash;
 mod handler_kv;
+pub mod handler_pubsub;
 pub mod listener;
 pub mod session;
 
