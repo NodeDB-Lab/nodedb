@@ -257,11 +257,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start response poller: routes Data Plane responses to waiting sessions.
+    // Uses yield_now() instead of sleep() because Tokio's timer wheel has 1ms
+    // minimum granularity — sleep(100us) actually sleeps ~1ms, adding 1ms to
+    // every request's latency. yield_now() yields to the scheduler without a
+    // timer, polling on every scheduler cycle (microsecond-level).
     let shared_poller = Arc::clone(&shared);
     tokio::spawn(async move {
         loop {
             shared_poller.poll_and_route_responses();
-            tokio::time::sleep(Duration::from_micros(100)).await;
+            tokio::task::yield_now().await;
         }
     });
 
