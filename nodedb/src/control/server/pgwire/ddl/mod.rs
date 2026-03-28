@@ -1,5 +1,7 @@
 pub mod apikey;
+pub mod auth_user_ddl;
 pub mod backup;
+pub mod blacklist_ddl;
 pub mod bulk;
 pub mod cluster;
 pub mod collection;

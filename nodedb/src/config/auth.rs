@@ -57,6 +57,16 @@ pub struct JwtAuthConfig {
     /// Identity providers. Each has its own JWKS endpoint, issuer, and audience.
     #[serde(default)]
     pub providers: Vec<JwtProviderConfig>,
+
+    /// Enable JIT (Just-In-Time) user provisioning from JWT claims.
+    /// When true, `_system.auth_users` records are auto-created on first JWT auth.
+    #[serde(default)]
+    pub jit_provisioning: bool,
+
+    /// Sync claims from JWT to `_system.auth_users` on each request.
+    /// Updates email, roles, groups, etc. when they change in the JWT.
+    #[serde(default = "default_true")]
+    pub jit_sync_claims: bool,
 }
 
 /// Configuration for a single JWT identity provider.
@@ -89,6 +99,9 @@ fn default_clock_skew() -> u64 {
 fn default_allowed_algorithms() -> Vec<String> {
     vec!["RS256".into(), "ES256".into()]
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for JwtAuthConfig {
     fn default() -> Self {
@@ -99,6 +112,8 @@ impl Default for JwtAuthConfig {
             clock_skew_secs: default_clock_skew(),
             jwks_cache_path: None,
             providers: Vec::new(),
+            jit_provisioning: false,
+            jit_sync_claims: true,
         }
     }
 }

@@ -178,6 +178,34 @@ pub async fn dispatch(
         return Some(super::rls::show_rls_policies(state, identity, &parts));
     }
 
+    // Blacklist management.
+    if upper.starts_with("BLACKLIST ") {
+        return Some(super::blacklist_ddl::handle_blacklist(
+            state, identity, &parts,
+        ));
+    }
+    if upper.starts_with("SHOW BLACKLIST") {
+        return Some(super::blacklist_ddl::show_blacklist(
+            state, identity, &parts,
+        ));
+    }
+    // Auth user management (JIT-provisioned users).
+    if upper.starts_with("DEACTIVATE AUTH USER ") || upper.starts_with("ALTER AUTH USER ") {
+        return Some(super::auth_user_ddl::handle_auth_user(
+            state, identity, &parts,
+        ));
+    }
+    if upper.starts_with("PURGE AUTH USERS ") {
+        return Some(super::auth_user_ddl::purge_auth_users(
+            state, identity, &parts,
+        ));
+    }
+    if upper.starts_with("SHOW AUTH USERS") {
+        return Some(super::auth_user_ddl::show_auth_users(
+            state, identity, &parts,
+        ));
+    }
+
     // API keys.
     if upper.starts_with("CREATE API KEY ") {
         return Some(super::apikey::create_api_key(state, identity, &parts));
