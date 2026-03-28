@@ -34,8 +34,29 @@ pub fn spawn_expiry_task(
     })
 }
 
+/// A scope lifecycle event for CDC/webhook/audit.
+#[derive(Debug, Clone)]
+pub struct ScopeEvent {
+    pub event_type: &'static str,
+    pub scope_name: String,
+    pub grantee_type: String,
+    pub grantee_id: String,
+    pub detail: String,
+}
+
+/// Process all expired and grace-period grants. Returns emitted events.
+pub fn process_expired_grants_with_events(store: &ScopeGrantStore) -> Vec<ScopeEvent> {
+    let mut events = Vec::new();
+    process_expired_grants_inner(store, &mut events);
+    events
+}
+
 /// Process all expired and grace-period grants.
 fn process_expired_grants(store: &ScopeGrantStore) {
+    let _ = process_expired_grants_with_events(store);
+}
+
+fn process_expired_grants_inner(store: &ScopeGrantStore, events: &mut Vec<ScopeEvent>) {
     let all_grants = store.list(None);
     let mut expired_count = 0u32;
     let mut grace_count = 0u32;
@@ -48,16 +69,29 @@ fn process_expired_grants(store: &ScopeGrantStore) {
         match grant.status() {
             ScopeStatus::Grace => {
                 grace_count += 1;
-                // Log that a grant is in grace period.
                 info!(
                     scope = %grant.scope_name,
                     grantee = %grant.grantee_id,
                     grantee_type = %grant.grantee_type,
                     "scope grant in grace period"
                 );
+                events.push(ScopeEvent {
+                    event_type: "scope.grace_entered",
+                    scope_name: grant.scope_name.clone(),
+                    grantee_type: grant.grantee_type.clone(),
+                    grantee_id: grant.grantee_id.clone(),
+                    detail: format!("expires_at={}", grant.expires_at),
+                });
             }
             ScopeStatus::Expired => {
                 expired_count += 1;
+                events.push(ScopeEvent {
+                    event_type: "scope.expired",
+                    scope_name: grant.scope_name.clone(),
+                    grantee_type: grant.grantee_type.clone(),
+                    grantee_id: grant.grantee_id.clone(),
+                    detail: grant.on_expire_action.clone(),
+                });
                 execute_on_expire(store, grant);
             }
             ScopeStatus::Active | ScopeStatus::None => {}

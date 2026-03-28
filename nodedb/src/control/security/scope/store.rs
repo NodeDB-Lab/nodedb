@@ -115,6 +115,41 @@ impl ScopeStore {
         Ok(())
     }
 
+    /// Alter a scope's grants and/or includes.
+    pub fn alter(
+        &self,
+        name: &str,
+        grants: Option<Vec<(String, String)>>,
+        includes: Option<Vec<String>>,
+    ) -> crate::Result<bool> {
+        let mut scopes = self.scopes.write().unwrap_or_else(|p| p.into_inner());
+        if !scopes.contains_key(name) {
+            return Ok(false);
+        }
+        // Validate includes before mutating.
+        if let Some(ref inc) = includes {
+            for i in inc {
+                if i != name && !scopes.contains_key(i) {
+                    return Err(crate::Error::BadRequest {
+                        detail: format!("included scope '{i}' does not exist"),
+                    });
+                }
+            }
+        }
+        let def = scopes.get_mut(name).unwrap();
+        if let Some(g) = grants {
+            def.grants = g;
+        }
+        if let Some(inc) = includes {
+            def.includes = inc;
+        }
+        if let Some(ref catalog) = self.catalog {
+            catalog.put_scope(&def.to_stored())?;
+        }
+        info!(scope = %name, "scope altered");
+        Ok(true)
+    }
+
     /// Drop a scope.
     pub fn drop_scope(&self, name: &str) -> crate::Result<bool> {
         if let Some(ref catalog) = self.catalog {

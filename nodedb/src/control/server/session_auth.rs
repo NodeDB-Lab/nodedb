@@ -236,6 +236,35 @@ pub fn build_auth_context(identity: &AuthenticatedIdentity) -> AuthContext {
     AuthContext::from_identity(identity, generate_session_id())
 }
 
+/// Enrich AuthContext with scope status data from the scope grant store.
+///
+/// Populates metadata entries for `scope_status.<name>` and `scope_expires_at.<name>`
+/// so RLS predicates can reference `$auth.metadata.scope_status.pro:all`.
+pub fn enrich_auth_context_with_scopes(
+    ctx: &mut AuthContext,
+    scope_grants: &crate::control::security::scope::grant::ScopeGrantStore,
+    org_ids: &[String],
+) {
+    let effective = scope_grants.effective_scopes(&ctx.id, org_ids);
+    for scope_name in &effective {
+        let status = scope_grants.scope_status(scope_name, "user", &ctx.id);
+        ctx.metadata
+            .insert(format!("scope_status.{scope_name}"), status.to_string());
+        let expires_at = scope_grants.scope_expires_at(scope_name, "user", &ctx.id);
+        if expires_at > 0 {
+            ctx.metadata.insert(
+                format!("scope_expires_at.{scope_name}"),
+                expires_at.to_string(),
+            );
+        }
+    }
+    // Also set a comma-separated list of effective scopes.
+    let scope_list: Vec<String> = effective.into_iter().collect();
+    if !scope_list.is_empty() {
+        ctx.metadata.insert("scopes".into(), scope_list.join(","));
+    }
+}
+
 /// Build an `AuthContext` with pgwire session overrides applied.
 ///
 /// Reads `nodedb.on_deny` and `nodedb.auth_session` from session parameters.
@@ -352,6 +381,27 @@ pub fn check_blacklist(
             return Err(crate::Error::RejectedAuthz {
                 tenant_id: identity.tenant_id,
                 resource: format!("account {ctx_status}"),
+            });
+        }
+    }
+
+    // Check org status overrides member status.
+    // If any of the user's orgs is suspended/banned, block the user.
+    let user_org_ids = state.orgs.orgs_for_user(&user_id);
+    for org_id in &user_org_ids {
+        if !state.orgs.is_active(org_id) {
+            state.audit_record(
+                AuditEvent::AuthFailure,
+                Some(identity.tenant_id),
+                peer_addr,
+                &format!(
+                    "org '{}' is not active — user '{}' blocked",
+                    org_id, identity.username
+                ),
+            );
+            return Err(crate::Error::RejectedAuthz {
+                tenant_id: identity.tenant_id,
+                resource: format!("organization '{org_id}' is suspended"),
             });
         }
     }

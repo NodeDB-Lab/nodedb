@@ -21,6 +21,12 @@ pub struct OrgRecord {
     pub status: String,
     pub created_at: u64,
     pub metadata: HashMap<String, String>,
+    /// Org-level rate limit QPS (0 = use default tier).
+    pub rate_limit_qps: u64,
+    /// Org-level max storage bytes (0 = unlimited).
+    pub quota_max_storage: u64,
+    /// Org-level max members (0 = unlimited).
+    pub quota_max_members: u32,
 }
 
 impl OrgRecord {
@@ -32,6 +38,9 @@ impl OrgRecord {
             status: s.status.clone(),
             created_at: s.created_at,
             metadata: s.metadata.clone(),
+            rate_limit_qps: 0,
+            quota_max_storage: 0,
+            quota_max_members: 0,
         }
     }
 
@@ -57,7 +66,6 @@ pub struct OrgMemberRecord {
 }
 
 impl OrgMemberRecord {
-    #[allow(dead_code)] // Used when persistent member loading is added.
     fn from_stored(s: &StoredOrgMember) -> Self {
         Self {
             auth_user_id: s.auth_user_id.clone(),
@@ -100,13 +108,26 @@ impl OrgStore {
         for s in &stored_orgs {
             orgs.insert(s.org_id.clone(), OrgRecord::from_stored(s));
         }
-        // Members are loaded lazily per-org, not all at once.
+        // Load members for all orgs on startup.
+        let mut members = HashMap::new();
+        for org_id in orgs.keys() {
+            if let Ok(stored_members) = catalog.load_members_for_org(org_id) {
+                for sm in &stored_members {
+                    let key = Self::member_key(&sm.org_id, &sm.auth_user_id);
+                    members.insert(key, OrgMemberRecord::from_stored(sm));
+                }
+            }
+        }
         if !orgs.is_empty() {
-            info!(count = orgs.len(), "orgs loaded from catalog");
+            info!(
+                orgs = orgs.len(),
+                members = members.len(),
+                "orgs loaded from catalog"
+            );
         }
         Ok(Self {
             orgs: RwLock::new(orgs),
-            members: RwLock::new(HashMap::new()),
+            members: RwLock::new(members),
             catalog: Some(catalog),
         })
     }
@@ -121,6 +142,9 @@ impl OrgStore {
             status: "active".into(),
             created_at: now,
             metadata: HashMap::new(),
+            rate_limit_qps: 0,
+            quota_max_storage: 0,
+            quota_max_members: 0,
         };
 
         if let Some(ref catalog) = self.catalog {
@@ -149,6 +173,44 @@ impl OrgStore {
         let mut orgs = self.orgs.write().unwrap_or_else(|p| p.into_inner());
         if let Some(org) = orgs.get_mut(org_id) {
             org.status = status.into();
+            if let Some(ref catalog) = self.catalog {
+                catalog.put_org(&org.to_stored())?;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Set org-level rate limit.
+    pub fn set_rate_limit(&self, org_id: &str, qps: u64) -> crate::Result<bool> {
+        let mut orgs = self.orgs.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(org) = orgs.get_mut(org_id) {
+            org.rate_limit_qps = qps;
+            if let Some(ref catalog) = self.catalog {
+                catalog.put_org(&org.to_stored())?;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Set org-level quotas.
+    pub fn set_quota(
+        &self,
+        org_id: &str,
+        max_storage: Option<u64>,
+        max_members: Option<u32>,
+    ) -> crate::Result<bool> {
+        let mut orgs = self.orgs.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(org) = orgs.get_mut(org_id) {
+            if let Some(s) = max_storage {
+                org.quota_max_storage = s;
+            }
+            if let Some(m) = max_members {
+                org.quota_max_members = m;
+            }
             if let Some(ref catalog) = self.catalog {
                 catalog.put_org(&org.to_stored())?;
             }
