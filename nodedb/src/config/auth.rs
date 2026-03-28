@@ -69,19 +69,23 @@ pub struct JwtAuthConfig {
     pub jit_sync_claims: bool,
 
     /// Claim mapping: maps provider-specific claim names to NodeDB fields.
-    /// Different providers use different names (Auth0 uses `sub`, Clerk uses
-    /// `user_id`, etc.). Keys = NodeDB field, values = JWT claim name.
-    ///
-    /// ```toml
-    /// [auth.jwt.claims]
-    /// user_id = "sub"
-    /// email = "email"
-    /// roles = "realm_access.roles"   # Keycloak
-    /// org_id = "org_id"
-    /// groups = "groups"
-    /// ```
     #[serde(default)]
     pub claims: std::collections::HashMap<String, String>,
+
+    /// Claim name for account status (e.g., "account_status", "status").
+    /// If present in the JWT, its value is checked against `blocked_statuses`.
+    #[serde(default)]
+    pub status_claim: Option<String>,
+
+    /// Status values that block access (e.g., ["suspended", "banned", "deactivated"]).
+    /// If the JWT status claim matches any of these, the request is denied.
+    #[serde(default)]
+    pub blocked_statuses: Vec<String>,
+
+    /// Enforce scope validation: reject unknown scopes from JWT `permissions` claim.
+    /// When true, JWT tokens with permissions not matching defined scopes are denied.
+    #[serde(default)]
+    pub enforce_scopes: bool,
 }
 
 /// Configuration for a single JWT identity provider.
@@ -130,6 +134,9 @@ impl Default for JwtAuthConfig {
             jit_provisioning: false,
             jit_sync_claims: true,
             claims: std::collections::HashMap::new(),
+            status_claim: None,
+            blocked_statuses: Vec::new(),
+            enforce_scopes: false,
         }
     }
 }
@@ -181,6 +188,10 @@ pub struct AuthConfig {
     /// Rate limiting configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<crate::control::security::ratelimit::config::RateLimitConfig>,
+
+    /// Usage metering configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metering: Option<crate::control::security::metering::config::MeteringConfig>,
 }
 
 impl Default for AuthConfig {
@@ -198,6 +209,7 @@ impl Default for AuthConfig {
             audit_retention_days: 0,
             jwt: None,
             rate_limit: None,
+            metering: None,
         }
     }
 }

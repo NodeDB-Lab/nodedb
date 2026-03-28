@@ -75,6 +75,16 @@ pub struct SharedState {
 
     /// Opaque session handle store (POST /api/auth/session → UUID).
     pub session_handles: crate::control::security::session_handle::SessionHandleStore,
+    /// Active session registry for KILL SESSIONS.
+    pub session_registry: crate::control::security::session_registry::SessionRegistry,
+    /// Auto-escalation engine (violations → suspend → ban).
+    pub escalation: crate::control::security::escalation::EscalationEngine,
+    /// Usage metering counter (per-core atomic, periodic flush).
+    pub usage_counter: std::sync::Arc<crate::control::security::metering::counter::UsageCounter>,
+    /// Usage metering store (aggregated events).
+    pub usage_store: std::sync::Arc<crate::control::security::metering::store::UsageStore>,
+    /// Quota manager (enforcement against scope quotas).
+    pub quota_manager: crate::control::security::metering::quota::QuotaManager,
 
     /// JWKS registry for multi-provider JWT validation (None = JWT disabled).
     pub jwks_registry:
@@ -197,6 +207,15 @@ impl SharedState {
             rate_limiter: crate::control::security::ratelimit::limiter::RateLimiter::default(),
             session_handles: crate::control::security::session_handle::SessionHandleStore::default(
             ),
+            session_registry: crate::control::security::session_registry::SessionRegistry::new(),
+            escalation: crate::control::security::escalation::EscalationEngine::default(),
+            usage_counter: std::sync::Arc::new(
+                crate::control::security::metering::counter::UsageCounter::new(),
+            ),
+            usage_store: std::sync::Arc::new(
+                crate::control::security::metering::store::UsageStore::default(),
+            ),
+            quota_manager: crate::control::security::metering::quota::QuotaManager::new(),
             jwks_registry: None,
             sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
             audit_retention_days: 0,
@@ -236,11 +255,13 @@ impl SharedState {
         let api_keys = ApiKeyStore::new();
         let roles = RoleStore::new();
         let permissions = PermissionStore::new();
+        let blacklist = crate::control::security::blacklist::store::BlacklistStore::new();
         let mut audit_start_seq = 1u64;
         if let Some(catalog) = credentials.catalog() {
             api_keys.load_from(catalog)?;
             roles.load_from(catalog)?;
             permissions.load_from(catalog)?;
+            blacklist.load_from(catalog)?;
             let max_seq = catalog.load_audit_max_seq()?;
             if max_seq > 0 {
                 audit_start_seq = max_seq + 1;
@@ -269,7 +290,7 @@ impl SharedState {
             raft_status_fn: None,
             migration_tracker: None,
             rls: RlsPolicyStore::new(),
-            blacklist: crate::control::security::blacklist::store::BlacklistStore::new(),
+            blacklist,
             auth_users: crate::control::security::jit::auth_user::AuthUserStore::new(),
             orgs: crate::control::security::org::store::OrgStore::new(),
             scope_defs: crate::control::security::scope::store::ScopeStore::new(),
@@ -277,6 +298,15 @@ impl SharedState {
             rate_limiter: crate::control::security::ratelimit::limiter::RateLimiter::default(),
             session_handles: crate::control::security::session_handle::SessionHandleStore::default(
             ),
+            session_registry: crate::control::security::session_registry::SessionRegistry::new(),
+            escalation: crate::control::security::escalation::EscalationEngine::default(),
+            usage_counter: std::sync::Arc::new(
+                crate::control::security::metering::counter::UsageCounter::new(),
+            ),
+            usage_store: std::sync::Arc::new(
+                crate::control::security::metering::store::UsageStore::default(),
+            ),
+            quota_manager: crate::control::security::metering::quota::QuotaManager::new(),
             jwks_registry: None,
             sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
             audit_retention_days: auth_config.audit_retention_days,
