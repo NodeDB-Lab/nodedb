@@ -56,8 +56,7 @@ pub(crate) fn build_plan(
 /// Check if a collection is KV type via catalog lookup.
 fn is_kv(ctx: &DispatchCtx<'_>, collection: &str) -> bool {
     if let Some(catalog) = ctx.state.credentials.catalog()
-        && let Ok(Some(coll)) =
-            catalog.get_collection(ctx.identity.tenant_id.as_u32(), collection)
+        && let Ok(Some(coll)) = catalog.get_collection(ctx.identity.tenant_id.as_u32(), collection)
     {
         return coll.collection_type.is_kv();
     }
@@ -67,8 +66,7 @@ fn is_kv(ctx: &DispatchCtx<'_>, collection: &str) -> bool {
 /// Check if a collection is timeseries type via catalog lookup.
 fn is_timeseries(ctx: &DispatchCtx<'_>, collection: &str) -> bool {
     if let Some(catalog) = ctx.state.credentials.catalog()
-        && let Ok(Some(coll)) =
-            catalog.get_collection(ctx.identity.tenant_id.as_u32(), collection)
+        && let Ok(Some(coll)) = catalog.get_collection(ctx.identity.tenant_id.as_u32(), collection)
     {
         return coll.collection_type.is_timeseries();
     }
@@ -106,7 +104,9 @@ fn build_point_get(
 
     if is_timeseries(ctx, collection) {
         return Err(crate::Error::BadRequest {
-            detail: "PointGet not supported on timeseries collections (use SQL SELECT with time range)".to_string(),
+            detail:
+                "PointGet not supported on timeseries collections (use SQL SELECT with time range)"
+                    .to_string(),
         });
     }
 
@@ -182,10 +182,7 @@ fn build_point_delete(
 // Vector search
 // ---------------------------------------------------------------------------
 
-fn build_vector_search(
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
+fn build_vector_search(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
     let query_vector = fields
         .query_vector
         .as_ref()
@@ -292,7 +289,6 @@ fn build_alter_policy(fields: &TextFields, collection: &str) -> crate::Result<Ph
         policy_json,
     }))
 }
-
 
 // ---------------------------------------------------------------------------
 // Text search

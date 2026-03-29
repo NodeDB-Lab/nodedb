@@ -40,8 +40,7 @@ pub(crate) async fn handle_direct_op(
     }
 
     // WAL append for writes.
-    if let Err(e) =
-        dispatch_utils::wal_append_if_write(&ctx.state.wal, tenant_id, vshard_id, &plan)
+    if let Err(e) = dispatch_utils::wal_append_if_write(&ctx.state.wal, tenant_id, vshard_id, &plan)
     {
         return error_to_native(seq, &e);
     }

@@ -33,8 +33,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/auth/session",
-            post(routes::auth_session::create_session)
-                .delete(routes::auth_session::delete_session),
+            post(routes::auth_session::create_session).delete(routes::auth_session::delete_session),
         )
         .route(
             "/collections/{name}/crdt/apply",
