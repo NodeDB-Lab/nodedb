@@ -5,7 +5,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_agg::{aggregate_by_time_bucket, timestamp_range_filter};
 use crate::engine::timeseries::columnar_memtable::{
-    ColumnType, ColumnarMemtable, ColumnarMemtableConfig,
+    ColumnData, ColumnType, ColumnarMemtable, ColumnarMemtableConfig,
 };
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
 use crate::engine::timeseries::ilp;
@@ -68,16 +68,47 @@ impl CoreLoop {
                     });
                     results.push(row);
                 }
-            } else if !indices.is_empty() && schema.columns.len() > 1 {
-                // Raw row output.
-                let val_col = mt.column(1);
-                let values = val_col.as_f64();
+            } else if !indices.is_empty() {
+                // Raw row output — emit all columns from the memtable schema.
                 for &idx in indices.iter().take(limit) {
-                    let row = serde_json::json!({
-                        "timestamp": timestamps[idx as usize],
-                        "value": values[idx as usize],
-                    });
-                    results.push(row);
+                    let mut row = serde_json::Map::new();
+                    for (col_idx, (col_name, col_type)) in schema.columns.iter().enumerate() {
+                        let col_data = mt.column(col_idx);
+                        let val = match col_type {
+                            ColumnType::Timestamp => serde_json::Value::Number(
+                                serde_json::Number::from(col_data.as_timestamps()[idx as usize]),
+                            ),
+                            ColumnType::Float64 => {
+                                let v = col_data.as_f64()[idx as usize];
+                                serde_json::Number::from_f64(v)
+                                    .map(serde_json::Value::Number)
+                                    .unwrap_or(serde_json::Value::Null)
+                            }
+                            ColumnType::Symbol => {
+                                // Resolve symbol ID to string via the symbol dictionary.
+                                if let ColumnData::Symbol(ids) = col_data {
+                                    let sym_id = ids[idx as usize];
+                                    mt.symbol_dict(col_idx)
+                                        .and_then(|dict| dict.get(sym_id))
+                                        .map(|s| serde_json::Value::String(s.to_string()))
+                                        .unwrap_or(serde_json::Value::Null)
+                                } else {
+                                    serde_json::Value::Null
+                                }
+                            }
+                            ColumnType::Int64 => {
+                                if let ColumnData::Int64(vals) = col_data {
+                                    serde_json::Value::Number(serde_json::Number::from(
+                                        vals[idx as usize],
+                                    ))
+                                } else {
+                                    serde_json::Value::Null
+                                }
+                            }
+                        };
+                        row.insert(col_name.clone(), val);
+                    }
+                    results.push(serde_json::Value::Object(row));
                 }
             }
         }
