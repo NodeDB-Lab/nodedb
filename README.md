@@ -1,6 +1,6 @@
 # NodeDB
 
-**A distributed hybrid database for multi-modal AI and edge-to-cloud workloads. Seven engines, one binary.**
+**A local-first, real-time, edge-to-cloud hybrid database for multi-modal workloads.**
 
 NodeDB provides Vector, Graph, Document (schemaless + strict), Columnar (with Timeseries and Spatial profiles), Key-Value, and Full-Text Search engines in a single Rust binary. All engines share the same storage, memory, and query planner — cross-engine queries execute in one process with zero network hops.
 
