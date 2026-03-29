@@ -74,6 +74,15 @@ pub struct CoreLoop {
     /// Full-text inverted index (BM25), shares redb with sparse engine.
     pub(in crate::data::executor) inverted: InvertedIndex,
 
+    /// Per-collection spatial R-tree indexes, keyed by "{tid}:{collection}:{field}".
+    /// Lazily initialized when a spatial query or geometry insert first targets a field.
+    pub(in crate::data::executor) spatial_indexes:
+        std::collections::HashMap<String, nodedb_spatial::RTree>,
+
+    /// Reverse map from R-tree entry ID → document ID, keyed by (index_key, entry_id).
+    /// Needed because RTreeEntry only stores a u64 hash, not the original doc_id.
+    pub(in crate::data::executor) spatial_doc_map: std::collections::HashMap<(String, u64), String>,
+
     /// Base data directory for this core (used for sort spill temp files).
     pub(in crate::data::executor) data_dir: std::path::PathBuf,
 
@@ -239,6 +248,8 @@ impl CoreLoop {
                 coord
             },
             segment_compaction_config: crate::storage::compaction::CompactionConfig::default(),
+            spatial_indexes: std::collections::HashMap::new(),
+            spatial_doc_map: std::collections::HashMap::new(),
             doc_configs: HashMap::new(),
             query_tuning: nodedb_types::config::tuning::QueryTuning::default(),
             graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),

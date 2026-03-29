@@ -167,6 +167,22 @@ impl CoreLoop {
                     tracing::trace!(core = self.core_id, %document_id, edges_removed, "EDGE_CASCADE_DELETE");
                 }
 
+                // Cascade 4: Remove from spatial R-tree indexes + reverse map.
+                let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
+                let prefix = format!("{tid}:{collection}:");
+                let spatial_keys: Vec<String> = self
+                    .spatial_indexes
+                    .keys()
+                    .filter(|k| k.starts_with(&prefix))
+                    .cloned()
+                    .collect();
+                for key in spatial_keys {
+                    if let Some(rtree) = self.spatial_indexes.get_mut(&key) {
+                        rtree.delete(entry_id);
+                    }
+                    self.spatial_doc_map.remove(&(key, entry_id));
+                }
+
                 // Record deletion for edge referential integrity.
                 self.deleted_nodes.insert(document_id.to_string());
 
@@ -394,6 +410,28 @@ impl CoreLoop {
         {
             let paths = config.index_paths.clone();
             self.apply_secondary_indexes(tid, collection, &doc, document_id, &paths);
+        }
+
+        // Spatial index: detect geometry fields and insert into R-tree.
+        // Tries to parse each object field as a GeoJSON Geometry.
+        // If successful, computes bbox and inserts into the per-field R-tree.
+        if let Some(doc) = super::super::doc_format::decode_document(value)
+            && let Some(obj) = doc.as_object()
+        {
+            for (field_name, field_value) in obj {
+                if let Ok(geom) =
+                    serde_json::from_value::<nodedb_types::geometry::Geometry>(field_value.clone())
+                {
+                    let bbox = nodedb_types::bbox::geometry_bbox(&geom);
+                    let index_key = format!("{tid}:{collection}:{field_name}");
+                    let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
+                    let rtree = self.spatial_indexes.entry(index_key.clone()).or_default();
+                    rtree.insert(nodedb_spatial::RTreeEntry { id: entry_id, bbox });
+                    // Maintain reverse map: entry_id → document_id.
+                    self.spatial_doc_map
+                        .insert((index_key, entry_id), document_id.to_string());
+                }
+            }
         }
 
         Ok(())

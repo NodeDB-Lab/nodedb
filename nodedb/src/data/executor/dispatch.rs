@@ -475,29 +475,27 @@ impl CoreLoop {
 
             PhysicalPlan::Spatial(SpatialOp::Scan {
                 collection,
-                limit,
+                field,
+                predicate,
+                query_geometry,
+                distance_meters,
                 attribute_filters,
+                limit,
                 projection,
-                ..
-            }) => {
-                // Spatial scan: R-tree index lookup → exact predicate refinement.
-                // Falls through to document scan with attribute filters.
-                // The spatial predicate is evaluated post-scan until the R-tree
-                // is wired into the per-core spatial index manager.
-                self.execute_document_scan(
-                    task,
-                    tid,
-                    collection,
-                    *limit,
-                    0,
-                    &[],
-                    attribute_filters,
-                    false,
-                    projection,
-                    &[],
-                    &[],
-                )
-            }
+                rls_filters,
+            }) => self.execute_spatial_scan(
+                task,
+                tid,
+                collection,
+                field,
+                predicate,
+                query_geometry,
+                *distance_meters,
+                attribute_filters,
+                *limit,
+                projection,
+                rls_filters,
+            ),
 
             PhysicalPlan::Document(DocumentOp::Register {
                 collection,
