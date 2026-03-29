@@ -62,6 +62,11 @@ fn build_router(state: AppState) -> Router {
             "/obsv/api/v1/label/{name}/values",
             get(routes::promql::label_values),
         )
+        .route(
+            "/obsv/api/v1/status/buildinfo",
+            get(routes::promql::buildinfo),
+        )
+        .route("/obsv/api/v1/metadata", get(routes::promql::metadata))
         .with_state(state)
 }
 

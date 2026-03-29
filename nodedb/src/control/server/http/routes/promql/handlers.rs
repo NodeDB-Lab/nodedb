@@ -1,57 +1,14 @@
-//! Prometheus-compatible PromQL HTTP API at `/obsv/api/v1/*`.
-//!
-//! Endpoints:
-//! - GET/POST `/obsv/api/v1/query`         — instant query
-//! - GET/POST `/obsv/api/v1/query_range`   — range query
-//! - GET      `/obsv/api/v1/series`        — find series by label matchers
-//! - GET      `/obsv/api/v1/labels`        — list all label names
-//! - GET      `/obsv/api/v1/label/:name/values` — list values for a label
-//!
-//! Grafana data source URL: `http://nodedb:6480/obsv/api`
+//! PromQL HTTP handler functions.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use super::super::auth::AppState;
 use crate::control::promql;
+use crate::control::server::http::auth::AppState;
 
-/// Query parameters for `/query`.
-#[derive(Debug, serde::Deserialize)]
-pub struct InstantQueryParams {
-    pub query: String,
-    /// Evaluation timestamp (Unix seconds, optional — defaults to now).
-    pub time: Option<f64>,
-}
-
-/// Query parameters for `/query_range`.
-#[derive(Debug, serde::Deserialize)]
-pub struct RangeQueryParams {
-    pub query: String,
-    /// Start timestamp (Unix seconds).
-    pub start: f64,
-    /// End timestamp (Unix seconds).
-    pub end: f64,
-    /// Query step (duration string like "15s" or seconds as float).
-    pub step: String,
-}
-
-/// Query parameters for `/series`.
-#[derive(Debug, serde::Deserialize)]
-pub struct SeriesParams {
-    /// Label matchers (multiple `match[]` params).
-    #[serde(rename = "match[]", default)]
-    pub matchers: Vec<String>,
-    pub start: Option<f64>,
-    pub end: Option<f64>,
-}
-
-/// Query parameters for `/labels`.
-#[derive(Debug, serde::Deserialize)]
-pub struct LabelsParams {
-    pub start: Option<f64>,
-    pub end: Option<f64>,
-}
+use super::helpers::*;
+use super::*;
 
 /// GET/POST `/obsv/api/v1/query` — instant query.
 pub async fn instant_query(
@@ -74,7 +31,6 @@ pub async fn instant_query(
         Err(e) => return prom_error("bad_data", &e),
     };
 
-    // Fetch series from timeseries engine.
     let series =
         fetch_series_for_query(&state, ts_ms - promql::types::DEFAULT_LOOKBACK_MS, ts_ms).await;
 
@@ -115,7 +71,6 @@ pub async fn range_query(
         Err(e) => return prom_error("bad_data", &e),
     };
 
-    // Fetch series covering the full range + lookback.
     let series = fetch_series_for_query(
         &state,
         start_ms - promql::types::DEFAULT_LOOKBACK_MS,
@@ -148,7 +103,6 @@ pub async fn series_query(
 
     let all_series = fetch_series_for_query(&state, start_ms, end_ms).await;
 
-    // Filter by matchers if provided.
     let filtered: Vec<&promql::Series> = if params.matchers.is_empty() {
         all_series.iter().collect()
     } else {
@@ -247,167 +201,99 @@ pub async fn label_values(
     (StatusCode::OK, [("content-type", "application/json")], out)
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+/// GET `/obsv/api/v1/status/buildinfo` — Grafana data source health check.
+pub async fn buildinfo() -> impl IntoResponse {
+    let out = format!(
+        r#"{{"status":"success","data":{{"version":"{}","revision":"nodedb","branch":"main","buildDate":"","goVersion":"","buildUser":""}}}}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    (StatusCode::OK, [("content-type", "application/json")], out)
+}
 
-/// Fetch all timeseries data within [start_ms, end_ms] from the shared state.
-///
-/// This reads from the SystemMetrics (NodeDB's own metrics) as a built-in
-/// metrics source. External timeseries collections (via ILP ingest) would
-/// additionally go through the Data Plane bridge.
-async fn fetch_series_for_query(
-    state: &AppState,
-    _start_ms: i64,
-    _end_ms: i64,
-) -> Vec<promql::Series> {
-    // Built-in: expose NodeDB's own system metrics as PromQL-queryable series.
-    // Each SystemMetrics counter/gauge becomes a series with __name__ label.
-    let mut series = Vec::new();
+/// GET `/obsv/api/v1/metadata` — Metric metadata for Grafana metric browser.
+pub async fn metadata(State(state): State<AppState>) -> impl IntoResponse {
+    let mut out = String::from(r#"{"status":"success","data":{"#);
+    let mut first = true;
 
-    if let Some(ref sys) = state.shared.system_metrics {
-        use std::sync::atomic::Ordering;
-
-        let ts = now_ms();
-        let metrics: Vec<(&str, f64)> = vec![
-            (
-                "nodedb_queries_total",
-                sys.queries_total.load(Ordering::Relaxed) as f64,
-            ),
-            (
-                "nodedb_query_errors_total",
-                sys.query_errors.load(Ordering::Relaxed) as f64,
-            ),
+    if state.shared.system_metrics.is_some() {
+        let metrics_meta: &[(&str, &str, &str)] = &[
+            ("nodedb_queries_total", "counter", "Total queries executed"),
+            ("nodedb_query_errors_total", "counter", "Query errors"),
             (
                 "nodedb_active_connections",
-                sys.active_connections.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "Active client connections",
             ),
             (
                 "nodedb_wal_fsync_latency_us",
-                sys.wal_fsync_latency_us.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "WAL fsync latency in microseconds",
             ),
-            (
-                "nodedb_raft_apply_lag",
-                sys.raft_apply_lag.load(Ordering::Relaxed) as f64,
-            ),
+            ("nodedb_raft_apply_lag", "gauge", "Raft apply lag entries"),
             (
                 "nodedb_bridge_utilization",
-                sys.bridge_utilization.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "SPSC bridge utilization percent",
             ),
             (
                 "nodedb_compaction_debt",
-                sys.compaction_debt.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "Pending L1 segments for compaction",
             ),
             (
                 "nodedb_vector_searches_total",
-                sys.vector_searches.load(Ordering::Relaxed) as f64,
+                "counter",
+                "Vector search operations",
             ),
             (
                 "nodedb_graph_traversals_total",
-                sys.graph_traversals.load(Ordering::Relaxed) as f64,
+                "counter",
+                "Graph traversal operations",
             ),
             (
                 "nodedb_text_searches_total",
-                sys.text_searches.load(Ordering::Relaxed) as f64,
+                "counter",
+                "Text search operations",
             ),
-            (
-                "nodedb_kv_gets_total",
-                sys.kv_gets_total.load(Ordering::Relaxed) as f64,
-            ),
-            (
-                "nodedb_kv_memory_bytes",
-                sys.kv_memory_bytes.load(Ordering::Relaxed) as f64,
-            ),
+            ("nodedb_kv_gets_total", "counter", "KV GET operations"),
+            ("nodedb_kv_memory_bytes", "gauge", "KV engine memory usage"),
             (
                 "nodedb_pgwire_connections",
-                sys.pgwire_connections.load(Ordering::Relaxed) as f64,
-            ),
-            (
-                "nodedb_http_connections",
-                sys.http_connections.load(Ordering::Relaxed) as f64,
-            ),
-            (
-                "nodedb_websocket_connections",
-                sys.websocket_connections.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "Active pgwire connections",
             ),
             (
                 "nodedb_slow_queries_total",
-                sys.slow_queries_total.load(Ordering::Relaxed) as f64,
+                "counter",
+                "Queries exceeding 100ms",
             ),
             (
                 "nodedb_storage_l0_bytes",
-                sys.storage_l0_bytes.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "L0 (hot/RAM) storage bytes",
             ),
             (
                 "nodedb_storage_l1_bytes",
-                sys.storage_l1_bytes.load(Ordering::Relaxed) as f64,
+                "gauge",
+                "L1 (warm/NVMe) storage bytes",
             ),
         ];
 
-        for (name, value) in metrics {
-            let mut labels = std::collections::BTreeMap::new();
-            labels.insert("__name__".into(), name.into());
-            series.push(promql::Series {
-                labels,
-                samples: vec![promql::Sample {
-                    timestamp_ms: ts,
-                    value,
-                }],
-            });
+        for (name, metric_type, help) in metrics_meta {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push('"');
+            out.push_str(name);
+            out.push_str(r#"":[{"type":""#);
+            out.push_str(metric_type);
+            out.push_str(r#"","help":""#);
+            promql::types::json_escape(&mut out, help);
+            out.push_str(r#"","unit":""}]"#);
         }
     }
 
-    series
-}
-
-fn prom_success(value: promql::Value) -> (StatusCode, [(&'static str, &'static str); 1], String) {
-    let result = promql::PromResult::success(value);
-    (
-        StatusCode::OK,
-        [("content-type", "application/json")],
-        result.to_json(),
-    )
-}
-
-fn prom_error(
-    err_type: &str,
-    message: &str,
-) -> (StatusCode, [(&'static str, &'static str); 1], String) {
-    let result = promql::PromResult::error(err_type, message.to_string());
-    let status = match err_type {
-        "bad_data" => StatusCode::BAD_REQUEST,
-        "execution" => StatusCode::UNPROCESSABLE_ENTITY,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (
-        status,
-        [("content-type", "application/json")],
-        result.to_json(),
-    )
-}
-
-fn parse_step(s: &str) -> Option<i64> {
-    // Try as duration string first.
-    if let Some(d) = promql::ast::Duration::parse(s) {
-        return Some(d.ms());
-    }
-    // Try as float seconds.
-    if let Ok(secs) = s.parse::<f64>() {
-        return Some((secs * 1000.0) as i64);
-    }
-    None
-}
-
-fn parse_series_matcher(input: &str) -> Option<Vec<promql::LabelMatcher>> {
-    let tokens = promql::lexer::tokenize(input).ok()?;
-    let expr = promql::parse(&tokens).ok()?;
-    match expr {
-        promql::ast::Expr::VectorSelector { matchers, .. } => Some(matchers),
-        _ => None,
-    }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    out.push_str("}}");
+    (StatusCode::OK, [("content-type", "application/json")], out)
 }
