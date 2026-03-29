@@ -232,7 +232,8 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Meta(
             MetaOp::RegisterContinuousAggregate { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
-            | MetaOp::ListContinuousAggregates,
+            | MetaOp::ListContinuousAggregates
+            | MetaOp::RefreshMaterializedView { .. },
         ) => Permission::Alter,
 
         PhysicalPlan::Vector(VectorOp::SetParams { .. }) => Permission::Alter,

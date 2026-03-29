@@ -9,6 +9,7 @@ pub mod graph_match;
 pub mod graph_rag;
 pub mod join;
 pub mod kv;
+pub mod materialized_view;
 pub mod point;
 pub mod rls_eval;
 pub mod spatial;

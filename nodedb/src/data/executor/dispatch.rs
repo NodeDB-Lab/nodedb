@@ -474,6 +474,11 @@ impl CoreLoop {
                 self.response_with_payload(task, json)
             }
 
+            PhysicalPlan::Meta(MetaOp::RefreshMaterializedView {
+                view_name,
+                source_collection,
+            }) => self.execute_refresh_materialized_view(task, tid, view_name, source_collection),
+
             PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                 collection,
                 time_range,

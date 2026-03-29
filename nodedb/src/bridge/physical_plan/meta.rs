@@ -33,4 +33,12 @@ pub enum MetaOp {
     /// List all continuous aggregates from this core's manager.
     /// Returns JSON-serialized `Vec<AggregateInfo>`.
     ListContinuousAggregates,
+
+    /// Refresh a materialized view: scan source collection, write to target.
+    RefreshMaterializedView {
+        /// View name (also the target collection name).
+        view_name: String,
+        /// Source collection to scan.
+        source_collection: String,
+    },
 }

@@ -36,6 +36,10 @@ pub(super) const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("_s
 pub(super) const COLLECTIONS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.collections");
 
+/// Table: "{tenant_id}:{name}" -> MessagePack-serialized materialized view metadata.
+pub(super) const MATERIALIZED_VIEWS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("_system.materialized_views");
+
 /// Table: metadata key -> value bytes (counters, config).
 pub(super) const METADATA: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.metadata");
 
@@ -223,6 +227,31 @@ impl StoredCollection {
     }
 }
 
+/// A materialized view: strict → columnar CDC bridge.
+///
+/// Created via `CREATE MATERIALIZED VIEW <name> ON <source> AS SELECT ...`.
+/// The source must be a strict (or document) collection. The target is
+/// an implicitly-created columnar collection with the view's schema.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct StoredMaterializedView {
+    pub tenant_id: u32,
+    /// View name (also the target columnar collection name).
+    pub name: String,
+    /// Source collection name.
+    pub source: String,
+    /// SQL body: the SELECT ... FROM ... part (used for schema + refresh).
+    pub query_sql: String,
+    /// Refresh mode: "auto" (on every write to source) or "manual".
+    #[serde(default = "default_refresh_mode")]
+    pub refresh_mode: String,
+    pub owner: String,
+    pub created_at: u64,
+}
+
+fn default_refresh_mode() -> String {
+    "auto".into()
+}
+
 /// Extended field definition supporting DEFAULT, VALUE, ASSERT, and TYPE constraints.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FieldDefinition {
@@ -377,6 +406,9 @@ impl SystemCatalog {
             let _ = write_txn
                 .open_table(SCOPE_GRANTS)
                 .map_err(|e| catalog_err("init scope_grants table", e))?;
+            let _ = write_txn
+                .open_table(MATERIALIZED_VIEWS)
+                .map_err(|e| catalog_err("init materialized_views table", e))?;
         }
         write_txn
             .commit()

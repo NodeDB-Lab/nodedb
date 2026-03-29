@@ -19,6 +19,7 @@ pub mod impersonation_ddl;
 pub mod inspect;
 pub mod kv;
 pub mod match_ops;
+pub mod materialized_view;
 pub mod metering_ddl;
 pub mod org_ddl;
 pub mod ownership;

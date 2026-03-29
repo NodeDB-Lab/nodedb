@@ -146,6 +146,28 @@ pub async fn dispatch(
         );
     }
 
+    // Materialized views (HTAP).
+    if upper.starts_with("CREATE MATERIALIZED VIEW ") {
+        return Some(super::materialized_view::create_materialized_view(
+            state, identity, sql,
+        ));
+    }
+    if upper.starts_with("DROP MATERIALIZED VIEW ") {
+        return Some(super::materialized_view::drop_materialized_view(
+            state, identity, &parts,
+        ));
+    }
+    if upper.starts_with("REFRESH MATERIALIZED VIEW ") {
+        return Some(
+            super::materialized_view::refresh_materialized_view(state, identity, &parts).await,
+        );
+    }
+    if upper.starts_with("SHOW MATERIALIZED VIEW") {
+        return Some(super::materialized_view::show_materialized_views(
+            state, identity, &parts,
+        ));
+    }
+
     // Pub/Sub: CREATE TOPIC, DROP TOPIC, SHOW TOPICS, PUBLISH TO, SUBSCRIBE TO.
     if upper.starts_with("CREATE TOPIC ") {
         return Some(super::pubsub::create_topic(state, identity, &parts));
