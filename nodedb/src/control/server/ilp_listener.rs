@@ -283,8 +283,12 @@ async fn flush_ilp_batch(
         .unwrap_or("default_metrics")
         .to_string();
 
-    // Group lines by series key hash for per-series core routing.
-    // Each unique (measurement, sorted_tags) combination hashes to a vShard.
+    // Route all ILP lines for a collection to the same vShard as the
+    // collection-based scan uses. This ensures timeseries scans find
+    // the memtable data on the correct Data Plane core.
+    // Per-series sharding is deferred until the scan path supports
+    // fan-out across multiple cores.
+    let collection_vshard = VShardId::from_collection(&collection);
     let mut shard_batches: std::collections::HashMap<u16, String> =
         std::collections::HashMap::new();
 
@@ -293,12 +297,7 @@ async fn flush_ilp_batch(
             continue;
         }
 
-        // Extract the series key: everything before the first space
-        // (measurement + tags in ILP format).
-        let series_key = line.split(' ').next().unwrap_or(line);
-        let vshard = VShardId::from_key(series_key.as_bytes());
-
-        let entry = shard_batches.entry(vshard.as_u16()).or_default();
+        let entry = shard_batches.entry(collection_vshard.as_u16()).or_default();
         entry.push_str(line);
         entry.push('\n');
     }
