@@ -33,7 +33,7 @@ pub fn encode_i64_pipeline(values: &[i64], codec: ColumnCodec) -> Result<Vec<u8>
         }
         // Cascading chains — rANS terminal (cold tier).
         ColumnCodec::DeltaFastLanesRans => encode_delta_fastlanes_rans(values),
-        // Legacy single-step codecs.
+        // Single-step codecs (small partitions / non-ALP-encodable data).
         ColumnCodec::DoubleDelta => Ok(crate::double_delta::encode(values)),
         ColumnCodec::Delta => Ok(crate::delta::encode(values)),
         ColumnCodec::Gorilla => Ok(crate::gorilla::encode_timestamps(values)),
@@ -68,7 +68,7 @@ pub fn encode_f64_pipeline(values: &[f64], codec: ColumnCodec) -> Result<Vec<u8>
         }
         // Cascading chains — rANS terminal (cold tier).
         ColumnCodec::AlpFastLanesRans => encode_alp_fastlanes_rans(values),
-        // Legacy single-step codecs.
+        // Single-step codecs (small partitions / non-ALP-encodable data).
         ColumnCodec::Gorilla => Ok(crate::gorilla::encode_f64(values)),
         ColumnCodec::Raw => {
             let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -133,7 +133,7 @@ pub fn decode_i64_pipeline(data: &[u8], codec: ColumnCodec) -> Result<Vec<i64>, 
         }
         // Cascading — rANS terminal.
         ColumnCodec::DeltaFastLanesRans => decode_delta_fastlanes_rans(data),
-        // Legacy single-step codecs.
+        // Single-step codecs (small partitions / non-ALP-encodable data).
         ColumnCodec::DoubleDelta => crate::double_delta::decode(data),
         ColumnCodec::Delta => crate::delta::decode(data),
         ColumnCodec::Gorilla => crate::gorilla::decode_timestamps(data),
@@ -168,7 +168,7 @@ pub fn decode_f64_pipeline(data: &[u8], codec: ColumnCodec) -> Result<Vec<f64>, 
         }
         // Cascading — rANS terminal.
         ColumnCodec::AlpFastLanesRans => decode_alp_fastlanes_rans(data),
-        // Legacy single-step codecs.
+        // Single-step codecs (small partitions / non-ALP-encodable data).
         ColumnCodec::Gorilla => crate::gorilla::decode_f64(data),
         ColumnCodec::Raw => {
             let raw = crate::raw::decode(data)?;

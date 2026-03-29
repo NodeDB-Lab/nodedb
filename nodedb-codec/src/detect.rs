@@ -5,7 +5,7 @@
 //!
 //! Selection strategy:
 //! - Partitions ≥ 1024 values → cascading codecs (ALP, FastLanes, etc.)
-//! - Partitions < 1024 values → legacy single-step codecs (Gorilla, Delta, etc.)
+//! - Partitions < 1024 values → single-step codecs (Gorilla, Delta, etc.)
 //! - f64 with >95% ALP encodability → `AlpFastLanesLz4`
 //! - f64 with ≤95% ALP encodability → `Gorilla` (fallback)
 //! - i64 timestamps/counters → `DeltaFastLanesLz4`
