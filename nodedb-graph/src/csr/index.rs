@@ -1,81 +1,80 @@
 //! Dense integer CSR adjacency index with interned node IDs and labels.
 //!
-//! Core data structure, interning, mutation (add/remove), neighbor queries,
-//! and compaction. Traversal algorithms live in `traversal.rs`.
+//! Core data structure, interning, mutation (add/remove), neighbor queries.
+//! Traversal algorithms live in `traversal.rs`. Weight management in `weights.rs`.
+//!
+//! Memory layout at scale (1B edges):
+//! - Old: `Vec<Vec<(String, u32)>>` ≈ 60 GB (heap String per edge)
+//! - New: contiguous `Vec<u32>` offsets + targets + `Vec<u16>` labels ≈ 10 GB
+//!
+//! Writes accumulate in a mutable buffer (`buffer_out`/`buffer_in`).
+//! Reads check both the dense CSR arrays and the mutable buffer.
+//! `compact()` merges the buffer into the dense arrays (double-buffered swap).
+//!
+//! ## Edge Weights
+//!
+//! Optional `f64` weight per edge stored in parallel arrays. `None` when the
+//! graph is entirely unweighted (zero memory overhead). Populated from the
+//! `"weight"` edge property at insertion time. Unweighted edges default to 1.0.
+//!
+//! Layout: `out_targets[i]`, `out_labels[i]`, `out_weights.as_ref()[i]` are
+//! parallel — SIMD-friendly for bulk scans (PageRank iterates all edges per
+//! superstep; Dijkstra reads weights during traversal).
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
-use crate::engine::graph::edge_store::{Direction, EdgeStore};
-
-use super::weights::extract_weight_from_properties;
+// Re-export shared Direction from nodedb-types.
+pub use nodedb_types::graph::Direction;
 
 /// Dense integer CSR adjacency index with interned node IDs and labels.
-///
-/// Memory layout at scale (1B edges):
-/// - Old: `Vec<Vec<(String, u32)>>` ≈ 60 GB (heap String per edge)
-/// - New: contiguous `Vec<u32>` offsets + `Vec<u32>` targets + `Vec<u16>` labels ≈ 10 GB
-///
-/// Writes accumulate in a mutable buffer (`buffer_out`/`buffer_in`).
-/// Reads check both the dense CSR arrays and the mutable buffer.
-/// `compact()` merges the buffer into the dense arrays (double-buffered swap).
-///
-/// ## Edge Weights
-///
-/// Optional `f64` weight per edge stored in parallel arrays. `None` when the
-/// graph is entirely unweighted (zero memory overhead). Populated from the
-/// `"weight"` edge property at insertion time. Unweighted edges default to 1.0.
-///
-/// Layout: `out_targets[i]`, `out_labels[i]`, `out_weights.as_ref()[i]` are
-/// parallel — SIMD-friendly for bulk scans (PageRank iterates all edges per
-/// superstep; Dijkstra reads weights during traversal).
 pub struct CsrIndex {
     // ── Node interning ──
-    pub(super) node_to_id: HashMap<String, u32>,
-    pub(super) id_to_node: Vec<String>,
+    pub(crate) node_to_id: HashMap<String, u32>,
+    pub(crate) id_to_node: Vec<String>,
 
     // ── Label interning ──
-    pub(super) label_to_id: HashMap<String, u16>,
-    pub(super) id_to_label: Vec<String>,
+    pub(crate) label_to_id: HashMap<String, u16>,
+    pub(crate) id_to_label: Vec<String>,
 
     // ── Dense CSR (read-only between compactions) ──
     /// `out_offsets[i]..out_offsets[i+1]` = range in `out_targets`/`out_labels`.
     /// Length: `num_nodes + 1`.
-    pub(super) out_offsets: Vec<u32>,
-    pub(super) out_targets: Vec<u32>,
-    pub(super) out_labels: Vec<u16>,
+    pub(crate) out_offsets: Vec<u32>,
+    pub(crate) out_targets: Vec<u32>,
+    pub(crate) out_labels: Vec<u16>,
     /// Parallel edge weight array. `None` if graph has no weighted edges.
-    pub(super) out_weights: Option<Vec<f64>>,
+    pub(crate) out_weights: Option<Vec<f64>>,
 
-    pub(super) in_offsets: Vec<u32>,
-    pub(super) in_targets: Vec<u32>,
-    pub(super) in_labels: Vec<u16>,
+    pub(crate) in_offsets: Vec<u32>,
+    pub(crate) in_targets: Vec<u32>,
+    pub(crate) in_labels: Vec<u16>,
     /// Parallel inbound edge weight array. `None` if graph has no weighted edges.
-    pub(super) in_weights: Option<Vec<f64>>,
+    pub(crate) in_weights: Option<Vec<f64>>,
 
     // ── Mutable write buffer ──
     /// Per-node outbound buffer: `buffer_out[node_id]` = `[(label_id, dst_id)]`.
-    pub(super) buffer_out: Vec<Vec<(u16, u32)>>,
-    pub(super) buffer_in: Vec<Vec<(u16, u32)>>,
+    pub(crate) buffer_out: Vec<Vec<(u16, u32)>>,
+    pub(crate) buffer_in: Vec<Vec<(u16, u32)>>,
     /// Per-node outbound weight buffer (parallel to `buffer_out`).
     /// Only populated when `has_weights` is true.
-    pub(super) buffer_out_weights: Vec<Vec<f64>>,
+    pub(crate) buffer_out_weights: Vec<Vec<f64>>,
     /// Per-node inbound weight buffer (parallel to `buffer_in`).
-    pub(super) buffer_in_weights: Vec<Vec<f64>>,
+    pub(crate) buffer_in_weights: Vec<Vec<f64>>,
 
     /// Edges deleted since last compaction: `(src, label, dst)`.
-    pub(super) deleted_edges: std::collections::HashSet<(u32, u16, u32)>,
+    pub(crate) deleted_edges: HashSet<(u32, u16, u32)>,
 
     /// Whether any edge has a non-default weight. When false, weight arrays
     /// are `None` and weight buffers are empty — zero overhead for unweighted graphs.
-    pub(super) has_weights: bool,
+    pub(crate) has_weights: bool,
 
     // ── Hot/cold access tracking ──
     /// Per-node access counter: incremented on each neighbor/BFS/path query.
     /// Uses `Cell<u32>` so access can be tracked through `&self` references
     /// (traversal methods are `&self` for shared read access).
-    pub(super) access_counts: Vec<std::cell::Cell<u32>>,
+    pub(crate) access_counts: Vec<std::cell::Cell<u32>>,
     /// Total queries served since last access counter reset.
-    pub(super) query_epoch: u64,
+    pub(crate) query_epoch: u64,
 }
 
 impl Default for CsrIndex {
@@ -103,39 +102,15 @@ impl CsrIndex {
             buffer_in: Vec::new(),
             buffer_out_weights: Vec::new(),
             buffer_in_weights: Vec::new(),
-            deleted_edges: std::collections::HashSet::new(),
+            deleted_edges: HashSet::new(),
             has_weights: false,
             access_counts: Vec::new(),
             query_epoch: 0,
         }
     }
 
-    /// Rebuild the entire CSR index from an EdgeStore.
-    ///
-    /// Extracts the `"weight"` property from edge properties (if present)
-    /// and populates the parallel weight arrays. Edges without a weight
-    /// property default to 1.0.
-    pub fn rebuild_from(store: &EdgeStore) -> crate::Result<Self> {
-        let mut csr = Self::new();
-        let all_edges = store.scan_all_edges()?;
-        for edge in &all_edges {
-            csr.ensure_node(&edge.src_id);
-            csr.ensure_node(&edge.dst_id);
-        }
-        for edge in &all_edges {
-            let weight = extract_weight_from_properties(&edge.properties);
-            if weight != 1.0 {
-                csr.add_edge_weighted(&edge.src_id, &edge.label, &edge.dst_id, weight);
-            } else {
-                csr.add_edge(&edge.src_id, &edge.label, &edge.dst_id);
-            }
-        }
-        csr.compact();
-        Ok(csr)
-    }
-
     /// Get or create a dense ID for a node.
-    pub(super) fn ensure_node(&mut self, node: &str) -> u32 {
+    pub(crate) fn ensure_node(&mut self, node: &str) -> u32 {
         match self.node_to_id.entry(node.to_string()) {
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(e) => {
@@ -203,7 +178,7 @@ impl CsrIndex {
             return;
         }
         // Check for duplicates in dense CSR.
-        if self.dense_has_edge(src_id, label_id, dst_id, true) {
+        if self.dense_has_edge(src_id, label_id, dst_id) {
             return;
         }
 
@@ -257,12 +232,12 @@ impl CsrIndex {
         }
 
         // Mark as deleted in dense CSR.
-        if self.dense_has_edge(src_id, label_id, dst_id, true) {
+        if self.dense_has_edge(src_id, label_id, dst_id) {
             self.deleted_edges.insert((src_id, label_id, dst_id));
         }
     }
 
-    /// Remove ALL edges touching a node.
+    /// Remove ALL edges touching a node. Returns the number of edges removed.
     pub fn remove_node_edges(&mut self, node: &str) -> usize {
         let Some(&node_id) = self.node_to_id.get(node) else {
             return 0;
@@ -353,6 +328,55 @@ impl CsrIndex {
         result
     }
 
+    /// Get neighbors with multi-label filter. Empty labels = all edges.
+    pub fn neighbors_multi(
+        &self,
+        node: &str,
+        label_filters: &[&str],
+        direction: Direction,
+    ) -> Vec<(String, String)> {
+        let Some(&node_id) = self.node_to_id.get(node) else {
+            return Vec::new();
+        };
+        self.record_access(node_id);
+        let label_ids: Vec<u16> = label_filters
+            .iter()
+            .filter_map(|l| self.label_to_id.get(*l).copied())
+            .collect();
+        let match_label = |lid: u16| label_ids.is_empty() || label_ids.contains(&lid);
+
+        let mut result = Vec::new();
+
+        if matches!(direction, Direction::Out | Direction::Both) {
+            for (lid, dst) in self.iter_out_edges(node_id) {
+                if match_label(lid) {
+                    result.push((
+                        self.id_to_label[lid as usize].clone(),
+                        self.id_to_node[dst as usize].clone(),
+                    ));
+                }
+            }
+        }
+        if matches!(direction, Direction::In | Direction::Both) {
+            for (lid, src) in self.iter_in_edges(node_id) {
+                if match_label(lid) {
+                    result.push((
+                        self.id_to_label[lid as usize].clone(),
+                        self.id_to_node[src as usize].clone(),
+                    ));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Add a node without any edges (used for isolated/dangling nodes).
+    /// Returns the dense node ID. Idempotent — returns existing ID if present.
+    pub fn add_node(&mut self, name: &str) -> u32 {
+        self.ensure_node(name)
+    }
+
     pub fn node_count(&self) -> usize {
         self.id_to_node.len()
     }
@@ -371,12 +395,6 @@ impl CsrIndex {
         self.node_to_id.get(name).copied()
     }
 
-    /// Add a node without any edges (used for isolated/dangling nodes).
-    /// Returns the dense node ID. Idempotent — returns existing ID if present.
-    pub fn add_node(&mut self, name: &str) -> u32 {
-        self.ensure_node(name)
-    }
-
     /// Get the string label for a dense label index.
     pub fn label_name(&self, label_id: u16) -> &str {
         &self.id_to_label[label_id as usize]
@@ -387,72 +405,26 @@ impl CsrIndex {
         self.label_to_id.get(name).copied()
     }
 
-    // ── Slice accessors for snapshot/clone ──
-
-    /// Node-to-ID mapping (for snapshot cloning).
-    pub fn node_to_id_map(&self) -> &HashMap<String, u32> {
-        &self.node_to_id
+    /// Out-degree of a node (including buffer, excluding deleted).
+    pub fn out_degree(&self, node_id: u32) -> usize {
+        self.iter_out_edges(node_id).count()
     }
 
-    /// ID-to-node list (for snapshot cloning).
-    pub fn id_to_node_list(&self) -> &[String] {
-        &self.id_to_node
+    /// In-degree of a node.
+    pub fn in_degree(&self, node_id: u32) -> usize {
+        self.iter_in_edges(node_id).count()
     }
 
-    /// Label-to-ID mapping (for snapshot cloning).
-    pub fn label_to_id_map(&self) -> &HashMap<String, u16> {
-        &self.label_to_id
-    }
-
-    /// ID-to-label list (for snapshot cloning).
-    pub fn id_to_label_list(&self) -> &[String] {
-        &self.id_to_label
-    }
-
-    /// Outbound offset array slice.
-    pub fn out_offsets_slice(&self) -> &[u32] {
-        &self.out_offsets
-    }
-
-    /// Outbound target array slice.
-    pub fn out_targets_slice(&self) -> &[u32] {
-        &self.out_targets
-    }
-
-    /// Outbound label array slice.
-    pub fn out_labels_slice(&self) -> &[u16] {
-        &self.out_labels
-    }
-
-    /// Outbound weight array slice (None if unweighted).
-    pub fn out_weights_slice(&self) -> Option<&[f64]> {
-        self.out_weights.as_deref()
-    }
-
-    /// Inbound offset array slice.
-    pub fn in_offsets_slice(&self) -> &[u32] {
-        &self.in_offsets
-    }
-
-    /// Inbound target array slice.
-    pub fn in_targets_slice(&self) -> &[u32] {
-        &self.in_targets
-    }
-
-    /// Inbound label array slice.
-    pub fn in_labels_slice(&self) -> &[u16] {
-        &self.in_labels
-    }
-
-    /// Inbound weight array slice (None if unweighted).
-    pub fn in_weights_slice(&self) -> Option<&[f64]> {
-        self.in_weights.as_deref()
+    /// Total edge count (dense + buffer - deleted). O(V).
+    pub fn edge_count(&self) -> usize {
+        let n = self.id_to_node.len();
+        (0..n).map(|i| self.out_degree(i as u32)).sum()
     }
 
     // ── Internal helpers ──
 
     /// Build contiguous offset/target/label arrays from per-node edge lists.
-    pub(super) fn build_dense(edges: &[Vec<(u16, u32)>]) -> (Vec<u32>, Vec<u32>, Vec<u16>) {
+    pub(crate) fn build_dense(edges: &[Vec<(u16, u32)>]) -> (Vec<u32>, Vec<u32>, Vec<u16>) {
         let n = edges.len();
         let total: usize = edges.iter().map(|e| e.len()).sum();
         let mut offsets = Vec::with_capacity(n + 1);
@@ -474,19 +446,17 @@ impl CsrIndex {
     }
 
     /// Check if a specific edge exists in the dense CSR.
-    fn dense_has_edge(&self, src: u32, label: u16, dst: u32, check_out: bool) -> bool {
-        if check_out {
-            for (lid, target) in self.dense_out_edges(src) {
-                if lid == label && target == dst {
-                    return true;
-                }
+    fn dense_has_edge(&self, src: u32, label: u16, dst: u32) -> bool {
+        for (lid, target) in self.dense_out_edges(src) {
+            if lid == label && target == dst {
+                return true;
             }
         }
         false
     }
 
     /// Iterate dense outbound edges for a node.
-    pub(super) fn dense_out_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
+    pub(crate) fn dense_out_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
         let idx = node as usize;
         if idx + 1 >= self.out_offsets.len() {
             return Vec::new().into_iter();
@@ -500,7 +470,7 @@ impl CsrIndex {
     }
 
     /// Iterate dense inbound edges for a node.
-    pub(super) fn dense_in_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
+    pub(crate) fn dense_in_edges(&self, node: u32) -> impl Iterator<Item = (u16, u32)> + '_ {
         let idx = node as usize;
         if idx + 1 >= self.in_offsets.len() {
             return Vec::new().into_iter();
@@ -525,22 +495,6 @@ impl CsrIndex {
             Vec::new()
         };
         dense.chain(buffer)
-    }
-
-    /// Out-degree of a node (including buffer, excluding deleted).
-    pub fn out_degree(&self, node_id: u32) -> usize {
-        self.iter_out_edges(node_id).count()
-    }
-
-    /// In-degree of a node.
-    pub fn in_degree(&self, node_id: u32) -> usize {
-        self.iter_in_edges(node_id).count()
-    }
-
-    /// Total edge count (dense + buffer - deleted). O(V).
-    pub fn edge_count(&self) -> usize {
-        let n = self.id_to_node.len();
-        (0..n).map(|i| self.out_degree(i as u32)).sum()
     }
 
     /// Iterate all inbound edges for a node (dense + buffer, minus deleted).
@@ -614,20 +568,6 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_from_edge_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EdgeStore::open(&dir.path().join("graph.redb")).unwrap();
-        store.put_edge("x", "REL", "y", b"").unwrap();
-        store.put_edge("y", "REL", "z", b"").unwrap();
-
-        let csr = CsrIndex::rebuild_from(&store).unwrap();
-        assert_eq!(csr.node_count(), 3);
-        let mut result = csr.traverse_bfs(&["x"], Some("REL"), Direction::Out, 3, 100_000);
-        result.sort();
-        assert_eq!(result, vec!["x", "y", "z"]);
-    }
-
-    #[test]
     fn compact_merges_buffer_into_dense() {
         let mut csr = CsrIndex::new();
         csr.add_edge("a", "L", "b");
@@ -635,7 +575,6 @@ mod tests {
         assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
 
         csr.compact();
-        // After compaction, buffer is empty, edges are in dense arrays.
         assert!(csr.buffer_out.iter().all(|b| b.is_empty()));
         assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
         assert_eq!(csr.neighbors("b", None, Direction::Out).len(), 1);
@@ -659,97 +598,41 @@ mod tests {
     #[test]
     fn label_interning_reduces_memory() {
         let mut csr = CsrIndex::new();
-        // Same label used many times — interned to a single u16.
         for i in 0..100 {
             csr.add_edge(&format!("n{i}"), "FOLLOWS", &format!("n{}", i + 1));
         }
-        // Only 1 unique label should be interned.
         assert_eq!(csr.id_to_label.len(), 1);
         assert_eq!(csr.id_to_label[0], "FOLLOWS");
     }
 
-    // ── Weighted edge tests ──
-
     #[test]
-    fn unweighted_graph_has_no_weight_arrays() {
+    fn edge_count() {
         let csr = make_csr();
-        assert!(!csr.has_weights());
-        assert!(csr.out_weights.is_none());
-        assert!(csr.in_weights.is_none());
+        assert_eq!(csr.edge_count(), 4);
     }
 
     #[test]
-    fn weighted_edge_basic() {
-        let mut csr = CsrIndex::new();
-        csr.add_edge_weighted("a", "ROAD", "b", 5.0);
-        csr.add_edge_weighted("b", "ROAD", "c", 3.0);
-        csr.add_edge("c", "ROAD", "d"); // unweighted → 1.0
-
-        assert!(csr.has_weights());
-        assert_eq!(csr.edge_weight("a", "ROAD", "b"), Some(5.0));
-        assert_eq!(csr.edge_weight("b", "ROAD", "c"), Some(3.0));
-        assert_eq!(csr.edge_weight("c", "ROAD", "d"), Some(1.0));
-        assert_eq!(csr.edge_weight("a", "ROAD", "c"), None); // nonexistent
-    }
-
-    #[test]
-    fn weighted_edges_survive_compaction() {
-        let mut csr = CsrIndex::new();
-        csr.add_edge_weighted("a", "R", "b", 2.5);
-        csr.add_edge_weighted("b", "R", "c", 7.0);
-        csr.add_edge("c", "R", "d");
-
+    fn checkpoint_roundtrip() {
+        let mut csr = make_csr();
         csr.compact();
 
-        assert!(csr.has_weights());
-        assert_eq!(csr.edge_weight("a", "R", "b"), Some(2.5));
-        assert_eq!(csr.edge_weight("b", "R", "c"), Some(7.0));
-        assert_eq!(csr.edge_weight("c", "R", "d"), Some(1.0));
+        let bytes = csr.checkpoint_to_bytes();
+        assert!(!bytes.is_empty());
+
+        let restored = CsrIndex::from_checkpoint(&bytes).expect("roundtrip");
+        assert_eq!(restored.node_count(), csr.node_count());
+        assert_eq!(restored.edge_count(), csr.edge_count());
+
+        let n = restored.neighbors("a", Some("KNOWS"), Direction::Out);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].1, "b");
     }
 
     #[test]
-    fn weighted_edge_remove_keeps_weights_consistent() {
-        let mut csr = CsrIndex::new();
-        csr.add_edge_weighted("a", "R", "b", 2.0);
-        csr.add_edge_weighted("a", "R", "c", 3.0);
-        csr.add_edge_weighted("a", "R", "d", 4.0);
-
-        csr.remove_edge("a", "R", "c");
-
-        // b and d should still have correct weights.
-        assert_eq!(csr.edge_weight("a", "R", "b"), Some(2.0));
-        assert_eq!(csr.edge_weight("a", "R", "c"), None);
-        assert_eq!(csr.edge_weight("a", "R", "d"), Some(4.0));
-    }
-
-    #[test]
-    fn iter_out_edges_weighted_returns_weights() {
-        let mut csr = CsrIndex::new();
-        csr.add_edge_weighted("a", "R", "b", 2.5);
-        csr.add_edge_weighted("a", "R", "c", 7.0);
-        csr.compact();
-
-        let edges: Vec<(u16, u32, f64)> = csr.iter_out_edges_weighted(0).collect();
-        assert_eq!(edges.len(), 2);
-
-        let weights: Vec<f64> = edges.iter().map(|e| e.2).collect();
-        assert!(weights.contains(&2.5));
-        assert!(weights.contains(&7.0));
-    }
-
-    #[test]
-    fn mixed_weighted_unweighted_backfill() {
-        let mut csr = CsrIndex::new();
-        // Add unweighted edges first.
-        csr.add_edge("a", "L", "b");
-        csr.add_edge("b", "L", "c");
-        assert!(!csr.has_weights());
-
-        // Adding a weighted edge should backfill existing with 1.0.
-        csr.add_edge_weighted("c", "L", "d", 5.0);
-        assert!(csr.has_weights());
-        assert_eq!(csr.edge_weight("a", "L", "b"), Some(1.0));
-        assert_eq!(csr.edge_weight("c", "L", "d"), Some(5.0));
+    fn memory_estimation() {
+        let csr = make_csr();
+        let mem = csr.estimated_memory_bytes();
+        assert!(mem > 0);
     }
 
     #[test]
@@ -767,75 +650,24 @@ mod tests {
     }
 
     #[test]
-    fn edge_count_total() {
-        let csr = make_csr();
-        assert_eq!(csr.edge_count(), 4);
+    fn remove_node_edges_all() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "L", "b");
+        csr.add_edge("a", "L", "c");
+        csr.add_edge("d", "L", "a");
+
+        let removed = csr.remove_node_edges("a");
+        assert_eq!(removed, 3);
+        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 0);
+        assert_eq!(csr.neighbors("a", None, Direction::In).len(), 0);
     }
 
     #[test]
-    fn extract_weight_from_msgpack() {
-        // Build a msgpack map with "weight": 0.75
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("weight".into()),
-            rmpv::Value::F64(0.75),
-        )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
-
-        assert_eq!(extract_weight_from_properties(&buf), 0.75);
-    }
-
-    #[test]
-    fn extract_weight_from_empty_properties() {
-        assert_eq!(extract_weight_from_properties(b""), 1.0);
-    }
-
-    #[test]
-    fn extract_weight_integer() {
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("weight".into()),
-            rmpv::Value::Integer(rmpv::Integer::from(42)),
-        )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
-
-        assert_eq!(extract_weight_from_properties(&buf), 42.0);
-    }
-
-    #[test]
-    fn extract_weight_missing_key() {
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("color".into()),
-            rmpv::Value::String("red".into()),
-        )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
-
-        assert_eq!(extract_weight_from_properties(&buf), 1.0);
-    }
-
-    #[test]
-    fn rebuild_from_weighted_edges() {
-        const TEST_WEIGHT: f64 = 0.75;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = EdgeStore::open(&dir.path().join("graph.redb")).unwrap();
-
-        // Edge with weight property.
-        let props = rmpv::Value::Map(vec![(
-            rmpv::Value::String("weight".into()),
-            rmpv::Value::F64(TEST_WEIGHT),
-        )]);
-        let mut buf = Vec::new();
-        rmpv::encode::write_value(&mut buf, &props).unwrap();
-        store.put_edge("x", "R", "y", &buf).unwrap();
-
-        // Edge without weight.
-        store.put_edge("y", "R", "z", b"").unwrap();
-
-        let csr = CsrIndex::rebuild_from(&store).unwrap();
-        assert!(csr.has_weights());
-        assert_eq!(csr.edge_weight("x", "R", "y"), Some(TEST_WEIGHT));
-        assert_eq!(csr.edge_weight("y", "R", "z"), Some(1.0));
+    fn add_node_idempotent() {
+        let mut csr = CsrIndex::new();
+        let id1 = csr.add_node("x");
+        let id2 = csr.add_node("x");
+        assert_eq!(id1, id2);
+        assert_eq!(csr.node_count(), 1);
     }
 }

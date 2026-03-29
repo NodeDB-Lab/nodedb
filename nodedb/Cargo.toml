@@ -33,6 +33,7 @@ nodedb-crdt = { workspace = true }
 nodedb-codec = { workspace = true }
 nodedb-strict = { workspace = true }
 nodedb-spatial = { workspace = true }
+nodedb-graph = { workspace = true }
 
 # Async runtime (Control Plane)
 tokio = { workspace = true }

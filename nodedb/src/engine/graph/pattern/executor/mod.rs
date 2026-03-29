@@ -276,7 +276,7 @@ mod tests {
         store.put_edge("alice", "LIKES", "carol", b"").unwrap();
         store.put_edge("bob", "BLOCKED", "dave", b"").unwrap();
 
-        let csr = CsrIndex::rebuild_from(&store).unwrap();
+        let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&store).unwrap();
         (csr, store, dir)
     }
 

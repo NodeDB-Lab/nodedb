@@ -402,7 +402,7 @@ mod tests {
         rmpv::encode::write_value(&mut buf, &props).unwrap();
         store.put_edge("alice", "KNOWS", "bob", &buf).unwrap();
 
-        let csr = crate::engine::graph::csr::CsrIndex::rebuild_from(&store).unwrap();
+        let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&store).unwrap();
 
         let columns = extract_edge_properties(&store, &csr, &["weight", "label"]).unwrap();
 
@@ -423,7 +423,7 @@ mod tests {
 
         store.put_edge("a", "L", "b", b"").unwrap();
 
-        let csr = crate::engine::graph::csr::CsrIndex::rebuild_from(&store).unwrap();
+        let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&store).unwrap();
         let columns = extract_edge_properties(&store, &csr, &["weight"]).unwrap();
 
         // No properties extracted.

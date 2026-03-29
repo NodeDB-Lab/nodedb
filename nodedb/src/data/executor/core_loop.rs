@@ -195,7 +195,7 @@ impl CoreLoop {
 
         let graph_path = data_dir.join(format!("graph/core-{core_id}.redb"));
         let edge_store = EdgeStore::open(&graph_path)?;
-        let csr = CsrIndex::rebuild_from(&edge_store)?;
+        let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&edge_store)?;
 
         // Inverted index shares the sparse engine's redb database.
         let inverted = InvertedIndex::open(sparse.db().clone())?;

@@ -175,7 +175,7 @@ impl CsrIndex {
     }
 }
 
-/// Compute degree distribution histogram from a sorted degree array.
+/// Compute degree distribution histogram from a degree array.
 fn compute_histogram(degrees: &[usize]) -> DegreeHistogram {
     if degrees.is_empty() {
         return DegreeHistogram {
@@ -232,8 +232,8 @@ mod tests {
 
         let knows = &stats.label_stats["KNOWS"];
         assert_eq!(knows.edge_count, 2);
-        assert_eq!(knows.distinct_sources, 2); // a, b
-        assert_eq!(knows.distinct_targets, 2); // b, c
+        assert_eq!(knows.distinct_sources, 2);
+        assert_eq!(knows.distinct_targets, 2);
 
         let likes = &stats.label_stats["LIKES"];
         assert_eq!(likes.edge_count, 1);
@@ -242,7 +242,6 @@ mod tests {
     #[test]
     fn degree_histogram_values() {
         let mut csr = CsrIndex::new();
-        // a has out-degree 3, b has 1, c has 0, d has 0.
         csr.add_edge("a", "L", "b");
         csr.add_edge("a", "L", "c");
         csr.add_edge("a", "L", "d");
@@ -250,7 +249,6 @@ mod tests {
         csr.compact();
 
         let stats = csr.compute_statistics();
-
         assert_eq!(stats.out_degree_histogram.min, 0);
         assert_eq!(stats.out_degree_histogram.max, 3);
         assert!(stats.out_degree_histogram.avg > 0.0);
@@ -282,7 +280,7 @@ mod tests {
 
         assert!((sel_knows - 2.0 / 3.0).abs() < 1e-9);
         assert!((sel_likes - 1.0 / 3.0).abs() < 1e-9);
-        assert_eq!(csr.label_selectivity("NONEXISTENT"), 1.0); // conservative
+        assert_eq!(csr.label_selectivity("NONEXISTENT"), 1.0);
     }
 
     #[test]
@@ -302,7 +300,7 @@ mod tests {
     fn statistics_with_buffer_edges() {
         let mut csr = CsrIndex::new();
         csr.add_edge("a", "KNOWS", "b");
-        // Don't compact — edges are in buffer.
+        // Don't compact — edges in buffer.
         let stats = csr.compute_statistics();
         assert_eq!(stats.edge_count, 1);
         assert_eq!(stats.label_stats["KNOWS"].edge_count, 1);

@@ -8,7 +8,7 @@ use super::index::CsrIndex;
 
 impl CsrIndex {
     /// Enable weight tracking. Backfills existing buffer entries with 1.0.
-    pub(super) fn enable_weights(&mut self) {
+    pub(crate) fn enable_weights(&mut self) {
         self.has_weights = true;
 
         // Backfill existing dense arrays with 1.0.
@@ -185,5 +185,128 @@ pub fn extract_weight_from_properties(properties: &[u8]) -> f64 {
             1.0
         }
         _ => 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unweighted_graph_has_no_weight_arrays() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "L", "b");
+        assert!(!csr.has_weights());
+        assert!(csr.out_weights.is_none());
+        assert!(csr.in_weights.is_none());
+    }
+
+    #[test]
+    fn weighted_edge_basic() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "ROAD", "b", 5.0);
+        csr.add_edge_weighted("b", "ROAD", "c", 3.0);
+        csr.add_edge("c", "ROAD", "d"); // unweighted → 1.0
+
+        assert!(csr.has_weights());
+        assert_eq!(csr.edge_weight("a", "ROAD", "b"), Some(5.0));
+        assert_eq!(csr.edge_weight("b", "ROAD", "c"), Some(3.0));
+        assert_eq!(csr.edge_weight("c", "ROAD", "d"), Some(1.0));
+        assert_eq!(csr.edge_weight("a", "ROAD", "c"), None);
+    }
+
+    #[test]
+    fn weighted_edges_survive_compaction() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "R", "b", 2.5);
+        csr.add_edge_weighted("b", "R", "c", 7.0);
+        csr.add_edge("c", "R", "d");
+
+        csr.compact();
+
+        assert!(csr.has_weights());
+        assert_eq!(csr.edge_weight("a", "R", "b"), Some(2.5));
+        assert_eq!(csr.edge_weight("b", "R", "c"), Some(7.0));
+        assert_eq!(csr.edge_weight("c", "R", "d"), Some(1.0));
+    }
+
+    #[test]
+    fn weighted_edge_remove_keeps_weights_consistent() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "R", "b", 2.0);
+        csr.add_edge_weighted("a", "R", "c", 3.0);
+        csr.add_edge_weighted("a", "R", "d", 4.0);
+
+        csr.remove_edge("a", "R", "c");
+
+        assert_eq!(csr.edge_weight("a", "R", "b"), Some(2.0));
+        assert_eq!(csr.edge_weight("a", "R", "c"), None);
+        assert_eq!(csr.edge_weight("a", "R", "d"), Some(4.0));
+    }
+
+    #[test]
+    fn iter_out_edges_weighted_returns_weights() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge_weighted("a", "R", "b", 2.5);
+        csr.add_edge_weighted("a", "R", "c", 7.0);
+        csr.compact();
+
+        let edges: Vec<(u16, u32, f64)> = csr.iter_out_edges_weighted(0).collect();
+        assert_eq!(edges.len(), 2);
+
+        let weights: Vec<f64> = edges.iter().map(|e| e.2).collect();
+        assert!(weights.contains(&2.5));
+        assert!(weights.contains(&7.0));
+    }
+
+    #[test]
+    fn mixed_weighted_unweighted_backfill() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "L", "b");
+        csr.add_edge("b", "L", "c");
+        assert!(!csr.has_weights());
+
+        csr.add_edge_weighted("c", "L", "d", 5.0);
+        assert!(csr.has_weights());
+        assert_eq!(csr.edge_weight("a", "L", "b"), Some(1.0));
+        assert_eq!(csr.edge_weight("c", "L", "d"), Some(5.0));
+    }
+
+    #[test]
+    fn extract_weight_from_empty_properties() {
+        assert_eq!(extract_weight_from_properties(b""), 1.0);
+    }
+
+    #[test]
+    fn extract_weight_f64() {
+        let props = rmpv::Value::Map(vec![(
+            rmpv::Value::String("weight".into()),
+            rmpv::Value::F64(0.75),
+        )]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &props).unwrap();
+        assert_eq!(extract_weight_from_properties(&buf), 0.75);
+    }
+
+    #[test]
+    fn extract_weight_integer() {
+        let props = rmpv::Value::Map(vec![(
+            rmpv::Value::String("weight".into()),
+            rmpv::Value::Integer(rmpv::Integer::from(42)),
+        )]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &props).unwrap();
+        assert_eq!(extract_weight_from_properties(&buf), 42.0);
+    }
+
+    #[test]
+    fn extract_weight_missing_key() {
+        let props = rmpv::Value::Map(vec![(
+            rmpv::Value::String("color".into()),
+            rmpv::Value::String("red".into()),
+        )]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &props).unwrap();
+        assert_eq!(extract_weight_from_properties(&buf), 1.0);
     }
 }

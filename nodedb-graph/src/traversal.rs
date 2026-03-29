@@ -1,7 +1,12 @@
 //! Graph traversal algorithms on the CSR index.
 //!
 //! BFS, bidirectional shortest path, and subgraph materialization.
-//! Max-visited cap prevents supernode fan-out explosion.
+//! All algorithms respect a max-visited cap to prevent supernode fan-out
+//! explosion from consuming unbounded memory.
+//!
+//! Access tracking and prefetch hints are integrated: each traversal records
+//! node access for hot/cold partition decisions, and prefetches frontier
+//! neighbors for cache efficiency.
 
 use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 
@@ -39,12 +44,16 @@ impl CsrIndex {
                 continue;
             }
 
+            // Track access for hot/cold partition decisions.
+            self.record_access(node_id);
+
             if matches!(direction, Direction::Out | Direction::Both) {
                 for (lid, dst) in self.iter_out_edges(node_id) {
                     if label_id.is_none_or(|f| f == lid)
                         && visited.len() < max_visited
                         && visited.insert(dst)
                     {
+                        self.prefetch_node(dst);
                         queue.push_back((dst, depth + 1));
                     }
                 }
@@ -55,6 +64,7 @@ impl CsrIndex {
                         && visited.len() < max_visited
                         && visited.insert(src)
                     {
+                        self.prefetch_node(src);
                         queue.push_back((src, depth + 1));
                     }
                 }
@@ -181,6 +191,7 @@ impl CsrIndex {
 
             let mut next_fwd = Vec::new();
             for &node in &fwd_frontier {
+                self.record_access(node);
                 for (lid, neighbor) in self.iter_out_edges(node) {
                     if label_id.is_none_or(|f| f == lid) {
                         if let Entry::Vacant(e) = fwd_parent.entry(neighbor) {
@@ -197,6 +208,7 @@ impl CsrIndex {
 
             let mut next_bwd = Vec::new();
             for &node in &bwd_frontier {
+                self.record_access(node);
                 for (lid, neighbor) in self.iter_in_edges(node) {
                     if label_id.is_none_or(|f| f == lid) {
                         if let Entry::Vacant(e) = bwd_parent.entry(neighbor) {
@@ -282,6 +294,7 @@ impl CsrIndex {
             if depth >= max_depth || visited.len() >= max_visited {
                 continue;
             }
+            self.record_access(node_id);
             for (lid, dst) in self.iter_out_edges(node_id) {
                 if label_id.is_none_or(|f| f == lid) {
                     edges.push((
@@ -408,7 +421,6 @@ mod tests {
     #[test]
     fn large_graph_bfs() {
         let mut csr = CsrIndex::new();
-        // Chain of 1000 nodes.
         for i in 0..999 {
             csr.add_edge(&format!("n{i}"), "NEXT", &format!("n{}", i + 1));
         }
@@ -421,12 +433,11 @@ mod tests {
             100,
             DEFAULT_MAX_VISITED,
         );
-        // Should find n0..n100 (101 nodes within 100 hops).
         assert_eq!(result.len(), 101);
 
         let path = csr
             .shortest_path("n0", "n50", Some("NEXT"), 100, DEFAULT_MAX_VISITED)
             .unwrap();
-        assert_eq!(path.len(), 51); // n0, n1, ..., n50
+        assert_eq!(path.len(), 51);
     }
 }

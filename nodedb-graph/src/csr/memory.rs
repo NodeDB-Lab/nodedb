@@ -55,9 +55,6 @@ impl CsrIndex {
     #[inline]
     pub fn prefetch_node(&self, node_id: u32) {
         let idx = node_id as usize;
-        // For in-memory CSR: prefetch the offset entry into L1 cache.
-        // This is a software prefetch hint — no-op on cache hit, ~200ns
-        // savings on cache miss for large graphs.
         if idx + 1 < self.out_offsets.len() {
             // SAFETY: We're just hinting the CPU to load this address.
             // The offset is within bounds (checked above). This is a
@@ -93,7 +90,7 @@ impl CsrIndex {
     ) -> (usize, usize) {
         if utilization >= spill_threshold {
             // Above spill threshold: identify cold nodes to demote.
-            let cold = self.cold_nodes(0); // nodes with zero access
+            let cold = self.cold_nodes(0);
             (cold.len(), 0)
         } else if utilization <= restore_threshold {
             // Below restore threshold: all nodes can stay hot.
@@ -128,5 +125,64 @@ impl CsrIndex {
         let interning = self.id_to_node.iter().map(|s| s.len() + 24).sum::<usize>()
             + self.id_to_label.iter().map(|s| s.len() + 24).sum::<usize>();
         offsets + targets + labels + weights + buffer + buffer_weights + interning
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_tracking() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "L", "b");
+        csr.add_edge("b", "L", "c");
+
+        let a_id = csr.node_id("a").unwrap();
+        assert_eq!(csr.hot_node_count(), 0);
+
+        csr.record_access(a_id);
+        csr.record_access(a_id);
+        assert_eq!(csr.hot_node_count(), 1);
+
+        let cold = csr.cold_nodes(0);
+        assert!(!cold.contains(&a_id));
+        assert_eq!(cold.len(), 2); // b and c
+
+        csr.reset_access_counts();
+        assert_eq!(csr.hot_node_count(), 0);
+    }
+
+    #[test]
+    fn memory_estimation_includes_weights() {
+        let mut unweighted = CsrIndex::new();
+        unweighted.add_edge("a", "L", "b");
+
+        let mut weighted = CsrIndex::new();
+        weighted.add_edge_weighted("a", "L", "b", 5.0);
+
+        // Weighted graph uses more memory.
+        assert!(weighted.estimated_memory_bytes() >= unweighted.estimated_memory_bytes());
+    }
+
+    #[test]
+    fn evaluate_memory_pressure_hysteresis() {
+        let mut csr = CsrIndex::new();
+        csr.add_edge("a", "L", "b");
+
+        // Above spill threshold.
+        let (demote, promote) = csr.evaluate_memory_pressure(95, 90, 75);
+        assert!(demote > 0);
+        assert_eq!(promote, 0);
+
+        // Below restore threshold.
+        let (demote, promote) = csr.evaluate_memory_pressure(60, 90, 75);
+        assert_eq!(demote, 0);
+        assert!(promote > 0);
+
+        // In hysteresis band.
+        let (demote, promote) = csr.evaluate_memory_pressure(80, 90, 75);
+        assert_eq!(demote, 0);
+        assert_eq!(promote, 0);
     }
 }
