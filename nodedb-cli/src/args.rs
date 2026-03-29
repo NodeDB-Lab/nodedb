@@ -7,7 +7,12 @@ use clap::{Parser, ValueEnum};
 use crate::config::CliConfig;
 
 #[derive(Parser)]
-#[command(name = "ndb", about = "NodeDB terminal client", version, disable_help_flag = true)]
+#[command(
+    name = "ndb",
+    about = "NodeDB terminal client",
+    version,
+    disable_help_flag = true
+)]
 pub struct CliArgs {
     /// Server host.
     #[arg(short = 'h', long, default_value = "127.0.0.1")]

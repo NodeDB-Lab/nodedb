@@ -51,7 +51,11 @@ fn apply_port_env(var: &str, target: &mut u16) {
     if let Ok(val) = std::env::var(var) {
         match val.trim().parse::<u16>() {
             Ok(port) => {
-                tracing::info!(env_var = var, value = port, "environment variable override applied");
+                tracing::info!(
+                    env_var = var,
+                    value = port,
+                    "environment variable override applied"
+                );
                 *target = port;
             }
             Err(_) => {
@@ -70,7 +74,11 @@ fn apply_optional_port_env(var: &str, target: &mut Option<u16>) {
     if let Ok(val) = std::env::var(var) {
         match val.trim().parse::<u16>() {
             Ok(port) => {
-                tracing::info!(env_var = var, value = port, "environment variable override applied");
+                tracing::info!(
+                    env_var = var,
+                    value = port,
+                    "environment variable override applied"
+                );
                 *target = Some(port);
             }
             Err(_) => {
@@ -89,11 +97,19 @@ fn apply_bool_env(var: &str, target: &mut bool) {
     if let Ok(val) = std::env::var(var) {
         match val.trim().to_lowercase().as_str() {
             "true" | "1" | "yes" => {
-                tracing::info!(env_var = var, value = true, "environment variable override applied");
+                tracing::info!(
+                    env_var = var,
+                    value = true,
+                    "environment variable override applied"
+                );
                 *target = true;
             }
             "false" | "0" | "no" => {
-                tracing::info!(env_var = var, value = false, "environment variable override applied");
+                tracing::info!(
+                    env_var = var,
+                    value = false,
+                    "environment variable override applied"
+                );
                 *target = false;
             }
             _ => {

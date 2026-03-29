@@ -43,7 +43,11 @@ impl IlpListener {
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> crate::Result<()> {
-        let tls_label = if tls_acceptor.is_some() { "tls" } else { "plain" };
+        let tls_label = if tls_acceptor.is_some() {
+            "tls"
+        } else {
+            "plain"
+        };
         info!(addr = %self.addr, tls = tls_label, "ILP listener accepting connections");
 
         let mut connections = tokio::task::JoinSet::new();

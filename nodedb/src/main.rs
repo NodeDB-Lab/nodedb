@@ -350,8 +350,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Bind all listeners before starting accept loops.
-    let listener =
-        nodedb::control::server::listener::Listener::bind(config.native_addr()).await?;
+    let listener = nodedb::control::server::listener::Listener::bind(config.native_addr()).await?;
     let pg_listener =
         nodedb::control::server::pgwire::listener::PgListener::bind(config.pgwire_addr()).await?;
     let ilp_listener = if let Some(ilp_addr) = config.ilp_addr() {
@@ -441,11 +440,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Per-protocol TLS: returns the acceptor only if the protocol flag is true.
     let tls_for = |enabled: bool| -> Option<tokio_rustls::TlsAcceptor> {
-        if enabled {
-            base_acceptor.clone()
-        } else {
-            None
-        }
+        if enabled { base_acceptor.clone() } else { None }
     };
     let tls_flags = config.tls.as_ref();
     let pgwire_tls_enabled = tls_flags.map_or(false, |t| t.pgwire);
