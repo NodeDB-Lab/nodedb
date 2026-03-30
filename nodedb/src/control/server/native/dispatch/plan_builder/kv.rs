@@ -151,3 +151,49 @@ fn require_key_bytes(fields: &TextFields) -> crate::Result<Vec<u8>> {
         detail: "missing 'document_id' or 'key'".to_string(),
     })
 }
+
+pub(crate) fn build_register_index(
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    let field = fields
+        .field
+        .as_ref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'field'".to_string(),
+        })?
+        .clone();
+    let field_position = fields.field_position.unwrap_or(0) as usize;
+    let backfill = fields.backfill.unwrap_or(true);
+
+    Ok(PhysicalPlan::Kv(KvOp::RegisterIndex {
+        collection: collection.to_string(),
+        field,
+        field_position,
+        backfill,
+    }))
+}
+
+pub(crate) fn build_drop_index(
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    let field = fields
+        .field
+        .as_ref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'field'".to_string(),
+        })?
+        .clone();
+
+    Ok(PhysicalPlan::Kv(KvOp::DropIndex {
+        collection: collection.to_string(),
+        field,
+    }))
+}
+
+pub(crate) fn build_truncate(collection: &str) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::Truncate {
+        collection: collection.to_string(),
+    }))
+}

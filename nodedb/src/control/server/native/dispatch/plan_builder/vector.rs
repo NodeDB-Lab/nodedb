@@ -111,3 +111,30 @@ pub(crate) fn build_delete(fields: &TextFields, collection: &str) -> crate::Resu
         vector_id,
     }))
 }
+
+pub(crate) fn build_set_params(
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    let m = fields.m.unwrap_or(16) as usize;
+    let ef_construction = fields.ef_construction.unwrap_or(200) as usize;
+    let metric = fields
+        .metric
+        .clone()
+        .unwrap_or_else(|| "cosine".to_string());
+    let index_type = fields
+        .index_type
+        .clone()
+        .unwrap_or_else(|| "hnsw".to_string());
+
+    Ok(PhysicalPlan::Vector(VectorOp::SetParams {
+        collection: collection.to_string(),
+        m,
+        ef_construction,
+        metric,
+        index_type,
+        pq_m: 0,
+        ivf_cells: 0,
+        ivf_nprobe: 0,
+    }))
+}

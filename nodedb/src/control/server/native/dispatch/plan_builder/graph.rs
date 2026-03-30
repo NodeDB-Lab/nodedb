@@ -163,3 +163,65 @@ pub(crate) fn build_edge_delete(fields: &TextFields) -> crate::Result<PhysicalPl
         dst_id: dst.clone(),
     }))
 }
+
+pub(crate) fn build_algo(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+    let algo_name = fields
+        .algorithm
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'algorithm'".to_string(),
+        })?;
+
+    let algorithm = match algo_name.to_lowercase().as_str() {
+        "pagerank" => crate::engine::graph::algo::params::GraphAlgorithm::PageRank,
+        "wcc" => crate::engine::graph::algo::params::GraphAlgorithm::Wcc,
+        "label_propagation" => crate::engine::graph::algo::params::GraphAlgorithm::LabelPropagation,
+        "lcc" => crate::engine::graph::algo::params::GraphAlgorithm::Lcc,
+        "sssp" => crate::engine::graph::algo::params::GraphAlgorithm::Sssp,
+        "betweenness" => crate::engine::graph::algo::params::GraphAlgorithm::Betweenness,
+        "closeness" => crate::engine::graph::algo::params::GraphAlgorithm::Closeness,
+        "harmonic" => crate::engine::graph::algo::params::GraphAlgorithm::Harmonic,
+        "degree" => crate::engine::graph::algo::params::GraphAlgorithm::Degree,
+        "louvain" => crate::engine::graph::algo::params::GraphAlgorithm::Louvain,
+        "triangles" => crate::engine::graph::algo::params::GraphAlgorithm::Triangles,
+        "diameter" => crate::engine::graph::algo::params::GraphAlgorithm::Diameter,
+        "kcore" => crate::engine::graph::algo::params::GraphAlgorithm::KCore,
+        other => {
+            return Err(crate::Error::BadRequest {
+                detail: format!("unknown graph algorithm: {other}"),
+            });
+        }
+    };
+
+    let params = crate::engine::graph::algo::params::AlgoParams {
+        collection: collection.to_string(),
+        source_node: fields.start_node.clone(),
+        max_iterations: fields.depth.map(|d| d as usize),
+        tolerance: None,
+        damping: None,
+        sample_size: None,
+        direction: fields.direction.clone(),
+        resolution: None,
+        mode: None,
+    };
+
+    Ok(PhysicalPlan::Graph(GraphOp::Algo { algorithm, params }))
+}
+
+pub(crate) fn build_match(fields: &TextFields, _collection: &str) -> crate::Result<PhysicalPlan> {
+    let query_str = fields
+        .match_query
+        .as_ref()
+        .or(fields.sql.as_ref())
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'match_query'".to_string(),
+        })?;
+
+    // Serialize the MATCH query string as MessagePack for the Data Plane.
+    let query = rmp_serde::to_vec(query_str).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("match query serialization: {e}"),
+    })?;
+
+    Ok(PhysicalPlan::Graph(GraphOp::Match { query }))
+}

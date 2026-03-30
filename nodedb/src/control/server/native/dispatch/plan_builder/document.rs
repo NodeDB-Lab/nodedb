@@ -224,3 +224,72 @@ pub(crate) fn build_bulk_delete(
         filters,
     }))
 }
+
+pub(crate) fn build_truncate(collection: &str) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Document(DocumentOp::Truncate {
+        collection: collection.to_string(),
+    }))
+}
+
+pub(crate) fn build_estimate_count(
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    let field = fields.field.as_deref().unwrap_or("id").to_string();
+
+    Ok(PhysicalPlan::Document(DocumentOp::EstimateCount {
+        collection: collection.to_string(),
+        field,
+    }))
+}
+
+pub(crate) fn build_insert_select(
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    let source = fields
+        .source_collection
+        .as_ref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'source_collection'".to_string(),
+        })?
+        .clone();
+    let filters = fields.filters.clone().unwrap_or_default();
+    let limit = fields.limit.unwrap_or(10_000) as usize;
+
+    Ok(PhysicalPlan::Document(DocumentOp::InsertSelect {
+        target_collection: collection.to_string(),
+        source_collection: source,
+        source_filters: filters,
+        source_limit: limit,
+    }))
+}
+
+pub(crate) fn build_register(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+    let index_paths = fields.index_paths.clone().unwrap_or_default();
+
+    Ok(PhysicalPlan::Document(DocumentOp::Register {
+        collection: collection.to_string(),
+        index_paths,
+        crdt_enabled: false,
+        storage_mode: crate::bridge::physical_plan::StorageMode::Schemaless,
+    }))
+}
+
+pub(crate) fn build_drop_index(
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
+    let field = fields
+        .field
+        .as_ref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'field'".to_string(),
+        })?
+        .clone();
+
+    Ok(PhysicalPlan::Document(DocumentOp::DropIndex {
+        collection: collection.to_string(),
+        field,
+    }))
+}

@@ -55,6 +55,8 @@ pub enum OpCode {
     GraphSubgraph = 0x53,
     EdgePut = 0x54,
     EdgeDelete = 0x55,
+    GraphAlgo = 0x56,
+    GraphMatch = 0x57,
 
     // ── Spatial operations (direct Data Plane dispatch) ────────
     SpatialScan = 0x19,
@@ -92,6 +94,28 @@ pub enum OpCode {
     VectorInsert = 0x7F,
     VectorMultiSearch = 0x80,
     VectorDelete = 0x81,
+
+    // ── Columnar operations ─────────────────────────────────────
+    ColumnarScan = 0x82,
+    ColumnarInsert = 0x83,
+
+    // ── Query operations ────────────────────────────────────────
+    RecursiveScan = 0x84,
+
+    // ── Document DDL operations ─────────────────────────────────
+    DocumentTruncate = 0x85,
+    DocumentEstimateCount = 0x86,
+    DocumentInsertSelect = 0x87,
+    DocumentRegister = 0x88,
+    DocumentDropIndex = 0x89,
+
+    // ── KV DDL operations ───────────────────────────────────────
+    KvRegisterIndex = 0x8A,
+    KvDropIndex = 0x8B,
+    KvTruncate = 0x8C,
+
+    // ── Vector DDL operations ───────────────────────────────────
+    VectorSetParams = 0x8D,
 }
 
 impl OpCode {
@@ -118,6 +142,15 @@ impl OpCode {
                 | OpCode::DocumentBulkDelete
                 | OpCode::VectorInsert
                 | OpCode::VectorDelete
+                | OpCode::ColumnarInsert
+                | OpCode::DocumentTruncate
+                | OpCode::DocumentInsertSelect
+                | OpCode::DocumentRegister
+                | OpCode::DocumentDropIndex
+                | OpCode::KvRegisterIndex
+                | OpCode::KvDropIndex
+                | OpCode::KvTruncate
+                | OpCode::VectorSetParams
         )
     }
 }
@@ -369,6 +402,47 @@ pub struct TextFields {
     // ── Collection policy ────────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy: Option<serde_json::Value>,
+
+    // ── Graph algorithm/match ───────────────────────────────
+    /// Algorithm name for GraphAlgo (e.g., "pagerank", "wcc", "sssp").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algorithm: Option<String>,
+    /// Cypher-subset MATCH query string for GraphMatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_query: Option<String>,
+    /// Algorithm-specific parameters (JSON object).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algo_params: Option<serde_json::Value>,
+
+    // ── Document DDL ────────────────────────────────────────
+    /// Index paths for DocumentRegister.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_paths: Option<Vec<String>>,
+    /// Source collection for InsertSelect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_collection: Option<String>,
+
+    // ── KV DDL ──────────────────────────────────────────────
+    /// Field position in tuple for KvRegisterIndex.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_position: Option<u64>,
+    /// Whether to backfill existing keys on index creation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<bool>,
+
+    // ── Vector DDL ──────────────────────────────────────────
+    /// HNSW M parameter (max connections per layer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub m: Option<u64>,
+    /// HNSW ef_construction parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef_construction: Option<u64>,
+    /// Distance metric name ("cosine", "euclidean", "dot").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+    /// Index type ("hnsw", "ivfpq", "flat").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_type: Option<String>,
 }
 
 /// A single vector in a batch insert.

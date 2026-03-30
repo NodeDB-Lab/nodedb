@@ -8,6 +8,7 @@ pub(crate) mod crdt;
 pub(crate) mod document;
 pub(crate) mod graph;
 pub(crate) mod kv;
+pub(crate) mod query;
 pub(crate) mod spatial;
 pub(crate) mod text;
 pub(crate) mod timeseries;
@@ -74,7 +75,25 @@ pub(crate) fn build_plan(
         OpCode::TimeseriesScan => timeseries::build_scan(fields, collection),
         OpCode::TimeseriesIngest => timeseries::build_ingest(fields, collection),
         // Columnar.
-        // (future: ColumnarScan, ColumnarInsert opcodes)
+        OpCode::ColumnarScan => columnar::build_scan(fields, collection),
+        OpCode::ColumnarInsert => columnar::build_insert(fields, collection),
+        // Graph DDL.
+        OpCode::GraphAlgo => graph::build_algo(fields, collection),
+        OpCode::GraphMatch => graph::build_match(fields, collection),
+        // Document DDL.
+        OpCode::DocumentTruncate => document::build_truncate(collection),
+        OpCode::DocumentEstimateCount => document::build_estimate_count(fields, collection),
+        OpCode::DocumentInsertSelect => document::build_insert_select(fields, collection),
+        OpCode::DocumentRegister => document::build_register(fields, collection),
+        OpCode::DocumentDropIndex => document::build_drop_index(fields, collection),
+        // KV DDL.
+        OpCode::KvRegisterIndex => kv::build_register_index(fields, collection),
+        OpCode::KvDropIndex => kv::build_drop_index(fields, collection),
+        OpCode::KvTruncate => kv::build_truncate(collection),
+        // Vector DDL.
+        OpCode::VectorSetParams => vector::build_set_params(fields, collection),
+        // Query.
+        OpCode::RecursiveScan => query::build_recursive_scan(fields, collection),
         _ => Err(crate::Error::BadRequest {
             detail: format!("operation {op:?} not supported as direct dispatch"),
         }),

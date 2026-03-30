@@ -290,7 +290,21 @@ impl NativeSession {
             | OpCode::DocumentBulkDelete
             | OpCode::VectorInsert
             | OpCode::VectorMultiSearch
-            | OpCode::VectorDelete => dispatch::handle_direct_op(&ctx, seq, op, fields).await,
+            | OpCode::VectorDelete
+            | OpCode::GraphAlgo
+            | OpCode::GraphMatch
+            | OpCode::ColumnarScan
+            | OpCode::ColumnarInsert
+            | OpCode::RecursiveScan
+            | OpCode::DocumentTruncate
+            | OpCode::DocumentEstimateCount
+            | OpCode::DocumentInsertSelect
+            | OpCode::DocumentRegister
+            | OpCode::DocumentDropIndex
+            | OpCode::KvRegisterIndex
+            | OpCode::KvDropIndex
+            | OpCode::KvTruncate
+            | OpCode::VectorSetParams => dispatch::handle_direct_op(&ctx, seq, op, fields).await,
 
             // Batch ops: direct Data Plane dispatch.
             OpCode::VectorBatchInsert | OpCode::DocumentBatchInsert => {
