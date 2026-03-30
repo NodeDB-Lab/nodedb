@@ -170,6 +170,7 @@ pub fn spawn_core(
     num_cores: usize,
     compaction_config: CoreCompactionConfig,
     system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
+    event_producer: Option<crate::event::bus::EventProducer>,
 ) -> std::io::Result<(JoinHandle<()>, EventFdNotifier)> {
     let data_dir = data_dir.to_path_buf();
 
@@ -193,6 +194,11 @@ pub fn spawn_core(
             // 2b. Apply metrics reference.
             if let Some(m) = system_metrics {
                 core.set_metrics(m);
+            }
+
+            // 2b. Wire Event Plane producer (Data Plane → Event Plane).
+            if let Some(ep) = event_producer {
+                core.set_event_producer(ep);
             }
 
             // 2c. Apply compaction config.

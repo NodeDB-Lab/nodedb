@@ -129,6 +129,17 @@ impl CoreLoop {
         }
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
+
+        // Emit write event to Event Plane (after successful commit).
+        self.emit_write_event(
+            task,
+            collection,
+            crate::event::WriteOp::Insert,
+            document_id,
+            Some(value),
+            None,
+        );
+
         self.response_ok(task)
     }
 
@@ -190,6 +201,17 @@ impl CoreLoop {
                 self.doc_cache.invalidate(tid, collection, document_id);
 
                 self.checkpoint_coordinator.mark_dirty("sparse", 1);
+
+                // Emit delete event to Event Plane.
+                self.emit_write_event(
+                    task,
+                    collection,
+                    crate::event::WriteOp::Delete,
+                    document_id,
+                    None,
+                    None, // old_value: would require reading before delete; future batch adds this.
+                );
+
                 self.response_ok(task)
             }
             Err(e) => self.response_error(
@@ -314,6 +336,17 @@ impl CoreLoop {
                     Ok(()) => {
                         self.doc_cache
                             .put(tid, collection, document_id, &updated_bytes);
+
+                        // Emit update event to Event Plane.
+                        self.emit_write_event(
+                            task,
+                            collection,
+                            crate::event::WriteOp::Update,
+                            document_id,
+                            Some(&updated_bytes),
+                            Some(&current_bytes),
+                        );
+
                         self.response_ok(task)
                     }
                     Err(e) => self.response_error(

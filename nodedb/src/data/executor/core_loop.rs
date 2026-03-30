@@ -177,6 +177,14 @@ pub struct CoreLoop {
 
     /// Shared system metrics — Arc is safe for `!Send` since all fields are atomic.
     pub(in crate::data::executor) metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
+
+    /// Event bus producer: emits WriteEvents to the Event Plane.
+    /// One per core, `!Send` once pinned. `None` if Event Plane is disabled.
+    pub(in crate::data::executor) event_producer: Option<crate::event::bus::EventProducer>,
+
+    /// Monotonic sequence counter for events emitted by this core.
+    /// Incremented on every successful event emission.
+    pub(in crate::data::executor) event_sequence: u64,
 }
 
 impl CoreLoop {
@@ -258,6 +266,8 @@ impl CoreLoop {
                 &nodedb_types::config::tuning::KvTuning::default(),
             ),
             metrics: None,
+            event_producer: None,
+            event_sequence: 0,
         })
     }
 
@@ -303,6 +313,49 @@ impl CoreLoop {
             self.doc_cache = DocCache::new(tuning.doc_cache_entries);
         }
         self.query_tuning = tuning;
+    }
+
+    /// Set the Event Plane producer (called after open, before event loop).
+    pub fn set_event_producer(&mut self, producer: crate::event::bus::EventProducer) {
+        self.event_producer = Some(producer);
+    }
+
+    /// Emit a write event to the Event Plane.
+    ///
+    /// Called after a successful write (PointPut, PointDelete, PointUpdate,
+    /// BatchInsert, BulkDelete, etc.). The Data Plane NEVER blocks here —
+    /// if the ring buffer is full, the event is dropped and the Event Plane
+    /// will detect the gap via sequence numbers and replay from WAL.
+    pub(in crate::data::executor) fn emit_write_event(
+        &mut self,
+        task: &super::task::ExecutionTask,
+        collection: &str,
+        op: crate::event::WriteOp,
+        row_id: &str,
+        new_value: Option<&[u8]>,
+        old_value: Option<&[u8]>,
+    ) {
+        let producer = match self.event_producer.as_mut() {
+            Some(p) => p,
+            None => return, // Event Plane not configured.
+        };
+
+        self.event_sequence += 1;
+
+        let event = crate::event::WriteEvent {
+            sequence: self.event_sequence,
+            collection: Arc::from(collection),
+            op,
+            row_id: crate::event::types::RowId::new(row_id),
+            lsn: self.watermark,
+            tenant_id: task.request.tenant_id,
+            vshard_id: task.request.vshard_id,
+            source: crate::event::EventSource::User,
+            new_value: new_value.map(Arc::from),
+            old_value: old_value.map(Arc::from),
+        };
+
+        producer.emit(event);
     }
 
     /// Apply secondary index extraction for a document.

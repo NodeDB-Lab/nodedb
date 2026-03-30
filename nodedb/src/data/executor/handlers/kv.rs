@@ -146,6 +146,18 @@ impl CoreLoop {
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
         }
+
+        // Emit write event to Event Plane.
+        let key_str = String::from_utf8_lossy(key);
+        self.emit_write_event(
+            task,
+            collection,
+            crate::event::WriteOp::Insert,
+            &key_str,
+            Some(value),
+            None,
+        );
+
         self.response_ok(task)
     }
 
@@ -217,6 +229,22 @@ impl CoreLoop {
         if let Some(ref m) = self.metrics {
             m.record_kv_delete();
         }
+
+        // Emit delete events to Event Plane (one per deleted key).
+        if count > 0 {
+            for key in keys {
+                let key_str = String::from_utf8_lossy(key);
+                self.emit_write_event(
+                    task,
+                    collection,
+                    crate::event::WriteOp::Delete,
+                    &key_str,
+                    None,
+                    None,
+                );
+            }
+        }
+
         let payload = serde_json::json!({ "deleted": count })
             .to_string()
             .into_bytes();

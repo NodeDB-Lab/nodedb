@@ -125,7 +125,25 @@ impl CoreLoop {
         let count = batch.len();
         for task in &batch {
             let response = match &commit_result {
-                Ok(()) => self.response_ok(task),
+                Ok(()) => {
+                    // Emit write event for each successful batched PointPut.
+                    if let PhysicalPlan::Document(DocumentOp::PointPut {
+                        collection,
+                        document_id,
+                        value,
+                    }) = task.plan()
+                    {
+                        self.emit_write_event(
+                            task,
+                            collection,
+                            crate::event::WriteOp::Insert,
+                            document_id,
+                            Some(value),
+                            None,
+                        );
+                    }
+                    self.response_ok(task)
+                }
                 Err(e) => self.response_error(
                     task,
                     ErrorCode::Internal {

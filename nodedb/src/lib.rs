@@ -4,6 +4,7 @@ pub mod control;
 pub mod data;
 pub mod engine;
 pub mod error;
+pub mod event;
 pub mod memory;
 pub mod query;
 pub mod storage;

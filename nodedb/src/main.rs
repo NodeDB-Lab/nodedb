@@ -146,8 +146,11 @@ async fn main() -> anyhow::Result<()> {
     let num_cores = config.data_plane_cores;
     let (mut dispatcher, data_sides) = Dispatcher::new(num_cores, 1024);
 
+    // Create Event Bus: per-core ring buffers (Data Plane → Event Plane).
+    let (event_producers, event_consumers) = nodedb::event::bus::create_event_bus(num_cores);
+
     // Start Data Plane cores on dedicated OS threads (thread-per-core).
-    // Each core gets: jemalloc arena pinning + eventfd-driven wake + WAL replay.
+    // Each core gets: jemalloc arena pinning + eventfd-driven wake + WAL replay + event producer.
     let compaction_cfg = nodedb::data::runtime::CoreCompactionConfig {
         interval: config.checkpoint.compaction_interval(),
         tombstone_threshold: config.checkpoint.compaction_tombstone_threshold,
@@ -156,7 +159,9 @@ async fn main() -> anyhow::Result<()> {
     let system_metrics = Arc::new(nodedb::control::metrics::SystemMetrics::new());
     let mut core_handles = Vec::with_capacity(num_cores);
     let mut notifiers = Vec::with_capacity(num_cores);
-    for (core_id, data_side) in data_sides.into_iter().enumerate() {
+    for (core_id, (data_side, event_producer)) in
+        data_sides.into_iter().zip(event_producers).enumerate()
+    {
         let (handle, notifier) = spawn_core(
             core_id,
             data_side.request_rx,
@@ -166,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
             num_cores,
             compaction_cfg.clone(),
             Some(Arc::clone(&system_metrics)),
+            Some(event_producer),
         )?;
         core_handles.push(handle);
         notifiers.push((core_id, notifier));
@@ -177,6 +183,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!(num_cores, "data plane cores running (eventfd-driven)");
+
+    // Spawn Event Plane: one consumer Tokio task per Data Plane core.
+    // Kept alive until process exit — Drop impl signals consumers to stop.
+    let _event_plane = nodedb::event::EventPlane::spawn(event_consumers);
+    info!(num_cores, "event plane running");
 
     // Initialize cluster mode if configured.
     let cluster_handle = if let Some(ref cluster_cfg) = config.cluster {
