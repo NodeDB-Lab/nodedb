@@ -9,9 +9,7 @@ use std::sync::Arc;
 use nodedb_types::protocol::{OpCode, TextFields};
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::{
-    CrdtOp, DocumentOp, KvOp, SpatialOp, SpatialPredicate, TextOp, TimeseriesOp, VectorOp,
-};
+use crate::bridge::physical_plan::{CrdtOp, DocumentOp, KvOp, TextOp, TimeseriesOp, VectorOp};
 
 use super::DispatchCtx;
 
@@ -43,11 +41,39 @@ pub(crate) fn build_plan(
         OpCode::GraphSubgraph => super::plan_builder_graph::build_graph_subgraph(fields),
         OpCode::EdgePut => super::plan_builder_graph::build_edge_put(fields),
         OpCode::EdgeDelete => super::plan_builder_graph::build_edge_delete(fields),
-        OpCode::SpatialScan => build_spatial_scan(fields, collection),
+        OpCode::SpatialScan => super::plan_builder_spatial::build_spatial_scan(fields, collection),
         OpCode::TextSearch => build_text_search(fields, collection),
         OpCode::HybridSearch => build_hybrid_search(fields, collection),
         OpCode::VectorBatchInsert => build_vector_batch_insert(fields, collection),
         OpCode::DocumentBatchInsert => build_document_batch_insert(fields, collection),
+        // Timeseries.
+        OpCode::TimeseriesScan => build_timeseries_scan(fields, collection),
+        OpCode::TimeseriesIngest => build_timeseries_ingest(fields, collection),
+        // KV advanced.
+        OpCode::KvScan => super::plan_builder_kv::build_kv_scan(fields, collection),
+        OpCode::KvExpire => super::plan_builder_kv::build_kv_expire(fields, collection),
+        OpCode::KvPersist => super::plan_builder_kv::build_kv_persist(fields, collection),
+        OpCode::KvGetTtl => super::plan_builder_kv::build_kv_get_ttl(fields, collection),
+        OpCode::KvBatchGet => super::plan_builder_kv::build_kv_batch_get(fields, collection),
+        OpCode::KvBatchPut => super::plan_builder_kv::build_kv_batch_put(fields, collection),
+        OpCode::KvFieldGet => super::plan_builder_kv::build_kv_field_get(fields, collection),
+        OpCode::KvFieldSet => super::plan_builder_kv::build_kv_field_set(fields, collection),
+        // Document advanced.
+        OpCode::DocumentUpdate => super::plan_builder_doc::build_doc_update(fields, collection),
+        OpCode::DocumentScan => super::plan_builder_doc::build_doc_scan(fields, collection),
+        OpCode::DocumentUpsert => super::plan_builder_doc::build_doc_upsert(fields, collection),
+        OpCode::DocumentBulkUpdate => {
+            super::plan_builder_doc::build_doc_bulk_update(fields, collection)
+        }
+        OpCode::DocumentBulkDelete => {
+            super::plan_builder_doc::build_doc_bulk_delete(fields, collection)
+        }
+        // Vector advanced.
+        OpCode::VectorInsert => super::plan_builder_vector::build_vector_insert(fields, collection),
+        OpCode::VectorMultiSearch => {
+            super::plan_builder_vector::build_vector_multi_search(fields, collection)
+        }
+        OpCode::VectorDelete => super::plan_builder_vector::build_vector_delete(fields, collection),
         _ => Err(crate::Error::BadRequest {
             detail: format!("operation {op:?} not supported as direct dispatch"),
         }),
@@ -390,10 +416,14 @@ fn build_document_batch_insert(
     let documents: Vec<(String, Vec<u8>)> = batch_docs
         .iter()
         .map(|d| {
-            let value_bytes = serde_json::to_vec(&d.fields).unwrap_or_default();
-            (d.id.clone(), value_bytes)
+            let value_bytes =
+                serde_json::to_vec(&d.fields).map_err(|e| crate::Error::Serialization {
+                    format: "json".into(),
+                    detail: format!("failed to serialize document '{}': {e}", d.id),
+                })?;
+            Ok((d.id.clone(), value_bytes))
         })
-        .collect();
+        .collect::<crate::Result<Vec<_>>>()?;
 
     Ok(PhysicalPlan::Document(DocumentOp::BatchInsert {
         collection: collection.to_string(),
@@ -402,45 +432,49 @@ fn build_document_batch_insert(
 }
 
 // ---------------------------------------------------------------------------
-// Spatial scan
+// Timeseries
 // ---------------------------------------------------------------------------
 
-fn build_spatial_scan(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
-    let query_geometry = fields
-        .query_geometry
+fn build_timeseries_scan(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+    let start = fields.time_range_start.unwrap_or(0);
+    let end = fields.time_range_end.unwrap_or(i64::MAX);
+    let limit = fields.limit.unwrap_or(10_000) as usize;
+    let bucket_interval_ms = fields
+        .bucket_interval
+        .as_deref()
+        .map(|s| {
+            nodedb_types::kv_parsing::parse_interval_to_ms(s)
+                .map(|ms| ms as i64)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    Ok(PhysicalPlan::Timeseries(TimeseriesOp::Scan {
+        collection: collection.to_string(),
+        time_range: (start, end),
+        projection: Vec::new(),
+        limit,
+        filters: Vec::new(),
+        bucket_interval_ms,
+        rls_filters: Vec::new(),
+    }))
+}
+
+fn build_timeseries_ingest(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+    let payload = fields
+        .payload
         .as_ref()
+        .or(fields.data.as_ref())
         .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'query_geometry'".to_string(),
+            detail: "missing 'payload' or 'data'".to_string(),
         })?
         .clone();
+    let format = fields.format.as_deref().unwrap_or("ilp").to_string();
 
-    let predicate_str = fields.spatial_predicate.as_deref().unwrap_or("dwithin");
-    let predicate = match predicate_str.to_lowercase().as_str() {
-        "dwithin" => SpatialPredicate::DWithin,
-        "contains" => SpatialPredicate::Contains,
-        "intersects" => SpatialPredicate::Intersects,
-        "within" => SpatialPredicate::Within,
-        other => {
-            return Err(crate::Error::BadRequest {
-                detail: format!("unknown spatial predicate: {other}"),
-            });
-        }
-    };
-
-    let distance_meters = fields.distance_meters.unwrap_or(0.0);
-    let field = fields.field.clone().unwrap_or_else(|| "geom".to_string());
-    let limit = fields.limit.unwrap_or(1000) as usize;
-
-    Ok(PhysicalPlan::Spatial(SpatialOp::Scan {
+    Ok(PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
         collection: collection.to_string(),
-        field,
-        predicate,
-        query_geometry,
-        distance_meters,
-        attribute_filters: Vec::new(),
-        limit,
-        projection: Vec::new(),
-        rls_filters: Vec::new(),
+        payload,
+        format,
     }))
 }
 

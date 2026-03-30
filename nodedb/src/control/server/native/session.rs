@@ -272,7 +272,25 @@ impl NativeSession {
             | OpCode::EdgeDelete
             | OpCode::TextSearch
             | OpCode::HybridSearch
-            | OpCode::SpatialScan => dispatch::handle_direct_op(&ctx, seq, op, fields).await,
+            | OpCode::SpatialScan
+            | OpCode::TimeseriesScan
+            | OpCode::TimeseriesIngest
+            | OpCode::KvScan
+            | OpCode::KvExpire
+            | OpCode::KvPersist
+            | OpCode::KvGetTtl
+            | OpCode::KvBatchGet
+            | OpCode::KvBatchPut
+            | OpCode::KvFieldGet
+            | OpCode::KvFieldSet
+            | OpCode::DocumentUpdate
+            | OpCode::DocumentScan
+            | OpCode::DocumentUpsert
+            | OpCode::DocumentBulkUpdate
+            | OpCode::DocumentBulkDelete
+            | OpCode::VectorInsert
+            | OpCode::VectorMultiSearch
+            | OpCode::VectorDelete => dispatch::handle_direct_op(&ctx, seq, op, fields).await,
 
             // Batch ops: direct Data Plane dispatch.
             OpCode::VectorBatchInsert | OpCode::DocumentBatchInsert => {

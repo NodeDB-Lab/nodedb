@@ -59,6 +59,10 @@ pub enum OpCode {
     // ── Spatial operations (direct Data Plane dispatch) ────────
     SpatialScan = 0x19,
 
+    // ── Timeseries operations (direct Data Plane dispatch) ──────
+    TimeseriesScan = 0x1A,
+    TimeseriesIngest = 0x1B,
+
     // ── Search operations (direct Data Plane dispatch) ──────────
     TextSearch = 0x60,
     HybridSearch = 0x61,
@@ -66,6 +70,28 @@ pub enum OpCode {
     // ── Batch operations ────────────────────────────────────────
     VectorBatchInsert = 0x70,
     DocumentBatchInsert = 0x71,
+
+    // ── KV advanced operations ──────────────────────────────────
+    KvScan = 0x72,
+    KvExpire = 0x73,
+    KvPersist = 0x74,
+    KvGetTtl = 0x75,
+    KvBatchGet = 0x76,
+    KvBatchPut = 0x77,
+    KvFieldGet = 0x78,
+    KvFieldSet = 0x79,
+
+    // ── Document advanced operations ────────────────────────────
+    DocumentUpdate = 0x7A,
+    DocumentScan = 0x7B,
+    DocumentUpsert = 0x7C,
+    DocumentBulkUpdate = 0x7D,
+    DocumentBulkDelete = 0x7E,
+
+    // ── Vector advanced operations ──────────────────────────────
+    VectorInsert = 0x7F,
+    VectorMultiSearch = 0x80,
+    VectorDelete = 0x81,
 }
 
 impl OpCode {
@@ -81,6 +107,17 @@ impl OpCode {
                 | OpCode::VectorBatchInsert
                 | OpCode::DocumentBatchInsert
                 | OpCode::AlterCollectionPolicy
+                | OpCode::TimeseriesIngest
+                | OpCode::KvExpire
+                | OpCode::KvPersist
+                | OpCode::KvBatchPut
+                | OpCode::KvFieldSet
+                | OpCode::DocumentUpdate
+                | OpCode::DocumentUpsert
+                | OpCode::DocumentBulkUpdate
+                | OpCode::DocumentBulkDelete
+                | OpCode::VectorInsert
+                | OpCode::VectorDelete
         )
     }
 }
@@ -275,6 +312,59 @@ pub struct TextFields {
     /// Distance threshold in meters (for ST_DWithin).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distance_meters: Option<f64>,
+
+    // ── Timeseries ───────────────────────────────────────────
+    /// ILP payload bytes (for TimeseriesIngest).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Vec<u8>>,
+    /// Ingest format (default: "ilp").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Time range start (epoch ms, for TimeseriesScan).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_range_start: Option<i64>,
+    /// Time range end (epoch ms, for TimeseriesScan).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_range_end: Option<i64>,
+    /// Bucket interval string for time_bucket aggregation (e.g., "5m").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket_interval: Option<String>,
+
+    // ── KV advanced ─────────────────────────────────────────
+    /// TTL in milliseconds (for KvExpire, KvBatchPut).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    /// Cursor bytes for KvScan pagination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Vec<u8>>,
+    /// Glob pattern for KvScan key matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_pattern: Option<String>,
+    /// Multiple keys for BatchGet / Delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<Vec<u8>>>,
+    /// Key-value entries for BatchPut: [(key, value), ...].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// Field names for FieldGet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+
+    // ── Document advanced ───────────────────────────────────
+    /// Field-level updates: [(field_name, value_bytes), ...].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates: Option<Vec<(String, Vec<u8>)>>,
+    /// Serialized filter predicates (MessagePack).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Vec<u8>>,
+
+    // ── Vector advanced ─────────────────────────────────────
+    /// Single vector embedding (for VectorInsert).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<Vec<f32>>,
+    /// Vector ID for deletion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_id: Option<u32>,
 
     // ── Collection policy ────────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
