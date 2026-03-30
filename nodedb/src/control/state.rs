@@ -162,6 +162,16 @@ pub struct SharedState {
     /// Loaded from catalog on startup, updated by CREATE/DROP TRIGGER DDL.
     pub trigger_registry: crate::control::trigger::TriggerRegistry,
 
+    /// In-memory change stream registry for CDC event routing.
+    /// Loaded from catalog on startup, updated by CREATE/DROP CHANGE STREAM DDL.
+    /// Arc-wrapped for sharing with the Event Plane's CdcRouter.
+    pub stream_registry: Arc<crate::event::cdc::StreamRegistry>,
+
+    /// CDC event router: routes WriteEvents to matching stream buffers.
+    /// Shared between Event Plane consumers (write) and DDL handlers (drop cleanup).
+    /// Initialized after SharedState construction (set by EventPlane::spawn).
+    pub cdc_router: Arc<crate::event::cdc::CdcRouter>,
+
     /// Total connections rejected due to max_connections limit (monotonic counter).
     pub connections_rejected: AtomicU64,
 
@@ -256,6 +266,10 @@ impl SharedState {
             shape_registry: crate::control::server::sync::shape::ShapeRegistry::new(),
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             trigger_registry: crate::control::trigger::TriggerRegistry::new(),
+            stream_registry: Arc::new(crate::event::cdc::StreamRegistry::new()),
+            cdc_router: Arc::new(crate::event::cdc::CdcRouter::new(Arc::new(
+                crate::event::cdc::StreamRegistry::new(),
+            ))),
             connections_rejected: AtomicU64::new(0),
             connections_accepted: AtomicU64::new(0),
             system_metrics: Some(Arc::new(crate::control::metrics::SystemMetrics::new())),
@@ -289,6 +303,7 @@ impl SharedState {
         let permissions = PermissionStore::new();
         let blacklist = crate::control::security::blacklist::store::BlacklistStore::new();
         let trigger_registry = crate::control::trigger::TriggerRegistry::new();
+        let stream_registry = Arc::new(crate::event::cdc::StreamRegistry::new());
         let mut audit_start_seq = 1u64;
         if let Some(catalog) = credentials.catalog() {
             api_keys.load_from(catalog)?;
@@ -296,6 +311,7 @@ impl SharedState {
             permissions.load_from(catalog)?;
             blacklist.load_from(catalog)?;
             trigger_registry.load_all(catalog);
+            stream_registry.load_from_catalog(catalog);
             let max_seq = catalog.load_audit_max_seq()?;
             if max_seq > 0 {
                 audit_start_seq = max_seq + 1;
@@ -315,6 +331,8 @@ impl SharedState {
             roles,
             permissions,
             trigger_registry,
+            stream_registry: Arc::clone(&stream_registry),
+            cdc_router: Arc::new(crate::event::cdc::CdcRouter::new(stream_registry)),
             tenants: Mutex::new(TenantIsolation::new(TenantQuota::default())),
             cluster_topology: None,
             cluster_routing: None,

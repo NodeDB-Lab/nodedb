@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth_users;
 pub mod blacklist;
+pub mod change_streams;
 pub mod collections;
 pub mod dependencies;
 pub mod function_types;

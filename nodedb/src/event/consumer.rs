@@ -59,6 +59,7 @@ pub struct ConsumerConfig {
     pub watermark_store: Arc<WatermarkStore>,
     pub shared_state: Arc<SharedState>,
     pub trigger_dlq: Arc<std::sync::Mutex<TriggerDlq>>,
+    pub cdc_router: Arc<super::cdc::CdcRouter>,
     pub num_cores: usize,
 }
 
@@ -106,6 +107,7 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
         watermark_store,
         shared_state,
         trigger_dlq,
+        cdc_router,
         num_cores,
     } = config;
 
@@ -157,7 +159,7 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                 if batch_count > 0 {
                     dirty_watermark = true;
 
-                    // Dispatch triggers for each event (async).
+                    // Dispatch triggers + CDC routing for each event.
                     for event in &events {
                         super::trigger::dispatcher::dispatch_triggers(
                             event,
@@ -165,6 +167,7 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                             &mut retry_queue,
                         )
                         .await;
+                        cdc_router.route_event(event);
                     }
 
                     trace!(core_id, batch_count, "event batch processed");
@@ -260,13 +263,14 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                         let count = events.len() as u64;
                         for event in &events {
                             record_event(core_id, event, &metrics);
-                            // Also dispatch triggers for WAL-replayed events.
+                            // Also dispatch triggers + CDC for WAL-replayed events.
                             super::trigger::dispatcher::dispatch_triggers(
                                 event,
                                 &shared_state,
                                 &mut retry_queue,
                             )
                             .await;
+                            cdc_router.route_event(event);
                             last_sequence = event.sequence;
                             if event.lsn.is_ahead_of(last_lsn) {
                                 last_lsn = event.lsn;
@@ -487,7 +491,7 @@ mod tests {
     async fn consumer_processes_and_persists_watermark() {
         let (mut producers, consumers) = create_event_bus_with_capacity(1, 64);
         let dir = tempfile::tempdir().unwrap();
-        let (wal, watermark_store, shared_state, trigger_dlq) =
+        let (wal, watermark_store, shared_state, trigger_dlq, cdc_router) =
             crate::event::test_utils::event_test_deps(&dir);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -504,6 +508,7 @@ mod tests {
             watermark_store: Arc::clone(&watermark_store),
             shared_state,
             trigger_dlq,
+            cdc_router,
             num_cores: 1,
         });
 

@@ -1,4 +1,5 @@
 pub mod bus;
+pub mod cdc;
 pub mod consumer;
 pub mod metrics;
 pub mod plane;

@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use tracing::{debug, info};
 
 use super::bus::EventConsumerRx;
+use super::cdc::CdcRouter;
 use super::consumer::{ConsumerConfig, ConsumerHandle, spawn_consumer};
 use super::metrics::{AggregateMetrics, CoreMetrics};
 use super::trigger::dlq::TriggerDlq;
@@ -44,6 +45,7 @@ impl EventPlane {
         watermark_store: Arc<WatermarkStore>,
         shared_state: Arc<SharedState>,
         trigger_dlq: Arc<std::sync::Mutex<TriggerDlq>>,
+        cdc_router: Arc<CdcRouter>,
     ) -> Self {
         let num_cores = consumers_rx.len();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -58,6 +60,7 @@ impl EventPlane {
                     watermark_store: Arc::clone(&watermark_store),
                     shared_state: Arc::clone(&shared_state),
                     trigger_dlq: Arc::clone(&trigger_dlq),
+                    cdc_router: Arc::clone(&cdc_router),
                     num_cores,
                 })
             })
@@ -154,10 +157,17 @@ mod tests {
     async fn event_plane_lifecycle() {
         let (mut producers, consumers) = create_event_bus_with_capacity(2, 64);
         let dir = tempfile::tempdir().unwrap();
-        let (wal, watermark_store, shared_state, trigger_dlq) =
+        let (wal, watermark_store, shared_state, trigger_dlq, cdc_router) =
             crate::event::test_utils::event_test_deps(&dir);
 
-        let plane = EventPlane::spawn(consumers, wal, watermark_store, shared_state, trigger_dlq);
+        let plane = EventPlane::spawn(
+            consumers,
+            wal,
+            watermark_store,
+            shared_state,
+            trigger_dlq,
+            cdc_router,
+        );
         assert_eq!(plane.num_consumers(), 2);
 
         // Emit events on both cores.
@@ -178,10 +188,17 @@ mod tests {
     async fn drop_aborts_consumers() {
         let (_producers, consumers) = create_event_bus_with_capacity(1, 16);
         let dir = tempfile::tempdir().unwrap();
-        let (wal, watermark_store, shared_state, trigger_dlq) =
+        let (wal, watermark_store, shared_state, trigger_dlq, cdc_router) =
             crate::event::test_utils::event_test_deps(&dir);
 
-        let plane = EventPlane::spawn(consumers, wal, watermark_store, shared_state, trigger_dlq);
+        let plane = EventPlane::spawn(
+            consumers,
+            wal,
+            watermark_store,
+            shared_state,
+            trigger_dlq,
+            cdc_router,
+        );
         drop(plane); // Should not panic.
     }
 }

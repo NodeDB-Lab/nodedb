@@ -5,21 +5,22 @@
 use std::sync::Arc;
 
 use crate::control::state::SharedState;
+use crate::event::cdc::CdcRouter;
 use crate::event::trigger::dlq::TriggerDlq;
 use crate::event::watermark::WatermarkStore;
 use crate::wal::WalManager;
 
-/// Create all Event Plane test dependencies from a temp directory.
-///
-/// Returns (WAL, WatermarkStore, SharedState, TriggerDlq).
-pub fn event_test_deps(
-    dir: &tempfile::TempDir,
-) -> (
+/// All Event Plane test dependencies bundled together.
+pub type EventTestDeps = (
     Arc<WalManager>,
     Arc<WatermarkStore>,
     Arc<SharedState>,
     Arc<std::sync::Mutex<TriggerDlq>>,
-) {
+    Arc<CdcRouter>,
+);
+
+/// Create all Event Plane test dependencies from a temp directory.
+pub fn event_test_deps(dir: &tempfile::TempDir) -> EventTestDeps {
     let watermark_store = Arc::new(WatermarkStore::open(dir.path()).unwrap());
     let wal_dir = dir.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
@@ -35,5 +36,6 @@ pub fn event_test_deps(
         Default::default(),
     )
     .unwrap();
-    (wal, watermark_store, shared_state, trigger_dlq)
+    let cdc_router = Arc::clone(&shared_state.cdc_router);
+    (wal, watermark_store, shared_state, trigger_dlq, cdc_router)
 }

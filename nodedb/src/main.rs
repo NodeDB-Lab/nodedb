@@ -308,12 +308,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn Event Plane: one consumer Tokio task per Data Plane core.
     // Kept alive until process exit — Drop impl aborts consumer tasks.
+    // CdcRouter lives in SharedState (shared with DDL handlers for drop cleanup).
     let _event_plane = nodedb::event::EventPlane::spawn(
         event_consumers,
         Arc::clone(&wal),
         watermark_store,
         Arc::clone(&shared),
         trigger_dlq,
+        Arc::clone(&shared.cdc_router),
     );
     info!(num_cores, "event plane running");
 

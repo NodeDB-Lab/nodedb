@@ -111,6 +111,21 @@ pub async fn dispatch(
         return Some(super::procedure::call_procedure(state, identity, sql).await);
     }
 
+    // Change Streams: CREATE/DROP/SHOW CHANGE STREAM ...
+    if upper.starts_with("CREATE CHANGE STREAM ") {
+        return Some(super::change_stream::create_change_stream(
+            state, identity, sql,
+        ));
+    }
+    if upper.starts_with("DROP CHANGE STREAM ") {
+        return Some(super::change_stream::drop_change_stream(
+            state, identity, &parts,
+        ));
+    }
+    if upper.starts_with("SHOW CHANGE STREAM") {
+        return Some(super::change_stream::show_change_streams(state, identity));
+    }
+
     // Triggers: CREATE [OR REPLACE] [SYNC|DEFERRED] TRIGGER ...
     if upper.starts_with("CREATE TRIGGER ")
         || upper.starts_with("CREATE OR REPLACE TRIGGER ")
