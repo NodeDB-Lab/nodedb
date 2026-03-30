@@ -11,7 +11,9 @@ use pgwire::error::PgWireResult;
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
-use crate::event::cdc::stream_def::{ChangeStreamDef, OpFilter, RetentionConfig, StreamFormat};
+use crate::event::cdc::stream_def::{
+    ChangeStreamDef, CompactionConfig, OpFilter, RetentionConfig, StreamFormat,
+};
 
 use super::super::super::types::{require_admin, sqlstate_error};
 
@@ -52,6 +54,7 @@ pub fn create_change_stream(
         op_filter: parsed.op_filter,
         format: parsed.format,
         retention: RetentionConfig::default(),
+        compaction: parsed.compaction,
         owner: identity.username.clone(),
         created_at: now,
     };
@@ -81,22 +84,47 @@ struct ParsedCreateChangeStream {
     collection_raw: String,
     op_filter: OpFilter,
     format: StreamFormat,
+    compaction: CompactionConfig,
 }
 
-/// Parse `CREATE CHANGE STREAM <name> ON <collection> [WITH (...)]`.
-/// Extract a quoted string value or bare word from the start of input.
-fn extract_quoted_or_word(s: &str) -> String {
-    if s.starts_with('\'') || s.starts_with('"') {
-        let quote = s.as_bytes()[0];
-        if let Some(end) = s[1..].find(|c: char| c as u8 == quote) {
-            return s[1..1 + end].to_string();
+/// Extract all `KEY = VALUE` pairs from a WITH clause inner string.
+/// Returns `(KEY_UPPER, value_string)` tuples. Handles quoted values.
+fn extract_key_value_pairs(inner: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    // Split on commas that are NOT inside quotes.
+    let mut pairs = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    for ch in inner.chars() {
+        if ch == '\'' && !in_quote {
+            in_quote = true;
+            current.push(ch);
+        } else if ch == '\'' && in_quote {
+            in_quote = false;
+            current.push(ch);
+        } else if ch == ',' && !in_quote {
+            pairs.push(std::mem::take(&mut current));
+        } else {
+            current.push(ch);
         }
     }
-    // Bare word: take until whitespace, comma, or closing paren.
-    s.split(|c: char| c.is_whitespace() || c == ',' || c == ')')
-        .next()
-        .unwrap_or("")
-        .to_string()
+    if !current.is_empty() {
+        pairs.push(current);
+    }
+
+    for pair in pairs {
+        let pair = pair.trim();
+        if let Some((key, value)) = pair.split_once('=') {
+            let key = key.trim().to_uppercase();
+            let value = value
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_string();
+            result.push((key, value));
+        }
+    }
+    result
 }
 
 fn parse_create_change_stream(sql: &str) -> PgWireResult<ParsedCreateChangeStream> {
@@ -133,40 +161,46 @@ fn parse_create_change_stream(sql: &str) -> PgWireResult<ParsedCreateChangeStrea
     // Parse optional WITH clause.
     let mut op_filter = OpFilter::all();
     let mut format = StreamFormat::Json;
+    let mut compaction = CompactionConfig::default();
 
     if let Some(with_pos) = upper.find("WITH") {
         let with_section = trimmed[with_pos + 4..].trim();
         let inner = with_section
             .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'))
+            .and_then(|s| s.split_once(')'))
+            .map(|(i, _)| i)
             .unwrap_or(with_section);
-        let inner_upper = inner.to_uppercase();
 
-        // Extract FORMAT value.
-        if let Some(fmt_pos) = inner_upper.find("FORMAT") {
-            let after = inner[fmt_pos + 6..].trim().trim_start_matches('=').trim();
-            let val = extract_quoted_or_word(after);
-            if let Some(f) = StreamFormat::from_str_opt(&val) {
-                format = f;
-            }
-        }
-
-        // Extract INCLUDE value (may contain commas inside quotes).
-        if let Some(inc_pos) = inner_upper.find("INCLUDE") {
-            let after = inner[inc_pos + 7..].trim().trim_start_matches('=').trim();
-            let val = extract_quoted_or_word(after);
-            op_filter = OpFilter {
-                insert: false,
-                update: false,
-                delete: false,
-            };
-            for op in val.split(',') {
-                match op.trim().to_uppercase().as_str() {
-                    "INSERT" => op_filter.insert = true,
-                    "UPDATE" => op_filter.update = true,
-                    "DELETE" => op_filter.delete = true,
-                    _ => {}
+        for (key, val) in extract_key_value_pairs(inner) {
+            match key.as_str() {
+                "FORMAT" => {
+                    if let Some(f) = StreamFormat::from_str_opt(&val) {
+                        format = f;
+                    }
                 }
+                "INCLUDE" => {
+                    op_filter = OpFilter {
+                        insert: false,
+                        update: false,
+                        delete: false,
+                    };
+                    for op in val.split(',') {
+                        match op.trim().to_uppercase().as_str() {
+                            "INSERT" => op_filter.insert = true,
+                            "UPDATE" => op_filter.update = true,
+                            "DELETE" => op_filter.delete = true,
+                            _ => {}
+                        }
+                    }
+                }
+                "COMPACTION" if val.eq_ignore_ascii_case("key") => {
+                    compaction.enabled = true;
+                }
+                "KEY" if !val.is_empty() => {
+                    compaction.key_field = val;
+                    compaction.enabled = true;
+                }
+                _ => {}
             }
         }
     }
@@ -177,6 +211,7 @@ fn parse_create_change_stream(sql: &str) -> PgWireResult<ParsedCreateChangeStrea
         collection_raw,
         op_filter,
         format,
+        compaction,
     })
 }
 

@@ -117,6 +117,7 @@ mod tests {
             op_filter: OpFilter::all(),
             format: StreamFormat::Json,
             retention: RetentionConfig::default(),
+            compaction: CompactionConfig::default(),
             owner: "admin".into(),
             created_at: 1000,
         }

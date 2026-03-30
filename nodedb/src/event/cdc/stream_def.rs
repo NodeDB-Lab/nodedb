@@ -92,6 +92,28 @@ impl Default for RetentionConfig {
     }
 }
 
+/// Log compaction configuration. When enabled, the buffer deduplicates
+/// by key field, keeping only the latest event per key value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Whether compaction is enabled.
+    pub enabled: bool,
+    /// Key field path used for deduplication (e.g., "id").
+    pub key_field: String,
+    /// Grace period for DELETE tombstones before removal (seconds). Default 24h.
+    pub tombstone_grace_secs: u64,
+}
+
+impl CompactionConfig {
+    pub fn key(field: impl Into<String>) -> Self {
+        Self {
+            enabled: true,
+            key_field: field.into(),
+            tombstone_grace_secs: 86_400,
+        }
+    }
+}
+
 /// Persistent definition of a change stream. Stored in the system catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeStreamDef {
@@ -107,6 +129,9 @@ pub struct ChangeStreamDef {
     pub format: StreamFormat,
     /// Retention configuration.
     pub retention: RetentionConfig,
+    /// Log compaction configuration (optional).
+    #[serde(default)]
+    pub compaction: CompactionConfig,
     /// Owner (creator).
     pub owner: String,
     /// Creation timestamp (epoch seconds).
@@ -150,6 +175,7 @@ mod tests {
             op_filter: OpFilter::all(),
             format: StreamFormat::Json,
             retention: RetentionConfig::default(),
+            compaction: CompactionConfig::default(),
             owner: "admin".into(),
             created_at: 0,
         };
@@ -167,6 +193,7 @@ mod tests {
             op_filter: OpFilter::all(),
             format: StreamFormat::Json,
             retention: RetentionConfig::default(),
+            compaction: CompactionConfig::default(),
             owner: "admin".into(),
             created_at: 0,
         };

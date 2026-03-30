@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod compaction;
 pub mod consume;
 pub mod consumer_group;
 pub mod event;
