@@ -326,33 +326,36 @@ async fn flush_ilp_batch(
         )
         .await?;
 
-        if !response.payload.is_empty() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&response.payload) {
-                total_accepted += v.get("accepted").and_then(|a| a.as_u64()).unwrap_or(0);
+        if !response.payload.is_empty()
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&response.payload)
+        {
+            total_accepted += v.get("accepted").and_then(|a| a.as_u64()).unwrap_or(0);
 
-                if let Some(schema_cols) = v.get("schema_columns").and_then(|s| s.as_array()) {
-                    let fields: Vec<(String, String)> = schema_cols
-                        .iter()
-                        .filter_map(|pair| {
-                            let arr = pair.as_array()?;
-                            Some((
-                                arr.first()?.as_str()?.to_string(),
-                                arr.get(1)?.as_str()?.to_string(),
-                            ))
-                        })
-                        .collect();
+            if let Some(schema_cols) = v.get("schema_columns").and_then(|s| s.as_array()) {
+                let fields: Vec<(String, String)> = schema_cols
+                    .iter()
+                    .filter_map(|pair| {
+                        let arr = pair.as_array()?;
+                        Some((
+                            arr.first()?.as_str()?.to_string(),
+                            arr.get(1)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect();
 
-                    if !fields.is_empty() {
-                        if let Some(catalog) = state.credentials.catalog() {
-                            if let Ok(Some(mut coll)) =
-                                catalog.get_collection(tenant_id.as_u32(), &collection)
-                            {
-                                if coll.fields.len() != fields.len() {
-                                    coll.fields = fields;
-                                    let _ = catalog.put_collection(&coll);
-                                }
-                            }
-                        }
+                if !fields.is_empty()
+                    && let Some(catalog) = state.credentials.catalog().as_ref()
+                    && let Ok(Some(mut coll)) =
+                        catalog.get_collection(tenant_id.as_u32(), &collection)
+                    && coll.fields != fields
+                {
+                    coll.fields = fields;
+                    if let Err(e) = catalog.put_collection(&coll) {
+                        tracing::warn!(
+                            collection = %collection,
+                            error = %e,
+                            "failed to propagate ILP schema to catalog",
+                        );
                     }
                 }
             }
