@@ -46,8 +46,16 @@ Unlike most databases that lock you into one storage model, NodeDB lets you choo
 
 - **Document (schemaless)** — MessagePack blobs, flexible schema, CRDT sync. Best for evolving data.
 - **Document (strict)** — Binary Tuples with fixed schema, O(1) field extraction. Best for OLTP.
-- **Columnar** — Per-column compression, block statistics, predicate pushdown. Best for analytics. Has Timeseries and Spatial profiles.
+- **Columnar** — Per-column compression, block statistics, predicate pushdown. Best for analytics. Timeseries and Spatial are profiles that extend it.
 - **Key-Value** — Hash-indexed O(1) point lookups. Best for key-dominant access patterns.
+
+**Columnar-first architecture.** Columnar is the base storage engine for all analytics workloads. Timeseries and Spatial are profiles layered on top of it — they do not have separate storage layers. All three share the same `columnar_memtables` (the in-memory L0 write buffer). Profile-specific behavior (partition-by-time, R*-tree indexing) is implemented as extensions to the base `ColumnarOp` physical plan node:
+
+- `ColumnarOp` — base plan for plain columnar collections
+- `TimeseriesOp` — extends `ColumnarOp` with `time_range` bounds, time bucketing, and retention
+- `SpatialOp` — extends `ColumnarOp` with R*-tree candidate lookup
+
+A `TIME_KEY` column modifier on a `TIMESTAMP` or `DATETIME` column designates the primary time dimension. A `SPATIAL_INDEX` modifier on a `GEOMETRY` column triggers automatic R*-tree maintenance.
 
 Collections can be converted between modes at any time with `CONVERT COLLECTION <name> TO <mode>`.
 

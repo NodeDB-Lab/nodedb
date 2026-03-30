@@ -35,30 +35,76 @@ Columnar collections can specialize via profiles:
 | **[Timeseries](timeseries.md)** | Time-ordered metrics | Append-only, retention policies, continuous aggregation, ILP ingest |
 | **[Spatial](spatial.md)**       | Geospatial data      | Auto R\*-tree indexing, geohash proximity queries                   |
 
+## DDL Syntax
+
+The unified `CREATE COLLECTION` syntax for columnar collections uses `WITH (storage = 'columnar')`. Column modifiers designate special columns:
+
+| Modifier | Applies to | Effect |
+| --- | --- | --- |
+| `TIME_KEY` | `TIMESTAMP` / `DATETIME` columns | Designates the primary time column. Enables partition-by-time, block-level skip, and retention policies. Required for the timeseries profile. |
+| `SPATIAL_INDEX` | `GEOMETRY` columns | Automatically builds and maintains an R*-tree index on this column. Required for the spatial profile. |
+
+```sql
+-- Plain columnar collection
+CREATE COLLECTION logs (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    level VARCHAR,
+    message VARCHAR
+) WITH (storage = 'columnar');
+
+-- Timeseries profile (TIME_KEY required)
+CREATE COLLECTION metrics (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    cpu FLOAT
+) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h');
+
+-- Spatial profile (SPATIAL_INDEX required)
+CREATE COLLECTION locations (
+    geom GEOMETRY SPATIAL_INDEX,
+    name VARCHAR
+) WITH (storage = 'columnar');
+```
+
+`CREATE TIMESERIES <name>` remains as a convenience alias for the timeseries profile — it is equivalent to the `WITH (storage = 'columnar', profile = 'timeseries')` form.
+
+## Physical Plan Types
+
+The query planner emits different physical plan nodes for columnar queries:
+
+- **`ColumnarOp`** — Base plan for plain columnar collections. All profiles extend this.
+- **`TimeseriesOp`** — Extends `ColumnarOp` with `time_range` bounds and time bucketing. Used when a `TIME_KEY` column and time predicate are present.
+- **`SpatialOp`** — Extends `ColumnarOp` with R*-tree lookup. Used when a `SPATIAL_INDEX` column is referenced in a spatial predicate.
+
+All three share the same `columnar_memtables` (the in-memory L0 structure). Profile-specific logic is layered on top.
+
 ## Examples
 
 ```sql
--- Create a columnar collection
-CREATE COLLECTION web_events TYPE columnar (
-    event_id UUID,
-    user_id UUID,
-    page STRING,
-    duration_ms INT,
-    created_at DATETIME
-);
+-- Plain columnar collection with a time column
+CREATE COLLECTION logs (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    level VARCHAR,
+    message VARCHAR
+) WITH (storage = 'columnar');
+
+-- Ingest
+INSERT INTO logs (ts, host, level, message)
+VALUES (now(), 'web-01', 'error', 'connection refused');
 
 -- Analytical query — only reads the columns it needs
-SELECT page, AVG(duration_ms), COUNT(*)
-FROM web_events
-WHERE created_at > '2024-01-01'
-GROUP BY page
-ORDER BY COUNT(*) DESC
-LIMIT 20;
+SELECT level, COUNT(*) AS count
+FROM logs
+WHERE ts > now() - INTERVAL '1 hour'
+GROUP BY level
+ORDER BY count DESC;
 
 -- Window functions
-SELECT user_id, page, duration_ms,
-       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS visit_rank
-FROM web_events;
+SELECT host, message,
+       ROW_NUMBER() OVER (PARTITION BY host ORDER BY ts DESC) AS recency_rank
+FROM logs;
 ```
 
 ## HTAP Bridge
@@ -67,13 +113,13 @@ The real power of columnar is combining it with strict documents for hybrid tran
 
 ```sql
 -- OLTP: strict collection for real-time writes
-CREATE COLLECTION orders TYPE strict (
+CREATE COLLECTION orders (
     id UUID DEFAULT gen_uuid_v7(),
     customer_id UUID,
     total DECIMAL,
     status STRING,
     created_at DATETIME DEFAULT now()
-);
+) WITH (storage = 'strict');
 
 -- OLAP: materialized view auto-replicates to columnar via CDC
 CREATE MATERIALIZED VIEW order_analytics AS
@@ -93,11 +139,15 @@ The query planner routes automatically — no application logic needed. Changes 
 ## Converting to Columnar
 
 ```sql
--- Convert an existing collection
-CONVERT COLLECTION logs TO columnar;
+-- Convert an existing collection to plain columnar
+CONVERT COLLECTION logs TO STORAGE='columnar';
 
--- Convert with a profile
-CONVERT COLLECTION metrics TO columnar PROFILE timeseries;
+-- Convert to columnar with timeseries profile
+CONVERT COLLECTION metrics TO STORAGE='columnar' WITH (profile = 'timeseries');
+
+-- Convert to document or kv
+CONVERT COLLECTION events TO STORAGE='document';
+CONVERT COLLECTION sessions TO STORAGE='kv';
 ```
 
 ## Related

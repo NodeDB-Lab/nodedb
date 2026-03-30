@@ -1,6 +1,6 @@
 # Timeseries
 
-Timeseries is a columnar profile specialized for time-ordered data — metrics, telemetry, sensor readings, financial ticks. It adds retention policies, continuous aggregation, ILP ingest, and 12 dedicated SQL functions on top of the columnar engine's compression and predicate pushdown.
+Timeseries is a **columnar profile**. It extends the [Columnar engine](columnar.md) with retention policies, continuous aggregation, ILP ingest, and 12 dedicated SQL functions. It does not have a separate storage layer — timeseries collections store data in the same `columnar_memtables` as plain columnar collections, with a `TIME_KEY` column driving partition-by-time and block-level skip.
 
 ## When to Use
 
@@ -25,15 +25,18 @@ Timeseries is a columnar profile specialized for time-ordered data — metrics, 
 ## Examples
 
 ```sql
--- Create a timeseries collection
-CREATE COLLECTION cpu_metrics TYPE columnar PROFILE timeseries (
-    host STRING,
-    region STRING,
+-- Unified DDL syntax (preferred)
+-- TIME_KEY designates the primary time column; enables partition-by-time and block-level skip
+CREATE COLLECTION cpu_metrics (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    region VARCHAR,
     cpu_usage FLOAT,
-    mem_usage FLOAT,
-    ts DATETIME
-) PARTITION BY TIME(ts, '1 day')
-  RETENTION '90 days';
+    mem_usage FLOAT
+) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1d', retention = '90d');
+
+-- CREATE TIMESERIES is a convenience alias for the above form
+CREATE TIMESERIES cpu_metrics;
 
 -- Insert metrics
 INSERT INTO cpu_metrics (host, region, cpu_usage, mem_usage, ts)
@@ -83,6 +86,49 @@ WHERE ts > now() - INTERVAL '24 hours';
 | `ts_rank`        | Rank within a series                  |
 | `ts_stddev`      | Standard deviation                    |
 | `ts_derivative`  | Rate of change                        |
+
+## time_bucket() UDF
+
+`time_bucket(interval, ts)` truncates a timestamp to the nearest interval boundary. It is registered as a DataFusion ScalarUDF and available on all SQL-capable protocols.
+
+```sql
+-- Truncate to 5-minute buckets
+SELECT time_bucket('5 minutes', ts) AS bucket, AVG(cpu_usage)
+FROM cpu_metrics
+GROUP BY bucket;
+
+-- Supported interval literals: '1s', '5m', '15m', '1h', '6h', '1d', '1w'
+-- ISO 8601 duration format also accepted: 'PT5M', 'PT1H', 'P1D'
+```
+
+## Continuous Aggregation DDL
+
+Continuous aggregates are incrementally maintained views over a timeseries collection. They refresh automatically as new data arrives — no full re-scan on each refresh.
+
+```sql
+-- Create a continuous aggregate
+CREATE CONTINUOUS AGGREGATE cpu_hourly
+ON cpu_metrics
+AS
+    SELECT time_bucket('1 hour', ts) AS hour,
+           host,
+           AVG(cpu_usage) AS avg_cpu,
+           ts_percentile(cpu_usage, 0.99) AS p99_cpu
+    FROM cpu_metrics
+    GROUP BY hour, host
+WITH (refresh_interval = '1m');
+
+-- Manually trigger a refresh
+REFRESH CONTINUOUS AGGREGATE cpu_hourly;
+
+-- List all continuous aggregates
+SHOW CONTINUOUS AGGREGATES;
+
+-- Drop
+DROP CONTINUOUS AGGREGATE cpu_hourly;
+```
+
+The `refresh_interval` controls how often the engine checks for new data since the last watermark. Out-of-order data within the watermark window is handled automatically.
 
 ## ILP Ingest (InfluxDB Line Protocol)
 

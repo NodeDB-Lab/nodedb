@@ -80,29 +80,29 @@ ilp = false                       # Example: disable TLS for ILP ingest
 
 **Server settings:**
 
-| Config field | Environment variable | Default |
-| ------------ | -------------------- | ------- |
-| `host` | `NODEDB_HOST` | `127.0.0.1` |
-| `ports.native` | `NODEDB_PORT_NATIVE` | `6433` |
-| `ports.pgwire` | `NODEDB_PORT_PGWIRE` | `6432` |
-| `ports.http` | `NODEDB_PORT_HTTP` | `6480` |
-| `ports.resp` | `NODEDB_PORT_RESP` | disabled |
-| `ports.ilp` | `NODEDB_PORT_ILP` | disabled |
-| `data_dir` | `NODEDB_DATA_DIR` | `~/.nodedb/data` |
-| `memory_limit` | `NODEDB_MEMORY_LIMIT` | `1GiB` |
-| `data_plane_cores` | `NODEDB_DATA_PLANE_CORES` | CPUs - 1 |
-| `max_connections` | `NODEDB_MAX_CONNECTIONS` | `1024` |
-| `log_format` | `NODEDB_LOG_FORMAT` | `text` |
+| Config field       | Environment variable      | Default          |
+| ------------------ | ------------------------- | ---------------- |
+| `host`             | `NODEDB_HOST`             | `127.0.0.1`      |
+| `ports.native`     | `NODEDB_PORT_NATIVE`      | `6433`           |
+| `ports.pgwire`     | `NODEDB_PORT_PGWIRE`      | `6432`           |
+| `ports.http`       | `NODEDB_PORT_HTTP`        | `6480`           |
+| `ports.resp`       | `NODEDB_PORT_RESP`        | disabled         |
+| `ports.ilp`        | `NODEDB_PORT_ILP`         | disabled         |
+| `data_dir`         | `NODEDB_DATA_DIR`         | `~/.nodedb/data` |
+| `memory_limit`     | `NODEDB_MEMORY_LIMIT`     | `1GiB`           |
+| `data_plane_cores` | `NODEDB_DATA_PLANE_CORES` | CPUs - 1         |
+| `max_connections`  | `NODEDB_MAX_CONNECTIONS`  | `1024`           |
+| `log_format`       | `NODEDB_LOG_FORMAT`       | `text`           |
 
 **Per-protocol TLS** (only applies when `[server.tls]` is configured):
 
 | Config field | Environment variable | Default |
 | ------------ | -------------------- | ------- |
-| `tls.native` | `NODEDB_TLS_NATIVE` | `true` |
-| `tls.pgwire` | `NODEDB_TLS_PGWIRE` | `true` |
-| `tls.http` | `NODEDB_TLS_HTTP` | `true` |
-| `tls.resp` | `NODEDB_TLS_RESP` | `true` |
-| `tls.ilp` | `NODEDB_TLS_ILP` | `true` |
+| `tls.native` | `NODEDB_TLS_NATIVE`  | `true`  |
+| `tls.pgwire` | `NODEDB_TLS_PGWIRE`  | `true`  |
+| `tls.http`   | `NODEDB_TLS_HTTP`    | `true`  |
+| `tls.resp`   | `NODEDB_TLS_RESP`    | `true`  |
+| `tls.ilp`    | `NODEDB_TLS_ILP`     | `true`  |
 
 ## Connect
 
@@ -202,6 +202,52 @@ INSERT INTO sessions { key: 'sess_abc', user_id: 'alice', ttl: 3600 };
 
 -- Get by key
 SELECT * FROM sessions WHERE key = 'sess_abc';
+```
+
+### Columnar (Analytics)
+
+Columnar collections store data in compressed columns with block-level skip. Three variants are available via column modifiers and the `WITH` clause:
+
+```sql
+-- Plain columnar: general analytics
+CREATE COLLECTION web_events (
+    ts TIMESTAMP,
+    user_id UUID,
+    page VARCHAR,
+    duration_ms INT
+) WITH (storage = 'columnar');
+
+SELECT page, AVG(duration_ms), COUNT(*)
+FROM web_events
+WHERE ts > now() - INTERVAL '7 days'
+GROUP BY page
+ORDER BY COUNT(*) DESC;
+
+-- Timeseries profile: TIME_KEY column drives partition-by-time and block skip
+CREATE COLLECTION cpu_metrics (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    cpu FLOAT
+) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h');
+
+-- CREATE TIMESERIES is a convenience alias for the timeseries profile
+-- CREATE TIMESERIES cpu_metrics;
+
+SELECT time_bucket('5 minutes', ts) AS bucket, host, AVG(cpu)
+FROM cpu_metrics
+WHERE ts > now() - INTERVAL '1 hour'
+GROUP BY bucket, host;
+
+-- Spatial profile: SPATIAL_INDEX column gets an automatic R*-tree
+CREATE COLLECTION locations (
+    geom GEOMETRY SPATIAL_INDEX,
+    name VARCHAR
+) WITH (storage = 'columnar');
+
+SELECT name, ST_Distance(geom, ST_Point(-73.98, 40.75)) AS dist
+FROM locations
+WHERE ST_DWithin(geom, ST_Point(-73.98, 40.75), 1000)
+ORDER BY dist;
 ```
 
 ## What's Next

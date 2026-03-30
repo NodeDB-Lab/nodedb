@@ -2,6 +2,8 @@
 
 NodeDB's spatial engine provides native geospatial indexing and querying — R\*-tree indexes, OGC predicates, geohash and H3 hexagonal indexing, and hybrid spatial-vector search. It runs identically across Origin, Lite, and WASM.
 
+Spatial is a **columnar profile**. Collections with a `SPATIAL_INDEX` column modifier store data in the same `columnar_memtables` as plain columnar collections. The R\*-tree is maintained as a secondary index over the geometry column; full scans (no spatial predicate) read directly from the columnar memtable.
+
 ## When to Use
 
 - Fleet tracking and logistics (GPS + timeseries)
@@ -24,7 +26,15 @@ NodeDB's spatial engine provides native geospatial indexing and querying — R\*
 ## Examples
 
 ```sql
--- Create a collection with a spatial index
+-- Create a columnar collection with an automatic R*-tree on the geometry column
+CREATE COLLECTION restaurants (
+    location GEOMETRY SPATIAL_INDEX,
+    name VARCHAR,
+    cuisine VARCHAR,
+    rating FLOAT
+) WITH (storage = 'columnar');
+
+-- Alternatively, add a spatial index to a document collection
 CREATE COLLECTION restaurants TYPE document;
 CREATE SPATIAL INDEX ON restaurants FIELDS location;
 
@@ -67,18 +77,38 @@ WHERE ST_Contains(z.boundary, r.location);
 
 ## Spatial as a Columnar Profile
 
-For append-heavy spatial workloads (GPS tracking, sensor positions), use the columnar spatial profile:
+The `SPATIAL_INDEX` column modifier designates a geometry column for automatic R\*-tree indexing. Use the unified `CREATE COLLECTION` DDL:
 
 ```sql
-CREATE COLLECTION fleet_positions TYPE columnar PROFILE spatial (
-    vehicle_id STRING,
-    position GEOMETRY,
-    speed FLOAT,
-    ts DATETIME
-);
+-- Spatial columnar collection
+CREATE COLLECTION locations (
+    geom GEOMETRY SPATIAL_INDEX,
+    name VARCHAR
+) WITH (storage = 'columnar');
 
--- Auto R*-tree indexing on geometry columns
--- Geohash computation for proximity queries
+-- Combine with TIME_KEY for fleet tracking or IoT
+CREATE COLLECTION fleet_positions (
+    ts TIMESTAMP TIME_KEY,
+    vehicle_id VARCHAR,
+    position GEOMETRY SPATIAL_INDEX,
+    speed FLOAT
+) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1d');
+```
+
+**Query execution model:**
+
+- `SELECT * FROM locations` — full scan reads from the columnar memtable directly (no R\*-tree involved)
+- `SELECT * FROM locations WHERE ST_DWithin(geom, ...)` — R\*-tree narrows the candidate set, then the columnar sparse index and predicate pushdown do the final refinement
+
+```sql
+-- Bare scan: columnar memtable read, all columns
+SELECT name FROM locations WHERE name LIKE 'Park%';
+
+-- Spatial predicate: R*-tree lookup -> sparse refinement -> result
+SELECT name, ST_Distance(geom, ST_Point(-73.98, 40.75)) AS dist
+FROM locations
+WHERE ST_DWithin(geom, ST_Point(-73.98, 40.75), 500)
+ORDER BY dist;
 ```
 
 ## Related

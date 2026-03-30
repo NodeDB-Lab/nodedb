@@ -200,7 +200,7 @@ CREATE COLLECTION sessions TYPE kv;
 -- Graph collection
 CREATE COLLECTION knows TYPE graph;
 
--- Timeseries collection
+-- Timeseries collection (convenience alias)
 CREATE TIMESERIES metrics;
 
 -- Drop
@@ -213,6 +213,41 @@ SHOW COLLECTIONS;
 DESCRIBE users;
 ```
 
+#### Unified Columnar DDL
+
+All columnar variants (plain, timeseries, spatial) use `CREATE COLLECTION ... WITH (storage = 'columnar', ...)`. Column modifiers designate special columns:
+
+| Modifier        | Column type              | Effect                                                                                                                          |
+| --------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `TIME_KEY`      | `TIMESTAMP` / `DATETIME` | Primary time column. Required for timeseries profile. Enables partition-by-time, block-level time skip, and retention policies. |
+| `SPATIAL_INDEX` | `GEOMETRY`               | Automatically builds and maintains an R\*-tree index on this column. Required for spatial profile.                              |
+
+```sql
+-- Plain columnar
+CREATE COLLECTION logs (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    level VARCHAR,
+    message VARCHAR
+) WITH (storage = 'columnar');
+
+-- Timeseries profile (TIME_KEY required)
+CREATE COLLECTION metrics (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    cpu FLOAT
+) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h', retention = '90d');
+
+-- CREATE TIMESERIES is a convenience alias equivalent to profile = 'timeseries'
+CREATE TIMESERIES metrics;
+
+-- Spatial profile (SPATIAL_INDEX required)
+CREATE COLLECTION locations (
+    geom GEOMETRY SPATIAL_INDEX,
+    name VARCHAR
+) WITH (storage = 'columnar');
+```
+
 ### Schema Evolution
 
 ```sql
@@ -222,11 +257,17 @@ ALTER TABLE orders ADD COLUMN priority INT;
 ### Storage Conversion
 
 ```sql
--- Convert between storage modes at any time
+-- Convert to kv, document, or strict
 CONVERT COLLECTION cache TO STORAGE='kv';
-CONVERT COLLECTION logs TO STORAGE='columnar';
+CONVERT COLLECTION events TO STORAGE='document';
 CONVERT COLLECTION users TO STORAGE='strict' WITH SCHEMA { ... };
+
+-- Convert to columnar (plain or with profile)
+CONVERT COLLECTION logs TO STORAGE='columnar';
+CONVERT COLLECTION metrics TO STORAGE='columnar' WITH (profile = 'timeseries');
 ```
+
+`CONVERT COLLECTION` works for document, strict, and kv targets. Columnar conversions re-encode existing data into compressed segments.
 
 ### Indexes
 
@@ -258,8 +299,36 @@ DROP SPATIAL INDEX idx_name;
 CREATE MATERIALIZED VIEW order_stats AS
     SELECT status, COUNT(*), SUM(total) FROM orders GROUP BY status;
 
+-- Trigger a full refresh (re-executes the defining query against current data)
 REFRESH MATERIALIZED VIEW order_stats;
+
 DROP MATERIALIZED VIEW order_stats;
+
+-- List all materialized views
+SHOW MATERIALIZED VIEWS;
+```
+
+### Continuous Aggregates
+
+Continuous aggregates are incrementally maintained views over timeseries collections. Unlike `REFRESH MATERIALIZED VIEW` (full re-scan), continuous aggregates update only the new watermark window.
+
+```sql
+CREATE CONTINUOUS AGGREGATE cpu_hourly
+ON cpu_metrics
+AS
+    SELECT time_bucket('1 hour', ts) AS hour,
+           host,
+           AVG(cpu) AS avg_cpu
+    FROM cpu_metrics
+    GROUP BY hour, host
+WITH (refresh_interval = '1m');
+
+-- Manually trigger a refresh
+REFRESH CONTINUOUS AGGREGATE cpu_hourly;
+
+SHOW CONTINUOUS AGGREGATES;
+
+DROP CONTINUOUS AGGREGATE cpu_hourly;
 ```
 
 ## Engine-Specific SQL
@@ -352,8 +421,15 @@ KV collections also support the [Redis wire protocol](kv.md#redis-compatible-acc
 ### Timeseries
 
 ```sql
--- Create
+-- Create (convenience alias; equivalent to WITH (storage = 'columnar', profile = 'timeseries'))
 CREATE TIMESERIES metrics;
+
+-- Full form with TIME_KEY modifier
+CREATE COLLECTION metrics (
+    ts TIMESTAMP TIME_KEY,
+    host VARCHAR,
+    cpu_load FLOAT
+) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h');
 
 -- Ingest (also via ILP protocol on port 8086)
 INSERT INTO metrics (ts, host, cpu_load) VALUES (now(), 'server01', 0.65);
@@ -362,7 +438,7 @@ INSERT INTO metrics (ts, host, cpu_load) VALUES (now(), 'server01', 0.65);
 SELECT * FROM metrics
 WHERE ts >= 1704067200000 AND ts <= 1704153600000;
 
--- Time-bucketed aggregation
+-- Time-bucketed aggregation using time_bucket() UDF
 SELECT time_bucket('1h', ts) AS hour, AVG(cpu_load)
 FROM metrics
 GROUP BY hour;
@@ -452,6 +528,8 @@ SHOW CHANGES FOR users SINCE '2025-01-01' LIMIT 100;
 LIVE SELECT * FROM users WHERE role = 'admin';
 ```
 
+`LIVE SELECT` works over all SQL-capable protocols including pgwire. See [Real-Time Features](real-time.md#live-select) for delivery details.
+
 ## Admin & Security
 
 ```sql
@@ -499,7 +577,9 @@ SHOW USERS;
 
 ### Date/Time
 
-`NOW()`, `CURRENT_TIMESTAMP()`, `EXTRACT(field FROM ts)`, `DATE_TRUNC(unit, ts)`, `DATE_FORMAT(ts, fmt)`
+`NOW()`, `CURRENT_TIMESTAMP()`, `EXTRACT(field FROM ts)`, `DATE_TRUNC(unit, ts)`, `DATE_FORMAT(ts, fmt)`, `time_bucket(interval, ts)`
+
+`time_bucket(interval, ts)` — truncates `ts` to the nearest `interval` boundary. Registered as a DataFusion ScalarUDF. Accepts interval literals (`'5m'`, `'1h'`, `'1d'`) and ISO 8601 durations (`'PT5M'`, `'PT1H'`). Used in timeseries aggregations and continuous aggregate definitions.
 
 ### Type
 
@@ -507,14 +587,14 @@ SHOW USERS;
 
 ## Limitations
 
-| Feature | Status | Reason |
-| --- | --- | --- |
-| `WITH RECURSIVE` | Not supported | NodeDB has a native graph engine with `GRAPH TRAVERSE`, `GRAPH PATH`, and 13 built-in algorithms (PageRank, SSSP, etc.) that handle recursive traversal far more efficiently than SQL recursion. Use those instead. |
-| `UPDATE/DELETE ... JOIN` | Not supported | The Data Plane executes mutations as single-collection atomic operations through the SPSC bridge. Multi-collection mutations would require cross-engine coordination that breaks the isolation model. Rewrite as a subquery: `DELETE FROM orders WHERE user_id IN (SELECT id FROM users WHERE ...)`. |
-| `FOREIGN KEY` | Not enforced | In a distributed system with CRDT sync and eventual consistency at the edge, enforcing FK constraints across collections would require cross-shard coordination on every write — killing write throughput. CRDT constraint validation (UNIQUE, FK) is enforced at Raft commit time for synced collections, but not for general SQL. |
-| `COPY TO` (export) | Not supported | The Data Plane is write-optimized with io_uring for ingest, but export requires serialization across all shards and cores. Use the HTTP API (`/query/stream`) for NDJSON export or query into Parquet via L2 cold storage. |
-| `UPDATE/DELETE` on timeseries | Not supported | Timeseries collections use append-only columnar memtables with cascading compression (ALP + FastLanes + FSST + Gorilla + LZ4). In-place mutation would break compression chains and invalidate block statistics. Use retention policies to age out old data. |
-| `EXPLAIN ANALYZE` | Not yet | Requires instrumentation across the SPSC bridge to collect per-core execution stats from the Data Plane and merge them on the Control Plane. The bridge currently returns results but not timing metadata. Planned. |
+| Feature                       | Status        | Reason                                                                                                                                                                                                                                                                                                                              |
+| ----------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WITH RECURSIVE`              | Not supported | NodeDB has a native graph engine with `GRAPH TRAVERSE`, `GRAPH PATH`, and 13 built-in algorithms (PageRank, SSSP, etc.) that handle recursive traversal far more efficiently than SQL recursion. Use those instead.                                                                                                                 |
+| `UPDATE/DELETE ... JOIN`      | Not supported | The Data Plane executes mutations as single-collection atomic operations through the SPSC bridge. Multi-collection mutations would require cross-engine coordination that breaks the isolation model. Rewrite as a subquery: `DELETE FROM orders WHERE user_id IN (SELECT id FROM users WHERE ...)`.                                |
+| `FOREIGN KEY`                 | Not enforced  | In a distributed system with CRDT sync and eventual consistency at the edge, enforcing FK constraints across collections would require cross-shard coordination on every write — killing write throughput. CRDT constraint validation (UNIQUE, FK) is enforced at Raft commit time for synced collections, but not for general SQL. |
+| `COPY TO` (export)            | Not supported | The Data Plane is write-optimized with io_uring for ingest, but export requires serialization across all shards and cores. Use the HTTP API (`/query/stream`) for NDJSON export or query into Parquet via L2 cold storage.                                                                                                          |
+| `UPDATE/DELETE` on timeseries | Not supported | Timeseries collections use append-only columnar memtables with cascading compression (ALP + FastLanes + FSST + Gorilla + LZ4). In-place mutation would break compression chains and invalidate block statistics. Use retention policies to age out old data.                                                                        |
+| `EXPLAIN ANALYZE`             | Not yet       | Requires instrumentation across the SPSC bridge to collect per-core execution stats from the Data Plane and merge them on the Control Plane. The bridge currently returns results but not timing metadata. Planned.                                                                                                                 |
 
 ## Related
 
