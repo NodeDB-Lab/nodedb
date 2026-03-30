@@ -230,6 +230,32 @@ ilp = false         # Example: disable TLS for ILP ingest
 
 Environment variables override config: `NODEDB_PORT_PGWIRE`, `NODEDB_PORT_NATIVE`, `NODEDB_PORT_HTTP`, `NODEDB_PORT_RESP`, `NODEDB_PORT_ILP`.
 
+## Native Protocol Opcodes
+
+The NDB protocol's direct opcode mode covers 18 engine-specific operations added across the engines. All opcodes are single-byte identifiers in the MessagePack framing.
+
+| Opcode               | Hex    | Operation                                        |
+| -------------------- | ------ | ------------------------------------------------ |
+| `TimeseriesScan`     | `0x1A` | Time-range scan with optional bucket aggregation |
+| `TimeseriesIngest`   | `0x1B` | Batch ingest into a timeseries collection        |
+| `SpatialScan`        | `0x19` | R\*-tree lookup with OGC predicate               |
+| `KvScan`             | `0x72` | Full scan over a KV collection                   |
+| `KvGet`              | `0x73` | Point lookup by key                              |
+| `KvSet`              | `0x74` | Set a key-value pair with optional TTL           |
+| `KvDelete`           | `0x75` | Delete by key                                    |
+| `KvExpire`           | `0x76` | Set TTL on an existing key                       |
+| `KvMultiGet`         | `0x77` | Batch point lookups                              |
+| `KvMultiSet`         | `0x78` | Batch set                                        |
+| `KvFieldSet`         | `0x79` | Set individual fields on a KV value              |
+| `DocumentUpdate`     | `0x7A` | Update fields on a document by ID                |
+| `DocumentPatch`      | `0x7B` | JSON-patch a document by ID                      |
+| `DocumentGet`        | `0x7C` | Fetch a document by ID                           |
+| `DocumentBulkInsert` | `0x7D` | Batch insert documents                           |
+| `DocumentBulkDelete` | `0x7E` | Batch delete documents by predicate              |
+| `VectorInsert`       | `0x7F` | Insert a vector with metadata                    |
+| `VectorSearch`       | `0x80` | ANN search (HNSW) with optional pre-filter       |
+| `VectorDelete`       | `0x81` | Delete a vector by ID                            |
+
 ## Which Protocol Should I Use?
 
 | Use case                                  | Protocol          |

@@ -4,7 +4,7 @@ NodeDB is a real-time database. Every committed mutation publishes to an interna
 
 ## LIVE SELECT
 
-Register a query and receive matching changes over WebSocket as they happen. No polling.
+Register a query and receive matching changes as they happen. No polling.
 
 ```sql
 -- Subscribe to all new orders over $100
@@ -15,6 +15,14 @@ LIVE SELECT id, status FROM orders WHERE status != 'pending';
 ```
 
 The server pushes matching inserts, updates, and deletes to the client in real time.
+
+**Protocol support:**
+
+- **pgwire** — Subscription is stored in the session. Notifications are delivered as `NotificationResponse` messages between query responses, using the standard pgwire async notification channel. Standard `psql` and JDBC clients receive them without any additional configuration.
+- **WebSocket** — Delivered as JSON frames over the `/ws` endpoint.
+- **NDB (native)** — Delivered as MessagePack frames on the native protocol connection.
+
+On pgwire, `LIVE SELECT` stores the subscription in session state. Each subsequent command response may be preceded by one or more `NotificationResponse` frames carrying the matching change payloads. The subscription remains active until the session ends or `CANCEL LIVE SELECT <id>` is executed.
 
 ## SHOW CHANGES
 
