@@ -223,27 +223,9 @@ mod tests {
     fn test_schema() -> StrictSchema {
         StrictSchema {
             columns: vec![
-                ColumnDef {
-                    name: "id".into(),
-                    column_type: ColumnType::String,
-                    nullable: false,
-                    default: None,
-                    primary_key: true,
-                },
-                ColumnDef {
-                    name: "name".into(),
-                    column_type: ColumnType::String,
-                    nullable: false,
-                    default: None,
-                    primary_key: false,
-                },
-                ColumnDef {
-                    name: "age".into(),
-                    column_type: ColumnType::Int64,
-                    nullable: true,
-                    default: None,
-                    primary_key: false,
-                },
+                ColumnDef::required("id", ColumnType::String).with_primary_key(),
+                ColumnDef::required("name", ColumnType::String),
+                ColumnDef::nullable("age", ColumnType::Int64),
             ],
             version: 1,
         }
