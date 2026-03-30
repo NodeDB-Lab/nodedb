@@ -43,8 +43,39 @@ pub fn create_function(
         ));
     }
 
-    // Validate body: parse as SQL expression via DataFusion.
-    validate_function_body(&parsed)?;
+    // Detect body kind and compile/validate accordingly.
+    use crate::control::planner::procedural::ast::BodyKind;
+    let compiled_body_sql = match BodyKind::detect(&parsed.body_sql) {
+        BodyKind::Expression => {
+            // Expression UDF: validate directly via DataFusion.
+            validate_function_body(&parsed)?;
+            None
+        }
+        BodyKind::Procedural => {
+            // Procedural UDF: parse → validate → compile to SQL expression.
+            let block = crate::control::planner::procedural::parse_block(&parsed.body_sql)
+                .map_err(|e| sqlstate_error("42601", &format!("procedural parse error: {e}")))?;
+
+            crate::control::planner::procedural::validate_function_block(&block)
+                .map_err(|e| sqlstate_error("42601", &format!("procedural validation: {e}")))?;
+
+            let compiled = crate::control::planner::procedural::compile_to_sql(&block)
+                .map_err(|e| sqlstate_error("42601", &format!("procedural compile: {e}")))?;
+
+            // Validate the compiled expression via DataFusion (type check, etc.).
+            let compiled_parsed = ParsedCreateFunction {
+                or_replace: parsed.or_replace,
+                name: parsed.name.clone(),
+                parameters: parsed.parameters.clone(),
+                return_type: parsed.return_type.clone(),
+                volatility: parsed.volatility,
+                body_sql: compiled.clone(),
+            };
+            validate_function_body(&compiled_parsed)?;
+
+            Some(compiled)
+        }
+    };
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -57,6 +88,7 @@ pub fn create_function(
         parameters: parsed.parameters,
         return_type: parsed.return_type,
         body_sql: parsed.body_sql,
+        compiled_body_sql,
         volatility: parsed.volatility,
         security: crate::control::security::catalog::FunctionSecurity::default(),
         owner: identity.username.clone(),

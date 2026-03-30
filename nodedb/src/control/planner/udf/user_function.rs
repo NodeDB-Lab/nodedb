@@ -95,19 +95,26 @@ impl UserDefinedFunction {
         let signature = Signature::one_of(vec![type_sig], volatility);
         let param_schema = Arc::new(Schema::new(fields));
 
+        // Use compiled SQL for procedural bodies, raw SQL for expression bodies.
+        let effective_body = func
+            .compiled_body_sql
+            .clone()
+            .unwrap_or_else(|| func.body_sql.clone());
+
         Some(Self {
             name: func.name.clone(),
             param_names,
             param_types,
             return_type,
-            body_sql: func.body_sql.clone(),
+            body_sql: effective_body,
             signature,
             compiled: OnceLock::new(),
             param_schema,
         })
     }
 
-    /// Access the body SQL (used by the inlining `AnalyzerRule`).
+    /// Access the effective body SQL (compiled for procedural, raw for expression).
+    /// Used by the inlining transform.
     pub fn body_sql(&self) -> &str {
         &self.body_sql
     }

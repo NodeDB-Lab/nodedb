@@ -76,9 +76,16 @@ pub struct StoredFunction {
     pub parameters: Vec<FunctionParam>,
     /// SQL return type name (e.g. "TEXT", "FLOAT", "BOOLEAN").
     pub return_type: String,
-    /// SQL expression body (everything after AS in CREATE FUNCTION).
-    /// Stored as raw SQL text; parsed and validated at CREATE time.
+    /// Original SQL body (everything after AS in CREATE FUNCTION).
+    /// For expression UDFs: `SELECT LOWER(TRIM(email))`.
+    /// For procedural UDFs: `BEGIN IF ... END`.
     pub body_sql: String,
+    /// Compiled SQL expression for procedural bodies.
+    /// Produced by the procedural compiler at CREATE time.
+    /// `None` for expression UDFs (body_sql is already an expression).
+    /// When present, the UDF engine uses this instead of body_sql.
+    #[serde(default)]
+    pub compiled_body_sql: Option<String>,
     pub volatility: FunctionVolatility,
     /// Security mode: INVOKER (default) or DEFINER (Tier 3).
     #[serde(default)]
