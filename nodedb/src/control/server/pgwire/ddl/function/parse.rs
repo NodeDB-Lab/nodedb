@@ -147,21 +147,7 @@ pub(super) fn parse_parameters(params_str: &str) -> PgWireResult<Vec<FunctionPar
 
 /// Find the matching closing paren for the open paren at `start`.
 pub(super) fn find_matching_paren(s: &str, start: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    super::super::parse_utils::find_matching_paren(s, start)
 }
 
 #[cfg(test)]

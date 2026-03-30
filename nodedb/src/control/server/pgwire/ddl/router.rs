@@ -97,6 +97,20 @@ pub async fn dispatch(
         return Some(super::function::show_functions(state, identity));
     }
 
+    // Stored procedures.
+    if upper.starts_with("CREATE OR REPLACE PROCEDURE ") || upper.starts_with("CREATE PROCEDURE ") {
+        return Some(super::procedure::create_procedure(state, identity, sql));
+    }
+    if upper.starts_with("DROP PROCEDURE ") {
+        return Some(super::procedure::drop_procedure(state, identity, &parts));
+    }
+    if upper == "SHOW PROCEDURES" || upper.starts_with("SHOW PROCEDURES") {
+        return Some(super::procedure::show_procedures(state, identity));
+    }
+    if upper.starts_with("CALL ") {
+        return Some(super::procedure::call_procedure(state, identity, sql).await);
+    }
+
     // Triggers.
     if upper.starts_with("CREATE OR REPLACE TRIGGER ") || upper.starts_with("CREATE TRIGGER ") {
         return Some(super::trigger::create_trigger(state, identity, sql));

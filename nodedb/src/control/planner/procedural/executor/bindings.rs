@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-/// Row bindings available during trigger body execution.
+/// Row bindings available during trigger/procedure body execution.
 #[derive(Debug, Clone)]
 pub struct RowBindings {
     /// NEW row fields (INSERT/UPDATE). None for DELETE.
@@ -18,9 +18,42 @@ pub struct RowBindings {
     tg_table_name: String,
     /// Trigger timing: "BEFORE" or "AFTER".
     tg_when: String,
+    /// Additional variables (loop variables, procedure parameters).
+    variables: HashMap<String, String>,
 }
 
 impl RowBindings {
+    /// Create empty bindings (for stored procedure execution — no NEW/OLD).
+    pub fn empty() -> Self {
+        Self {
+            new_row: None,
+            old_row: None,
+            tg_op: String::new(),
+            tg_table_name: String::new(),
+            tg_when: String::new(),
+            variables: HashMap::new(),
+        }
+    }
+
+    /// Create bindings with procedure parameter values substituted.
+    pub fn with_params(params: HashMap<String, String>) -> Self {
+        Self {
+            new_row: None,
+            old_row: None,
+            tg_op: String::new(),
+            tg_table_name: String::new(),
+            tg_when: String::new(),
+            variables: params,
+        }
+    }
+
+    /// Create a copy with an additional variable binding (for loop variables).
+    pub fn with_variable(&self, name: &str, value: &str) -> Self {
+        let mut copy = self.clone();
+        copy.variables.insert(name.to_string(), value.to_string());
+        copy
+    }
+
     /// Create bindings for an AFTER INSERT trigger.
     pub fn after_insert(collection: &str, new_row: HashMap<String, serde_json::Value>) -> Self {
         Self {
@@ -29,6 +62,7 @@ impl RowBindings {
             tg_op: "INSERT".into(),
             tg_table_name: collection.into(),
             tg_when: "AFTER".into(),
+            variables: HashMap::new(),
         }
     }
 
@@ -44,6 +78,7 @@ impl RowBindings {
             tg_op: "UPDATE".into(),
             tg_table_name: collection.into(),
             tg_when: "AFTER".into(),
+            variables: HashMap::new(),
         }
     }
 
@@ -55,6 +90,7 @@ impl RowBindings {
             tg_op: "DELETE".into(),
             tg_table_name: collection.into(),
             tg_when: "AFTER".into(),
+            variables: HashMap::new(),
         }
     }
 
@@ -90,6 +126,11 @@ impl RowBindings {
                 result = replace_case_insensitive(&result, &pattern_upper, &literal);
                 result = replace_case_insensitive(&result, &pattern_lower, &literal);
             }
+        }
+
+        // Replace user-defined variables (loop vars, procedure params).
+        for (name, value) in &self.variables {
+            result = replace_case_insensitive(&result, name, value);
         }
 
         // Replace statement-level variables.

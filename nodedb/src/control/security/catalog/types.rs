@@ -47,6 +47,10 @@ pub(super) const FUNCTIONS: TableDefinition<&str, &[u8]> =
 /// Table: "{tenant_id}:{name}" -> MessagePack-serialized trigger definition.
 pub(super) const TRIGGERS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.triggers");
 
+/// Table: "{tenant_id}:{name}" -> MessagePack-serialized stored procedure definition.
+pub(super) const PROCEDURES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("_system.procedures");
+
 /// Table: "{source_type}:{tenant_id}:{source_name}" -> MessagePack-serialized dependency list.
 /// Tracks what objects a function/trigger/procedure references in its body.
 pub(super) const DEPENDENCIES: TableDefinition<&str, &[u8]> =
@@ -447,6 +451,9 @@ impl SystemCatalog {
             let _ = write_txn
                 .open_table(TRIGGERS)
                 .map_err(|e| catalog_err("init triggers table", e))?;
+            let _ = write_txn
+                .open_table(PROCEDURES)
+                .map_err(|e| catalog_err("init procedures table", e))?;
             let _ = write_txn
                 .open_table(DEPENDENCIES)
                 .map_err(|e| catalog_err("init dependencies table", e))?;

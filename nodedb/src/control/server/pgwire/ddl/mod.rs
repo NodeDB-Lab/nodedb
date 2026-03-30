@@ -25,6 +25,8 @@ pub mod materialized_view;
 pub mod metering_ddl;
 pub mod org_ddl;
 pub mod ownership;
+pub(crate) mod parse_utils;
+pub mod procedure;
 pub mod pubsub;
 pub mod rls;
 pub mod role;

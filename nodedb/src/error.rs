@@ -71,6 +71,9 @@ pub enum Error {
     #[error("query plan error: {detail}")]
     PlanError { detail: String },
 
+    #[error("execution limit exceeded: {detail}")]
+    ExecutionLimitExceeded { detail: String },
+
     // --- Infrastructure errors ---
     #[error("WAL error: {0}")]
     Wal(#[from] nodedb_wal::WalError),
@@ -219,6 +222,7 @@ impl From<Error> for NodeDbError {
             // Client input
             Error::BadRequest { detail } => NodeDbError::bad_request(detail),
             Error::PlanError { detail } => NodeDbError::plan_error(detail),
+            Error::ExecutionLimitExceeded { detail } => NodeDbError::bad_request(detail),
 
             // Infrastructure — flatten to opaque public variants
             Error::Wal(wal_err) => NodeDbError::wal(wal_err),

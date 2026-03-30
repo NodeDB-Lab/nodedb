@@ -4,8 +4,8 @@
 //! embedded DML statement through the normal plan+SPSC path. Used by
 //! triggers (Tier 3) and stored procedures (Tier 4).
 //!
-//! Runs on the **Control Plane** (Tokio async). Each DML in the trigger
-//! body is planned via DataFusion and dispatched to the Data Plane through
+//! Runs on the **Control Plane** (Tokio async). Each DML in the body
+//! is planned via DataFusion and dispatched to the Data Plane through
 //! the existing SPSC bridge.
 
 use crate::control::planner::procedural::ast::*;
@@ -14,6 +14,7 @@ use crate::control::state::SharedState;
 use crate::types::TenantId;
 
 use super::bindings::RowBindings;
+use super::fuel::ExecutionBudget;
 
 /// Maximum trigger cascade depth (trigger A fires trigger B fires trigger A).
 pub const MAX_CASCADE_DEPTH: u32 = 16;
@@ -28,6 +29,16 @@ pub struct StatementExecutor<'a> {
     identity: AuthenticatedIdentity,
     tenant_id: TenantId,
     cascade_depth: u32,
+}
+
+/// Control flow signal from statement execution.
+enum Flow {
+    /// Continue to next statement.
+    Continue,
+    /// Break out of innermost loop.
+    Break,
+    /// Skip to next iteration of innermost loop.
+    LoopContinue,
 }
 
 impl<'a> StatementExecutor<'a> {
@@ -47,89 +58,146 @@ impl<'a> StatementExecutor<'a> {
 
     /// Execute a procedural block with the given row bindings.
     ///
-    /// Each DML statement in the body is substituted with NEW/OLD values,
-    /// planned via DataFusion, and dispatched to the Data Plane.
+    /// Uses an unlimited execution budget (for triggers). Stored procedures
+    /// should call `execute_block_with_budget` instead.
     pub async fn execute_block(
         &self,
         block: &ProceduralBlock,
         bindings: &RowBindings,
     ) -> crate::Result<()> {
-        for stmt in &block.statements {
-            self.execute_statement(stmt, bindings).await?;
-        }
-        Ok(())
+        let mut budget = ExecutionBudget::unlimited();
+        self.execute_statements(&block.statements, bindings, &mut budget)
+            .await
+    }
+
+    /// Execute a procedural block with an explicit execution budget.
+    ///
+    /// Used by stored procedures with configured max_iterations and timeout.
+    pub async fn execute_block_with_budget(
+        &self,
+        block: &ProceduralBlock,
+        bindings: &RowBindings,
+        budget: &mut ExecutionBudget,
+    ) -> crate::Result<()> {
+        self.execute_statements(&block.statements, bindings, budget)
+            .await
     }
 
     fn execute_statement<'b>(
         &'b self,
         stmt: &'b Statement,
         bindings: &'b RowBindings,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<()>> + Send + 'b>> {
+        budget: &'b mut ExecutionBudget,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Result<Flow>> + Send + 'b>> {
         Box::pin(async move {
+            budget.check()?;
+
             match stmt {
-                Statement::Dml { sql } => self.execute_dml(sql, bindings).await,
+                Statement::Dml { sql } => {
+                    self.execute_dml(sql, bindings).await?;
+                    Ok(Flow::Continue)
+                }
                 Statement::If {
                     condition,
                     then_block,
                     elsif_branches,
                     else_block,
                 } => {
-                    // Evaluate condition by substituting bindings.
                     let cond_sql = bindings.substitute(&condition.sql);
                     if self.evaluate_condition(&cond_sql).await? {
-                        return self.execute_statements(then_block, bindings).await;
+                        return self
+                            .execute_statements_flow(then_block, bindings, budget)
+                            .await;
                     }
                     for branch in elsif_branches {
                         let branch_cond = bindings.substitute(&branch.condition.sql);
                         if self.evaluate_condition(&branch_cond).await? {
-                            return self.execute_statements(&branch.body, bindings).await;
+                            return self
+                                .execute_statements_flow(&branch.body, bindings, budget)
+                                .await;
                         }
                     }
                     if let Some(else_stmts) = else_block {
-                        return self.execute_statements(else_stmts, bindings).await;
+                        return self
+                            .execute_statements_flow(else_stmts, bindings, budget)
+                            .await;
                     }
-                    Ok(())
+                    Ok(Flow::Continue)
                 }
+                Statement::While { condition, body } => {
+                    loop {
+                        budget.consume_iteration()?;
+                        let cond_sql = bindings.substitute(&condition.sql);
+                        if !self.evaluate_condition(&cond_sql).await? {
+                            break;
+                        }
+                        match self.execute_statements_flow(body, bindings, budget).await? {
+                            Flow::Break => break,
+                            Flow::Continue | Flow::LoopContinue => {}
+                        }
+                    }
+                    Ok(Flow::Continue)
+                }
+                Statement::Loop { body } => {
+                    loop {
+                        budget.consume_iteration()?;
+                        match self.execute_statements_flow(body, bindings, budget).await? {
+                            Flow::Break => break,
+                            Flow::Continue | Flow::LoopContinue => {}
+                        }
+                    }
+                    Ok(Flow::Continue)
+                }
+                Statement::For {
+                    var,
+                    start,
+                    end,
+                    reverse,
+                    body,
+                } => {
+                    // Evaluate start/end as SQL expressions.
+                    let start_sql = bindings.substitute(&start.sql);
+                    let end_sql = bindings.substitute(&end.sql);
+                    let start_val = self.evaluate_int(&start_sql).await?;
+                    let end_val = self.evaluate_int(&end_sql).await?;
+
+                    let range: Box<dyn Iterator<Item = i64> + Send> = if *reverse {
+                        Box::new((end_val..=start_val).rev())
+                    } else {
+                        Box::new(start_val..=end_val)
+                    };
+
+                    for val in range {
+                        budget.consume_iteration()?;
+                        // Create a modified bindings with the loop variable.
+                        let loop_bindings = bindings.with_variable(var, &val.to_string());
+                        match self
+                            .execute_statements_flow(body, &loop_bindings, budget)
+                            .await?
+                        {
+                            Flow::Break => break,
+                            Flow::Continue | Flow::LoopContinue => {}
+                        }
+                    }
+                    Ok(Flow::Continue)
+                }
+                Statement::Break => Ok(Flow::Break),
+                Statement::Continue => Ok(Flow::LoopContinue),
                 Statement::Raise {
                     level: RaiseLevel::Exception,
                     message,
                 } => {
                     let msg = bindings.substitute(&message.sql);
-                    // Strip surrounding quotes if present.
                     let clean_msg = msg.trim().trim_matches('\'').to_string();
                     Err(crate::Error::BadRequest {
-                        detail: format!("trigger raised exception: {clean_msg}"),
+                        detail: format!("raised exception: {clean_msg}"),
                     })
                 }
-                Statement::Raise { .. } => {
-                    // NOTICE/WARNING — log but continue.
-                    Ok(())
-                }
-                Statement::Declare { .. } | Statement::Assign { .. } => {
-                    // Variables in trigger bodies are handled by substitution
-                    // in the procedural parser. For the statement executor,
-                    // we skip DECLARE/ASSIGN (they have no runtime effect
-                    // when the body uses NEW/OLD substitution).
-                    Ok(())
-                }
-                Statement::Return { .. } | Statement::ReturnQuery { .. } => {
-                    // Triggers don't return values. Ignore.
-                    Ok(())
-                }
-                Statement::Break | Statement::Continue => {
-                    // Should not appear outside loops. Ignore gracefully.
-                    Ok(())
-                }
-                Statement::Loop { .. } | Statement::While { .. } | Statement::For { .. } => {
-                    // Loops in trigger bodies are uncommon but possible.
-                    // For now, reject at runtime. The procedural compiler
-                    // handles loops for functions; triggers use the executor.
-                    Err(crate::Error::BadRequest {
-                        detail: "LOOP/WHILE/FOR not yet supported in trigger bodies".into(),
-                    })
-                }
+                Statement::Raise { .. } => Ok(Flow::Continue),
+                Statement::Declare { .. } | Statement::Assign { .. } => Ok(Flow::Continue),
+                Statement::Return { .. } | Statement::ReturnQuery { .. } => Ok(Flow::Continue),
                 Statement::Commit | Statement::Rollback => Err(crate::Error::BadRequest {
-                    detail: "COMMIT/ROLLBACK not allowed in trigger bodies".into(),
+                    detail: "COMMIT/ROLLBACK not yet supported in procedure bodies".into(),
                 }),
             }
         })
@@ -139,30 +207,42 @@ impl<'a> StatementExecutor<'a> {
         &self,
         stmts: &[Statement],
         bindings: &RowBindings,
+        budget: &mut ExecutionBudget,
     ) -> crate::Result<()> {
         for stmt in stmts {
-            self.execute_statement(stmt, bindings).await?;
+            self.execute_statement(stmt, bindings, budget).await?;
         }
         Ok(())
     }
 
-    /// Execute a DML statement from the trigger body.
-    ///
-    /// Substitutes NEW/OLD/TG_* variables, plans via DataFusion, and
-    /// dispatches to the Data Plane through the normal path.
+    /// Execute statements, propagating Break/Continue flow signals.
+    async fn execute_statements_flow(
+        &self,
+        stmts: &[Statement],
+        bindings: &RowBindings,
+        budget: &mut ExecutionBudget,
+    ) -> crate::Result<Flow> {
+        for stmt in stmts {
+            let flow = self.execute_statement(stmt, bindings, budget).await?;
+            match flow {
+                Flow::Continue => {}
+                Flow::Break | Flow::LoopContinue => return Ok(flow),
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Execute a DML statement, substituting bindings into SQL.
     async fn execute_dml(&self, sql: &str, bindings: &RowBindings) -> crate::Result<()> {
         let bound_sql = bindings.substitute(sql);
 
-        // Plan the DML via DataFusion.
         let ctx = crate::control::planner::context::QueryContext::with_catalog(
             std::sync::Arc::clone(&self.state.credentials),
             self.tenant_id.as_u32(),
         );
         let tasks = ctx.plan_sql(&bound_sql, self.tenant_id).await?;
 
-        // Dispatch each task to the Data Plane.
         for task in tasks {
-            // WAL append for durability.
             crate::control::server::dispatch_utils::wal_append_if_write(
                 &self.state.wal,
                 task.tenant_id,
@@ -170,7 +250,6 @@ impl<'a> StatementExecutor<'a> {
                 &task.plan,
             )?;
 
-            // Dispatch to Data Plane.
             crate::control::server::dispatch_utils::dispatch_to_data_plane(
                 self.state,
                 task.tenant_id,
@@ -184,33 +263,14 @@ impl<'a> StatementExecutor<'a> {
         Ok(())
     }
 
-    /// Evaluate a SQL boolean condition by running it as a SELECT query.
-    ///
-    /// Returns true if the condition evaluates to a truthy value.
+    /// Evaluate a SQL boolean condition.
     async fn evaluate_condition(&self, condition_sql: &str) -> crate::Result<bool> {
-        // For simple constant conditions, avoid DataFusion overhead.
         if let Some(result) = crate::control::trigger::try_eval_simple_condition(condition_sql) {
             return Ok(result);
         }
 
-        // Plan and execute: SELECT (<condition>) as __cond
-        let ctx = crate::control::planner::context::QueryContext::with_catalog(
-            std::sync::Arc::clone(&self.state.credentials),
-            self.tenant_id.as_u32(),
-        );
-        let select_sql = format!("SELECT ({condition_sql}) as __cond");
-        let df = ctx
-            .session()
-            .sql(&select_sql)
-            .await
-            .map_err(|e| crate::Error::PlanError {
-                detail: format!("condition eval: {e}"),
-            })?;
-        let batches = df.collect().await.map_err(|e| crate::Error::PlanError {
-            detail: format!("condition eval collect: {e}"),
-        })?;
+        let batches = self.eval_sql_expr(condition_sql, "condition").await?;
 
-        // Extract the boolean result from the first row.
         for batch in &batches {
             if batch.num_rows() > 0 {
                 let col = batch.column(0);
@@ -220,7 +280,6 @@ impl<'a> StatementExecutor<'a> {
                 {
                     return Ok(bool_arr.value(0));
                 }
-                // Fallback: check if numeric truthy.
                 if let Some(int_arr) = col
                     .as_any()
                     .downcast_ref::<datafusion::arrow::array::Int32Array>()
@@ -230,11 +289,65 @@ impl<'a> StatementExecutor<'a> {
             }
         }
 
-        // Default to false if evaluation fails.
         Ok(false)
     }
 
-    /// Current cascade depth.
+    /// Evaluate a SQL expression as an integer.
+    async fn evaluate_int(&self, sql: &str) -> crate::Result<i64> {
+        if let Ok(v) = sql.trim().parse::<i64>() {
+            return Ok(v);
+        }
+
+        let batches = self.eval_sql_expr(sql, "integer").await?;
+
+        for batch in &batches {
+            if batch.num_rows() > 0 {
+                let col = batch.column(0);
+                if let Some(arr) = col
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                {
+                    return Ok(arr.value(0));
+                }
+                if let Some(arr) = col
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int32Array>()
+                {
+                    return Ok(arr.value(0) as i64);
+                }
+            }
+        }
+
+        Err(crate::Error::PlanError {
+            detail: format!("could not evaluate '{sql}' as integer"),
+        })
+    }
+
+    /// Execute a SQL expression via DataFusion and return the result batches.
+    ///
+    /// Wraps the expression in `SELECT (<expr>) as __result` and collects.
+    async fn eval_sql_expr(
+        &self,
+        expr: &str,
+        context: &str,
+    ) -> crate::Result<Vec<datafusion::arrow::record_batch::RecordBatch>> {
+        let ctx = crate::control::planner::context::QueryContext::with_catalog(
+            std::sync::Arc::clone(&self.state.credentials),
+            self.tenant_id.as_u32(),
+        );
+        let select_sql = format!("SELECT ({expr}) as __result");
+        let df = ctx
+            .session()
+            .sql(&select_sql)
+            .await
+            .map_err(|e| crate::Error::PlanError {
+                detail: format!("{context} eval: {e}"),
+            })?;
+        df.collect().await.map_err(|e| crate::Error::PlanError {
+            detail: format!("{context} eval collect: {e}"),
+        })
+    }
+
     pub fn cascade_depth(&self) -> u32 {
         self.cascade_depth
     }
