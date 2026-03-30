@@ -146,13 +146,15 @@ fn register_udfs(session: &SessionContext) {
         GeoDistance, StContains, StDistance, StDwithin, StIntersects, StWithin,
     };
     use super::udf::{
-        Bm25Score, DocArrayContains, DocExists, DocGet, RrfScore, TextMatch, VectorDistance,
+        Bm25Score, DocArrayContains, DocExists, DocGet, MultiVectorSearch, RrfScore, TextMatch,
+        VectorDistance,
     };
     use datafusion::logical_expr::ScalarUDF;
     session.register_udf(ScalarUDF::new_from_impl(DocGet::new()));
     session.register_udf(ScalarUDF::new_from_impl(DocExists::new()));
     session.register_udf(ScalarUDF::new_from_impl(DocArrayContains::new()));
     session.register_udf(ScalarUDF::new_from_impl(VectorDistance::new()));
+    session.register_udf(ScalarUDF::new_from_impl(MultiVectorSearch::new()));
     session.register_udf(ScalarUDF::new_from_impl(RrfScore::new()));
     session.register_udf(ScalarUDF::new_from_impl(Bm25Score::new()));
     session.register_udf(ScalarUDF::new_from_impl(TextMatch::new()));

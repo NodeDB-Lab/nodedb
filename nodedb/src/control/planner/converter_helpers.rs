@@ -11,8 +11,8 @@ use crate::types::{TenantId, VShardId};
 use super::converter::PlanConverter;
 use super::extract::expr_to_scan_filters;
 use super::search::{
-    extract_table_name, try_extract_hybrid_search, try_extract_text_search,
-    try_extract_vector_search,
+    extract_table_name, try_extract_hybrid_search, try_extract_multi_vector_search,
+    try_extract_text_search, try_extract_vector_search,
 };
 
 impl PlanConverter {
@@ -40,6 +40,25 @@ impl PlanConverter {
                     ef_search: 0,
                     filter_bitmap: None,
                     field_name: String::new(),
+                    rls_filters: Vec::new(),
+                }),
+            }]);
+        }
+
+        // Check for multi_vector_search() in sort expression → MultiSearch.
+        if let Some((collection, query_vector, top_k)) =
+            try_extract_multi_vector_search(&sort.expr, &sort.input, sort.fetch)?
+        {
+            let vshard = VShardId::from_collection(&collection);
+            return Ok(vec![PhysicalTask {
+                tenant_id,
+                vshard_id: vshard,
+                plan: PhysicalPlan::Vector(VectorOp::MultiSearch {
+                    collection,
+                    query_vector: std::sync::Arc::from(query_vector.as_slice()),
+                    top_k,
+                    ef_search: 0,
+                    filter_bitmap: None,
                     rls_filters: Vec::new(),
                 }),
             }]);

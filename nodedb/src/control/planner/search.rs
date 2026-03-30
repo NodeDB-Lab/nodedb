@@ -60,6 +60,52 @@ pub(super) fn try_extract_vector_search(
     Ok(Some((collection, query_vector, top_k)))
 }
 
+/// Detect `ORDER BY multi_vector_search(ARRAY[...]) LIMIT k` pattern.
+///
+/// Returns `(collection, query_vector, top_k)` for multi-field RRF fusion.
+pub(super) fn try_extract_multi_vector_search(
+    sort_exprs: &[datafusion::logical_expr::expr::Sort],
+    input: &LogicalPlan,
+    fetch: Option<usize>,
+) -> crate::Result<Option<(String, Vec<f32>, usize)>> {
+    let first = match sort_exprs.first() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let func_name = match &first.expr {
+        Expr::ScalarFunction(func) => func.name(),
+        _ => return Ok(None),
+    };
+
+    if func_name != "multi_vector_search" {
+        return Ok(None);
+    }
+
+    let func = match &first.expr {
+        Expr::ScalarFunction(f) => f,
+        _ => return Ok(None),
+    };
+
+    let query_vector = if !func.args.is_empty() {
+        extract_float_array(&func.args[0])?
+    } else {
+        return Ok(None);
+    };
+
+    if query_vector.is_empty() {
+        return Ok(None);
+    }
+
+    let collection = match extract_table_name(input) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let top_k = fetch.unwrap_or(10);
+    Ok(Some((collection, query_vector, top_k)))
+}
+
 /// Extract a float array from an Expr (for vector_distance query vector).
 pub(super) fn extract_float_array(expr: &Expr) -> crate::Result<Vec<f32>> {
     match expr {
