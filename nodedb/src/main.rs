@@ -303,6 +303,16 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // WAL catch-up task: re-dispatches timeseries WAL records that weren't
+    // delivered to the Data Plane due to SPSC backpressure during ILP ingest.
+    // Starts from current WAL tip (startup replay already handled prior records).
+    let catchup_initial_lsn = wal.next_lsn();
+    nodedb::control::wal_catchup::spawn_wal_catchup_task(
+        Arc::clone(&shared),
+        catchup_initial_lsn,
+        shutdown_rx.clone(),
+    );
+
     // Event trigger processor: evaluates DEFINE EVENT triggers on writes.
     nodedb::control::event_trigger::spawn_event_trigger_processor(Arc::clone(&shared));
 

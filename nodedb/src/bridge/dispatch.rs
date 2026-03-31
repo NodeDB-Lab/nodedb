@@ -164,6 +164,15 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// Maximum SPSC request queue utilization across all cores (0-100).
+    pub fn max_utilization(&self) -> u8 {
+        self.cores
+            .iter()
+            .map(|c| c.request_tx.utilization())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Poll responses from all Data Plane cores.
     ///
     /// Returns responses that have been produced since the last poll.

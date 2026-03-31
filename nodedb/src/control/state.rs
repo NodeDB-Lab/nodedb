@@ -252,6 +252,10 @@ pub struct SharedState {
     /// Performance tuning configuration (deadlines, query limits, engine
     /// knobs, etc.). Immutable after startup — set once from `ServerConfig`.
     pub tuning: TuningConfig,
+
+    /// Highest WAL LSN confirmed delivered to the Data Plane for timeseries
+    /// catch-up. Updated by the WAL catch-up task; read by diagnostics.
+    pub wal_catchup_lsn: AtomicU64,
 }
 
 impl SharedState {
@@ -387,6 +391,7 @@ impl SharedState {
                 crate::control::rolling_upgrade::ClusterVersionState::new(),
             ),
             tuning: TuningConfig::default(),
+            wal_catchup_lsn: AtomicU64::new(0),
         })
     }
 
@@ -530,7 +535,17 @@ impl SharedState {
                 crate::control::rolling_upgrade::ClusterVersionState::new(),
             ),
             tuning,
+            wal_catchup_lsn: AtomicU64::new(0),
         }))
+    }
+
+    /// Maximum SPSC ring buffer utilization across all cores (0-100).
+    /// Used by the WAL catch-up task to avoid pushing when under backpressure.
+    pub fn max_spsc_utilization(&self) -> u8 {
+        match self.dispatcher.lock() {
+            Ok(d) => d.max_utilization(),
+            Err(p) => p.into_inner().max_utilization(),
+        }
     }
 
     /// Get the idle session timeout in seconds (0 = no timeout).
