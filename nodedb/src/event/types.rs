@@ -130,6 +130,9 @@ pub enum EventSource {
     RaftFollower,
     /// Replicated via CRDT sync. Do NOT trigger.
     CrdtSync,
+    /// Deferred trigger write. The Event Plane fires DEFERRED-mode triggers
+    /// for these events (post-commit from transaction batch).
+    Deferred,
 }
 
 impl std::fmt::Display for EventSource {
@@ -139,6 +142,7 @@ impl std::fmt::Display for EventSource {
             Self::Trigger => write!(f, "trigger"),
             Self::RaftFollower => write!(f, "raft_follower"),
             Self::CrdtSync => write!(f, "crdt_sync"),
+            Self::Deferred => write!(f, "deferred"),
         }
     }
 }

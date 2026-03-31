@@ -29,15 +29,20 @@ pub async fn dispatch_triggers(
     state: &Arc<SharedState>,
     retry_queue: &mut TriggerRetryQueue,
 ) {
-    // Only fire triggers for user-originated DML.
-    if event.source != EventSource::User {
-        trace!(
-            source = %event.source,
-            collection = %event.collection,
-            "skipping trigger dispatch for non-User event"
-        );
-        return;
-    }
+    // Determine which trigger execution mode to fire based on event source.
+    let mode_filter = match event.source {
+        EventSource::User => Some(TriggerExecutionMode::Async),
+        EventSource::Deferred => Some(TriggerExecutionMode::Deferred),
+        // Trigger/RaftFollower/CrdtSync sources don't fire triggers.
+        _ => {
+            trace!(
+                source = %event.source,
+                collection = %event.collection,
+                "skipping trigger dispatch for non-triggerable event source"
+            );
+            return;
+        }
+    };
 
     // Deserialize row data from the event payload.
     let new_fields = event
@@ -68,7 +73,7 @@ pub async fn dispatch_triggers(
                     Some(new),
                     None,
                     0,
-                    Some(TriggerExecutionMode::Async),
+                    mode_filter,
                 )
                 .await
             } else {
@@ -89,7 +94,7 @@ pub async fn dispatch_triggers(
                     None,
                     Some(old),
                     0,
-                    Some(TriggerExecutionMode::Async),
+                    mode_filter,
                 )
                 .await
             } else {
@@ -106,7 +111,7 @@ pub async fn dispatch_triggers(
                 new_fields.as_ref(),
                 old_fields.as_ref(),
                 0, // cascade_depth starts at 0 for Event Plane dispatch
-                Some(TriggerExecutionMode::Async), // Event Plane only fires ASYNC triggers
+                mode_filter,
             )
             .await
         }
