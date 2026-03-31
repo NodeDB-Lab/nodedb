@@ -54,6 +54,7 @@ impl CrossShardReceiver {
 
         match envelope.msg_type {
             VShardMessageType::CrossShardEvent => self.handle_write(envelope).await,
+            VShardMessageType::NotifyBroadcast => self.handle_notify_broadcast(envelope),
             other => self.error_response(
                 envelope.source_node,
                 envelope.vshard_id,
@@ -123,6 +124,53 @@ impl CrossShardReceiver {
                 self.build_response(envelope.source_node, envelope.vshard_id, &resp)
             }
         }
+    }
+
+    /// Handle a NOTIFY broadcast from a remote peer.
+    ///
+    /// Deserializes the `NotifyBroadcastMsg` and delivers it to the local
+    /// `ChangeStream` so LISTEN sessions on this node receive the event.
+    fn handle_notify_broadcast(&self, envelope: VShardEnvelope) -> Vec<u8> {
+        let msg: super::types::NotifyBroadcastMsg = match rmp_serde::from_slice(&envelope.payload) {
+            Ok(m) => m,
+            Err(e) => {
+                return self.error_response(
+                    envelope.source_node,
+                    envelope.vshard_id,
+                    0,
+                    &format!("deserialize NotifyBroadcast: {e}"),
+                );
+            }
+        };
+
+        // Don't re-deliver our own broadcasts (should not happen, but guard).
+        if msg.source_node == self.node_id {
+            return self.build_ack_response(envelope.source_node, envelope.vshard_id);
+        }
+
+        // Deliver to local ChangeStream subscribers.
+        self.shared_state.change_stream.deliver_remote_notify(&msg);
+
+        trace!(
+            source_node = msg.source_node,
+            collection = %msg.collection,
+            "delivered remote NOTIFY to local subscribers"
+        );
+
+        self.build_ack_response(envelope.source_node, envelope.vshard_id)
+    }
+
+    /// Build a simple ACK response for fire-and-forget messages.
+    fn build_ack_response(&self, target_node: u64, vshard_id: u16) -> Vec<u8> {
+        let env = VShardEnvelope {
+            version: WIRE_VERSION,
+            msg_type: VShardMessageType::NotifyBroadcastAck,
+            source_node: self.node_id,
+            target_node,
+            vshard_id,
+            payload: Vec::new(),
+        };
+        env.to_bytes()
     }
 
     /// Execute a cross-shard write SQL through the Control Plane.

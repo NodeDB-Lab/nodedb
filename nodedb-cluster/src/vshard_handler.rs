@@ -82,6 +82,8 @@ pub fn dispatch_by_type(envelope: &VShardEnvelope) -> DispatchTarget {
         // Event Plane cross-shard delivery
         VShardMessageType::CrossShardEvent => DispatchTarget::EventPlane,
         VShardMessageType::CrossShardEventAck => DispatchTarget::EventPlane,
+        VShardMessageType::NotifyBroadcast => DispatchTarget::EventPlane,
+        VShardMessageType::NotifyBroadcastAck => DispatchTarget::EventPlane,
     }
 }
 
@@ -212,6 +214,8 @@ mod tests {
             VShardMessageType::SpatialScatterResponse,
             VShardMessageType::CrossShardEvent,
             VShardMessageType::CrossShardEventAck,
+            VShardMessageType::NotifyBroadcast,
+            VShardMessageType::NotifyBroadcastAck,
         ];
         for msg_type in all_types {
             let env = VShardEnvelope::new(msg_type, 1, 2, 0, vec![]);

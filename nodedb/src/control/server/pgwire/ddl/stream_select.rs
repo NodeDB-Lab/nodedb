@@ -21,7 +21,10 @@ use crate::event::cdc::consume::{ConsumeError, ConsumeParams, consume_stream};
 use super::super::types::{sqlstate_error, text_field};
 
 /// Handle `SELECT * FROM STREAM <stream> CONSUMER GROUP <group> [PARTITION <p>] [LIMIT <n>]`
-pub fn select_from_stream(
+///
+/// Cluster-aware: if the requested partition is on a remote node, forwards
+/// the consume request to the leader via QUIC `ForwardRequest`.
+pub async fn select_from_stream(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     parts: &[&str],
@@ -75,6 +78,14 @@ pub fn select_from_stream(
 
     let result = match consume_stream(state, &consume_params) {
         Ok(r) => r,
+        Err(ConsumeError::RemotePartition { leader_node, .. }) => {
+            match crate::event::cdc::consume::consume_remote(state, &consume_params, leader_node)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(sqlstate_error("58000", &e.to_string())),
+            }
+        }
         Err(ConsumeError::BufferEmpty(_)) => {
             // Return empty result set.
             let schema = Arc::new(result_schema());

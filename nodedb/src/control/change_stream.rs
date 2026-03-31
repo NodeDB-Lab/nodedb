@@ -12,7 +12,9 @@
 //! The bus is a broadcast channel: each subscriber gets all mutations.
 //! Subscribers can filter by collection/tenant on their end.
 
-use tracing::debug;
+use std::sync::Arc;
+
+use tracing::{debug, trace, warn};
 
 use crate::types::{Lsn, TenantId};
 
@@ -268,6 +270,115 @@ impl ChangeStream {
     pub fn unsubscribe(&self) {
         self.active_subscriptions
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Deliver a remote NOTIFY broadcast to local subscribers.
+    ///
+    /// Called when a `NotifyBroadcast` message is received from another node.
+    /// Converts the message into a `ChangeEvent` and publishes locally.
+    pub fn deliver_remote_notify(
+        &self,
+        msg: &crate::event::cross_shard::types::NotifyBroadcastMsg,
+    ) {
+        let op = match msg.operation.as_str() {
+            "INSERT" => ChangeOperation::Insert,
+            "UPDATE" => ChangeOperation::Update,
+            "DELETE" => ChangeOperation::Delete,
+            _ => ChangeOperation::Insert,
+        };
+
+        let event = ChangeEvent {
+            lsn: Lsn::new(msg.lsn),
+            tenant_id: TenantId::new(msg.tenant_id),
+            collection: msg.collection.clone(),
+            document_id: msg.document_id.clone(),
+            operation: op,
+            timestamp_ms: msg.timestamp_ms,
+            after: None,
+        };
+
+        // Publish locally — don't store in recent_changes (remote events).
+        let _ = self.sender.send(event);
+    }
+}
+
+/// Broadcast a `ChangeEvent` to all peer nodes in the cluster.
+///
+/// Fire-and-forget: spawns a Tokio task per peer. Failures are logged but
+/// don't block the local publish path. Called from the Event Plane consumer
+/// after processing each write event.
+pub fn broadcast_notify_to_cluster(
+    event: &ChangeEvent,
+    node_id: u64,
+    sequence: u64,
+    transport: &Arc<nodedb_cluster::NexarTransport>,
+    topology: &Arc<std::sync::RwLock<nodedb_cluster::ClusterTopology>>,
+) {
+    use crate::event::cross_shard::types::NotifyBroadcastMsg;
+    use nodedb_cluster::RaftRpc;
+    use nodedb_cluster::wire::{VShardEnvelope, VShardMessageType};
+
+    let msg = NotifyBroadcastMsg {
+        source_node: node_id,
+        sequence,
+        tenant_id: event.tenant_id.as_u32(),
+        collection: event.collection.clone(),
+        document_id: event.document_id.clone(),
+        operation: event.operation.as_str().to_string(),
+        timestamp_ms: event.timestamp_ms,
+        lsn: event.lsn.as_u64(),
+    };
+
+    let payload = match rmp_serde::to_vec(&msg) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize NotifyBroadcast");
+            return;
+        }
+    };
+
+    // Get all active peer node IDs (excluding self).
+    let peer_ids: Vec<u64> = {
+        let topo = topology.read().unwrap_or_else(|p| p.into_inner());
+        topo.active_nodes()
+            .iter()
+            .map(|n| n.node_id)
+            .filter(|&id| id != node_id)
+            .collect()
+    };
+
+    if peer_ids.is_empty() {
+        return;
+    }
+
+    trace!(
+        peer_count = peer_ids.len(),
+        collection = %event.collection,
+        "broadcasting NOTIFY to cluster peers"
+    );
+
+    // Fire-and-forget: spawn one send per peer.
+    let transport = Arc::clone(transport);
+    for peer_id in peer_ids {
+        let envelope = VShardEnvelope::new(
+            VShardMessageType::NotifyBroadcast,
+            node_id,
+            peer_id,
+            0, // No specific vShard for NOTIFY.
+            payload.clone(),
+        );
+
+        let transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            let rpc = RaftRpc::VShardEnvelope(envelope.to_bytes());
+            if let Err(e) = transport.send_rpc(peer_id, rpc).await {
+                trace!(
+                    peer = peer_id,
+                    error = %e,
+                    "NOTIFY broadcast to peer failed (best-effort)"
+                );
+            }
+        });
     }
 }
 

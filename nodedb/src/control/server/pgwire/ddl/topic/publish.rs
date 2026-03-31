@@ -12,7 +12,9 @@ use crate::event::topic::publish::publish_to_topic;
 use super::super::super::types::sqlstate_error;
 
 /// Handle `PUBLISH TO <topic> '<payload>'`
-pub fn handle_publish(
+///
+/// Cluster-aware: if the topic's home node is remote, forwards via QUIC.
+pub async fn handle_publish(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     sql: &str,
@@ -47,10 +49,27 @@ pub fn handle_publish(
 
     let tenant_id = identity.tenant_id.as_u32();
 
+    use crate::event::topic::publish::PublishError;
+
     match publish_to_topic(state, tenant_id, &topic_name, payload) {
         Ok(seq) => {
             tracing::trace!(topic = %topic_name, seq, "message published");
             Ok(vec![Response::Execution(Tag::new("PUBLISH"))])
+        }
+        Err(PublishError::RemoteHome { leader_node, .. }) => {
+            // Forward to remote home node.
+            match crate::event::topic::publish::publish_remote(
+                state,
+                tenant_id,
+                &topic_name,
+                payload,
+                leader_node,
+            )
+            .await
+            {
+                Ok(_) => Ok(vec![Response::Execution(Tag::new("PUBLISH"))]),
+                Err(e) => Err(sqlstate_error("58000", &e.to_string())),
+            }
         }
         Err(e) => Err(sqlstate_error("42704", &e.to_string())),
     }

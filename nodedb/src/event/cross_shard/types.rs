@@ -73,6 +73,31 @@ impl CrossShardWriteResponse {
     }
 }
 
+/// A NOTIFY broadcast message sent to all peers for cluster-wide delivery.
+///
+/// When a node publishes a NOTIFY (via `ChangeStream.publish()`), it also
+/// broadcasts this message to all peer nodes via `VShardEnvelope(NotifyBroadcast)`.
+/// Each peer delivers the event to its local `ChangeStream` for LISTEN subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifyBroadcastMsg {
+    /// The originating node ID (for dedup — don't re-broadcast our own events).
+    pub source_node: u64,
+    /// Monotonic sequence on the source node (for dedup on receiver).
+    pub sequence: u64,
+    /// Tenant that published the NOTIFY.
+    pub tenant_id: u32,
+    /// Collection affected.
+    pub collection: String,
+    /// Document ID affected.
+    pub document_id: String,
+    /// Operation type: "INSERT", "UPDATE", "DELETE".
+    pub operation: String,
+    /// Timestamp (epoch milliseconds).
+    pub timestamp_ms: u64,
+    /// LSN from the source node's WAL.
+    pub lsn: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +141,24 @@ mod tests {
         assert!(!err.success);
         assert!(!err.duplicate);
         assert_eq!(err.error, "shard unavailable");
+    }
+
+    #[test]
+    fn notify_broadcast_roundtrip() {
+        let msg = NotifyBroadcastMsg {
+            source_node: 1,
+            sequence: 42,
+            tenant_id: 5,
+            collection: "orders".into(),
+            document_id: "o-123".into(),
+            operation: "INSERT".into(),
+            timestamp_ms: 1700000000000,
+            lsn: 500,
+        };
+        let bytes = rmp_serde::to_vec(&msg).unwrap();
+        let decoded: NotifyBroadcastMsg = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.source_node, 1);
+        assert_eq!(decoded.collection, "orders");
+        assert_eq!(decoded.lsn, 500);
     }
 }

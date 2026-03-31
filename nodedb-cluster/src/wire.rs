@@ -101,6 +101,10 @@ pub enum VShardMessageType {
     CrossShardEvent = 70,
     /// Acknowledgement for a cross-shard event write.
     CrossShardEventAck = 71,
+    /// Broadcast NOTIFY message to all peers (LISTEN/NOTIFY cluster-wide).
+    NotifyBroadcast = 72,
+    /// Acknowledgement for a NOTIFY broadcast.
+    NotifyBroadcastAck = 73,
 }
 
 /// Current wire protocol version.
@@ -186,6 +190,8 @@ impl VShardEnvelope {
             61 => VShardMessageType::SpatialScatterResponse,
             70 => VShardMessageType::CrossShardEvent,
             71 => VShardMessageType::CrossShardEventAck,
+            72 => VShardMessageType::NotifyBroadcast,
+            73 => VShardMessageType::NotifyBroadcastAck,
             _ => return None,
         };
 
@@ -246,6 +252,8 @@ mod tests {
             VShardMessageType::SpatialScatterResponse,
             VShardMessageType::CrossShardEvent,
             VShardMessageType::CrossShardEventAck,
+            VShardMessageType::NotifyBroadcast,
+            VShardMessageType::NotifyBroadcastAck,
         ];
 
         for msg_type in types {

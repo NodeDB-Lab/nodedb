@@ -12,7 +12,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use super::super::auth::AppState;
-use crate::event::cdc::consume::{ConsumeError, ConsumeParams, consume_stream};
+use crate::event::cdc::consume::{ConsumeError, ConsumeParams, ConsumeResult, consume_stream};
 
 /// Query parameters.
 #[derive(Deserialize, Default)]
@@ -67,40 +67,56 @@ pub async fn poll_stream(
         limit,
     };
 
-    match consume_stream(&state.shared, &consume_params) {
-        Ok(result) => {
-            let events: Vec<serde_json::Value> = result
-                .events
-                .iter()
-                .map(|e| serde_json::to_value(e).unwrap_or_default())
-                .collect();
-            let count = events.len();
-            let partition_offsets: std::collections::BTreeMap<String, u64> = result
-                .partition_offsets
-                .into_iter()
-                .map(|(pid, lsn)| (pid.to_string(), lsn))
-                .collect();
+    let result = match consume_stream(&state.shared, &consume_params) {
+        Ok(r) => r,
+        Err(ConsumeError::RemotePartition { leader_node, .. }) => {
+            // Forward to remote node.
+            match crate::event::cdc::consume::consume_remote(
+                &state.shared,
+                &consume_params,
+                leader_node,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        Err(ConsumeError::BufferEmpty(_)) => ConsumeResult {
+            events: Vec::new(),
+            partition_offsets: Vec::new(),
+        },
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
 
-            Json(PollResponse {
-                events,
-                partition_offsets,
-                count,
-            })
-            .into_response()
-        }
-        Err(ConsumeError::BufferEmpty(_)) => {
-            // Not an error — just no events yet.
-            Json(PollResponse {
-                events: Vec::new(),
-                partition_offsets: std::collections::BTreeMap::new(),
-                count: 0,
-            })
-            .into_response()
-        }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    let events: Vec<serde_json::Value> = result
+        .events
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap_or_default())
+        .collect();
+    let count = events.len();
+    let partition_offsets: std::collections::BTreeMap<String, u64> = result
+        .partition_offsets
+        .into_iter()
+        .map(|(pid, lsn)| (pid.to_string(), lsn))
+        .collect();
+
+    Json(PollResponse {
+        events,
+        partition_offsets,
+        count,
+    })
+    .into_response()
 }

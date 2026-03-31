@@ -158,9 +158,7 @@ pub async fn dispatch(
         && upper.contains("FROM STREAM ")
         && upper.contains("CONSUMER GROUP")
     {
-        return Some(super::stream_select::select_from_stream(
-            state, identity, &parts,
-        ));
+        return Some(super::stream_select::select_from_stream(state, identity, &parts).await);
     }
 
     // Streaming materialized views: CREATE MATERIALIZED VIEW ... STREAMING AS ...
@@ -181,7 +179,7 @@ pub async fn dispatch(
         return Some(super::topic::show_topics(state, identity));
     }
     if upper.starts_with("PUBLISH TO ") {
-        return Some(super::topic::handle_publish(state, identity, sql));
+        return Some(super::topic::handle_publish(state, identity, sql).await);
     }
 
     // Stream/Topic consumption: SELECT * FROM STREAM/TOPIC ... CONSUMER GROUP ...
@@ -191,7 +189,7 @@ pub async fn dispatch(
     {
         // Rewrite: topics use "topic:<name>" buffer keys.
         // The stream_select handler works for both — we just need to prefix the name.
-        return Some(select_from_topic(state, identity, &parts));
+        return Some(select_from_topic(state, identity, &parts).await);
     }
 
     // Schedules: CREATE/DROP/SHOW SCHEDULE
@@ -870,7 +868,7 @@ pub async fn dispatch(
 ///
 /// Topics use "topic:<name>" as buffer keys. We parse the parts directly
 /// and call stream_select's underlying consume logic with the prefixed name.
-fn select_from_topic(
+async fn select_from_topic(
     state: &crate::control::state::SharedState,
     identity: &crate::control::security::identity::AuthenticatedIdentity,
     parts: &[&str],
@@ -901,5 +899,5 @@ fn select_from_topic(
         }
     }
 
-    super::stream_select::select_from_stream(state, identity, &rewritten)
+    super::stream_select::select_from_stream(state, identity, &rewritten).await
 }

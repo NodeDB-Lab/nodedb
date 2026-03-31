@@ -123,7 +123,7 @@ pub async fn dispatch_to_data_plane(
 
         if should_publish {
             use crate::control::change_stream::ChangeEvent;
-            shared.change_stream.publish(ChangeEvent {
+            let event = ChangeEvent {
                 lsn: response.watermark_lsn,
                 tenant_id,
                 collection,
@@ -131,7 +131,26 @@ pub async fn dispatch_to_data_plane(
                 operation: op,
                 timestamp_ms: current_timestamp_ms(),
                 after: None,
-            });
+            };
+
+            // Cluster-wide NOTIFY: broadcast to all peers via QUIC.
+            if let (Some(transport), Some(topology)) =
+                (&shared.cluster_transport, &shared.cluster_topology)
+            {
+                use std::sync::atomic::Ordering;
+                static NOTIFY_SEQ: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(1);
+                let seq = NOTIFY_SEQ.fetch_add(1, Ordering::Relaxed);
+                crate::control::change_stream::broadcast_notify_to_cluster(
+                    &event,
+                    shared.node_id,
+                    seq,
+                    transport,
+                    topology,
+                );
+            }
+
+            shared.change_stream.publish(event);
         }
     }
 

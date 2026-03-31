@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use super::super::auth::AppState;
 use crate::control::state::SharedState;
-use crate::event::cdc::consume::{ConsumeParams, consume_stream};
+use crate::event::cdc::consume::{ConsumeError, ConsumeParams, consume_stream};
 
 /// Query parameters.
 #[derive(Deserialize, Default)]
@@ -97,22 +97,44 @@ pub async fn stream_events(
                 limit: 100,
             };
 
-            match consume_stream(&state.shared, &consume_params) {
-                Ok(result) if !result.events.is_empty() => {
-                    for event in &result.events {
-                        let json = serde_json::to_string(event).unwrap_or_default();
-                        yield Ok(Event::default()
-                            .event("change")
-                            .id(format!("{}:{}", event.partition, event.lsn))
-                            .data(json));
+            let result = match consume_stream(&state.shared, &consume_params) {
+                Ok(r) => r,
+                Err(ConsumeError::RemotePartition { leader_node, .. }) => {
+                    match crate::event::cdc::consume::consume_remote(
+                        &state.shared,
+                        &consume_params,
+                        leader_node,
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(e.to_string()));
+                            return;
+                        }
                     }
                 }
-                Ok(_) => {}
+                Err(ConsumeError::BufferEmpty(_)) => {
+                    // No events yet — wait and retry.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
                 Err(e) => {
                     yield Ok(Event::default()
                         .event("error")
                         .data(e.to_string()));
                     return; // _guard dropped here → leave() called.
+                }
+            };
+            if !result.events.is_empty() {
+                for event in &result.events {
+                    let json = serde_json::to_string(event).unwrap_or_default();
+                    yield Ok(Event::default()
+                        .event("change")
+                        .id(format!("{}:{}", event.partition, event.lsn))
+                        .data(json));
                 }
             }
 
