@@ -148,20 +148,35 @@ impl Iterator for MmapRecordIter {
     }
 }
 
+/// Minimum number of segments to justify parallel replay overhead.
+const PARALLEL_SEGMENT_THRESHOLD: usize = 4;
+
 /// Replay WAL segments from a directory using mmap, starting from `from_lsn`.
 ///
 /// Discovers all sealed segments, mmap's each, and returns records with
 /// LSN >= `from_lsn`. This is the Event Plane's tier-2 catchup path.
+///
+/// When 4+ segments need scanning, uses `std::thread::scope` to read
+/// segments in parallel (one thread per segment). Each thread mmap's its
+/// segment and filters records independently; results are merged in
+/// segment order (already LSN-sorted since segments are monotonic).
 pub fn replay_segments_mmap(wal_dir: &Path, from_lsn: u64) -> Result<Vec<WalRecord>> {
     let segments = crate::segment::discover_segments(wal_dir)?;
-    let mut records = Vec::new();
 
-    for seg in &segments {
-        // Skip segments that are entirely before from_lsn.
-        // A segment's last LSN >= first_lsn (monotonic), so if
-        // first_lsn < from_lsn the segment MIGHT contain relevant records.
-        // We can't skip based on first_lsn alone without knowing last_lsn.
-        // Read all segments and filter — mmap makes this cheap.
+    if segments.len() < PARALLEL_SEGMENT_THRESHOLD {
+        return replay_segments_sequential(&segments, from_lsn);
+    }
+
+    replay_segments_parallel(&segments, from_lsn)
+}
+
+/// Sequential segment replay (used for small segment counts).
+fn replay_segments_sequential(
+    segments: &[crate::segment::SegmentMeta],
+    from_lsn: u64,
+) -> Result<Vec<WalRecord>> {
+    let mut records = Vec::new();
+    for seg in segments {
         let reader = MmapWalReader::open(&seg.path)?;
         for record_result in reader.records() {
             let record = record_result?;
@@ -169,6 +184,57 @@ pub fn replay_segments_mmap(wal_dir: &Path, from_lsn: u64) -> Result<Vec<WalReco
                 records.push(record);
             }
         }
+    }
+    Ok(records)
+}
+
+/// Parallel segment replay using scoped threads.
+///
+/// Each segment is read in its own thread via mmap. Since segments are
+/// monotonically ordered by LSN, concatenating per-segment results in
+/// segment order produces a globally LSN-ordered result.
+fn replay_segments_parallel(
+    segments: &[crate::segment::SegmentMeta],
+    from_lsn: u64,
+) -> Result<Vec<WalRecord>> {
+    // Collect per-segment results. Index corresponds to segment order.
+    let mut per_segment: Vec<Result<Vec<WalRecord>>> = Vec::with_capacity(segments.len());
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = segments
+            .iter()
+            .map(|seg| {
+                scope.spawn(move || -> Result<Vec<WalRecord>> {
+                    let reader = MmapWalReader::open(&seg.path)?;
+                    let mut seg_records = Vec::new();
+                    for record_result in reader.records() {
+                        let record = record_result?;
+                        if record.header.lsn >= from_lsn {
+                            seg_records.push(record);
+                        }
+                    }
+                    Ok(seg_records)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            per_segment.push(handle.join().unwrap_or_else(|_| {
+                Err(WalError::Io(std::io::Error::other(
+                    "segment replay thread panicked",
+                )))
+            }));
+        }
+    });
+
+    // Merge in segment order (preserves LSN ordering).
+    let total_estimate: usize = per_segment
+        .iter()
+        .map(|r| r.as_ref().map(|v| v.len()).unwrap_or(0))
+        .sum();
+    let mut records = Vec::with_capacity(total_estimate);
+    for seg_result in per_segment {
+        records.extend(seg_result?);
     }
 
     Ok(records)
