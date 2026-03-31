@@ -111,6 +111,49 @@ impl CoreLoop {
             "transaction batch committed"
         );
 
+        // Emit deferred trigger events for all writes in the committed transaction.
+        // The Event Plane will fire DEFERRED-mode triggers for these.
+        let deferred_writes: Vec<super::super::core_loop::deferred::DeferredWrite> = undo_log
+            .into_iter()
+            .filter_map(|entry| match entry {
+                UndoEntry::PutDocument {
+                    collection,
+                    document_id,
+                    old_value,
+                } => Some(super::super::core_loop::deferred::DeferredWrite {
+                    collection,
+                    op: if old_value.is_some() {
+                        crate::event::WriteOp::Update
+                    } else {
+                        crate::event::WriteOp::Insert
+                    },
+                    row_id: document_id,
+                    new_value: None, // Payload not preserved in undo_log (it stores old_value for rollback).
+                    old_value,
+                }),
+                UndoEntry::DeleteDocument {
+                    collection,
+                    document_id,
+                    old_value,
+                } => Some(super::super::core_loop::deferred::DeferredWrite {
+                    collection,
+                    op: crate::event::WriteOp::Delete,
+                    row_id: document_id,
+                    new_value: None,
+                    old_value: Some(old_value),
+                }),
+                _ => None, // Vector undo entries don't trigger deferred triggers.
+            })
+            .collect();
+
+        if !deferred_writes.is_empty() {
+            self.emit_deferred_events(
+                deferred_writes,
+                task.request.tenant_id,
+                task.request.vshard_id,
+            );
+        }
+
         // Return OK with the last sub-plan's response payload.
         last_response.status = Status::Ok;
         last_response.error_code = None;

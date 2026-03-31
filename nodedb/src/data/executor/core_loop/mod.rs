@@ -16,6 +16,7 @@ use crate::types::{Lsn, TenantId};
 
 use super::task::ExecutionTask;
 
+pub(in crate::data::executor) mod deferred;
 mod event_emit;
 mod maintenance;
 mod response;
