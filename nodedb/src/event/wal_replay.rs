@@ -42,10 +42,37 @@ pub fn replay_wal_to_events(
     base_sequence: u64,
 ) -> crate::Result<Vec<WriteEvent>> {
     let records = wal.replay_from(from_lsn)?;
+    convert_records_to_events(&records, from_lsn, core_id, num_cores, base_sequence)
+}
+
+/// Replay WAL records using mmap (tier-2 catchup path).
+///
+/// Same conversion logic as `replay_wal_to_events` but uses `MmapWalReader`
+/// for sealed segments — the kernel manages page residency without pinning
+/// slab memory. This is the preferred path for WAL Catchup Mode.
+pub fn replay_wal_mmap(
+    wal: &WalManager,
+    from_lsn: Lsn,
+    core_id: usize,
+    num_cores: usize,
+    base_sequence: u64,
+) -> crate::Result<Vec<WriteEvent>> {
+    let records = wal.replay_mmap_from(from_lsn)?;
+    convert_records_to_events(&records, from_lsn, core_id, num_cores, base_sequence)
+}
+
+/// Convert WAL records to WriteEvents, filtering by core affinity.
+fn convert_records_to_events(
+    records: &[nodedb_wal::WalRecord],
+    from_lsn: Lsn,
+    core_id: usize,
+    num_cores: usize,
+    base_sequence: u64,
+) -> crate::Result<Vec<WriteEvent>> {
     let mut events = Vec::new();
     let mut sequence = base_sequence;
 
-    for record in &records {
+    for record in records {
         let vshard_id = record.header.vshard_id as usize;
         let target_core = if num_cores > 0 {
             vshard_id % num_cores

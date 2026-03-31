@@ -61,6 +61,8 @@ pub struct ConsumerConfig {
     pub trigger_dlq: Arc<std::sync::Mutex<TriggerDlq>>,
     pub cdc_router: Arc<super::cdc::CdcRouter>,
     pub num_cores: usize,
+    /// Per-consumer slab-pin accounting for WAL memory budget enforcement.
+    pub slab_account: Arc<super::slab_budget::ConsumerSlabAccount>,
 }
 
 /// Handle to a running consumer task.
@@ -109,6 +111,7 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
         trigger_dlq,
         cdc_router,
         num_cores,
+        slab_account,
     } = config;
 
     let core_id = rx.core_id();
@@ -208,7 +211,31 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                             .package_and_enqueue(event, &shared_state.crdt_sync_delivery);
                     }
 
+                    // Track slab-pinned memory for budget enforcement.
+                    let batch_payload_bytes: u64 = events
+                        .iter()
+                        .map(|e| {
+                            e.new_value.as_ref().map_or(0, |v| v.len() as u64)
+                                + e.old_value.as_ref().map_or(0, |v| v.len() as u64)
+                        })
+                        .sum();
+                    slab_account.add_pinned(batch_payload_bytes);
+
+                    // Release after processing (Arcs dropped when events go out of scope).
+                    drop(events);
+                    slab_account.release_pinned(batch_payload_bytes);
+
                     trace!(core_id, batch_count, "event batch processed");
+
+                    // Check if slab budget enforcement shed this consumer.
+                    if slab_account.is_shed() {
+                        info!(core_id, "slab budget shed — entering WAL catchup mode");
+                        slab_account.reset();
+                        slab_account.clear_shed();
+                        mode = ConsumerMode::WalCatchup;
+                        metrics.record_wal_catchup_enter();
+                        continue;
+                    }
 
                     // Check for Suspended backpressure → WAL catchup.
                     if rx.pressure_state() == PressureState::Suspended {
@@ -289,13 +316,25 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                     "WAL catchup: replaying from WAL"
                 );
 
-                match super::wal_replay::replay_wal_to_events(
+                // Use mmap reader for catchup — kernel manages pages without
+                // pinning slab allocator memory. Falls back to sequential reader
+                // if mmap fails (e.g., WAL dir on tmpfs without mmap support).
+                match super::wal_replay::replay_wal_mmap(
                     &wal,
                     last_lsn.next(),
                     core_id,
                     num_cores,
                     last_sequence,
-                ) {
+                )
+                .or_else(|_| {
+                    super::wal_replay::replay_wal_to_events(
+                        &wal,
+                        last_lsn.next(),
+                        core_id,
+                        num_cores,
+                        last_sequence,
+                    )
+                }) {
                     Ok(events) => {
                         wal_retry_count = 0;
                         let count = events.len() as u64;
@@ -548,6 +587,7 @@ mod tests {
             trigger_dlq,
             cdc_router,
             num_cores: 1,
+            slab_account: Arc::new(crate::event::slab_budget::ConsumerSlabAccount::new(0)),
         });
 
         // Let consumer process.

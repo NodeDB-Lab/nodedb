@@ -8,6 +8,7 @@ pub mod kafka;
 pub mod metrics;
 pub mod plane;
 pub mod scheduler;
+pub mod slab_budget;
 pub mod streaming_mv;
 #[cfg(test)]
 mod test_utils;

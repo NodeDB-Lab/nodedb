@@ -50,9 +50,15 @@ impl EventPlane {
         let num_cores = consumers_rx.len();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+        let slab_budget = Arc::new(super::slab_budget::SlabBudget::new());
+        let mut slab_accounts: Vec<Arc<super::slab_budget::ConsumerSlabAccount>> = Vec::new();
+
         let consumers: Vec<ConsumerHandle> = consumers_rx
             .into_iter()
-            .map(|rx| {
+            .enumerate()
+            .map(|(i, rx)| {
+                let account = Arc::new(super::slab_budget::ConsumerSlabAccount::new(i));
+                slab_accounts.push(Arc::clone(&account));
                 spawn_consumer(ConsumerConfig {
                     rx,
                     shutdown: shutdown_rx.clone(),
@@ -62,9 +68,31 @@ impl EventPlane {
                     trigger_dlq: Arc::clone(&trigger_dlq),
                     cdc_router: Arc::clone(&cdc_router),
                     num_cores,
+                    slab_account: account,
                 })
             })
             .collect();
+
+        // Spawn periodic slab budget enforcement (every 5s).
+        {
+            let budget = Arc::clone(&slab_budget);
+            let accounts = slab_accounts.clone();
+            let mut shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                            let refs: Vec<&super::slab_budget::ConsumerSlabAccount> =
+                                accounts.iter().map(|a| a.as_ref()).collect();
+                            budget.check_and_shed(&refs);
+                        }
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() { return; }
+                        }
+                    }
+                }
+            });
+        }
 
         // Spawn the cron scheduler loop on the Event Plane.
         let _scheduler_handle = super::scheduler::executor::spawn_scheduler(

@@ -363,6 +363,17 @@ impl WalManager {
         Ok(records)
     }
 
+    /// Replay WAL records from `from_lsn` using mmap (tier-2 catchup).
+    ///
+    /// Uses `MmapWalReader` instead of sequential reads — the kernel manages
+    /// page residency without pinning slab allocator memory.
+    pub fn replay_mmap_from(&self, from_lsn: Lsn) -> crate::Result<Vec<WalRecord>> {
+        let records =
+            nodedb_wal::mmap_reader::replay_segments_mmap(self.wal_dir(), from_lsn.as_u64())
+                .map_err(crate::Error::Wal)?;
+        Ok(records)
+    }
+
     /// Total WAL size on disk across all segments.
     pub fn total_size_bytes(&self) -> crate::Result<u64> {
         let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
