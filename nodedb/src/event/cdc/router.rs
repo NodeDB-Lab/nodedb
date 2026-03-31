@@ -13,7 +13,9 @@ use tracing::trace;
 use super::buffer::StreamBuffer;
 use super::event::CdcEvent;
 use super::registry::StreamRegistry;
+use super::stream_def::LateDataPolicy;
 use crate::event::types::WriteEvent;
+use crate::event::watermark_tracker::WatermarkTracker;
 
 /// Manages per-stream buffers and routes events to matching streams.
 pub struct CdcRouter {
@@ -34,7 +36,8 @@ impl CdcRouter {
     /// Route a WriteEvent to all matching change streams.
     ///
     /// Called from the Event Plane consumer for every event (after trigger dispatch).
-    pub fn route_event(&self, event: &WriteEvent) {
+    /// `watermark_tracker` is used to enforce late-data policies.
+    pub fn route_event(&self, event: &WriteEvent, watermark_tracker: &WatermarkTracker) {
         let matching = self
             .registry
             .find_matching(event.tenant_id.as_u32(), &event.collection);
@@ -64,6 +67,33 @@ impl CdcRouter {
                 continue;
             }
 
+            // Late-data policy enforcement.
+            let partition_wm = watermark_tracker.partition_watermark(event.vshard_id.as_u16());
+            let is_late = event.lsn.as_u64() <= partition_wm && partition_wm > 0;
+
+            if is_late {
+                match def.late_data {
+                    LateDataPolicy::Drop => {
+                        trace!(
+                            stream = %def.name,
+                            lsn = event.lsn.as_u64(),
+                            watermark = partition_wm,
+                            "late event dropped by LATE_DATA = DROP policy"
+                        );
+                        continue;
+                    }
+                    LateDataPolicy::Allow => {
+                        // Process normally — no special handling.
+                    }
+                    LateDataPolicy::Recompute => {
+                        // Process the late event normally (it will update MV aggregates
+                        // via the consumer's MV processing). Then emit a RECOMPUTE
+                        // correction event so downstream consumers know a previously-
+                        // emitted aggregate was updated.
+                    }
+                }
+            }
+
             let cdc_event = CdcEvent {
                 sequence: event.sequence,
                 partition: event.vshard_id.as_u16(),
@@ -75,14 +105,34 @@ impl CdcRouter {
                 tenant_id: event.tenant_id.as_u32(),
                 new_value: new_value.clone(),
                 old_value: old_value.clone(),
-                // Schema version: 0 = unversioned. A full schema version system
-                // (ALTER TABLE bumps version, emits SchemaChangeEvent) is future work.
-                // The field is present so consumers can detect changes when implemented.
                 schema_version: 0,
             };
 
             let buffer = self.get_or_create_buffer(def.tenant_id, &def.name, &def.retention);
             buffer.push(cdc_event);
+
+            // Recompute: emit a correction event after the original event.
+            if is_late && def.late_data == LateDataPolicy::Recompute {
+                let correction = CdcEvent {
+                    sequence: event.sequence,
+                    partition: event.vshard_id.as_u16(),
+                    collection: event.collection.to_string(),
+                    op: "RECOMPUTE".to_string(),
+                    row_id: event.row_id.as_str().to_string(),
+                    event_time: now_ms,
+                    lsn: event.lsn.as_u64(),
+                    tenant_id: event.tenant_id.as_u32(),
+                    new_value: new_value.clone(),
+                    old_value: None,
+                    schema_version: 0,
+                };
+                buffer.push(correction);
+                trace!(
+                    stream = %def.name,
+                    lsn = event.lsn.as_u64(),
+                    "RECOMPUTE correction emitted for late event"
+                );
+            }
 
             trace!(
                 stream = %def.name,
@@ -189,7 +239,12 @@ mod tests {
     use super::*;
     use crate::event::cdc::stream_def::*;
     use crate::event::types::{EventSource, RowId, WriteOp};
+    use crate::event::watermark_tracker::WatermarkTracker;
     use crate::types::{Lsn, TenantId, VShardId};
+
+    fn test_tracker() -> WatermarkTracker {
+        WatermarkTracker::new()
+    }
 
     fn make_write_event(collection: &str, seq: u64) -> WriteEvent {
         WriteEvent {
@@ -223,6 +278,7 @@ mod tests {
             },
             compaction: CompactionConfig::default(),
             webhook: crate::event::webhook::WebhookConfig::default(),
+            late_data: LateDataPolicy::default(),
             owner: "admin".into(),
             created_at: 0,
         }
@@ -234,7 +290,8 @@ mod tests {
         registry.register(sample_def("orders_stream", "orders"));
         let router = CdcRouter::new(registry);
 
-        router.route_event(&make_write_event("orders", 1));
+        let wt = test_tracker();
+        router.route_event(&make_write_event("orders", 1), &wt);
 
         let buf = router.get_buffer(1, "orders_stream").unwrap();
         assert_eq!(buf.len(), 1);
@@ -248,7 +305,8 @@ mod tests {
         registry.register(sample_def("orders_stream", "orders"));
         let router = CdcRouter::new(registry);
 
-        router.route_event(&make_write_event("users", 1));
+        let wt = test_tracker();
+        router.route_event(&make_write_event("users", 1), &wt);
 
         assert!(router.get_buffer(1, "orders_stream").is_none());
     }
@@ -259,8 +317,9 @@ mod tests {
         registry.register(sample_def("all_changes", "*"));
         let router = CdcRouter::new(registry);
 
-        router.route_event(&make_write_event("orders", 1));
-        router.route_event(&make_write_event("users", 2));
+        let wt = test_tracker();
+        router.route_event(&make_write_event("orders", 1), &wt);
+        router.route_event(&make_write_event("users", 2), &wt);
 
         let buf = router.get_buffer(1, "all_changes").unwrap();
         assert_eq!(buf.len(), 2);
@@ -278,15 +337,16 @@ mod tests {
         registry.register(def);
         let router = CdcRouter::new(registry);
 
+        let wt = test_tracker();
         // Insert matches.
-        router.route_event(&make_write_event("orders", 1));
+        router.route_event(&make_write_event("orders", 1), &wt);
 
         // DELETE does not match.
         let delete_event = WriteEvent {
             op: WriteOp::Delete,
             ..make_write_event("orders", 2)
         };
-        router.route_event(&delete_event);
+        router.route_event(&delete_event, &wt);
 
         let buf = router.get_buffer(1, "inserts_only").unwrap();
         assert_eq!(buf.len(), 1); // Only the insert.
@@ -298,7 +358,8 @@ mod tests {
         registry.register(sample_def("s1", "orders"));
         let router = CdcRouter::new(registry);
 
-        router.route_event(&make_write_event("orders", 1));
+        let wt = test_tracker();
+        router.route_event(&make_write_event("orders", 1), &wt);
         assert!(router.get_buffer(1, "s1").is_some());
 
         router.remove_buffer(1, "s1");

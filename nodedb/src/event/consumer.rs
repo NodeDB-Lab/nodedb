@@ -177,7 +177,7 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                             &mut retry_queue,
                         )
                         .await;
-                        cdc_router.route_event(event);
+                        cdc_router.route_event(event, &shared_state.watermark_tracker);
                         // Update streaming MVs: find streams matching this event's
                         // collection, then process MVs sourced from those streams.
                         let matching_streams = shared_state
@@ -292,7 +292,7 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                                 &mut retry_queue,
                             )
                             .await;
-                            cdc_router.route_event(event);
+                            cdc_router.route_event(event, &shared_state.watermark_tracker);
                             last_sequence = event.sequence;
                             if event.lsn.is_ahead_of(last_lsn) {
                                 last_lsn = event.lsn;
