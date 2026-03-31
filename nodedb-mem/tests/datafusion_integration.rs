@@ -4,9 +4,6 @@
 //! allocations fail with ResourcesExhausted — forcing spill-to-disk.
 //! Meanwhile, other engines (Vector, Timeseries) are completely unaffected.
 //!
-//! Requires `datafusion` feature: `cargo test -p nodedb-mem --features datafusion`
-
-#![cfg(feature = "datafusion")]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,7 +36,7 @@ fn group_by_exceeds_budget_gets_resources_exhausted() {
     let pool: Arc<dyn MemoryPool> = Arc::new(GovernedMemoryPool::for_queries(Arc::clone(&gov)));
 
     // Simulate DataFusion's hash aggregate operator.
-    let mut hash_table = MemoryConsumer::new("HashAggregateExec").register(&pool);
+    let hash_table = MemoryConsumer::new("HashAggregateExec").register(&pool);
 
     // First batch: 5 KB — fits in 10 KB budget.
     assert!(hash_table.try_grow(5_000).is_ok());
@@ -69,9 +66,9 @@ fn multiple_operators_share_query_budget() {
     let gov = make_governor();
     let pool: Arc<dyn MemoryPool> = Arc::new(GovernedMemoryPool::for_queries(Arc::clone(&gov)));
 
-    let mut sort_op = MemoryConsumer::new("SortExec").register(&pool);
-    let mut hash_op = MemoryConsumer::new("HashJoinExec").register(&pool);
-    let mut agg_op = MemoryConsumer::new("AggregateExec").register(&pool);
+    let sort_op = MemoryConsumer::new("SortExec").register(&pool);
+    let hash_op = MemoryConsumer::new("HashJoinExec").register(&pool);
+    let agg_op = MemoryConsumer::new("AggregateExec").register(&pool);
 
     // Each takes 3 KB — total 9 KB out of 10 KB.
     sort_op.try_grow(3_000).unwrap();
@@ -96,7 +93,7 @@ fn query_pressure_does_not_starve_vector_engine() {
     let pool: Arc<dyn MemoryPool> = Arc::new(GovernedMemoryPool::for_queries(Arc::clone(&gov)));
 
     // Exhaust the entire query budget.
-    let mut big_query = MemoryConsumer::new("MassiveGroupBy").register(&pool);
+    let big_query = MemoryConsumer::new("MassiveGroupBy").register(&pool);
     big_query.try_grow(10_000).unwrap();
 
     // Query budget at 100% — Emergency pressure.
@@ -134,7 +131,7 @@ fn global_ceiling_prevents_oom() {
     gov.try_reserve(EngineId::Timeseries, 50_000).unwrap();
 
     // Query engine: 10 KB — this puts total at 160 KB, under 200 KB ceiling.
-    let mut query = MemoryConsumer::new("query").register(&pool);
+    let query = MemoryConsumer::new("query").register(&pool);
     query.try_grow(10_000).unwrap();
 
     // Total: 160 KB. Global ceiling is 200 KB.
@@ -153,7 +150,7 @@ fn reservation_drop_frees_memory() {
     let pool: Arc<dyn MemoryPool> = Arc::new(GovernedMemoryPool::for_queries(Arc::clone(&gov)));
 
     {
-        let mut reservation = MemoryConsumer::new("temp_sort").register(&pool);
+        let reservation = MemoryConsumer::new("temp_sort").register(&pool);
         reservation.try_grow(8_000).unwrap();
         assert_eq!(pool.reserved(), 8_000);
         // reservation dropped here
@@ -162,6 +159,6 @@ fn reservation_drop_frees_memory() {
     // Memory freed — budget available again.
     assert_eq!(pool.reserved(), 0);
 
-    let mut new_reservation = MemoryConsumer::new("next_query").register(&pool);
+    let new_reservation = MemoryConsumer::new("next_query").register(&pool);
     assert!(new_reservation.try_grow(10_000).is_ok());
 }

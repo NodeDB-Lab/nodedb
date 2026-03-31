@@ -133,7 +133,7 @@ mod tests {
         let gov = test_governor(1024 * 1024);
         let pool = make_pool(gov);
 
-        let mut reservation = MemoryConsumer::new("test_sort").register(&pool);
+        let reservation = MemoryConsumer::new("test_sort").register(&pool);
         assert!(reservation.try_grow(512 * 1024).is_ok());
         assert_eq!(reservation.size(), 512 * 1024);
     }
@@ -143,7 +143,7 @@ mod tests {
         let gov = test_governor(1024);
         let pool = make_pool(gov);
 
-        let mut reservation = MemoryConsumer::new("big_aggregate").register(&pool);
+        let reservation = MemoryConsumer::new("big_aggregate").register(&pool);
         // First: 512 bytes — succeeds.
         assert!(reservation.try_grow(512).is_ok());
         // Second: 1024 bytes — exceeds remaining 512.
@@ -158,7 +158,7 @@ mod tests {
         let gov = test_governor(1024);
         let pool = make_pool(gov);
 
-        let mut reservation = MemoryConsumer::new("test").register(&pool);
+        let reservation = MemoryConsumer::new("test").register(&pool);
         reservation.try_grow(1024).unwrap();
 
         // Budget fully consumed.
@@ -178,7 +178,7 @@ mod tests {
 
         assert_eq!(pool.reserved(), 0);
 
-        let mut reservation = MemoryConsumer::new("test").register(&pool);
+        let reservation = MemoryConsumer::new("test").register(&pool);
         reservation.try_grow(1000).unwrap();
         assert_eq!(pool.reserved(), 1000);
 
