@@ -66,6 +66,30 @@ pub struct NodeDbLite<S: StorageEngine> {
     /// HTAP bridge: CDC from strict → columnar materialized views.
     /// Arc-wrapped for sharing with the query engine's DDL handlers.
     pub(crate) htap: Arc<Mutex<HtapBridge>>,
+    /// When `false`, KV operations go directly to redb, bypassing Loro.
+    /// Other engines (vector, graph, document) are unaffected.
+    pub(crate) sync_enabled: bool,
+    /// Buffered KV writes awaiting batch commit to redb.
+    /// Flushed on `kv_flush()`, threshold (1000 ops), or `flush()`.
+    /// The HashMap overlay lets reads see uncommitted writes.
+    pub(crate) kv_write_buf: Mutex<KvWriteBuffer>,
+}
+
+/// Buffered KV writes for batch commit.
+///
+/// # Safety: single-writer design
+///
+/// The overlay allowing uncommitted reads is intentional and safe because
+/// `NodeDbLite` is designed for single-writer access. All public KV methods
+/// acquire the outer `Mutex<KvWriteBuffer>`, which serializes every write and
+/// read-through-overlay access to this buffer. There is no way for two callers
+/// to observe a torn write or a half-applied overlay entry.
+pub(crate) struct KvWriteBuffer {
+    /// Pending write operations for batch commit.
+    pub ops: Vec<crate::storage::engine::WriteOp>,
+    /// Read overlay: maps redb composite key → value (None = deleted).
+    /// Lets `kv_get` see uncommitted writes without hitting redb.
+    pub overlay: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 impl<S: StorageEngine> NodeDbLite<S> {
@@ -88,7 +112,8 @@ impl<S: StorageEngine> NodeDbLite<S> {
         config: crate::config::LiteConfig,
     ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::from_config(&config);
-        Self::open_inner(storage, peer_id, governor).await
+        let sync_enabled = config.sync_enabled;
+        Self::open_inner(storage, peer_id, governor, sync_enabled).await
     }
 
     /// Open with a custom memory budget (convenience wrapper using default percentages).
@@ -100,13 +125,14 @@ impl<S: StorageEngine> NodeDbLite<S> {
         memory_budget: usize,
     ) -> NodeDbResult<Self> {
         let governor = crate::memory::MemoryGovernor::new(memory_budget);
-        Self::open_inner(storage, peer_id, governor).await
+        Self::open_inner(storage, peer_id, governor, true).await
     }
 
     async fn open_inner(
         storage: S,
         peer_id: u64,
         governor: crate::memory::MemoryGovernor,
+        sync_enabled: bool,
     ) -> NodeDbResult<Self> {
         let storage = Arc::new(storage);
 
@@ -237,6 +263,11 @@ impl<S: StorageEngine> NodeDbLite<S> {
             strict,
             columnar,
             htap,
+            sync_enabled,
+            kv_write_buf: Mutex::new(KvWriteBuffer {
+                ops: Vec::with_capacity(1024),
+                overlay: HashMap::new(),
+            }),
         };
 
         // Rebuild text indices from CRDT state (cold start).

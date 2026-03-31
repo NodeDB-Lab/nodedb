@@ -10,6 +10,7 @@
 //! |-------------------------|----------------------------------------------|---------|
 //! | `NODEDB_LITE_MEMORY_MB` | Total memory budget in mebibytes             | 100     |
 
+use nodedb_types::error::{NodeDbError, NodeDbResult};
 use serde::{Deserialize, Serialize};
 
 /// Per-engine budget percentages must leave at least some headroom.
@@ -48,6 +49,17 @@ pub struct LiteConfig {
     /// Percentage of `memory_budget` reserved for query scratch space. Default: 15.
     pub query_percent: usize,
 
+    /// Enable CRDT sync for KV operations. Default: `true`.
+    ///
+    /// When `false`, KV operations go directly to redb (B-tree), bypassing
+    /// Loro entirely. This gives SQLite-class performance for local-only use.
+    /// Other engines (vector, graph, document) still use Loro for their storage.
+    ///
+    /// When `true`, KV writes also generate sync log entries (append-only)
+    /// for replication to Origin via LWW merge.
+    #[serde(default = "default_sync_enabled")]
+    pub sync_enabled: bool,
+
     /// Argon2id memory cost in KiB. Default: 19 MiB (19_456 KiB).
     /// Corresponds to the OWASP recommended minimum for interactive login.
     #[serde(default = "default_argon2_m_cost")]
@@ -60,6 +72,10 @@ pub struct LiteConfig {
     /// Argon2id parallelism lanes. Default: 1.
     #[serde(default = "default_argon2_p_cost")]
     pub argon2_p_cost: u32,
+}
+
+fn default_sync_enabled() -> bool {
+    true
 }
 
 fn default_argon2_m_cost() -> u32 {
@@ -82,6 +98,7 @@ impl Default for LiteConfig {
             csr_percent: 15,
             loro_percent: 15,
             query_percent: 15,
+            sync_enabled: true,
             argon2_m_cost: default_argon2_m_cost(),
             argon2_t_cost: default_argon2_t_cost(),
             argon2_p_cost: default_argon2_p_cost(),
@@ -126,10 +143,10 @@ impl LiteConfig {
 
     /// Validate that percentage fields are coherent.
     ///
-    /// Returns an error string if:
+    /// Returns an error if:
     /// - Any individual percentage exceeds 100
     /// - The sum of all engine percentages exceeds `MAX_TOTAL_ENGINE_PERCENT`
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> NodeDbResult<()> {
         for (name, pct) in [
             ("hnsw_percent", self.hnsw_percent),
             ("csr_percent", self.csr_percent),
@@ -137,7 +154,9 @@ impl LiteConfig {
             ("query_percent", self.query_percent),
         ] {
             if pct > 100 {
-                return Err(format!("{name} must be 0–100, got {pct}"));
+                return Err(NodeDbError::config(format!(
+                    "{name} must be 0–100, got {pct}"
+                )));
             }
         }
 
@@ -148,10 +167,10 @@ impl LiteConfig {
             .saturating_add(self.query_percent);
 
         if total > MAX_TOTAL_ENGINE_PERCENT {
-            return Err(format!(
+            return Err(NodeDbError::config(format!(
                 "sum of engine percentages is {total}%, must not exceed {MAX_TOTAL_ENGINE_PERCENT}% \
                  (at least 1% headroom required)"
-            ));
+            )));
         }
 
         Ok(())

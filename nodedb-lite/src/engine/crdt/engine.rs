@@ -48,6 +48,12 @@ pub struct CrdtEngine {
     /// Conflict resolution policies per collection.
     /// Evaluated on sync when Origin rejects a delta.
     pub(super) policies: nodedb_crdt::PolicyRegistry,
+    /// Version vector captured before the first deferred mutation.
+    /// Used by `flush_deltas()` to export a single delta covering all
+    /// deferred operations.
+    deferred_version: Option<loro::VersionVector>,
+    /// Count of deferred mutations since last `flush_deltas()`.
+    deferred_count: usize,
 }
 
 /// A pending (unsent) delta waiting to be synced to Origin.
@@ -76,6 +82,8 @@ impl CrdtEngine {
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
+            deferred_version: None,
+            deferred_count: 0,
         })
     }
 
@@ -94,6 +102,8 @@ impl CrdtEngine {
             pending_deltas: Vec::new(),
             acked_versions: HashMap::new(),
             policies: nodedb_crdt::PolicyRegistry::new(),
+            deferred_version: None,
+            deferred_count: 0,
         })
     }
 
@@ -198,15 +208,112 @@ impl CrdtEngine {
                 detail: format!("batch delta export failed: {e}"),
             })?;
 
+        // Use the collection from the first op. If ops span multiple collections,
+        // label it "mixed" to avoid misleading a single-collection name.
+        let collection_name = {
+            let first = ops[0].0;
+            if ops.iter().all(|&(c, _, _)| c == first) {
+                first.to_string()
+            } else {
+                "mixed".to_string()
+            }
+        };
+
         let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
         self.pending_deltas.push(PendingDelta {
             mutation_id,
-            collection: "batch".to_string(),
+            collection: collection_name,
             document_id: format!("{}_ops", ops.len()),
             delta_bytes,
         });
 
         Ok(mutation_id)
+    }
+
+    /// Upsert without generating a delta. Use `flush_deltas()` later
+    /// to batch-export all accumulated mutations as a single delta.
+    ///
+    /// This is the fast path for local-only writes (KV put, bulk insert)
+    /// where per-operation delta export is prohibitively expensive.
+    pub fn upsert_deferred(
+        &mut self,
+        collection: &str,
+        doc_id: &str,
+        fields: &[(&str, LoroValue)],
+    ) -> Result<(), LiteError> {
+        // Capture version before if this is the first deferred op.
+        if self.deferred_version.is_none() {
+            self.deferred_version = Some(self.state.doc().oplog_vv());
+        }
+
+        self.state
+            .upsert(collection, doc_id, fields)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("CRDT upsert failed: {e}"),
+            })?;
+        self.deferred_count += 1;
+        Ok(())
+    }
+
+    /// Delete without generating a delta. Use `flush_deltas()` later.
+    pub fn delete_deferred(&mut self, collection: &str, doc_id: &str) -> Result<(), LiteError> {
+        if self.deferred_version.is_none() {
+            self.deferred_version = Some(self.state.doc().oplog_vv());
+        }
+
+        self.state
+            .delete(collection, doc_id)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("CRDT delete failed: {e}"),
+            })?;
+        self.deferred_count += 1;
+        Ok(())
+    }
+
+    /// Export a single delta covering all deferred mutations since the last
+    /// flush. Returns the number of operations included, or 0 if none.
+    ///
+    /// Call this after a batch of `upsert_deferred` / `delete_deferred`
+    /// calls to produce the sync delta.
+    pub fn flush_deltas(&mut self) -> Result<usize, LiteError> {
+        let count = self.deferred_count;
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let version_before = self
+            .deferred_version
+            .take()
+            .expect("deferred_version must be set when deferred_count > 0");
+
+        let delta_bytes = self
+            .state
+            .doc()
+            .export(loro::ExportMode::updates(&version_before))
+            .map_err(|e| LiteError::Storage {
+                detail: format!("flush delta export failed: {e}"),
+            })?;
+
+        let mutation_id = self.next_mutation_id.fetch_add(1, Ordering::Relaxed);
+        self.pending_deltas.push(PendingDelta {
+            mutation_id,
+            // "deferred" reflects that this delta covers multiple collections
+            // accumulated via upsert_deferred/delete_deferred calls.
+            collection: "deferred".to_string(),
+            document_id: format!("{count}_ops"),
+            delta_bytes,
+        });
+
+        self.deferred_count = 0;
+        Ok(count)
+    }
+
+    /// Read a single field from a row without cloning the entire row.
+    ///
+    /// Fast path for KV reads: avoids `get_deep_value()` and returns
+    /// only the requested field.
+    pub fn read_field(&self, collection: &str, doc_id: &str, field: &str) -> Option<LoroValue> {
+        self.state.read_field(collection, doc_id, field)
     }
 
     // ─── Reads ───────────────────────────────────────────────────────
