@@ -78,6 +78,24 @@ pub fn create_schedule(
         .put_schedule(&def)
         .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
 
+    // Emit schedule definition as CRDT sync delta for Lite visibility.
+    // Lite devices receive this but NEVER execute Origin schedules —
+    // they display them via SHOW SCHEDULES for observability.
+    {
+        let delta_payload = rmp_serde::to_vec(&def).unwrap_or_default();
+        let delta = crate::event::crdt_sync::types::OutboundDelta {
+            collection: "_schedules".into(),
+            document_id: def.name.clone(),
+            payload: delta_payload,
+            op: crate::event::crdt_sync::types::DeltaOp::Upsert,
+            lsn: 0,
+            tenant_id,
+            peer_id: state.node_id,
+            sequence: 0,
+        };
+        state.crdt_sync_delivery.enqueue(tenant_id, delta);
+    }
+
     state.schedule_registry.register(def);
 
     state.audit_record(

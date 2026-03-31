@@ -52,6 +52,21 @@ pub fn drop_schedule(
 
     state.schedule_registry.unregister(tenant_id, &name);
 
+    // Emit tombstone delta for Lite visibility (removes schedule from Lite catalog).
+    {
+        let delta = crate::event::crdt_sync::types::OutboundDelta {
+            collection: "_schedules".into(),
+            document_id: name.clone(),
+            payload: Vec::new(),
+            op: crate::event::crdt_sync::types::DeltaOp::Delete,
+            lsn: 0,
+            tenant_id,
+            peer_id: state.node_id,
+            sequence: 0,
+        };
+        state.crdt_sync_delivery.enqueue(tenant_id, delta);
+    }
+
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
         Some(identity.tenant_id),
