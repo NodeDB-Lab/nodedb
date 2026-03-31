@@ -122,12 +122,10 @@ impl RedbStorage {
             &[]
         }
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl StorageEngine for RedbStorage {
-    async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+    // ─── Shared sync helpers (called by both async and sync trait impls) ─────
+
+    fn get_inner(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
         let composite = Self::make_key(ns, key);
         let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
@@ -153,7 +151,7 @@ impl StorageEngine for RedbStorage {
         }
     }
 
-    async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+    fn put_inner(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
         let composite = Self::make_key(ns, key);
         let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
@@ -176,7 +174,7 @@ impl StorageEngine for RedbStorage {
         Ok(())
     }
 
-    async fn delete(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+    fn delete_inner(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
         let composite = Self::make_key(ns, key);
         let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
 
@@ -197,6 +195,64 @@ impl StorageEngine for RedbStorage {
             detail: format!("commit failed: {e}"),
         })?;
         Ok(())
+    }
+
+    fn batch_write_inner(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+
+        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+
+        let txn = db.begin_write().map_err(|e| LiteError::Storage {
+            detail: format!("write txn failed: {e}"),
+        })?;
+        {
+            let mut table = txn.open_table(TABLE).map_err(|e| LiteError::Storage {
+                detail: format!("open table failed: {e}"),
+            })?;
+
+            for op in ops {
+                match op {
+                    WriteOp::Put { ns, key, value } => {
+                        let composite = Self::make_key(*ns, key);
+                        table
+                            .insert(composite.as_slice(), value.as_slice())
+                            .map_err(|e| LiteError::Storage {
+                                detail: format!("batch insert failed: {e}"),
+                            })?;
+                    }
+                    WriteOp::Delete { ns, key } => {
+                        let composite = Self::make_key(*ns, key);
+                        table
+                            .remove(composite.as_slice())
+                            .map_err(|e| LiteError::Storage {
+                                detail: format!("batch remove failed: {e}"),
+                            })?;
+                    }
+                }
+            }
+        }
+        txn.commit().map_err(|e| LiteError::Storage {
+            detail: format!("batch commit failed: {e}"),
+        })?;
+        Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl StorageEngine for RedbStorage {
+    async fn get(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+        self.get_inner(ns, key)
+    }
+
+    async fn put(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+        self.put_inner(ns, key, value)
+    }
+
+    async fn delete(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+        self.delete_inner(ns, key)
     }
 
     async fn scan_prefix(
@@ -258,45 +314,7 @@ impl StorageEngine for RedbStorage {
     }
 
     async fn batch_write(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
-        if ops.is_empty() {
-            return Ok(());
-        }
-
-        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
-
-        let txn = db.begin_write().map_err(|e| LiteError::Storage {
-            detail: format!("write txn failed: {e}"),
-        })?;
-        {
-            let mut table = txn.open_table(TABLE).map_err(|e| LiteError::Storage {
-                detail: format!("open table failed: {e}"),
-            })?;
-
-            for op in ops {
-                match op {
-                    WriteOp::Put { ns, key, value } => {
-                        let composite = Self::make_key(*ns, key);
-                        table
-                            .insert(composite.as_slice(), value.as_slice())
-                            .map_err(|e| LiteError::Storage {
-                                detail: format!("batch insert failed: {e}"),
-                            })?;
-                    }
-                    WriteOp::Delete { ns, key } => {
-                        let composite = Self::make_key(*ns, key);
-                        table
-                            .remove(composite.as_slice())
-                            .map_err(|e| LiteError::Storage {
-                                detail: format!("batch remove failed: {e}"),
-                            })?;
-                    }
-                }
-            }
-        }
-        txn.commit().map_err(|e| LiteError::Storage {
-            detail: format!("batch commit failed: {e}"),
-        })?;
-        Ok(())
+        self.batch_write_inner(ops)
     }
 
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError> {
@@ -335,6 +353,73 @@ impl StorageEngine for RedbStorage {
         }
 
         Ok(count)
+    }
+}
+
+impl crate::storage::engine::StorageEngineSync for RedbStorage {
+    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError> {
+        self.batch_write_inner(ops)
+    }
+
+    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError> {
+        self.get_inner(ns, key)
+    }
+
+    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError> {
+        self.put_inner(ns, key, value)
+    }
+
+    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError> {
+        self.delete_inner(ns, key)
+    }
+
+    fn scan_range_sync(
+        &self,
+        ns: Namespace,
+        start: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, LiteError> {
+        let ns_byte = ns as u8;
+        let mut start_key = Vec::with_capacity(1 + start.len());
+        start_key.push(ns_byte);
+        start_key.extend_from_slice(start);
+
+        let db = self.db.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let txn = db.begin_read().map_err(|e| LiteError::Storage {
+            detail: format!("read txn failed: {e}"),
+        })?;
+        let table = match txn.open_table(TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(LiteError::Storage {
+                    detail: format!("open table failed: {e}"),
+                });
+            }
+        };
+
+        let mut results = Vec::with_capacity(limit);
+        let range = table
+            .range(start_key.as_slice()..)
+            .map_err(|e| LiteError::Storage {
+                detail: format!("range scan failed: {e}"),
+            })?;
+
+        for entry in range {
+            if results.len() >= limit {
+                break;
+            }
+            let entry = entry.map_err(|e| LiteError::Storage {
+                detail: format!("range iteration failed: {e}"),
+            })?;
+            let k = entry.0.value();
+            if k[0] != ns_byte {
+                break;
+            }
+            results.push((Self::strip_ns(k).to_vec(), entry.1.value().to_vec()));
+        }
+
+        Ok(results)
     }
 }
 

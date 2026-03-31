@@ -69,6 +69,33 @@ pub trait StorageEngine: Send + Sync + 'static {
     async fn count(&self, ns: Namespace) -> Result<u64, LiteError>;
 }
 
+/// Synchronous KV fast path for storage backends that support it.
+///
+/// Bypasses the async runtime for the local-only KV engine. redb
+/// operations are inherently synchronous, so this avoids unnecessary
+/// async overhead on the hot path.
+pub trait StorageEngineSync: StorageEngine {
+    /// Sync get: retrieve a value by namespace and key.
+    fn get_sync(&self, ns: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>, LiteError>;
+
+    /// Sync put: insert or overwrite a value.
+    fn put_sync(&self, ns: Namespace, key: &[u8], value: &[u8]) -> Result<(), LiteError>;
+
+    /// Sync delete: remove a key.
+    fn delete_sync(&self, ns: Namespace, key: &[u8]) -> Result<(), LiteError>;
+
+    /// Sync batch write: atomically apply a batch of writes.
+    fn batch_write_sync(&self, ops: &[WriteOp]) -> Result<(), LiteError>;
+
+    /// Sync range scan: return up to `limit` entries where key >= `start`.
+    fn scan_range_sync(
+        &self,
+        ns: Namespace,
+        start: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, LiteError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
