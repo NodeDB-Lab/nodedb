@@ -150,11 +150,15 @@ impl NodeDbPgHandler {
                 }
             }
 
+            // Close non-WITH-HOLD cursors on transaction end.
+            self.sessions.close_non_hold_cursors(addr);
             return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
         }
 
         if upper == "ROLLBACK" || upper == "ABORT" {
             let _ = self.sessions.rollback(addr);
+            // Close non-WITH-HOLD cursors on transaction end.
+            self.sessions.close_non_hold_cursors(addr);
             return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
         }
 
