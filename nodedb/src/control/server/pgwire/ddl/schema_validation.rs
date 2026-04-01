@@ -4,11 +4,18 @@
 ///
 /// Syntax: `CREATE COLLECTION name FIELDS (field1 type1, field2 type2, ...)`
 /// Returns empty vec if no FIELDS clause.
-pub(super) fn parse_fields_clause(parts: &[&str]) -> Vec<(String, String)> {
+///
+/// SERIAL and BIGSERIAL are expanded:
+///   `id SERIAL` → `id INT` (caller creates implicit sequence)
+///   `id BIGSERIAL` → `id BIGINT` (caller creates implicit sequence)
+///
+/// The second return value lists field names that had SERIAL/BIGSERIAL types,
+/// so the caller can create the implicit sequences.
+pub(super) fn parse_fields_clause(parts: &[&str]) -> (Vec<(String, String)>, Vec<String>) {
     let fields_idx = parts.iter().position(|p| p.eq_ignore_ascii_case("FIELDS"));
     let fields_idx = match fields_idx {
         Some(i) => i,
-        None => return Vec::new(),
+        None => return (Vec::new(), Vec::new()),
     };
 
     let rest = parts[fields_idx + 1..].join(" ");
@@ -19,16 +26,35 @@ pub(super) fn parse_fields_clause(parts: &[&str]) -> Vec<(String, String)> {
         rest
     };
 
-    inner
-        .split(',')
-        .filter_map(|pair| {
-            let pair = pair.trim();
-            let mut tokens = pair.split_whitespace();
-            let name = tokens.next()?.to_string();
-            let type_name = tokens.next().unwrap_or("text").to_uppercase();
-            Some((name, type_name))
-        })
-        .collect()
+    let mut fields = Vec::new();
+    let mut serial_fields = Vec::new();
+
+    for pair in inner.split(',') {
+        let pair = pair.trim();
+        let mut tokens = pair.split_whitespace();
+        let Some(name) = tokens.next() else {
+            continue;
+        };
+        let name = name.to_string();
+        let type_name = tokens.next().unwrap_or("text").to_uppercase();
+
+        // Expand SERIAL/BIGSERIAL shorthand.
+        let actual_type = match type_name.as_str() {
+            "SERIAL" => {
+                serial_fields.push(name.clone());
+                "INT".to_string()
+            }
+            "BIGSERIAL" => {
+                serial_fields.push(name.clone());
+                "BIGINT".to_string()
+            }
+            other => other.to_string(),
+        };
+
+        fields.push((name, actual_type));
+    }
+
+    (fields, serial_fields)
 }
 
 /// Validate a JSON document against a collection's declared schema.

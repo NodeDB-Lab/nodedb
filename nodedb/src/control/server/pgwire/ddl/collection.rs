@@ -116,7 +116,7 @@ pub fn create_collection(
     };
 
     // Parse optional FIELDS clause: CREATE COLLECTION name FIELDS (field type, ...)
-    let fields = parse_fields_clause(parts);
+    let (fields, serial_fields) = parse_fields_clause(parts);
 
     // For strict/columnar/kv collections, serialize the schema as JSON in timeseries_config
     // (reused for schema storage until StoredCollection gets a dedicated schema field).
@@ -180,6 +180,22 @@ pub fn create_collection(
         }
     }
 
+    // Auto-create implicit sequences for SERIAL/BIGSERIAL fields.
+    for field_name in &serial_fields {
+        let seq_name = format!("{name}_{field_name}_seq");
+        let mut seq_def = crate::control::security::catalog::sequence_types::StoredSequence::new(
+            tenant_id.as_u32(),
+            seq_name.clone(),
+            identity.username.clone(),
+        );
+        seq_def.created_at = now;
+        if let Some(catalog) = state.credentials.catalog() {
+            let _ = catalog.put_sequence(&seq_def);
+        }
+        let _ = state.sequence_registry.create(seq_def);
+        tracing::info!(collection = %name, field = %field_name, sequence = %seq_name, "auto-created SERIAL sequence");
+    }
+
     state.audit_record(
         AuditEvent::AdminAction,
         Some(tenant_id),
@@ -233,7 +249,7 @@ pub async fn dispatch_register_if_needed(
     };
 
     // Parse index paths from FIELDS clause (if any).
-    let fields = super::schema_validation::parse_fields_clause(parts);
+    let (fields, _serial_fields) = super::schema_validation::parse_fields_clause(parts);
     let index_paths: Vec<String> = fields
         .iter()
         .map(|(name, _ty)| format!("$.{name}"))
@@ -310,6 +326,31 @@ pub fn drop_collection(
                 "42P01",
                 &format!("collection '{name}' does not exist"),
             ));
+        }
+    }
+
+    // Cascade: drop implicit sequences (SERIAL/BIGSERIAL fields create {coll}_{field}_seq).
+    if let Some(catalog) = state.credentials.catalog()
+        && let Ok(seqs) = catalog.load_sequences_for_tenant(tenant_id.as_u32())
+    {
+        let prefix = format!("{name}_");
+        let suffix = "_seq";
+        for seq in &seqs {
+            if seq.name.starts_with(&prefix) && seq.name.ends_with(suffix) {
+                catalog
+                    .delete_sequence(tenant_id.as_u32(), &seq.name)
+                    .map_err(|e| {
+                        sqlstate_error(
+                            "XX000",
+                            &format!("failed to drop sequence '{}': {e}", seq.name),
+                        )
+                    })?;
+                // Best-effort: registry removal is non-critical since catalog
+                // is the source of truth and the sequence won't be reloaded.
+                let _ = state
+                    .sequence_registry
+                    .remove(tenant_id.as_u32(), &seq.name);
+            }
         }
     }
 
