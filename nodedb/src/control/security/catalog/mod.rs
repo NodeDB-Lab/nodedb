@@ -22,7 +22,9 @@ pub mod triggers;
 pub mod types;
 pub mod users;
 
-pub use function_types::{FunctionParam, FunctionSecurity, FunctionVolatility, StoredFunction};
+pub use function_types::{
+    FunctionLanguage, FunctionParam, FunctionSecurity, FunctionVolatility, StoredFunction,
+};
 pub use orgs::{StoredOrg, StoredOrgMember};
 pub use procedure_types::StoredProcedure;
 pub use scopes::{StoredScope, StoredScopeGrant};

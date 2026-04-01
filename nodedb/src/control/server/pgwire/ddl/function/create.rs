@@ -8,7 +8,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
 use super::super::super::types::{require_admin, sqlstate_error};
-use super::parse::{find_matching_paren, is_valid_sql_type, parse_parameters, validate_identifier};
+use super::parse::parse_function_header;
 use super::validate::validate_function_body;
 
 /// Handle `CREATE [OR REPLACE] FUNCTION <name>(<params>) RETURNS <type> [IMMUTABLE|STABLE|VOLATILE] AS <body>`
@@ -91,6 +91,10 @@ pub fn create_function(
         compiled_body_sql,
         volatility: parsed.volatility,
         security: crate::control::security::catalog::FunctionSecurity::default(),
+        language: crate::control::security::catalog::function_types::FunctionLanguage::Sql,
+        wasm_hash: None,
+        wasm_fuel: 1_000_000,
+        wasm_memory: 16 * 1024 * 1024,
         owner: identity.username.clone(),
         created_at: now,
     };
@@ -258,49 +262,11 @@ pub(super) struct ParsedCreateFunction {
 ///   AS <sql_expression> ;
 /// ```
 pub(super) fn parse_create_function(sql: &str) -> PgWireResult<ParsedCreateFunction> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let upper = trimmed.to_uppercase();
-
-    // Detect OR REPLACE.
-    let (or_replace, after_create) = if upper.starts_with("CREATE OR REPLACE FUNCTION ") {
-        (true, &trimmed["CREATE OR REPLACE FUNCTION ".len()..])
-    } else if upper.starts_with("CREATE FUNCTION ") {
-        (false, &trimmed["CREATE FUNCTION ".len()..])
-    } else {
-        return Err(sqlstate_error("42601", "expected CREATE FUNCTION"));
-    };
-
-    // Extract function name (everything before the first '(').
-    let paren_open = after_create
-        .find('(')
-        .ok_or_else(|| sqlstate_error("42601", "expected '(' after function name"))?;
-    let name = after_create[..paren_open].trim().to_lowercase();
-    if name.is_empty() {
-        return Err(sqlstate_error("42601", "function name is required"));
-    }
-    validate_identifier(&name)?;
-
-    // Extract parameter list (between matching parens).
-    let paren_close = find_matching_paren(after_create, paren_open)
-        .ok_or_else(|| sqlstate_error("42601", "unmatched '(' in parameter list"))?;
-    let params_str = &after_create[paren_open + 1..paren_close];
-    let parameters = parse_parameters(params_str)?;
-
-    // Everything after the closing paren.
-    let after_params = after_create[paren_close + 1..].trim();
-    let after_params_upper = after_params.to_uppercase();
-
-    // RETURNS <type>
-    if !after_params_upper.starts_with("RETURNS ") {
-        return Err(sqlstate_error("42601", "expected RETURNS <type>"));
-    }
-    let after_returns = after_params["RETURNS ".len()..].trim();
-
-    // Extract return type — next word(s) until AS or volatility keyword.
-    let (return_type, rest) = extract_return_type(after_returns)?;
+    // Use shared header parser — SQL functions terminate return type at AS/volatility.
+    let header = parse_function_header(sql, &[" AS ", " IMMUTABLE ", " STABLE ", " VOLATILE "])?;
 
     // Optional volatility keyword, then AS.
-    let (volatility, body_part) = extract_volatility_and_body(rest)?;
+    let (volatility, body_part) = extract_volatility_and_body(&header.rest)?;
 
     // The body is the SQL expression after AS.
     let body_sql = body_part.trim().trim_end_matches(';').trim().to_string();
@@ -309,50 +275,13 @@ pub(super) fn parse_create_function(sql: &str) -> PgWireResult<ParsedCreateFunct
     }
 
     Ok(ParsedCreateFunction {
-        or_replace,
-        name,
-        parameters,
-        return_type,
+        or_replace: header.or_replace,
+        name: header.name,
+        parameters: header.parameters,
+        return_type: header.return_type,
         volatility,
         body_sql,
     })
-}
-
-/// Extract return type tokens until we hit AS or a volatility keyword.
-fn extract_return_type(s: &str) -> PgWireResult<(String, &str)> {
-    let upper = s.to_uppercase();
-    let keywords = [" AS ", " IMMUTABLE ", " STABLE ", " VOLATILE "];
-
-    let mut earliest = s.len();
-    for kw in &keywords {
-        if let Some(pos) = upper.find(kw) {
-            earliest = earliest.min(pos);
-        }
-    }
-    // Handle keyword at end of string (no trailing space).
-    for kw in [" AS", " IMMUTABLE", " STABLE", " VOLATILE"] {
-        if upper.ends_with(kw) {
-            let pos = s.len() - kw.len();
-            earliest = earliest.min(pos);
-        }
-    }
-
-    if earliest == 0 {
-        return Err(sqlstate_error(
-            "42601",
-            "expected return type after RETURNS",
-        ));
-    }
-
-    let return_type = s[..earliest].trim().to_uppercase();
-    if !is_valid_sql_type(&return_type) {
-        return Err(sqlstate_error(
-            "42601",
-            &format!("unsupported return type: '{return_type}'"),
-        ));
-    }
-    let rest = s[earliest..].trim();
-    Ok((return_type, rest))
 }
 
 /// Extract optional volatility keyword and the body after AS.

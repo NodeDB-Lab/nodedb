@@ -128,6 +128,11 @@ mod tests {
             compiled_body_sql: None,
             volatility: FunctionVolatility::Immutable,
             security: crate::control::security::catalog::FunctionSecurity::default(),
+            language: crate::control::security::catalog::function_types::FunctionLanguage::default(
+            ),
+            wasm_hash: None,
+            wasm_fuel: 1_000_000,
+            wasm_memory: 16 * 1024 * 1024,
             owner: "admin".into(),
             created_at: 1000,
         }

@@ -150,6 +150,96 @@ pub(super) fn find_matching_paren(s: &str, start: usize) -> Option<usize> {
     super::super::parse_utils::find_matching_paren(s, start)
 }
 
+// ─── Shared CREATE FUNCTION header parsing ──────────────────────────────────
+
+/// Result of parsing `CREATE [OR REPLACE] FUNCTION name(params) RETURNS type`.
+pub(super) struct FunctionHeader {
+    pub or_replace: bool,
+    pub name: String,
+    pub parameters: Vec<FunctionParam>,
+    pub return_type: String,
+    /// The remainder of the SQL string after the return type.
+    pub rest: String,
+}
+
+/// Parse the common header of a CREATE FUNCTION statement:
+/// `CREATE [OR REPLACE] FUNCTION <name>(<params>) RETURNS <type>`
+///
+/// `terminators` are keywords (with leading space) that end the return type
+/// (e.g. `[" AS ", " IMMUTABLE ", " LANGUAGE "]`).
+///
+/// Returns the parsed header and the remaining SQL after the return type,
+/// which varies by language (volatility+AS for SQL, LANGUAGE WASM for WASM).
+pub(super) fn parse_function_header(
+    sql: &str,
+    terminators: &[&str],
+) -> PgWireResult<FunctionHeader> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let upper = trimmed.to_uppercase();
+
+    let (or_replace, after) = if upper.starts_with("CREATE OR REPLACE FUNCTION ") {
+        (true, &trimmed["CREATE OR REPLACE FUNCTION ".len()..])
+    } else if upper.starts_with("CREATE FUNCTION ") {
+        (false, &trimmed["CREATE FUNCTION ".len()..])
+    } else {
+        return Err(sqlstate_error("42601", "expected CREATE FUNCTION"));
+    };
+
+    // Name
+    let paren_open = after
+        .find('(')
+        .ok_or_else(|| sqlstate_error("42601", "expected '(' after function name"))?;
+    let name = after[..paren_open].trim().to_lowercase();
+    if name.is_empty() {
+        return Err(sqlstate_error("42601", "function name is required"));
+    }
+    validate_identifier(&name)?;
+
+    // Parameters
+    let paren_close = find_matching_paren(after, paren_open)
+        .ok_or_else(|| sqlstate_error("42601", "unmatched '(' in parameter list"))?;
+    let params_str = &after[paren_open + 1..paren_close];
+    let parameters = parse_parameters(params_str)?;
+
+    // RETURNS <type>
+    let after_params = after[paren_close + 1..].trim();
+    let after_params_upper = after_params.to_uppercase();
+    if !after_params_upper.starts_with("RETURNS ") {
+        return Err(sqlstate_error("42601", "expected RETURNS <type>"));
+    }
+    let after_returns = after_params["RETURNS ".len()..].trim();
+
+    // Find the earliest terminator keyword to delimit the return type.
+    let after_returns_upper = after_returns.to_uppercase();
+    let mut earliest = after_returns.len();
+    for term in terminators {
+        if let Some(pos) = after_returns_upper.find(term) {
+            earliest = earliest.min(pos);
+        }
+        // Handle keyword at end of string (no trailing space).
+        let trimmed_term = term.trim();
+        if after_returns_upper.ends_with(trimmed_term) {
+            let pos = after_returns.len() - trimmed_term.len();
+            earliest = earliest.min(pos);
+        }
+    }
+
+    let return_type = after_returns[..earliest].trim().to_uppercase();
+    let rest = after_returns[earliest..].trim().to_string();
+
+    if return_type.is_empty() {
+        return Err(sqlstate_error("42601", "return type is required"));
+    }
+
+    Ok(FunctionHeader {
+        or_replace,
+        name,
+        parameters,
+        return_type,
+        rest,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

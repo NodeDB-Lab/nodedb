@@ -62,12 +62,26 @@ pub enum FunctionSecurity {
     Definer,
 }
 
+/// Function implementation language.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FunctionLanguage {
+    /// SQL expression or procedural SQL (default).
+    #[default]
+    Sql,
+    /// WebAssembly module (Tier 5).
+    Wasm,
+}
+
+impl FunctionLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sql => "SQL",
+            Self::Wasm => "WASM",
+        }
+    }
+}
+
 /// Serializable user-defined function record for redb storage.
-///
-/// Expression UDFs only. The body is a single SQL expression
-/// that gets inlined into the DataFusion logical plan. SECURITY INVOKER
-/// is enforced naturally because the inlined expression runs in the
-/// caller's query context with their permissions and RLS policies.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredFunction {
     pub tenant_id: u32,
@@ -76,19 +90,37 @@ pub struct StoredFunction {
     /// SQL return type name (e.g. "TEXT", "FLOAT", "BOOLEAN").
     pub return_type: String,
     /// Original SQL body (everything after AS in CREATE FUNCTION).
-    /// For expression UDFs: `SELECT LOWER(TRIM(email))`.
-    /// For procedural UDFs: `BEGIN IF ... END`.
+    /// For SQL functions: expression or procedural block.
+    /// For WASM functions: empty (binary stored separately).
     pub body_sql: String,
     /// Compiled SQL expression for procedural bodies.
-    /// Produced by the procedural compiler at CREATE time.
-    /// `None` for expression UDFs (body_sql is already an expression).
-    /// When present, the UDF engine uses this instead of body_sql.
     #[serde(default)]
     pub compiled_body_sql: Option<String>,
     pub volatility: FunctionVolatility,
     /// Security mode: INVOKER (default) or DEFINER.
     #[serde(default)]
     pub security: FunctionSecurity,
+    /// Implementation language: SQL (default) or WASM.
+    #[serde(default)]
+    pub language: FunctionLanguage,
+    /// SHA-256 hash of the WASM binary (for WASM functions only).
+    /// Used to look up the binary in the `_system.wasm_modules` table.
+    #[serde(default)]
+    pub wasm_hash: Option<String>,
+    /// Fuel budget for WASM functions (default 1_000_000).
+    #[serde(default = "default_wasm_fuel")]
+    pub wasm_fuel: u64,
+    /// Memory limit for WASM functions in bytes (default 16 MB).
+    #[serde(default = "default_wasm_memory")]
+    pub wasm_memory: usize,
     pub owner: String,
     pub created_at: u64,
+}
+
+fn default_wasm_fuel() -> u64 {
+    1_000_000
+}
+
+fn default_wasm_memory() -> usize {
+    16 * 1024 * 1024
 }

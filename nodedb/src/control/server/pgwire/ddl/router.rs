@@ -88,6 +88,9 @@ pub async fn dispatch(
 
     // User-defined functions.
     if upper.starts_with("CREATE OR REPLACE FUNCTION ") || upper.starts_with("CREATE FUNCTION ") {
+        if upper.contains("LANGUAGE WASM") {
+            return Some(super::function::create_wasm_function(state, identity, sql));
+        }
         return Some(super::function::create_function(state, identity, sql));
     }
     if upper.starts_with("DROP FUNCTION ") {

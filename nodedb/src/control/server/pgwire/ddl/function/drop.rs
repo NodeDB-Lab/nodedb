@@ -64,6 +64,13 @@ pub fn drop_function(
         ));
     }
 
+    // If the function is a WASM function, clean up the stored binary.
+    if let Ok(Some(func)) = catalog.get_function(tenant_id, &name)
+        && let Some(ref hash) = func.wasm_hash
+    {
+        let _ = crate::control::planner::wasm::store::delete_wasm_binary(catalog, hash);
+    }
+
     // Delete function definition + dependencies + ownership.
     catalog
         .delete_function(tenant_id, &name)
