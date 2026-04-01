@@ -1,6 +1,7 @@
 pub mod approx_agg;
 pub mod asof_join;
 pub mod bitmap_index;
+pub mod bitmap_simd;
 pub mod bucket;
 pub mod columnar_agg;
 pub mod columnar_bridge;

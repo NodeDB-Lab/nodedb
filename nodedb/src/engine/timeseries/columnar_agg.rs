@@ -92,29 +92,21 @@ pub fn aggregate_f64(values: &[f64]) -> AggResult {
 }
 
 /// Compute aggregates over an i64 column slice.
+///
+/// Dispatches sum/min/max to SIMD kernels (AVX-512/AVX2/NEON) via
+/// `i64_runtime()`. Falls back to scalar with i128 accumulator.
 pub fn aggregate_i64(values: &[i64]) -> AggResultI64 {
     if values.is_empty() {
         return AggResultI64::default();
     }
 
-    let mut sum = 0i128; // Use i128 to avoid overflow.
-    let mut min = i64::MAX;
-    let mut max = i64::MIN;
-    let mut count = 0u64;
-
-    for &v in values {
-        count += 1;
-        sum += v as i128;
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
-    }
+    let rt = nodedb_query::simd_agg_i64::i64_runtime();
+    let sum = (rt.sum_i64)(values);
+    let min = (rt.min_i64)(values);
+    let max = (rt.max_i64)(values);
 
     AggResultI64 {
-        count,
+        count: values.len() as u64,
         sum,
         min,
         max,

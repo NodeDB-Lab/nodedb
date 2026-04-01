@@ -373,28 +373,32 @@ fn apply_aggregate_window(
             .filter_map(|&i| as_f64(&get_field(&rows[i].1, field)))
             .collect();
 
+        // Dispatch sum/min/max to SIMD kernels when the values slice is available.
+        let rt = crate::simd_agg::ts_runtime();
         let result = match spec.func_name.as_str() {
-            "sum" => serde_json::json!(values.iter().sum::<f64>()),
+            "sum" => serde_json::json!((rt.sum_f64)(&values)),
             "count" => serde_json::json!(indices.len()),
             "avg" => {
                 if values.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    serde_json::json!(values.iter().sum::<f64>() / values.len() as f64)
+                    serde_json::json!((rt.sum_f64)(&values) / values.len() as f64)
                 }
             }
-            "min" => values
-                .iter()
-                .copied()
-                .reduce(f64::min)
-                .map(|m| serde_json::json!(m))
-                .unwrap_or(serde_json::Value::Null),
-            "max" => values
-                .iter()
-                .copied()
-                .reduce(f64::max)
-                .map(|m| serde_json::json!(m))
-                .unwrap_or(serde_json::Value::Null),
+            "min" => {
+                if values.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!((rt.min_f64)(&values))
+                }
+            }
+            "max" => {
+                if values.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!((rt.max_f64)(&values))
+                }
+            }
             "first_value" => get_field(&rows[indices[0]].1, field),
             "last_value" => get_field(&rows[*indices.last().unwrap()].1, field),
             _ => serde_json::Value::Null,

@@ -43,27 +43,39 @@ impl Bitmap {
     }
 
     /// Bitwise AND of two bitmaps. Result has same length as self.
+    ///
+    /// Dispatches to SIMD (AVX-512/AVX2/NEON) for large bitmaps.
     pub fn and(&self, other: &Bitmap) -> Bitmap {
         let min_words = self.bits.len().min(other.bits.len());
         let mut result = Bitmap::new(self.len);
-        for i in 0..min_words {
-            result.bits[i] = self.bits[i] & other.bits[i];
-        }
+        let simd = super::bitmap_simd::ops();
+        (simd.and_slices)(
+            &self.bits[..min_words],
+            &other.bits[..min_words],
+            &mut result.bits[..min_words],
+        );
         result
     }
 
     /// Bitwise OR of two bitmaps.
+    ///
+    /// Dispatches to SIMD (AVX-512/AVX2/NEON) for large bitmaps.
     pub fn or(&self, other: &Bitmap) -> Bitmap {
+        let max_len = self.len.max(other.len);
         let max_words = self.bits.len().max(other.bits.len());
-        let mut result = Bitmap::new(self.len.max(other.len));
-        for i in 0..max_words {
-            let a = if i < self.bits.len() { self.bits[i] } else { 0 };
-            let b = if i < other.bits.len() {
-                other.bits[i]
-            } else {
-                0
-            };
-            result.bits[i] = a | b;
+        let mut result = Bitmap::new(max_len);
+        let min_words = self.bits.len().min(other.bits.len());
+        let simd = super::bitmap_simd::ops();
+        (simd.or_slices)(
+            &self.bits[..min_words],
+            &other.bits[..min_words],
+            &mut result.bits[..min_words],
+        );
+        // Copy remaining words from the longer bitmap.
+        if self.bits.len() > min_words {
+            result.bits[min_words..max_words].copy_from_slice(&self.bits[min_words..max_words]);
+        } else if other.bits.len() > min_words {
+            result.bits[min_words..max_words].copy_from_slice(&other.bits[min_words..max_words]);
         }
         result
     }
