@@ -59,6 +59,7 @@ fn make_trigger(
         enabled: true,
         execution_mode: mode,
         security: nodedb::control::security::catalog::trigger_types::TriggerSecurity::default(),
+        batch_mode: nodedb::control::security::catalog::trigger_types::TriggerBatchMode::default(),
         owner: "admin".into(),
         created_at: 0,
     }

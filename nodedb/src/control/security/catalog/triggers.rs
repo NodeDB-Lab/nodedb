@@ -147,6 +147,7 @@ mod tests {
             enabled: true,
             execution_mode: TriggerExecutionMode::default(),
             security: TriggerSecurity::default(),
+            batch_mode: TriggerBatchMode::default(),
             owner: "admin".into(),
             created_at: 1000,
         }

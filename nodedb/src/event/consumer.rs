@@ -30,8 +30,9 @@ use crate::control::state::SharedState;
 use crate::types::Lsn;
 use crate::wal::WalManager;
 
-/// How often to persist the watermark to redb (avoid fsync on every event).
-const WATERMARK_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+use super::consumer_helpers::{
+    detect_sequence_gap, flush_watermark, maybe_flush_watermark, record_event,
+};
 
 /// How often to poll the ring buffer when empty (milliseconds).
 const EMPTY_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -162,13 +163,15 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                 if batch_count > 0 {
                     dirty_watermark = true;
 
-                    // Dispatch triggers + CDC routing + watermarks for each event.
+                    let mut trigger_collector =
+                        crate::control::trigger::batch::collector::TriggerBatchCollector::new(
+                            crate::control::trigger::batch::BatchConfig::default().batch_size,
+                        );
+
+                    // Process events: accumulate triggers in batch collector,
+                    // dispatch CDC/MV/CRDT per-event (they don't benefit from batching).
                     for event in &events {
-                        // Advance partition watermark with (LSN, event_time) pair.
                         if event.op.is_data_event() {
-                            // Data events carry wall-clock event_time from CdcEvent.
-                            // WriteEvent doesn't have event_time directly — use current
-                            // wall-clock as the event_time for watermark tracking.
                             let event_time_ms = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -179,13 +182,32 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                                 event_time_ms,
                             );
                         } else {
-                            // Heartbeats advance LSN only — no new wall-clock data.
                             shared_state
                                 .watermark_tracker
                                 .advance_lsn_only(event.vshard_id.as_u16(), event.lsn.as_u64());
                             continue;
                         }
 
+                        // Accumulate trigger rows into batches.
+                        // Non-triggerable events (Trigger/RaftFollower/CrdtSync) are
+                        // skipped inside push_event. Batch dispatch happens when the
+                        // batch fills or collection changes.
+                        if let Some(batch) =
+                            crate::control::trigger::batch::collector::push_write_event(
+                                &mut trigger_collector,
+                                event,
+                            )
+                        {
+                            super::trigger::dispatcher::dispatch_trigger_batch(
+                                &batch,
+                                &shared_state,
+                                &mut retry_queue,
+                            )
+                            .await;
+                        }
+
+                        // Per-event: CDC routing, streaming MVs, CRDT sync.
+                        // Also dispatch statement-level triggers per-event (they don't batch).
                         super::trigger::dispatcher::dispatch_triggers(
                             event,
                             &shared_state,
@@ -193,8 +215,6 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                         )
                         .await;
                         cdc_router.route_event(event, &shared_state.watermark_tracker);
-                        // Update streaming MVs: find streams matching this event's
-                        // collection, then process MVs sourced from those streams.
                         let matching_streams = shared_state
                             .stream_registry
                             .find_matching(event.tenant_id.as_u32(), &event.collection);
@@ -205,10 +225,19 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
                                 &stream_def.name,
                             );
                         }
-                        // CRDT sync: package outbound deltas for connected Lite devices.
                         shared_state
                             .delta_packager
                             .package_and_enqueue(event, &shared_state.crdt_sync_delivery);
+                    }
+
+                    // Flush any remaining batched trigger rows.
+                    if let Some(batch) = trigger_collector.flush() {
+                        super::trigger::dispatcher::dispatch_trigger_batch(
+                            &batch,
+                            &shared_state,
+                            &mut retry_queue,
+                        )
+                        .await;
                     }
 
                     // Track slab-pinned memory for budget enforcement.
@@ -462,68 +491,6 @@ fn drain_and_skip_stale(rx: &mut EventConsumerRx, last_sequence: u64) {
             skipped,
             "drained stale events from ring buffer after WAL catchup"
         );
-    }
-}
-
-/// Detect sequence gaps (events dropped by the producer due to buffer overflow).
-fn detect_sequence_gap(
-    core_id: usize,
-    event: &WriteEvent,
-    last_sequence: u64,
-    metrics: &CoreMetrics,
-) {
-    if last_sequence > 0 && event.sequence > last_sequence + 1 {
-        let gap = event.sequence - last_sequence - 1;
-        metrics.record_drop(gap);
-        warn!(
-            core_id,
-            gap,
-            last_seq = last_sequence,
-            new_seq = event.sequence,
-            "event sequence gap — {gap} events dropped (WAL replay needed)"
-        );
-    }
-}
-
-/// Process a single event. Dispatch point for trigger matching, CDC, etc.
-fn record_event(core_id: usize, event: &WriteEvent, metrics: &CoreMetrics) {
-    metrics.record_process_for_tenant(event.lsn.as_u64(), event.sequence, event.tenant_id.as_u32());
-
-    trace!(
-        core_id,
-        seq = event.sequence,
-        collection = %event.collection,
-        op = %event.op,
-        source = %event.source,
-        lsn = event.lsn.as_u64(),
-        "event consumed"
-    );
-}
-
-/// Flush watermark to redb if the flush interval has elapsed.
-fn maybe_flush_watermark(
-    store: &WatermarkStore,
-    core_id: usize,
-    lsn: Lsn,
-    dirty: &mut bool,
-    last_flush: &mut tokio::time::Instant,
-) {
-    if *dirty && last_flush.elapsed() >= WATERMARK_FLUSH_INTERVAL {
-        flush_watermark(store, core_id, lsn);
-        *dirty = false;
-        *last_flush = tokio::time::Instant::now();
-    }
-}
-
-/// Persist watermark to redb (best-effort — log on failure).
-fn flush_watermark(store: &WatermarkStore, core_id: usize, lsn: Lsn) {
-    if lsn == Lsn::ZERO {
-        return;
-    }
-    if let Err(e) = store.save(core_id, lsn) {
-        warn!(core_id, lsn = lsn.as_u64(), error = %e, "failed to persist watermark");
-    } else {
-        trace!(core_id, lsn = lsn.as_u64(), "watermark flushed");
     }
 }
 

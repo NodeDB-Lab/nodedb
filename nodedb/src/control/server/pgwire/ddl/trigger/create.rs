@@ -79,6 +79,9 @@ pub fn create_trigger(
         .map_err(|_| sqlstate_error("XX000", "system clock before UNIX epoch"))?
         .as_secs();
 
+    let batch_mode =
+        crate::control::trigger::batch::classify::classify_trigger_body(&parsed.body_sql);
+
     let stored = crate::control::security::catalog::trigger_types::StoredTrigger {
         tenant_id,
         name: parsed.name.clone(),
@@ -92,6 +95,7 @@ pub fn create_trigger(
         enabled: true,
         execution_mode: parsed.execution_mode,
         security: parsed.security,
+        batch_mode,
         owner: identity.username.clone(),
         created_at: now,
     };

@@ -43,6 +43,7 @@ fn make_trigger_full(
         enabled: true,
         execution_mode: mode,
         security,
+        batch_mode: nodedb::control::security::catalog::trigger_types::TriggerBatchMode::default(),
         owner: "admin".into(),
         created_at: 0,
     }

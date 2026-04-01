@@ -147,6 +147,24 @@ impl std::fmt::Display for EventSource {
     }
 }
 
+/// Deserialize a MessagePack or JSON payload into a [`serde_json::Map`].
+///
+/// WriteEvent payloads are stored in the same format as the WAL payload
+/// (MessagePack for schemaless documents, Binary Tuple for strict).
+/// Tries MessagePack first, then JSON fallback. Returns `None` if neither
+/// succeeds (e.g. Binary Tuple payloads that need schema-aware decoding).
+pub fn deserialize_event_payload(
+    bytes: &[u8],
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if let Ok(serde_json::Value::Object(map)) = rmp_serde::from_slice::<serde_json::Value>(bytes) {
+        return Some(map);
+    }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        return Some(map);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

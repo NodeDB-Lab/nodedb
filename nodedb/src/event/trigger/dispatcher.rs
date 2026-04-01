@@ -14,7 +14,7 @@ use crate::control::security::catalog::trigger_types::TriggerExecutionMode;
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
 use crate::control::trigger::fire;
-use crate::event::types::{EventSource, WriteEvent, WriteOp};
+use crate::event::types::{EventSource, WriteEvent, WriteOp, deserialize_event_payload};
 use crate::types::TenantId;
 
 use super::retry::{RetryEntry, TriggerRetryQueue};
@@ -48,11 +48,11 @@ pub async fn dispatch_triggers(
     let new_fields = event
         .new_value
         .as_ref()
-        .and_then(|v| deserialize_to_json_map(v));
+        .and_then(|v| deserialize_event_payload(v));
     let old_fields = event
         .old_value
         .as_ref()
-        .and_then(|v| deserialize_to_json_map(v));
+        .and_then(|v| deserialize_event_payload(v));
 
     // Build a system identity for trigger execution (SECURITY DEFINER model).
     let identity = trigger_identity(event.tenant_id);
@@ -289,23 +289,114 @@ async fn fire_for_operation(
     }
 }
 
-/// Deserialize a MessagePack payload (or raw JSON) into a serde_json::Map.
+/// Dispatch a batch of trigger rows.
 ///
-/// WriteEvent payloads are stored in the same format as the WAL payload,
-/// which is MessagePack for schemaless documents and Binary Tuple for strict.
-/// We try MessagePack first, then JSON fallback.
-fn deserialize_to_json_map(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
-    // Try MessagePack → serde_json::Value → Map.
-    if let Ok(serde_json::Value::Object(map)) = rmp_serde::from_slice::<serde_json::Value>(bytes) {
-        return Some(map);
+/// For `BatchSafe` triggers, fires each matching trigger once per row in the batch
+/// (but with the optimization of pre-filtering WHEN clauses across the whole batch).
+/// For `RowAtATime` triggers, fires per-row as usual.
+///
+/// This is called by the consumer loop after the batch collector yields a full batch.
+pub async fn dispatch_trigger_batch(
+    batch: &crate::control::trigger::batch::collector::TriggerBatch,
+    state: &Arc<SharedState>,
+    retry_queue: &mut TriggerRetryQueue,
+) {
+    use crate::control::security::catalog::trigger_types::{TriggerGranularity, TriggerTiming};
+    use crate::control::trigger::batch::when_filter;
+    use crate::control::trigger::fire_common;
+    use crate::control::trigger::registry::DmlEvent;
+
+    let tenant_id = TenantId::new(batch.tenant_id);
+    let identity = trigger_identity(tenant_id);
+    let mode_filter = Some(TriggerExecutionMode::Async);
+
+    let dml_event = match batch.operation.as_str() {
+        "INSERT" => DmlEvent::Insert,
+        "UPDATE" => DmlEvent::Update,
+        "DELETE" => DmlEvent::Delete,
+        _ => return,
+    };
+
+    let triggers =
+        state
+            .trigger_registry
+            .get_matching(batch.tenant_id, &batch.collection, dml_event);
+
+    let after_row_triggers: Vec<_> = triggers
+        .iter()
+        .filter(|t| t.timing == TriggerTiming::After)
+        .filter(|t| t.granularity == TriggerGranularity::Row)
+        .filter(|t| mode_filter.is_none() || Some(t.execution_mode) == mode_filter)
+        .collect();
+
+    if after_row_triggers.is_empty() {
+        return;
     }
 
-    // Try raw JSON.
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes) {
-        return Some(map);
-    }
+    for trigger in &after_row_triggers {
+        // Pre-filter the batch by WHEN clause.
+        let mask = when_filter::filter_batch_by_when(
+            &batch.rows,
+            &batch.collection,
+            &batch.operation,
+            trigger.when_condition.as_deref(),
+        );
 
-    None
+        let passing = when_filter::count_passing(&mask);
+        if passing == 0 {
+            continue;
+        }
+
+        // For each passing row, fire the trigger body.
+        // BatchSafe triggers could in the future dispatch a single bulk DML
+        // with all passing rows. For now, they still fire per-row but with
+        // the WHEN clause pre-filtered (avoiding parse+eval overhead on
+        // non-matching rows).
+        for (row, &passes) in batch.rows.iter().zip(mask.iter()) {
+            if !passes {
+                continue;
+            }
+
+            let bindings =
+                when_filter::build_row_bindings(row, &batch.collection, &batch.operation);
+
+            let result = fire_common::fire_triggers(
+                state,
+                &identity,
+                tenant_id,
+                &batch.collection,
+                std::slice::from_ref(trigger),
+                &bindings,
+                0,
+            )
+            .await;
+
+            if let Err(e) = result {
+                warn!(
+                    trigger = %trigger.name,
+                    collection = %batch.collection,
+                    row_id = %row.row_id,
+                    error = %e,
+                    "batch trigger fire failed, enqueuing row for retry"
+                );
+                retry_queue.enqueue(RetryEntry {
+                    tenant_id: batch.tenant_id,
+                    collection: batch.collection.clone(),
+                    row_id: row.row_id.clone(),
+                    operation: batch.operation.clone(),
+                    trigger_name: trigger.name.clone(),
+                    new_fields: row.new_fields.clone(),
+                    old_fields: row.old_fields.clone(),
+                    attempts: 0,
+                    last_error: e.to_string(),
+                    next_retry_at: std::time::Instant::now(),
+                    source_lsn: 0,
+                    source_sequence: 0,
+                    cascade_depth: 0,
+                });
+            }
+        }
+    }
 }
 
 /// Build a system identity for trigger execution (SECURITY DEFINER model).
@@ -332,7 +423,7 @@ mod tests {
     fn deserialize_json_payload() {
         let json = serde_json::json!({"id": 1, "name": "test"});
         let bytes = serde_json::to_vec(&json).unwrap();
-        let map = deserialize_to_json_map(&bytes).unwrap();
+        let map = deserialize_event_payload(&bytes).unwrap();
         assert_eq!(map.get("id").unwrap(), &serde_json::json!(1));
         assert_eq!(map.get("name").unwrap(), &serde_json::json!("test"));
     }
@@ -341,14 +432,14 @@ mod tests {
     fn deserialize_msgpack_payload() {
         let json = serde_json::json!({"status": "active", "count": 42});
         let bytes = rmp_serde::to_vec(&json).unwrap();
-        let map = deserialize_to_json_map(&bytes).unwrap();
+        let map = deserialize_event_payload(&bytes).unwrap();
         assert_eq!(map.get("status").unwrap(), &serde_json::json!("active"));
     }
 
     #[test]
     fn deserialize_non_object_returns_none() {
         let bytes = serde_json::to_vec(&serde_json::json!([1, 2, 3])).unwrap();
-        assert!(deserialize_to_json_map(&bytes).is_none());
+        assert!(deserialize_event_payload(&bytes).is_none());
     }
 
     #[test]

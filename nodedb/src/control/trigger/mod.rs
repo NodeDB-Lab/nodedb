@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod dml_hook;
 pub mod fire;
 pub mod fire_after;

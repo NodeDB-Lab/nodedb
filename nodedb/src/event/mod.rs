@@ -2,6 +2,7 @@ pub mod budget;
 pub mod bus;
 pub mod cdc;
 pub mod consumer;
+pub mod consumer_helpers;
 pub mod crdt_sync;
 pub mod cross_shard;
 pub mod kafka;
@@ -22,4 +23,4 @@ pub mod webhook;
 
 pub use bus::{EventProducer, create_event_bus};
 pub use plane::EventPlane;
-pub use types::{EventSource, WriteEvent, WriteOp};
+pub use types::{EventSource, WriteEvent, WriteOp, deserialize_event_payload};

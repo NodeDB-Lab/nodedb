@@ -112,6 +112,31 @@ impl TriggerSecurity {
     }
 }
 
+/// Batch execution mode for trigger bodies, determined at CREATE TRIGGER time.
+///
+/// Controls whether the trigger can process multiple rows as a batch (vectorized)
+/// or must fall back to row-at-a-time execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum TriggerBatchMode {
+    /// Trigger body has a single uniform DML target — safe for batch execution.
+    /// All rows can be collected into a RecordBatch and the trigger body's DML
+    /// can be dispatched as a single bulk INSERT/UPDATE/DELETE.
+    #[default]
+    BatchSafe,
+    /// Trigger body has row-dependent control flow or multiple DML targets.
+    /// Must execute row-at-a-time (the current behavior).
+    RowAtATime,
+}
+
+impl TriggerBatchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BatchSafe => "BATCH_SAFE",
+            Self::RowAtATime => "ROW_AT_A_TIME",
+        }
+    }
+}
+
 /// Serializable trigger definition for redb storage.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredTrigger {
@@ -140,9 +165,11 @@ pub struct StoredTrigger {
     #[serde(default)]
     pub execution_mode: TriggerExecutionMode,
     /// Security mode: INVOKER (default) or DEFINER.
-    /// DEFINER executes the trigger body with the owner's credentials.
     #[serde(default)]
     pub security: TriggerSecurity,
+    /// Batch execution mode: determined at CREATE time by analyzing the body.
+    #[serde(default)]
+    pub batch_mode: TriggerBatchMode,
     pub owner: String,
     pub created_at: u64,
 }
