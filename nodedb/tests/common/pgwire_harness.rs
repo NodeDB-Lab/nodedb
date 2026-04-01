@@ -35,7 +35,14 @@ impl TestServer {
         let wal = Arc::new(WalManager::open_for_testing(&wal_path).unwrap());
 
         let (dispatcher, data_sides) = Dispatcher::new(1, 64);
-        let shared = SharedState::new(dispatcher, wal);
+
+        // Use catalog-backed credential store (required for CREATE FUNCTION/TRIGGER/PROCEDURE).
+        let catalog_path = dir.path().join("system.redb");
+        let credentials = Arc::new(
+            nodedb::control::security::credential::store::CredentialStore::open(&catalog_path)
+                .unwrap(),
+        );
+        let shared = SharedState::new_with_credentials(dispatcher, wal, credentials);
 
         // Data Plane core.
         let data_side = data_sides.into_iter().next().unwrap();
@@ -124,7 +131,7 @@ impl TestServer {
                 }
                 Ok(rows)
             }
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(pg_error_detail(&e)),
         }
     }
 
@@ -132,7 +139,7 @@ impl TestServer {
     pub async fn exec(&self, sql: &str) -> Result<(), String> {
         match self.client.simple_query(sql).await {
             Ok(_) => Ok(()),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(pg_error_detail(&e)),
         }
     }
 
@@ -141,7 +148,7 @@ impl TestServer {
         match self.client.simple_query(sql).await {
             Ok(_) => panic!("expected error containing '{expected_substring}', got success"),
             Err(e) => {
-                let msg = e.to_string();
+                let msg = pg_error_detail(&e);
                 assert!(
                     msg.to_lowercase()
                         .contains(&expected_substring.to_lowercase()),
@@ -149,6 +156,23 @@ impl TestServer {
                 );
             }
         }
+    }
+}
+
+/// Extract detailed error message from a tokio-postgres error.
+///
+/// tokio-postgres `Error::to_string()` just returns "db error" — useless for debugging.
+/// This function extracts the actual server message from the `DbError` if available.
+fn pg_error_detail(e: &tokio_postgres::Error) -> String {
+    if let Some(db_err) = e.as_db_error() {
+        format!(
+            "{}: {} (SQLSTATE {})",
+            db_err.severity(),
+            db_err.message(),
+            db_err.code().code()
+        )
+    } else {
+        format!("{e:?}")
     }
 }
 

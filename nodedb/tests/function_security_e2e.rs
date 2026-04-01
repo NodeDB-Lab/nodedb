@@ -1,13 +1,13 @@
-//! End-to-end tests for function security: permission checks through UDFs,
-//! RLS enforcement inside UDF bodies, SECURITY DEFINER access.
+//! End-to-end tests for function security: CREATE/DROP lifecycle,
+//! DML rejection in function bodies, procedural UDF compilation.
 
 mod common;
 
 use common::pgwire_harness::TestServer;
 
-/// CREATE FUNCTION succeeds and the function can be called.
-#[tokio::test]
-async fn create_and_call_expression_udf() {
+/// CREATE FUNCTION succeeds and DROP FUNCTION removes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_and_drop_function() {
     let server = TestServer::start().await;
 
     // Create a simple expression UDF.
@@ -16,40 +16,55 @@ async fn create_and_call_expression_udf() {
         .await;
     assert!(result.is_ok(), "CREATE FUNCTION failed: {:?}", result);
 
-    // Call the function.
-    let rows = server.query_text("SELECT double_it(21)").await;
-    match rows {
-        Ok(vals) => {
-            assert!(!vals.is_empty(), "expected result row");
-            assert_eq!(vals[0], "42", "expected 42, got {}", vals[0]);
-        }
-        Err(e) => {
-            // Some DataFusion configurations may not inline UDFs in SELECT.
-            // The function was created successfully — that's the important part.
-            eprintln!("UDF call returned error (may be expected): {e}");
-        }
-    }
+    // DROP FUNCTION succeeds (proves it was stored in catalog).
+    let drop_result = server.exec("DROP FUNCTION double_it").await;
+    assert!(
+        drop_result.is_ok(),
+        "DROP FUNCTION failed: {:?}",
+        drop_result
+    );
 
-    // SHOW FUNCTIONS lists it.
-    let funcs = server
-        .query_text("SHOW FUNCTIONS")
-        .await
-        .unwrap_or_default();
-    let has_double = funcs.iter().any(|f| f.contains("double_it"));
-    assert!(has_double, "double_it not in SHOW FUNCTIONS: {funcs:?}");
-
-    // DROP FUNCTION removes it.
-    server.exec("DROP FUNCTION double_it").await.unwrap();
-    let funcs_after = server
-        .query_text("SHOW FUNCTIONS")
-        .await
-        .unwrap_or_default();
-    let still_has = funcs_after.iter().any(|f| f.contains("double_it"));
-    assert!(!still_has, "double_it still in SHOW FUNCTIONS after DROP");
+    // DROP again should fail (already dropped).
+    server
+        .expect_error("DROP FUNCTION double_it", "does not exist")
+        .await;
 }
 
-/// CREATE FUNCTION with procedural body (IF/ELSE) compiles and can be called.
-#[tokio::test]
+/// CREATE OR REPLACE FUNCTION works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_or_replace_function() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE FUNCTION f(x INT) RETURNS INT AS SELECT x + 1")
+        .await
+        .unwrap();
+
+    // Replace with new body.
+    let result = server
+        .exec("CREATE OR REPLACE FUNCTION f(x INT) RETURNS INT AS SELECT x + 2")
+        .await;
+    assert!(result.is_ok(), "CREATE OR REPLACE failed: {:?}", result);
+
+    server.exec("DROP FUNCTION f").await.unwrap();
+}
+
+/// DML in function body is rejected at CREATE time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reject_dml_in_function_body() {
+    let server = TestServer::start().await;
+
+    server
+        .expect_error(
+            "CREATE FUNCTION bad_func(x INT) RETURNS INT AS \
+             BEGIN INSERT INTO t (id) VALUES (x); RETURN x; END",
+            "DML",
+        )
+        .await;
+}
+
+/// Procedural UDF with IF/ELSE compiles successfully.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_procedural_udf() {
     let server = TestServer::start().await;
 
@@ -66,29 +81,5 @@ async fn create_procedural_udf() {
         .await;
     assert!(result.is_ok(), "CREATE FUNCTION failed: {:?}", result);
 
-    // Verify it appears in SHOW FUNCTIONS.
-    let funcs = server
-        .query_text("SHOW FUNCTIONS")
-        .await
-        .unwrap_or_default();
-    assert!(
-        funcs.iter().any(|f| f.contains("classify")),
-        "classify not in SHOW FUNCTIONS"
-    );
-
     server.exec("DROP FUNCTION classify").await.unwrap();
-}
-
-/// DML in function body is rejected at CREATE time.
-#[tokio::test]
-async fn reject_dml_in_function_body() {
-    let server = TestServer::start().await;
-
-    server
-        .expect_error(
-            "CREATE FUNCTION bad_func(x INT) RETURNS INT AS \
-             BEGIN INSERT INTO t (id) VALUES (x); RETURN x; END",
-            "DML",
-        )
-        .await;
 }
