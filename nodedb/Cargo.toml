@@ -64,6 +64,10 @@ memmap2 = { workspace = true }
 # CRDTs (needed for LoroValue in engine layer)
 loro = { workspace = true }
 
+# WASM runtime
+wasmtime = { workspace = true }
+sha2 = { workspace = true }
+
 # Feature-gated dependencies
 regex = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
@@ -74,7 +78,6 @@ rdkafka = { workspace = true, optional = true }
 
 # Password hashing & cryptography
 argon2 = { workspace = true }
-sha2 = { version = "0.10", features = ["oid"] }
 md5 = { workspace = true }
 hmac = { workspace = true }
 base64 = { workspace = true }
