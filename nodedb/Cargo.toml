@@ -55,6 +55,8 @@ rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 rkyv = { workspace = true }
 roaring = { workspace = true }
+memchr = { workspace = true }
+lexical-core = { workspace = true }
 rust-stemmers = { workspace = true }
 unicode-normalization = { workspace = true }
 tempfile = { workspace = true }

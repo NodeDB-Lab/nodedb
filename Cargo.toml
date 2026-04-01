@@ -165,6 +165,10 @@ tempfile = "3"
 rust-stemmers = "1"
 unicode-normalization = "0.1"
 
+# Fast parsing (CSV bulk import)
+memchr = "2.7"
+lexical-core = "1"
+
 # Random
 rand = "0.9"
 

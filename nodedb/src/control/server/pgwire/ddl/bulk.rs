@@ -115,7 +115,10 @@ pub async fn copy_from(
                 .next()
                 .ok_or_else(|| sqlstate_error("XX000", "CSV file is empty"))?
                 .map_err(|e| sqlstate_error("XX000", &format!("read header: {e}")))?;
-            let headers: Vec<&str> = header_line.split(',').map(|h| h.trim()).collect();
+            let headers: Vec<&str> = super::csv_parser::split_csv_line(&header_line)
+                .into_iter()
+                .map(|h| h.trim())
+                .collect();
 
             for line in lines {
                 let line = line.map_err(|e| {
@@ -126,14 +129,18 @@ pub async fn copy_from(
                     continue;
                 }
 
-                let values: Vec<&str> = line.split(',').map(|v| v.trim()).collect();
+                let values: Vec<&str> = super::csv_parser::split_csv_line(line)
+                    .into_iter()
+                    .map(|v| v.trim())
+                    .collect();
                 let mut obj = serde_json::Map::new();
                 for (i, header) in headers.iter().enumerate() {
                     let val = values.get(i).unwrap_or(&"");
                     // Try to parse as number, bool, or fall back to string.
-                    let json_val = if let Ok(n) = val.parse::<i64>() {
+                    // Uses lexical-core for ~10-15x faster f64 parsing.
+                    let json_val = if let Some(n) = super::csv_parser::fast_parse_i64(val) {
                         serde_json::Value::Number(n.into())
-                    } else if let Ok(f) = val.parse::<f64>() {
+                    } else if let Some(f) = super::csv_parser::fast_parse_f64(val) {
                         serde_json::Number::from_f64(f)
                             .map(serde_json::Value::Number)
                             .unwrap_or_else(|| serde_json::Value::String(val.to_string()))
