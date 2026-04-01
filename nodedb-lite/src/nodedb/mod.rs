@@ -2,6 +2,7 @@ mod batch;
 pub mod collection;
 pub(crate) mod convert;
 mod core;
+pub mod definitions;
 mod diagnostic;
 mod graph_rag;
 mod health;

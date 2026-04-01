@@ -35,6 +35,8 @@ pub trait SyncDelegate: Send + Sync + 'static {
     );
     /// Import remote deltas from Origin into local CRDT state.
     fn import_remote(&self, data: &[u8]);
+    /// Import a definition sync message (function/trigger/procedure) from Origin.
+    fn import_definition(&self, msg: &nodedb_types::sync::wire::DefinitionSyncMsg);
 }
 
 /// Run the sync loop — connects, handshakes, pushes/receives, reconnects.
@@ -296,6 +298,11 @@ async fn dispatch_frame(
                 client.handle_clock_sync(&clock_msg).await;
             }
         }
+        SyncMessageType::DefinitionSync => {
+            if let Some(msg) = frame.decode_body::<nodedb_types::sync::wire::DefinitionSyncMsg>() {
+                delegate.import_definition(&msg);
+            }
+        }
         SyncMessageType::PingPong => {
             // Origin sent a ping — we could respond with pong, but our
             // ping_loop handles keepalive. Just log.
@@ -487,6 +494,10 @@ mod tests {
 
         fn import_remote(&self, data: &[u8]) {
             self.imported.lock().unwrap().push(data.to_vec());
+        }
+
+        fn import_definition(&self, _msg: &nodedb_types::sync::wire::DefinitionSyncMsg) {
+            // No-op in test mock.
         }
     }
 

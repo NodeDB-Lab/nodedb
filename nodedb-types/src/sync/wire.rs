@@ -50,6 +50,9 @@ pub enum SyncMessageType {
     TokenRefresh = 0x60,
     /// Token refresh acknowledgment (server → client, 0x61).
     TokenRefreshAck = 0x61,
+    /// Definition sync (server → client, 0x70).
+    /// Carries function/trigger/procedure definitions from Origin to Lite.
+    DefinitionSync = 0x70,
     PingPong = 0xFF,
 }
 
@@ -72,6 +75,7 @@ impl SyncMessageType {
             0x52 => Some(Self::Throttle),
             0x60 => Some(Self::TokenRefresh),
             0x61 => Some(Self::TokenRefreshAck),
+            0x70 => Some(Self::DefinitionSync),
             0xFF => Some(Self::PingPong),
             _ => None,
         }
@@ -396,6 +400,22 @@ pub struct TimeseriesAckMsg {
     pub lsn: u64,
 }
 
+/// Definition sync message (server → client, 0x70).
+///
+/// Carries function/trigger/procedure definitions from Origin to Lite.
+/// Sent when definitions are created, modified, or dropped on Origin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefinitionSyncMsg {
+    /// Type of definition: "function", "trigger", "procedure".
+    pub definition_type: String,
+    /// The definition name.
+    pub name: String,
+    /// Action: "put" (create/replace) or "delete" (drop).
+    pub action: String,
+    /// Serialized definition body (JSON). Empty for "delete" actions.
+    pub payload: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,7 +478,7 @@ mod tests {
     fn message_type_roundtrip() {
         for v in [
             0x01, 0x02, 0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x23, 0x30, 0x40, 0x41, 0x50, 0x52,
-            0x60, 0x61, 0xFF,
+            0x60, 0x61, 0x70, 0xFF,
         ] {
             let mt = SyncMessageType::from_u8(v).unwrap();
             assert_eq!(mt as u8, v);
