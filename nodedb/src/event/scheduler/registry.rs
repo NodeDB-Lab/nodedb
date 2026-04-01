@@ -38,6 +38,13 @@ impl ScheduleRegistry {
         map.get(&key).cloned()
     }
 
+    /// Update an existing schedule definition (ALTER SCHEDULE).
+    pub fn update(&self, def: ScheduleDef) {
+        let key = (def.tenant_id, def.name.clone());
+        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
+        map.insert(key, def);
+    }
+
     /// List all enabled schedules (all tenants). Used by the scheduler loop.
     pub fn list_all_enabled(&self) -> Vec<ScheduleDef> {
         let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());

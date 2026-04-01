@@ -56,6 +56,24 @@ impl CronExpr {
         let (minute, hour, day, month, weekday) = epoch_to_fields(epoch_secs);
         self.matches(minute, hour, day, month, weekday)
     }
+
+    /// Find the next fire time after `after_epoch_secs`.
+    ///
+    /// Scans forward minute-by-minute up to 366 days. Returns `None` if no
+    /// match found (should only happen for impossible cron expressions).
+    pub fn next_fire_after(&self, after_epoch_secs: u64) -> Option<u64> {
+        // Start at the next minute boundary.
+        let start = (after_epoch_secs / 60 + 1) * 60;
+        // Scan up to 366 days (527040 minutes).
+        let max_minutes = 366 * 24 * 60;
+        for i in 0..max_minutes {
+            let candidate = start + i * 60;
+            if self.matches_epoch(candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
 }
 
 /// Parse one cron field (e.g., "*/5", "1-3", "1,2,3", "*").
