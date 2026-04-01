@@ -7,8 +7,12 @@ use crate::keywords::SQL_KEYWORDS;
 /// Metacommands for completion.
 const METACOMMANDS: &[&str] = &[
     "\\d",
+    "\\df",
     "\\di",
+    "\\dpr",
+    "\\dtr",
     "\\du",
+    "\\functions",
     "\\nodes",
     "\\node",
     "\\cluster",
@@ -27,6 +31,8 @@ const METACOMMANDS: &[&str] = &[
     "\\g",
     "\\watch",
     "\\x",
+    "\\procedures",
+    "\\triggers",
     "\\?",
     "\\q",
     "\\quit",
@@ -37,6 +43,12 @@ pub struct Completor {
     collections: Vec<String>,
     /// Cached column names per collection: { "users" => ["id", "name", "age"] }
     columns: std::collections::HashMap<String, Vec<String>>,
+    /// Cached function names for CALL/DROP/ALTER completion.
+    functions: Vec<String>,
+    /// Cached trigger names.
+    triggers: Vec<String>,
+    /// Cached procedure names for CALL completion.
+    procedures: Vec<String>,
 }
 
 /// Active completion popup state.
@@ -91,6 +103,9 @@ impl Completor {
         Self {
             collections: Vec::new(),
             columns: std::collections::HashMap::new(),
+            functions: Vec::new(),
+            triggers: Vec::new(),
+            procedures: Vec::new(),
         }
     }
 
@@ -118,6 +133,11 @@ impl Completor {
                 }
             }
         }
+
+        // Fetch function, trigger, procedure names for completion.
+        self.functions = fetch_names(client, "SHOW FUNCTIONS").await;
+        self.triggers = fetch_names(client, "SHOW TRIGGERS").await;
+        self.procedures = fetch_names(client, "SHOW PROCEDURES").await;
     }
 
     /// Generate completions for the word at the cursor position.
@@ -175,10 +195,27 @@ impl Completor {
             for c in &self.collections {
                 if c.to_uppercase().starts_with(&upper) && !candidates.contains(c) {
                     if is_collection_context {
-                        // Insert at front for priority.
                         candidates.insert(0, c.clone());
                     } else {
                         candidates.push(c.clone());
+                    }
+                }
+            }
+
+            // Function/procedure names (prioritize after CALL, FUNCTION, PROCEDURE, TRIGGER).
+            let is_callable_context = matches!(
+                context.as_deref(),
+                Some("CALL") | Some("FUNCTION") | Some("PROCEDURE") | Some("TRIGGER")
+            );
+            if is_callable_context {
+                for name in self
+                    .functions
+                    .iter()
+                    .chain(self.procedures.iter())
+                    .chain(self.triggers.iter())
+                {
+                    if name.to_uppercase().starts_with(&upper) && !candidates.contains(name) {
+                        candidates.insert(0, name.clone());
                     }
                 }
             }
@@ -199,6 +236,18 @@ impl Completor {
             active: true,
         }
     }
+}
+
+/// Fetch the first column of each row from a SHOW query as a list of names.
+async fn fetch_names(client: &NativeClient, query: &str) -> Vec<String> {
+    client
+        .query(query)
+        .await
+        .ok()
+        .into_iter()
+        .flat_map(|r| r.rows)
+        .filter_map(|row| row.first()?.as_str().map(String::from))
+        .collect()
 }
 
 /// Get the word immediately before the current prefix (for context).

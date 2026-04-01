@@ -72,6 +72,17 @@ pub fn parse(input: &str) -> MetaAction {
         "\\health" => MetaAction::Sql("SHOW PEER HEALTH".into()),
         "\\rebalance" => MetaAction::Sql("REBALANCE".into()),
 
+        // Functions, triggers, procedures
+        "\\df" | "\\functions" => MetaAction::Sql("SHOW FUNCTIONS".into()),
+        "\\dtr" | "\\triggers" => {
+            if arg.is_empty() {
+                MetaAction::Sql("SHOW TRIGGERS".into())
+            } else {
+                MetaAction::Sql(format!("SHOW TRIGGERS ON {arg}"))
+            }
+        }
+        "\\dpr" | "\\procedures" => MetaAction::Sql("SHOW PROCEDURES".into()),
+
         // Server status
         "\\s" | "\\status" => MetaAction::Sql("SHOW SESSION".into()),
         "\\connections" => MetaAction::Sql("SHOW CONNECTIONS".into()),
@@ -121,6 +132,9 @@ pub fn help_text() -> &'static str {
   \d                 Show collections
   \di [collection]   Show indexes
   \du                Show users
+  \df                Show functions
+  \dtr [collection]  Show triggers
+  \dpr               Show procedures
   \s                 Show session info
 
 Cluster:
@@ -178,7 +192,21 @@ SQL Examples:
   CRDT MERGE INTO collection FROM 'src_id' TO 'dst_id';
 
   -- GraphRAG Fusion (vector + graph + RRF)
-  SEARCH docs USING FUSION(VECTOR_TOP_K 20, DEPTH 2, TOP 10);"#
+  SEARCH docs USING FUSION(VECTOR_TOP_K 20, DEPTH 2, TOP 10);
+
+  -- Functions
+  CREATE FUNCTION normalize(email TEXT) RETURNS TEXT AS SELECT LOWER(TRIM(email));
+  SELECT normalize(email) FROM users;
+  DROP FUNCTION normalize;
+
+  -- Triggers
+  CREATE TRIGGER audit AFTER INSERT ON orders FOR EACH ROW
+    BEGIN INSERT INTO audit_log (id) VALUES (NEW.id); END;
+  ALTER TRIGGER audit DISABLE;
+
+  -- Procedures
+  CREATE PROCEDURE cleanup(days INT) AS BEGIN DELETE FROM temp WHERE age > days; END;
+  CALL cleanup(30);"#
 }
 
 #[cfg(test)]
@@ -221,6 +249,38 @@ mod tests {
         match parse("\\format json") {
             MetaAction::SetFormat(f) => assert_eq!(f, "json"),
             _ => panic!("expected SetFormat"),
+        }
+    }
+
+    #[test]
+    fn parse_functions() {
+        match parse("\\df") {
+            MetaAction::Sql(s) => assert_eq!(s, "SHOW FUNCTIONS"),
+            _ => panic!("expected Sql"),
+        }
+    }
+
+    #[test]
+    fn parse_triggers() {
+        match parse("\\dtr") {
+            MetaAction::Sql(s) => assert_eq!(s, "SHOW TRIGGERS"),
+            _ => panic!("expected Sql"),
+        }
+    }
+
+    #[test]
+    fn parse_triggers_on_collection() {
+        match parse("\\dtr orders") {
+            MetaAction::Sql(s) => assert_eq!(s, "SHOW TRIGGERS ON orders"),
+            _ => panic!("expected Sql"),
+        }
+    }
+
+    #[test]
+    fn parse_procedures() {
+        match parse("\\dpr") {
+            MetaAction::Sql(s) => assert_eq!(s, "SHOW PROCEDURES"),
+            _ => panic!("expected Sql"),
         }
     }
 
