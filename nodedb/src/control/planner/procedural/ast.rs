@@ -1,6 +1,6 @@
 //! Procedural SQL abstract syntax tree.
 //!
-//! Shared across Tier 2 (functions), Tier 3 (triggers), and Tier 4 (procedures).
+//! Shared across functions, triggers, and procedures.
 //! The parser produces these types; the compiler consumes them.
 
 /// A complete procedural block: `BEGIN ... END`.
@@ -85,30 +85,29 @@ pub enum Statement {
     /// `RETURN expr;` — return a scalar value.
     Return { expr: SqlExpr },
 
-    /// `RETURN QUERY sql;` — return result set from a query (Tier 2 table-valued functions).
+    /// `RETURN QUERY sql;` — return result set from a query.
     ReturnQuery { query: String },
 
     /// `RAISE EXCEPTION 'message';` — abort with error.
     Raise { level: RaiseLevel, message: SqlExpr },
 
-    // ── Tier 3/4 only (rejected in function bodies) ──────────────────
     /// Raw DML statement (INSERT/UPDATE/DELETE). Rejected in function bodies
-    /// at parse time. Used by triggers (Tier 3) and procedures (Tier 4).
+    /// at parse time. Used by triggers and procedures.
     Dml { sql: String },
 
-    /// `COMMIT;` — commit current transaction (Tier 4 only).
+    /// `COMMIT;` — commit current transaction.
     Commit,
 
-    /// `ROLLBACK;` — rollback current transaction (Tier 4 only).
+    /// `ROLLBACK;` — rollback current transaction.
     Rollback,
 
-    /// `SAVEPOINT name;` — record a savepoint (Tier 4 only).
+    /// `SAVEPOINT name;` — record a savepoint.
     Savepoint { name: String },
 
-    /// `ROLLBACK TO [SAVEPOINT] name;` — rollback to a savepoint (Tier 4 only).
+    /// `ROLLBACK TO [SAVEPOINT] name;` — rollback to a savepoint.
     RollbackTo { name: String },
 
-    /// `RELEASE [SAVEPOINT] name;` — release a savepoint (Tier 4 only).
+    /// `RELEASE [SAVEPOINT] name;` — release a savepoint.
     ReleaseSavepoint { name: String },
 }
 

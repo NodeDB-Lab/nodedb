@@ -1,4 +1,4 @@
-//! PromQL built-in functions (Tier 1 — ArcadeDB parity).
+//! PromQL built-in functions.
 //!
 //! All functions operate on sorted sample vectors and return a scalar or
 //! modified sample vector. Pure computation — no I/O.

@@ -55,7 +55,6 @@ impl FunctionVolatility {
 /// - `Invoker` (default): body executes with the **caller's** credentials.
 ///   Subqueries are subject to the caller's GRANT/DENY and RLS policies.
 /// - `Definer`: body executes with the **function owner's** credentials.
-///   Ships with Tier 3 (triggers + advanced security).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FunctionSecurity {
     #[default]
@@ -65,7 +64,7 @@ pub enum FunctionSecurity {
 
 /// Serializable user-defined function record for redb storage.
 ///
-/// Expression UDFs only (Tier 1). The body is a single SQL expression
+/// Expression UDFs only. The body is a single SQL expression
 /// that gets inlined into the DataFusion logical plan. SECURITY INVOKER
 /// is enforced naturally because the inlined expression runs in the
 /// caller's query context with their permissions and RLS policies.
@@ -87,7 +86,7 @@ pub struct StoredFunction {
     #[serde(default)]
     pub compiled_body_sql: Option<String>,
     pub volatility: FunctionVolatility,
-    /// Security mode: INVOKER (default) or DEFINER (Tier 3).
+    /// Security mode: INVOKER (default) or DEFINER.
     #[serde(default)]
     pub security: FunctionSecurity,
     pub owner: String,
