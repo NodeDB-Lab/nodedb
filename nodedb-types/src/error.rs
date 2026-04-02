@@ -53,6 +53,13 @@ impl ErrorCode {
     pub const WRITE_CONFLICT: Self = Self(1001);
     pub const DEADLINE_EXCEEDED: Self = Self(1002);
     pub const PREVALIDATION_REJECTED: Self = Self(1003);
+    pub const APPEND_ONLY_VIOLATION: Self = Self(1010);
+    pub const BALANCE_VIOLATION: Self = Self(1011);
+    pub const PERIOD_LOCKED: Self = Self(1012);
+    pub const STATE_TRANSITION_VIOLATION: Self = Self(1013);
+    pub const TRANSITION_CHECK_VIOLATION: Self = Self(1014);
+    pub const RETENTION_VIOLATION: Self = Self(1015);
+    pub const LEGAL_HOLD_ACTIVE: Self = Self(1016);
 
     // Read path (1100–1199)
     pub const COLLECTION_NOT_FOUND: Self = Self(1100);
@@ -136,6 +143,27 @@ pub enum ErrorDetails {
     DeadlineExceeded,
     PrevalidationRejected {
         constraint: String,
+    },
+    AppendOnlyViolation {
+        collection: String,
+    },
+    BalanceViolation {
+        collection: String,
+    },
+    PeriodLocked {
+        collection: String,
+    },
+    StateTransitionViolation {
+        collection: String,
+    },
+    TransitionCheckViolation {
+        collection: String,
+    },
+    RetentionViolation {
+        collection: String,
+    },
+    LegalHoldActive {
+        collection: String,
     },
 
     // Read path
@@ -291,6 +319,13 @@ impl NodeDbError {
             self.details,
             ErrorDetails::BadRequest
                 | ErrorDetails::ConstraintViolation { .. }
+                | ErrorDetails::AppendOnlyViolation { .. }
+                | ErrorDetails::BalanceViolation { .. }
+                | ErrorDetails::PeriodLocked { .. }
+                | ErrorDetails::StateTransitionViolation { .. }
+                | ErrorDetails::TransitionCheckViolation { .. }
+                | ErrorDetails::RetentionViolation { .. }
+                | ErrorDetails::LegalHoldActive { .. }
                 | ErrorDetails::CollectionNotFound { .. }
                 | ErrorDetails::DocumentNotFound { .. }
                 | ErrorDetails::AuthorizationDenied { .. }
@@ -393,6 +428,84 @@ impl NodeDbError {
             code: ErrorCode::PREVALIDATION_REJECTED,
             message: format!("pre-validation rejected: {constraint} — {reason}"),
             details: ErrorDetails::PrevalidationRejected { constraint },
+            cause: None,
+        }
+    }
+
+    // ── Accounting enforcement ──
+
+    pub fn append_only_violation(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::APPEND_ONLY_VIOLATION,
+            message: format!("append-only violation on {collection}: {detail}"),
+            details: ErrorDetails::AppendOnlyViolation { collection },
+            cause: None,
+        }
+    }
+
+    pub fn balance_violation(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::BALANCE_VIOLATION,
+            message: format!("balance violation on {collection}: {detail}"),
+            details: ErrorDetails::BalanceViolation { collection },
+            cause: None,
+        }
+    }
+
+    pub fn period_locked(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::PERIOD_LOCKED,
+            message: format!("period locked on {collection}: {detail}"),
+            details: ErrorDetails::PeriodLocked { collection },
+            cause: None,
+        }
+    }
+
+    pub fn state_transition_violation(
+        collection: impl Into<String>,
+        detail: impl fmt::Display,
+    ) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::STATE_TRANSITION_VIOLATION,
+            message: format!("state transition violation on {collection}: {detail}"),
+            details: ErrorDetails::StateTransitionViolation { collection },
+            cause: None,
+        }
+    }
+
+    pub fn transition_check_violation(
+        collection: impl Into<String>,
+        detail: impl fmt::Display,
+    ) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::TRANSITION_CHECK_VIOLATION,
+            message: format!("transition check violation on {collection}: {detail}"),
+            details: ErrorDetails::TransitionCheckViolation { collection },
+            cause: None,
+        }
+    }
+
+    pub fn retention_violation(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::RETENTION_VIOLATION,
+            message: format!("retention violation on {collection}: {detail}"),
+            details: ErrorDetails::RetentionViolation { collection },
+            cause: None,
+        }
+    }
+
+    pub fn legal_hold_active(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::LEGAL_HOLD_ACTIVE,
+            message: format!("legal hold active on {collection}: {detail}"),
+            details: ErrorDetails::LegalHoldActive { collection },
             cause: None,
         }
     }

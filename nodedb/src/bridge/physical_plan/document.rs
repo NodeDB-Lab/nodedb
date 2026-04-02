@@ -19,6 +19,35 @@ pub enum StorageMode {
     Strict { schema: StrictSchema },
 }
 
+/// Accounting enforcement options propagated from catalog to Data Plane.
+///
+/// These flags are cached by the Data Plane in `CollectionConfig` and checked
+/// on every write operation (INSERT, UPDATE, DELETE).
+#[derive(Debug, Clone, Default)]
+pub struct AccountingOptions {
+    /// Reject UPDATE/DELETE operations.
+    pub append_only: bool,
+    /// Maintain SHA-256 hash chain on INSERT.
+    pub hash_chain: bool,
+    /// Balanced constraint definition (debit/credit sums must match per group_key).
+    pub balanced: Option<BalancedDef>,
+}
+
+/// Bridge-level balanced constraint definition (mirrors catalog BalancedConstraintDef).
+#[derive(Debug, Clone)]
+pub struct BalancedDef {
+    /// Column used to group entries (e.g. `journal_id`).
+    pub group_key_column: String,
+    /// Column that distinguishes debits from credits (e.g. `entry_type`).
+    pub entry_type_column: String,
+    /// Value in `entry_type_column` that marks a debit (e.g. `"DEBIT"`).
+    pub debit_value: String,
+    /// Value in `entry_type_column` that marks a credit (e.g. `"CREDIT"`).
+    pub credit_value: String,
+    /// Column containing the monetary amount (e.g. `amount`).
+    pub amount_column: String,
+}
+
 /// Document engine physical operations (schemaless + strict + DML).
 #[derive(Debug, Clone)]
 pub enum DocumentOp {
@@ -94,6 +123,8 @@ pub enum DocumentOp {
         crdt_enabled: bool,
         /// Storage encoding mode. Determines how documents are serialized.
         storage_mode: StorageMode,
+        /// Accounting enforcement options propagated from catalog.
+        accounting: AccountingOptions,
     },
 
     /// Lookup documents by secondary index value.

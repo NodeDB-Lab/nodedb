@@ -94,6 +94,26 @@ impl CoreLoop {
             }
         }
 
+        // Pre-commit: BALANCED constraint check across all inserts in this transaction.
+        // Collect new inserts (undo entries where old_value is None) and check balance.
+        if let Err(error_code) = self.check_balanced_constraints(tid, &undo_log) {
+            warn!(
+                core = self.core_id,
+                "BALANCED constraint violated, rolling back {} operations",
+                undo_log.len()
+            );
+            self.rollback_undo_log(tid, undo_log);
+            return Response {
+                request_id: task.request_id(),
+                status: Status::Error,
+                attempt: 1,
+                partial: false,
+                payload: crate::bridge::envelope::Payload::empty(),
+                watermark_lsn: self.watermark,
+                error_code: Some(error_code),
+            };
+        }
+
         // All sub-plans succeeded. Apply buffered CRDT deltas.
         for (delta, peer_id) in crdt_deltas {
             let tenant_id = crate::types::TenantId::new(tid);
@@ -196,6 +216,16 @@ impl CoreLoop {
                 // Save old value for rollback.
                 let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
 
+                // Accounting enforcement: append-only check.
+                let config_key = format!("{tid}:{collection}");
+                if let Some(config) = self.doc_configs.get(&config_key) {
+                    super::super::accounting::append_only::check_point_put(
+                        collection,
+                        &config.accounting,
+                        &old_value,
+                    )?;
+                }
+
                 let stored = super::super::doc_format::json_to_msgpack(value);
                 match self.sparse.put(tid, collection, document_id, &stored) {
                     Ok(()) => {
@@ -234,6 +264,15 @@ impl CoreLoop {
                 collection,
                 document_id,
             }) => {
+                // Accounting enforcement: append-only check.
+                let config_key = format!("{tid}:{collection}");
+                if let Some(config) = self.doc_configs.get(&config_key) {
+                    super::super::accounting::append_only::check_point_delete(
+                        collection,
+                        &config.accounting,
+                    )?;
+                }
+
                 // Save old value for rollback.
                 let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
                 match self.sparse.delete(tid, collection, document_id) {
@@ -367,6 +406,65 @@ impl CoreLoop {
                 Ok(resp)
             }
         }
+    }
+
+    /// Check BALANCED constraints across all new inserts in this transaction.
+    ///
+    /// For each collection with a BALANCED constraint, collects all new inserts
+    /// (undo entries where `old_value == None`), extracts the balanced fields,
+    /// and validates that debits == credits per group_key.
+    fn check_balanced_constraints(
+        &self,
+        tid: u32,
+        undo_log: &[UndoEntry],
+    ) -> Result<(), ErrorCode> {
+        use super::super::accounting::balanced;
+        use std::collections::HashMap;
+
+        // Group new inserts by collection: (collection_name → [(doc_id, stored_bytes)]).
+        let mut inserts_by_collection: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+        for entry in undo_log {
+            if let UndoEntry::PutDocument {
+                collection,
+                document_id,
+                old_value: None, // Only new inserts, not updates.
+            } = entry
+            {
+                // Read the current stored value to extract balanced fields.
+                if let Ok(Some(stored)) = self.sparse.get(tid, collection, document_id) {
+                    inserts_by_collection
+                        .entry(collection.clone())
+                        .or_default()
+                        .push(stored);
+                }
+            }
+        }
+
+        // For each collection, check if it has a BALANCED constraint.
+        for (collection, stored_docs) in &inserts_by_collection {
+            let config_key = format!("{tid}:{collection}");
+            let Some(config) = self.doc_configs.get(&config_key) else {
+                continue;
+            };
+            let Some(ref balanced_def) = config.accounting.balanced else {
+                continue;
+            };
+
+            // Extract InsertEntry structs from the stored documents.
+            let mut entries = Vec::with_capacity(stored_docs.len());
+            for stored_bytes in stored_docs {
+                // Decode MessagePack/JSON to serde_json::Value for field extraction.
+                if let Some(json) = super::super::doc_format::decode_document(stored_bytes)
+                    && let Some(entry) = balanced::extract_entry(balanced_def, &json)
+                {
+                    entries.push(entry);
+                }
+            }
+
+            balanced::check_balanced(collection, balanced_def, &entries)?;
+        }
+
+        Ok(())
     }
 
     /// Roll back completed writes in reverse order.

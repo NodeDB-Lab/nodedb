@@ -269,6 +269,36 @@ pub struct StoredCollection {
     #[serde(default)]
     pub timeseries_config: Option<String>,
     pub is_active: bool,
+    /// Append-only: UPDATE/DELETE rejected. One-way flag (cannot be reversed without superuser).
+    #[serde(default)]
+    pub append_only: bool,
+    /// Hash chain: each INSERT computes SHA-256 over (previous_hash, row_id, row_contents).
+    /// Hidden `_chain_hash` column maintained. Requires `append_only = true`.
+    #[serde(default)]
+    pub hash_chain: bool,
+    /// Balanced constraint: at commit time, debit/credit sums must match per group_key.
+    #[serde(default)]
+    pub balanced: Option<BalancedConstraintDef>,
+    /// Last hash in the chain (updated atomically with each INSERT). `None` = empty chain.
+    #[serde(default)]
+    pub last_chain_hash: Option<String>,
+}
+
+/// Double-entry balance constraint: within a single transaction, for each
+/// distinct `group_key_column` value, `SUM(amount WHERE entry_type = debit_value)`
+/// must equal `SUM(amount WHERE entry_type = credit_value)`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct BalancedConstraintDef {
+    /// Column that groups entries into a logical journal (e.g. `journal_id`).
+    pub group_key_column: String,
+    /// Value of entry_type that indicates a debit (e.g. `"DEBIT"`).
+    pub debit_value: String,
+    /// Value of entry_type that indicates a credit (e.g. `"CREDIT"`).
+    pub credit_value: String,
+    /// Column containing the monetary amount.
+    pub amount_column: String,
+    /// Column containing the entry type (`"DEBIT"` or `"CREDIT"`).
+    pub entry_type_column: String,
 }
 
 impl StoredCollection {
@@ -289,6 +319,10 @@ impl StoredCollection {
             collection_type: nodedb_types::CollectionType::document(),
             timeseries_config: None,
             is_active: true,
+            append_only: false,
+            hash_chain: false,
+            balanced: None,
+            last_chain_hash: None,
         }
     }
 

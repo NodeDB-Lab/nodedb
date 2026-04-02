@@ -34,7 +34,7 @@ pub use scopes::{StoredScope, StoredScopeGrant};
 pub use sequence_types::{SequenceState, StoredSequence};
 pub use trigger_types::StoredTrigger;
 pub use types::{
-    StoredApiKey, StoredAuditEntry, StoredAuthUser, StoredBlacklistEntry, StoredCollection,
-    StoredMaterializedView, StoredOwner, StoredPermission, StoredRole, StoredTenant, StoredUser,
-    SystemCatalog, catalog_err, owner_key,
+    BalancedConstraintDef, StoredApiKey, StoredAuditEntry, StoredAuthUser, StoredBlacklistEntry,
+    StoredCollection, StoredMaterializedView, StoredOwner, StoredPermission, StoredRole,
+    StoredTenant, StoredUser, SystemCatalog, catalog_err, owner_key,
 };

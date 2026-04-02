@@ -198,6 +198,10 @@ pub enum ErrorCode {
     RejectedDanglingEdge { missing_node: String },
     /// Duplicate write detected via idempotency key.
     DuplicateWrite,
+    /// Append-only collection: UPDATE/DELETE not allowed.
+    AppendOnlyViolation { collection: String },
+    /// BALANCED constraint: debit/credit sums don't match.
+    BalanceViolation { collection: String, detail: String },
     /// Internal error (io_uring failure, corruption, etc.)
     Internal { detail: String },
 }
@@ -219,6 +223,12 @@ impl From<crate::Error> for ErrorCode {
             crate::Error::ConflictRetry { .. } => Self::ConflictRetry,
             crate::Error::FanOutExceeded { .. } => Self::FanOutExceeded,
             crate::Error::MemoryExhausted { .. } => Self::ResourcesExhausted,
+            crate::Error::AppendOnlyViolation { collection, .. } => {
+                Self::AppendOnlyViolation { collection }
+            }
+            crate::Error::BalanceViolation {
+                collection, detail, ..
+            } => Self::BalanceViolation { collection, detail },
             other => Self::Internal {
                 detail: other.to_string(),
             },

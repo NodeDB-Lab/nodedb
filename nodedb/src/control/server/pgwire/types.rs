@@ -80,6 +80,16 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             "23505",
             "duplicate write detected via idempotency key".into(),
         ),
+        ErrorCode::AppendOnlyViolation { collection } => (
+            "ERROR",
+            "23601",
+            format!("append-only violation: UPDATE/DELETE not allowed on {collection}"),
+        ),
+        ErrorCode::BalanceViolation { collection, detail } => (
+            "ERROR",
+            "23602",
+            format!("balance violation on {collection}: {detail}"),
+        ),
         ErrorCode::Internal { detail } => ("ERROR", "XX000", detail.clone()),
     }
 }

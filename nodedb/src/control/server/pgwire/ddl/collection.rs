@@ -128,6 +128,14 @@ pub fn create_collection(
         _ => None,
     };
 
+    // Parse accounting options: WITH APPEND_ONLY, WITH HASH_CHAIN, WITH BALANCED ON (...).
+    let append_only = upper.contains("APPEND_ONLY");
+    let hash_chain = upper.contains("HASH_CHAIN");
+    if hash_chain && !append_only {
+        return Err(sqlstate_error("42601", "HASH_CHAIN requires APPEND_ONLY"));
+    }
+    let balanced = parse_balanced_clause(&upper).map_err(|e| sqlstate_error("42601", &e))?;
+
     let coll = StoredCollection {
         tenant_id: tenant_id.as_u32(),
         name: name.to_string(),
@@ -139,6 +147,10 @@ pub fn create_collection(
         collection_type,
         timeseries_config: schema_json,
         is_active: true,
+        append_only,
+        hash_chain,
+        balanced,
+        last_chain_hash: None,
     };
 
     // Persist to catalog.
@@ -258,6 +270,22 @@ pub async fn dispatch_register_if_needed(
     let _ = sql; // Reserved for future CRDT detection from SQL.
     let crdt_enabled = false;
 
+    // Build accounting enforcement options from the stored collection metadata.
+    let accounting = crate::bridge::physical_plan::AccountingOptions {
+        append_only: coll.append_only,
+        hash_chain: coll.hash_chain,
+        balanced: coll
+            .balanced
+            .as_ref()
+            .map(|b| crate::bridge::physical_plan::BalancedDef {
+                group_key_column: b.group_key_column.clone(),
+                entry_type_column: b.entry_type_column.clone(),
+                debit_value: b.debit_value.clone(),
+                credit_value: b.credit_value.clone(),
+                amount_column: b.amount_column.clone(),
+            }),
+    };
+
     let vshard = crate::types::VShardId::from_collection(&name);
     let plan = crate::bridge::envelope::PhysicalPlan::Document(
         crate::bridge::physical_plan::DocumentOp::Register {
@@ -265,6 +293,7 @@ pub async fn dispatch_register_if_needed(
             index_paths,
             crdt_enabled,
             storage_mode,
+            accounting,
         },
     );
 
@@ -889,6 +918,76 @@ pub fn alter_table_add_column(
 /// Reconstruct uppercase SQL from split parts for keyword detection.
 fn sql_upper_from_parts(parts: &[&str]) -> String {
     parts.join(" ").to_uppercase()
+}
+
+/// Parse `BALANCED ON (group_key = col, debit = 'DEBIT', credit = 'CREDIT', amount = col)`
+/// from the uppercase SQL string. Returns `None` if not present.
+fn parse_balanced_clause(
+    upper: &str,
+) -> Result<Option<crate::control::security::catalog::BalancedConstraintDef>, String> {
+    let Some(pos) = upper.find("BALANCED ON") else {
+        return Ok(None);
+    };
+    let after = &upper[pos + "BALANCED ON".len()..];
+    let after = after.trim_start();
+    let Some(paren_start) = after.find('(') else {
+        return Err("BALANCED ON requires parenthesized options: (group_key = col, ...)".into());
+    };
+    let Some(paren_end) = after.find(')') else {
+        return Err("BALANCED ON: missing closing parenthesis".into());
+    };
+    let inner = &after[paren_start + 1..paren_end];
+
+    let mut group_key = None;
+    let mut entry_type = None;
+    let mut debit = None;
+    let mut credit = None;
+    let mut amount = None;
+
+    for part in inner.split(',') {
+        let part = part.trim();
+        if let Some((key, value)) = part.split_once('=') {
+            let key = key.trim().to_uppercase();
+            let value = value.trim().trim_matches('\'').trim_matches('"');
+            match key.as_str() {
+                "GROUP_KEY" => group_key = Some(value.to_lowercase()),
+                "ENTRY_TYPE" => entry_type = Some(value.to_lowercase()),
+                "DEBIT" => debit = Some(value.to_string()),
+                "CREDIT" => credit = Some(value.to_string()),
+                "AMOUNT" => amount = Some(value.to_lowercase()),
+                other => return Err(format!("BALANCED ON: unknown option '{other}'")),
+            }
+        }
+    }
+
+    let group_key = group_key.ok_or("BALANCED ON: missing group_key")?;
+    let debit = debit.ok_or("BALANCED ON: missing debit")?;
+    let credit = credit.ok_or("BALANCED ON: missing credit")?;
+    let amount = amount.ok_or("BALANCED ON: missing amount")?;
+    let entry_type = entry_type.unwrap_or_else(|| "entry_type".to_string());
+
+    // Validate column names are safe identifiers (alphanumeric + underscore).
+    for (label, col) in [
+        ("group_key", group_key.as_str()),
+        ("entry_type", entry_type.as_str()),
+        ("amount", amount.as_str()),
+    ] {
+        if col.is_empty() || !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!(
+                "BALANCED ON: {label} must be a valid column name, got '{col}'"
+            ));
+        }
+    }
+
+    Ok(Some(
+        crate::control::security::catalog::BalancedConstraintDef {
+            group_key_column: group_key,
+            entry_type_column: entry_type,
+            debit_value: debit,
+            credit_value: credit,
+            amount_column: amount,
+        },
+    ))
 }
 
 /// Extract a value from a WITH clause: `key = 'value'`.

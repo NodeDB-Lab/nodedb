@@ -265,6 +265,10 @@ mod tests {
             collection_type: nodedb_types::CollectionType::document(),
             timeseries_config: None,
             is_active: true,
+            append_only: false,
+            hash_chain: false,
+            balanced: None,
+            last_chain_hash: None,
         };
         let schema = collection_to_arrow_schema(&coll);
         assert_eq!(schema.fields().len(), 2);
@@ -290,6 +294,10 @@ mod tests {
                 ("active".into(), "BOOL".into()),
             ],
             is_active: true,
+            append_only: false,
+            hash_chain: false,
+            balanced: None,
+            last_chain_hash: None,
         };
         let schema = collection_to_arrow_schema(&coll);
         assert_eq!(schema.fields().len(), 5);

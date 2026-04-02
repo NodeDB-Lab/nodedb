@@ -326,6 +326,7 @@ impl CoreLoop {
     /// Stores the `CollectionConfig` in `self.doc_configs` so that subsequent
     /// `PointPut` and `DocumentBatchInsert` operations extract and write secondary
     /// index entries automatically.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_register_document_collection(
         &mut self,
         task: &ExecutionTask,
@@ -334,6 +335,7 @@ impl CoreLoop {
         index_paths: &[String],
         crdt_enabled: bool,
         storage_mode: &crate::bridge::physical_plan::StorageMode,
+        accounting: &crate::bridge::physical_plan::AccountingOptions,
     ) -> Response {
         let mode_label = match storage_mode {
             crate::bridge::physical_plan::StorageMode::Schemaless => "schemaless",
@@ -345,12 +347,16 @@ impl CoreLoop {
             index_count = index_paths.len(),
             crdt_enabled,
             storage_mode = mode_label,
+            append_only = accounting.append_only,
+            hash_chain = accounting.hash_chain,
+            balanced = accounting.balanced.is_some(),
             "register document collection"
         );
 
         let mut config = crate::engine::document::store::CollectionConfig::new(collection);
         config.crdt_enabled = crdt_enabled;
         config.storage_mode = storage_mode.clone();
+        config.accounting = accounting.clone();
         for path in index_paths {
             config = config.with_index(path);
         }

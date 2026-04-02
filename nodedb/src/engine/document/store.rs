@@ -30,6 +30,8 @@ pub struct CollectionConfig {
     pub crdt_enabled: bool,
     /// Storage encoding mode (schemaless MessagePack or strict Binary Tuple).
     pub storage_mode: crate::bridge::physical_plan::StorageMode,
+    /// Accounting enforcement options.
+    pub accounting: crate::bridge::physical_plan::AccountingOptions,
 }
 
 impl CollectionConfig {
@@ -39,6 +41,7 @@ impl CollectionConfig {
             index_paths: Vec::new(),
             crdt_enabled: false,
             storage_mode: crate::bridge::physical_plan::StorageMode::Schemaless,
+            accounting: crate::bridge::physical_plan::AccountingOptions::default(),
         }
     }
 

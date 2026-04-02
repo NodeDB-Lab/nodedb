@@ -69,6 +69,10 @@ pub fn create_timeseries(
         collection_type: nodedb_types::CollectionType::timeseries("timestamp", "1h"),
         timeseries_config: config_json,
         is_active: true,
+        append_only: false,
+        hash_chain: false,
+        balanced: None,
+        last_chain_hash: None,
     };
 
     if let Some(catalog) = state.credentials.catalog() {

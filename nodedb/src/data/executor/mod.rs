@@ -1,3 +1,4 @@
+pub mod accounting;
 pub mod core_loop;
 mod dispatch;
 pub(crate) mod doc_format;

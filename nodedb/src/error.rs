@@ -37,6 +37,12 @@ pub enum Error {
     #[error("CRDT delta pre-validation rejected: {constraint} — {reason}")]
     RejectedPrevalidation { constraint: String, reason: String },
 
+    #[error("append-only violation on {collection}: {detail}")]
+    AppendOnlyViolation { collection: String, detail: String },
+
+    #[error("balance violation on {collection}: {detail}")]
+    BalanceViolation { collection: String, detail: String },
+
     // --- Read path errors ---
     #[error("collection {collection} not found for tenant {tenant_id}")]
     CollectionNotFound {
@@ -199,6 +205,12 @@ impl From<Error> for NodeDbError {
             Error::RejectedPrevalidation { constraint, reason } => {
                 NodeDbError::prevalidation_rejected(constraint, reason)
             }
+            Error::AppendOnlyViolation {
+                collection, detail, ..
+            } => NodeDbError::append_only_violation(collection, detail),
+            Error::BalanceViolation {
+                collection, detail, ..
+            } => NodeDbError::balance_violation(collection, detail),
 
             // Read path
             Error::CollectionNotFound { collection, .. } => {
