@@ -211,33 +211,13 @@ impl SegmentedWal {
             .collect())
     }
 
-    /// Paginated replay: reads at most `max_records` from `from_lsn`.
-    ///
-    /// Uses sequential I/O (not mmap) so it can safely read the active
-    /// segment even when written via O_DIRECT. Returns `(records, has_more)`
-    /// where `has_more` is `true` if the limit was hit.
+    /// Paginated replay (delegates to standalone `replay_from_limit_dir`).
     pub fn replay_from_limit(
         &self,
         from_lsn: u64,
         max_records: usize,
     ) -> Result<(Vec<WalRecord>, bool)> {
-        let segments = discover_segments(&self.wal_dir)?;
-        let mut records = Vec::with_capacity(max_records.min(4096));
-
-        for seg in &segments {
-            let reader = crate::reader::WalReader::open(&seg.path)?;
-            for record_result in reader.records() {
-                let record = record_result?;
-                if record.header.lsn >= from_lsn {
-                    records.push(record);
-                    if records.len() >= max_records {
-                        return Ok((records, true));
-                    }
-                }
-            }
-        }
-
-        Ok((records, false))
+        replay_from_limit_dir(&self.wal_dir, from_lsn, max_records)
     }
 
     /// List all segment metadata (for monitoring / operational tooling).
@@ -302,6 +282,37 @@ pub fn replay_all_segments(wal_dir: &Path) -> Result<Vec<WalRecord>> {
     }
 
     Ok(all_records)
+}
+
+/// Paginated replay from a WAL directory: reads at most `max_records` from `from_lsn`.
+///
+/// Uses sequential I/O (not mmap) and does NOT require the WAL mutex — safe
+/// to call concurrently with writes. Sealed segments are immutable; the active
+/// segment is read via buffered I/O which sees data after the writer's fsync.
+///
+/// Returns `(records, has_more)` where `has_more` is `true` if the limit was hit.
+pub fn replay_from_limit_dir(
+    wal_dir: &Path,
+    from_lsn: u64,
+    max_records: usize,
+) -> Result<(Vec<WalRecord>, bool)> {
+    let segments = discover_segments(wal_dir)?;
+    let mut records = Vec::with_capacity(max_records.min(4096));
+
+    for seg in &segments {
+        let reader = crate::reader::WalReader::open(&seg.path)?;
+        for record_result in reader.records() {
+            let record = record_result?;
+            if record.header.lsn >= from_lsn {
+                records.push(record);
+                if records.len() >= max_records {
+                    return Ok((records, true));
+                }
+            }
+        }
+    }
+
+    Ok((records, false))
 }
 
 #[cfg(test)]

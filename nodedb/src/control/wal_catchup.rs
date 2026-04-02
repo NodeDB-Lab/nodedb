@@ -50,9 +50,10 @@ pub fn spawn_wal_catchup_task(
                 _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {
                     let result = run_catchup_cycle(&shared).await;
                     interval_ms = match result {
-                        CatchupResult::HasMore => 100,    // rapid drain
-                        CatchupResult::Dispatched => 250, // active, normal pace
-                        CatchupResult::Idle => 2000,      // nothing to do
+                        CatchupResult::HasMore => 100,      // rapid drain
+                        CatchupResult::Dispatched => 250,   // active, normal pace
+                        CatchupResult::Backpressured => 200, // retry soon
+                        CatchupResult::Idle => 2000,        // nothing to do
                     };
                 }
                 _ = shutdown.changed() => {
@@ -70,6 +71,8 @@ enum CatchupResult {
     HasMore,
     /// Some records dispatched, no more pending.
     Dispatched,
+    /// SPSC bridge is busy — retry soon without reading WAL.
+    Backpressured,
     /// Nothing to dispatch.
     Idle,
 }
@@ -81,7 +84,7 @@ enum CatchupResult {
 async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
     // Backpressure gate: don't compete with live ingest for SPSC slots.
     if shared.max_spsc_utilization() > 50 {
-        return CatchupResult::Idle;
+        return CatchupResult::Backpressured;
     }
 
     let catchup_lsn = shared.wal_catchup_lsn.load(Ordering::Acquire);

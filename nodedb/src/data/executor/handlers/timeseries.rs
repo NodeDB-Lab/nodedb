@@ -1116,10 +1116,14 @@ impl CoreLoop {
             crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter::new(&segment_dir);
         let partition_name = format!("ts-{}_{}", drain.min_ts, drain.max_ts);
 
-        // Pass the current WAL watermark LSN so the partition records which
-        // WAL records have been flushed. This enables WAL GC: the checkpoint
-        // coordinator can safely truncate segments whose max LSN ≤ this value.
-        let flush_wal_lsn = self.watermark.as_u64();
+        // Use the max ingested WAL LSN for this collection so the partition
+        // records which WAL records have been flushed. This enables both
+        // WAL GC and LSN-based dedup during startup replay and catch-up.
+        let flush_wal_lsn = self
+            .ts_max_ingested_lsn
+            .get(collection)
+            .copied()
+            .unwrap_or(0);
         match writer.write_partition(&partition_name, &drain, 0, flush_wal_lsn) {
             Ok(meta) => {
                 tracing::info!(

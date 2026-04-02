@@ -397,16 +397,15 @@ impl WalManager {
 
     /// Paginated sequential replay: reads at most `max_records` from `from_lsn`.
     ///
-    /// Uses sequential I/O (not mmap) while holding the WAL mutex, so it can
-    /// safely read the active segment even when written via O_DIRECT. This is
-    /// the correct method for the WAL catch-up task.
+    /// Uses sequential I/O (not mmap) without holding the WAL mutex — does
+    /// not block concurrent WAL appends. Safe because sealed segments are
+    /// immutable and the active segment is read via buffered I/O.
     pub fn replay_from_limit(
         &self,
         from_lsn: Lsn,
         max_records: usize,
     ) -> crate::Result<(Vec<WalRecord>, bool)> {
-        let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
-        wal.replay_from_limit(from_lsn.as_u64(), max_records)
+        nodedb_wal::segmented::replay_from_limit_dir(self.wal_dir(), from_lsn.as_u64(), max_records)
             .map_err(crate::Error::Wal)
     }
 
