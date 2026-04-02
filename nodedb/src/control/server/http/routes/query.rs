@@ -50,6 +50,16 @@ pub async fn query(
 
     // Extract per-query ON DENY override + plan SQL with RLS injection.
     let tenant_id = identity.tenant_id;
+
+    // Quota enforcement — reject before any planning or dispatch.
+    state
+        .shared
+        .check_tenant_quota(tenant_id)
+        .map_err(|e| ApiError::RateLimited {
+            message: e.to_string(),
+            retry_after_secs: 1,
+        })?;
+
     let mut auth_ctx = crate::control::server::session_auth::build_auth_context(&identity);
     let clean_sql =
         crate::control::server::session_auth::extract_and_apply_on_deny(sql, &mut auth_ctx);
@@ -73,66 +83,75 @@ pub async fn query(
         })));
     }
 
+    // Track active request for quota accounting.
+    state.shared.tenant_request_start(tenant_id);
+
     // Execute each task via the SPSC bridge.
     let mut result_rows = Vec::new();
 
-    for task in tasks {
-        // Permission check.
-        let required = required_permission(&task.plan);
-        if !identity.is_superuser
-            && !identity
-                .roles
-                .iter()
-                .any(|r| role_grants_permission(r, required))
-        {
-            return Err(ApiError::Forbidden(format!(
-                "insufficient permissions for this operation (requires {required:?})"
-            )));
-        }
+    let result = async {
+        for task in tasks {
+            // Permission check.
+            let required = required_permission(&task.plan);
+            if !identity.is_superuser
+                && !identity
+                    .roles
+                    .iter()
+                    .any(|r| role_grants_permission(r, required))
+            {
+                return Err(ApiError::Forbidden(format!(
+                    "insufficient permissions for this operation (requires {required:?})"
+                )));
+            }
 
-        // Tenant isolation check.
-        if task.tenant_id != tenant_id {
-            return Err(ApiError::Forbidden("tenant isolation violation".into()));
-        }
+            // Tenant isolation check.
+            if task.tenant_id != tenant_id {
+                return Err(ApiError::Forbidden("tenant isolation violation".into()));
+            }
 
-        // WAL append for write operations.
-        wal_append_if_write(&state, &task)?;
+            // WAL append for write operations.
+            wal_append_if_write(&state, &task)?;
 
-        // Dispatch to Data Plane.
-        let response =
-            dispatch_to_data_plane(&state, task.tenant_id, task.vshard_id, task.plan, trace_id)
-                .await
-                .map_err(|e| ApiError::Internal(format!("dispatch failed: {e}")))?;
+            // Dispatch to Data Plane.
+            let response =
+                dispatch_to_data_plane(&state, task.tenant_id, task.vshard_id, task.plan, trace_id)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("dispatch failed: {e}")))?;
 
-        // Check response status.
-        if response.status != Status::Ok {
-            let detail = response
-                .error_code
-                .as_ref()
-                .map(|c| format!("{c:?}"))
-                .unwrap_or_else(|| "unknown error".into());
-            return Err(ApiError::Internal(detail));
-        }
+            // Check response status.
+            if response.status != Status::Ok {
+                let detail = response
+                    .error_code
+                    .as_ref()
+                    .map(|c| format!("{c:?}"))
+                    .unwrap_or_else(|| "unknown error".into());
+                return Err(ApiError::Internal(detail));
+            }
 
-        // Decode payload to JSON.
-        let payload = response.payload.as_ref();
-        if !payload.is_empty() {
-            match decode_payload_to_json(payload) {
-                Ok(value) => result_rows.push(value),
-                Err(_) => {
-                    // Binary payload — base64 encode.
-                    use base64::Engine;
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
-                    result_rows.push(serde_json::json!({ "data": encoded }));
+            // Decode payload to JSON.
+            let payload = response.payload.as_ref();
+            if !payload.is_empty() {
+                match decode_payload_to_json(payload) {
+                    Ok(value) => result_rows.push(value),
+                    Err(_) => {
+                        // Binary payload — base64 encode.
+                        use base64::Engine;
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+                        result_rows.push(serde_json::json!({ "data": encoded }));
+                    }
                 }
             }
         }
-    }
 
-    Ok(axum::Json(serde_json::json!({
-        "status": "ok",
-        "rows": result_rows,
-    })))
+        Ok(axum::Json(serde_json::json!({
+            "status": "ok",
+            "rows": result_rows,
+        })))
+    }
+    .await;
+
+    state.shared.tenant_request_end(tenant_id);
+    result
 }
 
 /// Append write operations to WAL before dispatch (single-node durability).
@@ -238,6 +257,20 @@ pub async fn query_ndjson(
     }
 
     let tenant_id = identity.tenant_id;
+
+    // Quota enforcement — reject before any planning or dispatch.
+    if let Err(e) = state.shared.check_tenant_quota(tenant_id) {
+        let body = serde_json::json!({ "error": e.to_string() });
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", "1")
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response()
+            });
+    }
+
     let query_ctx = &state.query_ctx;
 
     let auth_ctx = crate::control::server::session_auth::build_auth_context(&identity);
@@ -252,6 +285,8 @@ pub async fn query_ndjson(
         Ok(t) => t,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
+
+    state.shared.tenant_request_start(tenant_id);
 
     let mut ndjson = String::new();
     for task in tasks {
@@ -287,6 +322,8 @@ pub async fn query_ndjson(
             }
         }
     }
+
+    state.shared.tenant_request_end(tenant_id);
 
     Response::builder()
         .header("Content-Type", "application/x-ndjson")

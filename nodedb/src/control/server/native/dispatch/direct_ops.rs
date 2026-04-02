@@ -24,6 +24,11 @@ pub(crate) async fn handle_direct_op(
     let vshard_id = ctx.vshard_for_key(vshard_key);
     let tenant_id = ctx.tenant_id();
 
+    // Quota enforcement — reject before planning or dispatch.
+    if let Err(e) = ctx.state.check_tenant_quota(tenant_id) {
+        return error_to_native(seq, &e);
+    }
+
     let mut plan = match super::plan_builder::build_plan(ctx, op, fields, &collection) {
         Ok(p) => p,
         Err(e) => return NativeResponse::error(seq, "42601", e.to_string()),
@@ -45,10 +50,17 @@ pub(crate) async fn handle_direct_op(
         return error_to_native(seq, &e);
     }
 
-    match dispatch_utils::dispatch_to_data_plane(ctx.state, tenant_id, vshard_id, plan, 0).await {
+    ctx.state.tenant_request_start(tenant_id);
+    let result = match dispatch_utils::dispatch_to_data_plane(
+        ctx.state, tenant_id, vshard_id, plan, 0,
+    )
+    .await
+    {
         Ok(resp) => data_plane_response_to_native(seq, &resp),
         Err(e) => error_to_native(seq, &e),
-    }
+    };
+    ctx.state.tenant_request_end(tenant_id);
+    result
 }
 
 fn data_plane_response_to_native(seq: u64, resp: &Response) -> NativeResponse {

@@ -312,7 +312,12 @@ async fn execute_sql(
     sql: &str,
     trace_id: u64,
 ) -> crate::Result<serde_json::Value> {
+    // Quota enforcement — reject before planning or dispatch.
+    shared.check_tenant_quota(tenant_id)?;
+
     let tasks = query_ctx.plan_sql(sql, tenant_id).await?;
+
+    shared.tenant_request_start(tenant_id);
 
     let mut results = Vec::new();
     for task in tasks {
@@ -323,16 +328,27 @@ async fn execute_sql(
             task.plan,
             trace_id,
         )
-        .await?;
+        .await;
 
-        if !resp.payload.is_empty() {
-            let json = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-            match serde_json::from_str::<serde_json::Value>(&json) {
-                Ok(v) => results.push(v),
-                Err(_) => results.push(serde_json::Value::String(json)),
+        match resp {
+            Ok(r) => {
+                if !r.payload.is_empty() {
+                    let json =
+                        crate::data::executor::response_codec::decode_payload_to_json(&r.payload);
+                    match serde_json::from_str::<serde_json::Value>(&json) {
+                        Ok(v) => results.push(v),
+                        Err(_) => results.push(serde_json::Value::String(json)),
+                    }
+                }
+            }
+            Err(e) => {
+                shared.tenant_request_end(tenant_id);
+                return Err(e);
             }
         }
     }
+
+    shared.tenant_request_end(tenant_id);
 
     match results.len() {
         0 => Ok(serde_json::Value::Null),

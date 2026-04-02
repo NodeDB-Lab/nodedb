@@ -275,6 +275,21 @@ async fn flush_ilp_batch(
     tenant_id: TenantId,
     batch: &str,
 ) -> crate::Result<u64> {
+    // Quota enforcement — reject before WAL append or dispatch.
+    state.check_tenant_quota(tenant_id)?;
+    state.tenant_request_start(tenant_id);
+
+    let result = flush_ilp_batch_inner(state, tenant_id, batch).await;
+    state.tenant_request_end(tenant_id);
+    result
+}
+
+/// Inner dispatch logic for ILP batch (separated for clean quota bookkeeping).
+async fn flush_ilp_batch_inner(
+    state: &SharedState,
+    tenant_id: TenantId,
+    batch: &str,
+) -> crate::Result<u64> {
     // Fast path: extract collection from first line.
     let collection = batch
         .lines()

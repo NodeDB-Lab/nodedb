@@ -26,10 +26,18 @@ pub(super) async fn handle_shape_subscribe_async(
     let msg: super::shape::handler::ShapeSubscribeMsg = frame.decode_body()?;
     let tenant_id = session.tenant_id.map(|t| t.as_u32()).unwrap_or(0);
 
+    // Quota enforcement — reject before dispatch.
+    let tid = TenantId::new(tenant_id);
+    if let Err(e) = shared.check_tenant_quota(tid) {
+        warn!(tenant_id, error = %e, "sync: shape subscribe rejected by quota");
+        return None;
+    }
+
     // Get current WAL LSN — this is the watermark for the snapshot.
     let current_lsn = shared.wal.next_lsn().as_u64().saturating_sub(1);
 
     // Dispatch a query to the Data Plane to get matching data for this shape.
+    shared.tenant_request_start(tid);
     let snapshot_data = match &msg.shape.shape_type {
         nodedb_types::sync::shape::ShapeType::Document { collection, .. } => {
             // Query the Data Plane for all documents in this collection.
@@ -78,6 +86,8 @@ pub(super) async fn handle_shape_subscribe_async(
         }
     };
 
+    shared.tenant_request_end(tid);
+
     // Register the shape subscription.
     let registry = super::shape::registry::ShapeRegistry::new();
     let response = super::shape::handler::handle_subscribe(
@@ -118,6 +128,21 @@ pub(super) async fn validate_delta_constraints(
     // rejects it (constraint violation), we get an error back.
     // Uses EventSource::CrdtSync so triggers are NOT fired on replicated deltas.
     let tenant_id = TenantId::new(0); // Trust mode default tenant.
+
+    // Quota enforcement — reject before dispatch.
+    if let Err(e) = shared.check_tenant_quota(tenant_id) {
+        warn!(error = %e, "sync: delta validation rejected by quota");
+        let reject = DeltaRejectMsg {
+            mutation_id: delta_msg.mutation_id,
+            reason: e.to_string(),
+            compensation: Some(CompensationHint::Custom {
+                constraint: "quota".into(),
+                detail: e.to_string(),
+            }),
+        };
+        return SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+    }
+
     let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: delta_msg.collection.clone(),
         document_id: delta_msg.document_id.clone(),
@@ -126,7 +151,8 @@ pub(super) async fn validate_delta_constraints(
         mutation_id: delta_msg.mutation_id,
     });
 
-    match dispatch_async_with_source(
+    shared.tenant_request_start(tenant_id);
+    let dispatch_result = dispatch_async_with_source(
         shared,
         tenant_id,
         &delta_msg.collection,
@@ -134,8 +160,10 @@ pub(super) async fn validate_delta_constraints(
         Duration::from_secs(10),
         crate::event::EventSource::CrdtSync,
     )
-    .await
-    {
+    .await;
+    shared.tenant_request_end(tenant_id);
+
+    match dispatch_result {
         Ok(_payload) => {
             // Constraint check passed — send the original DeltaAck.
             ack_frame
