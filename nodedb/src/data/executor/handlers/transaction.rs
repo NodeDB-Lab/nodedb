@@ -216,14 +216,24 @@ impl CoreLoop {
                 // Save old value for rollback.
                 let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
 
-                // Accounting enforcement: append-only check.
+                // Enforcement: append-only + period lock.
                 let config_key = format!("{tid}:{collection}");
                 if let Some(config) = self.doc_configs.get(&config_key) {
-                    super::super::accounting::append_only::check_point_put(
+                    super::super::enforcement::append_only::check_point_put(
                         collection,
                         &config.accounting,
                         &old_value,
                     )?;
+                    // Period lock: check if the period of this document is open.
+                    if let Some(ref pl) = config.accounting.period_lock {
+                        super::super::enforcement::period_lock::check_period_lock(
+                            &self.sparse,
+                            tid,
+                            collection,
+                            value, // raw value bytes from the plan
+                            pl,
+                        )?;
+                    }
                 }
 
                 let stored = super::super::doc_format::json_to_msgpack(value);
@@ -264,17 +274,37 @@ impl CoreLoop {
                 collection,
                 document_id,
             }) => {
-                // Accounting enforcement: append-only check.
+                // Enforcement: append-only + period lock + retention/hold.
                 let config_key = format!("{tid}:{collection}");
+                // Read old value early — needed for period lock and retention checks.
+                let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
                 if let Some(config) = self.doc_configs.get(&config_key) {
-                    super::super::accounting::append_only::check_point_delete(
+                    super::super::enforcement::append_only::check_point_delete(
                         collection,
                         &config.accounting,
                     )?;
+                    // Period lock on the existing document.
+                    if let Some(ref pl) = config.accounting.period_lock
+                        && let Some(ref old_bytes) = old_value
+                    {
+                        super::super::enforcement::period_lock::check_period_lock(
+                            &self.sparse,
+                            tid,
+                            collection,
+                            old_bytes,
+                            pl,
+                        )?;
+                    }
+                    // Retention and legal hold.
+                    let created_at = old_value.as_ref().and_then(|b| {
+                        super::super::enforcement::retention::extract_created_at_secs(b)
+                    });
+                    super::super::enforcement::retention::check_delete_allowed(
+                        collection,
+                        &config.accounting,
+                        created_at,
+                    )?;
                 }
-
-                // Save old value for rollback.
-                let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
                 match self.sparse.delete(tid, collection, document_id) {
                     Ok(_) => {
                         // Cascade: inverted index, secondary indexes, graph edges.
@@ -418,7 +448,7 @@ impl CoreLoop {
         tid: u32,
         undo_log: &[UndoEntry],
     ) -> Result<(), ErrorCode> {
-        use super::super::accounting::balanced;
+        use super::super::enforcement::balanced;
         use std::collections::HashMap;
 
         // Group new inserts by collection: (collection_name → [(doc_id, stored_bytes)]).
