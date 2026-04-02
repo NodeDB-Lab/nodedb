@@ -4,8 +4,15 @@
 //! compressed on disk. This cache holds decompressed column data for the
 //! hot window, avoiding decompression overhead on repeated queries.
 //!
+//! Key: `(tenant_id, collection, min_ts)` — tenant_id ensures cross-tenant
+//! isolation. Two tenants with the same collection name get independent
+//! cache entries.
+//!
 //! Config: `hot_window_ms` (e.g., 24 * 3600 * 1000 for 24 hours).
 //! Default: 0 (memtable data only, no extra cache).
+
+/// Cache key: (tenant_id, collection, min_ts).
+type CacheKey = (u32, String, i64);
 
 /// Decompressed column data for a recently-accessed partition.
 #[derive(Debug)]
@@ -24,10 +31,10 @@ pub struct CachedPartition {
 
 /// LRU cache of recently-accessed partition data.
 pub struct RecentWindowCache {
-    /// Cached partitions, keyed by (collection, min_ts).
-    entries: std::collections::HashMap<(String, i64), CachedPartition>,
+    /// Cached partitions, keyed by (tenant_id, collection, min_ts).
+    entries: std::collections::HashMap<CacheKey, CachedPartition>,
     /// LRU eviction order.
-    order: std::collections::VecDeque<(String, i64)>,
+    order: std::collections::VecDeque<CacheKey>,
     /// Maximum total cached bytes.
     max_bytes: usize,
     /// Current total cached bytes.
@@ -56,14 +63,15 @@ impl RecentWindowCache {
         max_ts >= now_ms - self.hot_window_ms
     }
 
-    /// Look up cached data for a partition.
-    pub fn get(&self, collection: &str, min_ts: i64) -> Option<&CachedPartition> {
-        self.entries.get(&(collection.to_string(), min_ts))
+    /// Look up cached data for a partition. Requires `tenant_id` for isolation.
+    pub fn get(&self, tenant_id: u32, collection: &str, min_ts: i64) -> Option<&CachedPartition> {
+        self.entries
+            .get(&(tenant_id, collection.to_string(), min_ts))
     }
 
     /// Insert decompressed partition data into the cache.
-    pub fn insert(&mut self, collection: &str, partition: CachedPartition) {
-        let key = (collection.to_string(), partition.min_ts);
+    pub fn insert(&mut self, tenant_id: u32, collection: &str, partition: CachedPartition) {
+        let key = (tenant_id, collection.to_string(), partition.min_ts);
         let size = partition.memory_bytes;
 
         if size > self.max_bytes {
@@ -95,7 +103,7 @@ impl RecentWindowCache {
     /// Evict partitions that are no longer in the hot window.
     pub fn evict_cold(&mut self, now_ms: i64) {
         let cutoff = now_ms - self.hot_window_ms;
-        let cold_keys: Vec<(String, i64)> = self
+        let cold_keys: Vec<CacheKey> = self
             .entries
             .iter()
             .filter(|(_, p)| p.max_ts < cutoff)
@@ -103,6 +111,25 @@ impl RecentWindowCache {
             .collect();
 
         for key in cold_keys {
+            if let Some(removed) = self.entries.remove(&key) {
+                self.current_bytes -= removed.memory_bytes;
+            }
+            self.order.retain(|k| k != &key);
+        }
+    }
+
+    /// Evict all cached entries belonging to a specific tenant.
+    ///
+    /// Used during tenant purge to ensure zero residual cached data.
+    pub fn evict_tenant(&mut self, tenant_id: u32) {
+        let keys: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|k| k.0 == tenant_id)
+            .cloned()
+            .collect();
+
+        for key in keys {
             if let Some(removed) = self.entries.remove(&key) {
                 self.current_bytes -= removed.memory_bytes;
             }
@@ -127,6 +154,9 @@ impl RecentWindowCache {
 mod tests {
     use super::*;
 
+    const T1: u32 = 1;
+    const T2: u32 = 2;
+
     fn make_partition(min_ts: i64, max_ts: i64, rows: usize) -> CachedPartition {
         CachedPartition {
             min_ts,
@@ -140,9 +170,23 @@ mod tests {
     #[test]
     fn basic_insert_and_get() {
         let mut cache = RecentWindowCache::new(1_000_000, 3_600_000);
-        cache.insert("metrics", make_partition(1000, 2000, 100));
-        assert!(cache.get("metrics", 1000).is_some());
+        cache.insert(T1, "metrics", make_partition(1000, 2000, 100));
+        assert!(cache.get(T1, "metrics", 1000).is_some());
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn tenant_isolation() {
+        let mut cache = RecentWindowCache::new(1_000_000, 3_600_000);
+        cache.insert(T1, "metrics", make_partition(1000, 2000, 10));
+        cache.insert(T2, "metrics", make_partition(1000, 2000, 10));
+
+        // Same collection + min_ts, different tenants — both exist.
+        assert!(cache.get(T1, "metrics", 1000).is_some());
+        assert!(cache.get(T2, "metrics", 1000).is_some());
+        // Cross-tenant lookup must miss.
+        assert!(cache.get(T1, "metrics", 9999).is_none());
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
@@ -157,24 +201,38 @@ mod tests {
     fn evict_cold() {
         let mut cache = RecentWindowCache::new(1_000_000, 3_600_000);
         // Old partition: max_ts=2000, will be cold at now=10_000_000.
-        cache.insert("m", make_partition(1000, 2000, 10));
+        cache.insert(T1, "m", make_partition(1000, 2000, 10));
         // Recent partition: max_ts=9_000_000, within hot window at now=10_000_000.
-        cache.insert("m", make_partition(8_000_000, 9_000_000, 10));
+        cache.insert(T1, "m", make_partition(8_000_000, 9_000_000, 10));
         assert_eq!(cache.len(), 2);
 
         cache.evict_cold(10_000_000);
         assert_eq!(cache.len(), 1);
-        assert!(cache.get("m", 1000).is_none()); // Evicted (cold).
-        assert!(cache.get("m", 8_000_000).is_some()); // Kept (hot).
+        assert!(cache.get(T1, "m", 1000).is_none()); // Evicted (cold).
+        assert!(cache.get(T1, "m", 8_000_000).is_some()); // Kept (hot).
+    }
+
+    #[test]
+    fn evict_tenant() {
+        let mut cache = RecentWindowCache::new(1_000_000, 3_600_000);
+        cache.insert(T1, "m", make_partition(1000, 2000, 10));
+        cache.insert(T1, "m", make_partition(3000, 4000, 10));
+        cache.insert(T2, "m", make_partition(1000, 2000, 10));
+        assert_eq!(cache.len(), 3);
+
+        cache.evict_tenant(T1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(T1, "m", 1000).is_none());
+        assert!(cache.get(T2, "m", 1000).is_some());
     }
 
     #[test]
     fn lru_eviction() {
         let mut cache = RecentWindowCache::new(500, 3_600_000);
-        cache.insert("m", make_partition(1000, 2000, 20)); // 320 bytes
-        cache.insert("m", make_partition(3000, 4000, 20)); // 320 bytes → evicts first
+        cache.insert(T1, "m", make_partition(1000, 2000, 20)); // 320 bytes
+        cache.insert(T1, "m", make_partition(3000, 4000, 20)); // 320 bytes → evicts first
         assert_eq!(cache.len(), 1);
-        assert!(cache.get("m", 1000).is_none());
-        assert!(cache.get("m", 3000).is_some());
+        assert!(cache.get(T1, "m", 1000).is_none());
+        assert!(cache.get(T1, "m", 3000).is_some());
     }
 }

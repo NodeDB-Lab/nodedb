@@ -3,19 +3,23 @@
 //! Sealed partitions never change → cache entries never invalidate.
 //! LRU eviction with configurable memory budget.
 //!
-//! Key: `(partition_id, query_hash)` where partition_id is the
-//! partition's min_ts (unique within a collection) and query_hash
-//! is a hash of the scan request parameters.
+//! Key: `(tenant_id, partition_id, query_hash)` where tenant_id ensures
+//! cross-tenant isolation, partition_id is the partition's min_ts
+//! (unique within a collection), and query_hash is a hash of the scan
+//! request parameters.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+/// Cache key: (tenant_id, partition_id, query_hash).
+type CacheKey = (u32, i64, u64);
+
 /// LRU query cache for sealed partition scan results.
 pub struct QueryCache {
-    /// (partition_id, query_hash) → cached result bytes.
-    entries: HashMap<(i64, u64), Vec<u8>>,
+    /// (tenant_id, partition_id, query_hash) → cached result bytes.
+    entries: HashMap<CacheKey, Vec<u8>>,
     /// LRU eviction order (oldest first).
-    order: VecDeque<(i64, u64)>,
+    order: VecDeque<CacheKey>,
     /// Maximum total cached bytes.
     max_bytes: usize,
     /// Current total cached bytes.
@@ -33,16 +37,16 @@ impl QueryCache {
         }
     }
 
-    /// Look up a cached result.
-    pub fn get(&self, partition_id: i64, query_hash: u64) -> Option<&[u8]> {
+    /// Look up a cached result. Requires `tenant_id` to prevent cross-tenant leaks.
+    pub fn get(&self, tenant_id: u32, partition_id: i64, query_hash: u64) -> Option<&[u8]> {
         self.entries
-            .get(&(partition_id, query_hash))
+            .get(&(tenant_id, partition_id, query_hash))
             .map(|v| v.as_slice())
     }
 
     /// Insert a result into the cache. Evicts old entries if over budget.
-    pub fn insert(&mut self, partition_id: i64, query_hash: u64, result: Vec<u8>) {
-        let key = (partition_id, query_hash);
+    pub fn insert(&mut self, tenant_id: u32, partition_id: i64, query_hash: u64, result: Vec<u8>) {
+        let key = (tenant_id, partition_id, query_hash);
 
         // Don't cache if the single entry exceeds budget.
         if result.len() > self.max_bytes {
@@ -75,11 +79,11 @@ impl QueryCache {
     ///
     /// Sealed partitions are immutable, so this should only be called for
     /// active partitions that are still receiving writes.
-    pub fn invalidate_partition(&mut self, partition_id: i64) {
-        let keys: Vec<(i64, u64)> = self
+    pub fn invalidate_partition(&mut self, tenant_id: u32, partition_id: i64) {
+        let keys: Vec<CacheKey> = self
             .entries
             .keys()
-            .filter(|&&(pid, _)| pid == partition_id)
+            .filter(|&&(tid, pid, _)| tid == tenant_id && pid == partition_id)
             .copied()
             .collect();
 
@@ -88,7 +92,27 @@ impl QueryCache {
                 self.current_bytes -= removed.len();
             }
         }
-        self.order.retain(|&(pid, _)| pid != partition_id);
+        self.order
+            .retain(|&(tid, pid, _)| !(tid == tenant_id && pid == partition_id));
+    }
+
+    /// Evict all cached entries belonging to a specific tenant.
+    ///
+    /// Used during tenant purge to ensure zero residual cached data.
+    pub fn evict_tenant(&mut self, tenant_id: u32) {
+        let keys: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|&&(tid, _, _)| tid == tenant_id)
+            .copied()
+            .collect();
+
+        for key in keys {
+            if let Some(removed) = self.entries.remove(&key) {
+                self.current_bytes -= removed.len();
+            }
+        }
+        self.order.retain(|&(tid, _, _)| tid != tenant_id);
     }
 
     /// Number of cached entries.
@@ -120,46 +144,83 @@ pub fn query_hash(value_column: &str, start_ms: i64, end_ms: i64, bucket_interva
 mod tests {
     use super::*;
 
+    const T1: u32 = 1;
+    const T2: u32 = 2;
+
     #[test]
     fn basic_cache_roundtrip() {
         let mut cache = QueryCache::new(1024 * 1024);
         let data = vec![1u8, 2, 3, 4];
-        cache.insert(100, 42, data.clone());
-        assert_eq!(cache.get(100, 42), Some(data.as_slice()));
+        cache.insert(T1, 100, 42, data.clone());
+        assert_eq!(cache.get(T1, 100, 42), Some(data.as_slice()));
         assert_eq!(cache.len(), 1);
     }
 
     #[test]
     fn cache_miss() {
         let cache = QueryCache::new(1024);
-        assert!(cache.get(100, 42).is_none());
+        assert!(cache.get(T1, 100, 42).is_none());
+    }
+
+    #[test]
+    fn tenant_isolation() {
+        let mut cache = QueryCache::new(1024 * 1024);
+        let data_t1 = vec![1u8, 2, 3];
+        let data_t2 = vec![4u8, 5, 6];
+
+        // Same partition_id and query_hash, different tenants.
+        cache.insert(T1, 100, 42, data_t1.clone());
+        cache.insert(T2, 100, 42, data_t2.clone());
+
+        assert_eq!(cache.get(T1, 100, 42), Some(data_t1.as_slice()));
+        assert_eq!(cache.get(T2, 100, 42), Some(data_t2.as_slice()));
+        // Cross-tenant lookup must miss.
+        assert!(cache.get(T2, 100, 99).is_none());
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
     fn lru_eviction() {
         let mut cache = QueryCache::new(100);
-        cache.insert(1, 0, vec![0u8; 40]);
-        cache.insert(2, 0, vec![0u8; 40]);
+        cache.insert(T1, 1, 0, vec![0u8; 40]);
+        cache.insert(T1, 2, 0, vec![0u8; 40]);
         assert_eq!(cache.len(), 2);
 
         // This should evict partition 1's entry.
-        cache.insert(3, 0, vec![0u8; 40]);
+        cache.insert(T1, 3, 0, vec![0u8; 40]);
         assert_eq!(cache.len(), 2);
-        assert!(cache.get(1, 0).is_none()); // Evicted.
-        assert!(cache.get(3, 0).is_some());
+        assert!(cache.get(T1, 1, 0).is_none()); // Evicted.
+        assert!(cache.get(T1, 3, 0).is_some());
     }
 
     #[test]
     fn invalidate_partition() {
         let mut cache = QueryCache::new(1024);
-        cache.insert(100, 1, vec![1]);
-        cache.insert(100, 2, vec![2]);
-        cache.insert(200, 1, vec![3]);
+        cache.insert(T1, 100, 1, vec![1]);
+        cache.insert(T1, 100, 2, vec![2]);
+        cache.insert(T1, 200, 1, vec![3]);
+        // Different tenant, same partition_id — must NOT be invalidated.
+        cache.insert(T2, 100, 1, vec![4]);
+        assert_eq!(cache.len(), 4);
+
+        cache.invalidate_partition(T1, 100);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(T1, 200, 1).is_some());
+        assert!(cache.get(T2, 100, 1).is_some()); // Other tenant unaffected.
+    }
+
+    #[test]
+    fn evict_tenant() {
+        let mut cache = QueryCache::new(1024);
+        cache.insert(T1, 100, 1, vec![1]);
+        cache.insert(T1, 200, 2, vec![2]);
+        cache.insert(T2, 100, 1, vec![3]);
         assert_eq!(cache.len(), 3);
 
-        cache.invalidate_partition(100);
+        cache.evict_tenant(T1);
         assert_eq!(cache.len(), 1);
-        assert!(cache.get(200, 1).is_some());
+        assert!(cache.get(T1, 100, 1).is_none());
+        assert!(cache.get(T2, 100, 1).is_some());
     }
 
     #[test]
