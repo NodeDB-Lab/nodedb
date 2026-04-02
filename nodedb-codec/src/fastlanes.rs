@@ -99,6 +99,188 @@ pub fn decode(data: &[u8]) -> Result<Vec<i64>, CodecError> {
     Ok(values)
 }
 
+/// Compute byte offsets for each block in an encoded stream.
+///
+/// Returns a Vec of byte offsets — `offsets[i]` is the start position of
+/// block `i` within `data`. O(num_blocks) header scan, no decompression.
+pub fn block_byte_offsets(data: &[u8]) -> Result<Vec<usize>, CodecError> {
+    if data.len() < GLOBAL_HEADER_SIZE {
+        return Err(CodecError::Truncated {
+            expected: GLOBAL_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+    let num_blocks = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let mut offsets = Vec::with_capacity(num_blocks);
+    let mut pos = GLOBAL_HEADER_SIZE;
+    for i in 0..num_blocks {
+        offsets.push(pos);
+        pos = skip_block(data, pos, i)?;
+    }
+    Ok(offsets)
+}
+
+/// Decode a range of blocks [start_block..end_block) from encoded data.
+///
+/// More efficient than calling `decode_single_block` repeatedly — scans
+/// headers once to find start_block, then decodes contiguously.
+pub fn decode_block_range(
+    data: &[u8],
+    start_block: usize,
+    end_block: usize,
+) -> Result<Vec<i64>, CodecError> {
+    if data.len() < GLOBAL_HEADER_SIZE {
+        return Err(CodecError::Truncated {
+            expected: GLOBAL_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+    let num_blocks = u16::from_le_bytes([data[4], data[5]]) as usize;
+    if start_block >= num_blocks || end_block > num_blocks || start_block >= end_block {
+        return Ok(Vec::new());
+    }
+
+    // Skip to start_block.
+    let mut offset = GLOBAL_HEADER_SIZE;
+    for i in 0..start_block {
+        offset = skip_block(data, offset, i)?;
+    }
+
+    // Decode [start_block..end_block).
+    let mut values = Vec::new();
+    for i in start_block..end_block {
+        offset = decode_block(data, offset, &mut values, i)?;
+    }
+    Ok(values)
+}
+
+/// Number of blocks in an encoded FastLanes stream.
+pub fn block_count(data: &[u8]) -> Result<usize, CodecError> {
+    if data.len() < GLOBAL_HEADER_SIZE {
+        return Err(CodecError::Truncated {
+            expected: GLOBAL_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+    Ok(u16::from_le_bytes([data[4], data[5]]) as usize)
+}
+
+/// Decode a single block by index without decoding the entire stream.
+///
+/// Iterates block headers to reach `block_idx`, then decodes only that
+/// block. For sequential block-at-a-time processing, prefer
+/// [`BlockIterator`] which tracks byte offsets without re-scanning.
+pub fn decode_single_block(data: &[u8], block_idx: usize) -> Result<Vec<i64>, CodecError> {
+    if data.len() < GLOBAL_HEADER_SIZE {
+        return Err(CodecError::Truncated {
+            expected: GLOBAL_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+    let num_blocks = u16::from_le_bytes([data[4], data[5]]) as usize;
+    if block_idx >= num_blocks {
+        return Err(CodecError::Corrupt {
+            detail: format!("block_idx {block_idx} >= block_count {num_blocks}"),
+        });
+    }
+
+    // Skip to the target block by iterating headers.
+    let mut offset = GLOBAL_HEADER_SIZE;
+    for i in 0..block_idx {
+        offset = skip_block(data, offset, i)?;
+    }
+
+    let mut values = Vec::new();
+    decode_block(data, offset, &mut values, block_idx)?;
+    Ok(values)
+}
+
+/// Iterator that decodes one 1024-row block at a time, tracking byte
+/// offsets internally. Avoids re-scanning headers for sequential access.
+pub struct BlockIterator<'a> {
+    data: &'a [u8],
+    offset: usize,
+    blocks_remaining: usize,
+    current_block: usize,
+}
+
+impl<'a> BlockIterator<'a> {
+    /// Create a block iterator over encoded FastLanes data.
+    pub fn new(data: &'a [u8]) -> Result<Self, CodecError> {
+        if data.len() < GLOBAL_HEADER_SIZE {
+            return Err(CodecError::Truncated {
+                expected: GLOBAL_HEADER_SIZE,
+                actual: data.len(),
+            });
+        }
+        let num_blocks = u16::from_le_bytes([data[4], data[5]]) as usize;
+        Ok(Self {
+            data,
+            offset: GLOBAL_HEADER_SIZE,
+            blocks_remaining: num_blocks,
+            current_block: 0,
+        })
+    }
+
+    /// Skip the next block without decoding it.
+    pub fn skip_block(&mut self) -> Result<(), CodecError> {
+        if self.blocks_remaining == 0 {
+            return Ok(());
+        }
+        self.offset = skip_block(self.data, self.offset, self.current_block)?;
+        self.current_block += 1;
+        self.blocks_remaining -= 1;
+        Ok(())
+    }
+}
+
+impl Iterator for BlockIterator<'_> {
+    type Item = Result<Vec<i64>, CodecError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.blocks_remaining == 0 {
+            return None;
+        }
+        let mut values = Vec::new();
+        match decode_block(self.data, self.offset, &mut values, self.current_block) {
+            Ok(new_offset) => {
+                self.offset = new_offset;
+                self.current_block += 1;
+                self.blocks_remaining -= 1;
+                Some(Ok(values))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.blocks_remaining, Some(self.blocks_remaining))
+    }
+}
+
+/// Skip a block without decoding, returning the next byte offset.
+fn skip_block(data: &[u8], offset: usize, block_idx: usize) -> Result<usize, CodecError> {
+    if offset + BLOCK_HEADER_SIZE > data.len() {
+        return Err(CodecError::Truncated {
+            expected: offset + BLOCK_HEADER_SIZE,
+            actual: data.len(),
+        });
+    }
+    let count = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+    let bit_width = data[offset + 2];
+    if bit_width > 64 {
+        return Err(CodecError::Corrupt {
+            detail: format!("block {block_idx}: invalid bit_width {bit_width}"),
+        });
+    }
+    let packed_bytes = if bit_width == 0 {
+        0
+    } else {
+        (count * bit_width as usize).div_ceil(8)
+    };
+    Ok(offset + BLOCK_HEADER_SIZE + packed_bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Block encode / decode
 // ---------------------------------------------------------------------------
@@ -532,5 +714,49 @@ mod tests {
         let encoded = encode(&values);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn decode_single_block_correctness() {
+        // 3 blocks: 1024 + 1024 + 952 = 3000 values.
+        let values: Vec<i64> = (0..3000).collect();
+        let encoded = encode(&values);
+        assert_eq!(block_count(&encoded).unwrap(), 3);
+
+        let b0 = decode_single_block(&encoded, 0).unwrap();
+        assert_eq!(b0.len(), 1024);
+        assert_eq!(b0, &values[..1024]);
+
+        let b1 = decode_single_block(&encoded, 1).unwrap();
+        assert_eq!(b1.len(), 1024);
+        assert_eq!(b1, &values[1024..2048]);
+
+        let b2 = decode_single_block(&encoded, 2).unwrap();
+        assert_eq!(b2.len(), 952);
+        assert_eq!(b2, &values[2048..]);
+    }
+
+    #[test]
+    fn block_iterator_matches_full_decode() {
+        let values: Vec<i64> = (0..5000).map(|i| i * 7 - 2000).collect();
+        let encoded = encode(&values);
+
+        let mut all = Vec::new();
+        let iter = BlockIterator::new(&encoded).unwrap();
+        for block in iter {
+            all.extend(block.unwrap());
+        }
+        assert_eq!(all, values);
+    }
+
+    #[test]
+    fn block_iterator_skip() {
+        let values: Vec<i64> = (0..3000).collect();
+        let encoded = encode(&values);
+
+        let mut iter = BlockIterator::new(&encoded).unwrap();
+        iter.skip_block().unwrap(); // skip block 0
+        let b1 = iter.next().unwrap().unwrap();
+        assert_eq!(b1, &values[1024..2048]);
     }
 }
