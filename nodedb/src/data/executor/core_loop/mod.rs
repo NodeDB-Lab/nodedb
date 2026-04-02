@@ -178,6 +178,10 @@ pub struct CoreLoop {
     pub(in crate::data::executor) doc_configs:
         HashMap<String, crate::engine::document::store::CollectionConfig>,
 
+    /// Per-collection last chain hash for HASH_CHAIN collections.
+    /// Maps collection_name → last SHA-256 hash.
+    pub(in crate::data::executor) chain_hashes: HashMap<String, String>,
+
     /// Query execution tuning parameters (sort run size, stream chunk size, etc.).
     /// Set at core spawn time from config; never changed at runtime.
     pub(in crate::data::executor) query_tuning: nodedb_types::config::tuning::QueryTuning,
@@ -275,6 +279,7 @@ impl CoreLoop {
             spatial_indexes: std::collections::HashMap::new(),
             spatial_doc_map: std::collections::HashMap::new(),
             doc_configs: HashMap::new(),
+            chain_hashes: HashMap::new(),
             query_tuning: nodedb_types::config::tuning::QueryTuning::default(),
             graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),
             kv_engine: crate::engine::kv::KvEngine::from_tuning(

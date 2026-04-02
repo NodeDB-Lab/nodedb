@@ -270,7 +270,24 @@ impl CoreLoop {
                     }
                 }
 
-                let stored = super::super::doc_format::json_to_msgpack(value);
+                // Hash chain: on INSERT, compute chain hash and inject _chain_hash field.
+                let stored = if old_value.is_none() {
+                    let config_key_hc = format!("{tid}:{collection}");
+                    let hash_chain_enabled = self
+                        .doc_configs
+                        .get(&config_key_hc)
+                        .is_some_and(|c| c.enforcement.hash_chain);
+                    super::super::enforcement::hash_chain::apply_chain_on_insert(
+                        &mut self.chain_hashes,
+                        collection,
+                        document_id,
+                        value,
+                        hash_chain_enabled,
+                    )
+                    .unwrap_or_else(|| super::super::doc_format::json_to_msgpack(value))
+                } else {
+                    super::super::doc_format::json_to_msgpack(value)
+                };
                 match self.sparse.put(tid, collection, document_id, &stored) {
                     Ok(()) => {
                         // Auto-index text fields.

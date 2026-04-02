@@ -43,6 +43,41 @@ pub fn compute_chain_hash(previous_hash: &str, row_id: &str, row_contents: &[u8]
     encode_hex(&hasher.finalize())
 }
 
+/// Apply hash chain enforcement to an INSERT.
+///
+/// Computes the chain hash, injects `_chain_hash` into the document JSON,
+/// and returns the re-encoded document. Updates `chain_hashes` with the new hash.
+/// Returns `None` if hash chain is not enabled for this collection config.
+pub fn apply_chain_on_insert(
+    chain_hashes: &mut std::collections::HashMap<String, String>,
+    collection: &str,
+    document_id: &str,
+    value: &[u8],
+    hash_chain_enabled: bool,
+) -> Option<Vec<u8>> {
+    if !hash_chain_enabled {
+        return None;
+    }
+
+    let prev_hash = chain_hashes
+        .get(collection)
+        .map(|s| s.as_str())
+        .unwrap_or(GENESIS_HASH);
+    let chain_hash = compute_chain_hash(prev_hash, document_id, value);
+
+    let mut doc_json = super::super::doc_format::decode_document(value)
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = doc_json.as_object_mut() {
+        obj.insert(
+            "_chain_hash".to_string(),
+            serde_json::Value::String(chain_hash.clone()),
+        );
+    }
+
+    chain_hashes.insert(collection.to_string(), chain_hash);
+    Some(super::super::doc_format::encode_to_msgpack(&doc_json))
+}
+
 /// Verify a segment of the hash chain.
 ///
 /// Takes an iterator of `(row_id, row_contents, stored_hash)` tuples in
