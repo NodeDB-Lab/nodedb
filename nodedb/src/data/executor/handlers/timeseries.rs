@@ -40,103 +40,101 @@ pub(in crate::data::executor) struct TimeseriesScanParams<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Aggregate result emission (GroupedAggResult → JSON)
+// Aggregate result emission — MessagePack (no serde_json::Value intermediate)
 // ---------------------------------------------------------------------------
 
-/// Emit JSON array from a GroupedAggResult.
+/// Serialize GroupedAggResult directly to MessagePack bytes.
 ///
-/// Key format depends on query:
+/// Avoids building `Vec<serde_json::Value>` (2M allocations for 2M groups).
+/// Writes an array of maps directly to the MessagePack buffer.
+///
+/// Key format in GroupedAggResult:
 /// - GROUP BY only: "group1\0group2"
 /// - time_bucket only: "bucket_ts"
 /// - time_bucket + GROUP BY: "bucket_ts\0group1\0group2"
-fn emit_grouped_results(
+fn encode_grouped_results(
     result: &crate::engine::timeseries::grouped_scan::GroupedAggResult,
     group_by: &[String],
     aggregates: &[(String, String)],
     limit: usize,
     bucket_interval_ms: i64,
-) -> Vec<serde_json::Value> {
+) -> Vec<u8> {
     let has_bucket = bucket_interval_ms > 0;
-    let mut results = Vec::with_capacity(result.groups.len().min(limit));
-    for (key, accums) in &result.groups {
-        let mut row = serde_json::Map::new();
+    let num_groups = result.groups.len().min(limit);
 
+    // Pre-compute aggregate key names once (not per group).
+    let agg_keys: Vec<String> = aggregates
+        .iter()
+        .map(|(op, field)| format!("{op}_{field}").replace('*', "all"))
+        .collect();
+
+    // Fields per row: group_by columns + aggregates + optional bucket.
+    let fields_per_row = group_by.len() + aggregates.len() + if has_bucket { 1 } else { 0 };
+
+    // Build result as Vec of lightweight structs for rmp_serde.
+    // Using rmpv::Value is faster than serde_json::Value (no string interning).
+    let mut rows: Vec<rmpv::Value> = Vec::with_capacity(num_groups);
+
+    let mut count = 0;
+    for (key, accums) in &result.groups {
+        if count >= limit {
+            break;
+        }
+
+        let mut fields: Vec<(rmpv::Value, rmpv::Value)> = Vec::with_capacity(fields_per_row);
         let parts: Vec<&str> = key.split('\0').collect();
 
         if has_bucket {
-            // First part is bucket timestamp.
-            let bucket_val = parts
+            let bucket_ts = parts
                 .first()
                 .and_then(|s| s.parse::<i64>().ok())
-                .map(|v| serde_json::Value::Number(serde_json::Number::from(v)))
-                .unwrap_or(serde_json::Value::Null);
-            row.insert("bucket".into(), bucket_val);
+                .unwrap_or(0);
+            fields.push((
+                rmpv::Value::String("bucket".into()),
+                rmpv::Value::Integer(bucket_ts.into()),
+            ));
 
-            // Remaining parts map to group_by fields (offset by 1).
             for (i, field) in group_by.iter().enumerate() {
                 let val = parts
                     .get(i + 1)
                     .filter(|s| !s.is_empty())
-                    .map(|s| serde_json::Value::String(s.to_string()))
-                    .unwrap_or(serde_json::Value::Null);
-                row.insert(field.clone(), val);
+                    .map(|s| rmpv::Value::String((*s).into()))
+                    .unwrap_or(rmpv::Value::Nil);
+                fields.push((rmpv::Value::String(field.as_str().into()), val));
             }
-        } else if !group_by.is_empty() {
+        } else {
             for (i, field) in group_by.iter().enumerate() {
                 let val = parts
                     .get(i)
                     .filter(|s| !s.is_empty())
-                    .map(|s| serde_json::Value::String(s.to_string()))
-                    .unwrap_or(serde_json::Value::Null);
-                row.insert(field.clone(), val);
+                    .map(|s| rmpv::Value::String((*s).into()))
+                    .unwrap_or(rmpv::Value::Nil);
+                fields.push((rmpv::Value::String(field.as_str().into()), val));
             }
         }
 
-        // Emit aggregate values.
-        for (agg_idx, (op, field)) in aggregates.iter().enumerate() {
-            let agg_key = format!("{op}_{field}").replace('*', "all");
+        for (agg_idx, agg_key) in agg_keys.iter().enumerate() {
             let accum = &accums[agg_idx];
+            let op = &aggregates[agg_idx].0;
             let val = match op.as_str() {
-                "count" => serde_json::json!(accum.count),
-                "sum" => {
-                    if accum.count == 0 {
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::json!(accum.sum())
-                    }
-                }
-                "avg" => {
-                    if accum.count == 0 {
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::json!(accum.sum() / accum.count as f64)
-                    }
-                }
-                "min" => {
-                    if accum.count == 0 {
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::json!(accum.min)
-                    }
-                }
-                "max" => {
-                    if accum.count == 0 {
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::json!(accum.max)
-                    }
-                }
-                _ => serde_json::Value::Null,
+                "count" => rmpv::Value::Integer((accum.count as i64).into()),
+                "sum" if accum.count > 0 => rmpv::Value::F64(accum.sum()),
+                "avg" if accum.count > 0 => rmpv::Value::F64(accum.sum() / accum.count as f64),
+                "min" if accum.count > 0 => rmpv::Value::F64(accum.min),
+                "max" if accum.count > 0 => rmpv::Value::F64(accum.max),
+                _ => rmpv::Value::Nil,
             };
-            row.insert(agg_key, val);
+            fields.push((rmpv::Value::String(agg_key.as_str().into()), val));
         }
 
-        results.push(serde_json::Value::Object(row));
-        if results.len() >= limit {
-            break;
-        }
+        rows.push(rmpv::Value::Map(fields));
+        count += 1;
     }
-    results
+
+    let array = rmpv::Value::Array(rows);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &array).unwrap_or(());
+    buf
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +201,13 @@ impl CoreLoop {
                     total += entry.meta.row_count;
                 }
             }
-            let results = vec![serde_json::json!({"count_all": total})];
-            let json = serde_json::to_vec(&results).unwrap_or_default();
+            let row = rmpv::Value::Map(vec![(
+                rmpv::Value::String("count_all".into()),
+                rmpv::Value::Integer((total as i64).into()),
+            )]);
+            let array = rmpv::Value::Array(vec![row]);
+            let mut json = Vec::new();
+            rmpv::encode::write_value(&mut json, &array).unwrap_or(());
             return Response {
                 request_id: task.request.request_id,
                 status: Status::Ok,
@@ -582,11 +585,10 @@ impl CoreLoop {
             }
         }
 
-        // ── Phase 3: Emit JSON response ──
-        let results =
-            emit_grouped_results(&merged, group_by, aggregates, limit, bucket_interval_ms);
-        let json = serde_json::to_vec(&results).unwrap_or_default();
-        self.response_with_payload(task, json)
+        // ── Phase 3: Encode response (MessagePack, no serde_json intermediate) ──
+        let payload =
+            encode_grouped_results(&merged, group_by, aggregates, limit, bucket_interval_ms);
+        self.response_with_payload(task, payload)
     }
 
     /// Ensure the partition registry is loaded for a timeseries collection.
