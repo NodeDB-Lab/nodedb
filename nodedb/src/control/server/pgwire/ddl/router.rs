@@ -289,6 +289,17 @@ pub async fn dispatch(
         ));
     }
 
+    // Query functions: VERIFY_HASH_CHAIN, BALANCE_AS_OF, TEMPORAL_LOOKUP.
+    if upper.contains("VERIFY_HASH_CHAIN") {
+        return Some(super::query_functions::verify_hash_chain(state, identity, sql).await);
+    }
+    if upper.contains("BALANCE_AS_OF") {
+        return Some(super::query_functions::balance_as_of(state, identity, sql).await);
+    }
+    if upper.contains("TEMPORAL_LOOKUP") {
+        return Some(super::query_functions::temporal_lookup(state, identity, sql).await);
+    }
+
     // Graph index and tree operations.
     if upper.starts_with("CREATE GRAPH INDEX ") {
         return Some(super::tree_ops::create_graph_index(state, identity, sql).await);

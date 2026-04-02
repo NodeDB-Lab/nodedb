@@ -34,6 +34,7 @@ pub(crate) mod parse_utils;
 pub mod period_lock;
 pub mod procedure;
 pub mod pubsub;
+pub mod query_functions;
 pub mod rls;
 pub mod role;
 pub mod router;
