@@ -1,4 +1,4 @@
-//! `nextval('sequence_name')` — advance sequence and return next value.
+//! `next_preview('sequence_name')` — peek at next value without consuming.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -10,23 +10,19 @@ use datafusion::logical_expr::{ColumnarValue, ScalarUDFImpl, Signature, Volatili
 
 use crate::control::sequence::SequenceRegistry;
 
-/// `nextval(name TEXT) → BIGINT | TEXT`
+/// `next_preview(name TEXT) → TEXT`
 ///
-/// Advances the named sequence and returns the new value.
-/// Returns BIGINT for plain sequences, TEXT for sequences with FORMAT.
-/// Registered as a DataFusion scalar UDF. Holds an `Arc<SequenceRegistry>`
-/// and a fixed `tenant_id` (resolved at QueryContext creation time).
-pub struct NextVal {
+/// Peeks at the next sequence value without consuming it. Returns the
+/// value that the next `nextval()` call would return.
+pub struct NextPreview {
     signature: Signature,
     registry: Arc<SequenceRegistry>,
     tenant_id: u32,
-    /// Tenant short code for `{TENANT}` format token resolution.
     tenant_code: String,
-    /// Session variables for `{CUSTOM:key}` format token resolution.
     session_vars: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
-impl NextVal {
+impl NextPreview {
     pub fn new(registry: Arc<SequenceRegistry>, tenant_id: u32) -> Self {
         Self {
             signature: Signature::exact(vec![DataType::Utf8], Volatility::Volatile),
@@ -36,53 +32,37 @@ impl NextVal {
             session_vars: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
-
-    /// Create with tenant code and session variables for format token resolution.
-    pub fn with_session_context(
-        registry: Arc<SequenceRegistry>,
-        tenant_id: u32,
-        tenant_code: String,
-        session_vars: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
-    ) -> Self {
-        Self {
-            signature: Signature::exact(vec![DataType::Utf8], Volatility::Volatile),
-            registry,
-            tenant_id,
-            tenant_code,
-            session_vars,
-        }
-    }
 }
 
-impl std::fmt::Debug for NextVal {
+impl std::fmt::Debug for NextPreview {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NextVal")
+        f.debug_struct("NextPreview")
             .field("tenant_id", &self.tenant_id)
             .finish()
     }
 }
 
-impl PartialEq for NextVal {
+impl PartialEq for NextPreview {
     fn eq(&self, other: &Self) -> bool {
         self.tenant_id == other.tenant_id
     }
 }
 
-impl Eq for NextVal {}
+impl Eq for NextPreview {}
 
-impl std::hash::Hash for NextVal {
+impl std::hash::Hash for NextPreview {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.tenant_id.hash(state);
     }
 }
 
-impl ScalarUDFImpl for NextVal {
+impl ScalarUDFImpl for NextPreview {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn name(&self) -> &str {
-        "nextval"
+        "next_preview"
     }
 
     fn signature(&self) -> &Signature {
@@ -90,9 +70,6 @@ impl ScalarUDFImpl for NextVal {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> DfResult<DataType> {
-        // Return Utf8 always — formatted sequences return strings, plain
-        // sequences return stringified integers. This avoids plan-time
-        // type ambiguity (we don't know at plan time if the sequence is formatted).
         Ok(DataType::Utf8)
     }
 
@@ -102,7 +79,7 @@ impl ScalarUDFImpl for NextVal {
     ) -> DfResult<ColumnarValue> {
         let args = &args.args;
         if args.len() != 1 {
-            return exec_err!("nextval requires exactly 1 argument");
+            return exec_err!("next_preview requires exactly 1 argument");
         }
 
         match &args[0] {
@@ -116,7 +93,7 @@ impl ScalarUDFImpl for NextVal {
                 let vars = self.session_vars.read().unwrap_or_else(|p| p.into_inner());
                 let result = self
                     .registry
-                    .nextval_formatted(self.tenant_id, &name, &self.tenant_code, &vars)
+                    .next_preview(self.tenant_id, &name, &self.tenant_code, &vars)
                     .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
                 let string_val = match result {
@@ -131,7 +108,7 @@ impl ScalarUDFImpl for NextVal {
             ColumnarValue::Array(arr) => {
                 let names = arr.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
                     datafusion::error::DataFusionError::Execution(
-                        "nextval argument must be TEXT".to_string(),
+                        "next_preview argument must be TEXT".to_string(),
                     )
                 })?;
 
@@ -144,7 +121,7 @@ impl ScalarUDFImpl for NextVal {
                         let name = names.value(i).to_lowercase();
                         let result = self
                             .registry
-                            .nextval_formatted(self.tenant_id, &name, &self.tenant_code, &vars)
+                            .next_preview(self.tenant_id, &name, &self.tenant_code, &vars)
                             .map_err(|e| {
                                 datafusion::error::DataFusionError::Execution(e.to_string())
                             })?;

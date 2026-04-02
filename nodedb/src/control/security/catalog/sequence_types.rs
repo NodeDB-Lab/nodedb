@@ -28,6 +28,16 @@ pub struct StoredSequence {
     pub epoch: u64,
     /// Timestamp of creation (milliseconds since epoch).
     pub created_at: u64,
+    /// Format template tokens (e.g. `[Literal("INV-"), Year2, Literal("-"), Seq{5}]`).
+    /// When `Some`, `nextval()` returns a formatted string instead of raw i64.
+    #[serde(default)]
+    pub format_template: Option<Vec<crate::control::sequence::FormatToken>>,
+    /// Reset scope — when the counter auto-resets to START.
+    #[serde(default)]
+    pub reset_scope: crate::control::sequence::ResetScope,
+    /// GAP_FREE mode: serialize nextval through a mutex, recycle on rollback.
+    #[serde(default)]
+    pub gap_free: bool,
 }
 
 impl StoredSequence {
@@ -45,6 +55,9 @@ impl StoredSequence {
             cache_size: 1,
             epoch: 1,
             created_at: 0,
+            format_template: None,
+            reset_scope: crate::control::sequence::ResetScope::Never,
+            gap_free: false,
         }
     }
 
@@ -89,6 +102,10 @@ pub struct SequenceState {
     pub is_called: bool,
     /// Epoch of the range allocation. Must match the sequence definition's epoch.
     pub epoch: u64,
+    /// Current period key for reset scope (e.g. "2026-04", "2026-Q2").
+    /// Empty string means no period tracking (ResetScope::Never).
+    #[serde(default)]
+    pub period_key: String,
 }
 
 impl SequenceState {
@@ -100,6 +117,7 @@ impl SequenceState {
             current_value: start_value,
             is_called: false,
             epoch,
+            period_key: String::new(),
         }
     }
 }

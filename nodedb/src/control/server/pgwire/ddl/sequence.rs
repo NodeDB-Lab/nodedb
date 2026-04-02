@@ -163,10 +163,41 @@ pub fn alter_sequence(
         return Ok(vec![Response::Execution(Tag::new("ALTER SEQUENCE"))]);
     }
 
+    if upper.contains("FORMAT") {
+        // ALTER SEQUENCE name FORMAT 'template'
+        let format_idx = parts
+            .iter()
+            .position(|p| p.eq_ignore_ascii_case("FORMAT"))
+            .unwrap_or(parts.len());
+        if let Some(raw) = parts.get(format_idx + 1) {
+            let raw = raw.trim_matches('\'').trim_matches('"');
+            let tokens =
+                crate::control::sequence::format::parse_format_template(raw).map_err(|e| {
+                    PgWireError::UserError(Box::new(ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "42601".to_owned(),
+                        format!("invalid FORMAT: {e}"),
+                    )))
+                })?;
+            // Update the stored definition with new format.
+            if let Some(mut def) = state.sequence_registry.get_def(tenant_id, &name) {
+                def.format_template = Some(tokens);
+                // Re-persist to catalog.
+                if let Some(catalog) = state.credentials.catalog() {
+                    let _ = catalog.put_sequence(&def);
+                }
+                // Re-create in registry with updated def.
+                let _ = state.sequence_registry.remove(tenant_id, &name);
+                let _ = state.sequence_registry.create(def);
+            }
+            return Ok(vec![Response::Execution(Tag::new("ALTER SEQUENCE"))]);
+        }
+    }
+
     Err(PgWireError::UserError(Box::new(ErrorInfo::new(
         "ERROR".to_owned(),
         "42601".to_owned(),
-        "ALTER SEQUENCE supports: RESTART [WITH value]".to_owned(),
+        "ALTER SEQUENCE supports: RESTART [WITH value], FORMAT 'template'".to_owned(),
     ))))
 }
 
@@ -190,6 +221,69 @@ pub fn show_sequences(
         encoder.encode_field(name)?;
         encoder.encode_field(&current_value.to_string())?;
         encoder.encode_field(&is_called.to_string())?;
+        rows.push(Ok(encoder.take_row()));
+    }
+
+    Ok(vec![Response::Query(QueryResponse::new(
+        schema,
+        futures::stream::iter(rows),
+    ))])
+}
+
+/// Handle `DESCRIBE SEQUENCE name`.
+pub fn describe_sequence(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    name: &str,
+) -> PgWireResult<Vec<Response>> {
+    let tenant_id = identity.tenant_id.as_u32();
+    let name = name.to_lowercase();
+
+    let def = state
+        .sequence_registry
+        .get_def(tenant_id, &name)
+        .ok_or_else(|| {
+            PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "42P01".to_owned(),
+                format!("sequence \"{name}\" does not exist"),
+            )))
+        })?;
+
+    let schema = Arc::new(vec![text_field("property"), text_field("value")]);
+
+    let format_str = def
+        .format_template
+        .as_ref()
+        .map(|_| "(defined)")
+        .unwrap_or("(none)");
+
+    let reset_str = match def.reset_scope {
+        crate::control::sequence::ResetScope::Never => "NEVER",
+        crate::control::sequence::ResetScope::Yearly => "YEARLY",
+        crate::control::sequence::ResetScope::Monthly => "MONTHLY",
+        crate::control::sequence::ResetScope::Quarterly => "QUARTERLY",
+        crate::control::sequence::ResetScope::Daily => "DAILY",
+    };
+
+    let props = [
+        ("name", def.name.as_str()),
+        ("start_value", &def.start_value.to_string()),
+        ("increment", &def.increment.to_string()),
+        ("min_value", &def.min_value.to_string()),
+        ("max_value", &def.max_value.to_string()),
+        ("cycle", &def.cycle.to_string()),
+        ("cache_size", &def.cache_size.to_string()),
+        ("format", format_str),
+        ("reset_scope", reset_str),
+        ("gap_free", &def.gap_free.to_string()),
+    ];
+
+    let mut rows = Vec::with_capacity(props.len());
+    for (k, v) in &props {
+        let mut encoder = DataRowEncoder::new(schema.clone());
+        encoder.encode_field(&k.to_string())?;
+        encoder.encode_field(&v.to_string())?;
         rows.push(Ok(encoder.take_row()));
     }
 
@@ -272,6 +366,43 @@ fn parse_create_sequence(sql: &str, tenant_id: u32, owner: &str) -> PgWireResult
                 if i < parts.len() {
                     def.cache_size = parse_i64(parts[i], "CACHE")?;
                 }
+            }
+            "FORMAT" => {
+                // FORMAT 'template-string'
+                i += 1;
+                if i < parts.len() {
+                    let raw = parts[i].trim_matches('\'').trim_matches('"');
+                    let tokens = crate::control::sequence::format::parse_format_template(raw)
+                        .map_err(|e| {
+                            PgWireError::UserError(Box::new(ErrorInfo::new(
+                                "ERROR".to_owned(),
+                                "42601".to_owned(),
+                                format!("invalid FORMAT: {e}"),
+                            )))
+                        })?;
+                    def.format_template = Some(tokens);
+                }
+            }
+            "RESET" => {
+                // RESET MONTHLY | RESET YEARLY | ...
+                i += 1;
+                if i < parts.len() {
+                    def.reset_scope = crate::control::sequence::format::ResetScope::parse(parts[i])
+                        .map_err(|e| {
+                            PgWireError::UserError(Box::new(ErrorInfo::new(
+                                "ERROR".to_owned(),
+                                "42601".to_owned(),
+                                e.to_string(),
+                            )))
+                        })?;
+                }
+            }
+            "GAP_FREE" => {
+                def.gap_free = true;
+            }
+            "SCOPE" => {
+                // SCOPE TENANT — informational, affects {TENANT} token resolution.
+                i += 1; // skip the "TENANT" token
             }
             _ => {
                 // Ignore unknown tokens (e.g., "IF NOT EXISTS" handled elsewhere).

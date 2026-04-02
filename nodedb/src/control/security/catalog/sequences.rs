@@ -202,6 +202,9 @@ mod tests {
             cache_size: 1,
             epoch: 1,
             created_at: 1000,
+            format_template: None,
+            reset_scope: crate::control::sequence::ResetScope::Never,
+            gap_free: false,
         };
         cat.put_sequence(&seq).unwrap();
 
@@ -226,6 +229,9 @@ mod tests {
             cache_size: 1,
             epoch: 1,
             created_at: 0,
+            format_template: None,
+            reset_scope: crate::control::sequence::ResetScope::Never,
+            gap_free: false,
         };
         cat.put_sequence(&seq).unwrap();
         assert!(cat.delete_sequence(1, "s1").unwrap());
@@ -249,6 +255,9 @@ mod tests {
                 cache_size: 1,
                 epoch: 1,
                 created_at: 0,
+                format_template: None,
+                reset_scope: crate::control::sequence::ResetScope::Never,
+                gap_free: false,
             };
             cat.put_sequence(&seq).unwrap();
         }
@@ -265,6 +274,9 @@ mod tests {
             cache_size: 1,
             epoch: 1,
             created_at: 0,
+            format_template: None,
+            reset_scope: crate::control::sequence::ResetScope::Never,
+            gap_free: false,
         };
         cat.put_sequence(&other).unwrap();
 

@@ -57,7 +57,19 @@ impl NodeDbPgHandler {
                 for (_collection, _doc_id, read_lsn) in &read_set {
                     if current > *read_lsn && current > snapshot_lsn {
                         // WAL advanced past what we read — concurrent write detected.
-                        self.sessions.rollback(addr).ok();
+                        // Rollback GAP_FREE reservations held by this transaction.
+                        if let Ok(reservations) = self.sessions.rollback(addr) {
+                            for handle in &reservations {
+                                let key = handle.sequence_key.clone();
+                                let registry = &self.state.sequence_registry;
+                                registry.gap_free_manager().rollback(handle, || {
+                                    let map = registry.sequences_read();
+                                    if let Some(h) = map.get(&key) {
+                                        h.rollback_one();
+                                    }
+                                });
+                            }
+                        }
                         return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                             "ERROR".to_owned(),
                             "40001".to_owned(),
@@ -150,13 +162,33 @@ impl NodeDbPgHandler {
                 }
             }
 
+            // Finalize GAP_FREE reservations (numbers become permanent).
+            let reservations = self.sessions.take_pending_reservations(addr);
+            for handle in &reservations {
+                self.state
+                    .sequence_registry
+                    .gap_free_manager()
+                    .commit(handle);
+            }
+
             // Close non-WITH-HOLD cursors on transaction end.
             self.sessions.close_non_hold_cursors(addr);
             return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
         }
 
         if upper == "ROLLBACK" || upper == "ABORT" {
-            let _ = self.sessions.rollback(addr);
+            // Rollback GAP_FREE reservations (numbers recycled).
+            let reservations = self.sessions.rollback(addr).unwrap_or_default();
+            for handle in &reservations {
+                let key = &handle.sequence_key;
+                let registry = &self.state.sequence_registry;
+                registry.gap_free_manager().rollback(handle, || {
+                    let map = registry.sequences_read();
+                    if let Some(h) = map.get(key.as_str()) {
+                        h.rollback_one();
+                    }
+                });
+            }
             // Close non-WITH-HOLD cursors on transaction end.
             self.sessions.close_non_hold_cursors(addr);
             return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);

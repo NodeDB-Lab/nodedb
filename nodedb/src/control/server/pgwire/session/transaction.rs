@@ -75,9 +75,23 @@ impl SessionStore {
             session.tx_state = TransactionState::Idle;
             session.tx_snapshot_lsn = None;
             session.savepoints.clear();
+            // Note: pending_sequence_reservations are taken separately via
+            // take_pending_reservations() so the caller can finalize them
+            // with the GAP_FREE manager (which requires Arc<SequenceRegistry>).
             Ok(buffer)
         })
         .unwrap_or(Ok(Vec::new()))
+    }
+
+    /// Take pending GAP_FREE sequence reservations (called after successful COMMIT).
+    pub fn take_pending_reservations(
+        &self,
+        addr: &SocketAddr,
+    ) -> Vec<crate::control::sequence::gap_free::ReservationHandle> {
+        self.write_session(addr, |session| {
+            std::mem::take(&mut session.pending_sequence_reservations)
+        })
+        .unwrap_or_default()
     }
 
     /// Take pending offset commits (called after successful COMMIT dispatch).
@@ -129,16 +143,23 @@ impl SessionStore {
     }
 
     /// ROLLBACK — discard the write buffer and return to idle.
-    pub fn rollback(&self, addr: &SocketAddr) -> Result<(), &'static str> {
-        self.write_session(addr, |session| {
-            session.tx_buffer.clear();
-            session.tx_state = TransactionState::Idle;
-            session.tx_snapshot_lsn = None;
-            session.tx_read_set.clear();
-            session.savepoints.clear();
-            session.pending_offset_commits.clear();
-        });
-        Ok(())
+    /// Returns any pending GAP_FREE reservations that need to be rolled back.
+    pub fn rollback(
+        &self,
+        addr: &SocketAddr,
+    ) -> Result<Vec<crate::control::sequence::gap_free::ReservationHandle>, &'static str> {
+        let reservations = self
+            .write_session(addr, |session| {
+                session.tx_buffer.clear();
+                session.tx_state = TransactionState::Idle;
+                session.tx_snapshot_lsn = None;
+                session.tx_read_set.clear();
+                session.savepoints.clear();
+                session.pending_offset_commits.clear();
+                std::mem::take(&mut session.pending_sequence_reservations)
+            })
+            .unwrap_or_default();
+        Ok(reservations)
     }
 
     /// Mark the current transaction as failed (after a query error inside BEGIN).

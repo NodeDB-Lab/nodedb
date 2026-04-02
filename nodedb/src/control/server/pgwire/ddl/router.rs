@@ -279,6 +279,10 @@ pub async fn dispatch(
     }
 
     // Schema introspection.
+    if upper.starts_with("DESCRIBE SEQUENCE ") {
+        let name = parts.get(2).unwrap_or(&"");
+        return Some(super::sequence::describe_sequence(state, identity, name));
+    }
     if upper.starts_with("DESCRIBE ") || upper.starts_with("\\D ") {
         return Some(super::collection::describe_collection(
             state, identity, &parts,

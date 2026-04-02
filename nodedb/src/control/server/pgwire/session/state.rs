@@ -77,6 +77,9 @@ pub struct PgSession {
     /// Per-session plan cache for prepared statement execution.
     /// Keyed by (sql_hash, schema_version) — auto-invalidates on DDL.
     pub plan_cache: crate::control::server::pgwire::handler::prepared::plan_cache::PlanCache,
+    /// GAP_FREE sequence reservations pending commit/rollback.
+    /// On COMMIT: each reservation is finalized. On ROLLBACK: counter decremented.
+    pub pending_sequence_reservations: Vec<crate::control::sequence::gap_free::ReservationHandle>,
 }
 
 impl PgSession {
@@ -113,6 +116,7 @@ impl PgSession {
             temp_tables: super::temp_tables::TempTableRegistry::new(),
             plan_cache:
                 crate::control::server::pgwire::handler::prepared::plan_cache::PlanCache::new(128),
+            pending_sequence_reservations: Vec::new(),
         }
     }
 }

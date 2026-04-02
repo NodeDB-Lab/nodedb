@@ -1,10 +1,12 @@
 //! Sequence runtime types.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Lock-free handle for a single sequence's counter on this node.
 ///
 /// `nextval` uses `AtomicI64::fetch_add` — zero contention, no mutex.
+/// For GAP_FREE mode, the caller must use `GapFreeManager` externally.
 pub struct SequenceHandle {
     /// Current counter value. Starts at `start_value - increment` so the
     /// first `fetch_add(increment)` returns `start_value`.
@@ -13,6 +15,9 @@ pub struct SequenceHandle {
     called: AtomicBool,
     /// Sequence definition (immutable after creation, replaced on ALTER).
     pub def: crate::control::security::catalog::sequence_types::StoredSequence,
+    /// Current period key for reset scope tracking. Protected by mutex
+    /// because period transitions are rare but must be atomic with counter reset.
+    period_key: Mutex<String>,
 }
 
 impl SequenceHandle {
@@ -21,22 +26,21 @@ impl SequenceHandle {
         def: crate::control::security::catalog::sequence_types::StoredSequence,
         state: Option<crate::control::security::catalog::sequence_types::SequenceState>,
     ) -> Self {
-        let (initial_counter, called) = if let Some(s) = state {
+        let (initial_counter, called, period_key) = if let Some(s) = state {
             if s.is_called {
-                (s.current_value, true)
+                (s.current_value, true, s.period_key)
             } else {
-                // Not yet called — position so first nextval returns start_value.
-                (def.start_value - def.increment, false)
+                (def.start_value - def.increment, false, s.period_key)
             }
         } else {
-            // No persisted state — position so first nextval returns start_value.
-            (def.start_value - def.increment, false)
+            (def.start_value - def.increment, false, String::new())
         };
 
         Self {
             counter: AtomicI64::new(initial_counter),
             called: AtomicBool::new(called),
             def,
+            period_key: Mutex::new(period_key),
         }
     }
 
@@ -186,6 +190,34 @@ impl SequenceHandle {
         Ok(value)
     }
 
+    /// Check if the period has changed and reset the counter if needed.
+    ///
+    /// Must be called before `nextval()` when the sequence has a reset scope.
+    /// Returns `true` if the counter was reset.
+    pub fn check_period_reset(&self, new_period_key: &str) -> bool {
+        if new_period_key.is_empty() {
+            return false; // ResetScope::Never
+        }
+
+        let mut pk = self.period_key.lock().unwrap_or_else(|p| p.into_inner());
+        if pk.as_str() != new_period_key {
+            // Period changed — reset counter to start_value position.
+            self.counter
+                .store(self.def.start_value - self.def.increment, Ordering::Relaxed);
+            self.called.store(false, Ordering::Relaxed);
+            *pk = new_period_key.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Decrement the counter by one increment (for GAP_FREE rollback).
+    pub fn rollback_one(&self) {
+        self.counter
+            .fetch_sub(self.def.increment, Ordering::Relaxed);
+    }
+
     /// Get current counter value for persistence.
     pub fn current_value(&self) -> i64 {
         self.counter.load(Ordering::Relaxed)
@@ -194,6 +226,14 @@ impl SequenceHandle {
     /// Whether nextval has been called.
     pub fn is_called(&self) -> bool {
         self.called.load(Ordering::Relaxed)
+    }
+
+    /// Get the current period key for persistence.
+    pub fn period_key(&self) -> String {
+        self.period_key
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 
@@ -217,6 +257,10 @@ pub enum SequenceError {
     AlreadyExists { name: String },
     /// Invalid definition.
     InvalidDefinition { detail: String },
+    /// Format template parse error.
+    FormatParse { detail: String },
+    /// Invalid reset scope.
+    InvalidResetScope { detail: String },
 }
 
 impl std::fmt::Display for SequenceError {
@@ -250,6 +294,12 @@ impl std::fmt::Display for SequenceError {
             }
             SequenceError::InvalidDefinition { detail } => {
                 write!(f, "invalid sequence definition: {detail}")
+            }
+            SequenceError::FormatParse { detail } => {
+                write!(f, "format template error: {detail}")
+            }
+            SequenceError::InvalidResetScope { detail } => {
+                write!(f, "invalid reset scope: {detail}")
             }
         }
     }

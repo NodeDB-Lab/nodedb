@@ -373,6 +373,7 @@ pub const SYSTEM_FUNCTION_NAMES: &[&str] = &[
     "nextval",
     "currval",
     "setval",
+    "next_preview",
 ];
 
 fn register_udfs(session: &SessionContext) {
@@ -415,7 +416,7 @@ fn register_sequence_udfs(
     registry: Arc<crate::control::sequence::SequenceRegistry>,
     tenant_id: u32,
 ) {
-    use super::udf::sequence::{CurrVal, NextVal, SetVal};
+    use super::udf::sequence::{CurrVal, NextPreview, NextVal, SetVal};
     use datafusion::logical_expr::ScalarUDF;
 
     session.register_udf(ScalarUDF::new_from_impl(NextVal::new(
@@ -423,6 +424,10 @@ fn register_sequence_udfs(
         tenant_id,
     )));
     session.register_udf(ScalarUDF::new_from_impl(CurrVal::new(
+        Arc::clone(&registry),
+        tenant_id,
+    )));
+    session.register_udf(ScalarUDF::new_from_impl(NextPreview::new(
         Arc::clone(&registry),
         tenant_id,
     )));

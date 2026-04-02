@@ -9,6 +9,8 @@ use std::sync::RwLock;
 use crate::control::security::catalog::sequence_types::{SequenceState, StoredSequence};
 use crate::control::security::catalog::types::SystemCatalog;
 
+use super::format::{self, FormatContext, ResetScope};
+use super::gap_free::GapFreeManager;
 use super::types::{SequenceError, SequenceHandle};
 
 /// In-memory registry of all sequences, keyed by `"{tenant_id}:{name}"`.
@@ -18,13 +20,21 @@ use super::types::{SequenceError, SequenceHandle};
 pub struct SequenceRegistry {
     /// Sequences keyed by `"{tenant_id}:{name}"`.
     sequences: RwLock<HashMap<String, SequenceHandle>>,
+    /// GAP_FREE reservation manager (shared across all sequences).
+    gap_free: GapFreeManager,
 }
 
 impl SequenceRegistry {
     pub fn new() -> Self {
         Self {
             sequences: RwLock::new(HashMap::new()),
+            gap_free: GapFreeManager::new(),
         }
+    }
+
+    /// Access the GAP_FREE manager (for commit/rollback from transaction lifecycle).
+    pub fn gap_free_manager(&self) -> &GapFreeManager {
+        &self.gap_free
     }
 
     /// Load all sequences from the catalog on startup.
@@ -86,7 +96,83 @@ impl SequenceRegistry {
             name: name.to_string(),
         })?;
 
+        // Check period reset before advancing.
+        self.check_period_reset(handle);
+
         handle.nextval()
+    }
+
+    /// Get the next value, returning a formatted string if format is defined.
+    ///
+    /// Returns `Ok(SequenceValue::Int(i64))` for plain sequences, or
+    /// `Ok(SequenceValue::Formatted(String))` for sequences with FORMAT.
+    pub fn nextval_formatted(
+        &self,
+        tenant_id: u32,
+        name: &str,
+        tenant_code: &str,
+        session_vars: &std::collections::HashMap<String, String>,
+    ) -> Result<SequenceValue, SequenceError> {
+        let key = registry_key(tenant_id, name);
+        let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
+
+        let handle = map.get(&key).ok_or_else(|| SequenceError::NotFound {
+            name: name.to_string(),
+        })?;
+
+        // Check period reset before advancing.
+        self.check_period_reset(handle);
+
+        let raw = handle.nextval()?;
+
+        match &handle.def.format_template {
+            Some(tokens) => {
+                let ctx = FormatContext::now(raw, tenant_code, session_vars);
+                let formatted = format::format_sequence_value(tokens, &ctx);
+                Ok(SequenceValue::Formatted(formatted))
+            }
+            None => Ok(SequenceValue::Int(raw)),
+        }
+    }
+
+    /// Peek at the next value without consuming it.
+    pub fn next_preview(
+        &self,
+        tenant_id: u32,
+        name: &str,
+        tenant_code: &str,
+        session_vars: &std::collections::HashMap<String, String>,
+    ) -> Result<SequenceValue, SequenceError> {
+        let key = registry_key(tenant_id, name);
+        let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
+
+        let handle = map.get(&key).ok_or_else(|| SequenceError::NotFound {
+            name: name.to_string(),
+        })?;
+
+        let next_raw = handle.current_value() + handle.def.increment;
+
+        match &handle.def.format_template {
+            Some(tokens) => {
+                let ctx = FormatContext::now(next_raw, tenant_code, session_vars);
+                let formatted = format::format_sequence_value(tokens, &ctx);
+                Ok(SequenceValue::Formatted(formatted))
+            }
+            None => Ok(SequenceValue::Int(next_raw)),
+        }
+    }
+
+    /// Check and apply period reset if the reset scope has changed period.
+    fn check_period_reset(&self, handle: &SequenceHandle) {
+        if handle.def.reset_scope == ResetScope::Never {
+            return;
+        }
+
+        let dt = nodedb_types::NdbDateTime::now();
+        let c = dt.components();
+        let new_pk =
+            format::compute_period_key(&handle.def.reset_scope, c.year as u16, c.month, c.day);
+        handle.check_period_reset(&new_pk);
     }
 
     /// Get N values from a sequence in one atomic batch.
@@ -174,6 +260,7 @@ impl SequenceRegistry {
                 current_value: handle.current_value(),
                 is_called: handle.is_called(),
                 epoch: handle.def.epoch,
+                period_key: handle.period_key(),
             };
             if let Err(e) = catalog.put_sequence_state(&state) {
                 tracing::warn!(
@@ -183,6 +270,13 @@ impl SequenceRegistry {
                 );
             }
         }
+    }
+
+    /// Read-lock the sequences map (for GAP_FREE rollback access).
+    pub fn sequences_read(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, HashMap<String, SequenceHandle>> {
+        self.sequences.read().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Check if a sequence exists.
@@ -204,6 +298,15 @@ impl Default for SequenceRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Return type for `nextval_formatted` — either raw integer or formatted string.
+#[derive(Debug, Clone)]
+pub enum SequenceValue {
+    /// Raw integer value (no format template).
+    Int(i64),
+    /// Formatted string (format template resolved).
+    Formatted(String),
 }
 
 fn registry_key(tenant_id: u32, name: &str) -> String {
