@@ -88,6 +88,9 @@ impl SharedState {
     }
 
     /// Record an audit event.
+    ///
+    /// Writes to both the in-memory cache and the durable audit WAL (if available).
+    /// The audit WAL write is synchronous — the entry is fsynced before return.
     pub fn audit_record(
         &self,
         event: crate::control::security::audit::AuditEvent,
@@ -95,15 +98,27 @@ impl SharedState {
         source: &str,
         detail: &str,
     ) {
-        match self.audit.lock() {
+        let entry = match self.audit.lock() {
             Ok(mut log) => {
                 log.record(event, tenant_id, source, detail);
+                // Clone the last entry for WAL persistence.
+                log.all().back().cloned()
             }
             Err(poisoned) => {
                 warn!("audit log mutex poisoned, recovering");
-                poisoned
-                    .into_inner()
-                    .record(event, tenant_id, source, detail);
+                let mut log = poisoned.into_inner();
+                log.record(event, tenant_id, source, detail);
+                log.all().back().cloned()
+            }
+        };
+
+        // Write to durable audit WAL if available.
+        if let Some(ref entry) = entry
+            && let Ok(bytes) = rmp_serde::to_vec_named(entry)
+        {
+            let data_lsn = self.wal.next_lsn().as_u64();
+            if let Err(e) = self.wal.append_audit_durable(&bytes, data_lsn) {
+                warn!(error = %e, "failed to write audit entry to durable WAL");
             }
         }
     }

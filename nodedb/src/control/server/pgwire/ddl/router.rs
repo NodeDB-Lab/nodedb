@@ -289,7 +289,10 @@ pub async fn dispatch(
         ));
     }
 
-    // Query functions: VERIFY_HASH_CHAIN, BALANCE_AS_OF, TEMPORAL_LOOKUP.
+    // Query functions.
+    if upper.contains("VERIFY_AUDIT_CHAIN") {
+        return Some(super::query_functions::verify_audit_chain(state, identity, sql).await);
+    }
     if upper.contains("VERIFY_HASH_CHAIN") {
         return Some(super::query_functions::verify_hash_chain(state, identity, sql).await);
     }
