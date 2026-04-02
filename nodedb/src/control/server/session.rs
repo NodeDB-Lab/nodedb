@@ -394,6 +394,7 @@ impl Session {
             consistency: ReadConsistency::Strong,
             idempotency_key: None,
             event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
         };
 
         // Register for response routing before dispatching.

@@ -38,6 +38,10 @@ pub enum SqlExpr {
     NullIf(Box<SqlExpr>, Box<SqlExpr>),
     /// IS NULL / IS NOT NULL.
     IsNull { expr: Box<SqlExpr>, negated: bool },
+    /// OLD column reference: extract field value from the pre-update document.
+    /// Used in TRANSITION CHECK predicates. Resolves against the OLD row
+    /// when evaluated via `eval_with_old()`. Returns NULL in normal `eval()`.
+    OldColumn(String),
 }
 
 /// Binary operators.
@@ -159,6 +163,101 @@ impl SqlExpr {
 
             SqlExpr::IsNull { expr, negated } => {
                 let v = expr.eval(doc);
+                let is_null = v.is_null();
+                serde_json::Value::Bool(if *negated { !is_null } else { is_null })
+            }
+
+            SqlExpr::OldColumn(_) => serde_json::Value::Null,
+        }
+    }
+
+    /// Evaluate with access to both NEW and OLD documents (for TRANSITION CHECK).
+    ///
+    /// `Column(name)` resolves against `new_doc`.
+    /// `OldColumn(name)` resolves against `old_doc`.
+    pub fn eval_with_old(
+        &self,
+        new_doc: &serde_json::Value,
+        old_doc: &serde_json::Value,
+    ) -> serde_json::Value {
+        match self {
+            SqlExpr::Column(name) => new_doc
+                .get(name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            SqlExpr::OldColumn(name) => old_doc
+                .get(name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            SqlExpr::Literal(v) => v.clone(),
+            SqlExpr::BinaryOp { left, op, right } => {
+                let l = left.eval_with_old(new_doc, old_doc);
+                let r = right.eval_with_old(new_doc, old_doc);
+                eval_binary_op(&l, *op, &r)
+            }
+            SqlExpr::Negate(inner) => {
+                let v = inner.eval_with_old(new_doc, old_doc);
+                if let Some(b) = v.as_bool() {
+                    serde_json::Value::Bool(!b)
+                } else {
+                    match json_to_f64(&v, false) {
+                        Some(n) => to_json_number(-n),
+                        None => serde_json::Value::Null,
+                    }
+                }
+            }
+            SqlExpr::Function { name, args } => {
+                let evaluated: Vec<serde_json::Value> = args
+                    .iter()
+                    .map(|a| a.eval_with_old(new_doc, old_doc))
+                    .collect();
+                crate::functions::eval_function(name, &evaluated)
+            }
+            SqlExpr::Cast { expr, to_type } => {
+                let v = expr.eval_with_old(new_doc, old_doc);
+                crate::cast::eval_cast(&v, to_type)
+            }
+            SqlExpr::Case {
+                operand,
+                when_thens,
+                else_expr,
+            } => {
+                let op_val = operand.as_ref().map(|e| e.eval_with_old(new_doc, old_doc));
+                for (when_expr, then_expr) in when_thens {
+                    let when_val = when_expr.eval_with_old(new_doc, old_doc);
+                    let matches = match &op_val {
+                        Some(ov) => coerced_eq(ov, &when_val),
+                        None => is_truthy(&when_val),
+                    };
+                    if matches {
+                        return then_expr.eval_with_old(new_doc, old_doc);
+                    }
+                }
+                match else_expr {
+                    Some(e) => e.eval_with_old(new_doc, old_doc),
+                    None => serde_json::Value::Null,
+                }
+            }
+            SqlExpr::Coalesce(exprs) => {
+                for expr in exprs {
+                    let v = expr.eval_with_old(new_doc, old_doc);
+                    if !v.is_null() {
+                        return v;
+                    }
+                }
+                serde_json::Value::Null
+            }
+            SqlExpr::NullIf(a, b) => {
+                let va = a.eval_with_old(new_doc, old_doc);
+                let vb = b.eval_with_old(new_doc, old_doc);
+                if coerced_eq(&va, &vb) {
+                    serde_json::Value::Null
+                } else {
+                    va
+                }
+            }
+            SqlExpr::IsNull { expr, negated } => {
+                let v = expr.eval_with_old(new_doc, old_doc);
                 let is_null = v.is_null();
                 serde_json::Value::Bool(if *negated { !is_null } else { is_null })
             }

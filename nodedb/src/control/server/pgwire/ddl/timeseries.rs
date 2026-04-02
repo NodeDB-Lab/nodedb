@@ -76,6 +76,8 @@ pub fn create_timeseries(
         period_lock: None,
         retention_period: None,
         legal_holds: Vec::new(),
+        state_constraints: Vec::new(),
+        transition_checks: Vec::new(),
     };
 
     if let Some(catalog) = state.credentials.catalog() {

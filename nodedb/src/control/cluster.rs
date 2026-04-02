@@ -260,6 +260,7 @@ impl nodedb_cluster::CommitApplier for SpscCommitApplier {
                         consistency: crate::types::ReadConsistency::Strong,
                         idempotency_key: Some(entry.index),
                         event_source: crate::event::EventSource::RaftFollower,
+                        user_roles: Vec::new(),
                     };
 
                     match self.shared.dispatcher.lock() {

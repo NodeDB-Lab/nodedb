@@ -43,6 +43,7 @@ pub async fn broadcast_to_all_cores(
             consistency: ReadConsistency::Strong,
             idempotency_key: None,
             event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
         };
 
         let rx = shared.tracker.register_oneshot(request_id);

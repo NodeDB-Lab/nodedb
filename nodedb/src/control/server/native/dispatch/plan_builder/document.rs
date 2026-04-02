@@ -299,7 +299,7 @@ pub(crate) fn build_register(fields: &TextFields, collection: &str) -> crate::Re
         index_paths,
         crdt_enabled: false,
         storage_mode: crate::bridge::physical_plan::StorageMode::Schemaless,
-        enforcement: crate::bridge::physical_plan::EnforcementOptions::default(),
+        enforcement: Box::new(crate::bridge::physical_plan::EnforcementOptions::default()),
     }))
 }
 

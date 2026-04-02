@@ -292,6 +292,12 @@ pub struct StoredCollection {
     /// Active legal holds. DELETE rejected while any hold is active. Each tag is unique.
     #[serde(default)]
     pub legal_holds: Vec<LegalHold>,
+    /// State transition constraints: column value can only change along declared paths.
+    #[serde(default)]
+    pub state_constraints: Vec<StateTransitionDef>,
+    /// Transition check predicates: OLD/NEW expression evaluated on UPDATE.
+    #[serde(default)]
+    pub transition_checks: Vec<TransitionCheckDef>,
 }
 
 /// Double-entry balance constraint: within a single transaction, for each
@@ -338,6 +344,42 @@ pub struct LegalHold {
     pub created_by: String,
 }
 
+/// State transition constraint: column value can only change along declared paths.
+///
+/// Example: `status` can go `'draft' → 'submitted'`, `'submitted' → 'approved' BY ROLE 'manager'`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct StateTransitionDef {
+    /// Constraint name (for DROP CONSTRAINT).
+    pub name: String,
+    /// Column this constraint applies to.
+    pub column: String,
+    /// Allowed transitions: (from_value, to_value, optional required_role).
+    pub transitions: Vec<TransitionRule>,
+}
+
+/// A single allowed state transition, optionally guarded by a role.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct TransitionRule {
+    /// Value the column is transitioning FROM.
+    pub from: String,
+    /// Value the column is transitioning TO.
+    pub to: String,
+    /// If set, the user must hold this role to perform this transition.
+    pub required_role: Option<String>,
+}
+
+/// Transition check predicate: evaluated on UPDATE with access to OLD and NEW row values.
+///
+/// If the predicate returns FALSE, the UPDATE is rejected.
+/// Not evaluated on INSERT (only CHECK constraints apply to inserts).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct TransitionCheckDef {
+    /// Constraint name (for DROP CONSTRAINT).
+    pub name: String,
+    /// Serialized predicate expression with OLD.* and NEW.* column references.
+    pub predicate: crate::bridge::expr_eval::SqlExpr,
+}
+
 impl StoredCollection {
     /// Create a minimal collection entry (schemaless document, no fields).
     pub fn new(tenant_id: u32, name: &str, owner: &str) -> Self {
@@ -363,6 +405,8 @@ impl StoredCollection {
             period_lock: None,
             retention_period: None,
             legal_holds: Vec::new(),
+            state_constraints: Vec::new(),
+            transition_checks: Vec::new(),
         }
     }
 

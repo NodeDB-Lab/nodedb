@@ -154,6 +154,8 @@ pub fn create_collection(
         period_lock: None,
         retention_period: None,
         legal_holds: Vec::new(),
+        state_constraints: Vec::new(),
+        transition_checks: Vec::new(),
     };
 
     // Persist to catalog.
@@ -300,6 +302,8 @@ pub async fn dispatch_register_if_needed(
             crate::data::executor::enforcement::retention::parse_retention_period(s).ok()
         }),
         has_legal_hold: !coll.legal_holds.is_empty(),
+        state_constraints: coll.state_constraints.clone(),
+        transition_checks: coll.transition_checks.clone(),
     };
 
     let vshard = crate::types::VShardId::from_collection(&name);
@@ -309,7 +313,7 @@ pub async fn dispatch_register_if_needed(
             index_paths,
             crdt_enabled,
             storage_mode,
-            enforcement,
+            enforcement: Box::new(enforcement),
         },
     );
 

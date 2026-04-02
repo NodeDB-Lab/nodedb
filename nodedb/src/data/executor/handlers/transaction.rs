@@ -61,7 +61,13 @@ impl CoreLoop {
         let mut last_response = self.response_ok(task);
 
         for (i, plan) in plans.iter().enumerate() {
-            let result = self.execute_tx_sub_plan(tid, plan, &mut undo_log, &mut crdt_deltas);
+            let result = self.execute_tx_sub_plan(
+                tid,
+                plan,
+                &mut undo_log,
+                &mut crdt_deltas,
+                &task.request.user_roles,
+            );
 
             match result {
                 Ok(resp) => {
@@ -190,6 +196,7 @@ impl CoreLoop {
         plan: &PhysicalPlan,
         undo_log: &mut Vec<UndoEntry>,
         crdt_deltas: &mut Vec<(Vec<u8>, u64)>,
+        user_roles: &[String],
     ) -> Result<Response, ErrorCode> {
         // Create a temporary task for sub-plan response construction.
         let dummy_task = ExecutionTask::new(crate::bridge::envelope::Request {
@@ -205,6 +212,7 @@ impl CoreLoop {
             consistency: crate::types::ReadConsistency::Strong,
             idempotency_key: None,
             event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
         });
 
         match plan {
@@ -216,7 +224,7 @@ impl CoreLoop {
                 // Save old value for rollback.
                 let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
 
-                // Enforcement: append-only + period lock.
+                // Enforcement: append-only + period lock + state transitions + transition checks.
                 let config_key = format!("{tid}:{collection}");
                 if let Some(config) = self.doc_configs.get(&config_key) {
                     super::super::enforcement::append_only::check_point_put(
@@ -233,6 +241,32 @@ impl CoreLoop {
                             value, // raw value bytes from the plan
                             pl,
                         )?;
+                    }
+                    // State transitions + transition checks: only on UPDATE (old exists).
+                    if old_value.is_some() {
+                        let old_json = old_value
+                            .as_ref()
+                            .and_then(|b| super::super::doc_format::decode_document(b));
+                        let new_json = super::super::doc_format::decode_document(value);
+                        if let (Some(old_doc), Some(new_doc)) = (&old_json, &new_json) {
+                            if !config.enforcement.state_constraints.is_empty() {
+                                super::super::enforcement::state_transition::check_state_transitions(
+                                    collection,
+                                    &config.enforcement.state_constraints,
+                                    old_doc,
+                                    new_doc,
+                                    user_roles,
+                                )?;
+                            }
+                            if !config.enforcement.transition_checks.is_empty() {
+                                super::super::enforcement::transition_check::check_transition_predicates(
+                                    collection,
+                                    &config.enforcement.transition_checks,
+                                    old_doc,
+                                    new_doc,
+                                )?;
+                            }
+                        }
                     }
                 }
 
@@ -427,6 +461,7 @@ impl CoreLoop {
                     consistency: crate::types::ReadConsistency::Strong,
                     idempotency_key: None,
                     event_source: crate::event::EventSource::User,
+                    user_roles: Vec::new(),
                 }));
                 if resp.status == Status::Error {
                     return Err(resp.error_code.unwrap_or(ErrorCode::Internal {

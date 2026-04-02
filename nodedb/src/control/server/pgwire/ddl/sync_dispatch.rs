@@ -62,6 +62,7 @@ pub async fn dispatch_async_with_source(
         consistency: ReadConsistency::Strong,
         idempotency_key: None,
         event_source,
+        user_roles: Vec::new(),
     };
 
     let rx = state.tracker.register_oneshot(request_id);

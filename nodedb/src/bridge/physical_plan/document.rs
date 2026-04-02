@@ -38,6 +38,10 @@ pub struct EnforcementOptions {
     pub retention: Option<crate::data::executor::enforcement::retention::RetentionDuration>,
     /// Whether any legal hold is active. DELETE unconditionally rejected.
     pub has_legal_hold: bool,
+    /// State transition constraints: column value transitions must follow declared paths.
+    pub state_constraints: Vec<crate::control::security::catalog::types::StateTransitionDef>,
+    /// Transition check predicates: OLD/NEW expressions evaluated on UPDATE.
+    pub transition_checks: Vec<crate::control::security::catalog::types::TransitionCheckDef>,
 }
 
 /// Period lock configuration propagated to Data Plane.
@@ -145,8 +149,8 @@ pub enum DocumentOp {
         crdt_enabled: bool,
         /// Storage encoding mode. Determines how documents are serialized.
         storage_mode: StorageMode,
-        /// Collection enforcement options propagated from catalog.
-        enforcement: EnforcementOptions,
+        /// Collection enforcement options propagated from catalog (boxed to reduce enum size).
+        enforcement: Box<EnforcementOptions>,
     },
 
     /// Lookup documents by secondary index value.

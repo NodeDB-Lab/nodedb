@@ -162,6 +162,7 @@ impl SqlExpr {
                 let is_null = v.is_null();
                 serde_json::Value::Bool(if *negated { !is_null } else { is_null })
             }
+
         }
     }
 }

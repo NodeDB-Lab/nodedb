@@ -26,6 +26,7 @@ pub fn dispatch_maintenance_to_all_cores(state: &SharedState, tenant_id: TenantI
         consistency: ReadConsistency::Strong,
         idempotency_key: None,
         event_source: EventSource::User,
+        user_roles: Vec::new(),
     };
 
     match state.dispatcher.lock() {

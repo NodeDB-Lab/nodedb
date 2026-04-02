@@ -491,6 +491,7 @@ fn startup_replay_recovers_all_wal_data() {
                 consistency: ReadConsistency::Strong,
                 idempotency_key: None,
                 event_source: nodedb::event::EventSource::User,
+                user_roles: Vec::new(),
             },
         })
         .unwrap();

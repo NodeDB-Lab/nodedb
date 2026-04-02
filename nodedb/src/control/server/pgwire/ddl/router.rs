@@ -389,6 +389,24 @@ pub async fn dispatch(
         return Some(super::collection::show_indexes(state, identity, &parts));
     }
 
+    // State transition constraints and transition checks.
+    if upper.starts_with("ALTER COLLECTION ")
+        && upper.contains("ADD CONSTRAINT")
+        && upper.contains("TRANSITIONS")
+    {
+        return Some(super::constraint::add_state_constraint(
+            state, identity, sql,
+        ));
+    }
+    if upper.starts_with("ALTER COLLECTION ") && upper.contains("ADD TRANSITION CHECK") {
+        return Some(super::constraint::add_transition_check(
+            state, identity, sql,
+        ));
+    }
+    if upper.starts_with("DROP CONSTRAINT ") {
+        return Some(super::constraint::drop_constraint(state, identity, &parts));
+    }
+
     // Period lock management.
     if upper.starts_with("ALTER COLLECTION ") && upper.contains("ADD PERIOD LOCK") {
         return Some(super::period_lock::add_period_lock(state, identity, sql));

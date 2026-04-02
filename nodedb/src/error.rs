@@ -52,6 +52,12 @@ pub enum Error {
     #[error("legal hold active on {collection}: {detail}")]
     LegalHoldActive { collection: String, detail: String },
 
+    #[error("state transition violation on {collection}: {detail}")]
+    StateTransitionViolation { collection: String, detail: String },
+
+    #[error("transition check violation on {collection}: {detail}")]
+    TransitionCheckViolation { collection: String, detail: String },
+
     // --- Read path errors ---
     #[error("collection {collection} not found for tenant {tenant_id}")]
     CollectionNotFound {
@@ -229,6 +235,12 @@ impl From<Error> for NodeDbError {
             Error::LegalHoldActive {
                 collection, detail, ..
             } => NodeDbError::legal_hold_active(collection, detail),
+            Error::StateTransitionViolation {
+                collection, detail, ..
+            } => NodeDbError::state_transition_violation(collection, detail),
+            Error::TransitionCheckViolation {
+                collection, detail, ..
+            } => NodeDbError::transition_check_violation(collection, detail),
 
             // Read path
             Error::CollectionNotFound { collection, .. } => {

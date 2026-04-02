@@ -62,6 +62,7 @@ pub(super) async fn dispatch_plan_with_trace(
         consistency: ReadConsistency::Strong,
         idempotency_key: None,
         event_source: crate::event::EventSource::User,
+        user_roles: Vec::new(),
     };
 
     let rx = state.shared.tracker.register_oneshot(request_id);

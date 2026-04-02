@@ -8,6 +8,7 @@ pub mod change_stream;
 pub mod cluster;
 pub mod collection;
 pub mod collection_insert;
+pub mod constraint;
 pub mod consumer_group;
 pub mod continuous_agg;
 pub mod convert;

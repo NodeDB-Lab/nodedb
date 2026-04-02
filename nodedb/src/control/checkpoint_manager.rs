@@ -96,6 +96,7 @@ pub async fn run_checkpoint_cycle(
                 consistency: ReadConsistency::Eventual,
                 idempotency_key: None,
                 event_source: crate::event::EventSource::User,
+                user_roles: Vec::new(),
             };
 
             let rx = tracker.register_oneshot(request_id);

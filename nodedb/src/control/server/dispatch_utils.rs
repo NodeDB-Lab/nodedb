@@ -84,6 +84,7 @@ pub async fn dispatch_to_data_plane_with_source(
         consistency: ReadConsistency::Strong,
         idempotency_key: None,
         event_source,
+        user_roles: Vec::new(),
     };
 
     let mut rx = shared.tracker.register(request_id);

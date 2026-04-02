@@ -176,6 +176,7 @@ pub async fn run_apply_loop(
                 consistency: ReadConsistency::Strong,
                 idempotency_key: None,
                 event_source: crate::event::EventSource::User,
+                user_roles: Vec::new(),
             };
 
             let rx = state.tracker.register_oneshot(request_id);

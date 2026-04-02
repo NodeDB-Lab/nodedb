@@ -118,6 +118,11 @@ pub struct Request {
     /// emitted WriteEvents carry the correct source tag. Trigger-generated
     /// writes use `EventSource::Trigger` to prevent cascade re-triggering.
     pub event_source: EventSource,
+
+    /// Roles held by the authenticated user. Propagated to the Data Plane
+    /// for role-guarded state transition enforcement (`BY ROLE 'manager'`).
+    /// Empty for system-generated writes (triggers, CRDT sync, etc.).
+    pub user_roles: Vec<String>,
 }
 
 /// Response envelope: Data Plane -> Control Plane.
@@ -208,6 +213,10 @@ pub enum ErrorCode {
     RetentionViolation { collection: String },
     /// Legal hold active: DELETE rejected.
     LegalHoldActive { collection: String },
+    /// State transition not in allowed list.
+    StateTransitionViolation { collection: String, detail: String },
+    /// Transition check predicate returned false.
+    TransitionCheckViolation { collection: String },
     /// Internal error (io_uring failure, corruption, etc.)
     Internal { detail: String },
 }
@@ -242,6 +251,12 @@ impl From<crate::Error> for ErrorCode {
             crate::Error::LegalHoldActive { collection, .. } => {
                 Self::LegalHoldActive { collection }
             }
+            crate::Error::StateTransitionViolation {
+                collection, detail, ..
+            } => Self::StateTransitionViolation { collection, detail },
+            crate::Error::TransitionCheckViolation { collection, .. } => {
+                Self::TransitionCheckViolation { collection }
+            }
             other => Self::Internal {
                 detail: other.to_string(),
             },
@@ -271,6 +286,7 @@ mod tests {
             consistency: ReadConsistency::Strong,
             idempotency_key: None,
             event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
         }
     }
 
@@ -334,6 +350,7 @@ mod tests {
             consistency: ReadConsistency::Eventual,
             idempotency_key: None,
             event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
         };
         match req.plan {
             PhysicalPlan::Meta(MetaOp::Cancel { target_request_id }) => {

@@ -53,6 +53,7 @@ pub fn make_request(plan: PhysicalPlan) -> Request {
         consistency: ReadConsistency::Strong,
         idempotency_key: None,
         event_source: nodedb::event::EventSource::User,
+        user_roles: Vec::new(),
     }
 }
 

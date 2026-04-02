@@ -105,6 +105,16 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             "23607",
             format!("legal hold active: cannot delete from {collection}"),
         ),
+        ErrorCode::StateTransitionViolation { collection, detail } => (
+            "ERROR",
+            "23604",
+            format!("state transition violation on {collection}: {detail}"),
+        ),
+        ErrorCode::TransitionCheckViolation { collection } => (
+            "ERROR",
+            "23605",
+            format!("transition check violation on {collection}"),
+        ),
         ErrorCode::Internal { detail } => ("ERROR", "XX000", detail.clone()),
     }
 }
