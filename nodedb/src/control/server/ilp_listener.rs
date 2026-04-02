@@ -144,6 +144,13 @@ async fn handle_ilp_connection(
 
     let tenant_id = TenantId::new(1);
 
+    // Per-tenant connection tracking.
+    if let Err(e) = state.check_tenant_connection(tenant_id) {
+        warn!(%peer, error = %e, "ILP connection rejected: tenant connection limit");
+        return Err(e);
+    }
+    state.tenant_connection_start(tenant_id);
+
     loop {
         tokio::select! {
             // Read next line.
@@ -208,6 +215,7 @@ async fn handle_ilp_connection(
         total_ingested += flush_ilp_batch(state, tenant_id, &batch).await?;
     }
 
+    state.tenant_connection_end(tenant_id);
     debug!(%peer, total_ingested, "ILP connection closed");
     Ok(())
 }

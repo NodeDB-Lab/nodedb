@@ -79,6 +79,42 @@ impl SharedState {
         }
     }
 
+    /// Check if a tenant can open a new connection.
+    pub fn check_tenant_connection(&self, tenant_id: TenantId) -> crate::Result<()> {
+        let tenants = match self.tenants.lock() {
+            Ok(t) => t,
+            Err(poisoned) => {
+                warn!("tenant isolation mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        match tenants.check_connection(tenant_id) {
+            QuotaCheck::Allowed => Ok(()),
+            QuotaCheck::ConcurrencyExceeded { active, limit } => Err(crate::Error::BadRequest {
+                detail: format!("tenant {tenant_id}: too many connections ({active}/{limit})"),
+            }),
+            other => Err(crate::Error::BadRequest {
+                detail: format!("tenant {tenant_id}: connection rejected ({other:?})"),
+            }),
+        }
+    }
+
+    /// Record a new connection for a tenant.
+    pub fn tenant_connection_start(&self, tenant_id: TenantId) {
+        match self.tenants.lock() {
+            Ok(mut t) => t.connection_start(tenant_id),
+            Err(poisoned) => poisoned.into_inner().connection_start(tenant_id),
+        }
+    }
+
+    /// Record a connection close for a tenant.
+    pub fn tenant_connection_end(&self, tenant_id: TenantId) {
+        match self.tenants.lock() {
+            Ok(mut t) => t.connection_end(tenant_id),
+            Err(poisoned) => poisoned.into_inner().connection_end(tenant_id),
+        }
+    }
+
     /// Reset per-second rate counters. Called by a 1-second timer.
     pub fn reset_tenant_rate_counters(&self) {
         match self.tenants.lock() {
