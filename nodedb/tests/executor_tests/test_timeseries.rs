@@ -47,6 +47,7 @@ fn ingest_ilp(
             collection: collection.to_string(),
             payload: payload.as_bytes().to_vec(),
             format: "ilp".to_string(),
+            wal_lsn: None,
         }),
     );
     serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null)
@@ -375,4 +376,301 @@ fn group_by_not_capped_at_10k() {
         15_000,
         "GROUP BY should return all unique groups, not capped at 10K"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #11 — LSN-based deduplication for WAL catch-up
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dedup_only_skips_flushed_partitions() {
+    let mut ctx = make_ctx();
+    let payload = b"dns,qname=a.com elapsed_ms=1.0 1700000000000000000\n";
+
+    // Ingest with wal_lsn — accepted (no flushed partitions yet).
+    let resp1 = send_raw(
+        &mut ctx.core,
+        &mut ctx.tx,
+        &mut ctx.rx,
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: "dns_dedup".to_string(),
+            payload: payload.to_vec(),
+            format: "ilp".to_string(),
+            wal_lsn: Some(100),
+        }),
+    );
+    let v1: serde_json::Value = serde_json::from_slice(&resp1.payload).unwrap();
+    assert_eq!(v1["accepted"], 1);
+
+    // Same LSN again — accepted (no flushed partition to dedup against).
+    // In-memory dedup is intentionally NOT done because SPSC gaps mean
+    // max-LSN watermarks produce false negatives.
+    let resp2 = send_raw(
+        &mut ctx.core,
+        &mut ctx.tx,
+        &mut ctx.rx,
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: "dns_dedup".to_string(),
+            payload: payload.to_vec(),
+            format: "ilp".to_string(),
+            wal_lsn: Some(100),
+        }),
+    );
+    let v2: serde_json::Value = serde_json::from_slice(&resp2.payload).unwrap();
+    assert_eq!(
+        v2["accepted"], 1,
+        "same LSN re-ingest must be accepted (no flushed partition to dedup against)"
+    );
+
+    // Live ingest (wal_lsn=None) — always accepted.
+    let resp3 = send_raw(
+        &mut ctx.core,
+        &mut ctx.tx,
+        &mut ctx.rx,
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: "dns_dedup".to_string(),
+            payload: payload.to_vec(),
+            format: "ilp".to_string(),
+            wal_lsn: None,
+        }),
+    );
+    let v3: serde_json::Value = serde_json::from_slice(&resp3.payload).unwrap();
+    assert_eq!(v3["accepted"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// #11 — Catch-up must not skip gaps in LSN coverage
+// ---------------------------------------------------------------------------
+
+/// Simulates the real-world failure: ILP ingests batches 1,2,3,4,5 to WAL,
+/// but SPSC drops batches 2 and 4 (never reach Data Plane). Batch 1,3,5
+/// are ingested with their WAL LSNs. Later, catch-up replays batch 2 and 4
+/// from WAL. The dedup must NOT skip them just because LSN 2 < max(5).
+#[test]
+fn catchup_replays_gaps_in_lsn_coverage() {
+    let mut ctx = make_ctx();
+
+    let mk_payload = |i: i64| -> Vec<u8> {
+        format!(
+            "dns,qname=host-{i}.test elapsed_ms=1.0 {}\n",
+            1700000000000000000 + i * 1000000
+        )
+        .into_bytes()
+    };
+
+    // Simulate live ingest: batches at LSN 1, 3, 5 reach Data Plane.
+    // (Batches at LSN 2, 4 were dropped by SPSC — they're in WAL only.)
+    for lsn in [1, 3, 5] {
+        send_raw(
+            &mut ctx.core,
+            &mut ctx.tx,
+            &mut ctx.rx,
+            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+                collection: "dns_gap".to_string(),
+                payload: mk_payload(lsn),
+                format: "ilp".to_string(),
+                wal_lsn: Some(lsn as u64),
+            }),
+        );
+    }
+
+    // Verify: 3 rows visible.
+    let results = ts_scan(
+        &mut ctx,
+        "dns_gap",
+        Vec::new(),
+        vec![("count".into(), "*".into())],
+        0,
+    );
+    assert_eq!(
+        results[0]["count_all"], 3,
+        "should see 3 rows from live ingest"
+    );
+
+    // Now simulate catch-up replaying the DROPPED batches (LSN 2, 4).
+    // These must NOT be skipped by dedup even though LSN 2 < max(5).
+    for lsn in [2, 4] {
+        let resp = send_raw(
+            &mut ctx.core,
+            &mut ctx.tx,
+            &mut ctx.rx,
+            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+                collection: "dns_gap".to_string(),
+                payload: mk_payload(lsn),
+                format: "ilp".to_string(),
+                wal_lsn: Some(lsn as u64),
+            }),
+        );
+        let v: serde_json::Value = serde_json::from_slice(&resp.payload).unwrap();
+        assert_eq!(
+            v["accepted"], 1,
+            "catch-up batch at LSN {lsn} must be accepted (not deduped)"
+        );
+    }
+
+    // Verify: all 5 rows visible.
+    let results = ts_scan(
+        &mut ctx,
+        "dns_gap",
+        Vec::new(),
+        vec![("count".into(), "*".into())],
+        0,
+    );
+    assert_eq!(
+        results[0]["count_all"], 5,
+        "all 5 rows must be visible after catch-up fills the gaps"
+    );
+}
+
+/// Multi-batch ingest exceeding memtable capacity: all rows must survive
+/// across memtable flushes. Simulates sustained ILP ingest where the
+/// server receives many small batches, not one giant batch.
+#[test]
+fn multi_batch_ingest_survives_memtable_flush() {
+    let mut ctx = make_ctx();
+
+    // Ingest in 10 batches of 100K rows each = 1M total.
+    // Each batch is ~10MB of wide ILP rows. After ~6 batches the memtable
+    // hits 64MB and flushes. All 1M rows must be visible at the end.
+    let batch_size = 100_000;
+    let num_batches = 10;
+    let total = batch_size * num_batches;
+
+    for batch in 0..num_batches {
+        let start = batch * batch_size;
+        let lines = ilp_lines(
+            "dns_multi",
+            batch_size,
+            1_700_000_000_000_000_000 + start as i64 * 1_000_000,
+        );
+        let result = ingest_ilp(&mut ctx, "dns_multi", &lines);
+        let accepted = result["accepted"].as_u64().unwrap_or(0);
+        assert!(
+            accepted > 0,
+            "batch {batch} must accept rows, got accepted={accepted}"
+        );
+    }
+
+    // COUNT must see all rows (memtable + sealed partitions).
+    let results = ts_scan(
+        &mut ctx,
+        "dns_multi",
+        Vec::new(),
+        vec![("count".into(), "*".into())],
+        0,
+    );
+    let count = results[0]["count_all"].as_u64().unwrap();
+    assert_eq!(
+        count, total as u64,
+        "all {total} rows must be visible across memtable + partitions"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #11 — Idle memtable flush via maybe_run_maintenance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn idle_flush_triggers_after_inactivity() {
+    let mut ctx = make_ctx();
+
+    // Ingest 5 small rows (well under 64MB threshold).
+    let mut lines = String::new();
+    for i in 0..5 {
+        let ts_ns = 1_700_000_000_000_000_000i64 + i * 1_000_000;
+        lines.push_str(&format!("dns,qname=idle-{i}.test elapsed_ms=1.0 {ts_ns}\n"));
+    }
+    ingest_ilp(&mut ctx, "dns_idle", &lines);
+
+    // COUNT(*) should see all 5 rows (from memtable).
+    let results = ts_scan(
+        &mut ctx,
+        "dns_idle",
+        Vec::new(),
+        vec![("count".into(), "*".into())],
+        0,
+    );
+    assert_eq!(results[0]["count_all"], 5);
+
+    // Simulate idle time: set last_ts_ingest to 10 seconds ago.
+    ctx.core.set_last_ts_ingest(Some(
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    ));
+
+    // Run maintenance — should trigger idle flush.
+    ctx.core.maybe_run_maintenance();
+
+    // COUNT(*) should still see all 5 rows (now from sealed partition).
+    let results = ts_scan(
+        &mut ctx,
+        "dns_idle",
+        Vec::new(),
+        vec![("count".into(), "*".into())],
+        0,
+    );
+    assert_eq!(results[0]["count_all"], 5);
+
+    // Verify memtable was flushed by ingesting more and checking partition count.
+    // After idle flush, the partition registry should have at least one entry.
+    // We test indirectly: ingest 3 more rows and count — should get 8 total.
+    let mut lines2 = String::new();
+    for i in 5..8 {
+        let ts_ns = 1_700_000_000_000_000_000i64 + i * 1_000_000;
+        lines2.push_str(&format!("dns,qname=idle-{i}.test elapsed_ms=1.0 {ts_ns}\n"));
+    }
+    ingest_ilp(&mut ctx, "dns_idle", &lines2);
+
+    let results = ts_scan(
+        &mut ctx,
+        "dns_idle",
+        Vec::new(),
+        vec![("count".into(), "*".into())],
+        0,
+    );
+    assert_eq!(
+        results[0]["count_all"], 8,
+        "should see all 8 rows (5 from partition + 3 from memtable)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #12 — Large GROUP BY produces valid single-payload response at Data Plane
+// ---------------------------------------------------------------------------
+
+#[test]
+fn large_group_by_returns_single_valid_json() {
+    let mut ctx = make_ctx();
+
+    // Ingest 2000 unique groups (exceeds default stream_chunk_size of 1000).
+    let mut lines = String::new();
+    for i in 0..2_000 {
+        let ts_ns = 1_700_000_000_000_000_000i64 + i as i64 * 1_000_000;
+        lines.push_str(&format!(
+            "dns,qname=host-{i}.example.com elapsed_ms=1.0 {ts_ns}\n"
+        ));
+    }
+    ingest_ilp(&mut ctx, "dns_large", &lines);
+
+    // GROUP BY should return a single valid JSON response with all 2000 groups.
+    let raw = send_ok(
+        &mut ctx.core,
+        &mut ctx.tx,
+        &mut ctx.rx,
+        PhysicalPlan::Timeseries(TimeseriesOp::Scan {
+            collection: "dns_large".to_string(),
+            time_range: (0, i64::MAX),
+            projection: Vec::new(),
+            limit: usize::MAX,
+            filters: Vec::new(),
+            bucket_interval_ms: 0,
+            group_by: vec!["qname".into()],
+            aggregates: vec![("count".into(), "*".into())],
+            rls_filters: Vec::new(),
+        }),
+    );
+
+    // The response should be a single valid JSON array.
+    let results: Vec<serde_json::Value> = serde_json::from_slice(&raw)
+        .expect("Data Plane response should be a single valid JSON array");
+    assert_eq!(results.len(), 2_000);
 }

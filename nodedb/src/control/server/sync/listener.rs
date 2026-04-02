@@ -202,6 +202,7 @@ async fn handle_sync_session(
                                         collection: ingest.collection,
                                         payload: ingest.ilp_payload,
                                         format: "ilp".to_string(),
+                                        wal_lsn: None,
                                     },
                                 );
                                 // Use CrdtSync source to prevent triggers on synced data.

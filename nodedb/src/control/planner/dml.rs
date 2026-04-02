@@ -315,6 +315,7 @@ impl PlanConverter {
                         collection: collection.to_string(),
                         payload: ilp_batch.into_bytes(),
                         format: "ilp".to_string(),
+                        wal_lsn: None,
                     }),
                 }])
             }

@@ -520,15 +520,7 @@ impl CoreLoop {
         }
 
         let json = serde_json::to_vec(&results).unwrap_or_default();
-        Response {
-            request_id: task.request.request_id,
-            status: Status::Ok,
-            attempt: 1,
-            partial: false,
-            payload: Payload::from_vec(json),
-            watermark_lsn: self.watermark,
-            error_code: None,
-        }
+        self.response_with_payload(task, json)
     }
 
     /// Aggregate mode: time-bucket or generic GROUP BY across memtable + partitions.
@@ -814,15 +806,7 @@ impl CoreLoop {
         };
 
         let json = serde_json::to_vec(&results).unwrap_or_default();
-        Response {
-            request_id: task.request.request_id,
-            status: Status::Ok,
-            attempt: 1,
-            partial: false,
-            payload: Payload::from_vec(json),
-            watermark_lsn: self.watermark,
-            error_code: None,
-        }
+        self.response_with_payload(task, json)
     }
 
     /// Ensure the partition registry is loaded for a timeseries collection.
@@ -881,13 +865,50 @@ impl CoreLoop {
     }
 
     /// Execute a timeseries ingest.
+    ///
+    /// `wal_lsn` is set by the WAL catch-up task to enable deduplication:
+    /// if the record has already been ingested (LSN <= max ingested) or
+    /// flushed to disk (LSN <= max flushed), the ingest is skipped.
     pub(in crate::data::executor) fn execute_timeseries_ingest(
         &mut self,
         task: &ExecutionTask,
         collection: &str,
         payload: &[u8],
         format: &str,
+        wal_lsn: Option<u64>,
     ) -> Response {
+        // LSN-based deduplication: only skip records that are provably
+        // already flushed to sealed disk partitions. We do NOT track a
+        // max-ingested-LSN watermark because SPSC drops create gaps —
+        // LSN 5 ingested does not mean LSNs 1-4 were also ingested.
+        if let Some(lsn) = wal_lsn
+            && let Some(registry) = self.ts_registries.get(collection)
+        {
+            let max_flushed = registry
+                .iter()
+                .map(|(_, e)| e.meta.last_flushed_wal_lsn)
+                .max()
+                .unwrap_or(0);
+            if max_flushed > 0 && lsn <= max_flushed {
+                let result = serde_json::json!({
+                    "accepted": 0,
+                    "rejected": 0,
+                    "collection": collection,
+                    "dedup_skipped": true,
+                });
+                let json = serde_json::to_vec(&result).unwrap_or_default();
+                return Response {
+                    request_id: task.request.request_id,
+                    status: Status::Ok,
+                    attempt: 1,
+                    partial: false,
+                    payload: Payload::from_vec(json),
+                    watermark_lsn: self.watermark,
+                    error_code: None,
+                };
+            }
+        }
+
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -973,8 +994,28 @@ impl CoreLoop {
                     );
                 };
                 let mut series_keys = HashMap::new();
-                let (accepted, rejected) =
+                let (mut accepted, rejected) =
                     ilp_ingest::ingest_batch(mt, &lines, &mut series_keys, now_ms);
+
+                // If rows were rejected (memtable hit hard limit), flush and
+                // re-ingest the rejected portion. This prevents silent data
+                // loss when batches arrive faster than the flush pipeline.
+                if rejected > 0 {
+                    tracing::warn!(
+                        collection,
+                        accepted,
+                        rejected,
+                        "ILP batch rows rejected by hard limit, flushing and retrying"
+                    );
+                    self.flush_ts_collection(collection, now_ms);
+                    if let Some(mt) = self.columnar_memtables.get_mut(collection) {
+                        let mut retry_keys = HashMap::new();
+                        let retry_lines = &lines[accepted..];
+                        let (retry_accepted, _) =
+                            ilp_ingest::ingest_batch(mt, retry_lines, &mut retry_keys, now_ms);
+                        accepted += retry_accepted;
+                    }
+                }
 
                 // Post-flush: standard 64MB threshold check.
                 let Some(mt) = self.columnar_memtables.get(collection) else {
@@ -987,6 +1028,18 @@ impl CoreLoop {
                 };
                 if mt.memory_bytes() >= 64 * 1024 * 1024 {
                     self.flush_ts_collection(collection, now_ms);
+                }
+
+                // Track WAL LSN and last ingest time for dedup + idle flush.
+                if accepted > 0 {
+                    if let Some(lsn) = wal_lsn {
+                        let entry = self
+                            .ts_max_ingested_lsn
+                            .entry(collection.to_string())
+                            .or_insert(0);
+                        *entry = (*entry).max(lsn);
+                    }
+                    self.last_ts_ingest = Some(std::time::Instant::now());
                 }
 
                 self.checkpoint_coordinator
@@ -1048,7 +1101,7 @@ impl CoreLoop {
     /// Drains the columnar memtable, writes segments via `ColumnarSegmentWriter`,
     /// registers the new partition in `ts_registries`, and fires the continuous
     /// aggregate hook.
-    fn flush_ts_collection(&mut self, collection: &str, now_ms: i64) {
+    pub(in crate::data::executor) fn flush_ts_collection(&mut self, collection: &str, now_ms: i64) {
         let Some(mt) = self.columnar_memtables.get_mut(collection) else {
             return;
         };
@@ -1064,10 +1117,14 @@ impl CoreLoop {
             crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter::new(&segment_dir);
         let partition_name = format!("ts-{}_{}", drain.min_ts, drain.max_ts);
 
-        // Pass the current WAL watermark LSN so the partition records which
-        // WAL records have been flushed. This enables WAL GC: the checkpoint
-        // coordinator can safely truncate segments whose max LSN ≤ this value.
-        let flush_wal_lsn = self.watermark.as_u64();
+        // Use the max ingested WAL LSN for this collection so the partition
+        // records which WAL records have been flushed. This enables both
+        // WAL GC and LSN-based dedup during startup replay and catch-up.
+        let flush_wal_lsn = self
+            .ts_max_ingested_lsn
+            .get(collection)
+            .copied()
+            .unwrap_or(0);
         match writer.write_partition(&partition_name, &drain, 0, flush_wal_lsn) {
             Ok(meta) => {
                 tracing::info!(

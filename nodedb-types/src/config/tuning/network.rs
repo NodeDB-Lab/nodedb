@@ -110,7 +110,7 @@ impl Default for WalTuning {
 }
 
 fn default_wal_write_buffer_size() -> usize {
-    256 * 1024
+    2 * 1024 * 1024
 }
 fn default_wal_alignment() -> usize {
     4096

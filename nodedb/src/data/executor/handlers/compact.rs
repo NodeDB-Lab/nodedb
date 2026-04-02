@@ -156,9 +156,45 @@ impl CoreLoop {
                     self.checkpoint_coordinator.record_flush("sparse", *pages);
                 }
                 "timeseries" => {
-                    // Timeseries memtables flush on their own schedule.
-                    self.checkpoint_coordinator
-                        .record_flush("timeseries", *pages);
+                    // Idle flush: if no ingest for 5 seconds, flush all
+                    // non-empty memtables so data becomes queryable.
+                    let idle_threshold = std::time::Duration::from_secs(5);
+                    let is_idle = self
+                        .last_ts_ingest
+                        .map(|t| t.elapsed() >= idle_threshold)
+                        .unwrap_or(false);
+
+                    if is_idle {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        let collections: Vec<String> = self
+                            .columnar_memtables
+                            .iter()
+                            .filter(|(_, mt)| !mt.is_empty())
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        let mut flushed = 0usize;
+                        for collection in &collections {
+                            self.flush_ts_collection(collection, now_ms);
+                            flushed += 1;
+                        }
+                        if flushed > 0 {
+                            tracing::info!(
+                                core = self.core_id,
+                                flushed,
+                                "idle flush: timeseries memtables flushed"
+                            );
+                        }
+                        // Reset so we don't re-flush until next ingest.
+                        self.last_ts_ingest = None;
+                        self.checkpoint_coordinator
+                            .record_flush("timeseries", flushed.max(*pages));
+                    } else {
+                        self.checkpoint_coordinator
+                            .record_flush("timeseries", *pages);
+                    }
                 }
                 _ => {}
             }

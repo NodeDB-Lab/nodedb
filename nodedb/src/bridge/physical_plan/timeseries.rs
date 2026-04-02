@@ -32,5 +32,9 @@ pub enum TimeseriesOp {
         payload: Vec<u8>,
         /// "ilp" for InfluxDB Line Protocol, "samples" for structured.
         format: String,
+        /// WAL record LSN for deduplication. Set by the WAL catch-up task
+        /// so the Data Plane can skip records that have already been ingested
+        /// or flushed to disk. `None` for live ingest (always accepted).
+        wal_lsn: Option<u64>,
     },
 }

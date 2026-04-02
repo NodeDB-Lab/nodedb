@@ -374,6 +374,41 @@ impl WalManager {
         Ok(records)
     }
 
+    /// Paginated mmap replay: reads at most `max_records` from `from_lsn`.
+    ///
+    /// Returns `(records, has_more)` where `has_more` indicates whether the
+    /// limit was hit before all segments were exhausted. Bounds memory to
+    /// O(max_records) per call.
+    ///
+    /// **Note:** Uses mmap, which cannot see data written via O_DIRECT to the
+    /// active segment. Use `replay_from_limit` for the catch-up task instead.
+    pub fn replay_mmap_from_limit(
+        &self,
+        from_lsn: Lsn,
+        max_records: usize,
+    ) -> crate::Result<(Vec<WalRecord>, bool)> {
+        nodedb_wal::mmap_reader::replay_segments_mmap_limit(
+            self.wal_dir(),
+            from_lsn.as_u64(),
+            max_records,
+        )
+        .map_err(crate::Error::Wal)
+    }
+
+    /// Paginated sequential replay: reads at most `max_records` from `from_lsn`.
+    ///
+    /// Uses sequential I/O (not mmap) without holding the WAL mutex — does
+    /// not block concurrent WAL appends. Safe because sealed segments are
+    /// immutable and the active segment is read via buffered I/O.
+    pub fn replay_from_limit(
+        &self,
+        from_lsn: Lsn,
+        max_records: usize,
+    ) -> crate::Result<(Vec<WalRecord>, bool)> {
+        nodedb_wal::segmented::replay_from_limit_dir(self.wal_dir(), from_lsn.as_u64(), max_records)
+            .map_err(crate::Error::Wal)
+    }
+
     /// Total WAL size on disk across all segments.
     pub fn total_size_bytes(&self) -> crate::Result<u64> {
         let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());

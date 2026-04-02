@@ -163,6 +163,7 @@ pub fn wal_append_if_write_with_creds(
             collection,
             payload,
             format: _,
+            ..
         }) => {
             // WAL bypass: skip WAL if collection has wal=false in timeseries_config.
             if let Some(creds) = credentials
@@ -297,4 +298,36 @@ pub fn wal_append_if_write_with_creds(
         _ => {}
     }
     Ok(())
+}
+
+/// Append a timeseries batch to WAL and return the assigned LSN.
+///
+/// Used by the ILP listener to propagate the WAL LSN to the Data Plane
+/// for proper dedup tracking and `flush_wal_lsn` in partition metadata.
+/// Returns `None` if WAL is bypassed for this collection.
+pub fn wal_append_timeseries(
+    wal: &WalManager,
+    tenant_id: TenantId,
+    vshard_id: VShardId,
+    collection: &str,
+    payload: &[u8],
+    credentials: Option<&CredentialStore>,
+) -> crate::Result<Option<nodedb_types::Lsn>> {
+    // WAL bypass check.
+    if let Some(creds) = credentials
+        && let Some(catalog) = creds.catalog()
+        && let Ok(Some(coll)) = catalog.get_collection(tenant_id.as_u32(), collection)
+        && let Some(config) = coll.get_timeseries_config()
+        && config.get("wal").and_then(|v| v.as_str()) == Some("false")
+    {
+        return Ok(None);
+    }
+
+    let wal_payload =
+        rmp_serde::to_vec(&(collection, payload)).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("wal timeseries batch: {e}"),
+        })?;
+    let lsn = wal.append_timeseries_batch(tenant_id, vshard_id, &wal_payload)?;
+    Ok(Some(lsn))
 }

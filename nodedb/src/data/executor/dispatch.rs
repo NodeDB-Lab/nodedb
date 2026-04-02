@@ -569,7 +569,8 @@ impl CoreLoop {
                 collection,
                 payload,
                 format,
-            }) => self.execute_timeseries_ingest(task, collection, payload, format),
+                wal_lsn,
+            }) => self.execute_timeseries_ingest(task, collection, payload, format, *wal_lsn),
 
             PhysicalPlan::Spatial(SpatialOp::Scan {
                 collection,

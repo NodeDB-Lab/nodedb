@@ -373,6 +373,7 @@ async fn ingest_ilp(
         collection: collection.to_string(),
         payload,
         format: "ilp".into(),
+        wal_lsn: None,
     });
     dispatch_to_data_plane(shared, TenantId::new(1), VShardId::new(0), plan, 0).await?;
     Ok(1)

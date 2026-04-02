@@ -211,6 +211,15 @@ impl SegmentedWal {
             .collect())
     }
 
+    /// Paginated replay (delegates to standalone `replay_from_limit_dir`).
+    pub fn replay_from_limit(
+        &self,
+        from_lsn: u64,
+        max_records: usize,
+    ) -> Result<(Vec<WalRecord>, bool)> {
+        replay_from_limit_dir(&self.wal_dir, from_lsn, max_records)
+    }
+
     /// List all segment metadata (for monitoring / operational tooling).
     pub fn list_segments(&self) -> Result<Vec<SegmentMeta>> {
         discover_segments(&self.wal_dir)
@@ -273,6 +282,37 @@ pub fn replay_all_segments(wal_dir: &Path) -> Result<Vec<WalRecord>> {
     }
 
     Ok(all_records)
+}
+
+/// Paginated replay from a WAL directory: reads at most `max_records` from `from_lsn`.
+///
+/// Uses sequential I/O (not mmap) and does NOT require the WAL mutex — safe
+/// to call concurrently with writes. Sealed segments are immutable; the active
+/// segment is read via buffered I/O which sees data after the writer's fsync.
+///
+/// Returns `(records, has_more)` where `has_more` is `true` if the limit was hit.
+pub fn replay_from_limit_dir(
+    wal_dir: &Path,
+    from_lsn: u64,
+    max_records: usize,
+) -> Result<(Vec<WalRecord>, bool)> {
+    let segments = discover_segments(wal_dir)?;
+    let mut records = Vec::with_capacity(max_records.min(4096));
+
+    for seg in &segments {
+        let reader = crate::reader::WalReader::open(&seg.path)?;
+        for record_result in reader.records() {
+            let record = record_result?;
+            if record.header.lsn >= from_lsn {
+                records.push(record);
+                if records.len() >= max_records {
+                    return Ok((records, true));
+                }
+            }
+        }
+    }
+
+    Ok((records, false))
 }
 
 #[cfg(test)]
@@ -502,5 +542,105 @@ mod tests {
         assert_eq!(records.len(), 10);
         // All records should be marked as encrypted.
         assert!(records.iter().all(|r| r.is_encrypted()));
+    }
+
+    #[test]
+    fn replay_from_limit_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let mut wal = SegmentedWal::open(config).unwrap();
+
+        // Append 10 records.
+        for i in 0..10u8 {
+            wal.append(RecordType::Put as u16, 1, 0, &[i]).unwrap();
+        }
+        wal.sync().unwrap();
+
+        // Read all with limit > count.
+        let (records, has_more) = wal.replay_from_limit(1, 100).unwrap();
+        assert_eq!(records.len(), 10);
+        assert!(!has_more);
+
+        // Read with limit = 3.
+        let (records, has_more) = wal.replay_from_limit(1, 3).unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(has_more);
+        assert_eq!(records[0].header.lsn, 1);
+        assert_eq!(records[2].header.lsn, 3);
+    }
+
+    #[test]
+    fn replay_from_limit_with_lsn_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let mut wal = SegmentedWal::open(config).unwrap();
+
+        for i in 0..10u8 {
+            wal.append(RecordType::Put as u16, 1, 0, &[i]).unwrap();
+        }
+        wal.sync().unwrap();
+
+        // Start from LSN 6 with limit 100 — should get 5 records (LSNs 6-10).
+        let (records, has_more) = wal.replay_from_limit(6, 100).unwrap();
+        assert_eq!(records.len(), 5);
+        assert!(!has_more);
+        assert_eq!(records[0].header.lsn, 6);
+
+        // Start from LSN 6 with limit 2 — should get 2 records.
+        let (records, has_more) = wal.replay_from_limit(6, 2).unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn replay_from_limit_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let mut wal = SegmentedWal::open(config).unwrap();
+
+        wal.append(RecordType::Put as u16, 1, 0, b"a").unwrap();
+        wal.sync().unwrap();
+
+        // Start from beyond all records.
+        let (records, has_more) = wal.replay_from_limit(999, 100).unwrap();
+        assert!(records.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn replay_from_limit_across_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let mut wal = SegmentedWal::open(config).unwrap();
+
+        // Write 10 records to first segment.
+        for i in 0..10u8 {
+            wal.append(RecordType::Put as u16, 1, 0, &[i]).unwrap();
+        }
+        wal.sync().unwrap();
+        // Force a segment rollover.
+        wal.roll_segment().unwrap();
+
+        // Write 10 more records to second segment.
+        for i in 10..20u8 {
+            wal.append(RecordType::Put as u16, 1, 0, &[i]).unwrap();
+        }
+        wal.sync().unwrap();
+
+        let seg_count = wal.list_segments().unwrap().len();
+        assert!(
+            seg_count >= 2,
+            "expected multiple segments, got {seg_count}"
+        );
+
+        // Paginated read should span segments correctly.
+        let (records, has_more) = wal.replay_from_limit(1, 5).unwrap();
+        assert_eq!(records.len(), 5);
+        assert!(has_more);
+
+        // Continue from where we left off.
+        let next_lsn = records.last().unwrap().header.lsn + 1;
+        let (records2, _) = wal.replay_from_limit(next_lsn, 200).unwrap();
+        assert_eq!(records2.len(), 15); // 20 - 5 = 15 remaining
     }
 }

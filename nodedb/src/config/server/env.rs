@@ -338,6 +338,35 @@ pub fn apply_env_overrides(config: &mut ServerConfig) {
         apply_bool_env("NODEDB_TLS_ILP", &mut tls.ilp);
     }
 
+    // ── WAL tuning ─────────────────────────────────────────────────
+
+    if let Ok(val) = std::env::var("NODEDB_WAL_WRITE_BUFFER_SIZE") {
+        match parse_memory_size(&val) {
+            Ok(size) if size >= 64 * 1024 => {
+                tracing::info!(
+                    env_var = "NODEDB_WAL_WRITE_BUFFER_SIZE",
+                    value = size,
+                    "environment variable override applied"
+                );
+                config.tuning.wal.write_buffer_size = size;
+            }
+            Ok(size) => {
+                tracing::warn!(
+                    env_var = "NODEDB_WAL_WRITE_BUFFER_SIZE",
+                    value = size,
+                    "ignoring value below minimum 64KiB, using config value"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    env_var = "NODEDB_WAL_WRITE_BUFFER_SIZE",
+                    value = %val,
+                    "ignoring malformed environment variable, using config value"
+                );
+            }
+        }
+    }
+
     // ── Observability overrides (PromQL, OTLP) ─────────────────────
 
     super::observability::apply_observability_env(&mut config.observability);

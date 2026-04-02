@@ -90,6 +90,14 @@ impl CoreLoop {
                 }
             }
 
+            // Track the max WAL LSN ingested per collection for flush metadata.
+            if let Some(entry) = self.ts_max_ingested_lsn.get_mut(&collection) {
+                *entry = (*entry).max(record_lsn);
+            } else {
+                self.ts_max_ingested_lsn
+                    .insert(collection.clone(), record_lsn);
+            }
+
             // Re-ingest the ILP payload into the memtable.
             if let Ok(input) = std::str::from_utf8(&payload) {
                 let lines: Vec<_> = crate::engine::timeseries::ilp::parse_batch(input)
@@ -99,6 +107,15 @@ impl CoreLoop {
 
                 if lines.is_empty() {
                     continue;
+                }
+
+                // Flush memtable if it's at the soft limit BEFORE ingesting.
+                // Without this, the memtable overflows during large WAL replays
+                // and excess rows are silently rejected.
+                if let Some(mt) = self.columnar_memtables.get(&collection)
+                    && mt.memory_bytes() >= 64 * 1024 * 1024
+                {
+                    self.flush_ts_collection(&collection, 0);
                 }
 
                 // Ensure memtable exists.

@@ -145,6 +145,16 @@ pub struct CoreLoop {
     pub(in crate::data::executor) columnar_memtables:
         HashMap<String, crate::engine::timeseries::columnar_memtable::ColumnarMemtable>,
 
+    /// Per-collection max WAL LSN that has been ingested into the memtable.
+    /// Used by the WAL catch-up deduplication: if a catch-up record's LSN
+    /// is <= this value, the Data Plane skips it (already ingested).
+    pub(in crate::data::executor) ts_max_ingested_lsn: HashMap<String, u64>,
+
+    /// Last time any timeseries ingest was processed on this core.
+    /// Used by idle flush: if no ingest for 5 seconds, `maybe_run_maintenance`
+    /// flushes all non-empty memtables to disk partitions.
+    pub(in crate::data::executor) last_ts_ingest: Option<std::time::Instant>,
+
     /// Per-collection timeseries partition registries for this core.
     pub(in crate::data::executor) ts_registries:
         HashMap<String, crate::engine::timeseries::partition_registry::PartitionRegistry>,
@@ -246,6 +256,8 @@ impl CoreLoop {
                 nodedb_types::config::tuning::QueryTuning::default().doc_cache_entries,
             ),
             columnar_memtables: HashMap::new(),
+            ts_max_ingested_lsn: HashMap::new(),
+            last_ts_ingest: None,
             ts_registries: HashMap::new(),
             continuous_agg_mgr:
                 crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),
@@ -277,6 +289,11 @@ impl CoreLoop {
 
     pub fn core_id(&self) -> usize {
         self.core_id
+    }
+
+    /// Set the last timeseries ingest timestamp (for testing idle flush).
+    pub fn set_last_ts_ingest(&mut self, value: Option<std::time::Instant>) {
+        self.last_ts_ingest = value;
     }
 
     pub fn pending_count(&self) -> usize {

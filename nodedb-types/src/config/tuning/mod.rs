@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(parsed.kv.expiry_reap_budget, 1024);
         assert_eq!(parsed.bridge.slab_page_size, 64 * 1024);
         assert_eq!(parsed.network.default_deadline_secs, 30);
-        assert_eq!(parsed.wal.write_buffer_size, 256 * 1024);
+        assert_eq!(parsed.wal.write_buffer_size, 2 * 1024 * 1024);
         assert_eq!(parsed.cluster_transport.raft_tick_interval_ms, 10);
         // New ClusterTransportTuning fields.
         assert_eq!(

@@ -47,5 +47,6 @@ pub(crate) fn build_ingest(fields: &TextFields, collection: &str) -> crate::Resu
         collection: collection.to_string(),
         payload,
         format,
+        wal_lsn: None,
     }))
 }

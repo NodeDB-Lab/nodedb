@@ -240,6 +240,42 @@ fn replay_segments_parallel(
     Ok(records)
 }
 
+/// Paginated mmap replay: reads at most `max_records` from `from_lsn`.
+///
+/// Returns `(records, has_more)` where `has_more` is `true` if the limit
+/// was reached before all segments were exhausted. This bounds memory
+/// usage per catch-up cycle to O(max_records) instead of O(all WAL data).
+///
+/// Always uses sequential reading (no parallel threads) since the bounded
+/// record count makes parallel overhead unnecessary.
+pub fn replay_segments_mmap_limit(
+    wal_dir: &Path,
+    from_lsn: u64,
+    max_records: usize,
+) -> Result<(Vec<WalRecord>, bool)> {
+    let segments = crate::segment::discover_segments(wal_dir)?;
+    let mut records = Vec::with_capacity(max_records.min(4096));
+
+    for seg in &segments {
+        // Skip segments that end before from_lsn. A segment's max LSN
+        // is at least its first_lsn, so if first_lsn of the NEXT segment
+        // is <= from_lsn we can skip this one. Conservative: always read
+        // the last segment since we don't know its max LSN cheaply.
+        let reader = MmapWalReader::open(&seg.path)?;
+        for record_result in reader.records() {
+            let record = record_result?;
+            if record.header.lsn >= from_lsn {
+                records.push(record);
+                if records.len() >= max_records {
+                    return Ok((records, true));
+                }
+            }
+        }
+    }
+
+    Ok((records, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

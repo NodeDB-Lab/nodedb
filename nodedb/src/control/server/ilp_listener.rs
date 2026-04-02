@@ -73,7 +73,7 @@ impl IlpListener {
                                         Ok(tls_stream) => {
                                             let cs = ConnStream::tls(tls_stream);
                                             if let Err(e) = handle_ilp_connection(cs, peer, &state).await {
-                                                debug!(%peer, error = %e, "ILP TLS connection error");
+                                                warn!(%peer, error = %e, "ILP TLS connection error (data may be lost)");
                                             }
                                         }
                                         Err(e) => {
@@ -86,7 +86,7 @@ impl IlpListener {
                                 connections.spawn(async move {
                                     let cs = ConnStream::plain(stream);
                                     if let Err(e) = handle_ilp_connection(cs, peer, &state).await {
-                                        debug!(%peer, error = %e, "ILP connection error");
+                                        warn!(%peer, error = %e, "ILP connection error (data may be lost)");
                                     }
                                     drop(permit);
                                 });
@@ -306,20 +306,25 @@ async fn flush_ilp_batch(
 
     for (shard_id, shard_batch) in &shard_batches {
         let vshard_id = VShardId::new(*shard_id);
+        let payload_bytes = shard_batch.as_bytes().to_vec();
 
-        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection: collection.clone(),
-            payload: shard_batch.as_bytes().to_vec(),
-            format: "ilp".to_string(),
-        });
-
-        crate::control::server::wal_dispatch::wal_append_if_write_with_creds(
+        // Append to WAL first — returns the assigned LSN for dedup tracking.
+        let wal_lsn = crate::control::server::wal_dispatch::wal_append_timeseries(
             &state.wal,
             tenant_id,
             vshard_id,
-            &plan,
+            &collection,
+            &payload_bytes,
             Some(&state.credentials),
-        )?;
+        )?
+        .map(|lsn| lsn.as_u64());
+
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: collection.clone(),
+            payload: payload_bytes,
+            format: "ilp".to_string(),
+            wal_lsn,
+        });
 
         let response = crate::control::server::dispatch_utils::dispatch_to_data_plane(
             state, tenant_id, vshard_id, plan, 0,

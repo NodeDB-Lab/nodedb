@@ -289,25 +289,59 @@ impl NativeConnection {
         self.stream.write_all(&payload).await.map_err(io_err)?;
         self.stream.flush().await.map_err(io_err)?;
 
-        // Read response frame.
-        let mut len_buf = [0u8; FRAME_HEADER_LEN];
-        self.stream.read_exact(&mut len_buf).await.map_err(io_err)?;
-        let resp_len = u32::from_be_bytes(len_buf);
-        if resp_len > MAX_FRAME_SIZE {
-            return Err(NodeDbError::internal(format!(
-                "response frame too large: {resp_len}"
-            )));
+        // Read response frame(s) — handle chunked partial responses.
+        let mut combined_rows: Vec<Vec<nodedb_types::Value>> = Vec::new();
+        let mut final_resp: Option<NativeResponse> = None;
+
+        loop {
+            let mut len_buf = [0u8; FRAME_HEADER_LEN];
+            self.stream.read_exact(&mut len_buf).await.map_err(io_err)?;
+            let resp_len = u32::from_be_bytes(len_buf);
+            if resp_len > MAX_FRAME_SIZE {
+                return Err(NodeDbError::internal(format!(
+                    "response frame too large: {resp_len}"
+                )));
+            }
+
+            let mut resp_buf = vec![0u8; resp_len as usize];
+            self.stream
+                .read_exact(&mut resp_buf)
+                .await
+                .map_err(io_err)?;
+
+            let resp: NativeResponse = rmp_serde::from_slice(&resp_buf).map_err(|e| {
+                NodeDbError::serialization("msgpack", format!("response decode: {e}"))
+            })?;
+
+            if resp.status == ResponseStatus::Partial {
+                // Partial chunk — accumulate rows and continue.
+                if let Some(rows) = resp.rows {
+                    combined_rows.extend(rows);
+                }
+                // Capture columns from first chunk.
+                if final_resp.is_none() {
+                    final_resp = Some(NativeResponse { rows: None, ..resp });
+                }
+            } else {
+                // Final frame.
+                if combined_rows.is_empty() {
+                    // Non-chunked: single response.
+                    final_resp = Some(resp);
+                } else {
+                    // Chunked: merge accumulated rows with final chunk.
+                    if let Some(ref rows) = resp.rows {
+                        combined_rows.extend(rows.iter().cloned());
+                    }
+                    let mut merged = final_resp.unwrap_or(resp);
+                    merged.rows = Some(combined_rows);
+                    merged.status = ResponseStatus::Ok;
+                    final_resp = Some(merged);
+                }
+                break;
+            }
         }
 
-        let mut resp_buf = vec![0u8; resp_len as usize];
-        self.stream
-            .read_exact(&mut resp_buf)
-            .await
-            .map_err(io_err)?;
-
-        // Decode response.
-        rmp_serde::from_slice(&resp_buf)
-            .map_err(|e| NodeDbError::serialization("msgpack", format!("response decode: {e}")))
+        final_resp.ok_or_else(|| NodeDbError::internal("no final response received"))
     }
 }
 

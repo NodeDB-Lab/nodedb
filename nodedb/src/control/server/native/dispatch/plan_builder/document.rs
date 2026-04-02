@@ -64,6 +64,7 @@ pub(crate) fn build_point_put(
                 collection: collection.to_string(),
                 payload: ilp_line.into_bytes(),
                 format: "ilp".to_string(),
+                wal_lsn: None,
             }))
         }
         Some(CollectionType::Columnar(_)) => Err(crate::Error::BadRequest {

@@ -72,6 +72,7 @@ pub async fn remote_write(
             collection,
             payload: ilp_payload.into_bytes(),
             format: "ilp".into(),
+            wal_lsn: None,
         });
         match dispatch_to_data_plane(&state.shared, TenantId::new(1), vshard, plan, 0).await {
             Ok(_) => total_accepted += ts.samples.len() as u64,
