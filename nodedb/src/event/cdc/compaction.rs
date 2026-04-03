@@ -40,30 +40,48 @@ pub fn spawn_compaction_task(
                 return;
             }
 
-            // Scan all streams with compaction enabled.
+            // Scan all streams with compaction enabled, grouped by tenant.
+            // Round-robin across tenants: process one stream per tenant in
+            // rotation so a tenant with many streams doesn't starve others.
             let stats = router.buffer_stats();
-            for stat in &stats {
-                let def = registry.get(stat.tenant_id, &stat.stream_name);
-                let def = match def {
-                    Some(d) if d.compaction.enabled => d,
-                    _ => continue,
-                };
 
-                if let Some(buffer) = router.get_buffer(stat.tenant_id, &stat.stream_name) {
-                    let removed = buffer.compact(
-                        &def.compaction.key_field,
-                        def.compaction.tombstone_grace_secs,
-                    );
-                    if removed > 0 {
-                        debug!(
-                            stream = %stat.stream_name,
-                            removed,
-                            remaining = buffer.len(),
-                            key = %def.compaction.key_field,
-                            "compacted stream buffer"
+            // Group by tenant_id.
+            let mut by_tenant: std::collections::HashMap<u32, Vec<_>> =
+                std::collections::HashMap::new();
+            for stat in stats {
+                by_tenant.entry(stat.tenant_id).or_default().push(stat);
+            }
+
+            // Interleave: process one stream from each tenant, then repeat.
+            let max_streams = by_tenant.values().map(|v| v.len()).max().unwrap_or(0);
+            for round in 0..max_streams {
+                for streams in by_tenant.values() {
+                    let Some(stat) = streams.get(round) else {
+                        continue;
+                    };
+                    let def = registry.get(stat.tenant_id, &stat.stream_name);
+                    let def = match def {
+                        Some(d) if d.compaction.enabled => d,
+                        _ => continue,
+                    };
+
+                    if let Some(buffer) = router.get_buffer(stat.tenant_id, &stat.stream_name) {
+                        let removed = buffer.compact(
+                            &def.compaction.key_field,
+                            def.compaction.tombstone_grace_secs,
                         );
-                    } else {
-                        trace!(stream = %stat.stream_name, "compaction: nothing to compact");
+                        if removed > 0 {
+                            debug!(
+                                stream = %stat.stream_name,
+                                tenant = stat.tenant_id,
+                                removed,
+                                remaining = buffer.len(),
+                                key = %def.compaction.key_field,
+                                "compacted stream buffer"
+                            );
+                        } else {
+                            trace!(stream = %stat.stream_name, "compaction: nothing to compact");
+                        }
                     }
                 }
             }
