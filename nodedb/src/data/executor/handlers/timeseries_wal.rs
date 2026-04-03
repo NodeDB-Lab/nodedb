@@ -63,7 +63,7 @@ impl CoreLoop {
             }
 
             // Deserialize: (collection, raw_payload).
-            let Ok((collection, payload)): Result<(String, Vec<u8>), _> =
+            let Ok((raw_collection, payload)): Result<(String, Vec<u8>), _> =
                 rmp_serde::from_slice(&record.payload)
             else {
                 tracing::warn!(
@@ -73,6 +73,11 @@ impl CoreLoop {
                 );
                 continue;
             };
+
+            // Scope collection name with tenant ID to match the query path
+            // (dispatch.rs scopes scan queries as "{tenant_id}:{collection}").
+            let tenant_id = record.header.tenant_id;
+            let collection = format!("{tenant_id}:{raw_collection}");
 
             let record_lsn = record.header.lsn;
 
