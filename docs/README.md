@@ -17,7 +17,7 @@ Welcome to the NodeDB docs. These guides explain what each engine does, when to 
 - [Columnar](columnar.md) — Per-column compression, predicate pushdown, HTAP bridge
 - [Timeseries](timeseries.md) — ILP ingest, continuous aggregation, PromQL, approximate aggregation
 - [Spatial](spatial.md) — R\*-tree, geohash, H3, OGC predicates, hybrid spatial-vector
-- [Key-Value](kv.md) — O(1) lookups, TTL, secondary indexes, SQL-queryable
+- [Key-Value](kv.md) — O(1) lookups, TTL, atomic INCR/CAS, sorted indexes (leaderboards), rate gates, SQL-queryable
 - [Full-Text Search](full-text-search.md) — BM25, stemming, fuzzy, hybrid vector fusion
 
 ## AI/ML Patterns

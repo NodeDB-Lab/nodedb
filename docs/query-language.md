@@ -318,11 +318,11 @@ DROP TRIGGER notify_shipped ON orders;
 SHOW TRIGGERS;
 ```
 
-| Execution mode | Where | Atomicity | Write latency impact | Rollback on failure |
-| -------------- | ----- | --------- | -------------------- | ------------------- |
-| `ASYNC` (default) | Event Plane | Eventually consistent | None | No — original write committed |
-| `SYNC` | Data Plane | Same transaction (ACID) | Trigger time added | Yes |
-| `DEFERRED` | Data Plane at COMMIT | Same transaction, batched | At COMMIT time | Yes |
+| Execution mode    | Where                | Atomicity                 | Write latency impact | Rollback on failure           |
+| ----------------- | -------------------- | ------------------------- | -------------------- | ----------------------------- |
+| `ASYNC` (default) | Event Plane          | Eventually consistent     | None                 | No — original write committed |
+| `SYNC`            | Data Plane           | Same transaction (ACID)   | Trigger time added   | Yes                           |
+| `DEFERRED`        | Data Plane at COMMIT | Same transaction, batched | At COMMIT time       | Yes                           |
 
 ### Stored Procedures
 
@@ -700,6 +700,45 @@ COMMIT;
 
 Isolation level: **Snapshot Isolation (SI)**. Reads see a consistent snapshot from `BEGIN` time. Write conflicts detected at `COMMIT`.
 
+### Atomic Transfers
+
+Higher-level transaction primitives for moving currency or items between entities. Built on `TransactionBatch` with automatic validation and deterministic lock ordering.
+
+```sql
+-- Fungible transfer (currency, resources)
+-- Atomically: source.gold -= 500, dest.gold += 500
+-- Fails if source.gold < 500 (INSUFFICIENT_BALANCE)
+SELECT TRANSFER('player_wallets', 'player-A', 'player-B', 'gold', 500);
+
+-- Non-fungible transfer (unique items)
+-- Atomically: delete from source owner, add to dest owner
+-- Fails if source doesn't own the item (NOT_FOUND)
+SELECT TRANSFER_ITEM('inventory', 'inventory', 'sword-of-doom', 'player-A', 'player-B');
+```
+
+### Weighted Random Selection
+
+Server-side weighted random sampling with optional deterministic seeds and audit trail.
+
+```sql
+-- Pick 1 item weighted by drop_rate column
+SELECT * FROM WEIGHTED_PICK('loot_table', weight => 'drop_rate', count => 1);
+
+-- Pick 10 items with deterministic seed (provably fair — same seed = same result)
+SELECT * FROM WEIGHTED_PICK('gacha_pool', weight => 'probability', count => 10,
+    SEED => 'player-123:pull-456');
+
+-- With audit trail (logged to _system_random_audit)
+SELECT * FROM WEIGHTED_PICK('gacha_pool', weight => 'probability', count => 1,
+    SEED => 'player-123:pull-789', AUDIT => TRUE);
+
+-- Allow duplicates
+SELECT * FROM WEIGHTED_PICK('reward_pool', weight => 'chance', count => 5,
+    WITH REPLACEMENT);
+```
+
+Returns rows with columns: `pick_index`, `key`, `weight`. Uses Vose's alias method (O(N) setup, O(1) per pick). Default RNG is ChaCha-based CSPRNG; `SEED` enables deterministic reproducibility.
+
 ## Bulk Import
 
 ```sql
@@ -793,11 +832,31 @@ SHOW USERS;
 
 `CAST(expr AS type)`, `TRY_CAST(expr AS type)`, `expr::type`
 
+### KV Atomic
+
+`KV_INCR(collection, key, delta [, TTL => secs])`, `KV_DECR(collection, key, delta)`, `KV_INCR_FLOAT(collection, key, delta)`, `KV_CAS(collection, key, expected, new_value)`, `KV_GETSET(collection, key, new_value)`
+
+### Leaderboard
+
+`RANK(index_name, key)`, `TOPK(index_name, k)` (TVF), `RANGE(index_name, min, max)` (TVF), `SORTED_COUNT(index_name)`
+
+### Rate Limiting
+
+`RATE_CHECK(gate, key, max_count, window_secs)`, `RATE_REMAINING(gate, key, max_count, window_secs)`, `RATE_RESET(gate, key)`
+
+### Transfer
+
+`TRANSFER(collection, source_key, dest_key, field, amount)`, `TRANSFER_ITEM(source_coll, dest_coll, item_id, source_owner, dest_owner)`
+
+### Random Selection
+
+`WEIGHTED_PICK(collection, weight => 'col', count => N [, SEED => 'str'] [, AUDIT => TRUE] [, WITH REPLACEMENT])` (TVF)
+
 ## Limitations
 
 | Feature                       | Status        | Reason                                                                                                                                                                                                                                                                                                                              |
 | ----------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WITH RECURSIVE`              | Supported     | Iterative fixed-point execution. For graph traversal, the native `GRAPH TRAVERSE`, `GRAPH PATH`, and algorithm functions remain more efficient.                                                                                                                                                                                      |
+| `WITH RECURSIVE`              | Supported     | Iterative fixed-point execution. For graph traversal, the native `GRAPH TRAVERSE`, `GRAPH PATH`, and algorithm functions remain more efficient.                                                                                                                                                                                     |
 | `UPDATE/DELETE ... JOIN`      | Not supported | The Data Plane executes mutations as single-collection atomic operations through the SPSC bridge. Multi-collection mutations would require cross-engine coordination that breaks the isolation model. Rewrite as a subquery: `DELETE FROM orders WHERE user_id IN (SELECT id FROM users WHERE ...)`.                                |
 | `FOREIGN KEY`                 | Not enforced  | In a distributed system with CRDT sync and eventual consistency at the edge, enforcing FK constraints across collections would require cross-shard coordination on every write — killing write throughput. CRDT constraint validation (UNIQUE, FK) is enforced at Raft commit time for synced collections, but not for general SQL. |
 | `COPY TO` (export)            | Not supported | The Data Plane is write-optimized with io_uring for ingest, but export requires serialization across all shards and cores. Use the HTTP API (`/query/stream`) for NDJSON export or query into Parquet via L2 cold storage.                                                                                                          |
