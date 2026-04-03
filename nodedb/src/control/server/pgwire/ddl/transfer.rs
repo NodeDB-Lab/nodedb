@@ -3,22 +3,21 @@
 //! `SELECT TRANSFER(collection, source_key, dest_key, field, amount)`
 //!   — Atomically: source.field -= amount, dest.field += amount.
 //!   — Fails with INSUFFICIENT_BALANCE if source.field < amount.
-//!   — Returns: `{ source_balance, dest_balance }`.
+//!   — Returns: `{ source_key, dest_key, field, amount, source_balance, dest_balance }`.
 //!
 //! `SELECT TRANSFER_ITEM(source_collection, dest_collection, item_id, source_owner, dest_owner)`
 //!   — Atomically: remove item from source owner, add to dest owner.
 //!   — Fails with NOT_FOUND if source doesn't own the item.
-//!   — Returns: `{ item_id, from, to }`.
+//!   — Returns: `{ item_key, dest_key, source_collection, dest_collection }`.
 //!
-//! Both are implemented as Control Plane orchestration: read → validate → TransactionBatch.
-//! The TransactionBatch executes atomically on the Data Plane with undo-log rollback.
+//! Both dispatch to the Data Plane as dedicated KvOp variants. The entire
+//! read-validate-write executes in a single TPC core pass — no TOCTOU race.
 
 use futures::stream;
 use pgwire::api::results::{DataRowEncoder, QueryResponse, Response};
 use pgwire::error::PgWireResult;
 
-use crate::bridge::envelope::{PhysicalPlan, Status};
-use crate::bridge::physical_plan::{KvOp, MetaOp};
+use crate::bridge::physical_plan::{KvOp, PhysicalPlan};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::VShardId;
@@ -56,76 +55,24 @@ pub async fn transfer(
     let tenant_id = identity.tenant_id;
     let vshard = VShardId::from_collection(&collection);
 
-    // Step 1: Read source value.
-    let source_value = read_kv_value(state, tenant_id, vshard, &collection, &source_key).await?;
-    let dest_value = read_kv_value(state, tenant_id, vshard, &collection, &dest_key).await?;
-
-    // Step 2: Extract field values and validate.
-    let source_balance = extract_numeric_field(&source_value, &field).ok_or_else(|| {
-        sqlstate_error(
-            "42846",
-            &format!(
-                "TRANSFER: source key '{}' field '{}' is not numeric or missing",
-                source_key, field
-            ),
-        )
-    })?;
-
-    let dest_balance = extract_numeric_field(&dest_value, &field).unwrap_or(0.0);
-
-    if source_balance < amount {
-        return Err(sqlstate_error(
-            "23514",
-            &format!(
-                "insufficient balance: {source_key}.{field} = {source_balance}, need {amount}"
-            ),
-        ));
-    }
-
-    // Step 3: Build new values with updated field.
-    let new_source = update_numeric_field(&source_value, &field, source_balance - amount)?;
-    let new_dest = update_numeric_field(&dest_value, &field, dest_balance + amount)?;
-
-    // Step 4: Atomic write via TransactionBatch.
-    // Deterministic lock ordering: lexicographic lower key first.
-    let (first_key, first_val, second_key, second_val) = if source_key <= dest_key {
-        (&source_key, &new_source, &dest_key, &new_dest)
-    } else {
-        (&dest_key, &new_dest, &source_key, &new_source)
-    };
-
-    let plans = vec![
-        PhysicalPlan::Kv(KvOp::Put {
-            collection: collection.clone(),
-            key: first_key.as_bytes().to_vec(),
-            value: first_val.clone(),
-            ttl_ms: 0,
-        }),
-        PhysicalPlan::Kv(KvOp::Put {
-            collection: collection.clone(),
-            key: second_key.as_bytes().to_vec(),
-            value: second_val.clone(),
-            ttl_ms: 0,
-        }),
-    ];
-
-    let batch_plan = PhysicalPlan::Meta(MetaOp::TransactionBatch { plans });
+    // Dispatch to Data Plane — entire read+validate+write is atomic (single TPC core).
+    let plan = PhysicalPlan::Kv(KvOp::Transfer {
+        collection,
+        source_key: source_key.into_bytes(),
+        dest_key: dest_key.into_bytes(),
+        field,
+        amount,
+    });
 
     match crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state, tenant_id, vshard, batch_plan, 0,
+        state, tenant_id, vshard, plan, 0,
     )
     .await
     {
-        Ok(_) => {
-            let result = serde_json::json!({
-                "source_key": source_key,
-                "dest_key": dest_key,
-                "field": field,
-                "amount": amount,
-                "source_balance": source_balance - amount,
-                "dest_balance": dest_balance + amount,
-            });
-            respond_json("transfer", &result.to_string())
+        Ok(resp) => {
+            let payload_text =
+                crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
+            respond_json("transfer", &payload_text)
         }
         Err(e) => Err(sqlstate_error("XX000", &e.to_string())),
     }
@@ -151,116 +98,48 @@ pub async fn transfer_item(
     let source_owner = unquote(&args[3]);
     let dest_owner = unquote(&args[4]);
 
-    let tenant_id = identity.tenant_id;
-    let vshard = VShardId::from_collection(&source_collection);
-
-    // Step 1: Verify source owns the item.
-    let item_key = format!("{source_owner}:{item_id}");
-    let source_value = read_kv_value(state, tenant_id, vshard, &source_collection, &item_key).await;
-
-    if source_value.is_err() || source_value.as_ref().is_ok_and(|v| v.is_empty()) {
+    // Cross-collection transfers must be on the same vshard.
+    // Validate this upfront to prevent silent failures.
+    let vshard_src = VShardId::from_collection(&source_collection);
+    let vshard_dst = VShardId::from_collection(&dest_collection);
+    if source_collection != dest_collection && vshard_src != vshard_dst {
         return Err(sqlstate_error(
-            "02000",
+            "0A000",
             &format!(
-                "TRANSFER_ITEM: item '{}' not found for owner '{}'",
-                item_id, source_owner
+                "TRANSFER_ITEM: cross-shard transfer not supported \
+                 (source '{}' and dest '{}' map to different vShards)",
+                source_collection, dest_collection
             ),
         ));
     }
-    let item_data = source_value.unwrap();
 
-    // Step 2: Build atomic batch — delete from source, insert at dest.
+    let tenant_id = identity.tenant_id;
+    let item_key = format!("{source_owner}:{item_id}");
     let dest_key = format!("{dest_owner}:{item_id}");
 
-    let plans = vec![
-        PhysicalPlan::Kv(KvOp::Delete {
-            collection: source_collection.clone(),
-            keys: vec![item_key.as_bytes().to_vec()],
-        }),
-        PhysicalPlan::Kv(KvOp::Put {
-            collection: dest_collection.clone(),
-            key: dest_key.as_bytes().to_vec(),
-            value: item_data,
-            ttl_ms: 0,
-        }),
-    ];
-
-    let batch_plan = PhysicalPlan::Meta(MetaOp::TransactionBatch { plans });
+    // Dispatch to Data Plane — verify + delete + insert is atomic.
+    let plan = PhysicalPlan::Kv(KvOp::TransferItem {
+        source_collection,
+        dest_collection,
+        item_key: item_key.into_bytes(),
+        dest_key: dest_key.into_bytes(),
+    });
 
     match crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state, tenant_id, vshard, batch_plan, 0,
+        state, tenant_id, vshard_src, plan, 0,
     )
     .await
     {
-        Ok(_) => {
-            let result = serde_json::json!({
-                "item_id": item_id,
-                "from": source_owner,
-                "to": dest_owner,
-            });
-            respond_json("transfer_item", &result.to_string())
+        Ok(resp) => {
+            let payload_text =
+                crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
+            respond_json("transfer_item", &payload_text)
         }
         Err(e) => Err(sqlstate_error("XX000", &e.to_string())),
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
-
-/// Read a KV value from the Data Plane.
-async fn read_kv_value(
-    state: &SharedState,
-    tenant_id: crate::types::TenantId,
-    vshard: VShardId,
-    collection: &str,
-    key: &str,
-) -> PgWireResult<Vec<u8>> {
-    let plan = PhysicalPlan::Kv(KvOp::Get {
-        collection: collection.to_string(),
-        key: key.as_bytes().to_vec(),
-        rls_filters: Vec::new(),
-    });
-
-    match crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state, tenant_id, vshard, plan, 0,
-    )
-    .await
-    {
-        Ok(resp) if resp.status == Status::Ok && !resp.payload.is_empty() => {
-            Ok(resp.payload.to_vec())
-        }
-        Ok(_) => Err(sqlstate_error(
-            "02000",
-            &format!("key '{key}' not found in collection '{collection}'"),
-        )),
-        Err(e) => Err(sqlstate_error("XX000", &e.to_string())),
-    }
-}
-
-/// Extract a numeric field from a MessagePack-encoded KV value.
-fn extract_numeric_field(value: &[u8], field: &str) -> Option<f64> {
-    let doc: serde_json::Value = rmp_serde::from_slice(value).ok()?;
-    let v = doc.get(field)?;
-    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
-}
-
-/// Update a numeric field in a MessagePack-encoded KV value.
-fn update_numeric_field(value: &[u8], field: &str, new_value: f64) -> PgWireResult<Vec<u8>> {
-    let mut doc: serde_json::Value = rmp_serde::from_slice(value)
-        .map_err(|e| sqlstate_error("XX000", &format!("failed to decode value: {e}")))?;
-
-    if let Some(obj) = doc.as_object_mut() {
-        // Preserve integer type if the new value has no fractional part.
-        if new_value.fract() == 0.0 && new_value >= i64::MIN as f64 && new_value <= i64::MAX as f64
-        {
-            obj.insert(field.to_string(), serde_json::json!(new_value as i64));
-        } else {
-            obj.insert(field.to_string(), serde_json::json!(new_value));
-        }
-    }
-
-    rmp_serde::to_vec(&doc)
-        .map_err(|e| sqlstate_error("XX000", &format!("failed to encode value: {e}")))
-}
 
 fn respond_json(col_name: &str, json_text: &str) -> PgWireResult<Vec<Response>> {
     let schema = std::sync::Arc::new(vec![super::super::types::text_field(col_name)]);

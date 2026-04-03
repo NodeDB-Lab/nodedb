@@ -158,6 +158,27 @@ impl CoreLoop {
                 index_name,
                 primary_key,
             } => self.execute_kv_sorted_index_score(task, tid, index_name, primary_key),
+            KvOp::Transfer {
+                collection,
+                source_key,
+                dest_key,
+                field,
+                amount,
+            } => self
+                .execute_kv_transfer(task, tid, collection, source_key, dest_key, field, *amount),
+            KvOp::TransferItem {
+                source_collection,
+                dest_collection,
+                item_key,
+                dest_key,
+            } => self.execute_kv_transfer_item(
+                task,
+                tid,
+                source_collection,
+                dest_collection,
+                item_key,
+                dest_key,
+            ),
         }
     }
 }

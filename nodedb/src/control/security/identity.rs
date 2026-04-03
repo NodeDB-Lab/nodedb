@@ -306,7 +306,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | KvOp::Cas { .. }
             | KvOp::GetSet { .. }
             | KvOp::RegisterSortedIndex { .. }
-            | KvOp::DropSortedIndex { .. },
+            | KvOp::DropSortedIndex { .. }
+            | KvOp::Transfer { .. }
+            | KvOp::TransferItem { .. },
         ) => Permission::Write,
 
         // Tenant purge requires superuser (checked at DDL level); map to Write.

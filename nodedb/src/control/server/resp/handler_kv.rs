@@ -311,11 +311,14 @@ pub(super) async fn handle_decrby(
     let Some(delta) = cmd.arg_i64(1) else {
         return RespValue::err("ERR value is not an integer or out of range");
     };
+    let Some(neg_delta) = delta.checked_neg() else {
+        return RespValue::err("ERR value is not an integer or out of range");
+    };
 
     let plan = PhysicalPlan::Kv(KvOp::Incr {
         collection: session.collection.clone(),
         key,
-        delta: -delta,
+        delta: neg_delta,
         ttl_ms: 0,
     });
 

@@ -168,6 +168,31 @@ pub enum KvOp {
         new_value: Vec<u8>,
     },
 
+    // ── Atomic Transfer Operations ───────────────────────────────────
+    /// Atomic fungible transfer: read-validate-write in one Data Plane pass.
+    ///
+    /// Reads source and dest values, validates source.field >= amount,
+    /// then atomically writes both updated values. No TOCTOU race.
+    Transfer {
+        collection: String,
+        source_key: Vec<u8>,
+        dest_key: Vec<u8>,
+        field: String,
+        /// Amount to transfer (encoded as f64 bytes).
+        amount: f64,
+    },
+
+    /// Atomic non-fungible item transfer: verify + delete + insert in one pass.
+    ///
+    /// Verifies source owns the item, then atomically deletes from source
+    /// and inserts at dest. Fails with NotFound if source doesn't own it.
+    TransferItem {
+        source_collection: String,
+        dest_collection: String,
+        item_key: Vec<u8>,
+        dest_key: Vec<u8>,
+    },
+
     // ── Sorted Index (Leaderboard) Operations ──────────────────────────
     /// Register a sorted index on a KV collection (DDL).
     RegisterSortedIndex {
