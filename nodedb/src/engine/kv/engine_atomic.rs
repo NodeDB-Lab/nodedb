@@ -228,38 +228,31 @@ impl KvEngine {
         now_ms: u64,
         is_new_key: bool,
     ) {
+        // Cache metadata lookup to avoid double HashMap access.
+        let old_meta = if is_new_key {
+            None
+        } else {
+            self.tables.get(&tkey).and_then(|t| t.get_entry_meta(key))
+        };
+
         // Determine the target expire_at.
         let expire_at = if ttl_ms > 0 {
             // Explicit TTL: set/reset.
             now_ms + ttl_ms
-        } else if is_new_key {
+        } else if let Some(ref meta) = old_meta {
+            // Existing key, preserve TTL.
+            meta.expire_at_ms
+        } else {
             // New key with no TTL request: persistent.
             NO_EXPIRY
-        } else {
-            // Existing key, preserve TTL.
-            self.tables
-                .get(&tkey)
-                .and_then(|t| t.get_entry_meta(key))
-                .map(|m| m.expire_at_ms)
-                .unwrap_or(NO_EXPIRY)
         };
 
         // Cancel old expiry before mutation.
-        if !is_new_key
-            && let Some(old_expire) = self
-                .tables
-                .get(&tkey)
-                .and_then(|t| t.get_entry_meta(key))
-                .and_then(|m| {
-                    if m.has_ttl {
-                        Some(m.expire_at_ms)
-                    } else {
-                        None
-                    }
-                })
-        {
-            let composite = expiry_key(tenant_id, collection, key);
-            self.expiry.cancel(&composite, old_expire);
+        if let Some(ref meta) = old_meta {
+            if meta.has_ttl {
+                let composite = expiry_key(tenant_id, collection, key);
+                self.expiry.cancel(&composite, meta.expire_at_ms);
+            }
         }
 
         // Write the value.

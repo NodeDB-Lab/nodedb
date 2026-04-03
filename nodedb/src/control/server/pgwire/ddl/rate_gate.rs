@@ -62,13 +62,37 @@ pub async fn rate_check(
     let vshard = VShardId::from_collection(RATE_COLLECTION);
     let ttl_ms = window_secs * 1000;
 
-    // Atomically increment the counter. On new key, initializes to 0 then adds 1.
-    // TTL is set on creation and reset on increment (fixed window from first call).
+    // Fixed-window semantics: TTL is set ONLY on the first call (new key).
+    // Subsequent calls within the window increment without resetting TTL.
+    // To achieve this: check if key exists first, then INCR with ttl_ms=0
+    // if it does, or ttl_ms=window if it doesn't.
+    let key_exists = {
+        let check = PhysicalPlan::Kv(KvOp::GetTtl {
+            collection: RATE_COLLECTION.to_string(),
+            key: rate_key.as_bytes().to_vec(),
+        });
+        match crate::control::server::dispatch_utils::dispatch_to_data_plane(
+            state, tenant_id, vshard, check, 0,
+        )
+        .await
+        {
+            Ok(resp) if resp.status == Status::Ok => {
+                let text =
+                    crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
+                // ttl_ms == -2 means key does not exist.
+                !text.contains("-2")
+            }
+            _ => false,
+        }
+    };
+
+    let actual_ttl = if key_exists { 0 } else { ttl_ms };
+
     let plan = PhysicalPlan::Kv(KvOp::Incr {
         collection: RATE_COLLECTION.to_string(),
         key: rate_key.as_bytes().to_vec(),
         delta: 1,
-        ttl_ms,
+        ttl_ms: actual_ttl,
     });
 
     match crate::control::server::dispatch_utils::dispatch_to_data_plane(

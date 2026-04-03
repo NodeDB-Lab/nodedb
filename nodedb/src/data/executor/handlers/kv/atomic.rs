@@ -33,13 +33,14 @@ impl CoreLoop {
                 if let Some(ref m) = self.metrics {
                     m.record_kv_put();
                 }
+                let new_bytes = rmp_serde::to_vec(&new_value).unwrap_or_default();
                 let key_str = String::from_utf8_lossy(key);
                 self.emit_write_event(
                     task,
                     collection,
                     crate::event::WriteOp::Update,
                     &key_str,
-                    None,
+                    Some(&new_bytes),
                     None,
                 );
                 let payload = serde_json::json!({ "value": new_value })
@@ -86,13 +87,14 @@ impl CoreLoop {
                 if let Some(ref m) = self.metrics {
                     m.record_kv_put();
                 }
+                let new_bytes = rmp_serde::to_vec(&new_value).unwrap_or_default();
                 let key_str = String::from_utf8_lossy(key);
                 self.emit_write_event(
                     task,
                     collection,
                     crate::event::WriteOp::Update,
                     &key_str,
-                    None,
+                    Some(&new_bytes),
                     None,
                 );
                 let payload = serde_json::json!({ "value": new_value })

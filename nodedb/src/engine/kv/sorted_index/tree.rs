@@ -121,6 +121,17 @@ impl OrderStatTree {
         result
     }
 
+    /// Iterate entries in sort order, calling `f` for each.
+    ///
+    /// `f` receives `(sort_key, primary_key)` and returns `true` to continue,
+    /// `false` to stop. This avoids allocating all entries into a Vec.
+    pub fn for_each_in_order<F>(&self, mut f: F)
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        self.in_order_visit(self.root, &mut f);
+    }
+
     /// Check if a primary key exists in the tree.
     pub fn contains(&self, primary_key: &[u8]) -> bool {
         self.key_to_sort.contains_key(primary_key)
@@ -154,9 +165,13 @@ impl OrderStatTree {
 
     fn free_node(&mut self, idx: u32) {
         self.free_list.push(idx);
-        self.nodes[idx as usize].count = 0;
-        self.nodes[idx as usize].left = NULL;
-        self.nodes[idx as usize].right = NULL;
+        let n = &mut self.nodes[idx as usize];
+        n.sort_key.clear();
+        n.primary_key.clear();
+        n.count = 0;
+        n.left = NULL;
+        n.right = NULL;
+        n.height = 0;
     }
 
     fn height(&self, idx: u32) -> i8 {
@@ -383,6 +398,24 @@ impl OrderStatTree {
         self.in_order_collect(n.right, k, result);
     }
 
+    /// In-order traversal with callback. Returns false from callback to stop.
+    fn in_order_visit<F>(&self, idx: u32, f: &mut F) -> bool
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        if idx == NULL {
+            return true;
+        }
+        let n = &self.nodes[idx as usize];
+        if !self.in_order_visit(n.left, f) {
+            return false;
+        }
+        if !f(&n.sort_key, &n.primary_key) {
+            return false;
+        }
+        self.in_order_visit(n.right, f)
+    }
+
     /// Collect all entries in sort key range [min, max] (inclusive bounds).
     fn range_collect<'a>(
         &'a self,
@@ -396,15 +429,21 @@ impl OrderStatTree {
         }
 
         let n = &self.nodes[idx as usize];
-        let go_left = min.is_none() || n.sort_key.as_slice() >= min.unwrap();
-        let go_right = max.is_none() || n.sort_key.as_slice() <= max.unwrap();
+        let key = n.sort_key.as_slice();
+
+        // Pruning: left subtree is all < current node.
+        // Visit left if current > min (left might contain values in [min, current)).
+        let go_left = min.is_none() || key > min.unwrap();
+        // Pruning: right subtree is all > current node.
+        // Visit right if current < max (right might contain values in (current, max]).
+        let go_right = max.is_none() || key < max.unwrap();
 
         if go_left {
             self.range_collect(n.left, min, max, result);
         }
 
-        let in_range = (min.is_none() || n.sort_key.as_slice() >= min.unwrap())
-            && (max.is_none() || n.sort_key.as_slice() <= max.unwrap());
+        let in_range =
+            (min.is_none() || key >= min.unwrap()) && (max.is_none() || key <= max.unwrap());
         if in_range {
             result.push((&n.sort_key, &n.primary_key));
         }

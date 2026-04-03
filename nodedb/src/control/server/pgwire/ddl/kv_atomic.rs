@@ -35,7 +35,13 @@ pub async fn kv_incr(
     let collection = unquote(&args[0]).to_lowercase();
     let key = unquote(&args[1]);
     let delta: i64 = parse_i64(&args[2], func_name)?;
-    let delta = if negate { -delta } else { delta };
+    let delta = if negate {
+        delta.checked_neg().ok_or_else(|| {
+            sqlstate_error("22003", &format!("{func_name}: delta overflow on negation"))
+        })?
+    } else {
+        delta
+    };
 
     let ttl_ms = parse_optional_ttl(&args[3..])?;
 
@@ -205,20 +211,31 @@ pub(super) fn parse_function_args(sql: &str, _func_name: &str) -> PgWireResult<V
 }
 
 /// Split comma-separated arguments, respecting single-quoted strings.
+///
+/// Handles SQL-standard escaped quotes: `''` inside a quoted string becomes `'`.
+/// Example: `'O''Reilly'` → `O'Reilly`.
 pub(super) fn split_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quote = false;
+    let mut chars = s.chars().peekable();
 
-    for ch in s.chars() {
+    while let Some(ch) = chars.next() {
         match ch {
             '\'' if !in_quote => {
                 in_quote = true;
                 current.push(ch);
             }
             '\'' if in_quote => {
-                in_quote = false;
-                current.push(ch);
+                // Check if next char is also ' (escaped quote).
+                if chars.peek() == Some(&'\'') {
+                    chars.next(); // Consume the second '.
+                    current.push('\''); // Keep one ' in the output.
+                    current.push('\'');
+                } else {
+                    in_quote = false;
+                    current.push(ch);
+                }
             }
             ',' if !in_quote => {
                 args.push(current.trim().to_string());

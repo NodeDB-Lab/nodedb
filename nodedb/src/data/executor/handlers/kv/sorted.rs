@@ -49,11 +49,30 @@ impl CoreLoop {
             _ => WindowConfig::none(),
         };
 
+        let encoder = SortKeyEncoder::new(columns);
+
+        // Validate: if windowed, the timestamp column must be in the sort key columns.
+        if !window.is_unwindowed() {
+            let ts_col = &window.timestamp_column;
+            let has_ts = encoder.columns().iter().any(|c| c.name == *ts_col);
+            if !has_ts {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!(
+                            "WINDOW timestamp column '{}' must be included in sort columns",
+                            ts_col
+                        ),
+                    },
+                );
+            }
+        }
+
         let def = SortedIndexDef {
             name: index_name.to_string(),
             collection: collection.to_string(),
             key_column: key_column.to_string(),
-            encoder: SortKeyEncoder::new(columns),
+            encoder,
             window,
         };
 

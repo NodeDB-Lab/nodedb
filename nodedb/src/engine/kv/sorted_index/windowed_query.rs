@@ -2,6 +2,11 @@
 //!
 //! These functions handle time-windowed queries where only entries within
 //! a configurable time window are considered for rank/top_k/range/count.
+//!
+//! Performance: uses `for_each_in_order` with early termination instead of
+//! fetching all entries. windowed_top_k(10) on a 10M-entry tree is O(N) in
+//! the worst case (all entries outside window) but O(k) in the typical case
+//! where windowed entries are near the front of sort order.
 
 use std::collections::HashMap;
 
@@ -22,44 +27,46 @@ pub(super) fn windowed_rank(
     now_ms: u64,
 ) -> Option<u32> {
     let window_start = idx.def.window.window_start(now_ms)?;
-
     let target_sort = idx.tree.get_sort_key(primary_key)?;
 
-    // Get all entries in sort order, filter by window, count position.
-    let all = idx.tree.top_k(idx.tree.count());
     let mut rank = 0u32;
-    for (sort_key, pk) in &all {
+    let mut found = false;
+
+    idx.tree.for_each_in_order(|sort_key, pk| {
         if !entry_in_window(idx, pk, window_start) {
-            continue;
+            return true; // Skip, continue.
         }
         rank += 1;
-        if *pk == primary_key && *sort_key == target_sort {
-            return Some(rank);
+        if pk == primary_key && sort_key == target_sort {
+            found = true;
+            return false; // Stop.
         }
-    }
-    None
+        true
+    });
+
+    if found { Some(rank) } else { None }
 }
 
 /// Windowed top-k: collect top K entries that are in the current window.
+///
+/// Early termination: stops as soon as k windowed entries are found.
 pub(super) fn windowed_top_k(idx: &SortedIndexRef<'_>, k: u32, now_ms: u64) -> Vec<(u32, Vec<u8>)> {
     let Some(window_start) = idx.def.window.window_start(now_ms) else {
         return Vec::new();
     };
 
-    let all = idx.tree.top_k(idx.tree.count());
     let mut result = Vec::with_capacity(k as usize);
     let mut rank = 0u32;
 
-    for (_, pk) in &all {
+    idx.tree.for_each_in_order(|_, pk| {
         if !entry_in_window(idx, pk, window_start) {
-            continue;
+            return true; // Skip, continue.
         }
         rank += 1;
         result.push((rank, pk.to_vec()));
-        if rank >= k {
-            break;
-        }
-    }
+        rank < k // Stop when we have k entries.
+    });
+
     result
 }
 
@@ -73,16 +80,17 @@ pub(super) fn windowed_range(
         return Vec::new();
     };
 
-    // For windowed range, we need global windowed ranks. Get all windowed entries.
-    let all = idx.tree.top_k(idx.tree.count());
+    // Build windowed ranks via streaming traversal.
     let mut windowed_ranks: HashMap<Vec<u8>, u32> = HashMap::new();
     let mut rank = 0u32;
-    for (_, pk) in &all {
+
+    idx.tree.for_each_in_order(|_, pk| {
         if entry_in_window(idx, pk, window_start) {
             rank += 1;
             windowed_ranks.insert(pk.to_vec(), rank);
         }
-    }
+        true // Must scan all to compute correct ranks.
+    });
 
     entries
         .iter()
@@ -99,10 +107,14 @@ pub(super) fn windowed_count(idx: &SortedIndexRef<'_>, now_ms: u64) -> u32 {
         return 0;
     };
 
-    let all = idx.tree.top_k(idx.tree.count());
-    all.iter()
-        .filter(|(_, pk)| entry_in_window(idx, pk, window_start))
-        .count() as u32
+    let mut count = 0u32;
+    idx.tree.for_each_in_order(|_, pk| {
+        if entry_in_window(idx, pk, window_start) {
+            count += 1;
+        }
+        true
+    });
+    count
 }
 
 /// Check if an entry's timestamp is within the window.
