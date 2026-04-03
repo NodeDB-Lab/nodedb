@@ -4,6 +4,7 @@ pub mod handler;
 mod handler_hash;
 mod handler_kv;
 pub mod handler_pubsub;
+mod handler_sorted;
 pub mod listener;
 pub mod session;
 

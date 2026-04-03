@@ -142,6 +142,19 @@ pub enum ReplicatedWrite {
         key: Vec<u8>,
         new_value: Vec<u8>,
     },
+    KvRegisterSortedIndex {
+        collection: String,
+        index_name: String,
+        sort_columns: Vec<(String, String)>,
+        key_column: String,
+        window_type: String,
+        window_timestamp_column: String,
+        window_start_ms: u64,
+        window_end_ms: u64,
+    },
+    KvDropSortedIndex {
+        index_name: String,
+    },
 }
 
 /// Metadata carried alongside the write for routing on the receiving node.
@@ -353,6 +366,30 @@ pub fn to_replicated_entry(
             key: key.clone(),
             new_value: new_value.clone(),
         },
+        PhysicalPlan::Kv(KvOp::RegisterSortedIndex {
+            collection,
+            index_name,
+            sort_columns,
+            key_column,
+            window_type,
+            window_timestamp_column,
+            window_start_ms,
+            window_end_ms,
+        }) => ReplicatedWrite::KvRegisterSortedIndex {
+            collection: collection.clone(),
+            index_name: index_name.clone(),
+            sort_columns: sort_columns.clone(),
+            key_column: key_column.clone(),
+            window_type: window_type.clone(),
+            window_timestamp_column: window_timestamp_column.clone(),
+            window_start_ms: *window_start_ms,
+            window_end_ms: *window_end_ms,
+        },
+        PhysicalPlan::Kv(KvOp::DropSortedIndex { index_name }) => {
+            ReplicatedWrite::KvDropSortedIndex {
+                index_name: index_name.clone(),
+            }
+        }
         // Not a write — reads, system ops, etc.
         _ => return None,
     };
@@ -560,6 +597,30 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             key: key.clone(),
             new_value: new_value.clone(),
         }),
+        ReplicatedWrite::KvRegisterSortedIndex {
+            collection,
+            index_name,
+            sort_columns,
+            key_column,
+            window_type,
+            window_timestamp_column,
+            window_start_ms,
+            window_end_ms,
+        } => PhysicalPlan::Kv(KvOp::RegisterSortedIndex {
+            collection: collection.clone(),
+            index_name: index_name.clone(),
+            sort_columns: sort_columns.clone(),
+            key_column: key_column.clone(),
+            window_type: window_type.clone(),
+            window_timestamp_column: window_timestamp_column.clone(),
+            window_start_ms: *window_start_ms,
+            window_end_ms: *window_end_ms,
+        }),
+        ReplicatedWrite::KvDropSortedIndex { index_name } => {
+            PhysicalPlan::Kv(KvOp::DropSortedIndex {
+                index_name: index_name.clone(),
+            })
+        }
     }
 }
 

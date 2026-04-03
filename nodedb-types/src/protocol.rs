@@ -122,6 +122,15 @@ pub enum OpCode {
     KvIncrFloat = 0x8F,
     KvCas = 0x90,
     KvGetSet = 0x91,
+
+    // ── KV sorted index operations ─────────────────────────────
+    KvRegisterSortedIndex = 0x92,
+    KvDropSortedIndex = 0x93,
+    KvSortedIndexRank = 0x94,
+    KvSortedIndexTopK = 0x95,
+    KvSortedIndexRange = 0x96,
+    KvSortedIndexCount = 0x97,
+    KvSortedIndexScore = 0x98,
 }
 
 impl OpCode {
@@ -161,6 +170,8 @@ impl OpCode {
                 | OpCode::KvIncrFloat
                 | OpCode::KvCas
                 | OpCode::KvGetSet
+                | OpCode::KvRegisterSortedIndex
+                | OpCode::KvDropSortedIndex
         )
     }
 }
@@ -406,6 +417,38 @@ pub struct TextFields {
     /// New value for KvCas / KvGetSet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<Vec<u8>>,
+
+    // ── KV sorted index operations ──────────────────────────
+    /// Sorted index name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_name: Option<String>,
+    /// Sort columns: [(column_name, direction), ...].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_columns: Option<Vec<(String, String)>>,
+    /// Primary key column for sorted index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_column: Option<String>,
+    /// Window type for sorted index: "none", "daily", "weekly", "monthly", "custom".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_type: Option<String>,
+    /// Timestamp column for windowed sorted index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_timestamp_column: Option<String>,
+    /// Custom window start (ms since epoch).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_start_ms: Option<u64>,
+    /// Custom window end (ms since epoch).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_end_ms: Option<u64>,
+    /// Top-K value for SortedIndexTopK.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k_count: Option<u32>,
+    /// Score min for SortedIndexRange (encoded bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_min: Option<Vec<u8>>,
+    /// Score max for SortedIndexRange (encoded bytes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_max: Option<Vec<u8>>,
 
     // ── Document advanced ───────────────────────────────────
     /// Field-level updates: [(field_name, value_bytes), ...].

@@ -95,6 +95,14 @@ pub(crate) fn build_plan(
         OpCode::KvIncrFloat => kv::build_incr_float(collection, fields),
         OpCode::KvCas => kv::build_cas(collection, fields),
         OpCode::KvGetSet => kv::build_getset(collection, fields),
+        // KV sorted index operations.
+        OpCode::KvRegisterSortedIndex => kv::build_register_sorted_index(collection, fields),
+        OpCode::KvDropSortedIndex => kv::build_drop_sorted_index(fields),
+        OpCode::KvSortedIndexRank => kv::build_sorted_index_rank(fields),
+        OpCode::KvSortedIndexTopK => kv::build_sorted_index_top_k(fields),
+        OpCode::KvSortedIndexRange => kv::build_sorted_index_range(fields),
+        OpCode::KvSortedIndexCount => kv::build_sorted_index_count(fields),
+        OpCode::KvSortedIndexScore => kv::build_sorted_index_score(fields),
         // Vector DDL.
         OpCode::VectorSetParams => vector::build_set_params(fields, collection),
         // Query.

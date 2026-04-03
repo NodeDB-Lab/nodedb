@@ -340,6 +340,43 @@ pub fn wal_append_if_write_with_creds(
                 })?;
             wal.append_put(tenant_id, vshard_id, &entry)?;
         }
+        // Sorted index DDL — persisted so indexes are rebuilt on recovery.
+        PhysicalPlan::Kv(KvOp::RegisterSortedIndex {
+            collection,
+            index_name,
+            sort_columns,
+            key_column,
+            window_type,
+            window_timestamp_column,
+            window_start_ms,
+            window_end_ms,
+        }) => {
+            let entry = rmp_serde::to_vec(&(
+                "kv_register_sorted_index",
+                collection,
+                index_name,
+                sort_columns,
+                key_column,
+                window_type,
+                window_timestamp_column,
+                window_start_ms,
+                window_end_ms,
+            ))
+            .map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("wal kv register sorted index: {e}"),
+            })?;
+            wal.append_put(tenant_id, vshard_id, &entry)?;
+        }
+        PhysicalPlan::Kv(KvOp::DropSortedIndex { index_name }) => {
+            let entry = rmp_serde::to_vec(&("kv_drop_sorted_index", index_name)).map_err(|e| {
+                crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("wal kv drop sorted index: {e}"),
+                }
+            })?;
+            wal.append_delete(tenant_id, vshard_id, &entry)?;
+        }
         // Truncate uses append_delete to mark the collection as cleared in the WAL.
         // On recovery, replaying this entry drops all hash table state for the collection.
         PhysicalPlan::Kv(KvOp::Truncate { collection }) => {

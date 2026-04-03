@@ -315,7 +315,14 @@ impl NativeSession {
             | OpCode::KvIncr
             | OpCode::KvIncrFloat
             | OpCode::KvCas
-            | OpCode::KvGetSet => dispatch::handle_direct_op(&ctx, seq, op, fields).await,
+            | OpCode::KvGetSet
+            | OpCode::KvRegisterSortedIndex
+            | OpCode::KvDropSortedIndex
+            | OpCode::KvSortedIndexRank
+            | OpCode::KvSortedIndexTopK
+            | OpCode::KvSortedIndexRange
+            | OpCode::KvSortedIndexCount
+            | OpCode::KvSortedIndexScore => dispatch::handle_direct_op(&ctx, seq, op, fields).await,
 
             // Batch ops: direct Data Plane dispatch.
             OpCode::VectorBatchInsert | OpCode::DocumentBatchInsert => {

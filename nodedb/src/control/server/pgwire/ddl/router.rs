@@ -325,6 +325,31 @@ pub async fn dispatch(
         )));
     }
 
+    // Sorted index DDL.
+    if upper.starts_with("CREATE SORTED INDEX ") {
+        return Some(super::kv_sorted_index::create_sorted_index(state, identity, sql).await);
+    }
+    if upper.starts_with("DROP SORTED INDEX ") {
+        return Some(super::kv_sorted_index::drop_sorted_index(state, identity, sql).await);
+    }
+
+    // Sorted index query functions.
+    if upper.starts_with("SELECT RANK(") || upper.starts_with("SELECT RANK (") {
+        return Some(super::kv_sorted_index::select_rank(state, identity, sql).await);
+    }
+    if upper.contains("TOPK(") || upper.contains("TOPK (") {
+        return Some(super::kv_sorted_index::select_topk(state, identity, sql).await);
+    }
+    if upper.starts_with("SELECT SORTED_COUNT(") || upper.starts_with("SELECT SORTED_COUNT (") {
+        return Some(super::kv_sorted_index::select_sorted_count(state, identity, sql).await);
+    }
+    // RANGE as a sorted index function (check it's not a standard SQL RANGE).
+    if (upper.starts_with("SELECT * FROM RANGE(") || upper.starts_with("SELECT * FROM RANGE ("))
+        && !upper.contains(" BETWEEN ")
+    {
+        return Some(super::kv_sorted_index::select_range(state, identity, sql).await);
+    }
+
     // KV_INCR / KV_DECR / KV_INCR_FLOAT / KV_CAS / KV_GETSET — atomic KV operations.
     if upper.starts_with("SELECT KV_INCR(") || upper.starts_with("SELECT KV_INCR (") {
         return Some(super::kv_atomic::kv_incr(state, identity, sql, false).await);

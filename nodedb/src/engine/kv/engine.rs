@@ -43,6 +43,8 @@ pub struct KvEngine {
     /// Memory budget in bytes (0 = unlimited). When total_mem_usage() exceeds
     /// this, new PUTs are rejected with a retriable error.
     memory_budget_bytes: usize,
+    /// Sorted index manager: order-statistic trees for leaderboard-style queries.
+    pub(super) sorted_indexes: super::sorted_index::SortedIndexManager,
 }
 
 impl KvEngine {
@@ -67,6 +69,7 @@ impl KvEngine {
             rehash_batch_size,
             inline_threshold,
             memory_budget_bytes: 0, // 0 = unlimited (set via set_memory_budget).
+            sorted_indexes: super::sorted_index::SortedIndexManager::new(),
         }
     }
 
@@ -230,7 +233,8 @@ impl KvEngine {
         }
 
         // Secondary index maintenance (zero-index fast path: skip entirely).
-        if has_indexes {
+        let has_sorted = self.sorted_indexes.has_indexes(tkey);
+        if has_indexes || has_sorted {
             let new_value_bytes: Vec<u8> = self
                 .tables
                 .get(&tkey)
@@ -242,16 +246,22 @@ impl KvEngine {
                 .as_ref()
                 .map(|v| extract_all_field_values_from_msgpack(v));
 
-            let new_refs: Vec<(&str, &[u8])> = new_fields
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_slice()))
-                .collect();
-            let old_refs: Option<Vec<(&str, &[u8])>> = old_fields
-                .as_ref()
-                .map(|f| f.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect());
+            if has_indexes {
+                let new_refs: Vec<(&str, &[u8])> = new_fields
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_slice()))
+                    .collect();
+                let old_refs: Option<Vec<(&str, &[u8])>> = old_fields
+                    .as_ref()
+                    .map(|f| f.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect());
 
-            if let Some(idx_set) = self.indexes.get_mut(&tkey) {
-                idx_set.on_put(key, &new_refs, old_refs.as_deref());
+                if let Some(idx_set) = self.indexes.get_mut(&tkey) {
+                    idx_set.on_put(key, &new_refs, old_refs.as_deref());
+                }
+            }
+
+            if has_sorted {
+                self.sorted_indexes.on_put(tkey, key, &new_fields);
             }
         }
 
@@ -274,6 +284,7 @@ impl KvEngine {
 
         let mut count = 0;
         let has_indexes = self.indexes.get(&tkey).is_some_and(|s| !s.is_empty());
+        let has_sorted = self.sorted_indexes.has_indexes(tkey);
 
         for key in keys {
             // Cancel expiry if the key had one.
@@ -305,6 +316,11 @@ impl KvEngine {
                         .map(|(k, v)| (k.as_str(), v.as_slice()))
                         .collect();
                     idx_set.on_delete(key, &refs);
+                }
+
+                // Clean up sorted indexes.
+                if has_sorted {
+                    self.sorted_indexes.on_delete(tkey, key);
                 }
             }
         }

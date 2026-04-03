@@ -278,3 +278,122 @@ pub(crate) fn build_getset(collection: &str, fields: &TextFields) -> crate::Resu
         new_value,
     }))
 }
+
+pub(crate) fn build_register_sorted_index(
+    collection: &str,
+    fields: &TextFields,
+) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    let sort_columns = fields.sort_columns.clone().unwrap_or_default();
+    let key_column = fields.key_column.clone().unwrap_or_default();
+    let window_type = fields.window_type.clone().unwrap_or_else(|| "none".into());
+    let window_timestamp_column = fields.window_timestamp_column.clone().unwrap_or_default();
+    let window_start_ms = fields.window_start_ms.unwrap_or(0);
+    let window_end_ms = fields.window_end_ms.unwrap_or(0);
+
+    Ok(PhysicalPlan::Kv(KvOp::RegisterSortedIndex {
+        collection: collection.to_string(),
+        index_name: index_name.to_string(),
+        sort_columns,
+        key_column,
+        window_type,
+        window_timestamp_column,
+        window_start_ms,
+        window_end_ms,
+    }))
+}
+
+pub(crate) fn build_drop_sorted_index(fields: &TextFields) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    Ok(PhysicalPlan::Kv(KvOp::DropSortedIndex {
+        index_name: index_name.to_string(),
+    }))
+}
+
+pub(crate) fn build_sorted_index_rank(fields: &TextFields) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    let key = fields
+        .key
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'key'".into(),
+        })?;
+    Ok(PhysicalPlan::Kv(KvOp::SortedIndexRank {
+        index_name: index_name.to_string(),
+        primary_key: key.as_bytes().to_vec(),
+    }))
+}
+
+pub(crate) fn build_sorted_index_top_k(fields: &TextFields) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    let k = fields.top_k_count.unwrap_or(10);
+    Ok(PhysicalPlan::Kv(KvOp::SortedIndexTopK {
+        index_name: index_name.to_string(),
+        k,
+    }))
+}
+
+pub(crate) fn build_sorted_index_range(fields: &TextFields) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    Ok(PhysicalPlan::Kv(KvOp::SortedIndexRange {
+        index_name: index_name.to_string(),
+        score_min: fields.score_min.clone(),
+        score_max: fields.score_max.clone(),
+    }))
+}
+
+pub(crate) fn build_sorted_index_count(fields: &TextFields) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    Ok(PhysicalPlan::Kv(KvOp::SortedIndexCount {
+        index_name: index_name.to_string(),
+    }))
+}
+
+pub(crate) fn build_sorted_index_score(fields: &TextFields) -> crate::Result<PhysicalPlan> {
+    let index_name = fields
+        .index_name
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'index_name'".into(),
+        })?;
+    let key = fields
+        .key
+        .as_deref()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "missing 'key'".into(),
+        })?;
+    Ok(PhysicalPlan::Kv(KvOp::SortedIndexScore {
+        index_name: index_name.to_string(),
+        primary_key: key.as_bytes().to_vec(),
+    }))
+}

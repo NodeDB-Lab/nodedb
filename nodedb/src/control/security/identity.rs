@@ -282,7 +282,12 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | KvOp::GetTtl { .. }
             | KvOp::Scan { .. }
             | KvOp::BatchGet { .. }
-            | KvOp::FieldGet { .. },
+            | KvOp::FieldGet { .. }
+            | KvOp::SortedIndexRank { .. }
+            | KvOp::SortedIndexTopK { .. }
+            | KvOp::SortedIndexRange { .. }
+            | KvOp::SortedIndexCount { .. }
+            | KvOp::SortedIndexScore { .. },
         ) => Permission::Read,
 
         // KV engine: write operations.
@@ -299,7 +304,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | KvOp::Incr { .. }
             | KvOp::IncrFloat { .. }
             | KvOp::Cas { .. }
-            | KvOp::GetSet { .. },
+            | KvOp::GetSet { .. }
+            | KvOp::RegisterSortedIndex { .. }
+            | KvOp::DropSortedIndex { .. },
         ) => Permission::Write,
 
         // Tenant purge requires superuser (checked at DDL level); map to Write.

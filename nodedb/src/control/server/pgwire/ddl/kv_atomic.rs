@@ -205,7 +205,7 @@ fn parse_function_args(sql: &str, _func_name: &str) -> PgWireResult<Vec<String>>
 }
 
 /// Split comma-separated arguments, respecting single-quoted strings.
-fn split_args(s: &str) -> Vec<String> {
+pub(super) fn split_args(s: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quote = false;

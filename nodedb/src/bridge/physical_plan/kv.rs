@@ -167,4 +167,51 @@ pub enum KvOp {
         key: Vec<u8>,
         new_value: Vec<u8>,
     },
+
+    // ── Sorted Index (Leaderboard) Operations ──────────────────────────
+    /// Register a sorted index on a KV collection (DDL).
+    RegisterSortedIndex {
+        collection: String,
+        index_name: String,
+        /// Sort columns: (column_name, direction "ASC"/"DESC").
+        sort_columns: Vec<(String, String)>,
+        /// Primary key column name.
+        key_column: String,
+        /// Window type: "none", "daily", "weekly", "monthly", or "custom".
+        window_type: String,
+        /// Window timestamp column (empty if window_type == "none").
+        window_timestamp_column: String,
+        /// Custom window start (ms since epoch, 0 if N/A).
+        window_start_ms: u64,
+        /// Custom window end (ms since epoch, 0 if N/A).
+        window_end_ms: u64,
+    },
+
+    /// Drop a sorted index.
+    DropSortedIndex { index_name: String },
+
+    /// Get the 1-based rank of a key in a sorted index.
+    SortedIndexRank {
+        index_name: String,
+        primary_key: Vec<u8>,
+    },
+
+    /// Get the top K entries from a sorted index.
+    SortedIndexTopK { index_name: String, k: u32 },
+
+    /// Get entries in a score range from a sorted index.
+    SortedIndexRange {
+        index_name: String,
+        score_min: Option<Vec<u8>>,
+        score_max: Option<Vec<u8>>,
+    },
+
+    /// Get total count of entries in a sorted index.
+    SortedIndexCount { index_name: String },
+
+    /// Get the sort key (score) for a key in a sorted index (ZSCORE equivalent).
+    SortedIndexScore {
+        index_name: String,
+        primary_key: Vec<u8>,
+    },
 }
