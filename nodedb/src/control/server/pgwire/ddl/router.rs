@@ -325,6 +325,30 @@ pub async fn dispatch(
         )));
     }
 
+    // Weighted random selection.
+    if upper.contains("WEIGHTED_PICK(") || upper.contains("WEIGHTED_PICK (") {
+        return Some(super::weighted_pick::weighted_pick(state, identity, sql).await);
+    }
+
+    // Rate gate / cooldown functions.
+    if upper.starts_with("SELECT RATE_CHECK(") || upper.starts_with("SELECT RATE_CHECK (") {
+        return Some(super::rate_gate::rate_check(state, identity, sql).await);
+    }
+    if upper.starts_with("SELECT RATE_REMAINING(") || upper.starts_with("SELECT RATE_REMAINING (") {
+        return Some(super::rate_gate::rate_remaining(state, identity, sql).await);
+    }
+    if upper.starts_with("SELECT RATE_RESET(") || upper.starts_with("SELECT RATE_RESET (") {
+        return Some(super::rate_gate::rate_reset(state, identity, sql).await);
+    }
+
+    // Atomic transfer functions.
+    if upper.starts_with("SELECT TRANSFER(") || upper.starts_with("SELECT TRANSFER (") {
+        return Some(super::transfer::transfer(state, identity, sql).await);
+    }
+    if upper.starts_with("SELECT TRANSFER_ITEM(") || upper.starts_with("SELECT TRANSFER_ITEM (") {
+        return Some(super::transfer::transfer_item(state, identity, sql).await);
+    }
+
     // Sorted index DDL.
     if upper.starts_with("CREATE SORTED INDEX ") {
         return Some(super::kv_sorted_index::create_sorted_index(state, identity, sql).await);

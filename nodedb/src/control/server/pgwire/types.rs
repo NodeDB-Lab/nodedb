@@ -125,6 +125,19 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             "22003",
             format!("arithmetic overflow on {collection}"),
         ),
+        ErrorCode::InsufficientBalance { collection, detail } => (
+            "ERROR",
+            "23514",
+            format!("insufficient balance on {collection}: {detail}"),
+        ),
+        ErrorCode::RateExceeded {
+            gate,
+            retry_after_ms,
+        } => (
+            "ERROR",
+            "54001",
+            format!("rate limit exceeded for {gate}, retry after {retry_after_ms}ms"),
+        ),
         ErrorCode::Internal { detail } => ("ERROR", "XX000", detail.clone()),
     }
 }

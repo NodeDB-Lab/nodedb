@@ -68,6 +68,20 @@ pub enum Error {
     #[error("arithmetic overflow on {collection} key {key}")]
     OverflowError { collection: String, key: String },
 
+    #[error("insufficient balance on {collection} key {key}: {detail}")]
+    InsufficientBalance {
+        collection: String,
+        key: String,
+        detail: String,
+    },
+
+    #[error("rate limit exceeded for {gate}: {detail}")]
+    RateExceeded {
+        gate: String,
+        detail: String,
+        retry_after_ms: u64,
+    },
+
     // --- Read path errors ---
     #[error("collection {collection} not found for tenant {tenant_id}")]
     CollectionNotFound {
@@ -257,6 +271,12 @@ impl From<Error> for NodeDbError {
             Error::OverflowError { collection, key } => {
                 NodeDbError::overflow(collection, format!("key {key}"))
             }
+            Error::InsufficientBalance {
+                collection,
+                key,
+                detail,
+            } => NodeDbError::insufficient_balance(collection, format!("key {key}: {detail}")),
+            Error::RateExceeded { gate, detail, .. } => NodeDbError::rate_exceeded(gate, detail),
 
             // Read path
             Error::CollectionNotFound { collection, .. } => {

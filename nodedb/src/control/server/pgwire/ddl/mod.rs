@@ -37,6 +37,7 @@ pub mod period_lock;
 pub mod procedure;
 pub mod pubsub;
 pub mod query_functions;
+pub mod rate_gate;
 pub mod rls;
 pub mod role;
 pub mod router;
@@ -57,8 +58,10 @@ pub mod tenant;
 pub mod timeseries;
 mod timeseries_helpers;
 pub mod topic;
+pub mod transfer;
 pub mod tree_ops;
 pub mod trigger;
 pub mod user;
+pub mod weighted_pick;
 
 pub use router::dispatch;

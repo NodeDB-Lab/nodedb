@@ -221,6 +221,10 @@ pub enum ErrorCode {
     TypeMismatch { collection: String, detail: String },
     /// Arithmetic overflow (e.g. i64::MAX + 1 on INCR).
     OverflowError { collection: String },
+    /// Insufficient balance for transfer (source lacks required amount).
+    InsufficientBalance { collection: String, detail: String },
+    /// Rate limit exceeded for a rate gate / cooldown.
+    RateExceeded { gate: String, retry_after_ms: u64 },
     /// Internal error (io_uring failure, corruption, etc.)
     Internal { detail: String },
 }
@@ -265,6 +269,17 @@ impl From<crate::Error> for ErrorCode {
                 collection, detail, ..
             } => Self::TypeMismatch { collection, detail },
             crate::Error::OverflowError { collection, .. } => Self::OverflowError { collection },
+            crate::Error::InsufficientBalance {
+                collection, detail, ..
+            } => Self::InsufficientBalance { collection, detail },
+            crate::Error::RateExceeded {
+                gate,
+                retry_after_ms,
+                ..
+            } => Self::RateExceeded {
+                gate,
+                retry_after_ms,
+            },
             other => Self::Internal {
                 detail: other.to_string(),
             },

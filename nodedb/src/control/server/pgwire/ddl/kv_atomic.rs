@@ -189,7 +189,7 @@ async fn dispatch_and_respond(
 /// Parse function arguments from `SELECT FUNC_NAME(arg1, arg2, ...)`.
 ///
 /// Handles quoted strings with commas inside them.
-fn parse_function_args(sql: &str, _func_name: &str) -> PgWireResult<Vec<String>> {
+pub(super) fn parse_function_args(sql: &str, _func_name: &str) -> PgWireResult<Vec<String>> {
     let start = sql
         .find('(')
         .ok_or_else(|| sqlstate_error("42601", "expected '(' in function call"))?;

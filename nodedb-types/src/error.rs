@@ -62,6 +62,8 @@ impl ErrorCode {
     pub const LEGAL_HOLD_ACTIVE: Self = Self(1016);
     pub const TYPE_MISMATCH: Self = Self(1020);
     pub const OVERFLOW: Self = Self(1021);
+    pub const INSUFFICIENT_BALANCE: Self = Self(1022);
+    pub const RATE_EXCEEDED: Self = Self(1023);
 
     // Read path (1100–1199)
     pub const COLLECTION_NOT_FOUND: Self = Self(1100);
@@ -172,6 +174,12 @@ pub enum ErrorDetails {
     },
     Overflow {
         collection: String,
+    },
+    InsufficientBalance {
+        collection: String,
+    },
+    RateExceeded {
+        gate: String,
     },
 
     // Read path
@@ -379,6 +387,12 @@ impl NodeDbError {
     pub fn is_overflow(&self) -> bool {
         matches!(self.details, ErrorDetails::Overflow { .. })
     }
+    pub fn is_insufficient_balance(&self) -> bool {
+        matches!(self.details, ErrorDetails::InsufficientBalance { .. })
+    }
+    pub fn is_rate_exceeded(&self) -> bool {
+        matches!(self.details, ErrorDetails::RateExceeded { .. })
+    }
     pub fn is_cluster(&self) -> bool {
         matches!(
             self.details,
@@ -540,6 +554,26 @@ impl NodeDbError {
             code: ErrorCode::OVERFLOW,
             message: format!("arithmetic overflow on {collection}: {detail}"),
             details: ErrorDetails::Overflow { collection },
+            cause: None,
+        }
+    }
+
+    pub fn insufficient_balance(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::INSUFFICIENT_BALANCE,
+            message: format!("insufficient balance on {collection}: {detail}"),
+            details: ErrorDetails::InsufficientBalance { collection },
+            cause: None,
+        }
+    }
+
+    pub fn rate_exceeded(gate: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let gate = gate.into();
+        Self {
+            code: ErrorCode::RATE_EXCEEDED,
+            message: format!("rate limit exceeded for {gate}: {detail}"),
+            details: ErrorDetails::RateExceeded { gate },
             cause: None,
         }
     }
