@@ -107,6 +107,14 @@ fn purge_removes_all_tenant_data() {
         summary["documents_removed"].as_u64().unwrap_or(0) > 0,
         "should have removed documents"
     );
+    assert!(
+        summary["edges_removed"].as_u64().unwrap_or(0) > 0,
+        "should have removed edges"
+    );
+    assert!(
+        summary["kv_tables_removed"].as_u64().unwrap_or(0) > 0,
+        "should have removed KV tables"
+    );
 
     // ── Verify Tenant A data is gone ──
 
@@ -126,6 +134,26 @@ fn purge_removes_all_tenant_data() {
         resp.error_code,
         Some(ErrorCode::NotFound),
         "Tenant A documents should be purged"
+    );
+
+    // Graph: edges gone.
+    let graph_resp = send_raw_as_tenant(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        TENANT_A,
+        PhysicalPlan::Graph(GraphOp::Neighbors {
+            node_id: "u0".into(),
+            edge_label: Some("KNOWS".into()),
+            direction: nodedb::engine::graph::edge_store::Direction::Out,
+            rls_filters: Vec::new(),
+        }),
+    );
+    assert_eq!(graph_resp.status, Status::Ok);
+    let graph_json = payload_json(&graph_resp.payload);
+    assert!(
+        !graph_json.contains("u1"),
+        "Tenant A graph edges should be purged, got: {graph_json}"
     );
 
     // KV: gone.
