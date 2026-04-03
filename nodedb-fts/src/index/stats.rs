@@ -34,7 +34,7 @@ mod tests {
 
     #[test]
     fn stats_after_indexing() {
-        let mut idx = FtsIndex::new(MemoryBackend::new());
+        let idx = FtsIndex::new(MemoryBackend::new());
         idx.index_document("docs", "d1", "hello world greeting")
             .unwrap();
         idx.index_document("docs", "d2", "hello rust").unwrap();

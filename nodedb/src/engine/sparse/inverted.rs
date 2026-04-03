@@ -15,7 +15,7 @@ use nodedb_fts::index::FtsIndex;
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 
 use super::fts_redb::RedbFtsBackend;
-use super::fts_redb::tables::{DOC_LENGTHS, POSTINGS};
+use super::fts_redb::tables::{DOC_LENGTHS, INDEX_META, POSTINGS};
 
 /// Full-text inverted index backed by redb via `nodedb-fts`.
 pub struct InvertedIndex {
@@ -170,7 +170,44 @@ impl InvertedIndex {
             .insert(scoped_doc_id.as_str(), len_bytes.as_slice())
             .map_err(|e| inverted_err("insert doc_len", e))?;
 
+        // Update incremental stats in the same transaction.
+        drop(lengths);
+        Self::update_stats_in_txn(txn, collection, doc_len as i64)?;
+
         debug!(%collection, %doc_id, tokens = tokens.len(), terms = term_postings.len(), "indexed document");
+        Ok(())
+    }
+
+    /// Atomically update `(doc_count, total_token_sum)` in INDEX_META within a transaction.
+    /// `delta` is positive for insert, negative for remove.
+    fn update_stats_in_txn(
+        txn: &WriteTransaction,
+        collection: &str,
+        delta: i64,
+    ) -> crate::Result<()> {
+        let meta_key = format!("stats:{collection}");
+        let mut meta = txn
+            .open_table(INDEX_META)
+            .map_err(|e| inverted_err("open index_meta", e))?;
+        let (mut count, mut total) = meta
+            .get(meta_key.as_str())
+            .ok()
+            .flatten()
+            .and_then(|v| rmp_serde::from_slice::<(u32, u64)>(v.value()).ok())
+            .unwrap_or((0, 0));
+
+        if delta > 0 {
+            count += 1;
+            total += delta as u64;
+        } else {
+            count = count.saturating_sub(1);
+            total = total.saturating_sub((-delta) as u64);
+        }
+
+        let bytes = rmp_serde::to_vec_named(&(count, total))
+            .map_err(|e| inverted_err("serialize stats", e))?;
+        meta.insert(meta_key.as_str(), bytes.as_slice())
+            .map_err(|e| inverted_err("insert stats", e))?;
         Ok(())
     }
 
@@ -225,7 +262,22 @@ impl InvertedIndex {
             let mut lengths = write_txn
                 .open_table(DOC_LENGTHS)
                 .map_err(|e| inverted_err("open doc_lengths", e))?;
+
+            // Read doc length before removing (for stats decrement).
+            let old_len = lengths
+                .get(scoped_doc_id.as_str())
+                .ok()
+                .flatten()
+                .and_then(|v| rmp_serde::from_slice::<u32>(v.value()).ok())
+                .unwrap_or(0);
+
             let _ = lengths.remove(scoped_doc_id.as_str());
+            drop(lengths);
+
+            // Decrement stats in the same transaction.
+            if old_len > 0 {
+                Self::update_stats_in_txn(&write_txn, collection, -(old_len as i64))?;
+            }
         }
         write_txn
             .commit()

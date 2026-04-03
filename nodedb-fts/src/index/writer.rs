@@ -50,7 +50,7 @@ impl<B: FtsBackend> FtsIndex<B> {
     /// and stores via the backend. If the document already exists,
     /// call `remove_document` first to avoid duplicate postings.
     pub fn index_document(
-        &mut self,
+        &self,
         collection: &str,
         doc_id: &str,
         text: &str,
@@ -85,8 +85,9 @@ impl<B: FtsBackend> FtsIndex<B> {
             self.backend.write_postings(collection, term, &existing)?;
         }
 
-        // Write document length.
+        // Write document length and update incremental stats.
         self.backend.write_doc_length(collection, doc_id, doc_len)?;
+        self.backend.increment_stats(collection, doc_len)?;
 
         debug!(%collection, %doc_id, tokens = tokens.len(), terms = term_data.len(), "indexed document");
         Ok(())
@@ -95,8 +96,11 @@ impl<B: FtsBackend> FtsIndex<B> {
     /// Remove a document from the index.
     ///
     /// Scans all terms in the collection and removes the document's postings.
-    /// Also removes the document length entry.
-    pub fn remove_document(&mut self, collection: &str, doc_id: &str) -> Result<(), B::Error> {
+    /// Also removes the document length entry and decrements stats.
+    pub fn remove_document(&self, collection: &str, doc_id: &str) -> Result<(), B::Error> {
+        // Read doc length before removing (needed for stats decrement).
+        let doc_len = self.backend.read_doc_length(collection, doc_id)?;
+
         // Get all terms in the collection and remove this doc from each.
         let terms = self.backend.collection_terms(collection)?;
 
@@ -114,11 +118,17 @@ impl<B: FtsBackend> FtsIndex<B> {
         }
 
         self.backend.remove_doc_length(collection, doc_id)?;
+
+        // Decrement incremental stats.
+        if let Some(len) = doc_len {
+            self.backend.decrement_stats(collection, len)?;
+        }
+
         Ok(())
     }
 
     /// Purge all entries for a collection. Returns count of removed entries.
-    pub fn purge_collection(&mut self, collection: &str) -> Result<usize, B::Error> {
+    pub fn purge_collection(&self, collection: &str) -> Result<usize, B::Error> {
         self.backend.purge_collection(collection)
     }
 }
@@ -134,8 +144,8 @@ mod tests {
     }
 
     #[test]
-    fn index_and_stats() {
-        let mut idx = make_index();
+    fn index_updates_stats() {
+        let idx = make_index();
         idx.index_document("docs", "d1", "hello world greeting")
             .unwrap();
         idx.index_document("docs", "d2", "hello rust language")
@@ -147,14 +157,19 @@ mod tests {
     }
 
     #[test]
-    fn remove_document() {
-        let mut idx = make_index();
+    fn remove_decrements_stats() {
+        let idx = make_index();
         idx.index_document("docs", "d1", "hello world").unwrap();
         idx.index_document("docs", "d2", "hello rust").unwrap();
 
+        let (count_before, total_before) = idx.backend.collection_stats("docs").unwrap();
+        assert_eq!(count_before, 2);
+
         idx.remove_document("docs", "d1").unwrap();
-        let (count, _) = idx.backend.collection_stats("docs").unwrap();
-        assert_eq!(count, 1);
+
+        let (count_after, total_after) = idx.backend.collection_stats("docs").unwrap();
+        assert_eq!(count_after, 1);
+        assert!(total_after < total_before);
 
         // Verify d1's postings are gone.
         let postings = idx.backend.read_postings("docs", "hello").unwrap();
@@ -164,7 +179,7 @@ mod tests {
 
     #[test]
     fn purge_collection() {
-        let mut idx = make_index();
+        let idx = make_index();
         idx.index_document("col_a", "d1", "alpha bravo").unwrap();
         idx.index_document("col_b", "d1", "delta echo").unwrap();
 
@@ -176,9 +191,27 @@ mod tests {
 
     #[test]
     fn empty_text_is_noop() {
-        let mut idx = make_index();
-        // All stop words — analyze() returns empty.
+        let idx = make_index();
         idx.index_document("docs", "d1", "the a is").unwrap();
         assert_eq!(idx.backend.collection_stats("docs").unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn stats_o1_lookup() {
+        let idx = make_index();
+        // Index many documents.
+        for i in 0..100 {
+            idx.index_document("docs", &format!("d{i}"), &format!("word{i} common term"))
+                .unwrap();
+        }
+        let (count, _) = idx.backend.collection_stats("docs").unwrap();
+        assert_eq!(count, 100);
+
+        // Remove half.
+        for i in 0..50 {
+            idx.remove_document("docs", &format!("d{i}")).unwrap();
+        }
+        let (count, _) = idx.backend.collection_stats("docs").unwrap();
+        assert_eq!(count, 50);
     }
 }

@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn fuzzy_lookup_finds_close_term() {
-        let mut idx = FtsIndex::new(MemoryBackend::new());
+        let idx = FtsIndex::new(MemoryBackend::new());
         idx.index_document("docs", "d1", "distributed database systems")
             .unwrap();
 
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn fuzzy_lookup_no_match() {
-        let mut idx = FtsIndex::new(MemoryBackend::new());
+        let idx = FtsIndex::new(MemoryBackend::new());
         idx.index_document("docs", "d1", "hello world").unwrap();
 
         let (postings, is_fuzzy) = idx.fuzzy_lookup("docs", "zzzzzzz").unwrap();

@@ -61,7 +61,8 @@ impl FtsBackend for RedbFtsBackend {
             .map_err(|e| redb_err("open postings", e))?;
         match table.get(key.as_str()) {
             Ok(Some(val)) => {
-                let list: Vec<Posting> = rmp_serde::from_slice(val.value()).unwrap_or_default();
+                let list: Vec<Posting> = rmp_serde::from_slice(val.value())
+                    .map_err(|e| redb_err("deserialize postings", e))?;
                 Ok(list)
             }
             Ok(None) => Ok(Vec::new()),
@@ -70,7 +71,7 @@ impl FtsBackend for RedbFtsBackend {
     }
 
     fn write_postings(
-        &mut self,
+        &self,
         collection: &str,
         term: &str,
         postings: &[Posting],
@@ -98,7 +99,7 @@ impl FtsBackend for RedbFtsBackend {
         Ok(())
     }
 
-    fn remove_postings(&mut self, collection: &str, term: &str) -> crate::Result<()> {
+    fn remove_postings(&self, collection: &str, term: &str) -> crate::Result<()> {
         let key = format!("{collection}:{term}");
         let write_txn = self
             .db
@@ -122,7 +123,8 @@ impl FtsBackend for RedbFtsBackend {
             .map_err(|e| redb_err("open doc_lengths", e))?;
         match table.get(key.as_str()) {
             Ok(Some(val)) => {
-                let len: u32 = rmp_serde::from_slice(val.value()).unwrap_or(1);
+                let len: u32 = rmp_serde::from_slice(val.value())
+                    .map_err(|e| redb_err("deserialize doc_length", e))?;
                 Ok(Some(len))
             }
             Ok(None) => Ok(None),
@@ -130,12 +132,7 @@ impl FtsBackend for RedbFtsBackend {
         }
     }
 
-    fn write_doc_length(
-        &mut self,
-        collection: &str,
-        doc_id: &str,
-        length: u32,
-    ) -> crate::Result<()> {
+    fn write_doc_length(&self, collection: &str, doc_id: &str, length: u32) -> crate::Result<()> {
         let key = format!("{collection}:{doc_id}");
         let write_txn = self
             .db
@@ -155,7 +152,7 @@ impl FtsBackend for RedbFtsBackend {
         Ok(())
     }
 
-    fn remove_doc_length(&mut self, collection: &str, doc_id: &str) -> crate::Result<()> {
+    fn remove_doc_length(&self, collection: &str, doc_id: &str) -> crate::Result<()> {
         let key = format!("{collection}:{doc_id}");
         let write_txn = self
             .db
@@ -191,30 +188,79 @@ impl FtsBackend for RedbFtsBackend {
     }
 
     fn collection_stats(&self, collection: &str) -> crate::Result<(u32, u64)> {
-        let prefix = format!("{collection}:");
-        let end = format!("{collection}:\u{ffff}");
+        let meta_key = format!("stats:{collection}");
         let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let table = read_txn
-            .open_table(DOC_LENGTHS)
-            .map_err(|e| redb_err("open doc_lengths", e))?;
-
-        let mut count = 0u32;
-        let mut total = 0u64;
-        for (_, val) in table
-            .range(prefix.as_str()..end.as_str())
-            .map_err(|e| redb_err("range", e))?
-            .flatten()
-        {
-            if let Ok(len) = rmp_serde::from_slice::<u32>(val.value()) {
-                count += 1;
-                total += len as u64;
+            .open_table(INDEX_META)
+            .map_err(|e| redb_err("open index_meta", e))?;
+        match table.get(meta_key.as_str()) {
+            Ok(Some(val)) => {
+                let stats: (u32, u64) = rmp_serde::from_slice(val.value())
+                    .map_err(|e| redb_err("deserialize stats", e))?;
+                Ok(stats)
             }
+            Ok(None) => Ok((0, 0)),
+            Err(e) => Err(redb_err("get stats", e)),
         }
-
-        Ok((count, total))
     }
 
-    fn purge_collection(&mut self, collection: &str) -> crate::Result<usize> {
+    fn increment_stats(&self, collection: &str, doc_len: u32) -> crate::Result<()> {
+        let meta_key = format!("stats:{collection}");
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(INDEX_META)
+                .map_err(|e| redb_err("open index_meta", e))?;
+            let (mut count, mut total) = table
+                .get(meta_key.as_str())
+                .ok()
+                .flatten()
+                .and_then(|v| rmp_serde::from_slice::<(u32, u64)>(v.value()).ok())
+                .unwrap_or((0, 0));
+            count += 1;
+            total += doc_len as u64;
+            let bytes = rmp_serde::to_vec_named(&(count, total))
+                .map_err(|e| redb_err("serialize stats", e))?;
+            table
+                .insert(meta_key.as_str(), bytes.as_slice())
+                .map_err(|e| redb_err("insert stats", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
+    fn decrement_stats(&self, collection: &str, doc_len: u32) -> crate::Result<()> {
+        let meta_key = format!("stats:{collection}");
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(INDEX_META)
+                .map_err(|e| redb_err("open index_meta", e))?;
+            let (mut count, mut total) = table
+                .get(meta_key.as_str())
+                .ok()
+                .flatten()
+                .and_then(|v| rmp_serde::from_slice::<(u32, u64)>(v.value()).ok())
+                .unwrap_or((0, 0));
+            count = count.saturating_sub(1);
+            total = total.saturating_sub(doc_len as u64);
+            let bytes = rmp_serde::to_vec_named(&(count, total))
+                .map_err(|e| redb_err("serialize stats", e))?;
+            table
+                .insert(meta_key.as_str(), bytes.as_slice())
+                .map_err(|e| redb_err("insert stats", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
+    fn purge_collection(&self, collection: &str) -> crate::Result<usize> {
         let prefix = format!("{collection}:");
         let end = format!("{collection}:\u{ffff}");
 
@@ -252,6 +298,15 @@ impl FtsBackend for RedbFtsBackend {
             for key in &keys {
                 let _ = doc_lengths.remove(key.as_str());
             }
+        }
+
+        // Clear incremental stats for this collection.
+        {
+            let mut meta = write_txn
+                .open_table(INDEX_META)
+                .map_err(|e| redb_err("open index_meta", e))?;
+            let stats_key = format!("stats:{collection}");
+            let _ = meta.remove(stats_key.as_str());
         }
 
         write_txn
