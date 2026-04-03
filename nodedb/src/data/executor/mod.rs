@@ -6,6 +6,7 @@ mod handlers;
 pub mod response_codec;
 pub(crate) mod scoping;
 mod snapshot;
+mod sparse_vector_checkpoint;
 mod spatial_checkpoint;
 pub(super) mod strict_format;
 pub mod task;

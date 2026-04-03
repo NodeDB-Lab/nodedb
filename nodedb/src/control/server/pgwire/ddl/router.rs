@@ -857,6 +857,9 @@ pub async fn dispatch(
     if upper.starts_with("CREATE FULLTEXT INDEX ") {
         return Some(super::dsl::create_fulltext_index(state, identity, &parts));
     }
+    if upper.starts_with("CREATE SPARSE INDEX ") {
+        return Some(super::dsl::create_sparse_index(state, identity, &parts));
+    }
     if upper.starts_with("CREATE SPATIAL INDEX ") {
         return Some(super::spatial::create_spatial_index(
             state, identity, &parts,

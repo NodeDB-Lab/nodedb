@@ -305,6 +305,68 @@ pub fn create_fulltext_index(
     Ok(vec![Response::Execution(Tag::new("CREATE FULLTEXT INDEX"))])
 }
 
+// ── CREATE SPARSE INDEX ─────────────────────────────────────────────
+
+/// CREATE SPARSE INDEX [name] ON <collection> (<field>)
+pub fn create_sparse_index(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    parts: &[&str],
+) -> PgWireResult<Vec<Response>> {
+    // CREATE SPARSE INDEX <name> ON <collection> (<field>)
+    // or: CREATE SPARSE INDEX ON <collection> (<field>)
+    if parts.len() < 6 {
+        return Err(sqlstate_error(
+            "42601",
+            "syntax: CREATE SPARSE INDEX [name] ON <collection> (<field>)",
+        ));
+    }
+
+    // Determine if name is provided or omitted.
+    let (index_name, on_idx) = if parts[3].eq_ignore_ascii_case("ON") {
+        // No name: CREATE SPARSE INDEX ON collection (field)
+        ("_auto_sparse".to_string(), 3)
+    } else {
+        // Named: CREATE SPARSE INDEX name ON collection (field)
+        if parts.len() < 7 || !parts[4].eq_ignore_ascii_case("ON") {
+            return Err(sqlstate_error("42601", "expected ON after index name"));
+        }
+        (parts[3].to_string(), 4)
+    };
+
+    let collection = parts
+        .get(on_idx + 1)
+        .ok_or_else(|| sqlstate_error("42601", "expected collection name after ON"))?;
+
+    let field = parts
+        .get(on_idx + 2)
+        .map(|s| s.trim_matches(|c| c == '(' || c == ')'))
+        .unwrap_or("_sparse");
+
+    let tenant_id = identity.tenant_id;
+
+    let catalog = state.credentials.catalog();
+    state
+        .permissions
+        .set_owner(
+            "sparse_index",
+            tenant_id,
+            &index_name,
+            &identity.username,
+            catalog.as_ref(),
+        )
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("created sparse index '{index_name}' on '{collection}' ({field})"),
+    );
+
+    Ok(vec![Response::Execution(Tag::new("CREATE SPARSE INDEX"))])
+}
+
 // ── CRDT MERGE INTO ─────────────────────────────────────────────────
 
 /// CRDT MERGE INTO <collection> FROM '<source_id>' TO '<target_id>'

@@ -167,7 +167,10 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         ) => Permission::Read,
 
         PhysicalPlan::Vector(
-            VectorOp::Search { .. } | VectorOp::MultiSearch { .. } | VectorOp::QueryStats { .. },
+            VectorOp::Search { .. }
+            | VectorOp::MultiSearch { .. }
+            | VectorOp::QueryStats { .. }
+            | VectorOp::SparseSearch { .. },
         ) => Permission::Read,
 
         PhysicalPlan::Crdt(CrdtOp::Read { .. }) => Permission::Read,
@@ -204,7 +207,11 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Crdt(CrdtOp::Apply { .. }) => Permission::Write,
 
         PhysicalPlan::Vector(
-            VectorOp::Insert { .. } | VectorOp::BatchInsert { .. } | VectorOp::Delete { .. },
+            VectorOp::Insert { .. }
+            | VectorOp::BatchInsert { .. }
+            | VectorOp::Delete { .. }
+            | VectorOp::SparseInsert { .. }
+            | VectorOp::SparseDelete { .. },
         ) => Permission::Write,
 
         PhysicalPlan::Document(

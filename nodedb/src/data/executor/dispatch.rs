@@ -154,6 +154,28 @@ impl CoreLoop {
                 *ef_construction,
             ),
 
+            PhysicalPlan::Vector(VectorOp::SparseInsert {
+                collection,
+                field_name,
+                doc_id,
+                entries,
+            }) => self.execute_sparse_insert(task, tid, collection, field_name, doc_id, entries),
+
+            PhysicalPlan::Vector(VectorOp::SparseSearch {
+                collection,
+                field_name,
+                query_entries,
+                top_k,
+            }) => {
+                self.execute_sparse_search(task, tid, collection, field_name, query_entries, *top_k)
+            }
+
+            PhysicalPlan::Vector(VectorOp::SparseDelete {
+                collection,
+                field_name,
+                doc_id,
+            }) => self.execute_sparse_delete(task, tid, collection, field_name, doc_id),
+
             PhysicalPlan::Document(DocumentOp::Scan {
                 collection,
                 limit,

@@ -11,3 +11,4 @@ pub mod ivf;
 pub mod mmap_segment;
 pub mod quantize;
 pub mod simd;
+pub mod sparse;

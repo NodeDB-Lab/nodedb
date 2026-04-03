@@ -104,4 +104,35 @@ pub enum VectorOp {
         /// New ef_construction. 0 = keep current.
         ef_construction: usize,
     },
+
+    /// Insert a sparse vector into the inverted index.
+    SparseInsert {
+        collection: String,
+        /// Named sparse vector field.
+        field_name: String,
+        /// Document ID to associate with this sparse vector.
+        doc_id: String,
+        /// Sparse vector entries as `(dimension, weight)` pairs.
+        entries: Vec<(u32, f32)>,
+    },
+
+    /// Search the sparse inverted index via dot-product scoring.
+    SparseSearch {
+        collection: String,
+        /// Named sparse vector field.
+        field_name: String,
+        /// Query sparse vector entries.
+        query_entries: Vec<(u32, f32)>,
+        /// Maximum results to return.
+        top_k: usize,
+    },
+
+    /// Delete a document from the sparse inverted index.
+    SparseDelete {
+        collection: String,
+        /// Named sparse vector field.
+        field_name: String,
+        /// Document ID to remove.
+        doc_id: String,
+    },
 }

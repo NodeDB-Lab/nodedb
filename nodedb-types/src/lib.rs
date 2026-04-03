@@ -20,6 +20,7 @@ pub mod lsn;
 pub mod namespace;
 pub mod protocol;
 pub mod result;
+pub mod sparse_vector;
 pub mod sync;
 pub mod timeseries;
 pub mod value;
@@ -45,6 +46,7 @@ pub use kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy, is_valid_kv_key
 pub use lsn::Lsn;
 pub use namespace::Namespace;
 pub use result::{QueryResult, SearchResult, SubGraph};
+pub use sparse_vector::{SparseVector, SparseVectorError};
 pub use sync::compensation::CompensationHint;
 pub use sync::shape::{ShapeDefinition, ShapeType};
 pub use sync::violation::ViolationType;

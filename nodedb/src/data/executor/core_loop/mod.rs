@@ -12,6 +12,7 @@ use crate::engine::sparse::btree::SparseEngine;
 use crate::engine::sparse::doc_cache::DocCache;
 use crate::engine::sparse::inverted::InvertedIndex;
 use crate::engine::vector::collection::VectorCollection;
+use crate::engine::vector::sparse::SparseInvertedIndex;
 use crate::types::{Lsn, TenantId};
 
 use super::task::ExecutionTask;
@@ -130,6 +131,9 @@ pub struct CoreLoop {
     /// IVF-PQ indexes for collections configured with `index_type = "ivf_pq"`.
     pub(in crate::data::executor) ivf_indexes:
         HashMap<String, crate::engine::vector::ivf::IvfPqIndex>,
+
+    /// Per-collection sparse vector inverted indexes, keyed by "{tid}:{collection}:{field}".
+    pub(in crate::data::executor) sparse_vector_indexes: HashMap<String, SparseInvertedIndex>,
 
     /// Compaction interval (how often `maybe_run_maintenance` triggers).
     pub(in crate::data::executor) compaction_interval: std::time::Duration,
@@ -256,6 +260,7 @@ impl CoreLoop {
             compaction_tombstone_threshold: 0.2,
             index_configs: HashMap::new(),
             ivf_indexes: HashMap::new(),
+            sparse_vector_indexes: HashMap::new(),
             doc_cache: DocCache::new(
                 nodedb_types::config::tuning::QueryTuning::default().doc_cache_entries,
             ),

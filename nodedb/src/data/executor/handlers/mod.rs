@@ -28,4 +28,5 @@ pub mod transaction;
 pub mod vector;
 pub mod vector_lifecycle;
 pub mod vector_search;
+pub mod vector_sparse;
 pub mod write_batch;
