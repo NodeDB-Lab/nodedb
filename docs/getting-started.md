@@ -329,10 +329,10 @@ COMMIT OFFSETS ON order_changes CONSUMER GROUP processors;
 SHOW CHANGE STREAMS;
 ```
 
-### Backup and Restore
+### Backup, Restore, and Purge
 
 ```sql
--- Backup a tenant's data to a path (encrypted with AES-256-GCM)
+-- Backup all tenant data across all engines (encrypted with AES-256-GCM)
 BACKUP TENANT acme TO '/backups/acme-2026-03-31.bak';
 
 -- Validate a backup without restoring
@@ -340,6 +340,13 @@ RESTORE TENANT acme FROM '/backups/acme-2026-03-31.bak' DRY RUN;
 
 -- Restore
 RESTORE TENANT acme FROM '/backups/acme-2026-03-31.bak';
+
+-- Permanently delete all tenant data (GDPR erasure) — requires CONFIRM
+PURGE TENANT acme CONFIRM;
+
+-- Inspect resource usage and limits
+SHOW TENANT USAGE FOR acme;
+SHOW TENANT QUOTA FOR acme;
 ```
 
 ## What's Next

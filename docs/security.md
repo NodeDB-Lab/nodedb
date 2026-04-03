@@ -47,7 +47,7 @@ Functions created with `SECURITY DEFINER` execute with the permissions of the fu
 
 ### Tenant Backup and Restore
 
-`BACKUP TENANT` and `RESTORE TENANT` require the `BACKUP` privilege on the target tenant. Backups are encrypted with AES-256-GCM using the tenant's WAL key — restoring a backup to a different tenant requires re-keying.
+`BACKUP TENANT` and `RESTORE TENANT` require the `BACKUP` privilege on the target tenant. Backups are encrypted with AES-256-GCM using the tenant's WAL key — restoring a backup to a different tenant requires re-keying. Backups cover all 7 engines: documents, indexes, vectors, graph edges, KV tables, timeseries, and CRDT state.
 
 ```sql
 -- Grant backup privilege
@@ -55,6 +55,36 @@ GRANT BACKUP ON TENANT acme TO ops_user;
 
 -- Validate a backup before restoring (no data written)
 RESTORE TENANT acme FROM '/backups/acme.bak' DRY RUN;
+```
+
+### Tenant Data Purge
+
+`PURGE TENANT` permanently deletes all data for a tenant across every engine and cache. Requires explicit `CONFIRM` to prevent accidents. Superuser-only.
+
+```sql
+-- Remove catalog metadata only (data remains on disk)
+DROP TENANT acme;
+
+-- Remove ALL data across all engines and caches (GDPR erasure)
+PURGE TENANT acme CONFIRM;
+```
+
+Purge is idempotent — safe to re-run after a crash. WAL records are retained (WAL is append-only) but are inert after purge.
+
+### Tenant Usage and Quotas
+
+```sql
+-- Set resource limits per tenant
+ALTER TENANT acme SET QUOTA max_qps = 5000;
+ALTER TENANT acme SET QUOTA max_storage_bytes = 53687091200;
+ALTER TENANT acme SET QUOTA max_connections = 50;
+
+-- Inspect current usage vs limits
+SHOW TENANT USAGE FOR acme;
+SHOW TENANT QUOTA FOR acme;
+
+-- Export usage data for billing integration
+EXPORT USAGE FOR TENANT acme PERIOD '2026-03' FORMAT 'json';
 ```
 
 ## Scopes and Organizations

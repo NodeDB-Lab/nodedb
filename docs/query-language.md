@@ -456,10 +456,10 @@ DROP SCHEDULE nightly_cleanup;
 SHOW SCHEDULES;
 ```
 
-### Backup and Restore
+### Backup, Restore, and Purge
 
 ```sql
--- Backup a tenant (encrypted with AES-256-GCM, serialized as MessagePack)
+-- Backup a tenant across all 7 engines (encrypted AES-256-GCM, MessagePack)
 BACKUP TENANT acme TO '/backups/acme-2026-03-31.bak';
 
 -- Validate without restoring
@@ -467,6 +467,9 @@ RESTORE TENANT acme FROM '/backups/acme-2026-03-31.bak' DRY RUN;
 
 -- Restore
 RESTORE TENANT acme FROM '/backups/acme-2026-03-31.bak';
+
+-- Remove ALL tenant data across all engines and caches (requires CONFIRM)
+PURGE TENANT acme CONFIRM;
 ```
 
 ### Indexes
@@ -751,6 +754,11 @@ REVOKE API KEY my_key;
 -- Multi-tenancy
 CREATE TENANT acme;
 SHOW TENANTS;
+ALTER TENANT acme SET QUOTA max_qps = 5000;
+SHOW TENANT USAGE FOR acme;
+SHOW TENANT QUOTA FOR acme;
+EXPORT USAGE FOR TENANT acme PERIOD '2026-03' FORMAT 'json';
+PURGE TENANT acme CONFIRM;
 
 -- Cluster
 SHOW CLUSTER;
