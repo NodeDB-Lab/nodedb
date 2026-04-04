@@ -382,6 +382,35 @@ impl CoreLoop {
                 policy_json,
             }) => self.execute_set_collection_policy(task, collection, policy_json),
 
+            PhysicalPlan::Crdt(CrdtOp::ReadAtVersion {
+                collection,
+                document_id,
+                version_vector_json,
+            }) => self.execute_crdt_read_at_version(
+                task,
+                collection,
+                document_id,
+                version_vector_json,
+            ),
+
+            PhysicalPlan::Crdt(CrdtOp::GetVersionVector) => {
+                self.execute_crdt_get_version_vector(task)
+            }
+
+            PhysicalPlan::Crdt(CrdtOp::ExportDelta { from_version_json }) => {
+                self.execute_crdt_export_delta(task, from_version_json)
+            }
+
+            PhysicalPlan::Crdt(CrdtOp::RestoreToVersion {
+                collection,
+                document_id,
+                target_version_json,
+            }) => self.execute_crdt_restore(task, collection, document_id, target_version_json),
+
+            PhysicalPlan::Crdt(CrdtOp::CompactAtVersion {
+                target_version_json,
+            }) => self.execute_crdt_compact(task, target_version_json),
+
             PhysicalPlan::Text(TextOp::Search {
                 collection,
                 query,

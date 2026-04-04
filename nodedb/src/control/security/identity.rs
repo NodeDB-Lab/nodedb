@@ -174,7 +174,12 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | VectorOp::MultiVectorScoreSearch { .. },
         ) => Permission::Read,
 
-        PhysicalPlan::Crdt(CrdtOp::Read { .. }) => Permission::Read,
+        PhysicalPlan::Crdt(
+            CrdtOp::Read { .. }
+            | CrdtOp::ReadAtVersion { .. }
+            | CrdtOp::GetVersionVector
+            | CrdtOp::ExportDelta { .. },
+        ) => Permission::Read,
 
         PhysicalPlan::Graph(
             GraphOp::Hop { .. }
@@ -205,7 +210,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. }) => Permission::Read,
 
         // Write operations.
-        PhysicalPlan::Crdt(CrdtOp::Apply { .. }) => Permission::Write,
+        PhysicalPlan::Crdt(CrdtOp::Apply { .. } | CrdtOp::RestoreToVersion { .. }) => {
+            Permission::Write
+        }
 
         PhysicalPlan::Vector(
             VectorOp::Insert { .. }
@@ -247,7 +254,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             Permission::Alter
         }
 
-        PhysicalPlan::Crdt(CrdtOp::SetPolicy { .. }) => Permission::Alter,
+        PhysicalPlan::Crdt(CrdtOp::SetPolicy { .. } | CrdtOp::CompactAtVersion { .. }) => {
+            Permission::Alter
+        }
 
         PhysicalPlan::Meta(
             MetaOp::RegisterContinuousAggregate { .. }
