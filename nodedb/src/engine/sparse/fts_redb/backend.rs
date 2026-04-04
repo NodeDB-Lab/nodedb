@@ -260,6 +260,35 @@ impl FtsBackend for RedbFtsBackend {
         Ok(())
     }
 
+    fn read_meta(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let table = read_txn
+            .open_table(INDEX_META)
+            .map_err(|e| redb_err("open index_meta", e))?;
+        match table.get(key) {
+            Ok(Some(val)) => Ok(Some(val.value().to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(redb_err("get meta", e)),
+        }
+    }
+
+    fn write_meta(&self, key: &str, value: &[u8]) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(INDEX_META)
+                .map_err(|e| redb_err("open index_meta", e))?;
+            table
+                .insert(key, value)
+                .map_err(|e| redb_err("insert meta", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
     fn purge_collection(&self, collection: &str) -> crate::Result<usize> {
         let prefix = format!("{collection}:");
         let end = format!("{collection}:\u{ffff}");

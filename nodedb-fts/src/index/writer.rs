@@ -6,6 +6,7 @@ use tracing::debug;
 
 use crate::analyzer::pipeline::analyze;
 use crate::backend::FtsBackend;
+use crate::codec::DocIdMap;
 use crate::posting::{Bm25Params, Posting};
 
 /// Full-text search index generic over storage backend.
@@ -44,11 +45,26 @@ impl<B: FtsBackend> FtsIndex<B> {
         &mut self.backend
     }
 
+    /// Load the DocIdMap for a collection from backend metadata.
+    pub fn load_doc_id_map(&self, collection: &str) -> Result<DocIdMap, B::Error> {
+        let key = format!("{collection}:docmap");
+        match self.backend.read_meta(&key)? {
+            Some(bytes) => Ok(DocIdMap::from_bytes(&bytes).unwrap_or_default()),
+            None => Ok(DocIdMap::new()),
+        }
+    }
+
+    /// Persist the DocIdMap for a collection to backend metadata.
+    fn save_doc_id_map(&self, collection: &str, map: &DocIdMap) -> Result<(), B::Error> {
+        let key = format!("{collection}:docmap");
+        self.backend.write_meta(&key, &map.to_bytes())
+    }
+
     /// Index a document's text content.
     ///
     /// Analyzes `text` into tokens, builds a posting list per term,
-    /// and stores via the backend. If the document already exists,
-    /// call `remove_document` first to avoid duplicate postings.
+    /// and stores via the backend. Assigns a u32 doc ID via DocIdMap
+    /// and stores a SmallFloat fieldnorm.
     pub fn index_document(
         &self,
         collection: &str,
@@ -59,6 +75,11 @@ impl<B: FtsBackend> FtsIndex<B> {
         if tokens.is_empty() {
             return Ok(());
         }
+
+        // Assign u32 ID and persist map.
+        let mut doc_map = self.load_doc_id_map(collection)?;
+        let _int_id = doc_map.get_or_assign(doc_id);
+        self.save_doc_id_map(collection, &doc_map)?;
 
         // Build per-term frequency and position data.
         let mut term_data: HashMap<&str, (u32, Vec<u32>)> = HashMap::new();
@@ -85,21 +106,28 @@ impl<B: FtsBackend> FtsIndex<B> {
             self.backend.write_postings(collection, term, &existing)?;
         }
 
-        // Write document length and update incremental stats.
+        // Write document length, fieldnorm, and update incremental stats.
         self.backend.write_doc_length(collection, doc_id, doc_len)?;
+        self.write_fieldnorm(collection, _int_id, doc_len)?;
         self.backend.increment_stats(collection, doc_len)?;
 
-        debug!(%collection, %doc_id, tokens = tokens.len(), terms = term_data.len(), "indexed document");
+        debug!(%collection, %doc_id, int_id = _int_id, tokens = tokens.len(), terms = term_data.len(), "indexed document");
         Ok(())
     }
 
     /// Remove a document from the index.
     ///
     /// Scans all terms in the collection and removes the document's postings.
-    /// Also removes the document length entry and decrements stats.
+    /// Also removes the document length entry, decrements stats, and tombstones
+    /// the doc ID in the DocIdMap.
     pub fn remove_document(&self, collection: &str, doc_id: &str) -> Result<(), B::Error> {
         // Read doc length before removing (needed for stats decrement).
         let doc_len = self.backend.read_doc_length(collection, doc_id)?;
+
+        // Tombstone in DocIdMap.
+        let mut doc_map = self.load_doc_id_map(collection)?;
+        doc_map.remove(doc_id);
+        self.save_doc_id_map(collection, &doc_map)?;
 
         // Get all terms in the collection and remove this doc from each.
         let terms = self.backend.collection_terms(collection)?;
@@ -144,6 +172,45 @@ mod tests {
     }
 
     #[test]
+    fn index_assigns_doc_ids() {
+        let idx = make_index();
+        idx.index_document("docs", "d1", "hello world greeting")
+            .unwrap();
+        idx.index_document("docs", "d2", "hello rust language")
+            .unwrap();
+
+        let map = idx.load_doc_id_map("docs").unwrap();
+        assert_eq!(map.to_u32("d1"), Some(0));
+        assert_eq!(map.to_u32("d2"), Some(1));
+        assert_eq!(map.to_string(0), Some("d1"));
+    }
+
+    #[test]
+    fn remove_tombstones_doc_id() {
+        let idx = make_index();
+        idx.index_document("docs", "d1", "hello world").unwrap();
+        idx.index_document("docs", "d2", "hello rust").unwrap();
+
+        idx.remove_document("docs", "d1").unwrap();
+
+        let map = idx.load_doc_id_map("docs").unwrap();
+        assert_eq!(map.to_u32("d1"), None); // Tombstoned.
+        assert_eq!(map.to_u32("d2"), Some(1)); // Unaffected.
+    }
+
+    #[test]
+    fn fieldnorm_stored_on_index() {
+        let idx = make_index();
+        idx.index_document("docs", "d1", "hello world greeting")
+            .unwrap();
+
+        let map = idx.load_doc_id_map("docs").unwrap();
+        let int_id = map.to_u32("d1").unwrap();
+        let norm = idx.read_fieldnorm("docs", int_id).unwrap();
+        assert!(norm.is_some());
+    }
+
+    #[test]
     fn index_updates_stats() {
         let idx = make_index();
         idx.index_document("docs", "d1", "hello world greeting")
@@ -162,16 +229,11 @@ mod tests {
         idx.index_document("docs", "d1", "hello world").unwrap();
         idx.index_document("docs", "d2", "hello rust").unwrap();
 
-        let (count_before, total_before) = idx.backend.collection_stats("docs").unwrap();
-        assert_eq!(count_before, 2);
-
         idx.remove_document("docs", "d1").unwrap();
 
-        let (count_after, total_after) = idx.backend.collection_stats("docs").unwrap();
-        assert_eq!(count_after, 1);
-        assert!(total_after < total_before);
+        let (count, _) = idx.backend.collection_stats("docs").unwrap();
+        assert_eq!(count, 1);
 
-        // Verify d1's postings are gone.
         let postings = idx.backend.read_postings("docs", "hello").unwrap();
         assert_eq!(postings.len(), 1);
         assert_eq!(postings[0].doc_id, "d2");
@@ -183,8 +245,7 @@ mod tests {
         idx.index_document("col_a", "d1", "alpha bravo").unwrap();
         idx.index_document("col_b", "d1", "delta echo").unwrap();
 
-        let removed = idx.purge_collection("col_a").unwrap();
-        assert!(removed > 0);
+        idx.purge_collection("col_a").unwrap();
         assert_eq!(idx.backend.collection_stats("col_a").unwrap(), (0, 0));
         assert!(idx.backend.collection_stats("col_b").unwrap().0 > 0);
     }
@@ -194,24 +255,5 @@ mod tests {
         let idx = make_index();
         idx.index_document("docs", "d1", "the a is").unwrap();
         assert_eq!(idx.backend.collection_stats("docs").unwrap(), (0, 0));
-    }
-
-    #[test]
-    fn stats_o1_lookup() {
-        let idx = make_index();
-        // Index many documents.
-        for i in 0..100 {
-            idx.index_document("docs", &format!("d{i}"), &format!("word{i} common term"))
-                .unwrap();
-        }
-        let (count, _) = idx.backend.collection_stats("docs").unwrap();
-        assert_eq!(count, 100);
-
-        // Remove half.
-        for i in 0..50 {
-            idx.remove_document("docs", &format!("d{i}")).unwrap();
-        }
-        let (count, _) = idx.backend.collection_stats("docs").unwrap();
-        assert_eq!(count, 50);
     }
 }

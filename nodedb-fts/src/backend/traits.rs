@@ -61,6 +61,12 @@ pub trait FtsBackend {
     /// `doc_len` is the token count of the removed document.
     fn decrement_stats(&self, collection: &str, doc_len: u32) -> Result<(), Self::Error>;
 
+    /// Read a metadata blob by key (e.g., "docmap:{collection}", "fieldnorms:{collection}").
+    fn read_meta(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error>;
+
+    /// Write a metadata blob by key.
+    fn write_meta(&self, key: &str, value: &[u8]) -> Result<(), Self::Error>;
+
     /// Remove all entries for a collection prefix. Returns count of removed entries.
     fn purge_collection(&self, collection: &str) -> Result<usize, Self::Error>;
 }

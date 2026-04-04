@@ -37,6 +37,8 @@ pub struct MemoryBackend {
     doc_lengths: RefCell<HashMap<String, u32>>,
     /// Per-collection incremental stats: collection → (doc_count, total_token_sum).
     stats: RefCell<HashMap<String, (u32, u64)>>,
+    /// Generic metadata blobs (DocIdMap, fieldnorms, etc.).
+    meta: RefCell<HashMap<String, Vec<u8>>>,
 }
 
 impl MemoryBackend {
@@ -137,6 +139,17 @@ impl FtsBackend for MemoryBackend {
         Ok(())
     }
 
+    fn read_meta(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(self.meta.borrow().get(key).cloned())
+    }
+
+    fn write_meta(&self, key: &str, value: &[u8]) -> Result<(), Self::Error> {
+        self.meta
+            .borrow_mut()
+            .insert(key.to_string(), value.to_vec());
+        Ok(())
+    }
+
     fn purge_collection(&self, collection: &str) -> Result<usize, Self::Error> {
         let prefix = format!("{collection}:");
         let mut postings = self.postings.borrow_mut();
@@ -145,6 +158,10 @@ impl FtsBackend for MemoryBackend {
         postings.retain(|k, _| !k.starts_with(&prefix));
         doc_lengths.retain(|k, _| !k.starts_with(&prefix));
         self.stats.borrow_mut().remove(collection);
+        let meta_prefix = format!("{collection}:");
+        self.meta
+            .borrow_mut()
+            .retain(|k, _| !k.starts_with(&meta_prefix));
         let after = postings.len() + doc_lengths.len();
         Ok(before - after)
     }
