@@ -13,6 +13,7 @@ pub mod metadata;
 pub mod orgs;
 pub mod procedure_types;
 pub mod procedures;
+pub mod retention_policy;
 pub mod schedules;
 pub mod scopes;
 pub mod security;

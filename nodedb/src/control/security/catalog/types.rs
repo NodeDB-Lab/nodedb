@@ -59,6 +59,10 @@ pub(super) const CONSUMER_GROUPS: TableDefinition<&str, &[u8]> =
 pub(super) const SCHEDULES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.schedules");
 
+/// Table: "{tenant_id}:{policy_name}" -> MessagePack-serialized RetentionPolicyDef.
+pub(super) const RETENTION_POLICIES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("_system.retention_policies");
+
 /// Table: "{tenant_id}:{topic_name}" -> MessagePack-serialized TopicDef.
 pub(super) const TOPICS_EP: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.topics_ep");

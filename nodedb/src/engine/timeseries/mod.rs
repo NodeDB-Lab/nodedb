@@ -27,6 +27,7 @@ pub mod query;
 pub mod query_cache;
 pub mod reader;
 pub mod recent_cache;
+pub mod retention_policy;
 pub mod s3_archive;
 pub mod schema_evolution;
 pub mod segment_index;

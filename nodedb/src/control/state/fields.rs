@@ -169,6 +169,10 @@ pub struct SharedState {
     /// Per-group, per-partition offset tracking (redb-persisted).
     pub offset_store: Arc<crate::event::cdc::OffsetStore>,
 
+    /// In-memory retention policy registry for tiered data lifecycle.
+    pub retention_policy_registry:
+        Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>,
+
     /// In-memory schedule registry for cron scheduler.
     pub schedule_registry: Arc<crate::event::scheduler::ScheduleRegistry>,
 

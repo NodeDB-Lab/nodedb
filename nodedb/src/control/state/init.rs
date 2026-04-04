@@ -117,6 +117,9 @@ impl SharedState {
                         .expect("failed to open test offset store"),
                 )
             },
+            retention_policy_registry: Arc::new(
+                crate::engine::timeseries::retention_policy::RetentionPolicyRegistry::new(),
+            ),
             schedule_registry: Arc::new(crate::event::scheduler::ScheduleRegistry::new()),
             job_history: {
                 let dir = std::env::temp_dir().join(format!(
@@ -201,6 +204,8 @@ impl SharedState {
         let stream_registry = Arc::new(crate::event::cdc::StreamRegistry::new());
         let group_registry = crate::event::cdc::GroupRegistry::new();
         let schedule_registry = Arc::new(crate::event::scheduler::ScheduleRegistry::new());
+        let retention_policy_registry =
+            Arc::new(crate::engine::timeseries::retention_policy::RetentionPolicyRegistry::new());
         let ep_topic_registry = crate::event::topic::EpTopicRegistry::new();
         let mv_registry = Arc::new(crate::event::streaming_mv::MvRegistry::new());
         let sequence_registry = Arc::new(crate::control::sequence::SequenceRegistry::new());
@@ -214,6 +219,9 @@ impl SharedState {
             stream_registry.load_from_catalog(catalog);
             group_registry.load_from_catalog(catalog);
             schedule_registry.load_from_catalog(catalog);
+            if let Ok(rp_defs) = catalog.load_all_retention_policies() {
+                retention_policy_registry.load(rp_defs);
+            }
             ep_topic_registry.load_from_catalog(catalog);
             mv_registry.load_from_catalog(catalog);
             sequence_registry.load_from_catalog(catalog);
@@ -246,6 +254,7 @@ impl SharedState {
             offset_store: Arc::new(crate::event::cdc::OffsetStore::open(
                 catalog_path.parent().unwrap_or(std::path::Path::new(".")),
             )?),
+            retention_policy_registry,
             schedule_registry,
             job_history: Arc::new(crate::event::scheduler::JobHistoryStore::open(
                 catalog_path.parent().unwrap_or(std::path::Path::new(".")),

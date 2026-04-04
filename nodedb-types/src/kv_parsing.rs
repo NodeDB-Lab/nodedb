@@ -70,15 +70,9 @@ pub fn parse_interval_to_ms(s: &str) -> Result<u64, IntervalParseError> {
             .parse()
             .map_err(|_| IntervalParseError::InvalidAmount(parts[0].to_string()))?;
         let unit = parts[1].to_lowercase();
-        let ms = match unit.as_str() {
-            "ms" | "millisecond" | "milliseconds" => amount,
-            "s" | "sec" | "second" | "seconds" => amount * 1_000,
-            "m" | "min" | "minute" | "minutes" => amount * 60_000,
-            "h" | "hr" | "hour" | "hours" => amount * 3_600_000,
-            "d" | "day" | "days" => amount * 86_400_000,
-            other => return Err(IntervalParseError::UnknownUnit(other.to_string())),
-        };
-        return Ok(ms);
+        let multiplier = unit_to_ms_multiplier(&unit)
+            .ok_or_else(|| IntervalParseError::UnknownUnit(unit.clone()))?;
+        return Ok(amount * multiplier);
     }
 
     // Bare number: treat as milliseconds.
@@ -103,15 +97,25 @@ pub fn try_parse_short_interval(s: &str) -> Option<u64> {
     }
     let amount: u64 = s[..num_end].parse().ok()?;
     let unit = &s[num_end..].to_lowercase();
-    let ms = match unit.as_str() {
-        "ms" => amount,
-        "s" => amount * 1_000,
-        "m" => amount * 60_000,
-        "h" => amount * 3_600_000,
-        "d" => amount * 86_400_000,
-        _ => return None,
-    };
-    Some(ms)
+    let multiplier = unit_to_ms_multiplier(unit)?;
+    Some(amount * multiplier)
+}
+
+/// Map a time unit string to its millisecond multiplier.
+///
+/// Accepts both short forms ("ms", "s", "m", "h", "d", "w", "y") and
+/// long forms ("millisecond", "seconds", "minutes", "hours", "days", etc.).
+fn unit_to_ms_multiplier(unit: &str) -> Option<u64> {
+    match unit {
+        "ms" | "millisecond" | "milliseconds" => Some(1),
+        "s" | "sec" | "second" | "seconds" => Some(1_000),
+        "m" | "min" | "minute" | "minutes" => Some(60_000),
+        "h" | "hr" | "hour" | "hours" => Some(3_600_000),
+        "d" | "day" | "days" => Some(86_400_000),
+        "w" | "week" | "weeks" => Some(604_800_000),
+        "y" | "year" | "years" => Some(31_536_000_000),
+        _ => None,
+    }
 }
 
 /// Find the byte position of a named option in the WITH clause.
