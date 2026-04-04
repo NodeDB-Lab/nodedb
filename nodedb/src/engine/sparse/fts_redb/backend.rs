@@ -10,7 +10,7 @@ use redb::{Database, ReadableTable};
 use nodedb_fts::backend::FtsBackend;
 use nodedb_fts::posting::Posting;
 
-use super::tables::{DOC_LENGTHS, INDEX_META, POSTINGS};
+use super::tables::{DOC_LENGTHS, INDEX_META, POSTINGS, SEGMENTS};
 
 fn redb_err(ctx: &str, e: impl std::fmt::Display) -> crate::Error {
     crate::Error::Storage {
@@ -38,6 +38,9 @@ impl RedbFtsBackend {
             write_txn
                 .open_table(INDEX_META)
                 .map_err(|e| redb_err("create index_meta table", e))?;
+            write_txn
+                .open_table(SEGMENTS)
+                .map_err(|e| redb_err("create segments table", e))?;
         }
         write_txn.commit().map_err(|e| redb_err("commit init", e))?;
 
@@ -289,6 +292,65 @@ impl FtsBackend for RedbFtsBackend {
         Ok(())
     }
 
+    fn write_segment(&self, key: &str, data: &[u8]) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(SEGMENTS)
+                .map_err(|e| redb_err("open segments", e))?;
+            table
+                .insert(key, data)
+                .map_err(|e| redb_err("insert segment", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
+    fn read_segment(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let table = read_txn
+            .open_table(SEGMENTS)
+            .map_err(|e| redb_err("open segments", e))?;
+        match table.get(key) {
+            Ok(Some(val)) => Ok(Some(val.value().to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(redb_err("get segment", e)),
+        }
+    }
+
+    fn list_segments(&self, collection: &str) -> crate::Result<Vec<String>> {
+        let prefix = format!("{collection}:seg:");
+        let end = format!("{collection}:seg:\u{ffff}");
+        let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let table = read_txn
+            .open_table(SEGMENTS)
+            .map_err(|e| redb_err("open segments", e))?;
+        let keys: Vec<String> = table
+            .range(prefix.as_str()..end.as_str())
+            .map_err(|e| redb_err("range", e))?
+            .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+            .collect();
+        Ok(keys)
+    }
+
+    fn remove_segment(&self, key: &str) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("write txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(SEGMENTS)
+                .map_err(|e| redb_err("open segments", e))?;
+            let _ = table.remove(key);
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
+
     fn purge_collection(&self, collection: &str) -> crate::Result<usize> {
         let prefix = format!("{collection}:");
         let end = format!("{collection}:\u{ffff}");
@@ -336,6 +398,24 @@ impl FtsBackend for RedbFtsBackend {
                 .map_err(|e| redb_err("open index_meta", e))?;
             let stats_key = format!("stats:{collection}");
             let _ = meta.remove(stats_key.as_str());
+        }
+
+        // Clear segments for this collection.
+        {
+            let seg_prefix = format!("{collection}:seg:");
+            let seg_end = format!("{collection}:seg:\u{ffff}");
+            let mut segs = write_txn
+                .open_table(SEGMENTS)
+                .map_err(|e| redb_err("open segments", e))?;
+            let seg_keys: Vec<String> = segs
+                .range(seg_prefix.as_str()..seg_end.as_str())
+                .map_err(|e| redb_err("segments range", e))?
+                .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+                .collect();
+            removed += seg_keys.len();
+            for key in &seg_keys {
+                let _ = segs.remove(key.as_str());
+            }
         }
 
         write_txn

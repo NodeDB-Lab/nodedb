@@ -10,3 +10,6 @@ pub const DOC_LENGTHS: TableDefinition<&str, &[u8]> = TableDefinition::new("text
 
 /// Index metadata: key = name, value = MessagePack bytes.
 pub const INDEX_META: TableDefinition<&str, &[u8]> = TableDefinition::new("text.meta");
+
+/// Segment blobs: key = "{collection}:seg:{id}", value = compressed segment bytes.
+pub const SEGMENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("text.segments");
