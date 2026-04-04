@@ -368,6 +368,13 @@ pub const SYSTEM_FUNCTION_NAMES: &[&str] = &[
     "ts_percentile",
     "ts_stddev",
     "ts_correlate",
+    // Timeseries anomaly detection / statistical window functions (nodedb-query).
+    "ts_zscore",
+    "ts_bollinger_upper",
+    "ts_bollinger_lower",
+    "ts_bollinger_mid",
+    "ts_bollinger_width",
+    "ts_moving_percentile",
     // Approximate aggregates (nodedb-query).
     "approx_count_distinct",
     "approx_percentile",
