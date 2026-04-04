@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use crate::analyzer::pipeline::analyze;
 use crate::backend::FtsBackend;
 use crate::bm25::bm25_score;
 use crate::index::FtsIndex;
@@ -40,7 +39,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         fuzzy_enabled: bool,
         mode: QueryMode,
     ) -> Result<Vec<TextSearchResult>, B::Error> {
-        let query_tokens = analyze(query);
+        let query_tokens = self.analyze_for_collection(collection, query)?;
         if query_tokens.is_empty() {
             return Ok(Vec::new());
         }

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use tracing::debug;
 
-use crate::analyzer::pipeline::analyze;
 use crate::backend::FtsBackend;
 use crate::codec::DocIdMap;
 use crate::posting::{Bm25Params, Posting};
@@ -71,7 +70,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         doc_id: &str,
         text: &str,
     ) -> Result<(), B::Error> {
-        let tokens = analyze(text);
+        let tokens = self.analyze_for_collection(collection, text)?;
         if tokens.is_empty() {
             return Ok(());
         }

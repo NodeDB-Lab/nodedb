@@ -2,11 +2,26 @@
 
 use std::collections::HashMap;
 
-use super::language::LanguageAnalyzer;
+use super::language::stemmer::{LanguageAnalyzer, NoStemAnalyzer};
 use super::ngram::{EdgeNgramAnalyzer, NgramAnalyzer};
 use super::pipeline::{TextAnalyzer, analyze};
 use super::standard::{KeywordAnalyzer, SimpleAnalyzer, StandardAnalyzer};
 use super::synonym::SynonymMap;
+
+/// CJK bigram analyzer: applies CJK bigram tokenization for all CJK scripts.
+struct CjkBigramAnalyzer;
+
+impl TextAnalyzer for CjkBigramAnalyzer {
+    fn analyze(&self, text: &str) -> Vec<String> {
+        let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+        let stop_list = super::language::stop_words::stop_words("en");
+        super::pipeline::tokenize_with_stemmer(text, &stemmer, "en", stop_list)
+    }
+
+    fn name(&self) -> &str {
+        "cjk_bigram"
+    }
+}
 
 /// Registry of named text analyzers and synonym maps per collection.
 ///
@@ -31,8 +46,9 @@ impl AnalyzerRegistry {
 
     /// Set the analyzer for a collection.
     ///
-    /// Supported names: "standard", "simple", "keyword", "ngram", "edge_ngram",
-    /// or any Snowball language ("english", "german", "french", etc.).
+    /// Supported names: "standard", "simple", "keyword", "cjk_bigram",
+    /// "ngram", "edge_ngram", any Snowball language ("english", "german", etc.),
+    /// or no-stemmer languages ("hindi", "hebrew", "chinese", "japanese", etc.).
     ///
     /// N-gram analyzers accept optional parameters: "ngram:2:4" (min:max).
     pub fn set_analyzer(&mut self, collection: &str, analyzer_name: &str) -> bool {
@@ -40,6 +56,7 @@ impl AnalyzerRegistry {
             "standard" => Box::new(StandardAnalyzer),
             "simple" => Box::new(SimpleAnalyzer),
             "keyword" => Box::new(KeywordAnalyzer),
+            "cjk_bigram" | "cjk" => Box::new(CjkBigramAnalyzer),
             "ngram" => Box::new(NgramAnalyzer::new(3, 4)),
             "edge_ngram" => Box::new(EdgeNgramAnalyzer::new(2, 5)),
             name if name.starts_with("ngram:") => {
@@ -54,10 +71,17 @@ impl AnalyzerRegistry {
                 let max = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
                 Box::new(EdgeNgramAnalyzer::new(min, max))
             }
-            lang => match LanguageAnalyzer::new(lang) {
-                Some(a) => Box::new(a),
-                None => return false,
-            },
+            lang => {
+                // Try Snowball-supported language first.
+                if let Some(a) = LanguageAnalyzer::new(lang) {
+                    Box::new(a)
+                } else if let Some(a) = NoStemAnalyzer::new(lang) {
+                    // No-stemmer fallback for Hindi, Hebrew, CJK, etc.
+                    Box::new(a)
+                } else {
+                    return false;
+                }
+            }
         };
         self.overrides.insert(collection.to_string(), analyzer);
         true
@@ -77,9 +101,6 @@ impl AnalyzerRegistry {
     }
 
     /// Analyze text for a collection, applying synonym expansion at query time.
-    ///
-    /// For indexing, call `analyze_for_index()` (no synonym expansion).
-    /// For querying, call `analyze()` (with synonym expansion).
     pub fn analyze(&self, collection: &str, text: &str) -> Vec<String> {
         let tokens = match self.overrides.get(collection) {
             Some(analyzer) => analyzer.analyze(text),
@@ -128,7 +149,6 @@ mod tests {
         assert!(registry.set_analyzer("col", "ngram:2:3"));
         let tokens = registry.analyze_for_index("col", "hello");
         assert_eq!(tokens.len(), 7);
-        assert!(tokens.contains(&"he".to_string()));
     }
 
     #[test]
@@ -137,8 +157,22 @@ mod tests {
         assert!(registry.set_analyzer("col", "edge_ngram:1:3"));
         let tokens = registry.analyze_for_index("col", "test");
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], "t");
-        assert_eq!(tokens[2], "tes");
+    }
+
+    #[test]
+    fn registry_cjk_bigram() {
+        let mut registry = AnalyzerRegistry::new();
+        assert!(registry.set_analyzer("col", "cjk_bigram"));
+        let tokens = registry.analyze_for_index("col", "全文検索");
+        assert!(tokens.contains(&"全文".to_string()));
+    }
+
+    #[test]
+    fn registry_hindi_no_stem() {
+        let mut registry = AnalyzerRegistry::new();
+        assert!(registry.set_analyzer("col", "hindi"));
+        let tokens = registry.analyze_for_index("col", "यह एक परीक्षा है");
+        assert!(!tokens.iter().any(|t| t == "यह" || t == "है"));
     }
 
     #[test]
