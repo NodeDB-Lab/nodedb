@@ -498,14 +498,10 @@ pub async fn dispatch(
 
     // Retention policies.
     if upper.starts_with("CREATE RETENTION POLICY ") {
-        return Some(super::retention_policy::create_retention_policy(
-            state, identity, sql,
-        ));
+        return Some(super::retention_policy::create_retention_policy(state, identity, sql).await);
     }
     if upper.starts_with("DROP RETENTION POLICY ") {
-        return Some(super::retention_policy::drop_retention_policy(
-            state, identity, &parts,
-        ));
+        return Some(super::retention_policy::drop_retention_policy(state, identity, &parts).await);
     }
     if upper.starts_with("ALTER RETENTION POLICY ") {
         return Some(super::retention_policy::alter_retention_policy(

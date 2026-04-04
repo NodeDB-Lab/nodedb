@@ -313,6 +313,11 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
 
         // Tenant purge requires superuser (checked at DDL level); map to Write.
         PhysicalPlan::Meta(MetaOp::PurgeTenant { .. }) => Permission::Write,
+
+        // Retention enforcement is admin-level (invoked by background tasks).
+        PhysicalPlan::Meta(
+            MetaOp::EnforceTimeseriesRetention { .. } | MetaOp::ApplyContinuousAggRetention,
+        ) => Permission::Admin,
     }
 }
 

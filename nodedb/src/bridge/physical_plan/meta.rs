@@ -76,4 +76,13 @@ pub enum MetaOp {
     /// KV entries, CRDT state, inverted index terms, and cache entries.
     /// Idempotent: safe to re-run after a crash.
     PurgeTenant { tenant_id: u32 },
+
+    /// Enforce retention on a timeseries collection: drop segments older than
+    /// the cutoff. Called by the retention policy enforcement loop.
+    EnforceTimeseriesRetention { collection: String, max_age_ms: i64 },
+
+    /// Apply retention to continuous aggregate buckets managed by
+    /// the aggregate manager. Drops materialized buckets older than
+    /// each aggregate's configured retention_period_ms.
+    ApplyContinuousAggRetention,
 }

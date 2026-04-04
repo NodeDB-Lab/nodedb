@@ -13,7 +13,7 @@ use crate::control::state::SharedState;
 
 use super::super::super::types::{require_admin, sqlstate_error};
 
-pub fn drop_retention_policy(
+pub async fn drop_retention_policy(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     parts: &[&str],
@@ -30,17 +30,16 @@ pub fn drop_retention_policy(
     let name = parts[3].to_lowercase();
     let tenant_id = identity.tenant_id.as_u32();
 
-    // Verify policy exists.
-    if state
+    // Verify policy exists and capture definition for cleanup.
+    let policy_def = state
         .retention_policy_registry
         .get(tenant_id, &name)
-        .is_none()
-    {
-        return Err(sqlstate_error(
-            "42704",
-            &format!("retention policy '{name}' does not exist"),
-        ));
-    }
+        .ok_or_else(|| {
+            sqlstate_error(
+                "42704",
+                &format!("retention policy '{name}' does not exist"),
+            )
+        })?;
 
     // Delete from catalog.
     let catalog = state
@@ -68,12 +67,22 @@ pub fn drop_retention_policy(
         state.crdt_sync_delivery.enqueue(tenant_id, delta);
     }
 
-    // Capture collection name before removing from registry.
-    let collection = state
-        .retention_policy_registry
-        .get(tenant_id, &name)
-        .map(|p| p.collection.clone())
-        .unwrap_or_default();
+    // Unregister auto-created continuous aggregates.
+    if !policy_def.downsample_tiers().is_empty()
+        && let Err(e) = crate::engine::timeseries::retention_policy::autowire::unregister_tiers(
+            state,
+            &policy_def,
+        )
+        .await
+    {
+        tracing::warn!(
+            policy = name,
+            error = %e,
+            "failed to unregister some auto-wired aggregates (continuing drop)"
+        );
+    }
+
+    let collection = policy_def.collection.clone();
 
     // Remove from in-memory registry.
     state.retention_policy_registry.unregister(tenant_id, &name);

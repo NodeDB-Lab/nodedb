@@ -22,7 +22,7 @@ use super::super::super::types::{require_admin, sqlstate_error};
 use super::RETENTION_POLICIES_CRDT_COLLECTION;
 use super::parse::parse_create_retention_policy;
 
-pub fn create_retention_policy(
+pub async fn create_retention_policy(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     sql: &str,
@@ -123,7 +123,21 @@ pub fn create_retention_policy(
     }
 
     // Register in memory.
-    state.retention_policy_registry.register(def);
+    state.retention_policy_registry.register(def.clone());
+
+    // Auto-wire continuous aggregates for each downsample tier.
+    if !def.downsample_tiers().is_empty() {
+        crate::engine::timeseries::retention_policy::autowire::register_tiers(state, &def)
+            .await
+            .map_err(|e| {
+                // Roll back: remove from registry and catalog on failure.
+                state
+                    .retention_policy_registry
+                    .unregister(tenant_id, &def.name);
+                let _ = catalog.delete_retention_policy(tenant_id, &def.name);
+                sqlstate_error("XX000", &format!("failed to auto-wire aggregates: {e}"))
+            })?;
+    }
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

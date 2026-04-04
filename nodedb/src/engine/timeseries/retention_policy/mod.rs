@@ -1,3 +1,5 @@
+pub mod autowire;
+pub mod enforcement;
 pub mod registry;
 pub mod types;
 

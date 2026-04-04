@@ -102,6 +102,14 @@ impl EventPlane {
             shutdown_rx.clone(),
         );
 
+        // Spawn the retention policy enforcement loop.
+        let _retention_handle =
+            crate::engine::timeseries::retention_policy::enforcement::spawn_enforcement_loop(
+                Arc::clone(&shared_state),
+                Arc::clone(&shared_state.retention_policy_registry),
+                shutdown_rx.clone(),
+            );
+
         // Spawn the CDC log compaction background task.
         let _compaction_handle = super::cdc::compaction::spawn_compaction_task(
             Arc::clone(&shared_state.stream_registry),

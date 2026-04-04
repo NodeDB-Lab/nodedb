@@ -616,6 +616,75 @@ impl CoreLoop {
                 self.execute_purge_tenant(task, *tenant_id)
             }
 
+            PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
+                collection,
+                max_age_ms,
+            }) => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("system clock before UNIX_EPOCH: {e}; using epoch as now");
+                        std::time::Duration::ZERO
+                    })
+                    .as_millis() as i64;
+                let cutoff = now_ms - *max_age_ms;
+                let mut deleted = 0usize;
+                let ts_base = self.data_dir.join("ts").join(collection.as_str());
+
+                if let Some(registry) = self.ts_registries.get_mut(collection.as_str()) {
+                    // Find partitions older than cutoff.
+                    let expired: Vec<(i64, String)> = registry
+                        .iter()
+                        .filter(|(_, e)| {
+                            e.meta.max_ts < cutoff
+                                && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
+                        })
+                        .map(|(&start, e)| (start, e.dir_name.clone()))
+                        .collect();
+
+                    for (start_ts, dir_name) in expired {
+                        let partition_path = ts_base.join(&dir_name);
+                        if partition_path.exists()
+                            && let Err(e) = std::fs::remove_dir_all(&partition_path)
+                        {
+                            tracing::warn!(
+                                path = %partition_path.display(),
+                                error = %e,
+                                "failed to delete expired partition"
+                            );
+                            continue;
+                        }
+                        registry.mark_deleted(start_ts);
+                        deleted += 1;
+                    }
+
+                    if deleted > 0 {
+                        tracing::info!(
+                            collection,
+                            deleted,
+                            max_age_ms,
+                            "retention enforcement complete"
+                        );
+                    }
+                }
+
+                let payload = (deleted as u64).to_le_bytes().to_vec();
+                self.response_with_payload(task, payload)
+            }
+
+            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention) => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("system clock before UNIX_EPOCH: {e}; using epoch as now");
+                        std::time::Duration::ZERO
+                    })
+                    .as_millis() as i64;
+                let removed = self.continuous_agg_mgr.apply_retention(now_ms);
+                tracing::debug!(removed, "continuous aggregate retention applied");
+                self.response_ok(task)
+            }
+
             PhysicalPlan::Columnar(ColumnarOp::Scan {
                 collection,
                 projection,
