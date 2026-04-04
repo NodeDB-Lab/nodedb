@@ -313,6 +313,10 @@ pub struct StoredCollection {
     /// Materialized sum definitions: automatic balance maintenance on INSERT to source.
     #[serde(default)]
     pub materialized_sums: Vec<MaterializedSumDef>,
+    /// Enable last-value cache for O(1) per-series recent value lookups.
+    /// Only applicable to timeseries collections.
+    #[serde(default)]
+    pub lvc_enabled: bool,
 }
 
 /// Double-entry balance constraint: within a single transaction, for each
@@ -445,6 +449,7 @@ impl StoredCollection {
             state_constraints: Vec::new(),
             transition_checks: Vec::new(),
             materialized_sums: Vec::new(),
+            lvc_enabled: false,
         }
     }
 

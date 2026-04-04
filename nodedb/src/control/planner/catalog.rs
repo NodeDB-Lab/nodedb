@@ -275,6 +275,7 @@ mod tests {
             state_constraints: Vec::new(),
             transition_checks: Vec::new(),
             materialized_sums: Vec::new(),
+            lvc_enabled: false,
         };
         let schema = collection_to_arrow_schema(&coll);
         assert_eq!(schema.fields().len(), 2);
@@ -310,6 +311,7 @@ mod tests {
             state_constraints: Vec::new(),
             transition_checks: Vec::new(),
             materialized_sums: Vec::new(),
+            lvc_enabled: false,
         };
         let schema = collection_to_arrow_schema(&coll);
         assert_eq!(schema.fields().len(), 5);

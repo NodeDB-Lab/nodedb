@@ -79,6 +79,7 @@ pub fn create_timeseries(
         state_constraints: Vec::new(),
         transition_checks: Vec::new(),
         materialized_sums: Vec::new(),
+        lvc_enabled: false,
     };
 
     if let Some(catalog) = state.credentials.catalog() {

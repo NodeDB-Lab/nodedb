@@ -668,6 +668,15 @@ impl CoreLoop {
                     }
                 }
 
+                // Evict LVC entries older than the cutoff.
+                let scoped = format!("{tid}:{collection}");
+                if let Some(lvc) = self.ts_last_value_caches.get_mut(&scoped) {
+                    let evicted = lvc.evict_older_than(cutoff);
+                    if evicted > 0 {
+                        tracing::debug!(collection, evicted, "evicted stale LVC entries");
+                    }
+                }
+
                 let payload = (deleted as u64).to_le_bytes().to_vec();
                 self.response_with_payload(task, payload)
             }
@@ -697,6 +706,10 @@ impl CoreLoop {
 
             PhysicalPlan::Meta(MetaOp::QueryLastValues { collection }) => {
                 let scoped = format!("{tid}:{collection}");
+
+                // LVC is populated on ingest via ingest_batch_with_lvc().
+                // After crash recovery, it rebuilds as new data flows in.
+                // If no new data has arrived since restart, the cache is empty.
                 let entries: Vec<(u64, i64, f64)> =
                     if let Some(lvc) = self.ts_last_value_caches.get(&scoped) {
                         lvc.all().map(|(id, e)| (id, e.ts, e.value)).collect()

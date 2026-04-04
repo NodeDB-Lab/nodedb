@@ -186,6 +186,19 @@ pub fn alter_collection_enforcement(
             }
             coll.append_only = true;
         }
+        "last_value_cache" => {
+            // ALTER COLLECTION x SET LAST_VALUE_CACHE = TRUE | FALSE
+            if !coll.collection_type.is_timeseries() {
+                return Err(sqlstate_error(
+                    "42809",
+                    &format!("'{name}' is not a timeseries collection"),
+                ));
+            }
+            let val = extract_set_value(&upper, "LAST_VALUE_CACHE").ok_or_else(|| {
+                sqlstate_error("42601", "SET LAST_VALUE_CACHE requires = TRUE or = FALSE")
+            })?;
+            coll.lvc_enabled = val.eq_ignore_ascii_case("TRUE");
+        }
         _ => {
             return Err(sqlstate_error(
                 "42601",

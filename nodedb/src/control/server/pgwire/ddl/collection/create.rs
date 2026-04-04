@@ -153,6 +153,7 @@ pub fn create_collection(
         state_constraints: Vec::new(),
         transition_checks: Vec::new(),
         materialized_sums: Vec::new(),
+        lvc_enabled: false,
     };
 
     // Persist to catalog.

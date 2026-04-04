@@ -74,6 +74,14 @@ impl LastValueCache {
         self.entries.remove(&series_id).is_some()
     }
 
+    /// Evict all entries with timestamps older than `cutoff_ms`.
+    /// Returns the number of evicted entries.
+    pub fn evict_older_than(&mut self, cutoff_ms: i64) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| entry.ts >= cutoff_ms);
+        before - self.entries.len()
+    }
+
     /// Number of cached series.
     pub fn len(&self) -> usize {
         self.entries.len()
