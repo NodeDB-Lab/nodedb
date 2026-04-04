@@ -159,6 +159,10 @@ pub struct CoreLoop {
     /// flushes all non-empty memtables to disk partitions.
     pub(in crate::data::executor) last_ts_ingest: Option<std::time::Instant>,
 
+    /// Per-collection last-value caches for O(1) recent value lookup.
+    pub(in crate::data::executor) ts_last_value_caches:
+        HashMap<String, crate::engine::timeseries::last_value_cache::LastValueCache>,
+
     /// Per-collection timeseries partition registries for this core.
     pub(in crate::data::executor) ts_registries:
         HashMap<String, crate::engine::timeseries::partition_registry::PartitionRegistry>,
@@ -267,6 +271,7 @@ impl CoreLoop {
             columnar_memtables: HashMap::new(),
             ts_max_ingested_lsn: HashMap::new(),
             last_ts_ingest: None,
+            ts_last_value_caches: HashMap::new(),
             ts_registries: HashMap::new(),
             continuous_agg_mgr:
                 crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),

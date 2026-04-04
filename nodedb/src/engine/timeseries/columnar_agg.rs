@@ -263,6 +263,9 @@ pub struct AggAccum {
     pub max: f64,
     first: f64,
     last: f64,
+    /// Welford's M2 for online variance/stddev computation.
+    mean: f64,
+    m2: f64,
 }
 
 impl Default for AggAccum {
@@ -275,6 +278,8 @@ impl Default for AggAccum {
             max: f64::NEG_INFINITY,
             first: f64::NAN,
             last: f64::NAN,
+            mean: 0.0,
+            m2: 0.0,
         }
     }
 }
@@ -298,6 +303,11 @@ impl AggAccum {
         if v > self.max {
             self.max = v;
         }
+        // Welford's online variance (for stddev).
+        let delta = v - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = v - self.mean;
+        self.m2 += delta * delta2;
     }
 
     /// Increment count without a value (for `COUNT(*)` on non-numeric columns).
@@ -314,6 +324,14 @@ impl AggAccum {
             self.first = other.first;
         }
         self.last = other.last;
+
+        // Chan's parallel algorithm for merging Welford variance.
+        let n_a = self.count as f64;
+        let n_b = other.count as f64;
+        let delta = other.mean - self.mean;
+        self.m2 += other.m2 + delta * delta * n_a * n_b / (n_a + n_b);
+        self.mean = (n_a * self.mean + n_b * other.mean) / (n_a + n_b);
+
         self.count += other.count;
         self.sum += other.sum;
         if other.min < self.min {
@@ -322,6 +340,14 @@ impl AggAccum {
         if other.max > self.max {
             self.max = other.max;
         }
+    }
+
+    /// Population standard deviation. Returns 0.0 if fewer than 2 values.
+    pub fn stddev_population(&self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        (self.m2 / self.count as f64).max(0.0).sqrt()
     }
 
     /// Convert to final `AggResult`.
@@ -338,6 +364,14 @@ impl AggAccum {
 
     pub fn sum(&self) -> f64 {
         self.sum
+    }
+
+    pub fn first(&self) -> f64 {
+        self.first
+    }
+
+    pub fn last(&self) -> f64 {
+        self.last
     }
 }
 

@@ -112,6 +112,17 @@ pub fn ingest_batch(
     series_keys: &mut HashMap<SeriesId, SeriesKey>,
     default_timestamp_ms: i64,
 ) -> (usize, usize) {
+    ingest_batch_with_lvc(memtable, lines, series_keys, default_timestamp_ms, None)
+}
+
+/// Ingest a batch of ILP lines with optional last-value cache update.
+pub fn ingest_batch_with_lvc(
+    memtable: &mut ColumnarMemtable,
+    lines: &[IlpLine<'_>],
+    series_keys: &mut HashMap<SeriesId, SeriesKey>,
+    default_timestamp_ms: i64,
+    mut lvc: Option<&mut super::last_value_cache::LastValueCache>,
+) -> (usize, usize) {
     let schema = memtable.schema().clone();
     let mut accepted = 0;
     let mut rejected = 0;
@@ -165,7 +176,20 @@ pub fn ingest_batch(
 
         match memtable.ingest_row(series_id, &values) {
             Ok(IngestResult::Rejected) => rejected += 1,
-            Ok(_) => accepted += 1,
+            Ok(_) => {
+                accepted += 1;
+                // Update last-value cache with the first float64 field value.
+                if let Some(ref mut cache) = lvc {
+                    let value = values
+                        .iter()
+                        .find_map(|v| match v {
+                            ColumnValue::Float64(f) => Some(*f),
+                            _ => None,
+                        })
+                        .unwrap_or(0.0);
+                    cache.update(series_id, ts_ms, value);
+                }
+            }
             Err(_) => rejected += 1,
         }
     }
