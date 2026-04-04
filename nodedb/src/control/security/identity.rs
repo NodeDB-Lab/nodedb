@@ -318,6 +318,14 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Meta(
             MetaOp::EnforceTimeseriesRetention { .. } | MetaOp::ApplyContinuousAggRetention,
         ) => Permission::Admin,
+
+        // Watermark query is admin-level (invoked by enforcement loop).
+        PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark { .. }) => Permission::Admin,
+
+        // Last-value cache queries are read operations.
+        PhysicalPlan::Meta(MetaOp::QueryLastValues { .. } | MetaOp::QueryLastValue { .. }) => {
+            Permission::Read
+        }
     }
 }
 

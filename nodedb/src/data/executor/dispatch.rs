@@ -685,6 +685,42 @@ impl CoreLoop {
                 self.response_ok(task)
             }
 
+            PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark { aggregate_name }) => {
+                let wm = self
+                    .continuous_agg_mgr
+                    .get_watermark(aggregate_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let json = sonic_rs::to_vec(&wm).unwrap_or_default();
+                self.response_with_payload(task, json)
+            }
+
+            PhysicalPlan::Meta(MetaOp::QueryLastValues { collection }) => {
+                let scoped = format!("{tid}:{collection}");
+                let entries: Vec<(u64, i64, f64)> =
+                    if let Some(lvc) = self.ts_last_value_caches.get(&scoped) {
+                        lvc.all().map(|(id, e)| (id, e.ts, e.value)).collect()
+                    } else {
+                        Vec::new()
+                    };
+                let json = sonic_rs::to_vec(&entries).unwrap_or_default();
+                self.response_with_payload(task, json)
+            }
+
+            PhysicalPlan::Meta(MetaOp::QueryLastValue {
+                collection,
+                series_id,
+            }) => {
+                let scoped = format!("{tid}:{collection}");
+                let entry: Option<(i64, f64)> = self
+                    .ts_last_value_caches
+                    .get(&scoped)
+                    .and_then(|lvc| lvc.get(*series_id))
+                    .map(|e| (e.ts, e.value));
+                let json = sonic_rs::to_vec(&entry).unwrap_or_default();
+                self.response_with_payload(task, json)
+            }
+
             PhysicalPlan::Columnar(ColumnarOp::Scan {
                 collection,
                 projection,

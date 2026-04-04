@@ -85,4 +85,16 @@ pub enum MetaOp {
     /// the aggregate manager. Drops materialized buckets older than
     /// each aggregate's configured retention_period_ms.
     ApplyContinuousAggRetention,
+
+    /// Query the watermark for a named continuous aggregate.
+    /// Returns JSON-serialized `WatermarkState`.
+    QueryAggregateWatermark { aggregate_name: String },
+
+    /// Query all entries from a collection's last-value cache.
+    /// Returns JSON-serialized `Vec<(u64, i64, f64)>` — (series_id, ts, value).
+    QueryLastValues { collection: String },
+
+    /// Query a single series from a collection's last-value cache.
+    /// Returns JSON-serialized `Option<(i64, f64)>` — (ts, value).
+    QueryLastValue { collection: String, series_id: u64 },
 }

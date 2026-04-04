@@ -66,29 +66,46 @@ async fn enforcement_loop(
         for policy in &policies {
             let tenant_id = TenantId::new(policy.tenant_id);
 
-            // Enforce raw tier retention.
+            // Enforce raw tier retention — only if downsample tier covers it.
             if let Some(raw_tier) = policy.raw_tier()
                 && raw_tier.retain_ms > 0
             {
-                let plan = PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
-                    collection: policy.collection.clone(),
-                    max_age_ms: raw_tier.retain_ms as i64,
-                });
+                // Safety check: if there are downsample tiers, verify tier1's
+                // watermark covers the data we're about to drop.
+                let safe_to_drop = if !policy.downsample_tiers().is_empty() {
+                    check_watermark_coverage(&state, tenant_id, policy).await
+                } else {
+                    true // No downsample tiers — safe to drop raw unconditionally.
+                };
 
-                if let Err(e) = crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async(
-                    &state,
-                    tenant_id,
-                    &policy.collection,
-                    plan,
-                    Duration::from_secs(30),
-                )
-                .await
-                {
+                if safe_to_drop {
+                    let plan = PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
+                        collection: policy.collection.clone(),
+                        max_age_ms: raw_tier.retain_ms as i64,
+                    });
+
+                    if let Err(e) =
+                        crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async(
+                            &state,
+                            tenant_id,
+                            &policy.collection,
+                            plan,
+                            Duration::from_secs(30),
+                        )
+                        .await
+                    {
+                        warn!(
+                            policy = policy.name,
+                            collection = policy.collection,
+                            error = %e,
+                            "failed to enforce raw tier retention"
+                        );
+                    }
+                } else {
                     warn!(
                         policy = policy.name,
                         collection = policy.collection,
-                        error = %e,
-                        "failed to enforce raw tier retention"
+                        "skipping raw retention: tier1 watermark does not cover cutoff"
                     );
                 }
             }
@@ -124,6 +141,63 @@ fn next_sleep_ms(registry: &RetentionPolicyRegistry) -> u64 {
         .filter(|&ms| ms > 0)
         .min()
         .unwrap_or(3_600_000) // Default: 1 hour
+}
+
+/// Check whether the first downsample tier's watermark covers the raw
+/// retention cutoff. Raw data is only safe to drop if the aggregate has
+/// already processed (aggregated) all data up to that cutoff.
+async fn check_watermark_coverage(
+    state: &std::sync::Arc<SharedState>,
+    tenant_id: TenantId,
+    policy: &crate::engine::timeseries::retention_policy::RetentionPolicyDef,
+) -> bool {
+    let raw_retain_ms = policy.raw_tier().map(|t| t.retain_ms).unwrap_or(0);
+    if raw_retain_ms == 0 {
+        return false; // Forever retention — never drop.
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let cutoff = now_ms - raw_retain_ms as i64;
+
+    // Query tier1's watermark via MetaOp.
+    let tier1_name = policy.aggregate_name(1);
+    let plan = PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark {
+        aggregate_name: tier1_name.clone(),
+    });
+
+    match crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async(
+        state,
+        tenant_id,
+        &policy.collection,
+        plan,
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(payload) => {
+            if let Ok(wm) = sonic_rs::from_slice::<
+                crate::engine::timeseries::continuous_agg::WatermarkState,
+            >(&payload)
+            {
+                // Safe if tier1 has aggregated data beyond the cutoff.
+                wm.watermark_ts >= cutoff
+            } else {
+                false // Can't parse watermark — not safe.
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                policy = policy.name,
+                tier1 = tier1_name,
+                error = %e,
+                "failed to query tier1 watermark for safety check"
+            );
+            false // Query failed — not safe to drop.
+        }
+    }
 }
 
 #[cfg(test)]
