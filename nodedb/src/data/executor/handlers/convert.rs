@@ -12,6 +12,7 @@ use nodedb_types::columnar::{ColumnDef, StrictSchema};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -52,8 +53,15 @@ impl CoreLoop {
                     "target_type": target_type,
                     "collection": collection,
                 });
-                let payload = sonic_rs::to_vec(&result).unwrap_or_default();
-                self.response_with_payload(task, payload)
+                match response_codec::encode_json(&result) {
+                    Ok(payload) => self.response_with_payload(task, payload),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
+                }
             }
             other => self.response_error(
                 task,
@@ -141,7 +149,14 @@ impl CoreLoop {
             "target_type": "strict",
             "collection": collection,
         });
-        let payload = sonic_rs::to_vec(&result).unwrap_or_default();
-        self.response_with_payload(task, payload)
+        match response_codec::encode_json(&result) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 }

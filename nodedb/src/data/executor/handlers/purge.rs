@@ -165,7 +165,7 @@ impl CoreLoop {
             "spatial_indexes_removed": spatial_removed,
         });
 
-        match sonic_rs::to_vec(&summary) {
+        match crate::data::executor::response_codec::encode_json(&summary) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(_) => self.response_ok(task),
         }

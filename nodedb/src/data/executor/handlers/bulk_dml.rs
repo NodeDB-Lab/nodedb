@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -180,12 +181,27 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, affected, "bulk update complete");
 
         if returning && affected > 0 {
-            let payload =
-                sonic_rs::to_vec(&serde_json::Value::Array(returned_docs)).unwrap_or_default();
-            self.response_with_payload(task, payload)
+            let result = serde_json::Value::Array(returned_docs);
+            match response_codec::encode_json(&result) {
+                Ok(payload) => self.response_with_payload(task, payload),
+                Err(e) => self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                ),
+            }
         } else {
-            let payload = serde_json::json!({ "affected": affected });
-            self.response_with_payload(task, sonic_rs::to_vec(&payload).unwrap_or_default())
+            let result = serde_json::json!({ "affected": affected });
+            match response_codec::encode_json(&result) {
+                Ok(payload) => self.response_with_payload(task, payload),
+                Err(e) => self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                ),
+            }
         }
     }
 
@@ -256,7 +272,15 @@ impl CoreLoop {
         }
 
         debug!(core = self.core_id, %collection, affected, "bulk delete complete");
-        let payload = serde_json::json!({ "affected": affected });
-        self.response_with_payload(task, sonic_rs::to_vec(&payload).unwrap_or_default())
+        let result = serde_json::json!({ "affected": affected });
+        match response_codec::encode_json(&result) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 }

@@ -7,6 +7,7 @@
 use sonic_rs;
 use tracing::debug;
 
+use super::super::response_codec;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::physical_plan::SpatialPredicate;
 use crate::bridge::scan_filter::ScanFilter;
@@ -106,8 +107,17 @@ impl CoreLoop {
             Some(rt) => rt,
             None => {
                 // Should not happen (has_index was true), but handle gracefully.
-                let json = sonic_rs::to_vec(&Vec::<serde_json::Value>::new()).unwrap_or_default();
-                return self.response_with_payload(task, json);
+                match response_codec::encode_json_vec(&[]) {
+                    Ok(payload) => return self.response_with_payload(task, payload),
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: e.to_string(),
+                            },
+                        );
+                    }
+                }
             }
         };
 
@@ -170,8 +180,15 @@ impl CoreLoop {
             results.push(project_doc(&doc, doc_id, projection));
         }
 
-        let json = sonic_rs::to_vec(&results).unwrap_or_default();
-        self.response_with_payload(task, json)
+        match response_codec::encode_json_vec(&results) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 
     /// Full scan fallback when no R-tree exists for the field.
@@ -247,8 +264,15 @@ impl CoreLoop {
             results.push(project_doc(&doc, doc_id, projection));
         }
 
-        let json = sonic_rs::to_vec(&results).unwrap_or_default();
-        self.response_with_payload(task, json)
+        match response_codec::encode_json_vec(&results) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 }
 

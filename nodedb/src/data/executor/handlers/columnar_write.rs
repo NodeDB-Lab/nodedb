@@ -8,6 +8,7 @@ use sonic_rs;
 
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_memtable::{
     ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
@@ -141,7 +142,17 @@ impl CoreLoop {
             "accepted": accepted,
             "collection": collection,
         });
-        let json = sonic_rs::to_vec(&result).unwrap_or_default();
+        let json = match response_codec::encode_json(&result) {
+            Ok(b) => b,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                );
+            }
+        };
         Response {
             request_id: task.request.request_id,
             status: Status::Ok,

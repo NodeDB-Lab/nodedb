@@ -5,10 +5,9 @@
 //! columnar collections. Timeseries and spatial profiles have their
 //! own scan handlers that add time-range/bucketing and R-tree semantics.
 
-use sonic_rs;
-
-use crate::bridge::envelope::Response;
+use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
 
@@ -53,8 +52,15 @@ impl CoreLoop {
             }
         }
 
-        let json = sonic_rs::to_vec(&results).unwrap_or_default();
-        self.response_with_payload(task, json)
+        match response_codec::encode_json_vec(&results) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 }
 

@@ -15,6 +15,7 @@ use sonic_rs;
 
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::engine::timeseries::columnar_memtable::{
@@ -465,8 +466,15 @@ impl CoreLoop {
             }
         }
 
-        let json = sonic_rs::to_vec(&results).unwrap_or_default();
-        self.response_with_payload(task, json)
+        match response_codec::encode_json_vec(&results) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 
     /// Aggregate mode: GROUP BY / time-bucket across memtable + partitions.
@@ -702,7 +710,17 @@ impl CoreLoop {
                     "collection": collection,
                     "dedup_skipped": true,
                 });
-                let json = sonic_rs::to_vec(&result).unwrap_or_default();
+                let json = match response_codec::encode_json(&result) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: e.to_string(),
+                            },
+                        );
+                    }
+                };
                 return Response {
                     request_id: task.request.request_id,
                     status: Status::Ok,
@@ -889,7 +907,17 @@ impl CoreLoop {
                             "collection": collection,
                         })
                     };
-                let json = sonic_rs::to_vec(&result).unwrap_or_default();
+                let json = match response_codec::encode_json(&result) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: e.to_string(),
+                            },
+                        );
+                    }
+                };
                 Response {
                     request_id: task.request.request_id,
                     status: Status::Ok,

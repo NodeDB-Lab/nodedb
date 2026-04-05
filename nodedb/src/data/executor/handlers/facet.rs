@@ -85,14 +85,21 @@ impl CoreLoop {
         // Cache the result.
         let cache_key = facet_cache_key(tid, collection, fields, filter_bytes);
         if self.aggregate_cache.len() < 256
-            && let Ok(bytes) = sonic_rs::to_vec(&serde_json::Value::Object(facet_result.clone()))
+            && let Ok(bytes) =
+                nodedb_types::json_to_msgpack(&serde_json::Value::Object(facet_result.clone()))
         {
             self.aggregate_cache.insert(cache_key, bytes);
         }
 
-        let payload =
-            sonic_rs::to_vec(&serde_json::Value::Object(facet_result)).unwrap_or_default();
-        self.response_with_payload(task, payload)
+        match super::super::response_codec::encode_json(&serde_json::Value::Object(facet_result)) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                crate::bridge::envelope::ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 
     /// Count distinct values for a single facet field, filtered to matching documents.

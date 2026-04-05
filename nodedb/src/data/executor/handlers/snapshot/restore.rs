@@ -132,7 +132,7 @@ impl CoreLoop {
             "crdt_restored": crdt_written,
             "timeseries_restored": ts_written,
         });
-        match sonic_rs::to_vec(&result) {
+        match crate::data::executor::response_codec::encode_json(&result) {
             Ok(p) => self.response_with_payload(task, p),
             Err(e) => self.response_error(
                 task,

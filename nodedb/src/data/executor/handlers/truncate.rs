@@ -1,10 +1,10 @@
 //! TRUNCATE and ESTIMATE_COUNT handlers.
 
-use sonic_rs;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -65,8 +65,16 @@ impl CoreLoop {
             .retain(|k, _| !k.starts_with(&cache_prefix));
 
         debug!(core = self.core_id, %collection, truncated, "truncate complete");
-        let payload = serde_json::json!({ "truncated": truncated });
-        self.response_with_payload(task, sonic_rs::to_vec(&payload).unwrap_or_default())
+        let result = serde_json::json!({ "truncated": truncated });
+        match response_codec::encode_json(&result) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 
     /// ESTIMATE_COUNT: return approximate row count from HLL cardinality stats.
@@ -79,24 +87,40 @@ impl CoreLoop {
     ) -> Response {
         match self.stats_store.get(tid, collection, field) {
             Ok(Some(stats)) => {
-                let payload = serde_json::json!({
+                let result = serde_json::json!({
                     "collection": collection,
                     "field": field,
                     "estimate": stats.distinct_count,
                     "row_count": stats.row_count,
                     "null_count": stats.null_count,
                 });
-                self.response_with_payload(task, sonic_rs::to_vec(&payload).unwrap_or_default())
+                match response_codec::encode_json(&result) {
+                    Ok(payload) => self.response_with_payload(task, payload),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
+                }
             }
             Ok(None) => {
-                let payload = serde_json::json!({
+                let result = serde_json::json!({
                     "collection": collection,
                     "field": field,
                     "estimate": 0,
                     "row_count": 0,
                     "null_count": 0,
                 });
-                self.response_with_payload(task, sonic_rs::to_vec(&payload).unwrap_or_default())
+                match response_codec::encode_json(&result) {
+                    Ok(payload) => self.response_with_payload(task, payload),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    ),
+                }
             }
             Err(e) => self.response_error(
                 task,

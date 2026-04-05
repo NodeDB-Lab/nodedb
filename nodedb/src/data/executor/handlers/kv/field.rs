@@ -48,8 +48,16 @@ impl CoreLoop {
             })
             .collect();
 
-        let payload = sonic_rs::to_vec(&result).unwrap_or_default();
-        self.response_with_payload(task, payload)
+        let result_value = serde_json::Value::Object(result);
+        match response_codec::encode_json(&result_value) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 
     pub(in crate::data::executor) fn execute_kv_field_set(

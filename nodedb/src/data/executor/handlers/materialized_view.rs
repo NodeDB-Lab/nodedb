@@ -4,11 +4,11 @@
 //! the target (view) collection. Removes orphaned target docs that
 //! no longer exist in the source.
 
-use sonic_rs;
 use std::collections::HashSet;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -94,7 +94,14 @@ impl CoreLoop {
             "source": source_collection,
             "view": view_name,
         });
-        let payload = sonic_rs::to_vec(&result).unwrap_or_default();
-        self.response_with_payload(task, payload)
+        match response_codec::encode_json(&result) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: e.to_string(),
+                },
+            ),
+        }
     }
 }
