@@ -30,6 +30,8 @@ pub struct PlanConverter {
     retention_policy_registry: Option<
         std::sync::Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>,
     >,
+    /// Whether the current query has a RETURNING clause (set per-query).
+    returning: std::sync::atomic::AtomicBool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -38,6 +40,7 @@ impl Default for PlanConverter {
         Self {
             credentials: None,
             retention_policy_registry: None,
+            returning: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -52,6 +55,7 @@ impl PlanConverter {
         Self {
             credentials: Some(credentials),
             retention_policy_registry: None,
+            returning: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -65,7 +69,14 @@ impl PlanConverter {
         Self {
             credentials: Some(credentials),
             retention_policy_registry: Some(retention_policy_registry),
+            returning: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Set whether the current query has a RETURNING clause.
+    pub fn set_returning(&self, returning: bool) {
+        self.returning
+            .store(returning, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get the retention policy for a collection (if AUTO_TIER enabled).
@@ -537,7 +548,11 @@ impl PlanConverter {
 
             LogicalPlan::Aggregate(agg) => self.convert_aggregate(agg, tenant_id),
 
-            LogicalPlan::Dml(dml) => self.convert_dml(dml, tenant_id),
+            LogicalPlan::Dml(dml) => self.convert_dml(
+                dml,
+                tenant_id,
+                self.returning.load(std::sync::atomic::Ordering::Relaxed),
+            ),
 
             LogicalPlan::Join(join) => super::join::convert_join(join, tenant_id),
 

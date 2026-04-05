@@ -18,6 +18,9 @@ pub(super) enum PlanKind {
     SingleDocument,
     MultiRow,
     Execution,
+    /// DML operation that returns affected row count.
+    /// The tag name is used in the pgwire `CommandComplete` message (e.g., "UPDATE", "DELETE").
+    DmlResult(&'static str),
 }
 
 /// Extract the collection name from a physical plan (if applicable).
@@ -101,6 +104,7 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
     match plan {
         PhysicalPlan::Document(DocumentOp::PointGet { .. })
         | PhysicalPlan::Crdt(CrdtOp::Read { .. }) => PlanKind::SingleDocument,
+
         PhysicalPlan::Vector(VectorOp::Search { .. })
         | PhysicalPlan::Document(DocumentOp::RangeScan { .. })
         | PhysicalPlan::Graph(GraphOp::Hop { .. })
@@ -113,13 +117,62 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         | PhysicalPlan::Query(QueryOp::HashJoin { .. })
         | PhysicalPlan::Graph(GraphOp::Algo { .. })
         | PhysicalPlan::Graph(GraphOp::Match { .. }) => PlanKind::MultiRow,
+
+        // DML operations that return affected row count.
+        PhysicalPlan::Document(DocumentOp::PointPut { .. })
+        | PhysicalPlan::Document(DocumentOp::BatchInsert { .. }) => DmlResult("INSERT"),
+
+        PhysicalPlan::Document(DocumentOp::PointUpdate {
+            returning: true, ..
+        })
+        | PhysicalPlan::Document(DocumentOp::BulkUpdate {
+            returning: true, ..
+        }) => PlanKind::MultiRow,
+        PhysicalPlan::Document(DocumentOp::PointUpdate { .. })
+        | PhysicalPlan::Document(DocumentOp::BulkUpdate { .. }) => DmlResult("UPDATE"),
+
+        PhysicalPlan::Document(DocumentOp::PointDelete { .. })
+        | PhysicalPlan::Document(DocumentOp::BulkDelete { .. }) => DmlResult("DELETE"),
+
+        PhysicalPlan::Document(DocumentOp::Truncate { .. }) => DmlResult("TRUNCATE"),
+
+        PhysicalPlan::Document(DocumentOp::InsertSelect { .. }) => DmlResult("INSERT"),
+
+        PhysicalPlan::Document(DocumentOp::Upsert { .. }) => DmlResult("UPSERT"),
+
         _ => PlanKind::Execution,
     }
+}
+
+// Bring the variant into scope for brevity in match arms above.
+use PlanKind::DmlResult;
+
+/// Extract affected row count from a JSON payload.
+///
+/// Looks for `"affected"`, `"truncated"`, or `"inserted"` fields in the JSON.
+fn extract_affected_count(payload: &[u8]) -> Option<u64> {
+    if payload.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    v.get("affected")
+        .or_else(|| v.get("truncated"))
+        .or_else(|| v.get("inserted"))
+        .and_then(|n| n.as_u64())
 }
 
 pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> Response {
     match kind {
         PlanKind::Execution => Response::Execution(Tag::new("OK")),
+        PlanKind::DmlResult(tag) => {
+            let count = if payload.is_empty() {
+                // Point operations with empty payload succeeded on exactly 1 row.
+                1
+            } else {
+                extract_affected_count(payload).unwrap_or(1) as usize
+            };
+            Response::Execution(Tag::new(tag).with_rows(count))
+        }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
             let col_name = if matches!(kind, PlanKind::SingleDocument) {
                 "document"

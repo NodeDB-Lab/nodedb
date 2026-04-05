@@ -267,6 +267,15 @@ impl QueryContext {
         Ok(tasks)
     }
 
+    /// Set whether the current query has a RETURNING clause.
+    ///
+    /// Must be called before `plan_sql_with_rls` or `convert_plan`.
+    /// The flag is consumed by `PlanConverter::convert_dml` to set
+    /// `returning: true` on UPDATE/DELETE physical plans.
+    pub fn set_returning(&self, returning: bool) {
+        self.converter.set_returning(returning);
+    }
+
     /// Access the underlying DataFusion session for advanced configuration
     /// (e.g., registering UDFs, table providers).
     pub fn session(&self) -> &SessionContext {

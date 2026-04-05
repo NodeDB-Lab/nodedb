@@ -180,6 +180,7 @@ pub(crate) fn build_update(fields: &TextFields, collection: &str) -> crate::Resu
         collection: collection.to_string(),
         document_id: doc_id,
         updates,
+        returning: false,
     }))
 }
 
@@ -231,6 +232,7 @@ pub(crate) fn build_bulk_update(
         collection: collection.to_string(),
         filters,
         updates,
+        returning: false,
     }))
 }
 

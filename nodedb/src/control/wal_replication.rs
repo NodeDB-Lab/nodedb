@@ -206,6 +206,7 @@ pub fn to_replicated_entry(
             collection,
             document_id,
             updates,
+            ..
         }) => ReplicatedWrite::PointUpdate {
             collection: collection.clone(),
             document_id: document_id.clone(),
@@ -441,6 +442,7 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             collection: collection.clone(),
             document_id: document_id.clone(),
             updates: updates.clone(),
+            returning: false,
         }),
         ReplicatedWrite::VectorInsert {
             collection,

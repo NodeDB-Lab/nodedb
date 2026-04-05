@@ -31,7 +31,8 @@ impl CoreLoop {
                 collection,
                 document_id,
                 updates,
-            } => self.execute_point_update(task, tid, collection, document_id, updates),
+                returning,
+            } => self.execute_point_update(task, tid, collection, document_id, updates, *returning),
 
             DocumentOp::Scan {
                 collection,
@@ -82,7 +83,8 @@ impl CoreLoop {
                 collection,
                 filters,
                 updates,
-            } => self.execute_bulk_update(task, tid, collection, filters, updates),
+                returning,
+            } => self.execute_bulk_update(task, tid, collection, filters, updates, *returning),
 
             DocumentOp::BulkDelete {
                 collection,

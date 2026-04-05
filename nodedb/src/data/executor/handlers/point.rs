@@ -231,8 +231,9 @@ impl CoreLoop {
         collection: &str,
         document_id: &str,
         updates: &[(String, Vec<u8>)],
+        returning: bool,
     ) -> Response {
-        debug!(core = self.core_id, %collection, %document_id, fields = updates.len(), "point update");
+        debug!(core = self.core_id, %collection, %document_id, fields = updates.len(), returning, "point update");
 
         let config_key = format!("{tid}:{collection}");
         let is_strict = self.doc_configs.get(&config_key).is_some_and(|c| {
@@ -348,7 +349,24 @@ impl CoreLoop {
                             Some(&current_bytes),
                         );
 
-                        self.response_ok(task)
+                        if returning {
+                            // Return post-update document as JSON array (consistent with bulk).
+                            if let Some(obj) = doc.as_object_mut() {
+                                obj.insert(
+                                    "id".to_string(),
+                                    serde_json::Value::String(document_id.to_string()),
+                                );
+                            }
+                            let payload = serde_json::to_vec(&serde_json::Value::Array(vec![doc]))
+                                .unwrap_or_default();
+                            self.response_with_payload(task, payload)
+                        } else {
+                            let payload = serde_json::json!({ "affected": 1u64 });
+                            self.response_with_payload(
+                                task,
+                                serde_json::to_vec(&payload).unwrap_or_default(),
+                            )
+                        }
                     }
                     Err(e) => self.response_error(
                         task,

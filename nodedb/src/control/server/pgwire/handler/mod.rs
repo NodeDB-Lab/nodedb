@@ -4,6 +4,7 @@ mod dispatch;
 pub mod listen_notify;
 mod plan;
 pub mod prepared;
+mod returning;
 mod routing;
 mod session_cmds;
 mod sql_exec;

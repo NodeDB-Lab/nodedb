@@ -126,6 +126,8 @@ pub enum DocumentOp {
         document_id: String,
         /// Field name → new JSON value.
         updates: Vec<(String, Vec<u8>)>,
+        /// If true, return the post-update document as payload (for RETURNING clause).
+        returning: bool,
     },
 
     /// Full collection scan with filtering, sorting, and pagination.
@@ -207,6 +209,8 @@ pub enum DocumentOp {
         collection: String,
         filters: Vec<u8>,
         updates: Vec<(String, Vec<u8>)>,
+        /// If true, return updated documents as JSON array payload (for RETURNING clause).
+        returning: bool,
     },
 
     /// Bulk delete: scan + delete all matches.
