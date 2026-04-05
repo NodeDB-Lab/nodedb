@@ -39,17 +39,11 @@ pub fn filter_batch_by_when(
 pub fn build_row_bindings(row: &TriggerBatchRow, collection: &str, operation: &str) -> RowBindings {
     let new_row = row
         .new_fields()
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
-                .collect()
-        })
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
-    let old_row = row.old_fields().map(|m| {
-        m.iter()
-            .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
-            .collect()
-    });
+    let old_row = row
+        .old_fields()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
 
     match operation {
         "INSERT" => RowBindings::after_insert(collection, new_row),
@@ -68,8 +62,8 @@ pub fn count_passing(mask: &[bool]) -> usize {
 mod tests {
     use super::*;
 
-    fn row_with_field(key: &str, val: serde_json::Value) -> TriggerBatchRow {
-        let mut map = serde_json::Map::new();
+    fn row_with_field(key: &str, val: nodedb_types::Value) -> TriggerBatchRow {
+        let mut map = std::collections::HashMap::new();
         map.insert(key.to_string(), val);
         TriggerBatchRow::from_decoded(Some(map), None, "r1".into())
     }
@@ -77,8 +71,8 @@ mod tests {
     #[test]
     fn no_when_all_pass() {
         let rows = vec![
-            row_with_field("x", serde_json::json!(1)),
-            row_with_field("x", serde_json::json!(2)),
+            row_with_field("x", nodedb_types::Value::Integer(1)),
+            row_with_field("x", nodedb_types::Value::Integer(2)),
         ];
         let mask = filter_batch_by_when(&rows, "c", "INSERT", None);
         assert_eq!(mask, vec![true, true]);
@@ -86,7 +80,7 @@ mod tests {
 
     #[test]
     fn when_true_all_pass() {
-        let rows = vec![row_with_field("x", serde_json::json!(1))];
+        let rows = vec![row_with_field("x", nodedb_types::Value::Integer(1))];
         let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("TRUE"));
         assert_eq!(mask, vec![true]);
     }
@@ -94,8 +88,8 @@ mod tests {
     #[test]
     fn when_false_none_pass() {
         let rows = vec![
-            row_with_field("x", serde_json::json!(1)),
-            row_with_field("x", serde_json::json!(2)),
+            row_with_field("x", nodedb_types::Value::Integer(1)),
+            row_with_field("x", nodedb_types::Value::Integer(2)),
         ];
         let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("FALSE"));
         assert_eq!(mask, vec![false, false]);

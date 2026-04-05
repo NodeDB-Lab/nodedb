@@ -8,15 +8,15 @@
 //!
 //! BEFORE triggers are ALWAYS synchronous — there is no ASYNC or DEFERRED variant.
 
+use std::collections::HashMap;
+
 use crate::control::planner::procedural::executor::bindings::RowBindings;
 use crate::control::security::catalog::trigger_types::TriggerTiming;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
-use super::fire_common::{
-    check_cascade_depth, fire_before_triggers_with_mutation, fire_triggers, map_to_hashmap,
-};
+use super::fire_common::{check_cascade_depth, fire_before_triggers_with_mutation, fire_triggers};
 use super::registry::DmlEvent;
 
 /// Fire BEFORE ROW triggers for an INSERT operation.
@@ -31,9 +31,9 @@ pub async fn fire_before_insert(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
     collection: &str,
-    new_fields: &serde_json::Map<String, serde_json::Value>,
+    new_fields: &HashMap<String, nodedb_types::Value>,
     cascade_depth: u32,
-) -> crate::Result<serde_json::Map<String, serde_json::Value>> {
+) -> crate::Result<HashMap<String, nodedb_types::Value>> {
     let triggers =
         state
             .trigger_registry
@@ -50,7 +50,7 @@ pub async fn fire_before_insert(
 
     check_cascade_depth(cascade_depth, collection)?;
 
-    let bindings = RowBindings::before_insert(collection, map_to_hashmap(new_fields));
+    let bindings = RowBindings::before_insert(collection, new_fields.clone());
 
     let result = fire_before_triggers_with_mutation(
         state,
@@ -79,10 +79,10 @@ pub async fn fire_before_update(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
     collection: &str,
-    old_fields: &serde_json::Map<String, serde_json::Value>,
-    new_fields: &serde_json::Map<String, serde_json::Value>,
+    old_fields: &HashMap<String, nodedb_types::Value>,
+    new_fields: &HashMap<String, nodedb_types::Value>,
     cascade_depth: u32,
-) -> crate::Result<serde_json::Map<String, serde_json::Value>> {
+) -> crate::Result<HashMap<String, nodedb_types::Value>> {
     let triggers =
         state
             .trigger_registry
@@ -99,11 +99,7 @@ pub async fn fire_before_update(
 
     check_cascade_depth(cascade_depth, collection)?;
 
-    let bindings = RowBindings::before_update(
-        collection,
-        map_to_hashmap(old_fields),
-        map_to_hashmap(new_fields),
-    );
+    let bindings = RowBindings::before_update(collection, old_fields.clone(), new_fields.clone());
 
     let result = fire_before_triggers_with_mutation(
         state,
@@ -131,7 +127,7 @@ pub async fn fire_before_delete(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
     collection: &str,
-    old_fields: &serde_json::Map<String, serde_json::Value>,
+    old_fields: &HashMap<String, nodedb_types::Value>,
     cascade_depth: u32,
 ) -> crate::Result<()> {
     let triggers =
@@ -150,7 +146,7 @@ pub async fn fire_before_delete(
 
     check_cascade_depth(cascade_depth, collection)?;
 
-    let bindings = RowBindings::before_delete(collection, map_to_hashmap(old_fields));
+    let bindings = RowBindings::before_delete(collection, old_fields.clone());
 
     fire_triggers(
         state,

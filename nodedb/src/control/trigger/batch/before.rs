@@ -113,7 +113,7 @@ pub async fn execute_before_batch(
                     if !mutations.is_empty() {
                         if let Some(fields) = row.new_fields_mut() {
                             for (field, value) in mutations {
-                                fields.insert(field, serde_json::Value::from(value));
+                                fields.insert(field, value);
                             }
                         }
                     }
@@ -133,17 +133,11 @@ pub async fn execute_before_batch(
 fn build_before_bindings(row: &TriggerBatchRow, collection: &str, operation: &str) -> RowBindings {
     let new_row = row
         .new_fields()
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
-                .collect()
-        })
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
-    let old_row = row.old_fields().map(|m| {
-        m.iter()
-            .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
-            .collect()
-    });
+    let old_row = row
+        .old_fields()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
 
     match operation {
         "INSERT" => RowBindings::before_insert(collection, new_row),

@@ -11,6 +11,8 @@
 //!
 //! ASYNC AFTER triggers are handled by the Event Plane via WriteEvents — not here.
 
+use std::collections::HashMap;
+
 use sonic_rs;
 
 use crate::bridge::physical_plan::DocumentOp;
@@ -35,7 +37,7 @@ pub struct DmlWriteInfo {
     /// DML event type.
     pub event: DmlEvent,
     /// NEW row fields extracted from the write plan. None for DELETE.
-    pub new_fields: Option<serde_json::Map<String, serde_json::Value>>,
+    pub new_fields: Option<HashMap<String, nodedb_types::Value>>,
 }
 
 /// Attempt to classify a PhysicalPlan as a document DML write.
@@ -143,19 +145,25 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
     }
 }
 
-/// Deserialize a MessagePack/JSON value blob into serde_json::Map.
-fn deserialize_value_to_fields(value: &[u8]) -> serde_json::Map<String, serde_json::Value> {
+/// Deserialize a MessagePack/JSON value blob into a HashMap for trigger bindings.
+fn deserialize_value_to_fields(value: &[u8]) -> HashMap<String, nodedb_types::Value> {
     // Try MessagePack first (primary format), fall back to JSON.
     if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(value) {
-        return map;
+        return map
+            .into_iter()
+            .map(|(k, v)| (k, nodedb_types::Value::from(v)))
+            .collect();
     }
     if let Ok(serde_json::Value::Object(map)) = sonic_rs::from_slice::<serde_json::Value>(value) {
-        return map;
+        return map
+            .into_iter()
+            .map(|(k, v)| (k, nodedb_types::Value::from(v)))
+            .collect();
     }
-    serde_json::Map::new()
+    HashMap::new()
 }
 
-/// Fetch the current document as a JSON map (for OLD row bindings).
+/// Fetch the current document as a field map (for OLD row bindings).
 ///
 /// Issues a PointGet to the Data Plane and deserializes the response.
 /// Returns an empty map if the document doesn't exist or can't be read.
@@ -164,7 +172,7 @@ pub async fn fetch_old_row(
     tenant_id: TenantId,
     collection: &str,
     document_id: &str,
-) -> serde_json::Map<String, serde_json::Value> {
+) -> HashMap<String, nodedb_types::Value> {
     let plan = crate::bridge::envelope::PhysicalPlan::Document(DocumentOp::PointGet {
         collection: collection.to_string(),
         document_id: document_id.to_string(),
@@ -178,23 +186,29 @@ pub async fn fetch_old_row(
     .await
     {
         Ok(r) => r,
-        Err(_) => return serde_json::Map::new(),
+        Err(_) => return HashMap::new(),
     };
 
     if resp.payload.is_empty() {
-        return serde_json::Map::new();
+        return HashMap::new();
     }
 
     // Decode the response payload (MessagePack or JSON).
     let bytes = resp.payload.as_ref();
     if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(bytes) {
-        return map;
+        return map
+            .into_iter()
+            .map(|(k, v)| (k, nodedb_types::Value::from(v)))
+            .collect();
     }
     if let Ok(serde_json::Value::Object(map)) = sonic_rs::from_slice::<serde_json::Value>(bytes) {
-        return map;
+        return map
+            .into_iter()
+            .map(|(k, v)| (k, nodedb_types::Value::from(v)))
+            .collect();
     }
 
-    serde_json::Map::new()
+    HashMap::new()
 }
 
 /// Check if any triggers exist for this collection+event combination.
@@ -230,7 +244,7 @@ pub async fn fire_pre_dispatch_triggers(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
     info: &DmlWriteInfo,
-    old_row: &Option<serde_json::Map<String, serde_json::Value>>,
+    old_row: &Option<HashMap<String, nodedb_types::Value>>,
     cascade_depth: u32,
 ) -> crate::Result<bool> {
     // Check INSTEAD OF first — if it handles the write, skip everything else.
@@ -253,7 +267,7 @@ pub async fn fire_pre_dispatch_triggers(
             }
         }
         DmlEvent::Update => {
-            let empty = serde_json::Map::new();
+            let empty = HashMap::new();
             let old_fields = old_row.as_ref().unwrap_or(&empty);
             let new_fields = info.new_fields.as_ref().unwrap_or(&empty);
             match super::fire_instead::fire_instead_of_update(
@@ -272,7 +286,7 @@ pub async fn fire_pre_dispatch_triggers(
             }
         }
         DmlEvent::Delete => {
-            let empty = serde_json::Map::new();
+            let empty = HashMap::new();
             let old_fields = old_row.as_ref().unwrap_or(&empty);
             match super::fire_instead::fire_instead_of_delete(
                 state,
@@ -308,7 +322,7 @@ pub async fn fire_pre_dispatch_triggers(
             }
         }
         DmlEvent::Update => {
-            let empty = serde_json::Map::new();
+            let empty = HashMap::new();
             let old_fields = old_row.as_ref().unwrap_or(&empty);
             let new_fields = info.new_fields.as_ref().unwrap_or(&empty);
             fire_before::fire_before_update(
@@ -323,7 +337,7 @@ pub async fn fire_pre_dispatch_triggers(
             .await?;
         }
         DmlEvent::Delete => {
-            let empty = serde_json::Map::new();
+            let empty = HashMap::new();
             let old_fields = old_row.as_ref().unwrap_or(&empty);
             fire_before::fire_before_delete(
                 state,
@@ -350,10 +364,10 @@ pub async fn fire_post_dispatch_triggers(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
     info: &DmlWriteInfo,
-    old_row: &Option<serde_json::Map<String, serde_json::Value>>,
+    old_row: &Option<HashMap<String, nodedb_types::Value>>,
     cascade_depth: u32,
 ) -> crate::Result<()> {
-    let empty = serde_json::Map::new();
+    let empty = HashMap::new();
 
     // Fire SYNC AFTER ROW triggers.
     match info.event {

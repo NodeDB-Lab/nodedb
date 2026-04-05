@@ -330,7 +330,7 @@ impl CoreLoop {
                     } else {
                         Vec::new()
                     };
-                match response_codec::encode_serde(&entries) {
+                match response_codec::encode(&entries) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(
                         task,
@@ -351,7 +351,7 @@ impl CoreLoop {
                     .get(&scoped)
                     .and_then(|lvc| lvc.get(*series_id))
                     .map(|e| (e.ts, e.value));
-                match response_codec::encode_serde(&entry) {
+                match response_codec::encode(&entry) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(
                         task,

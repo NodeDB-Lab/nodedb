@@ -187,13 +187,20 @@ pub async fn insert_document(
     let tenant_id = identity.tenant_id;
     let vshard_id = crate::types::VShardId::from_key(parsed.doc_id.as_bytes());
 
+    // Convert fields to HashMap<String, nodedb_types::Value> for trigger fire functions.
+    let fields_as_hm: std::collections::HashMap<String, nodedb_types::Value> = parsed
+        .fields
+        .iter()
+        .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
+        .collect();
+
     // Fire INSTEAD OF INSERT triggers — if handled, skip normal dispatch.
     match crate::control::trigger::fire_instead::fire_instead_of_insert(
         state,
         identity,
         tenant_id,
         &parsed.coll_name,
-        &parsed.fields,
+        &fields_as_hm,
         0,
     )
     .await
@@ -206,12 +213,12 @@ pub async fn insert_document(
     }
 
     // Fire BEFORE INSERT triggers — may reject via RAISE EXCEPTION, may mutate NEW fields.
-    let fields_after_before = match crate::control::trigger::fire_before::fire_before_insert(
+    let fields_after_before_hm = match crate::control::trigger::fire_before::fire_before_insert(
         state,
         identity,
         tenant_id,
         &parsed.coll_name,
-        &parsed.fields,
+        &fields_as_hm,
         0,
     )
     .await
@@ -224,6 +231,11 @@ pub async fn insert_document(
             )));
         }
     };
+    // Convert back to serde_json::Map for serialization and comparison.
+    let fields_after_before: serde_json::Map<String, serde_json::Value> = fields_after_before_hm
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::from(v)))
+        .collect();
 
     // Auto-generate sequence values for fields with sequence_name where the
     // INSERT didn't provide an explicit value. This implements column-level
@@ -296,12 +308,16 @@ pub async fn insert_document(
     // Fire SYNC AFTER INSERT triggers (execute in write path, same transaction).
     // ASYNC triggers are handled by the Event Plane via WriteEvent dispatch.
     use crate::control::security::catalog::trigger_types::TriggerExecutionMode;
+    let fields_hm_after: std::collections::HashMap<String, nodedb_types::Value> = fields
+        .iter()
+        .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
+        .collect();
     if let Err(e) = crate::control::trigger::fire::fire_after_insert(
         state,
         identity,
         tenant_id,
         &parsed.coll_name,
-        &fields,
+        &fields_hm_after,
         0,
         Some(TriggerExecutionMode::Sync),
     )
@@ -382,13 +398,20 @@ pub async fn upsert_document(
     let tenant_id = identity.tenant_id;
     let vshard_id = crate::types::VShardId::from_key(parsed.doc_id.as_bytes());
 
+    // Convert fields to HashMap<String, nodedb_types::Value> for trigger fire functions.
+    let upsert_fields_as_hm: std::collections::HashMap<String, nodedb_types::Value> = parsed
+        .fields
+        .iter()
+        .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
+        .collect();
+
     // Fire INSTEAD OF INSERT triggers (upsert treated as INSERT for triggers).
     match crate::control::trigger::fire_instead::fire_instead_of_insert(
         state,
         identity,
         tenant_id,
         &parsed.coll_name,
-        &parsed.fields,
+        &upsert_fields_as_hm,
         0,
     )
     .await
@@ -401,12 +424,12 @@ pub async fn upsert_document(
     }
 
     // Fire BEFORE INSERT triggers — may mutate NEW fields.
-    let fields_after_before = match crate::control::trigger::fire_before::fire_before_insert(
+    let fields_after_before_hm = match crate::control::trigger::fire_before::fire_before_insert(
         state,
         identity,
         tenant_id,
         &parsed.coll_name,
-        &parsed.fields,
+        &upsert_fields_as_hm,
         0,
     )
     .await
@@ -419,6 +442,11 @@ pub async fn upsert_document(
             )));
         }
     };
+    // Convert back to serde_json::Map for serialization and comparison.
+    let fields_after_before: serde_json::Map<String, serde_json::Value> = fields_after_before_hm
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::from(v.clone())))
+        .collect();
 
     // Rebuild value bytes if BEFORE trigger mutated NEW fields.
     let value_bytes = if fields_after_before != parsed.fields {
@@ -450,12 +478,16 @@ pub async fn upsert_document(
 
     // Fire SYNC AFTER INSERT triggers.
     use crate::control::security::catalog::trigger_types::TriggerExecutionMode;
+    let upsert_fields_hm_after: std::collections::HashMap<String, nodedb_types::Value> = fields
+        .iter()
+        .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
+        .collect();
     if let Err(e) = crate::control::trigger::fire::fire_after_insert(
         state,
         identity,
         tenant_id,
         &parsed.coll_name,
-        &fields,
+        &upsert_fields_hm_after,
         0,
         Some(TriggerExecutionMode::Sync),
     )

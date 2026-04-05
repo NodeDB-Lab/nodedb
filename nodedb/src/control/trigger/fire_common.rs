@@ -144,8 +144,8 @@ pub async fn fire_before_triggers_with_mutation(
     triggers: &[StoredTrigger],
     bindings: &RowBindings,
     cascade_depth: u32,
-    mut new_fields: Option<serde_json::Map<String, serde_json::Value>>,
-) -> crate::Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    mut new_fields: Option<HashMap<String, nodedb_types::Value>>,
+) -> crate::Result<Option<HashMap<String, nodedb_types::Value>>> {
     for trigger in triggers {
         if let Some(ref when_cond) = trigger.when_condition {
             // Rebuild bindings with current (possibly mutated) NEW fields.
@@ -216,7 +216,7 @@ pub async fn fire_before_triggers_with_mutation(
             && let Some(fields) = new_fields.as_mut()
         {
             for (field, value) in mutations {
-                fields.insert(field, serde_json::Value::from(value));
+                fields.insert(field, value);
             }
         }
     }
@@ -227,22 +227,9 @@ pub async fn fire_before_triggers_with_mutation(
 /// Rebuild a RowBindings with updated NEW fields (for BEFORE trigger chaining).
 fn rebuild_bindings_with_new(
     original: &RowBindings,
-    new_fields: &serde_json::Map<String, serde_json::Value>,
+    new_fields: &HashMap<String, nodedb_types::Value>,
 ) -> RowBindings {
-    let new_row: HashMap<String, nodedb_types::Value> = new_fields
-        .iter()
-        .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
-        .collect();
-    original.with_new_row(new_row)
-}
-
-/// Convert a serde_json::Map to a HashMap<String, nodedb_types::Value> for RowBindings.
-pub fn map_to_hashmap(
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> HashMap<String, nodedb_types::Value> {
-    map.iter()
-        .map(|(k, v)| (k.clone(), nodedb_types::Value::from(v.clone())))
-        .collect()
+    original.with_new_row(new_fields.clone())
 }
 
 /// Simple condition evaluation for WHEN clauses.

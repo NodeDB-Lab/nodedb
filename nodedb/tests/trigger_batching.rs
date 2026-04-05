@@ -21,7 +21,7 @@ fn default_batch_size_is_1024() {
 // ---------------------------------------------------------------------------
 
 fn row(id: &str) -> TriggerBatchRow {
-    TriggerBatchRow::from_decoded(Some(serde_json::Map::new()), None, id.to_string())
+    TriggerBatchRow::from_decoded(Some(std::collections::HashMap::new()), None, id.to_string())
 }
 
 #[test]

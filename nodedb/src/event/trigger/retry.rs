@@ -35,9 +35,9 @@ pub struct RetryEntry {
     /// Trigger name that failed.
     pub trigger_name: String,
     /// The deserialized row data (new_value).
-    pub new_fields: Option<serde_json::Map<String, serde_json::Value>>,
+    pub new_fields: Option<std::collections::HashMap<String, nodedb_types::Value>>,
     /// The deserialized row data (old_value).
-    pub old_fields: Option<serde_json::Map<String, serde_json::Value>>,
+    pub old_fields: Option<std::collections::HashMap<String, nodedb_types::Value>>,
     /// Number of retries attempted so far.
     pub attempts: u32,
     /// Last error message.

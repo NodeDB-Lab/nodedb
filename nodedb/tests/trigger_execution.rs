@@ -644,8 +644,14 @@ fn classify_point_put_deserializes_json_value() {
     });
     let info = classify_dml_write(&plan).unwrap();
     let fields = info.new_fields.unwrap();
-    assert_eq!(fields.get("name").unwrap(), "Alice");
-    assert_eq!(fields.get("age").unwrap(), 30);
+    assert_eq!(
+        fields.get("name").unwrap(),
+        &nodedb_types::Value::String("Alice".into())
+    );
+    assert_eq!(
+        fields.get("age").unwrap(),
+        &nodedb_types::Value::Integer(30)
+    );
 }
 
 #[test]
@@ -661,7 +667,10 @@ fn classify_point_put_deserializes_msgpack_value() {
     });
     let info = classify_dml_write(&plan).unwrap();
     let fields = info.new_fields.unwrap();
-    assert_eq!(fields.get("key").unwrap(), "val");
+    assert_eq!(
+        fields.get("key").unwrap(),
+        &nodedb_types::Value::String("val".into())
+    );
 }
 
 // ---------------------------------------------------------------------------

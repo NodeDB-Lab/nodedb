@@ -80,8 +80,8 @@ pub fn partition_by_field(
         row.new_fields()
             .and_then(|m| m.get(field_name))
             .map(|v| match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
+                nodedb_types::Value::String(s) => s.clone(),
+                other => other.to_sql_literal(),
             })
             .unwrap_or_else(|| "__null__".to_string())
     })
@@ -92,10 +92,10 @@ mod tests {
     use super::*;
 
     fn row_with_field(id: &str, field: &str, val: &str) -> TriggerBatchRow {
-        let mut map = serde_json::Map::new();
+        let mut map = std::collections::HashMap::new();
         map.insert(
             field.to_string(),
-            serde_json::Value::String(val.to_string()),
+            nodedb_types::Value::String(val.to_string()),
         );
         TriggerBatchRow::from_decoded(Some(map), None, id.to_string())
     }
@@ -154,8 +154,16 @@ mod tests {
     #[test]
     fn null_field_partitions_together() {
         let rows = vec![
-            TriggerBatchRow::from_decoded(Some(serde_json::Map::new()), None, "r1".into()),
-            TriggerBatchRow::from_decoded(Some(serde_json::Map::new()), None, "r2".into()),
+            TriggerBatchRow::from_decoded(
+                Some(std::collections::HashMap::new()),
+                None,
+                "r1".into(),
+            ),
+            TriggerBatchRow::from_decoded(
+                Some(std::collections::HashMap::new()),
+                None,
+                "r2".into(),
+            ),
         ];
 
         match partition_by_field(&rows, "missing", 32) {

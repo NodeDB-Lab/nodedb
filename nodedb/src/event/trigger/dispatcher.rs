@@ -1,7 +1,7 @@
 //! Trigger dispatcher: bridges Event Plane events to Control Plane trigger fire.
 //!
 //! For each incoming WriteEvent with `source: User`, the dispatcher:
-//! 1. Deserializes `new_value`/`old_value` from MessagePack to serde_json::Map
+//! 1. Deserializes `new_value`/`old_value` from MessagePack to `HashMap<String, nodedb_types::Value>`
 //! 2. Calls the existing `fire_after_insert/update/delete()` in `control::trigger::fire`
 //! 3. On failure, enqueues into the retry queue (exponential backoff)
 //! 4. After max retries, sends to the trigger DLQ
@@ -44,15 +44,26 @@ pub async fn dispatch_triggers(
         }
     };
 
-    // Deserialize row data from the event payload.
-    let new_fields = event
+    // Deserialize row data from the event payload and convert to nodedb_types::Value
+    // at this Event Plane boundary — the only remaining serde_json::Map → HashMap conversion point.
+    let new_fields: Option<std::collections::HashMap<String, nodedb_types::Value>> = event
         .new_value
         .as_ref()
-        .and_then(|v| deserialize_event_payload(v));
-    let old_fields = event
+        .and_then(|v| deserialize_event_payload(v))
+        .map(|map| {
+            map.into_iter()
+                .map(|(k, v)| (k, nodedb_types::Value::from(v)))
+                .collect()
+        });
+    let old_fields: Option<std::collections::HashMap<String, nodedb_types::Value>> = event
         .old_value
         .as_ref()
-        .and_then(|v| deserialize_event_payload(v));
+        .and_then(|v| deserialize_event_payload(v))
+        .map(|map| {
+            map.into_iter()
+                .map(|(k, v)| (k, nodedb_types::Value::from(v)))
+                .collect()
+        });
 
     // Build a system identity for trigger execution (SECURITY DEFINER model).
     let identity = trigger_identity(event.tenant_id);
@@ -230,8 +241,8 @@ async fn fire_for_operation(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
     collection: &str,
-    new_fields: Option<&serde_json::Map<String, serde_json::Value>>,
-    old_fields: Option<&serde_json::Map<String, serde_json::Value>>,
+    new_fields: Option<&std::collections::HashMap<String, nodedb_types::Value>>,
+    old_fields: Option<&std::collections::HashMap<String, nodedb_types::Value>>,
     cascade_depth: u32,
     mode_filter: Option<TriggerExecutionMode>,
 ) -> crate::Result<()> {

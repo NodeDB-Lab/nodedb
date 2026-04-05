@@ -8,25 +8,27 @@
 //! out by WHEN clauses never pay the decode cost, and raw bytes are ~50%
 //! more compact than `serde_json::Map` in memory.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use nodedb_types::Value;
+
 /// A single row in a trigger batch.
 ///
-/// Stores raw MessagePack bytes from the WriteEvent and decodes to
-/// `serde_json::Map` lazily on first access. This eliminates upfront
-/// deserialization at event ingestion time and avoids decoding rows
-/// that get filtered out by WHEN clauses.
+/// Stores raw MessagePack bytes from the WriteEvent and decodes directly
+/// to `HashMap<String, nodedb_types::Value>` on first access — skipping
+/// the `serde_json::Value` intermediate that was previously required.
 #[derive(Debug)]
 pub struct TriggerBatchRow {
     /// Raw NEW value bytes (MessagePack). None for DELETE.
     new_raw: Option<Arc<[u8]>>,
     /// Raw OLD value bytes (MessagePack). None for INSERT.
     old_raw: Option<Arc<[u8]>>,
-    /// Lazily decoded NEW fields.
-    new_cache: OnceLock<Option<serde_json::Map<String, serde_json::Value>>>,
-    /// Lazily decoded OLD fields.
-    old_cache: OnceLock<Option<serde_json::Map<String, serde_json::Value>>>,
+    /// Lazily decoded NEW fields (directly to nodedb_types::Value).
+    new_cache: OnceLock<Option<HashMap<String, Value>>>,
+    /// Lazily decoded OLD fields (directly to nodedb_types::Value).
+    old_cache: OnceLock<Option<HashMap<String, Value>>>,
     /// Row identifier (for error blaming).
     pub row_id: String,
 }
@@ -78,8 +80,8 @@ impl TriggerBatchRow {
 
     /// Create from pre-decoded fields (test convenience).
     pub fn from_decoded(
-        new_fields: Option<serde_json::Map<String, serde_json::Value>>,
-        old_fields: Option<serde_json::Map<String, serde_json::Value>>,
+        new_fields: Option<HashMap<String, Value>>,
+        old_fields: Option<HashMap<String, Value>>,
         row_id: String,
     ) -> Self {
         let new_cache = OnceLock::new();
@@ -96,45 +98,92 @@ impl TriggerBatchRow {
     }
 
     /// Access NEW fields, decoding lazily from raw bytes if needed.
-    pub fn new_fields(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    pub fn new_fields(&self) -> Option<&HashMap<String, Value>> {
         self.new_cache
             .get_or_init(|| {
                 self.new_raw
                     .as_ref()
-                    .and_then(|bytes| decode_payload_to_map(bytes))
+                    .and_then(|bytes| decode_msgpack_to_value_map(bytes))
             })
             .as_ref()
     }
 
     /// Access OLD fields, decoding lazily from raw bytes if needed.
-    pub fn old_fields(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    pub fn old_fields(&self) -> Option<&HashMap<String, Value>> {
         self.old_cache
             .get_or_init(|| {
                 self.old_raw
                     .as_ref()
-                    .and_then(|bytes| decode_payload_to_map(bytes))
+                    .and_then(|bytes| decode_msgpack_to_value_map(bytes))
             })
             .as_ref()
     }
 
     /// Mutable access to NEW fields (for BEFORE trigger ASSIGN mutations).
     /// Ensures the cache is initialized first.
-    pub fn new_fields_mut(&mut self) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    pub fn new_fields_mut(&mut self) -> Option<&mut HashMap<String, Value>> {
         // Force initialization if not yet decoded.
         let _ = self.new_fields();
         self.new_cache.get_mut().and_then(|opt| opt.as_mut())
     }
 }
 
-/// Decode raw event payload bytes to a JSON map.
-fn decode_payload_to_map(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(bytes) {
+/// Decode raw msgpack bytes directly to `HashMap<String, nodedb_types::Value>`.
+///
+/// Skips the `serde_json::Value` intermediate entirely. Uses `rmpv` for
+/// dynamic msgpack parsing, then converts each value to `nodedb_types::Value`.
+fn decode_msgpack_to_value_map(bytes: &[u8]) -> Option<HashMap<String, Value>> {
+    // Try msgpack first.
+    if let Ok(rmpv::Value::Map(pairs)) = rmpv::decode::read_value(&mut &bytes[..]) {
+        let mut map = HashMap::with_capacity(pairs.len());
+        for (k, v) in &pairs {
+            if let rmpv::Value::String(key) = k
+                && let Some(key_str) = key.as_str()
+            {
+                map.insert(key_str.to_string(), rmpv_to_value(v));
+            }
+        }
         return Some(map);
     }
+    // JSON fallback (legacy data).
     if let Ok(serde_json::Value::Object(map)) = sonic_rs::from_slice::<serde_json::Value>(bytes) {
-        return Some(map);
+        return Some(map.into_iter().map(|(k, v)| (k, Value::from(v))).collect());
     }
     None
+}
+
+/// Convert an rmpv Value directly to nodedb_types::Value (no serde_json intermediate).
+fn rmpv_to_value(val: &rmpv::Value) -> Value {
+    match val {
+        rmpv::Value::Nil => Value::Null,
+        rmpv::Value::Boolean(b) => Value::Bool(*b),
+        rmpv::Value::Integer(i) => {
+            if let Some(n) = i.as_i64() {
+                Value::Integer(n)
+            } else if let Some(n) = i.as_u64() {
+                Value::Integer(n as i64)
+            } else {
+                Value::Null
+            }
+        }
+        rmpv::Value::F32(f) => Value::Float(*f as f64),
+        rmpv::Value::F64(f) => Value::Float(*f),
+        rmpv::Value::String(s) => Value::String(s.as_str().unwrap_or("").to_string()),
+        rmpv::Value::Binary(b) => Value::Bytes(b.clone()),
+        rmpv::Value::Array(arr) => Value::Array(arr.iter().map(rmpv_to_value).collect()),
+        rmpv::Value::Map(pairs) => {
+            let mut map = HashMap::new();
+            for (k, v) in pairs {
+                let key = match k {
+                    rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
+                    other => format!("{other}"),
+                };
+                map.insert(key, rmpv_to_value(v));
+            }
+            Value::Object(map)
+        }
+        rmpv::Value::Ext(_, _) => Value::Null,
+    }
 }
 
 /// A complete batch of rows for trigger dispatch.
@@ -284,7 +333,7 @@ mod tests {
     use super::*;
 
     fn row(id: &str) -> TriggerBatchRow {
-        TriggerBatchRow::from_decoded(Some(serde_json::Map::new()), None, id.to_string())
+        TriggerBatchRow::from_decoded(Some(HashMap::new()), None, id.to_string())
     }
 
     #[test]
