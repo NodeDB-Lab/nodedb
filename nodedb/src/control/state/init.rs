@@ -247,6 +247,24 @@ impl SharedState {
         let mut audit_log = AuditLog::new(10_000);
         audit_log.set_next_seq(audit_start_seq);
 
+        // Pre-load permission tree definitions before wrapping in RwLock
+        // (avoids blocking_write() which panics inside async runtimes).
+        let mut permission_cache =
+            crate::control::security::permission_tree::PermissionCache::new();
+        if let Some(catalog) = credentials.catalog()
+            && let Ok(collections) = catalog.load_all_collections()
+        {
+            for coll in &collections {
+                if let Some(ref def_json) = coll.permission_tree_def
+                    && let Ok(def) = sonic_rs::from_str::<
+                        crate::control::security::permission_tree::PermissionTreeDef,
+                    >(def_json)
+                {
+                    permission_cache.register_tree_def(coll.tenant_id, &coll.name, def);
+                }
+            }
+        }
+
         let mut shutdown_senders: Vec<tokio::sync::watch::Sender<bool>> = Vec::new();
         let state = Arc::new(Self {
             dispatcher: Mutex::new(dispatcher),
@@ -360,27 +378,9 @@ impl SharedState {
                     crate::control::server::sync::presence::PresenceConfig::default(),
                 ),
             )),
-            permission_cache: Arc::new(tokio::sync::RwLock::new(
-                crate::control::security::permission_tree::PermissionCache::new(),
-            )),
+            permission_cache: Arc::new(tokio::sync::RwLock::new(permission_cache)),
             _shutdown_senders: shutdown_senders,
         });
-
-        // Load permission tree definitions from catalog into the in-memory cache.
-        if let Some(catalog) = state.credentials.catalog()
-            && let Ok(collections) = catalog.load_all_collections()
-        {
-            let mut cache = state.permission_cache.blocking_write();
-            for coll in &collections {
-                if let Some(ref def_json) = coll.permission_tree_def
-                    && let Ok(def) = sonic_rs::from_str::<
-                        crate::control::security::permission_tree::PermissionTreeDef,
-                    >(def_json)
-                {
-                    cache.register_tree_def(coll.tenant_id, &coll.name, def);
-                }
-            }
-        }
 
         Ok(state)
     }
