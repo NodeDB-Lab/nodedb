@@ -44,6 +44,17 @@ pub enum DecodedColumn {
         offsets: Vec<u32>,
         valid: Vec<bool>,
     },
+    /// Dictionary-encoded string column.
+    ///
+    /// IDs index into `dictionary`. Use `dictionary[ids[i]]` to recover the string
+    /// for row `i` when `valid[i]` is true.
+    DictEncoded {
+        /// Symbol IDs per row (index into `dictionary`).
+        ids: Vec<u32>,
+        /// Dictionary: ID → string value. Populated from `ColumnMeta.dictionary`.
+        dictionary: Vec<String>,
+        valid: Vec<bool>,
+    },
 }
 
 /// Reads and decodes columns from a segment byte buffer.
@@ -191,7 +202,7 @@ impl<'a> SegmentReader<'a> {
                 &col_type,
                 col_meta.codec,
                 block_row_count as usize,
-                0,
+                col_meta.dictionary.as_deref(),
             )?;
 
             // Apply delete bitmap to the newly decoded rows.
@@ -225,6 +236,12 @@ impl<'a> SegmentReader<'a> {
 /// We use the codec as a strong signal: DeltaFastLanesLz4 = numeric,
 /// FsstLz4 = string, etc. The name is a fallback heuristic.
 fn infer_column_type(meta: &ColumnMeta) -> ColumnKind {
+    // Dict-encoded columns store IDs as DeltaFastLanesLz4 but must be decoded
+    // differently — the presence of a dictionary distinguishes them.
+    if meta.dictionary.is_some() {
+        return ColumnKind::DictEncoded;
+    }
+
     match meta.codec {
         ColumnCodec::DeltaFastLanesLz4
         | ColumnCodec::DeltaFastLanesRans
@@ -259,6 +276,7 @@ enum ColumnKind {
     Float64,
     VarLen,
     Binary,
+    DictEncoded,
 }
 
 /// Create an empty DecodedColumn for the given kind.
@@ -275,6 +293,11 @@ fn empty_decoded(kind: &ColumnKind) -> DecodedColumn {
         ColumnKind::VarLen | ColumnKind::Binary => DecodedColumn::Binary {
             data: Vec::new(),
             offsets: Vec::new(),
+            valid: Vec::new(),
+        },
+        ColumnKind::DictEncoded => DecodedColumn::DictEncoded {
+            ids: Vec::new(),
+            dictionary: Vec::new(), // Populated during decode_block.
             valid: Vec::new(),
         },
     }
@@ -313,6 +336,10 @@ fn append_null_fill(result: &mut DecodedColumn, row_count: usize) {
             offsets.extend(std::iter::repeat_n(last, row_count));
             valid.extend(std::iter::repeat_n(false, row_count));
         }
+        DecodedColumn::DictEncoded { ids, valid, .. } => {
+            ids.extend(std::iter::repeat_n(0u32, row_count));
+            valid.extend(std::iter::repeat_n(false, row_count));
+        }
     }
 }
 
@@ -323,7 +350,8 @@ fn result_valid_len(result: &DecodedColumn) -> usize {
         | DecodedColumn::Float64 { valid, .. }
         | DecodedColumn::Timestamp { valid, .. }
         | DecodedColumn::Bool { valid, .. }
-        | DecodedColumn::Binary { valid, .. } => valid.len(),
+        | DecodedColumn::Binary { valid, .. }
+        | DecodedColumn::DictEncoded { valid, .. } => valid.len(),
     }
 }
 
@@ -334,7 +362,8 @@ fn result_valid_slice_mut(result: &mut DecodedColumn, offset: usize) -> &mut [bo
         | DecodedColumn::Float64 { valid, .. }
         | DecodedColumn::Timestamp { valid, .. }
         | DecodedColumn::Bool { valid, .. }
-        | DecodedColumn::Binary { valid, .. } => &mut valid[offset..],
+        | DecodedColumn::Binary { valid, .. }
+        | DecodedColumn::DictEncoded { valid, .. } => &mut valid[offset..],
     }
 }
 
@@ -345,7 +374,7 @@ fn decode_block(
     kind: &ColumnKind,
     codec: ColumnCodec,
     row_count: usize,
-    _block_idx: usize,
+    dictionary: Option<&[String]>,
 ) -> Result<(), ColumnarError> {
     let bitmap_size = row_count.div_ceil(8);
 
@@ -452,6 +481,35 @@ fn decode_block(
 
             data.extend_from_slice(&decoded_bytes);
             v.extend_from_slice(&valid);
+        }
+        ColumnKind::DictEncoded => {
+            let DecodedColumn::DictEncoded {
+                ids,
+                dictionary: col_dict,
+                valid: v,
+            } = result
+            else {
+                append_null_fill(result, row_count);
+                return Ok(());
+            };
+
+            // IDs are stored as i64 via DeltaFastLanesLz4.
+            let decoded =
+                nodedb_codec::decode_i64_pipeline(payload, ColumnCodec::DeltaFastLanesLz4)?;
+            let id_slice = &decoded[..row_count.min(decoded.len())];
+            ids.extend(id_slice.iter().map(|&id| id as u32));
+            // Pad to row_count if decoded is shorter.
+            while ids.len() < v.len() + row_count {
+                ids.push(0);
+            }
+            v.extend_from_slice(&valid);
+
+            // Populate the dictionary on the first block that provides it.
+            if col_dict.is_empty()
+                && let Some(dict) = dictionary
+            {
+                col_dict.extend_from_slice(dict);
+            }
         }
     }
 
@@ -643,6 +701,179 @@ mod tests {
                 }
             }
             _ => panic!("expected Int64"),
+        }
+    }
+
+    #[test]
+    fn string_predicate_pushdown_skips_blocks() {
+        use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+        use nodedb_types::value::Value;
+
+        // Two-block segment:
+        //   Block 0 (1024 rows): "aaaa_NNNN" → lexicographic range [aaaa_0000, aaaa_1023]
+        //   Block 1 (476 rows):  "zzzz_NNNN" → range [zzzz_1024, zzzz_1499]
+        let schema = ColumnarSchema::new(vec![ColumnDef::required("tag", ColumnType::String)])
+            .expect("valid");
+
+        let mut mt = crate::memtable::ColumnarMemtable::new(&schema);
+        for i in 0..1024usize {
+            mt.append_row(&[Value::String(format!("aaaa_{i:04}"))])
+                .expect("append");
+        }
+        for i in 1024..1500usize {
+            mt.append_row(&[Value::String(format!("zzzz_{i}"))])
+                .expect("append");
+        }
+
+        let (schema, columns, row_count) = mt.drain();
+        let segment = crate::writer::SegmentWriter::plain()
+            .write_segment(&schema, &columns, row_count)
+            .expect("write");
+
+        let reader = SegmentReader::open(&segment).expect("open");
+        let footer = reader.footer();
+
+        // Confirm zone maps are populated on both blocks.
+        let b0 = &footer.columns[0].block_stats[0];
+        let b1 = &footer.columns[0].block_stats[1];
+        assert!(b0.str_min.is_some(), "block 0 str_min missing");
+        assert!(b1.str_min.is_some(), "block 1 str_min missing");
+
+        // Predicate: tag >= "zzzz_0" → block 0 max ≈ "aaaa_..." < "zzzz_0" → skip block 0.
+        let pred = ScanPredicate::str_gte(0, "zzzz_0");
+        assert!(pred.can_skip_block(b0), "block 0 should be skippable");
+        assert!(!pred.can_skip_block(b1), "block 1 should not be skipped");
+
+        // End-to-end read: block 0 should be null-filled, block 1 decoded.
+        let col = reader
+            .read_column_filtered(0, &[pred])
+            .expect("filtered read");
+        match col {
+            DecodedColumn::Binary { valid, .. } => {
+                assert_eq!(valid.len(), 1500);
+                // Block 0 (rows 0..1024) null-filled.
+                assert!(!valid[0], "row 0 should be null-filled (skipped block)");
+                assert!(!valid[1023], "row 1023 should be null-filled");
+                // Block 1 (rows 1024..1500) present.
+                assert!(valid[1024], "row 1024 should be valid");
+                assert!(valid[1499], "row 1499 should be valid");
+            }
+            _ => panic!("expected Binary for string column"),
+        }
+    }
+
+    /// Write a segment from a memtable that has been dict-encoded, then read back
+    /// and verify the dictionary and IDs match the original values.
+    #[test]
+    fn dict_encoded_roundtrip() {
+        use crate::memtable::{ColumnData, ColumnarMemtable, DICT_ENCODE_MAX_CARDINALITY};
+        use crate::writer::SegmentWriter;
+
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+            ColumnDef::required("qtype", ColumnType::String),
+        ])
+        .expect("valid");
+
+        let qtypes = ["A", "AAAA", "MX", "NS", "SOA", "CNAME", "PTR", "TXT"];
+        let mut mt = ColumnarMemtable::new(&schema);
+        for (i, &q) in qtypes.iter().cycle().take(100).enumerate() {
+            mt.append_row(&[Value::Integer(i as i64), Value::String(q.into())])
+                .expect("append");
+        }
+
+        // Convert low-cardinality string column to dict-encoded.
+        mt.try_dict_encode_columns(DICT_ENCODE_MAX_CARDINALITY);
+
+        // Verify it converted.
+        assert!(matches!(mt.columns()[1], ColumnData::DictEncoded { .. }));
+
+        let (schema, columns, row_count) = mt.drain();
+        let segment = SegmentWriter::plain()
+            .write_segment(&schema, &columns, row_count)
+            .expect("write segment");
+
+        // Read back.
+        let reader = SegmentReader::open(&segment).expect("open");
+        assert_eq!(reader.row_count(), 100);
+
+        // The footer should record the dictionary.
+        let dict_in_meta = reader.footer().columns[1].dictionary.as_deref();
+        assert!(dict_in_meta.is_some(), "dictionary should be in ColumnMeta");
+        let meta_dict = dict_in_meta.expect("present");
+        assert_eq!(meta_dict.len(), 8, "8 distinct qtypes");
+
+        // Read the qtype column — should come back as DictEncoded.
+        let col = reader.read_column(1).expect("read qtype column");
+        match col {
+            DecodedColumn::DictEncoded {
+                ids,
+                dictionary,
+                valid,
+            } => {
+                assert_eq!(ids.len(), 100);
+                assert_eq!(valid.len(), 100);
+                assert!(valid.iter().all(|&v| v));
+                assert_eq!(dictionary.len(), 8);
+
+                // Verify round-trip: each row's ID resolves to the original qtype.
+                for (i, &q) in qtypes.iter().cycle().take(100).enumerate() {
+                    let resolved = &dictionary[ids[i] as usize];
+                    assert_eq!(resolved, q, "row {i}: expected {q}, got {resolved}");
+                }
+            }
+            _ => panic!("expected DictEncoded, got {col:?}"),
+        }
+    }
+
+    /// Dict-encoded column with nulls must decode with valid=false for null rows.
+    #[test]
+    fn dict_encoded_roundtrip_with_nulls() {
+        use crate::memtable::{ColumnarMemtable, DICT_ENCODE_MAX_CARDINALITY};
+        use crate::writer::SegmentWriter;
+
+        let schema = ColumnarSchema::new(vec![ColumnDef::nullable("rcode", ColumnType::String)])
+            .expect("valid");
+
+        let mut mt = ColumnarMemtable::new(&schema);
+        mt.append_row(&[Value::String("NOERROR".into())])
+            .expect("append");
+        mt.append_row(&[Value::Null]).expect("null");
+        mt.append_row(&[Value::String("NXDOMAIN".into())])
+            .expect("append");
+        mt.append_row(&[Value::Null]).expect("null");
+        mt.append_row(&[Value::String("SERVFAIL".into())])
+            .expect("append");
+
+        mt.try_dict_encode_columns(DICT_ENCODE_MAX_CARDINALITY);
+
+        let (schema, columns, row_count) = mt.drain();
+        let segment = SegmentWriter::plain()
+            .write_segment(&schema, &columns, row_count)
+            .expect("write");
+
+        let reader = SegmentReader::open(&segment).expect("open");
+        let col = reader.read_column(0).expect("read");
+
+        match col {
+            DecodedColumn::DictEncoded {
+                ids,
+                dictionary,
+                valid,
+            } => {
+                assert_eq!(ids.len(), 5);
+                assert!(valid[0]);
+                assert!(!valid[1]); // Null.
+                assert!(valid[2]);
+                assert!(!valid[3]); // Null.
+                assert!(valid[4]);
+                assert_eq!(dictionary.len(), 3);
+
+                assert_eq!(&dictionary[ids[0] as usize], "NOERROR");
+                assert_eq!(&dictionary[ids[2] as usize], "NXDOMAIN");
+                assert_eq!(&dictionary[ids[4] as usize], "SERVFAIL");
+            }
+            _ => panic!("expected DictEncoded"),
         }
     }
 }

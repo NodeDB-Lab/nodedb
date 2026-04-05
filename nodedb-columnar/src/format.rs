@@ -99,7 +99,7 @@ impl SegmentHeader {
 #[derive(Debug, Clone, Serialize, Deserialize, ToMessagePack, FromMessagePack)]
 pub struct BlockStats {
     /// Minimum value in this block (encoded as f64 for uniformity;
-    /// i64 values are cast losslessly, strings use 0.0).
+    /// i64 values are cast losslessly, strings use NaN).
     pub min: f64,
     /// Maximum value in this block.
     pub max: f64,
@@ -107,16 +107,64 @@ pub struct BlockStats {
     pub null_count: u32,
     /// Number of rows in this block (≤ BLOCK_SIZE, last block may be smaller).
     pub row_count: u32,
+    /// Lexicographic minimum for string columns (truncated to 32 bytes).
+    /// `None` for numeric, bool, binary, vector, and other non-string columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub str_min: Option<String>,
+    /// Lexicographic maximum for string columns (truncated to 32 bytes).
+    /// `None` for non-string columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub str_max: Option<String>,
+    /// Bloom filter bytes for equality-predicate skipping on string columns
+    /// (256 bytes = 2048 bits, 3 FNV-variant hash functions).
+    /// `None` when there are no non-null string values in the block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom: Option<Vec<u8>>,
 }
 
 impl BlockStats {
-    /// Create stats for a block with no meaningful min/max (e.g., string columns).
+    /// Create stats for a numeric block with known min/max.
+    pub fn numeric(min: f64, max: f64, null_count: u32, row_count: u32) -> Self {
+        Self {
+            min,
+            max,
+            null_count,
+            row_count,
+            str_min: None,
+            str_max: None,
+            bloom: None,
+        }
+    }
+
+    /// Create stats for a block with no meaningful numeric min/max (non-numeric columns).
     pub fn non_numeric(null_count: u32, row_count: u32) -> Self {
         Self {
             min: f64::NAN,
             max: f64::NAN,
             null_count,
             row_count,
+            str_min: None,
+            str_max: None,
+            bloom: None,
+        }
+    }
+
+    /// Create stats for a string block with lexicographic bounds and bloom filter.
+    pub fn string_block(
+        null_count: u32,
+        row_count: u32,
+        str_min: Option<String>,
+        str_max: Option<String>,
+        bloom: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            min: f64::NAN,
+            max: f64::NAN,
+            null_count,
+            row_count,
+            str_min,
+            str_max,
+            bloom,
         }
     }
 }
@@ -137,6 +185,12 @@ pub struct ColumnMeta {
     pub block_count: u32,
     /// Per-block statistics (one entry per block).
     pub block_stats: Vec<BlockStats>,
+    /// Dictionary for dict-encoded columns (`None` for non-dict columns).
+    ///
+    /// Strings are stored in ID order: `dictionary[0]` is ID 0, etc.
+    /// The actual column data is stored as i64 IDs via `DeltaFastLanesLz4`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary: Option<Vec<String>>,
 }
 
 /// Segment footer: contains all metadata needed to read any column.
@@ -276,19 +330,10 @@ mod tests {
                     codec: nodedb_codec::ColumnCodec::DeltaFastLanesLz4,
                     block_count: 2,
                     block_stats: vec![
-                        BlockStats {
-                            min: 1.0,
-                            max: 1024.0,
-                            null_count: 0,
-                            row_count: 1024,
-                        },
-                        BlockStats {
-                            min: 1025.0,
-                            max: 2048.0,
-                            null_count: 0,
-                            row_count: 1024,
-                        },
+                        BlockStats::numeric(1.0, 1024.0, 0, 1024),
+                        BlockStats::numeric(1025.0, 2048.0, 0, 1024),
                     ],
+                    dictionary: None,
                 },
                 ColumnMeta {
                     name: "name".into(),
@@ -300,6 +345,7 @@ mod tests {
                         BlockStats::non_numeric(0, 1024),
                         BlockStats::non_numeric(5, 1024),
                     ],
+                    dictionary: None,
                 },
                 ColumnMeta {
                     name: "score".into(),
@@ -308,19 +354,10 @@ mod tests {
                     codec: nodedb_codec::ColumnCodec::AlpFastLanesLz4,
                     block_count: 2,
                     block_stats: vec![
-                        BlockStats {
-                            min: 0.0,
-                            max: 100.0,
-                            null_count: 10,
-                            row_count: 1024,
-                        },
-                        BlockStats {
-                            min: 0.5,
-                            max: 99.5,
-                            null_count: 3,
-                            row_count: 1024,
-                        },
+                        BlockStats::numeric(0.0, 100.0, 10, 1024),
+                        BlockStats::numeric(0.5, 99.5, 3, 1024),
                     ],
+                    dictionary: None,
                 },
             ],
         };
@@ -366,12 +403,7 @@ mod tests {
 
     #[test]
     fn block_stats_predicate_skip() {
-        let stats = BlockStats {
-            min: 10.0,
-            max: 50.0,
-            null_count: 0,
-            row_count: 1024,
-        };
+        let stats = BlockStats::numeric(10.0, 50.0, 0, 1024);
 
         use crate::predicate::ScanPredicate;
 

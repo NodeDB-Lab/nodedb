@@ -75,6 +75,20 @@ pub enum ColumnData {
         dim: u32,
         valid: Vec<bool>,
     },
+    /// Dictionary-encoded string column: stores u32 symbol IDs + dictionary.
+    ///
+    /// Low-cardinality string columns (e.g. `qtype`, `rcode`) are converted to
+    /// this representation before segment flush. The IDs are delta-encoded as
+    /// i64 for compact storage; the dictionary is stored in `ColumnMeta`.
+    DictEncoded {
+        /// Symbol IDs per row (index into dictionary).
+        ids: Vec<u32>,
+        /// Dictionary: ID → string value.
+        dictionary: Vec<String>,
+        /// Reverse lookup: string → ID.
+        reverse: std::collections::HashMap<String, u32>,
+        valid: Vec<bool>,
+    },
 }
 
 impl ColumnData {
@@ -140,7 +154,8 @@ impl ColumnData {
             | Self::String { valid, .. }
             | Self::Bytes { valid, .. }
             | Self::Geometry { valid, .. }
-            | Self::Vector { valid, .. } => valid.len(),
+            | Self::Vector { valid, .. }
+            | Self::DictEncoded { valid, .. } => valid.len(),
         }
     }
 
@@ -315,6 +330,33 @@ impl ColumnData {
                 valid.push(true);
             }
 
+            // DictEncoded null: push ID=0 (placeholder) with valid=false.
+            (Self::DictEncoded { ids, valid, .. }, Value::Null) => {
+                ids.push(0);
+                valid.push(false);
+            }
+            // DictEncoded string: intern the string and push its ID.
+            (
+                Self::DictEncoded {
+                    ids,
+                    dictionary,
+                    reverse,
+                    valid,
+                },
+                Value::String(s),
+            ) => {
+                let id = if let Some(&existing) = reverse.get(s.as_str()) {
+                    existing
+                } else {
+                    let new_id = dictionary.len() as u32;
+                    dictionary.push(s.clone());
+                    reverse.insert(s.clone(), new_id);
+                    new_id
+                };
+                ids.push(id);
+                valid.push(true);
+            }
+
             (other, val) => {
                 let type_name = match other {
                     Self::Int64 { .. } => "Int64",
@@ -327,6 +369,7 @@ impl ColumnData {
                     Self::Bytes { .. } => "Bytes",
                     Self::Geometry { .. } => "Geometry",
                     Self::Vector { .. } => "Vector",
+                    Self::DictEncoded { .. } => "DictEncoded",
                 };
                 let _ = val; // Consumed by match.
                 return Err(ColumnarError::TypeMismatch {
@@ -336,6 +379,67 @@ impl ColumnData {
             }
         }
         Ok(())
+    }
+}
+
+/// Maximum cardinality for automatic dictionary encoding.
+///
+/// Columns with ≤ this many distinct string values are dict-encoded before flush.
+pub const DICT_ENCODE_MAX_CARDINALITY: u32 = 1024;
+
+impl ColumnData {
+    /// Attempt to convert a `String` column to `DictEncoded`.
+    ///
+    /// Returns `Some(DictEncoded { .. })` if the column has ≤ `max_cardinality`
+    /// distinct values. Returns `None` if the column is not a `String` variant
+    /// or exceeds the cardinality limit.
+    pub fn try_dict_encode(col: &ColumnData, max_cardinality: u32) -> Option<ColumnData> {
+        let (data, offsets, valid) = match col {
+            ColumnData::String {
+                data,
+                offsets,
+                valid,
+            } => (data, offsets, valid),
+            _ => return None,
+        };
+
+        let row_count = valid.len();
+        let mut dictionary: Vec<String> = Vec::new();
+        let mut reverse: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut ids: Vec<u32> = Vec::with_capacity(row_count);
+
+        for i in 0..row_count {
+            if !valid[i] {
+                ids.push(0); // Placeholder; valid[i] = false signals null.
+                continue;
+            }
+            let start = offsets[i] as usize;
+            let end = offsets[i + 1] as usize;
+            // SAFETY: data was written as UTF-8 via Value::String in push().
+            let s = match std::str::from_utf8(&data[start..end]) {
+                Ok(s) => s,
+                Err(_) => return None, // Non-UTF8 data; skip dict encoding.
+            };
+            let id = if let Some(&existing) = reverse.get(s) {
+                existing
+            } else {
+                if dictionary.len() as u32 >= max_cardinality {
+                    return None; // Cardinality exceeds threshold.
+                }
+                let new_id = dictionary.len() as u32;
+                dictionary.push(s.to_string());
+                reverse.insert(s.to_string(), new_id);
+                new_id
+            };
+            ids.push(id);
+        }
+
+        Some(ColumnData::DictEncoded {
+            ids,
+            dictionary,
+            reverse,
+            valid: valid.clone(),
+        })
     }
 }
 
@@ -420,6 +524,21 @@ impl ColumnarMemtable {
         &self.columns
     }
 
+    /// Convert low-cardinality `String` columns to `DictEncoded` in-place.
+    ///
+    /// Should be called just before `drain()` to maximise compression on
+    /// GROUP BY / WHERE-heavy workloads. Columns that exceed `max_cardinality`
+    /// distinct values are left as `String`.
+    pub fn try_dict_encode_columns(&mut self, max_cardinality: u32) {
+        for col in &mut self.columns {
+            if let ColumnData::String { .. } = col
+                && let Some(encoded) = ColumnData::try_dict_encode(col, max_cardinality)
+            {
+                *col = encoded;
+            }
+        }
+    }
+
     /// Drain the memtable: return all column data and reset to empty.
     pub fn drain(&mut self) -> (ColumnarSchema, Vec<ColumnData>, usize) {
         let columns = std::mem::replace(
@@ -433,6 +552,14 @@ impl ColumnarMemtable {
         let row_count = self.row_count;
         self.row_count = 0;
         (self.schema.clone(), columns, row_count)
+    }
+
+    /// Drain with automatic dictionary encoding for low-cardinality String
+    /// columns. Improves compression and enables integer-based GROUP BY /
+    /// WHERE evaluation on the resulting segment.
+    pub fn drain_optimized(&mut self) -> (ColumnarSchema, Vec<ColumnData>, usize) {
+        self.try_dict_encode_columns(DICT_ENCODE_MAX_CARDINALITY as u32);
+        self.drain()
     }
 }
 
@@ -584,5 +711,106 @@ mod tests {
         .expect("append all types");
 
         assert_eq!(mt.row_count(), 1);
+    }
+
+    #[test]
+    fn dict_encode_low_cardinality() {
+        let schema = ColumnarSchema::new(vec![ColumnDef::required("qtype", ColumnType::String)])
+            .expect("valid");
+
+        let mut mt = ColumnarMemtable::new(&schema);
+        // Insert 8 distinct values repeated multiple times.
+        let qtypes = ["A", "B", "AAAA", "NS", "MX", "SOA", "CNAME", "PTR"];
+        for _ in 0..10 {
+            for &q in &qtypes {
+                mt.append_row(&[Value::String(q.into())]).expect("append");
+            }
+        }
+        assert_eq!(mt.row_count(), 80);
+
+        mt.try_dict_encode_columns(DICT_ENCODE_MAX_CARDINALITY);
+
+        let (_schema, columns, _row_count) = mt.drain();
+        match &columns[0] {
+            ColumnData::DictEncoded {
+                ids,
+                dictionary,
+                valid,
+                ..
+            } => {
+                assert_eq!(ids.len(), 80);
+                assert_eq!(valid.len(), 80);
+                // All rows are valid.
+                assert!(valid.iter().all(|&v| v));
+                // Dictionary has exactly 8 entries.
+                assert_eq!(dictionary.len(), 8);
+                // Every id is a valid dictionary index.
+                for &id in ids {
+                    assert!((id as usize) < dictionary.len());
+                }
+                // Values round-trip correctly.
+                for (i, &q) in qtypes.iter().enumerate().take(8) {
+                    let expected_id = dictionary.iter().position(|s| s == q).expect("in dict");
+                    assert_eq!(ids[i], expected_id as u32);
+                }
+            }
+            _ => panic!("expected DictEncoded after try_dict_encode_columns"),
+        }
+    }
+
+    #[test]
+    fn dict_encode_exceeds_cardinality_stays_string() {
+        let schema = ColumnarSchema::new(vec![ColumnDef::required("name", ColumnType::String)])
+            .expect("valid");
+
+        let mut mt = ColumnarMemtable::new(&schema);
+        // Insert more than max_cardinality distinct values.
+        let max: u32 = 4;
+        for i in 0..=max {
+            mt.append_row(&[Value::String(format!("val_{i}"))])
+                .expect("append");
+        }
+
+        mt.try_dict_encode_columns(max);
+
+        let (_schema, columns, _row_count) = mt.drain();
+        // Should remain as String since cardinality = max+1 > max.
+        assert!(matches!(columns[0], ColumnData::String { .. }));
+    }
+
+    #[test]
+    fn dict_encode_with_nulls() {
+        let schema = ColumnarSchema::new(vec![ColumnDef::nullable("tag", ColumnType::String)])
+            .expect("valid");
+
+        let mut mt = ColumnarMemtable::new(&schema);
+        mt.append_row(&[Value::String("foo".into())])
+            .expect("append");
+        mt.append_row(&[Value::Null]).expect("append null");
+        mt.append_row(&[Value::String("bar".into())])
+            .expect("append");
+        mt.append_row(&[Value::Null]).expect("append null");
+
+        mt.try_dict_encode_columns(DICT_ENCODE_MAX_CARDINALITY);
+
+        let (_schema, columns, _row_count) = mt.drain();
+        match &columns[0] {
+            ColumnData::DictEncoded {
+                ids,
+                valid,
+                dictionary,
+                ..
+            } => {
+                assert_eq!(ids.len(), 4);
+                assert_eq!(valid.len(), 4);
+                assert!(valid[0]);
+                assert!(!valid[1]); // Null row.
+                assert!(valid[2]);
+                assert!(!valid[3]); // Null row.
+                // Dictionary has 2 entries: "foo" and "bar".
+                assert_eq!(dictionary.len(), 2);
+            }
+            _ => panic!("expected DictEncoded"),
+        }
     }
 }

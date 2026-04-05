@@ -207,6 +207,21 @@ fn extract_row_value(
                 _ => Value::Bytes(bytes.to_vec()),
             }
         }
+        DecodedColumn::DictEncoded {
+            ids,
+            dictionary,
+            valid,
+        } => {
+            if !valid[row_idx] {
+                return Value::Null;
+            }
+            let id = ids[row_idx] as usize;
+            if let Some(s) = dictionary.get(id) {
+                Value::String(s.clone())
+            } else {
+                Value::Null
+            }
+        }
     }
 }
 

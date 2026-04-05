@@ -15,6 +15,7 @@
 pub mod compaction;
 pub mod delete_bitmap;
 pub mod error;
+pub mod filter;
 pub mod format;
 pub mod memtable;
 pub mod mutation;
@@ -27,6 +28,11 @@ pub mod writer;
 pub use compaction::compact_segments;
 pub use delete_bitmap::DeleteBitmap;
 pub use error::ColumnarError;
+pub use filter::{
+    bitmask_all, bitmask_and, decoded_dict_eval_contains, decoded_dict_eval_eq,
+    decoded_dict_eval_like, decoded_dict_eval_ne, dict_eval_contains, dict_eval_eq, dict_eval_like,
+    dict_eval_ne, words_for,
+};
 pub use format::{
     BLOCK_SIZE, BlockStats, ColumnMeta, MAGIC, SegmentFooter, SegmentHeader, VERSION_MAJOR,
     VERSION_MINOR,
@@ -34,6 +40,9 @@ pub use format::{
 pub use memtable::ColumnarMemtable;
 pub use mutation::MutationEngine;
 pub use pk_index::PkIndex;
-pub use predicate::ScanPredicate;
+pub use predicate::{
+    BLOOM_BYTES, PredicateOp, PredicateValue, ScanPredicate, bloom_insert, bloom_may_contain,
+    build_bloom,
+};
 pub use reader::SegmentReader;
 pub use writer::SegmentWriter;
