@@ -327,7 +327,6 @@ pub(super) struct DocumentRow {
 
 impl zerompk::ToMessagePack for DocumentRow {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
-        use zerompk::ToMessagePack;
         writer.write_map_len(2)?;
         writer.write_string("id")?;
         writer.write_string(&self.id)?;

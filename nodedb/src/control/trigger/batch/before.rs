@@ -110,11 +110,11 @@ pub async fn execute_before_batch(
                 Ok(()) => {
                     // Apply NEW mutations from ASSIGN statements.
                     let mutations = executor.take_new_mutations();
-                    if !mutations.is_empty() {
-                        if let Some(fields) = row.new_fields_mut() {
-                            for (field, value) in mutations {
-                                fields.insert(field, value);
-                            }
+                    if !mutations.is_empty()
+                        && let Some(fields) = row.new_fields_mut()
+                    {
+                        for (field, value) in mutations {
+                            fields.insert(field, value);
                         }
                     }
                 }

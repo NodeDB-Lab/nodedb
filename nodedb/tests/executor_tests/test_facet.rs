@@ -10,7 +10,6 @@
 use nodedb::bridge::envelope::PhysicalPlan;
 use nodedb::bridge::physical_plan::{DocumentOp, QueryOp};
 use nodedb::bridge::scan_filter::ScanFilter;
-use nodedb_types;
 
 use crate::helpers::*;
 

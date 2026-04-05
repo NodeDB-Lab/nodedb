@@ -4,7 +4,6 @@
 //! RLS policies are scoped by `(tenant_id, collection)` by construction.
 
 use nodedb::control::security::rls::{PolicyType, RlsPolicy, RlsPolicyStore};
-use nodedb_types;
 
 const TENANT_A: u32 = 10;
 const TENANT_B: u32 = 20;

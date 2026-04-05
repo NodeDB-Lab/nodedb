@@ -28,10 +28,6 @@ pub(crate) struct Node {
     pub deleted: bool,
 }
 
-/// Hierarchical Navigable Small World graph index.
-///
-/// Production HNSW per Malkov & Yashunin (2018):
-/// - Multi-layer graph with exponential layer assignment
 /// Magic header for rkyv-serialized HNSW snapshots (6 bytes).
 const HNSW_RKYV_MAGIC: &[u8; 6] = b"RKHNS\0";
 

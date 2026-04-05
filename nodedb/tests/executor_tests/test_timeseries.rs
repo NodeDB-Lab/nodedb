@@ -5,7 +5,6 @@
 
 use nodedb::bridge::envelope::PhysicalPlan;
 use nodedb::bridge::physical_plan::TimeseriesOp;
-use nodedb_types;
 
 use crate::helpers::*;
 

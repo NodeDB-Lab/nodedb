@@ -13,8 +13,6 @@ pub use aggregate::compute_aggregate;
 pub use like::sql_like_match;
 pub use parse::parse_simple_predicates;
 
-use crate::json_ops::{coerced_eq, compare_json_optional as compare_json_values};
-
 /// Filter operator enum for O(1) dispatch instead of string comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterOp {
@@ -44,7 +42,7 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_op(s: &str) -> Self {
         match s {
             "eq" => Self::Eq,
             "ne" | "neq" => Self::Ne,
@@ -102,13 +100,13 @@ impl FilterOp {
 
 impl From<&str> for FilterOp {
     fn from(s: &str) -> Self {
-        Self::from_str(s)
+        Self::parse_op(s)
     }
 }
 
 impl From<String> for FilterOp {
     fn from(s: String) -> Self {
-        Self::from_str(&s)
+        Self::parse_op(&s)
     }
 }
 
@@ -121,7 +119,7 @@ impl serde::Serialize for FilterOp {
 impl<'de> serde::Deserialize<'de> for FilterOp {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(FilterOp::from_str(&s))
+        Ok(FilterOp::parse_op(&s))
     }
 }
 
@@ -167,7 +165,7 @@ impl<'a> zerompk::FromMessagePack<'a> for ScanFilter {
         let clauses = Vec::<Vec<ScanFilter>>::read(reader)?;
         Ok(Self {
             field,
-            op: FilterOp::from_str(&op_str),
+            op: FilterOp::parse_op(&op_str),
             // Convert serde_json::Value → nodedb_types::Value at wire boundary.
             value: nodedb_types::Value::from(jv.0),
             clauses,

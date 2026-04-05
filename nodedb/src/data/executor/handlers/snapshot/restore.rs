@@ -1,6 +1,5 @@
 //! Tenant snapshot restoration: import Data Plane state for all engines.
 
-use sonic_rs;
 use tracing::{info, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};

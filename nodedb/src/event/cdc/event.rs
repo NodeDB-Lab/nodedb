@@ -61,7 +61,6 @@ impl CdcEvent {
 
 impl zerompk::ToMessagePack for CdcEvent {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
-        use zerompk::ToMessagePack;
         let field_count = 9
             + usize::from(self.new_value.is_some())
             + usize::from(self.old_value.is_some())

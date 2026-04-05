@@ -9,7 +9,6 @@ use nodedb::bridge::dispatch::BridgeRequest;
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
 use nodedb::bridge::physical_plan::{DocumentOp, GraphOp, TextOp, VectorOp};
 use nodedb::engine::graph::edge_store::Direction;
-use nodedb_types;
 
 use crate::helpers::*;
 

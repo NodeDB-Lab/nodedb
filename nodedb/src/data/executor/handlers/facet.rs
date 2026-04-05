@@ -6,7 +6,6 @@
 //! index-backed counting (if the field has a secondary index) or via HashMap
 //! counting over the matching documents.
 
-use sonic_rs;
 use std::collections::{HashMap, HashSet};
 
 use tracing::debug;

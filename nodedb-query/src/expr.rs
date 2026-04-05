@@ -116,7 +116,6 @@ pub struct ComputedColumn {
 impl zerompk::ToMessagePack for SqlExpr {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
         use nodedb_types::json_msgpack::JsonValue;
-        use zerompk::ToMessagePack;
         match self {
             SqlExpr::Column(s) => {
                 writer.write_array_len(2)?;
@@ -198,7 +197,6 @@ impl zerompk::ToMessagePack for SqlExpr {
 impl<'a> zerompk::FromMessagePack<'a> for SqlExpr {
     fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
         use nodedb_types::json_msgpack::JsonValue;
-        use zerompk::FromMessagePack;
         let len = reader.read_array_len()?;
         if len == 0 {
             return Err(zerompk::Error::ArrayLengthMismatch {

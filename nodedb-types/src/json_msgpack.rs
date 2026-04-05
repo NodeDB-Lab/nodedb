@@ -488,7 +488,7 @@ fn read_map(c: &mut Cursor<'_>, len: usize) -> zerompk::Result<serde_json::Value
 fn base64_encode(data: &[u8]) -> String {
     use std::fmt::Write;
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn roundtrip_float() {
-        let val = json!(3.14);
+        let val = json!(9.81);
         let bytes = json_to_msgpack(&val).unwrap();
         let restored = json_from_msgpack(&bytes).unwrap();
         assert_eq!(val, restored);
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn roundtrip_array() {
-        let val = json!([1, "two", null, true, 3.14]);
+        let val = json!([1, "two", null, true, 9.81]);
         let bytes = json_to_msgpack(&val).unwrap();
         let restored = json_from_msgpack(&bytes).unwrap();
         assert_eq!(val, restored);

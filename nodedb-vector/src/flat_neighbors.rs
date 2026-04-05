@@ -29,6 +29,7 @@ pub(crate) struct FlatNeighborStore {
 }
 
 /// A flat u32 array backed by either owned memory or a shared buffer.
+#[allow(dead_code)]
 enum FlatArray {
     Owned(Vec<u32>),
     #[cfg(target_endian = "little")]
@@ -83,6 +84,7 @@ impl FlatNeighborStore {
 
     /// Build from rkyv-archived flat arrays (zero-copy on little-endian).
     #[cfg(target_endian = "little")]
+    #[allow(dead_code)]
     pub unsafe fn from_rkyv(
         backing: Arc<rkyv::util::AlignedVec>,
         data_ptr: *const u32,

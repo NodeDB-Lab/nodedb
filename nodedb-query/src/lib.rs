@@ -7,6 +7,7 @@ pub mod fusion;
 pub mod geo_functions;
 pub mod json_ops;
 pub mod metadata_filter;
+pub mod msgpack_scan;
 pub mod scan_filter;
 pub mod simd_agg;
 pub mod simd_agg_i64;

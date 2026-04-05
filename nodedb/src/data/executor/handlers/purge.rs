@@ -7,7 +7,6 @@
 //! then in-memory state (vectors, timeseries, KV, CRDT, caches).
 //! Idempotent: safe to re-run after a crash (missing data is a no-op).
 
-use sonic_rs;
 use tracing::{info, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};

@@ -39,7 +39,7 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
             };
             return Some(ScanFilter {
                 field,
-                op: super::FilterOp::from_str(op),
+                op: super::FilterOp::parse_op(op),
                 value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
                 clauses: Vec::new(),
             });

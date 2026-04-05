@@ -7,7 +7,6 @@
 
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
 use nodedb::bridge::physical_plan::{DocumentOp, GraphOp, VectorOp};
-use nodedb_types;
 
 use crate::helpers::*;
 

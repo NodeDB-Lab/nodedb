@@ -39,11 +39,6 @@ unsafe impl<T: Copy + Send> Send for DenseArray<T> {}
 unsafe impl<T: Copy + Sync> Sync for DenseArray<T> {}
 
 impl<T: Copy> DenseArray<T> {
-    /// Create an owned array.
-    pub fn owned(data: Vec<T>) -> Self {
-        Self::Owned(data)
-    }
-
     /// Create a zero-copy reference into an rkyv buffer.
     ///
     /// # Safety
