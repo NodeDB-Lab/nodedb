@@ -119,6 +119,20 @@ impl TriggerBatchRow {
             .as_ref()
     }
 
+    /// Raw NEW bytes (MessagePack). Used for binary fast-reject in WHEN filters.
+    ///
+    /// Returns `None` for rows created via `from_decoded` (test path) or DELETE ops.
+    pub fn new_raw(&self) -> Option<&[u8]> {
+        self.new_raw.as_deref()
+    }
+
+    /// Raw OLD bytes (MessagePack). Used for binary fast-reject in WHEN filters.
+    ///
+    /// Returns `None` for rows created via `from_decoded` (test path) or INSERT ops.
+    pub fn old_raw(&self) -> Option<&[u8]> {
+        self.old_raw.as_deref()
+    }
+
     /// Mutable access to NEW fields (for BEFORE trigger ASSIGN mutations).
     /// Ensures the cache is initialized first.
     pub fn new_fields_mut(&mut self) -> Option<&mut HashMap<String, Value>> {

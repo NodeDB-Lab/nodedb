@@ -2,10 +2,15 @@
 //!
 //! Evaluates a trigger's WHEN predicate against each row in a batch,
 //! returning a boolean mask indicating which rows should fire the trigger.
+//!
+//! Fast path: simple `NEW.field OP value` conditions are parsed into a
+//! `ScanFilter` and evaluated directly on raw MessagePack bytes via
+//! `matches_binary`, avoiding HashMap decode for non-matching rows.
 
 use super::collector::TriggerBatchRow;
 use crate::control::planner::procedural::executor::bindings::RowBindings;
 use crate::control::trigger::fire_common::evaluate_simple_condition;
+use crate::control::trigger::when_parse::WhenTarget;
 
 /// Filter a batch of rows by a WHEN clause predicate.
 ///
@@ -13,6 +18,16 @@ use crate::control::trigger::fire_common::evaluate_simple_condition;
 /// Rows where the WHEN condition evaluates to false are skipped.
 ///
 /// If `when_condition` is `None`, all rows pass (trigger always fires).
+///
+/// ## Fast-reject path
+///
+/// If the WHEN condition is a simple `NEW.field OP value` or `OLD.field OP
+/// value` expression, it is parsed at call time into a `ScanFilter` and
+/// evaluated via `matches_binary` on the raw MessagePack bytes. This avoids
+/// full HashMap decode for rows that do not match the predicate.
+///
+/// If raw bytes are unavailable (rows created via `from_decoded`, i.e. in
+/// tests) the function falls through to the existing decode + substitute path.
 pub fn filter_batch_by_when(
     rows: &[TriggerBatchRow],
     collection: &str,
@@ -24,6 +39,32 @@ pub fn filter_batch_by_when(
         None => return vec![true; rows.len()],
     };
 
+    // Attempt to parse as binary-evaluable filter(s) — supports AND-joined predicates.
+    if let Some((target, filters)) =
+        crate::control::trigger::when_parse::try_parse_when_to_filters(when_cond)
+    {
+        return rows
+            .iter()
+            .map(|row| {
+                let raw = match target {
+                    WhenTarget::New => row.new_raw(),
+                    WhenTarget::Old => row.old_raw(),
+                };
+                match raw {
+                    Some(bytes) => filters.iter().all(|f| f.matches_binary(bytes)),
+                    // No raw bytes (test rows from from_decoded) — fall back to
+                    // the decode + substitute path for this row.
+                    None => {
+                        let bindings = build_row_bindings(row, collection, operation);
+                        let bound_cond = bindings.substitute(when_cond);
+                        evaluate_simple_condition(&bound_cond)
+                    }
+                }
+            })
+            .collect();
+    }
+
+    // General path: substitute bindings and evaluate.
     rows.iter()
         .map(|row| {
             let bindings = build_row_bindings(row, collection, operation);

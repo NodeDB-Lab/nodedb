@@ -7,6 +7,7 @@ pub mod fire_common;
 pub mod fire_instead;
 pub mod fire_statement;
 pub mod registry;
+pub mod when_parse;
 
 pub use registry::{DmlEvent, TriggerRegistry};
 
