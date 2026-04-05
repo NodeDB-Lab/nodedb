@@ -94,7 +94,7 @@ fn ts_scan_filtered(
     let filter_bytes = if filters.is_empty() {
         Vec::new()
     } else {
-        rmp_serde::to_vec_named(&filters).unwrap_or_default()
+        zerompk::to_msgpack_vec(&filters).unwrap_or_default()
     };
     let raw = send_ok(
         &mut ctx.core,

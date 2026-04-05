@@ -264,7 +264,7 @@ fn extract_exists_source(plan: &LogicalPlan) -> (Option<String>, Option<Vec<u8>>
                 for f in &scan.filters {
                     all.extend(expr_to_scan_filters(f));
                 }
-                rmp_serde::to_vec_named(&all).ok()
+                zerompk::to_msgpack_vec(&all).ok()
             } else {
                 Some(Vec::new())
             };
@@ -273,7 +273,7 @@ fn extract_exists_source(plan: &LogicalPlan) -> (Option<String>, Option<Vec<u8>>
         LogicalPlan::Filter(filter) => {
             let (coll, _) = extract_exists_source(&filter.input);
             let filters = expr_to_scan_filters(&filter.predicate);
-            let filter_bytes = rmp_serde::to_vec_named(&filters).ok();
+            let filter_bytes = zerompk::to_msgpack_vec(&filters).ok();
             (coll, filter_bytes)
         }
         LogicalPlan::Projection(proj) => extract_exists_source(&proj.input),
@@ -295,7 +295,7 @@ pub(in crate::control::planner) fn extract_where_filters(
                         .into(),
                 });
             }
-            rmp_serde::to_vec_named(&scan_filters).map_err(|e| crate::Error::PlanError {
+            zerompk::to_msgpack_vec(&scan_filters).map_err(|e| crate::Error::PlanError {
                 detail: format!("failed to serialize scan filters: {e}"),
             })
         }

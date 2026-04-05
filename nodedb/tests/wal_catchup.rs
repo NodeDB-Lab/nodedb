@@ -116,7 +116,7 @@ impl TestStack {
     }
 
     fn write_to_wal(&self, collection: &str, payload: Vec<u8>) {
-        let wal_payload = rmp_serde::to_vec(&(collection.to_string(), payload)).unwrap();
+        let wal_payload = zerompk::to_msgpack_vec(&(collection.to_string(), payload)).unwrap();
         self.wal
             .append_timeseries_batch(
                 TenantId::new(1),
@@ -154,7 +154,8 @@ async fn wal_redispatch_makes_data_queryable() {
     assert_eq!(records.len(), 1, "WAL should have 1 timeseries batch");
 
     for record in &records {
-        let (coll, payload): (String, Vec<u8>) = rmp_serde::from_slice(&record.payload).unwrap();
+        let (coll, payload): (String, Vec<u8>) =
+            zerompk::from_msgpack::<(String, Vec<u8>)>(&record.payload).unwrap();
         let resp = stack
             .dispatch(
                 PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
@@ -240,7 +241,8 @@ async fn catchup_fills_gaps_from_spsc_drops() {
         if i == 1 || i == 3 {
             continue; // simulate SPSC drop
         }
-        let (coll, payload): (String, Vec<u8>) = rmp_serde::from_slice(&record.payload).unwrap();
+        let (coll, payload): (String, Vec<u8>) =
+            zerompk::from_msgpack::<(String, Vec<u8>)>(&record.payload).unwrap();
         stack
             .dispatch(
                 PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
@@ -384,8 +386,9 @@ async fn production_scenario_catchup_drains_wal_after_ingest() {
         if batch % 5 < 3 {
             // 6 out of 10 batches dispatched directly.
             let (coll_str, raw_payload): (String, Vec<u8>) = {
-                let wal_payload = rmp_serde::to_vec(&(collection.to_string(), payload)).unwrap();
-                rmp_serde::from_slice(&wal_payload).unwrap()
+                let wal_payload =
+                    zerompk::to_msgpack_vec(&(collection.to_string(), payload)).unwrap();
+                zerompk::from_msgpack::<(String, Vec<u8>)>(&wal_payload).unwrap()
             };
             stack
                 .dispatch(
@@ -443,7 +446,7 @@ fn startup_replay_recovers_all_wal_data() {
         let start_ts =
             1_700_000_000_000_000_000i64 + batch as i64 * rows_per_batch as i64 * 1_000_000;
         let payload = ilp_payload(collection, rows_per_batch, start_ts);
-        let wal_payload = rmp_serde::to_vec(&(collection.to_string(), payload)).unwrap();
+        let wal_payload = zerompk::to_msgpack_vec(&(collection.to_string(), payload)).unwrap();
         wal.append_timeseries_batch(TenantId::new(1), VShardId::new(0), &wal_payload)
             .unwrap();
     }

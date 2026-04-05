@@ -268,7 +268,7 @@ pub async fn insert_document(
     // Rebuild value bytes (sequence injection or BEFORE trigger may have mutated fields).
     let value_bytes = if fields != parsed.fields {
         let doc = serde_json::Value::Object(fields.clone());
-        rmp_serde::to_vec_named(&doc).unwrap_or(parsed.value_bytes)
+        nodedb_types::json_to_msgpack(&doc).unwrap_or(parsed.value_bytes)
     } else {
         parsed.value_bytes
     };
@@ -423,7 +423,7 @@ pub async fn upsert_document(
     // Rebuild value bytes if BEFORE trigger mutated NEW fields.
     let value_bytes = if fields_after_before != parsed.fields {
         let doc = serde_json::Value::Object(fields_after_before.clone());
-        rmp_serde::to_vec_named(&doc).unwrap_or(parsed.value_bytes)
+        nodedb_types::json_to_msgpack(&doc).unwrap_or(parsed.value_bytes)
     } else {
         parsed.value_bytes
     };

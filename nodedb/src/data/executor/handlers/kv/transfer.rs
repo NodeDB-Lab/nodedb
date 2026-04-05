@@ -89,7 +89,7 @@ impl CoreLoop {
         let new_dest = if dest_bytes.is_empty() {
             // Dest key doesn't exist — create with just the field.
             let doc = serde_json::json!({ field: dest_balance + amount });
-            match rmp_serde::to_vec(&doc) {
+            match nodedb_types::json_to_msgpack(&doc) {
                 Ok(v) => v,
                 Err(e) => {
                     return self.response_error(
@@ -231,7 +231,7 @@ impl CoreLoop {
 
 /// Extract a numeric field from a MessagePack-encoded KV value.
 fn extract_numeric_field(value: &[u8], field: &str) -> Option<f64> {
-    let doc: serde_json::Value = rmp_serde::from_slice(value).ok()?;
+    let doc: serde_json::Value = nodedb_types::json_from_msgpack(value).ok()?;
     let v = doc.get(field)?;
     v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
 }
@@ -239,7 +239,7 @@ fn extract_numeric_field(value: &[u8], field: &str) -> Option<f64> {
 /// Update a numeric field in a MessagePack-encoded KV value, preserving other fields.
 fn update_numeric_field(value: &[u8], field: &str, new_value: f64) -> Result<Vec<u8>, ErrorCode> {
     let mut doc: serde_json::Value =
-        rmp_serde::from_slice(value).map_err(|e| ErrorCode::Internal {
+        nodedb_types::json_from_msgpack(value).map_err(|e| ErrorCode::Internal {
             detail: format!("deserialize value: {e}"),
         })?;
     if let Some(obj) = doc.as_object_mut() {
@@ -250,7 +250,7 @@ fn update_numeric_field(value: &[u8], field: &str, new_value: f64) -> Result<Vec
             obj.insert(field.to_string(), serde_json::json!(new_value));
         }
     }
-    rmp_serde::to_vec(&doc).map_err(|e| ErrorCode::Internal {
+    nodedb_types::json_to_msgpack(&doc).map_err(|e| ErrorCode::Internal {
         detail: format!("serialize value: {e}"),
     })
 }

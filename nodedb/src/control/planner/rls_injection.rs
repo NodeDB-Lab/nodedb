@@ -192,16 +192,16 @@ fn merge_filters(existing: &mut Vec<u8>, rls_bytes: &[u8]) -> crate::Result<()> 
         return Ok(());
     }
 
-    let mut all: Vec<crate::bridge::scan_filter::ScanFilter> = rmp_serde::from_slice(existing)
+    let mut all: Vec<crate::bridge::scan_filter::ScanFilter> = zerompk::from_msgpack(existing)
         .map_err(|e| crate::Error::PlanError {
             detail: format!("RLS filter deserialization failed (existing): {e}"),
         })?;
-    let rls: Vec<crate::bridge::scan_filter::ScanFilter> = rmp_serde::from_slice(rls_bytes)
+    let rls: Vec<crate::bridge::scan_filter::ScanFilter> = zerompk::from_msgpack(rls_bytes)
         .map_err(|e| crate::Error::PlanError {
             detail: format!("RLS filter deserialization failed (new): {e}"),
         })?;
     all.extend(rls);
-    *existing = rmp_serde::to_vec_named(&all).map_err(|e| crate::Error::PlanError {
+    *existing = zerompk::to_msgpack_vec(&all).map_err(|e| crate::Error::PlanError {
         detail: format!("RLS filter serialization failed: {e}"),
     })?;
     Ok(())
@@ -354,7 +354,7 @@ fn inject_permission_tree_for_plan(
     };
 
     let filter_bytes =
-        rmp_serde::to_vec_named(&vec![in_filter]).map_err(|e| crate::Error::PlanError {
+        zerompk::to_msgpack_vec(&vec![in_filter]).map_err(|e| crate::Error::PlanError {
             detail: format!("permission tree filter serialization: {e}"),
         })?;
 

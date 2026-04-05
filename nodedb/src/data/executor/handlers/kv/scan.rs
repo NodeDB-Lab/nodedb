@@ -76,7 +76,13 @@ pub(in crate::data::executor) fn extract_eq_filter(
     }
 
     // Filters are MessagePack-encoded Vec<ScanFilter>.
-    let Ok(parsed) = rmp_serde::from_slice::<Vec<serde_json::Value>>(filters) else {
+    let Ok(parsed) = zerompk::from_msgpack::<Vec<nodedb_types::json_msgpack::JsonValue>>(filters)
+        .map(|v| {
+            v.into_iter()
+                .map(|jv| jv.0)
+                .collect::<Vec<serde_json::Value>>()
+        })
+    else {
         tracing::trace!(
             len = filters.len(),
             "filter deserialization failed, falling back to full scan"

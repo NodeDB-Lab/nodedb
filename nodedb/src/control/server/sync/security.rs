@@ -172,7 +172,7 @@ pub fn enforce_rls_on_delta(
         }
 
         let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-            match rmp_serde::from_slice(&policy.predicate) {
+            match zerompk::from_msgpack(&policy.predicate) {
                 Ok(f) => f,
                 Err(_) => continue, // Skip unparseable policies.
             };
@@ -243,7 +243,7 @@ pub fn log_silent_rejection(
 /// CRDT operations (which can't be evaluated against field-level predicates).
 fn delta_to_document_value(delta_bytes: &[u8]) -> serde_json::Value {
     // Try MessagePack first (our internal format).
-    if let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(delta_bytes) {
+    if let Ok(value) = nodedb_types::json_from_msgpack(delta_bytes) {
         return value;
     }
     // Try raw JSON.
@@ -290,7 +290,7 @@ mod tests {
         DeltaPushMsg {
             collection: collection.into(),
             document_id: doc_id.into(),
-            delta: rmp_serde::to_vec_named(data).unwrap(),
+            delta: nodedb_types::json_to_msgpack(data).unwrap(),
             peer_id: 1,
             mutation_id: 42,
             checksum: 0,
@@ -315,7 +315,7 @@ mod tests {
             value: serde_json::json!("active"),
             clauses: Vec::new(),
         };
-        let predicate = rmp_serde::to_vec_named(&vec![filter]).unwrap();
+        let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 
         store
             .create_policy(RlsPolicy {
@@ -348,7 +348,7 @@ mod tests {
             value: serde_json::json!("active"),
             clauses: Vec::new(),
         };
-        let predicate = rmp_serde::to_vec_named(&vec![filter]).unwrap();
+        let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 
         store
             .create_policy(RlsPolicy {
@@ -413,7 +413,7 @@ mod tests {
 
         // Valid MessagePack → parsed.
         let data = serde_json::json!({"key": "value"});
-        let msgpack = rmp_serde::to_vec_named(&data).unwrap();
+        let msgpack = nodedb_types::json_to_msgpack(&data).unwrap();
         let val = delta_to_document_value(&msgpack);
         assert_eq!(val["key"], "value");
     }

@@ -52,7 +52,7 @@ pub(super) async fn handle_zadd(
         // Write to the underlying KV collection as a MessagePack document
         // containing the score and member. The sorted index auto-maintenance
         // in KvEngine::put will update the order-statistic tree.
-        let value = rmp_serde::to_vec(&serde_json::json!({
+        let value = nodedb_types::json_to_msgpack(&serde_json::json!({
             "score": score,
             "member": String::from_utf8_lossy(&member),
         }))

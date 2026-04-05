@@ -21,7 +21,7 @@ pub fn rls_check_document(rls_filters: &[u8], doc: &serde_json::Value) -> bool {
         return true;
     }
 
-    let filters: Vec<ScanFilter> = match rmp_serde::from_slice(rls_filters) {
+    let filters: Vec<ScanFilter> = match zerompk::from_msgpack(rls_filters) {
         Ok(f) => f,
         Err(_) => {
             // Deserialization failure → deny (fail-closed).
@@ -62,7 +62,7 @@ mod tests {
             value,
             clauses: Vec::new(),
         };
-        rmp_serde::to_vec_named(&vec![filter]).unwrap()
+        zerompk::to_msgpack_vec(&vec![filter]).unwrap()
     }
 
     #[test]
@@ -115,7 +115,7 @@ mod tests {
                 clauses: Vec::new(),
             },
         ];
-        let rls = rmp_serde::to_vec_named(&filters).unwrap();
+        let rls = zerompk::to_msgpack_vec(&filters).unwrap();
 
         let doc_ok = json!({"user_id": "42", "status": "active"});
         assert!(rls_check_document(&rls, &doc_ok));

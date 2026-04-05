@@ -266,7 +266,7 @@ impl PlanConverter {
         let filter_bytes =
             if let datafusion::logical_expr::LogicalPlan::Filter(filter) = agg.input.as_ref() {
                 let filters = expr_to_scan_filters(&filter.predicate);
-                rmp_serde::to_vec_named(&filters).unwrap_or_default()
+                zerompk::to_msgpack_vec(&filters).unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -388,7 +388,7 @@ pub(super) fn extract_timeseries_filters(filters: &[Expr]) -> crate::Result<((i6
     let filter_bytes = if remaining.is_empty() {
         Vec::new()
     } else {
-        rmp_serde::to_vec_named(&remaining).map_err(|e| crate::Error::Serialization {
+        zerompk::to_msgpack_vec(&remaining).map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
             detail: format!("ts filter serialization: {e}"),
         })?

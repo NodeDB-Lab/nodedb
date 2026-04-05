@@ -36,6 +36,32 @@ pub struct ScanFilter {
     pub clauses: Vec<Vec<ScanFilter>>,
 }
 
+impl zerompk::ToMessagePack for ScanFilter {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        writer.write_array_len(4)?;
+        self.field.write(writer)?;
+        self.op.write(writer)?;
+        nodedb_types::JsonValue(self.value.clone()).write(writer)?;
+        self.clauses.write(writer)
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for ScanFilter {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        reader.check_array_len(4)?;
+        let field = String::read(reader)?;
+        let op = String::read(reader)?;
+        let jv = nodedb_types::JsonValue::read(reader)?;
+        let clauses = Vec::<Vec<ScanFilter>>::read(reader)?;
+        Ok(Self {
+            field,
+            op,
+            value: jv.0,
+            clauses,
+        })
+    }
+}
+
 impl ScanFilter {
     /// Evaluate this filter against a JSON document.
     pub fn matches(&self, doc: &serde_json::Value) -> bool {

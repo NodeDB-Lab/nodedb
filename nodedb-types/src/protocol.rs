@@ -15,7 +15,19 @@ use crate::value::Value;
 /// Opcodes are grouped by functional area with 16-slot gaps to allow
 /// future additions without renumbering.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(c_enum)]
 pub enum OpCode {
     // ── Auth & session ──────────────────────────────────────────
     Auth = 0x01,
@@ -180,7 +192,18 @@ impl OpCode {
 
 /// Status code in response frames.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(c_enum)]
 pub enum ResponseStatus {
     /// Request completed successfully.
     Ok = 0,
@@ -193,7 +216,9 @@ pub enum ResponseStatus {
 // ─── Auth ───────────────────────────────────────────────────────────
 
 /// Authentication method in an `Auth` request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum AuthMethod {
     Trust {
@@ -214,7 +239,9 @@ fn default_username() -> String {
 }
 
 /// Successful auth response payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 pub struct AuthResponse {
     pub username: String,
     pub tenant_id: u32,
@@ -237,11 +264,38 @@ pub struct NativeRequest {
     pub fields: RequestFields,
 }
 
+impl zerompk::ToMessagePack for NativeRequest {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        writer.write_array_len(3)?;
+        self.op.write(writer)?;
+        writer.write_u64(self.seq)?;
+        self.fields.write(writer)
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for NativeRequest {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        let len = reader.read_array_len()?;
+        if len != 3 {
+            return Err(zerompk::Error::ArrayLengthMismatch {
+                expected: 3,
+                actual: len,
+            });
+        }
+        let op = OpCode::read(reader)?;
+        let seq = reader.read_u64()?;
+        let fields = RequestFields::read(reader)?;
+        Ok(Self { op, seq, fields })
+    }
+}
+
 /// Operation-specific request fields.
 ///
 /// Each variant carries only the fields needed for that operation.
 /// Unknown fields are silently ignored during deserialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 #[serde(untagged)]
 pub enum RequestFields {
     /// Auth, SQL, DDL, Explain, Set, Show, Reset, Begin, Commit, Rollback,
@@ -512,6 +566,199 @@ pub struct TextFields {
     pub index_type: Option<String>,
 }
 
+impl zerompk::ToMessagePack for TextFields {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        use crate::json_msgpack::JsonValue;
+        writer.write_array_len(81)?;
+        self.auth.write(writer)?;
+        self.sql.write(writer)?;
+        self.key.write(writer)?;
+        self.value.write(writer)?;
+        self.collection.write(writer)?;
+        self.document_id.write(writer)?;
+        self.data.write(writer)?;
+        self.query_vector.write(writer)?;
+        self.top_k.write(writer)?;
+        self.field.write(writer)?;
+        self.limit.write(writer)?;
+        self.delta.write(writer)?;
+        self.peer_id.write(writer)?;
+        self.vector_top_k.write(writer)?;
+        self.edge_label.write(writer)?;
+        self.direction.write(writer)?;
+        self.expansion_depth.write(writer)?;
+        self.final_top_k.write(writer)?;
+        self.vector_k.write(writer)?;
+        self.graph_k.write(writer)?;
+        self.start_node.write(writer)?;
+        self.end_node.write(writer)?;
+        self.depth.write(writer)?;
+        self.from_node.write(writer)?;
+        self.to_node.write(writer)?;
+        self.edge_type.write(writer)?;
+        self.properties
+            .as_ref()
+            .map(|v| JsonValue(v.clone()))
+            .write(writer)?;
+        self.query_text.write(writer)?;
+        self.vector_weight.write(writer)?;
+        self.fuzzy.write(writer)?;
+        self.ef_search.write(writer)?;
+        self.field_name.write(writer)?;
+        self.lower_bound.write(writer)?;
+        self.upper_bound.write(writer)?;
+        self.mutation_id.write(writer)?;
+        self.vectors.write(writer)?;
+        self.documents.write(writer)?;
+        self.query_geometry.write(writer)?;
+        self.spatial_predicate.write(writer)?;
+        self.distance_meters.write(writer)?;
+        self.payload.write(writer)?;
+        self.format.write(writer)?;
+        self.time_range_start.write(writer)?;
+        self.time_range_end.write(writer)?;
+        self.bucket_interval.write(writer)?;
+        self.ttl_ms.write(writer)?;
+        self.cursor.write(writer)?;
+        self.match_pattern.write(writer)?;
+        self.keys.write(writer)?;
+        self.entries.write(writer)?;
+        self.fields.write(writer)?;
+        self.incr_delta.write(writer)?;
+        self.incr_float_delta.write(writer)?;
+        self.expected.write(writer)?;
+        self.new_value.write(writer)?;
+        self.index_name.write(writer)?;
+        self.sort_columns.write(writer)?;
+        self.key_column.write(writer)?;
+        self.window_type.write(writer)?;
+        self.window_timestamp_column.write(writer)?;
+        self.window_start_ms.write(writer)?;
+        self.window_end_ms.write(writer)?;
+        self.top_k_count.write(writer)?;
+        self.score_min.write(writer)?;
+        self.score_max.write(writer)?;
+        self.updates.write(writer)?;
+        self.filters.write(writer)?;
+        self.vector.write(writer)?;
+        self.vector_id.write(writer)?;
+        self.policy
+            .as_ref()
+            .map(|v| JsonValue(v.clone()))
+            .write(writer)?;
+        self.algorithm.write(writer)?;
+        self.match_query.write(writer)?;
+        self.algo_params
+            .as_ref()
+            .map(|v| JsonValue(v.clone()))
+            .write(writer)?;
+        self.index_paths.write(writer)?;
+        self.source_collection.write(writer)?;
+        self.field_position.write(writer)?;
+        self.backfill.write(writer)?;
+        self.m.write(writer)?;
+        self.ef_construction.write(writer)?;
+        self.metric.write(writer)?;
+        self.index_type.write(writer)
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for TextFields {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        use crate::json_msgpack::JsonValue;
+        let len = reader.read_array_len()?;
+        if len != 81 {
+            return Err(zerompk::Error::ArrayLengthMismatch {
+                expected: 81,
+                actual: len,
+            });
+        }
+        Ok(Self {
+            auth: Option::<AuthMethod>::read(reader)?,
+            sql: Option::<String>::read(reader)?,
+            key: Option::<String>::read(reader)?,
+            value: Option::<String>::read(reader)?,
+            collection: Option::<String>::read(reader)?,
+            document_id: Option::<String>::read(reader)?,
+            data: Option::<Vec<u8>>::read(reader)?,
+            query_vector: Option::<Vec<f32>>::read(reader)?,
+            top_k: Option::<u64>::read(reader)?,
+            field: Option::<String>::read(reader)?,
+            limit: Option::<u64>::read(reader)?,
+            delta: Option::<Vec<u8>>::read(reader)?,
+            peer_id: Option::<u64>::read(reader)?,
+            vector_top_k: Option::<u64>::read(reader)?,
+            edge_label: Option::<String>::read(reader)?,
+            direction: Option::<String>::read(reader)?,
+            expansion_depth: Option::<u64>::read(reader)?,
+            final_top_k: Option::<u64>::read(reader)?,
+            vector_k: Option::<f64>::read(reader)?,
+            graph_k: Option::<f64>::read(reader)?,
+            start_node: Option::<String>::read(reader)?,
+            end_node: Option::<String>::read(reader)?,
+            depth: Option::<u64>::read(reader)?,
+            from_node: Option::<String>::read(reader)?,
+            to_node: Option::<String>::read(reader)?,
+            edge_type: Option::<String>::read(reader)?,
+            properties: Option::<JsonValue>::read(reader)?.map(|v| v.0),
+            query_text: Option::<String>::read(reader)?,
+            vector_weight: Option::<f64>::read(reader)?,
+            fuzzy: Option::<bool>::read(reader)?,
+            ef_search: Option::<u64>::read(reader)?,
+            field_name: Option::<String>::read(reader)?,
+            lower_bound: Option::<Vec<u8>>::read(reader)?,
+            upper_bound: Option::<Vec<u8>>::read(reader)?,
+            mutation_id: Option::<u64>::read(reader)?,
+            vectors: Option::<Vec<BatchVector>>::read(reader)?,
+            documents: Option::<Vec<BatchDocument>>::read(reader)?,
+            query_geometry: Option::<Vec<u8>>::read(reader)?,
+            spatial_predicate: Option::<String>::read(reader)?,
+            distance_meters: Option::<f64>::read(reader)?,
+            payload: Option::<Vec<u8>>::read(reader)?,
+            format: Option::<String>::read(reader)?,
+            time_range_start: Option::<i64>::read(reader)?,
+            time_range_end: Option::<i64>::read(reader)?,
+            bucket_interval: Option::<String>::read(reader)?,
+            ttl_ms: Option::<u64>::read(reader)?,
+            cursor: Option::<Vec<u8>>::read(reader)?,
+            match_pattern: Option::<String>::read(reader)?,
+            keys: Option::<Vec<Vec<u8>>>::read(reader)?,
+            entries: Option::<Vec<(Vec<u8>, Vec<u8>)>>::read(reader)?,
+            fields: Option::<Vec<String>>::read(reader)?,
+            incr_delta: Option::<i64>::read(reader)?,
+            incr_float_delta: Option::<f64>::read(reader)?,
+            expected: Option::<Vec<u8>>::read(reader)?,
+            new_value: Option::<Vec<u8>>::read(reader)?,
+            index_name: Option::<String>::read(reader)?,
+            sort_columns: Option::<Vec<(String, String)>>::read(reader)?,
+            key_column: Option::<String>::read(reader)?,
+            window_type: Option::<String>::read(reader)?,
+            window_timestamp_column: Option::<String>::read(reader)?,
+            window_start_ms: Option::<u64>::read(reader)?,
+            window_end_ms: Option::<u64>::read(reader)?,
+            top_k_count: Option::<u32>::read(reader)?,
+            score_min: Option::<Vec<u8>>::read(reader)?,
+            score_max: Option::<Vec<u8>>::read(reader)?,
+            updates: Option::<Vec<(String, Vec<u8>)>>::read(reader)?,
+            filters: Option::<Vec<u8>>::read(reader)?,
+            vector: Option::<Vec<f32>>::read(reader)?,
+            vector_id: Option::<u32>::read(reader)?,
+            policy: Option::<JsonValue>::read(reader)?.map(|v| v.0),
+            algorithm: Option::<String>::read(reader)?,
+            match_query: Option::<String>::read(reader)?,
+            algo_params: Option::<JsonValue>::read(reader)?.map(|v| v.0),
+            index_paths: Option::<Vec<String>>::read(reader)?,
+            source_collection: Option::<String>::read(reader)?,
+            field_position: Option::<u64>::read(reader)?,
+            backfill: Option::<bool>::read(reader)?,
+            m: Option::<u64>::read(reader)?,
+            ef_construction: Option::<u64>::read(reader)?,
+            metric: Option::<String>::read(reader)?,
+            index_type: Option::<String>::read(reader)?,
+        })
+    }
+}
+
 /// A single vector in a batch insert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchVector {
@@ -521,6 +768,40 @@ pub struct BatchVector {
     pub metadata: Option<serde_json::Value>,
 }
 
+impl zerompk::ToMessagePack for BatchVector {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        use crate::json_msgpack::JsonValue;
+        writer.write_array_len(3)?;
+        writer.write_string(&self.id)?;
+        self.embedding.write(writer)?;
+        self.metadata
+            .as_ref()
+            .map(|v| JsonValue(v.clone()))
+            .write(writer)
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for BatchVector {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        use crate::json_msgpack::JsonValue;
+        let len = reader.read_array_len()?;
+        if len != 3 {
+            return Err(zerompk::Error::ArrayLengthMismatch {
+                expected: 3,
+                actual: len,
+            });
+        }
+        let id = reader.read_string()?.into_owned();
+        let embedding = Vec::<f32>::read(reader)?;
+        let metadata = Option::<JsonValue>::read(reader)?.map(|v| v.0);
+        Ok(Self {
+            id,
+            embedding,
+            metadata,
+        })
+    }
+}
+
 /// A single document in a batch insert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchDocument {
@@ -528,10 +809,37 @@ pub struct BatchDocument {
     pub fields: serde_json::Value,
 }
 
+impl zerompk::ToMessagePack for BatchDocument {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        use crate::json_msgpack::JsonValue;
+        writer.write_array_len(2)?;
+        writer.write_string(&self.id)?;
+        JsonValue(self.fields.clone()).write(writer)
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for BatchDocument {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        use crate::json_msgpack::JsonValue;
+        let len = reader.read_array_len()?;
+        if len != 2 {
+            return Err(zerompk::Error::ArrayLengthMismatch {
+                expected: 2,
+                actual: len,
+            });
+        }
+        let id = reader.read_string()?.into_owned();
+        let fields = JsonValue::read(reader)?.0;
+        Ok(Self { id, fields })
+    }
+}
+
 // ─── Response Frame ─────────────────────────────────────────────────
 
 /// A response sent from server to client over the native protocol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 pub struct NativeResponse {
     /// Echoed from the request for correlation.
     pub seq: u64,
@@ -557,7 +865,9 @@ pub struct NativeResponse {
 }
 
 /// Error details in a response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
 pub struct ErrorPayload {
     /// SQLSTATE-style error code (e.g., "42P01" for undefined table).
     pub code: String,
@@ -738,8 +1048,8 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let bytes = rmp_serde::to_vec_named(&req).unwrap();
-        let decoded: NativeRequest = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&req).unwrap();
+        let decoded: NativeRequest = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(decoded.op, OpCode::Sql);
         assert_eq!(decoded.seq, 1);
     }
@@ -755,8 +1065,8 @@ mod tests {
             },
             99,
         );
-        let bytes = rmp_serde::to_vec_named(&resp).unwrap();
-        let decoded: NativeResponse = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&resp).unwrap();
+        let decoded: NativeResponse = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(decoded.seq, 7);
         assert_eq!(decoded.watermark_lsn, 99);
         assert_eq!(decoded.rows.unwrap()[0][0].as_i64(), Some(42));
@@ -767,8 +1077,8 @@ mod tests {
         let trust = AuthMethod::Trust {
             username: "admin".into(),
         };
-        let bytes = rmp_serde::to_vec_named(&trust).unwrap();
-        let decoded: AuthMethod = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&trust).unwrap();
+        let decoded: AuthMethod = zerompk::from_msgpack(&bytes).unwrap();
         match decoded {
             AuthMethod::Trust { username } => assert_eq!(username, "admin"),
             _ => panic!("expected Trust variant"),
@@ -778,8 +1088,8 @@ mod tests {
             username: "user".into(),
             password: "secret".into(),
         };
-        let bytes = rmp_serde::to_vec_named(&pw).unwrap();
-        let decoded: AuthMethod = rmp_serde::from_slice(&bytes).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&pw).unwrap();
+        let decoded: AuthMethod = zerompk::from_msgpack(&bytes).unwrap();
         match decoded {
             AuthMethod::Password { username, password } => {
                 assert_eq!(username, "user");

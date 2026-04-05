@@ -7,7 +7,14 @@
 ///
 /// Records the document ID, how many times the term appears, and the
 /// token positions (for phrase matching and proximity boost).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Clone,
+    Debug,
+)]
 pub struct Posting {
     pub doc_id: String,
     pub term_freq: u32,

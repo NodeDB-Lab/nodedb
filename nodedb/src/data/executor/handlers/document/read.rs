@@ -37,7 +37,7 @@ impl CoreLoop {
             if window_functions_bytes.is_empty() {
                 Vec::new()
             } else {
-                rmp_serde::from_slice(window_functions_bytes).unwrap_or_default()
+                zerompk::from_msgpack(window_functions_bytes).unwrap_or_default()
             };
 
         // Parse computed column expressions.
@@ -45,7 +45,7 @@ impl CoreLoop {
             if computed_columns_bytes.is_empty() {
                 Vec::new()
             } else {
-                rmp_serde::from_slice(computed_columns_bytes).unwrap_or_default()
+                zerompk::from_msgpack(computed_columns_bytes).unwrap_or_default()
             };
 
         let fetch_limit = (limit + offset).saturating_mul(2).max(1000);
@@ -54,7 +54,7 @@ impl CoreLoop {
         let filter_predicates: Vec<ScanFilter> = if filters.is_empty() {
             Vec::new()
         } else {
-            match rmp_serde::from_slice(filters) {
+            match zerompk::from_msgpack(filters) {
                 Ok(f) => f,
                 Err(e) => {
                     warn!(core = self.core_id, error = %e, "failed to parse scan filters");
@@ -202,7 +202,7 @@ impl CoreLoop {
                     let last_idx = chunks.len().saturating_sub(1);
                     for (i, chunk) in chunks.iter().enumerate() {
                         let is_last = i == last_idx;
-                        match super::super::super::response_codec::encode(chunk) {
+                        match super::super::super::response_codec::encode(&chunk.to_vec()) {
                             Ok(payload) => {
                                 if is_last {
                                     // Final chunk: return as the function's response.

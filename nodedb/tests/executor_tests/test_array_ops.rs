@@ -84,7 +84,7 @@ fn array_contains_filter() {
 
     // Products where tags contains "sale".
     let filters = vec![filter("tags", "array_contains", serde_json::json!("sale"))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
     let payload = send_ok(
         &mut core,
@@ -115,7 +115,7 @@ fn array_contains_all_filter() {
         "array_contains_all",
         serde_json::json!(["S", "M"]),
     )];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
     let payload = send_ok(
         &mut core,
@@ -147,7 +147,7 @@ fn array_overlap_filter() {
         "array_overlap",
         serde_json::json!(["sale", "premium"]),
     )];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
     let payload = send_ok(
         &mut core,
@@ -246,7 +246,7 @@ fn no_match_returns_zero() {
         "array_contains",
         serde_json::json!("nonexistent"),
     )];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
     let payload = send_ok(
         &mut core,

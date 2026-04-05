@@ -277,7 +277,7 @@ impl NativeConnection {
         };
 
         // Encode request as MessagePack.
-        let payload = rmp_serde::to_vec_named(&req)
+        let payload = zerompk::to_msgpack_vec(&req)
             .map_err(|e| NodeDbError::serialization("msgpack", format!("request encode: {e}")))?;
 
         // Write length-prefixed frame.
@@ -309,7 +309,7 @@ impl NativeConnection {
                 .await
                 .map_err(io_err)?;
 
-            let resp: NativeResponse = rmp_serde::from_slice(&resp_buf).map_err(|e| {
+            let resp: NativeResponse = zerompk::from_msgpack(&resp_buf).map_err(|e| {
                 NodeDbError::serialization("msgpack", format!("response decode: {e}"))
             })?;
 

@@ -15,7 +15,20 @@ use serde::{Deserialize, Serialize};
 /// ~292,000 years BCE to ~292,000 years CE.
 ///
 /// String format: ISO 8601 `"2024-03-15T10:30:00.000000Z"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct NdbDateTime {
     /// Microseconds since Unix epoch (1970-01-01T00:00:00Z).
     pub micros: i64,
@@ -219,7 +232,20 @@ pub struct DateTimeComponents {
 /// Microseconds-precision duration (signed).
 ///
 /// String format: human-readable `"1h30m15s"` or `"500ms"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct NdbDuration {
     /// Microseconds (signed: negative = past).
     pub micros: i64,

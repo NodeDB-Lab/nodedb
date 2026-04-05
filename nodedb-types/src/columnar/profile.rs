@@ -56,7 +56,17 @@ impl fmt::Display for ColumnarProfile {
 }
 
 /// Storage mode for document collections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Default,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(tag = "mode")]
 pub enum DocumentMode {
     /// Schemaless MessagePack documents. Default. CRDT-friendly.

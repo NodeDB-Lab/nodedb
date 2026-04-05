@@ -86,7 +86,7 @@ pub fn decode_request(payload: &[u8], format: FrameFormat) -> crate::Result<Nati
             detail: format!("invalid JSON request: {e}"),
         }),
         FrameFormat::MessagePack => {
-            rmp_serde::from_slice(payload).map_err(|e| crate::Error::BadRequest {
+            zerompk::from_msgpack(payload).map_err(|e| crate::Error::BadRequest {
                 detail: format!("invalid MessagePack request: {e}"),
             })
         }
@@ -101,7 +101,7 @@ pub fn encode_response(resp: &NativeResponse, format: FrameFormat) -> crate::Res
             detail: format!("response encode: {e}"),
         }),
         FrameFormat::MessagePack => {
-            rmp_serde::to_vec_named(resp).map_err(|e| crate::Error::Serialization {
+            zerompk::to_msgpack_vec(resp).map_err(|e| crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!("response encode: {e}"),
             })
@@ -156,7 +156,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let bytes = rmp_serde::to_vec_named(&req).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&req).unwrap();
         assert_eq!(FrameFormat::detect(bytes[0]), FrameFormat::MessagePack);
 
         let decoded = decode_request(&bytes, FrameFormat::MessagePack).unwrap();
@@ -184,7 +184,7 @@ mod tests {
             100,
         );
         let bytes = encode_response(&resp, FrameFormat::MessagePack).unwrap();
-        let decoded: NativeResponse = rmp_serde::from_slice(&bytes).unwrap();
+        let decoded: NativeResponse = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(decoded.seq, 5);
         assert_eq!(decoded.watermark_lsn, 100);
     }

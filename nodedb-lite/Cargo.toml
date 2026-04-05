@@ -28,7 +28,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 zerompk = { workspace = true }
-rmp-serde = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 loro = { workspace = true }

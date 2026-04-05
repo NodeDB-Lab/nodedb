@@ -19,6 +19,7 @@ tracing = { workspace = true }
 
 # Serialization (compact binary for RPCs)
 rkyv = { workspace = true }
+zerompk = { workspace = true }
 
 # Random for election timeouts
 rand = { workspace = true }

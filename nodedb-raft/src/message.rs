@@ -13,6 +13,8 @@
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct LogEntry {
     /// The term when this entry was received by the leader.
@@ -36,6 +38,8 @@ pub struct LogEntry {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct AppendEntriesRequest {
     /// Leader's term.
@@ -62,6 +66,8 @@ pub struct AppendEntriesRequest {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct AppendEntriesResponse {
     /// Current term, for leader to update itself.
@@ -82,6 +88,8 @@ pub struct AppendEntriesResponse {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct RequestVoteRequest {
     /// Candidate's term.
@@ -104,6 +112,8 @@ pub struct RequestVoteRequest {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct RequestVoteResponse {
     /// Current term, for candidate to update itself.
@@ -123,6 +133,8 @@ pub struct RequestVoteResponse {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct InstallSnapshotRequest {
     /// Leader's term.
@@ -151,6 +163,8 @@ pub struct InstallSnapshotRequest {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct InstallSnapshotResponse {
     /// Current term, for leader to update itself.

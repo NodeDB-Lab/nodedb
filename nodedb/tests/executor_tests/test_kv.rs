@@ -292,10 +292,14 @@ fn kv_register_index_and_lookup() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Insert entries first.
-    let doc1 =
-        rmp_serde::to_vec(&serde_json::json!({"region": "us-east", "status": "active"})).unwrap();
-    let doc2 =
-        rmp_serde::to_vec(&serde_json::json!({"region": "eu-west", "status": "active"})).unwrap();
+    let doc1 = nodedb_types::json_to_msgpack(
+        &serde_json::json!({"region": "us-east", "status": "active"}),
+    )
+    .unwrap();
+    let doc2 = nodedb_types::json_to_msgpack(
+        &serde_json::json!({"region": "eu-west", "status": "active"}),
+    )
+    .unwrap();
 
     send_ok(
         &mut core,
@@ -354,7 +358,7 @@ fn kv_drop_index() {
     );
 
     // Insert entry (will be indexed).
-    let doc = rmp_serde::to_vec(&serde_json::json!({"status": "active"})).unwrap();
+    let doc = nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"})).unwrap();
     send_ok(
         &mut core,
         &mut tx,

@@ -64,7 +64,7 @@ impl FtsBackend for RedbFtsBackend {
             .map_err(|e| redb_err("open postings", e))?;
         match table.get(key.as_str()) {
             Ok(Some(val)) => {
-                let list: Vec<Posting> = rmp_serde::from_slice(val.value())
+                let list: Vec<Posting> = zerompk::from_msgpack(val.value())
                     .map_err(|e| redb_err("deserialize postings", e))?;
                 Ok(list)
             }
@@ -91,7 +91,7 @@ impl FtsBackend for RedbFtsBackend {
             if postings.is_empty() {
                 let _ = table.remove(key.as_str());
             } else {
-                let bytes = rmp_serde::to_vec_named(postings)
+                let bytes = zerompk::to_msgpack_vec(&postings.to_vec())
                     .map_err(|e| redb_err("serialize postings", e))?;
                 table
                     .insert(key.as_str(), bytes.as_slice())
@@ -126,7 +126,7 @@ impl FtsBackend for RedbFtsBackend {
             .map_err(|e| redb_err("open doc_lengths", e))?;
         match table.get(key.as_str()) {
             Ok(Some(val)) => {
-                let len: u32 = rmp_serde::from_slice(val.value())
+                let len: u32 = zerompk::from_msgpack(val.value())
                     .map_err(|e| redb_err("deserialize doc_length", e))?;
                 Ok(Some(len))
             }
@@ -146,7 +146,7 @@ impl FtsBackend for RedbFtsBackend {
                 .open_table(DOC_LENGTHS)
                 .map_err(|e| redb_err("open doc_lengths", e))?;
             let bytes =
-                rmp_serde::to_vec_named(&length).map_err(|e| redb_err("serialize doc_len", e))?;
+                zerompk::to_msgpack_vec(&length).map_err(|e| redb_err("serialize doc_len", e))?;
             table
                 .insert(key.as_str(), bytes.as_slice())
                 .map_err(|e| redb_err("insert doc_len", e))?;
@@ -198,7 +198,7 @@ impl FtsBackend for RedbFtsBackend {
             .map_err(|e| redb_err("open index_meta", e))?;
         match table.get(meta_key.as_str()) {
             Ok(Some(val)) => {
-                let stats: (u32, u64) = rmp_serde::from_slice(val.value())
+                let stats: (u32, u64) = zerompk::from_msgpack(val.value())
                     .map_err(|e| redb_err("deserialize stats", e))?;
                 Ok(stats)
             }
@@ -221,11 +221,11 @@ impl FtsBackend for RedbFtsBackend {
                 .get(meta_key.as_str())
                 .ok()
                 .flatten()
-                .and_then(|v| rmp_serde::from_slice::<(u32, u64)>(v.value()).ok())
+                .and_then(|v| zerompk::from_msgpack::<(u32, u64)>(v.value()).ok())
                 .unwrap_or((0, 0));
             count += 1;
             total += doc_len as u64;
-            let bytes = rmp_serde::to_vec_named(&(count, total))
+            let bytes = zerompk::to_msgpack_vec(&(count, total))
                 .map_err(|e| redb_err("serialize stats", e))?;
             table
                 .insert(meta_key.as_str(), bytes.as_slice())
@@ -249,11 +249,11 @@ impl FtsBackend for RedbFtsBackend {
                 .get(meta_key.as_str())
                 .ok()
                 .flatten()
-                .and_then(|v| rmp_serde::from_slice::<(u32, u64)>(v.value()).ok())
+                .and_then(|v| zerompk::from_msgpack::<(u32, u64)>(v.value()).ok())
                 .unwrap_or((0, 0));
             count = count.saturating_sub(1);
             total = total.saturating_sub(doc_len as u64);
-            let bytes = rmp_serde::to_vec_named(&(count, total))
+            let bytes = zerompk::to_msgpack_vec(&(count, total))
                 .map_err(|e| redb_err("serialize stats", e))?;
             table
                 .insert(meta_key.as_str(), bytes.as_slice())

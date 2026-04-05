@@ -15,6 +15,7 @@ nodedb-spatial = { workspace = true }
 nodedb-fts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+zerompk = { workspace = true }
 sonic-rs = { workspace = true }
 rust_decimal = { workspace = true }
 rust-stemmers = { workspace = true }

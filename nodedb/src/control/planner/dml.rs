@@ -33,7 +33,7 @@ fn extract_select_source(plan: &LogicalPlan) -> crate::Result<(String, Vec<u8>, 
                 for f in &scan.filters {
                     all_filters.extend(expr_to_scan_filters(f));
                 }
-                rmp_serde::to_vec_named(&all_filters).unwrap_or_default()
+                zerompk::to_msgpack_vec(&all_filters).unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -42,7 +42,7 @@ fn extract_select_source(plan: &LogicalPlan) -> crate::Result<(String, Vec<u8>, 
         LogicalPlan::Filter(filter) => {
             let (source, _, limit) = extract_select_source(&filter.input)?;
             let scan_filters = expr_to_scan_filters(&filter.predicate);
-            let filter_bytes = rmp_serde::to_vec_named(&scan_filters).unwrap_or_default();
+            let filter_bytes = zerompk::to_msgpack_vec(&scan_filters).unwrap_or_default();
             Ok((source, filter_bytes, limit))
         }
         LogicalPlan::Projection(proj) => extract_select_source(&proj.input),

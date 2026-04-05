@@ -38,7 +38,7 @@ impl PlanConverter {
                 let mut json_rows = Vec::with_capacity(values.len());
                 for (_doc_id, value_bytes) in &values {
                     let row: serde_json::Value =
-                        rmp_serde::from_slice(value_bytes).unwrap_or_default();
+                        nodedb_types::json_from_msgpack(value_bytes).unwrap_or_default();
                     json_rows.push(row);
                 }
                 let payload = serde_json::to_vec(&json_rows).unwrap_or_default();

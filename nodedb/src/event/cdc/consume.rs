@@ -213,7 +213,7 @@ pub async fn consume_remote(
             // Deserialize events from the response payloads.
             // ForwardResponse.payloads contains msgpack-serialized Vec<CdcEvent>.
             let events = if let Some(payload) = resp.payloads.first() {
-                rmp_serde::from_slice::<Vec<CdcEvent>>(payload).unwrap_or_default()
+                zerompk::from_msgpack::<Vec<CdcEvent>>(payload).unwrap_or_default()
             } else {
                 Vec::new()
             };

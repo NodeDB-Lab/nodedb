@@ -73,7 +73,7 @@ fn encode_grouped_results(
     // Fields per row: group_by columns + aggregates + optional bucket.
     let fields_per_row = group_by.len() + aggregates.len() + if has_bucket { 1 } else { 0 };
 
-    // Build result as Vec of lightweight structs for rmp_serde.
+    // Build result as Vec of lightweight structs for MessagePack encoding.
     // Using rmpv::Value is faster than serde_json::Value (no string interning).
     let mut rows: Vec<rmpv::Value> = Vec::with_capacity(num_groups);
 
@@ -177,7 +177,7 @@ impl CoreLoop {
         let filter_predicates: Vec<crate::bridge::scan_filter::ScanFilter> = if filters.is_empty() {
             Vec::new()
         } else {
-            rmp_serde::from_slice(filters).unwrap_or_default()
+            zerompk::from_msgpack(filters).unwrap_or_default()
         };
         let has_filters = !filter_predicates.is_empty();
         let is_aggregate = !aggregates.is_empty();

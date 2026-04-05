@@ -25,7 +25,7 @@ impl CoreLoop {
         };
 
         // Deserialize as MessagePack → JSON.
-        let doc: serde_json::Value = match rmp_serde::from_slice(&value) {
+        let doc: serde_json::Value = match nodedb_types::json_from_msgpack(&value) {
             Ok(v) => v,
             Err(_) => {
                 return self.response_error(
@@ -66,7 +66,7 @@ impl CoreLoop {
 
         let mut doc: serde_json::Map<String, serde_json::Value> = current
             .as_ref()
-            .and_then(|v| rmp_serde::from_slice(v).ok())
+            .and_then(|v| nodedb_types::json_from_msgpack(v).ok())
             .and_then(|v: serde_json::Value| v.as_object().cloned())
             .unwrap_or_default();
 
@@ -83,7 +83,7 @@ impl CoreLoop {
         }
 
         // Serialize back to MessagePack and write.
-        let new_value = match rmp_serde::to_vec(&serde_json::Value::Object(doc)) {
+        let new_value = match nodedb_types::json_to_msgpack(&serde_json::Value::Object(doc)) {
             Ok(v) => v,
             Err(e) => {
                 return self.response_error(

@@ -304,7 +304,7 @@ fn index_key(tenant_id: u32, index_name: &str) -> String {
 
 /// Extract field values from a MessagePack-encoded KV value and build a sort key.
 fn extract_sort_key_from_value(def: &SortedIndexDef, value_bytes: &[u8]) -> Option<Vec<u8>> {
-    let doc: serde_json::Value = rmp_serde::from_slice(value_bytes).ok()?;
+    let doc: serde_json::Value = nodedb_types::json_from_msgpack(value_bytes).ok()?;
     let obj = doc.as_object()?;
 
     let mut values: Vec<Vec<u8>> = Vec::with_capacity(def.encoder.column_count());
@@ -378,7 +378,7 @@ mod tests {
 
     fn make_entry(player_id: &str, score: i64) -> (Vec<u8>, Vec<u8>) {
         let pk = player_id.as_bytes().to_vec();
-        let value = rmp_serde::to_vec(&serde_json::json!({
+        let value = nodedb_types::json_to_msgpack(&serde_json::json!({
             "player_id": player_id,
             "score": score,
         }))

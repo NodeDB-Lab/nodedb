@@ -13,7 +13,15 @@ use crate::value::Value;
 ///
 /// Documents are schemaless: each field maps a string key to a `Value`.
 /// The `id` field is mandatory and immutable after creation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct Document {
     /// Document identifier (unique within a collection).
     pub id: String,
@@ -60,13 +68,13 @@ impl Document {
     }
 
     /// Serialize the document to MessagePack bytes.
-    pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec_named(self)
+    pub fn to_msgpack(&self) -> Result<Vec<u8>, zerompk::Error> {
+        zerompk::to_msgpack_vec(self)
     }
 
     /// Deserialize a document from MessagePack bytes.
-    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, zerompk::Error> {
+        zerompk::from_msgpack(bytes)
     }
 }
 

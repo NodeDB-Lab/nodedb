@@ -87,8 +87,8 @@ fn cross_shard_request_serialization_roundtrip() {
         cascade_depth: 1,
         source_collection: "articles".into(),
     };
-    let bytes = rmp_serde::to_vec_named(&req).unwrap();
-    let restored: CrossShardWriteRequest = rmp_serde::from_slice(&bytes).unwrap();
+    let bytes = zerompk::to_msgpack_vec(&req).unwrap();
+    let restored: CrossShardWriteRequest = zerompk::from_msgpack(&bytes).unwrap();
     assert_eq!(restored.sql, req.sql);
     assert_eq!(restored.cascade_depth, 1);
     assert_eq!(restored.source_collection, "articles");

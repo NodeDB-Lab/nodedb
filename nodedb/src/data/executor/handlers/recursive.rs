@@ -38,7 +38,7 @@ impl CoreLoop {
         let base_preds: Vec<ScanFilter> = if base_filters.is_empty() {
             Vec::new()
         } else {
-            match rmp_serde::from_slice(base_filters) {
+            match zerompk::from_msgpack(base_filters) {
                 Ok(p) => p,
                 Err(e) => {
                     return self.response_error(
@@ -53,7 +53,7 @@ impl CoreLoop {
         let recursive_preds: Vec<ScanFilter> = if recursive_filters.is_empty() {
             Vec::new()
         } else {
-            match rmp_serde::from_slice(recursive_filters) {
+            match zerompk::from_msgpack(recursive_filters) {
                 Ok(p) => p,
                 Err(e) => {
                     return self.response_error(
@@ -152,7 +152,7 @@ impl CoreLoop {
         // Truncate to limit.
         results.truncate(limit);
 
-        match super::super::response_codec::encode(&results) {
+        match super::super::response_codec::encode_json_vec(&results) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,

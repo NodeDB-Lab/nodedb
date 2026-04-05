@@ -498,7 +498,7 @@ mod tests {
 
         // Decode each frame and verify structure.
         for (i, frame) in frames.iter().enumerate() {
-            let resp: NativeResponse = rmp_serde::from_slice(frame).unwrap();
+            let resp: NativeResponse = zerompk::from_msgpack(frame).unwrap();
             assert!(resp.rows.is_some());
             if i < frames.len() - 1 {
                 assert_eq!(resp.status, ResponseStatus::Partial);
@@ -561,7 +561,7 @@ mod tests {
         // Reassemble all rows from frames (simulating client behavior).
         let mut total_rows: Vec<Vec<Value>> = Vec::new();
         for frame in &frames {
-            let resp: NativeResponse = rmp_serde::from_slice(frame).unwrap();
+            let resp: NativeResponse = zerompk::from_msgpack(frame).unwrap();
             if let Some(rows) = resp.rows {
                 total_rows.extend(rows);
             }
@@ -569,12 +569,12 @@ mod tests {
         assert_eq!(total_rows.len(), row_count as usize);
 
         // First frame should have columns.
-        let first: NativeResponse = rmp_serde::from_slice(&frames[0]).unwrap();
+        let first: NativeResponse = zerompk::from_msgpack(&frames[0]).unwrap();
         assert_eq!(first.columns, Some(columns));
         assert_eq!(first.status, ResponseStatus::Partial);
 
         // Last frame should have Ok status.
-        let last: NativeResponse = rmp_serde::from_slice(frames.last().unwrap()).unwrap();
+        let last: NativeResponse = zerompk::from_msgpack(frames.last().unwrap()).unwrap();
         assert_eq!(last.status, ResponseStatus::Ok);
 
         // Each frame should be <= MAX_FRAME_SIZE.

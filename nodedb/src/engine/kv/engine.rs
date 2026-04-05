@@ -627,7 +627,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
             .collect();
-        rmp_serde::to_vec(&serde_json::Value::Object(obj)).unwrap()
+        nodedb_types::json_to_msgpack(&serde_json::Value::Object(obj)).unwrap()
     }
 
     #[test]

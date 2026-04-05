@@ -61,12 +61,12 @@ impl CoreLoop {
         let attr_filters: Vec<ScanFilter> = if attribute_filters.is_empty() {
             Vec::new()
         } else {
-            rmp_serde::from_slice(attribute_filters).unwrap_or_default()
+            zerompk::from_msgpack(attribute_filters).unwrap_or_default()
         };
         let row_level_filters: Vec<ScanFilter> = if rls_filters.is_empty() {
             Vec::new()
         } else {
-            rmp_serde::from_slice(rls_filters).unwrap_or_default()
+            zerompk::from_msgpack(rls_filters).unwrap_or_default()
         };
 
         // 3. Compute search bbox (expand by distance for ST_DWithin).

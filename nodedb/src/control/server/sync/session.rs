@@ -810,7 +810,7 @@ mod tests {
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "o1".into(),
-            delta: rmp_serde::to_vec_named(&data).unwrap(),
+            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
             peer_id: 1,
             mutation_id: 42,
             checksum: 0,
@@ -834,7 +834,7 @@ mod tests {
             value: serde_json::json!("active"),
             clauses: Vec::new(),
         };
-        let predicate = rmp_serde::to_vec_named(&vec![filter]).unwrap();
+        let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
         rls_store
             .create_policy(RlsPolicy {
                 name: "require_active".into(),
@@ -859,7 +859,7 @@ mod tests {
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "o1".into(),
-            delta: rmp_serde::to_vec_named(&data).unwrap(),
+            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
             peer_id: 1,
             mutation_id: 42,
             checksum: 0,
@@ -905,7 +905,7 @@ mod tests {
         let msg = DeltaPushMsg {
             collection: "docs".into(),
             document_id: "d1".into(),
-            delta: rmp_serde::to_vec_named(&data).unwrap(),
+            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
             peer_id: 1,
             mutation_id: 1,
             checksum: 0,
@@ -923,7 +923,7 @@ mod tests {
         let msg2 = DeltaPushMsg {
             collection: "docs".into(),
             document_id: "d2".into(),
-            delta: rmp_serde::to_vec_named(&data).unwrap(),
+            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
             peer_id: 1,
             mutation_id: 2,
             checksum: 0,
@@ -970,7 +970,7 @@ mod tests {
         let mut session = make_authenticated_session();
 
         let data = serde_json::json!({"key": "value"});
-        let delta = rmp_serde::to_vec_named(&data).unwrap();
+        let delta = nodedb_types::json_to_msgpack(&data).unwrap();
 
         let msg = DeltaPushMsg {
             collection: "docs".into(),
@@ -1028,7 +1028,7 @@ mod tests {
         let mut session = make_authenticated_session();
 
         let data = serde_json::json!({"key": "value"});
-        let delta = rmp_serde::to_vec_named(&data).unwrap();
+        let delta = nodedb_types::json_to_msgpack(&data).unwrap();
 
         // Valid checksum — accepted.
         let valid_checksum = crc32c::crc32c(&delta);

@@ -194,7 +194,7 @@ impl RlsPolicyStore {
             if !policy.predicate.is_empty() {
                 // Deserialize predicate and evaluate against the document.
                 let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-                    match rmp_serde::from_slice(&policy.predicate) {
+                    match zerompk::from_msgpack(&policy.predicate) {
                         Ok(f) => f,
                         Err(e) => {
                             warn!(
@@ -246,7 +246,7 @@ impl RlsPolicyStore {
         let mut all_filters: Vec<crate::bridge::scan_filter::ScanFilter> = Vec::new();
         for policy in &policies {
             if !policy.predicate.is_empty()
-                && let Ok(filters) = rmp_serde::from_slice::<
+                && let Ok(filters) = zerompk::from_msgpack::<
                     Vec<crate::bridge::scan_filter::ScanFilter>,
                 >(&policy.predicate)
             {
@@ -257,7 +257,7 @@ impl RlsPolicyStore {
         if all_filters.is_empty() {
             Vec::new()
         } else {
-            rmp_serde::to_vec_named(&all_filters).unwrap_or_default()
+            zerompk::to_msgpack_vec(&all_filters).unwrap_or_default()
         }
     }
 
@@ -297,7 +297,7 @@ impl RlsPolicyStore {
                 compiled_policies.push((compiled.clone(), policy.mode));
             } else if !policy.predicate.is_empty() {
                 // Legacy static predicate — deserialize and include directly.
-                if let Ok(filters) = rmp_serde::from_slice::<
+                if let Ok(filters) = zerompk::from_msgpack::<
                     Vec<crate::bridge::scan_filter::ScanFilter>,
                 >(&policy.predicate)
                 {
@@ -319,7 +319,7 @@ impl RlsPolicyStore {
         if all_filters.is_empty() {
             Some(Vec::new())
         } else {
-            Some(rmp_serde::to_vec_named(&all_filters).unwrap_or_default())
+            Some(zerompk::to_msgpack_vec(&all_filters).unwrap_or_default())
         }
     }
 
@@ -385,7 +385,7 @@ impl RlsPolicyStore {
             } else if !policy.predicate.is_empty() {
                 // Legacy static predicate.
                 let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-                    match rmp_serde::from_slice(&policy.predicate) {
+                    match zerompk::from_msgpack(&policy.predicate) {
                         Ok(f) => f,
                         Err(e) => {
                             warn!(
@@ -538,7 +538,7 @@ mod tests {
             value: serde_json::json!("active"),
             clauses: Vec::new(),
         };
-        let predicate = rmp_serde::to_vec_named(&vec![filter]).unwrap();
+        let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
         let mut policy = make_policy("require_active", "orders", PolicyType::Write);
         policy.predicate = predicate;
         store.create_policy(policy).unwrap();

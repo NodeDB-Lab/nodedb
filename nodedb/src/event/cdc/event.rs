@@ -3,6 +3,7 @@
 //! Each event contains full context — consumers never need to fetch
 //! from storage to process the event.
 
+use nodedb_types::json_msgpack::JsonValue;
 use serde::{Deserialize, Serialize};
 
 /// A formatted CDC event ready for consumer delivery.
@@ -51,7 +52,105 @@ impl CdcEvent {
 
     /// Serialize to MessagePack bytes.
     pub fn to_msgpack_bytes(&self) -> Vec<u8> {
-        rmp_serde::to_vec(self).unwrap_or_default()
+        zerompk::to_msgpack_vec(self).unwrap_or_default()
+    }
+}
+
+// ─── zerompk impls for CdcEvent ───────────────────────────────────────────
+
+impl zerompk::ToMessagePack for CdcEvent {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        use zerompk::ToMessagePack;
+        let field_count = 9
+            + usize::from(self.new_value.is_some())
+            + usize::from(self.old_value.is_some())
+            + usize::from(self.field_diffs.is_some());
+        writer.write_map_len(field_count)?;
+        writer.write_string("sequence")?;
+        writer.write_u64(self.sequence)?;
+        writer.write_string("partition")?;
+        writer.write_u16(self.partition)?;
+        writer.write_string("collection")?;
+        writer.write_string(&self.collection)?;
+        writer.write_string("op")?;
+        writer.write_string(&self.op)?;
+        writer.write_string("row_id")?;
+        writer.write_string(&self.row_id)?;
+        writer.write_string("event_time")?;
+        writer.write_u64(self.event_time)?;
+        writer.write_string("lsn")?;
+        writer.write_u64(self.lsn)?;
+        writer.write_string("tenant_id")?;
+        writer.write_u32(self.tenant_id)?;
+        writer.write_string("schema_version")?;
+        writer.write_u64(self.schema_version)?;
+        if let Some(ref v) = self.new_value {
+            writer.write_string("new_value")?;
+            JsonValue(v.clone()).write(writer)?;
+        }
+        if let Some(ref v) = self.old_value {
+            writer.write_string("old_value")?;
+            JsonValue(v.clone()).write(writer)?;
+        }
+        if let Some(ref diffs) = self.field_diffs {
+            writer.write_string("field_diffs")?;
+            diffs.write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        let len = reader.read_map_len()?;
+        let mut sequence: u64 = 0;
+        let mut partition: u16 = 0;
+        let mut collection = String::new();
+        let mut op = String::new();
+        let mut row_id = String::new();
+        let mut event_time: u64 = 0;
+        let mut lsn: u64 = 0;
+        let mut tenant_id: u32 = 0;
+        let mut schema_version: u64 = 0;
+        let mut new_value: Option<serde_json::Value> = None;
+        let mut old_value: Option<serde_json::Value> = None;
+        let mut field_diffs: Option<Vec<super::super::field_diff::FieldDiff>> = None;
+        for _ in 0..len {
+            let key = reader.read_string()?.into_owned();
+            match key.as_str() {
+                "sequence" => sequence = reader.read_u64()?,
+                "partition" => partition = reader.read_u16()?,
+                "collection" => collection = reader.read_string()?.into_owned(),
+                "op" => op = reader.read_string()?.into_owned(),
+                "row_id" => row_id = reader.read_string()?.into_owned(),
+                "event_time" => event_time = reader.read_u64()?,
+                "lsn" => lsn = reader.read_u64()?,
+                "tenant_id" => tenant_id = reader.read_u32()?,
+                "schema_version" => schema_version = reader.read_u64()?,
+                "new_value" => new_value = Some(JsonValue::read(reader)?.0),
+                "old_value" => old_value = Some(JsonValue::read(reader)?.0),
+                "field_diffs" => {
+                    field_diffs = Some(Vec::<super::super::field_diff::FieldDiff>::read(reader)?);
+                }
+                _ => {
+                    JsonValue::read(reader)?;
+                }
+            }
+        }
+        Ok(CdcEvent {
+            sequence,
+            partition,
+            collection,
+            op,
+            row_id,
+            event_time,
+            lsn,
+            tenant_id,
+            schema_version,
+            new_value,
+            old_value,
+            field_diffs,
+        })
     }
 }
 
@@ -101,7 +200,7 @@ mod tests {
         };
 
         let bytes = event.to_msgpack_bytes();
-        let parsed: CdcEvent = rmp_serde::from_slice(&bytes).unwrap();
+        let parsed: CdcEvent = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(parsed.op, "UPDATE");
         assert!(parsed.old_value.is_some());
     }

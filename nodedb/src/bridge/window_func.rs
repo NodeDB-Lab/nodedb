@@ -6,7 +6,7 @@
 use crate::bridge::expr_eval::SqlExpr;
 
 /// A window function specification.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct WindowFuncSpec {
     /// Output column name (e.g., "row_num", "running_sum").
     pub alias: String,
@@ -23,7 +23,7 @@ pub struct WindowFuncSpec {
 }
 
 /// Window frame: defines which rows within the partition are visible to the function.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct WindowFrame {
     /// Frame mode: "rows" or "range".
     pub mode: String,
@@ -44,7 +44,7 @@ impl Default for WindowFrame {
 }
 
 /// Window frame boundary.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum FrameBound {
     UnboundedPreceding,
     Preceding(u64),

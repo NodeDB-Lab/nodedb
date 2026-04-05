@@ -41,7 +41,7 @@ impl PlanConverter {
                 let mut ilp_batch = String::new();
                 for (_doc_id, value_bytes) in &values {
                     let row: serde_json::Value =
-                        rmp_serde::from_slice(value_bytes).unwrap_or_default();
+                        nodedb_types::json_from_msgpack(value_bytes).unwrap_or_default();
                     if let serde_json::Value::Object(map) = row {
                         // Extract timestamp (look for common timestamp field names).
                         let ts_ns = map

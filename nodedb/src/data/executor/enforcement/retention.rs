@@ -168,7 +168,7 @@ pub fn extract_created_at_secs(doc_bytes: &[u8]) -> Option<u64> {
     let first = doc_bytes[0];
     let is_msgpack = (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF;
     let val: serde_json::Value = if is_msgpack {
-        rmp_serde::from_slice(doc_bytes)
+        nodedb_types::json_from_msgpack(doc_bytes)
             .ok()
             .or_else(|| serde_json::from_slice(doc_bytes).ok())?
     } else {
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn extract_created_at_millis() {
         let doc = serde_json::json!({"created_at": 1700000000000u64});
-        let bytes = rmp_serde::to_vec_named(&doc).unwrap();
+        let bytes = nodedb_types::json_to_msgpack(&doc).unwrap();
         assert_eq!(extract_created_at_secs(&bytes), Some(1700000000));
     }
 

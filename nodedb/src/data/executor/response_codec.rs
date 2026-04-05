@@ -1,7 +1,7 @@
 //! Response payload serialization for SPSC bridge transport.
 //!
 //! Replaces `serde_json::to_vec` + `serde_json::json!` on all Data Plane
-//! response hot paths. Uses MessagePack (`rmp_serde`) for serialization
+//! response hot paths. Uses MessagePack (`zerompk`) for serialization
 //! which is 2-3x faster and 30-50% smaller than JSON.
 //!
 //! The Control Plane converts MessagePack payloads to JSON text for pgwire
@@ -29,11 +29,26 @@ use serde::Serialize;
 /// Drop-in replacement for `serde_json::to_vec(&value)` in handler code.
 /// Returns MessagePack bytes that are 30-50% smaller and 2-3x faster to
 /// produce than JSON.
-pub(super) fn encode<T: Serialize>(value: &T) -> crate::Result<Vec<u8>> {
-    // Use `to_vec_named` to preserve struct field names as string map keys.
-    // Without this, rmp_serde uses integer indices (compact mode) which
-    // produces `{0: value}` instead of `{"field": value}` on decode.
-    rmp_serde::to_vec_named(value).map_err(|e| crate::Error::Codec {
+pub(super) fn encode<T: zerompk::ToMessagePack>(value: &T) -> crate::Result<Vec<u8>> {
+    zerompk::to_msgpack_vec(value).map_err(|e| crate::Error::Codec {
+        detail: format!("response serialization: {e}"),
+    })
+}
+
+/// Encode a serde_json::Value payload as MessagePack bytes.
+pub(super) fn encode_json(value: &serde_json::Value) -> crate::Result<Vec<u8>> {
+    nodedb_types::json_to_msgpack(value).map_err(|e| crate::Error::Codec {
+        detail: format!("response serialization: {e}"),
+    })
+}
+
+/// Encode a Vec of serde_json::Value as MessagePack bytes.
+pub(super) fn encode_json_vec(values: &[serde_json::Value]) -> crate::Result<Vec<u8>> {
+    let wrapped: Vec<nodedb_types::JsonValue> = values
+        .iter()
+        .map(|v| nodedb_types::JsonValue(v.clone()))
+        .collect();
+    zerompk::to_msgpack_vec(&wrapped).map_err(|e| crate::Error::Codec {
         detail: format!("response serialization: {e}"),
     })
 }
@@ -206,7 +221,7 @@ pub fn decode_payload_to_json(payload: &[u8]) -> String {
     }
 
     // Try MessagePack → JSON.
-    match rmp_serde::from_slice::<serde_json::Value>(payload) {
+    match nodedb_types::json_from_msgpack(payload) {
         Ok(value) => serde_json::to_string(&value)
             .unwrap_or_else(|_| String::from_utf8_lossy(payload).into_owned()),
         Err(_) => String::from_utf8_lossy(payload).into_owned(),
@@ -217,7 +232,8 @@ pub fn decode_payload_to_json(payload: &[u8]) -> String {
 /// These implement Serialize for MessagePack encoding without going through
 /// `serde_json::Value` heap allocations.
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub(super) struct VectorSearchHit {
     pub id: u32,
     pub distance: f32,
@@ -225,26 +241,40 @@ pub(super) struct VectorSearchHit {
     pub doc_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(super) struct DocumentRow {
     pub id: String,
     pub data: serde_json::Value,
 }
 
-#[derive(Serialize)]
+impl zerompk::ToMessagePack for DocumentRow {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        use zerompk::ToMessagePack;
+        writer.write_map_len(2)?;
+        writer.write_string("id")?;
+        writer.write_string(&self.id)?;
+        writer.write_string("data")?;
+        nodedb_types::json_msgpack::JsonValue(self.data.clone()).write(writer)
+    }
+}
+
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct NeighborEntry<'a> {
     pub label: &'a str,
     pub node: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct SubgraphEdge<'a> {
     pub src: &'a str,
     pub label: &'a str,
     pub dst: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct GraphRagResult {
     pub node_id: String,
     pub rrf_score: f64,
@@ -256,14 +286,16 @@ pub(super) struct GraphRagResult {
     pub hop_distance: Option<usize>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct TextSearchHit<'a> {
     pub doc_id: &'a str,
     pub score: f32,
     pub fuzzy: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct HybridSearchHit<'a> {
     pub doc_id: &'a str,
     pub rrf_score: f64,
@@ -273,13 +305,15 @@ pub(super) struct HybridSearchHit<'a> {
     pub text_rank: Option<usize>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct GraphRagResponse {
     pub results: Vec<GraphRagResult>,
     pub metadata: GraphRagMetadata,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, zerompk::ToMessagePack)]
+#[msgpack(map)]
 pub(super) struct GraphRagMetadata {
     pub vector_candidates: usize,
     pub graph_expanded: usize,
@@ -334,7 +368,7 @@ mod tests {
     #[test]
     fn msgpack_to_json_roundtrip() {
         let value = serde_json::json!({"key": "value", "num": 42});
-        let msgpack = rmp_serde::to_vec(&value).unwrap();
+        let msgpack = nodedb_types::json_to_msgpack(&value).unwrap();
         let json = decode_payload_to_json(&msgpack);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["key"], "value");

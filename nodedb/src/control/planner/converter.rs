@@ -131,7 +131,7 @@ impl PlanConverter {
 
                 // Try to convert computed expressions (e.g., price * qty AS total).
                 if let Some(computed) = try_convert_projection(&proj.expr) {
-                    let computed_bytes = rmp_serde::to_vec_named(&computed).unwrap_or_default();
+                    let computed_bytes = zerompk::to_msgpack_vec(&computed).unwrap_or_default();
                     for task in &mut tasks {
                         if let PhysicalPlan::Document(DocumentOp::Scan {
                             computed_columns, ..
@@ -347,7 +347,7 @@ impl PlanConverter {
                 if matches!(filter.input.as_ref(), LogicalPlan::Aggregate(_)) {
                     let mut tasks = self.convert_inner(&filter.input, tenant_id, returning)?;
                     let having_filters = expr_to_scan_filters(&filter.predicate);
-                    let having_bytes = rmp_serde::to_vec_named(&having_filters).map_err(|e| {
+                    let having_bytes = zerompk::to_msgpack_vec(&having_filters).map_err(|e| {
                         crate::Error::Serialization {
                             format: "msgpack".into(),
                             detail: format!("having serialization: {e}"),
@@ -367,7 +367,7 @@ impl PlanConverter {
                 let mut tasks = self.convert_inner(&filter.input, tenant_id, returning)?;
                 let filters = expr_to_scan_filters(&filter.predicate);
                 let filter_bytes =
-                    rmp_serde::to_vec_named(&filters).map_err(|e| crate::Error::Serialization {
+                    zerompk::to_msgpack_vec(&filters).map_err(|e| crate::Error::Serialization {
                         format: "msgpack".into(),
                         detail: format!("filter serialization: {e}"),
                     })?;
@@ -395,11 +395,11 @@ impl PlanConverter {
                             // Merge existing filters (e.g., time-range) with new
                             // WHERE predicates.
                             let mut existing: Vec<crate::bridge::scan_filter::ScanFilter> =
-                                rmp_serde::from_slice(filters).unwrap_or_default();
+                                zerompk::from_msgpack(filters).unwrap_or_default();
                             let new: Vec<crate::bridge::scan_filter::ScanFilter> =
-                                rmp_serde::from_slice(&filter_bytes).unwrap_or_default();
+                                zerompk::from_msgpack(&filter_bytes).unwrap_or_default();
                             existing.extend(new);
-                            *filters = rmp_serde::to_vec_named(&existing).unwrap_or_default();
+                            *filters = zerompk::to_msgpack_vec(&existing).unwrap_or_default();
                         }
                     }
                 }
@@ -578,7 +578,7 @@ impl PlanConverter {
                 // Convert window expressions to WindowFuncSpec.
                 let specs = super::sql_expr_convert::convert_window_exprs(&window.window_expr);
                 if !specs.is_empty() {
-                    let spec_bytes = rmp_serde::to_vec_named(&specs).unwrap_or_default();
+                    let spec_bytes = zerompk::to_msgpack_vec(&specs).unwrap_or_default();
                     for task in &mut tasks {
                         if let PhysicalPlan::Document(DocumentOp::Scan {
                             window_functions, ..
@@ -667,7 +667,7 @@ fn resolve_scan_projection(scan: &datafusion::logical_expr::TableScan) -> Vec<St
 /// Serialize a single Filter predicate expression into ScanFilter bytes.
 fn serialize_predicate_filters(predicate: &Expr) -> crate::Result<Vec<u8>> {
     let filters = expr_to_scan_filters(predicate);
-    rmp_serde::to_vec_named(&filters).map_err(|e| crate::Error::Serialization {
+    zerompk::to_msgpack_vec(&filters).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("filter serialization: {e}"),
     })
@@ -683,7 +683,7 @@ fn serialize_scan_filters(scan_filters: &[Expr]) -> crate::Result<Vec<u8>> {
     for f in scan_filters {
         all_filters.extend(expr_to_scan_filters(f));
     }
-    rmp_serde::to_vec_named(&all_filters).map_err(|e| crate::Error::Serialization {
+    zerompk::to_msgpack_vec(&all_filters).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("filter serialization: {e}"),
     })
@@ -694,7 +694,7 @@ fn extract_filters_from_plan(plan: &LogicalPlan) -> Vec<u8> {
     match plan {
         LogicalPlan::Filter(filter) => {
             let filters = super::extract::expr_to_scan_filters(&filter.predicate);
-            rmp_serde::to_vec_named(&filters).unwrap_or_default()
+            zerompk::to_msgpack_vec(&filters).unwrap_or_default()
         }
         LogicalPlan::Projection(proj) => extract_filters_from_plan(&proj.input),
         LogicalPlan::SubqueryAlias(alias) => extract_filters_from_plan(&alias.input),

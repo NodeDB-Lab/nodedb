@@ -14,7 +14,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 thiserror = { workspace = true }
-rmp-serde = { workspace = true }
 rkyv = { workspace = true }
 zerompk = { workspace = true }
 uuid = { workspace = true }

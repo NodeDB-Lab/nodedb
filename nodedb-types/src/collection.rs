@@ -13,7 +13,16 @@ use crate::kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy};
 /// - `Document`: B-tree storage in redb (schemaless MessagePack or strict Binary Tuples).
 /// - `Columnar`: Compressed segment files with profile specialization (plain, timeseries, spatial).
 /// - `KeyValue`: Hash-indexed O(1) point lookups with typed value fields (Binary Tuples).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(tag = "storage")]
 pub enum CollectionType {
     /// Document storage in redb B-tree.

@@ -145,7 +145,7 @@ pub async fn weighted_pick(
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let audit_value = rmp_serde::to_vec(&audit_entry).unwrap_or_default();
+        let audit_value = nodedb_types::json_to_msgpack(&audit_entry).unwrap_or_default();
         let audit_plan = PhysicalPlan::Kv(KvOp::Put {
             collection: "_system_random_audit".to_string(),
             key: audit_key.into_bytes(),
@@ -257,7 +257,7 @@ async fn scan_all_entries(
 
 /// Extract a numeric weight from a MessagePack-encoded value.
 fn extract_weight(value_bytes: &[u8], weight_col: &str) -> Option<f64> {
-    let doc: serde_json::Value = rmp_serde::from_slice(value_bytes).ok()?;
+    let doc: serde_json::Value = nodedb_types::json_from_msgpack(value_bytes).ok()?;
     let v = doc.get(weight_col)?;
     v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
 }

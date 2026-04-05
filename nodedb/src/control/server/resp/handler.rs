@@ -269,7 +269,7 @@ async fn handle_scan(cmd: &RespCommand, session: &RespSession, state: &SharedSta
                         "op": "eq",
                         "value": value,
                     }]);
-                    match rmp_serde::to_vec(&scan_filter) {
+                    match nodedb_types::json_to_msgpack(&scan_filter) {
                         Ok(bytes) => filter_bytes = bytes,
                         Err(_) => {
                             return RespValue::err("ERR filter serialization failed");

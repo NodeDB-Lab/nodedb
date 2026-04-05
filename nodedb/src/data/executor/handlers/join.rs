@@ -224,7 +224,7 @@ impl CoreLoop {
             right_collection,
         );
 
-        match super::super::response_codec::encode(&results) {
+        match super::super::response_codec::encode_json_vec(&results) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,
@@ -315,7 +315,7 @@ impl CoreLoop {
             small_collection,
         );
 
-        match super::super::response_codec::encode(&results) {
+        match super::super::response_codec::encode_json_vec(&results) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,
@@ -382,7 +382,7 @@ impl CoreLoop {
         let predicates: Vec<crate::bridge::scan_filter::ScanFilter> = if condition.is_empty() {
             Vec::new() // Cross join — no condition.
         } else {
-            match rmp_serde::from_slice(condition) {
+            match zerompk::from_msgpack(condition) {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!(core = self.core_id, error = %e, "malformed join condition");
@@ -470,7 +470,7 @@ impl CoreLoop {
             }
         }
 
-        match super::super::response_codec::encode(&results) {
+        match super::super::response_codec::encode_json_vec(&results) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,

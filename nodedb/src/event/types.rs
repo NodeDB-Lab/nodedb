@@ -156,7 +156,7 @@ impl std::fmt::Display for EventSource {
 pub fn deserialize_event_payload(
     bytes: &[u8],
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if let Ok(serde_json::Value::Object(map)) = rmp_serde::from_slice::<serde_json::Value>(bytes) {
+    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(bytes) {
         return Some(map);
     }
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes) {

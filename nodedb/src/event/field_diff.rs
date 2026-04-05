@@ -3,6 +3,7 @@
 //! Compares `old_value` and `new_value` JSON objects to produce per-field diffs.
 //! Supports nested objects and arrays (block-level changes for collaborative docs).
 
+use nodedb_types::json_msgpack::JsonValue;
 use serde::{Deserialize, Serialize};
 
 /// A single field-level change within a document mutation.
@@ -42,6 +43,92 @@ pub enum DiffOp {
     /// `old_value` contains the deleted text, `new_value` contains
     /// position as JSON number (character offset).
     TextDelete,
+}
+
+// ─── zerompk impls for DiffOp ─────────────────────────────────────────────
+
+impl zerompk::ToMessagePack for DiffOp {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        let tag: u8 = match self {
+            DiffOp::Modified => 0,
+            DiffOp::Added => 1,
+            DiffOp::Removed => 2,
+            DiffOp::ArrayInsert => 3,
+            DiffOp::ArrayRemove => 4,
+            DiffOp::TextInsert => 5,
+            DiffOp::TextDelete => 6,
+        };
+        writer.write_u8(tag)
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for DiffOp {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => Ok(DiffOp::Modified),
+            1 => Ok(DiffOp::Added),
+            2 => Ok(DiffOp::Removed),
+            3 => Ok(DiffOp::ArrayInsert),
+            4 => Ok(DiffOp::ArrayRemove),
+            5 => Ok(DiffOp::TextInsert),
+            6 => Ok(DiffOp::TextDelete),
+            _ => Err(zerompk::Error::InvalidMarker(tag)),
+        }
+    }
+}
+
+// ─── zerompk impls for FieldDiff ──────────────────────────────────────────
+
+impl zerompk::ToMessagePack for FieldDiff {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        // Determine how many fields to write (omit None option fields).
+        let field_count =
+            2 + usize::from(self.old_value.is_some()) + usize::from(self.new_value.is_some());
+        writer.write_map_len(field_count)?;
+        writer.write_string("field")?;
+        writer.write_string(&self.field)?;
+        writer.write_string("op")?;
+        self.op.write(writer)?;
+        if let Some(ref v) = self.old_value {
+            writer.write_string("old_value")?;
+            JsonValue(v.clone()).write(writer)?;
+        }
+        if let Some(ref v) = self.new_value {
+            writer.write_string("new_value")?;
+            JsonValue(v.clone()).write(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for FieldDiff {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        let len = reader.read_map_len()?;
+        let mut field: Option<String> = None;
+        let mut op: Option<DiffOp> = None;
+        let mut old_value: Option<serde_json::Value> = None;
+        let mut new_value: Option<serde_json::Value> = None;
+        for _ in 0..len {
+            let key = reader.read_string()?.into_owned();
+            match key.as_str() {
+                "field" => field = Some(reader.read_string()?.into_owned()),
+                "op" => op = Some(DiffOp::read(reader)?),
+                "old_value" => old_value = Some(JsonValue::read(reader)?.0),
+                "new_value" => new_value = Some(JsonValue::read(reader)?.0),
+                _ => {
+                    // Skip unknown field values by reading as JsonValue.
+                    JsonValue::read(reader)?;
+                }
+            }
+        }
+        Ok(FieldDiff {
+            field: field.unwrap_or_default(),
+            op: op.unwrap_or(DiffOp::Modified),
+            old_value,
+            new_value,
+        })
+    }
 }
 
 /// Compute field-level diffs between two JSON objects.

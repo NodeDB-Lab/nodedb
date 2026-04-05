@@ -74,7 +74,7 @@ fn bulk_update_returns_affected_count() {
 
     // Bulk update: SET stock = 99 WHERE stock > 0 (should match p1 and p2).
     let filters = vec![filter("stock", "gt", serde_json::json!(0))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
     let updates = vec![(
         "stock".to_string(),
         serde_json::to_vec(&serde_json::json!(99)).unwrap(),
@@ -111,7 +111,7 @@ fn conditional_decrement_stops_at_zero() {
         let current_stock = get_stock(&mut core, &mut tx, &mut rx, "flash-deal");
 
         let filters = vec![filter("stock", "gte", serde_json::json!(1))];
-        let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+        let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
         let new_stock = current_stock.saturating_sub(1);
         let updates = vec![(
@@ -156,7 +156,7 @@ fn bulk_update_zero_match_returns_zero_affected() {
     insert_product(&mut core, &mut tx, &mut rx, "p1", 0);
 
     let filters = vec![filter("stock", "gte", serde_json::json!(100))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
     let updates = vec![(
         "stock".to_string(),
         serde_json::to_vec(&serde_json::json!(999)).unwrap(),
@@ -186,7 +186,7 @@ fn bulk_update_returning_returns_updated_documents() {
     insert_product(&mut core, &mut tx, &mut rx, "r2", 20);
 
     let filters = vec![filter("stock", "gt", serde_json::json!(0))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
     let updates = vec![(
         "stock".to_string(),
         serde_json::to_vec(&serde_json::json!(0)).unwrap(),
@@ -221,7 +221,7 @@ fn bulk_update_returning_zero_match_returns_affected_zero() {
     insert_product(&mut core, &mut tx, &mut rx, "p1", 0);
 
     let filters = vec![filter("stock", "gte", serde_json::json!(100))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
     let updates = vec![(
         "stock".to_string(),
         serde_json::to_vec(&serde_json::json!(999)).unwrap(),
@@ -311,10 +311,10 @@ fn transaction_batch_does_not_abort_on_zero_row_update() {
     // Transaction: first update matches (stock >= 1), second doesn't (stock >= 100).
     // Batch should NOT auto-abort on 0-row update.
     let filters_match =
-        rmp_serde::to_vec_named(&vec![filter("stock", "gte", serde_json::json!(1))]).unwrap();
+        zerompk::to_msgpack_vec(&vec![filter("stock", "gte", serde_json::json!(1))]).unwrap();
 
     let filters_nomatch =
-        rmp_serde::to_vec_named(&vec![filter("stock", "gte", serde_json::json!(100))]).unwrap();
+        zerompk::to_msgpack_vec(&vec![filter("stock", "gte", serde_json::json!(100))]).unwrap();
 
     let resp = send_raw(
         &mut core,

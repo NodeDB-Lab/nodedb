@@ -35,7 +35,7 @@ impl CoreLoop {
         let filters: Vec<ScanFilter> = if filter_bytes.is_empty() {
             Vec::new()
         } else {
-            match rmp_serde::from_slice(filter_bytes) {
+            match zerompk::from_msgpack(filter_bytes) {
                 Ok(f) => f,
                 Err(e) => {
                     return self.response_error(

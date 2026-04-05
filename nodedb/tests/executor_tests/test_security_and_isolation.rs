@@ -63,7 +63,7 @@ fn security_rls_policy_enforcement() {
         value: serde_json::json!("approved"),
         clauses: Vec::new(),
     };
-    let predicate = rmp_serde::to_vec_named(&vec![filter]).unwrap();
+    let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 
     store
         .create_policy(RlsPolicy {

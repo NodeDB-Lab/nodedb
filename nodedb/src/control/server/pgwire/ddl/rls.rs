@@ -158,7 +158,7 @@ pub fn create_rls_policy(
             value: serde_json::json!(value_str),
             clauses: Vec::new(),
         };
-        let predicate = rmp_serde::to_vec_named(&vec![filter])
+        let predicate = zerompk::to_msgpack_vec(&vec![filter])
             .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
         (predicate, None)

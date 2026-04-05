@@ -26,7 +26,7 @@ pub fn process_write_event_for_mvs(event: &WriteEvent, registry: &MvRegistry, st
 
     // Deserialize new_value for field extraction.
     let new_value: Option<serde_json::Value> = event.new_value.as_ref().and_then(|bytes| {
-        rmp_serde::from_slice(bytes)
+        nodedb_types::json_from_msgpack(bytes)
             .ok()
             .or_else(|| serde_json::from_slice(bytes).ok())
     });

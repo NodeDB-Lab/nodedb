@@ -41,7 +41,7 @@ pub fn handle_permission_event(
     let new_val = event
         .new_value
         .as_ref()
-        .and_then(|b| rmp_serde::from_slice::<serde_json::Value>(b).ok());
+        .and_then(|b| nodedb_types::json_from_msgpack(b).ok());
 
     match event.op {
         crate::event::types::WriteOp::Insert | crate::event::types::WriteOp::Update => {
@@ -65,7 +65,7 @@ pub fn handle_permission_event(
             let old_val = event
                 .old_value
                 .as_ref()
-                .and_then(|b| rmp_serde::from_slice::<serde_json::Value>(b).ok());
+                .and_then(|b| nodedb_types::json_from_msgpack(b).ok());
 
             if is_permission_table
                 && let Some(ref val) = old_val

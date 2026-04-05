@@ -244,7 +244,7 @@ pub struct BufferStats {
 
 /// Deserialize bytes (MessagePack or JSON) to serde_json::Value.
 fn deserialize_to_json(bytes: &[u8]) -> Option<serde_json::Value> {
-    rmp_serde::from_slice::<serde_json::Value>(bytes)
+    nodedb_types::json_from_msgpack(bytes)
         .ok()
         .or_else(|| serde_json::from_slice::<serde_json::Value>(bytes).ok())
 }

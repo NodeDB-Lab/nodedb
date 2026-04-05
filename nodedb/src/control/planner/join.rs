@@ -73,7 +73,7 @@ pub(super) fn convert_join(join: &Join, tenant_id: TenantId) -> crate::Result<Ve
         // Serialize any filter expression as join condition for NLJ.
         let condition = if let Some(filter) = &join.filter {
             let filters = super::extract::expr_to_scan_filters(filter);
-            rmp_serde::to_vec_named(&filters).map_err(|e| crate::Error::Serialization {
+            zerompk::to_msgpack_vec(&filters).map_err(|e| crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!("join condition serialization: {e}"),
             })?

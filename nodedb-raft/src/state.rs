@@ -1,7 +1,16 @@
 /// Persistent state that must survive restarts.
 ///
 /// Corresponds to Raft paper Figure 2 "Persistent state on all servers".
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct HardState {
     /// Latest term this server has seen.
     pub current_term: u64,

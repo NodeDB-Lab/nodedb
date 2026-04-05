@@ -26,7 +26,7 @@ pub(super) fn decode_document(bytes: &[u8]) -> Option<serde_json::Value> {
     let first = bytes[0];
     if (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF {
         // Try MessagePack first.
-        if let Ok(val) = rmp_serde::from_slice::<serde_json::Value>(bytes) {
+        if let Ok(val) = nodedb_types::json_from_msgpack(bytes) {
             return Some(val);
         }
     }
@@ -127,7 +127,7 @@ fn rmpv_to_json(val: &rmpv::Value) -> serde_json::Value {
 /// If encoding fails (should not happen for valid `serde_json::Value`),
 /// falls back to JSON bytes.
 pub(super) fn encode_to_msgpack(value: &serde_json::Value) -> Vec<u8> {
-    rmp_serde::to_vec(value).unwrap_or_else(|_| {
+    nodedb_types::json_to_msgpack(value).unwrap_or_else(|_| {
         // Fallback: store as JSON if MessagePack encoding fails.
         serde_json::to_vec(value).unwrap_or_default()
     })
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn msgpack_input_detected_correctly() {
         let value = serde_json::json!({"key": "value"});
-        let msgpack = rmp_serde::to_vec(&value).unwrap();
+        let msgpack = nodedb_types::json_to_msgpack(&value).unwrap();
         let decoded = decode_document(&msgpack).unwrap();
         assert_eq!(decoded["key"], "value");
     }
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn already_msgpack_unchanged() {
         let value = serde_json::json!({"a": 1});
-        let msgpack = rmp_serde::to_vec(&value).unwrap();
+        let msgpack = nodedb_types::json_to_msgpack(&value).unwrap();
         let result = json_to_msgpack(&msgpack);
         assert_eq!(result, msgpack, "msgpack should pass through unchanged");
     }
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn extract_multiple_fields() {
         let value = serde_json::json!({"a": 1, "b": "hello", "c": true, "d": null});
-        let msgpack = rmp_serde::to_vec(&value).unwrap();
+        let msgpack = nodedb_types::json_to_msgpack(&value).unwrap();
 
         let results = extract_fields(&msgpack, &["a", "c", "z"]);
         assert_eq!(results[0], Some(serde_json::json!(1)));

@@ -300,7 +300,7 @@ fn kv_field_get_and_set() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Store a MessagePack-encoded document.
-    let doc = rmp_serde::to_vec(&serde_json::json!({
+    let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
         "name": "alice",
         "age": 30,
         "region": "us-east"
@@ -437,7 +437,7 @@ fn kv_index_write_amp_ratio_matches() {
 
     // Insert 100 entries (each triggers 3 index writes).
     for i in 0..100u32 {
-        let doc = rmp_serde::to_vec(&serde_json::json!({
+        let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
             "region": format!("r{}", i % 5),
             "status": if i % 2 == 0 { "active" } else { "inactive" },
             "tier": format!("t{}", i % 3),

@@ -147,13 +147,13 @@ impl InvertedIndex {
                 .get(term_key.as_str())
                 .ok()
                 .flatten()
-                .and_then(|v| rmp_serde::from_slice(v.value()).ok())
+                .and_then(|v| zerompk::from_msgpack(v.value()).ok())
                 .unwrap_or_default();
 
             existing.retain(|p| p.doc_id != scoped_doc_id);
             existing.push(posting);
 
-            let bytes = rmp_serde::to_vec_named(&existing)
+            let bytes = zerompk::to_msgpack_vec(&existing)
                 .map_err(|e| inverted_err("serialize postings", e))?;
             postings_table
                 .insert(term_key.as_str(), bytes.as_slice())
@@ -165,7 +165,7 @@ impl InvertedIndex {
             .open_table(DOC_LENGTHS)
             .map_err(|e| inverted_err("open doc_lengths", e))?;
         let len_bytes =
-            rmp_serde::to_vec_named(&doc_len).map_err(|e| inverted_err("serialize doc_len", e))?;
+            zerompk::to_msgpack_vec(&doc_len).map_err(|e| inverted_err("serialize doc_len", e))?;
         lengths
             .insert(scoped_doc_id.as_str(), len_bytes.as_slice())
             .map_err(|e| inverted_err("insert doc_len", e))?;
@@ -193,7 +193,7 @@ impl InvertedIndex {
             .get(meta_key.as_str())
             .ok()
             .flatten()
-            .and_then(|v| rmp_serde::from_slice::<(u32, u64)>(v.value()).ok())
+            .and_then(|v| zerompk::from_msgpack::<(u32, u64)>(v.value()).ok())
             .unwrap_or((0, 0));
 
         if delta > 0 {
@@ -204,7 +204,7 @@ impl InvertedIndex {
             total = total.saturating_sub((-delta) as u64);
         }
 
-        let bytes = rmp_serde::to_vec_named(&(count, total))
+        let bytes = zerompk::to_msgpack_vec(&(count, total))
             .map_err(|e| inverted_err("serialize stats", e))?;
         meta.insert(meta_key.as_str(), bytes.as_slice())
             .map_err(|e| inverted_err("insert stats", e))?;
@@ -234,14 +234,14 @@ impl InvertedIndex {
             for key in &keys {
                 if let Ok(Some(val)) = postings_table.get(key.as_str()) {
                     let mut list: Vec<Posting> =
-                        rmp_serde::from_slice(val.value()).unwrap_or_default();
+                        zerompk::from_msgpack(val.value()).unwrap_or_default();
                     let before = list.len();
                     list.retain(|p| p.doc_id != scoped_doc_id);
                     if list.len() != before {
                         if list.is_empty() {
                             updates.push((key.clone(), None));
                         } else {
-                            let bytes = rmp_serde::to_vec_named(&list).unwrap_or_default();
+                            let bytes = zerompk::to_msgpack_vec(&list).unwrap_or_default();
                             updates.push((key.clone(), Some(bytes)));
                         }
                     }
@@ -268,7 +268,7 @@ impl InvertedIndex {
                 .get(scoped_doc_id.as_str())
                 .ok()
                 .flatten()
-                .and_then(|v| rmp_serde::from_slice::<u32>(v.value()).ok())
+                .and_then(|v| zerompk::from_msgpack::<u32>(v.value()).ok())
                 .unwrap_or(0);
 
             let _ = lengths.remove(scoped_doc_id.as_str());

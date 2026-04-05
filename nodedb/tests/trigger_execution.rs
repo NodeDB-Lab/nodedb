@@ -653,7 +653,7 @@ fn classify_point_put_deserializes_msgpack_value() {
     use nodedb::bridge::envelope::PhysicalPlan;
     use nodedb::bridge::physical_plan::DocumentOp;
 
-    let value = rmp_serde::to_vec_named(&serde_json::json!({"key": "val"})).unwrap();
+    let value = nodedb_types::json_to_msgpack(&serde_json::json!({"key": "val"})).unwrap();
     let plan = PhysicalPlan::Document(DocumentOp::PointPut {
         collection: "data".into(),
         document_id: "d-1".into(),

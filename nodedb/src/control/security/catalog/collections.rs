@@ -6,7 +6,8 @@ impl SystemCatalog {
     /// Store a collection record.
     pub fn put_collection(&self, coll: &StoredCollection) -> crate::Result<()> {
         let key = format!("{}:{}", coll.tenant_id, coll.name);
-        let bytes = rmp_serde::to_vec(coll).map_err(|e| catalog_err("serialize collection", e))?;
+        let bytes =
+            zerompk::to_msgpack_vec(coll).map_err(|e| catalog_err("serialize collection", e))?;
         let write_txn = self
             .db
             .begin_write()
@@ -42,7 +43,7 @@ impl SystemCatalog {
         {
             let (key, value) = entry.map_err(|e| catalog_err("read collection", e))?;
             if key.value().starts_with(&prefix) {
-                let coll: StoredCollection = rmp_serde::from_slice(value.value())
+                let coll: StoredCollection = zerompk::from_msgpack(value.value())
                     .map_err(|e| catalog_err("deser collection", e))?;
                 if coll.is_active {
                     colls.push(coll);
@@ -67,7 +68,7 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("range collections", e))?
         {
             let (_, value) = entry.map_err(|e| catalog_err("read collection", e))?;
-            let coll: StoredCollection = rmp_serde::from_slice(value.value())
+            let coll: StoredCollection = zerompk::from_msgpack(value.value())
                 .map_err(|e| catalog_err("deser collection", e))?;
             colls.push(coll);
         }
@@ -90,7 +91,7 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("open collections", e))?;
         match table.get(key.as_str()) {
             Ok(Some(value)) => {
-                let coll: StoredCollection = rmp_serde::from_slice(value.value())
+                let coll: StoredCollection = zerompk::from_msgpack(value.value())
                     .map_err(|e| catalog_err("deser collection", e))?;
                 Ok(Some(coll))
             }

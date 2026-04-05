@@ -186,7 +186,14 @@ impl CheckpointRecord {
 // ── Collection metadata ───────────────────────────────────────────────
 
 /// Serializable collection metadata for redb storage.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Debug,
+    Clone,
+)]
 pub struct StoredCollection {
     pub tenant_id: u32,
     pub name: String,
@@ -449,14 +456,28 @@ pub struct TransitionRule {
 }
 
 /// Transition check predicate: evaluated on UPDATE with OLD and NEW access.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Debug,
+    Clone,
+)]
 pub struct TransitionCheckDef {
     pub name: String,
     pub predicate: crate::bridge::expr_eval::SqlExpr,
 }
 
 /// Materialized sum: on INSERT to source, atomically add value_expr to target balance.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Debug,
+    Clone,
+)]
 pub struct MaterializedSumDef {
     pub target_collection: String,
     pub target_column: String,

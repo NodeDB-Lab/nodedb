@@ -193,7 +193,7 @@ async fn dispatch_to_data_plane(
 /// Tries MessagePack first (primary format), then JSON passthrough.
 fn decode_payload_to_json(payload: &[u8]) -> Result<serde_json::Value, ()> {
     // Try MessagePack.
-    if let Ok(val) = rmp_serde::from_slice::<serde_json::Value>(payload) {
+    if let Ok(val) = nodedb_types::json_from_msgpack(payload) {
         return Ok(val);
     }
 

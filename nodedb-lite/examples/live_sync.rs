@@ -142,7 +142,7 @@ async fn test_delta_push() -> Result<(), String> {
     let delta = DeltaPushMsg {
         collection: "live_test".into(),
         document_id: "d1".into(),
-        delta: rmp_serde::to_vec_named(&serde_json::json!({"key": "value"}))
+        delta: nodedb_types::json_to_msgpack(&serde_json::json!({"key": "value"}))
             .map_err(|e| format!("serialize: {e}"))?,
         peer_id: 42,
         mutation_id: 1,
@@ -424,7 +424,7 @@ async fn test_rls_violation() -> Result<(), String> {
     // Delta with status=draft — violates the RLS write policy.
     let violating_data = serde_json::json!({"status": "draft", "order_id": "ord-999"});
     let delta_bytes =
-        rmp_serde::to_vec_named(&violating_data).map_err(|e| format!("serialize: {e}"))?;
+        nodedb_types::json_to_msgpack(&violating_data).map_err(|e| format!("serialize: {e}"))?;
 
     let msg = DeltaPushMsg {
         collection: "orders".into(),

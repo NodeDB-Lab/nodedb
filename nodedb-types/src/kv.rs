@@ -16,7 +16,16 @@ pub const KV_DEFAULT_INLINE_THRESHOLD: u16 = 64;
 /// KV collections use a hash-indexed primary key for O(1) point lookups.
 /// Value fields are encoded as Binary Tuples (same codec as strict mode)
 /// providing O(1) field extraction by byte offset.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct KvConfig {
     /// Typed schema for this KV collection (key + value columns).
     ///
@@ -64,7 +73,16 @@ impl KvConfig {
 /// - `FixedDuration`: All keys share the same lifetime from insertion time.
 /// - `FieldBased`: Each key expires when a referenced timestamp field plus an
 ///   offset exceeds the current time, allowing per-key variable expiration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(tag = "kind")]
 pub enum KvTtlPolicy {
     /// Fixed duration from insertion time. All keys share the same lifetime.

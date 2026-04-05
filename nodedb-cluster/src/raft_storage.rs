@@ -100,7 +100,7 @@ impl LogStorage for RedbLogStorage {
 
             for entry in entries {
                 let key = index_key(entry.index);
-                let value = rmp_serde::to_vec_named(entry).map_err(|e| {
+                let value = zerompk::to_msgpack_vec(entry).map_err(|e| {
                     nodedb_raft::error::RaftError::Storage {
                         detail: format!("serialize entry: {e}"),
                     }
@@ -198,7 +198,7 @@ impl LogStorage for RedbLogStorage {
             let (_, value) = result.map_err(|e| nodedb_raft::error::RaftError::Storage {
                 detail: format!("entry read: {e}"),
             })?;
-            let entry: LogEntry = rmp_serde::from_slice(value.value()).map_err(|e| {
+            let entry: LogEntry = zerompk::from_msgpack(value.value()).map_err(|e| {
                 nodedb_raft::error::RaftError::Storage {
                     detail: format!("deserialize entry: {e}"),
                 }
@@ -260,12 +260,12 @@ impl LogStorage for RedbLogStorage {
                         detail: format!("open meta: {e}"),
                     })?;
 
-            let idx_bytes = rmp_serde::to_vec_named(&index).map_err(|e| {
+            let idx_bytes = zerompk::to_msgpack_vec(&index).map_err(|e| {
                 nodedb_raft::error::RaftError::Storage {
                     detail: format!("serialize: {e}"),
                 }
             })?;
-            let term_bytes = rmp_serde::to_vec_named(&term).map_err(|e| {
+            let term_bytes = zerompk::to_msgpack_vec(&term).map_err(|e| {
                 nodedb_raft::error::RaftError::Storage {
                     detail: format!("serialize: {e}"),
                 }
@@ -302,13 +302,13 @@ impl LogStorage for RedbLogStorage {
             .get(KEY_SNAPSHOT_INDEX)
             .ok()
             .flatten()
-            .and_then(|v| rmp_serde::from_slice::<u64>(v.value()).ok())
+            .and_then(|v| zerompk::from_msgpack::<u64>(v.value()).ok())
             .unwrap_or(0);
         let term = table
             .get(KEY_SNAPSHOT_TERM)
             .ok()
             .flatten()
-            .and_then(|v| rmp_serde::from_slice::<u64>(v.value()).ok())
+            .and_then(|v| zerompk::from_msgpack::<u64>(v.value()).ok())
             .unwrap_or(0);
 
         (index, term)
@@ -329,7 +329,7 @@ impl LogStorage for RedbLogStorage {
                         detail: format!("open meta: {e}"),
                     })?;
 
-            let bytes = rmp_serde::to_vec_named(state).map_err(|e| {
+            let bytes = zerompk::to_msgpack_vec(state).map_err(|e| {
                 nodedb_raft::error::RaftError::Storage {
                     detail: format!("serialize: {e}"),
                 }
@@ -370,7 +370,7 @@ impl LogStorage for RedbLogStorage {
 
         match table.get(KEY_HARD_STATE) {
             Ok(Some(value)) => {
-                let state: HardState = rmp_serde::from_slice(value.value()).map_err(|e| {
+                let state: HardState = zerompk::from_msgpack(value.value()).map_err(|e| {
                     nodedb_raft::error::RaftError::Storage {
                         detail: format!("deserialize: {e}"),
                     }

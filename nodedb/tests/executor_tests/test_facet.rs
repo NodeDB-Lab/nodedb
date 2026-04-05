@@ -118,7 +118,7 @@ fn filtered_facet_counts() {
 
     // Filter: brand = 'Nike' — should only count Nike products.
     let filters = vec![filter("brand", "eq", serde_json::json!("Nike"))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
     let payload = send_ok(
         &mut core,
@@ -154,7 +154,7 @@ fn zero_match_filter_returns_empty_facets() {
 
     // Filter: brand = 'NonExistent'.
     let filters = vec![filter("brand", "eq", serde_json::json!("NonExistent"))];
-    let filter_bytes = rmp_serde::to_vec_named(&filters).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
 
     let payload = send_ok(
         &mut core,

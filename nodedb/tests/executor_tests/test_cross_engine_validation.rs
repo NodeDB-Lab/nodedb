@@ -124,7 +124,7 @@ fn cross_model_query_vector_graph_relational() {
         value: serde_json::json!(2023),
         clauses: Vec::new(),
     }];
-    let filter_bytes = rmp_serde::to_vec_named(&filter).unwrap();
+    let filter_bytes = zerompk::to_msgpack_vec(&filter).unwrap();
     let scan_payload = send_ok(
         &mut core,
         &mut tx,

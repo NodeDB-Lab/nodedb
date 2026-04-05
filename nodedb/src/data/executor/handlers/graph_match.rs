@@ -16,7 +16,7 @@ impl CoreLoop {
         debug!(core = self.core_id, "graph match execution");
 
         // Deserialize the MatchQuery from MessagePack.
-        let query: MatchQuery = match rmp_serde::from_slice(query_bytes) {
+        let query: MatchQuery = match zerompk::from_msgpack(query_bytes) {
             Ok(q) => q,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to deserialize MatchQuery");

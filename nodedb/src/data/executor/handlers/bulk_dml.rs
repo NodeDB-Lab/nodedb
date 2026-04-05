@@ -83,7 +83,7 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        let filters: Vec<ScanFilter> = match rmp_serde::from_slice(filter_bytes) {
+        let filters: Vec<ScanFilter> = match zerompk::from_msgpack(filter_bytes) {
             Ok(f) => f,
             Err(e) => {
                 return self.response_error(
@@ -201,7 +201,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, "bulk delete");
 
-        let filters: Vec<ScanFilter> = match rmp_serde::from_slice(filter_bytes) {
+        let filters: Vec<ScanFilter> = match zerompk::from_msgpack(filter_bytes) {
             Ok(f) => f,
             Err(e) => {
                 return self.response_error(

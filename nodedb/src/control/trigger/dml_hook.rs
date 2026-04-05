@@ -144,7 +144,7 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
 /// Deserialize a MessagePack/JSON value blob into serde_json::Map.
 fn deserialize_value_to_fields(value: &[u8]) -> serde_json::Map<String, serde_json::Value> {
     // Try MessagePack first (primary format), fall back to JSON.
-    if let Ok(serde_json::Value::Object(map)) = rmp_serde::from_slice::<serde_json::Value>(value) {
+    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(value) {
         return map;
     }
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(value) {
@@ -185,7 +185,7 @@ pub async fn fetch_old_row(
 
     // Decode the response payload (MessagePack or JSON).
     let bytes = resp.payload.as_ref();
-    if let Ok(serde_json::Value::Object(map)) = rmp_serde::from_slice::<serde_json::Value>(bytes) {
+    if let Ok(serde_json::Value::Object(map)) = nodedb_types::json_from_msgpack(bytes) {
         return map;
     }
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes) {

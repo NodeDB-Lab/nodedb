@@ -39,7 +39,7 @@ pub(super) fn parse_expiry_key(composite: &[u8]) -> Option<(u32, String, Vec<u8>
 /// Returns `(field_name, value_bytes)` where `value_bytes` is the JSON-serialized
 /// scalar value suitable for B-Tree comparison.
 pub(super) fn extract_all_field_values_from_msgpack(data: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(data) else {
+    let Ok(value) = nodedb_types::json_from_msgpack(data) else {
         return Vec::new();
     };
 
@@ -57,7 +57,7 @@ pub(super) fn extract_all_field_values_from_msgpack(data: &[u8]) -> Vec<(String,
 
 /// Extract a single field's value from a MessagePack-encoded document.
 pub(super) fn extract_field_values_from_msgpack(data: &[u8], field: &str) -> Vec<Vec<u8>> {
-    let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(data) else {
+    let Ok(value) = nodedb_types::json_from_msgpack(data) else {
         return Vec::new();
     };
 

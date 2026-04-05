@@ -106,7 +106,7 @@ impl CoreLoop {
                     })
                     .collect();
                 results.truncate(limit);
-                return match super::super::response_codec::encode(&results) {
+                return match super::super::response_codec::encode_json_vec(&results) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(
                         task,
@@ -139,7 +139,7 @@ impl CoreLoop {
             let filter_predicates: Vec<ScanFilter> = if filters.is_empty() {
                 Vec::new()
             } else {
-                rmp_serde::from_slice(filters).unwrap_or_default()
+                zerompk::from_msgpack(filters).unwrap_or_default()
             };
 
             if let Some(mut agg_result) = super::columnar_agg::try_columnar_aggregate(
@@ -153,7 +153,7 @@ impl CoreLoop {
                 // Apply HAVING filters.
                 if !having.is_empty() {
                     let having_predicates: Vec<ScanFilter> =
-                        rmp_serde::from_slice(having).unwrap_or_default();
+                        zerompk::from_msgpack(having).unwrap_or_default();
                     if !having_predicates.is_empty() {
                         agg_result
                             .rows
@@ -163,7 +163,7 @@ impl CoreLoop {
 
                 agg_result.rows.truncate(limit);
 
-                return match super::super::response_codec::encode(&agg_result.rows) {
+                return match super::super::response_codec::encode_json_vec(&agg_result.rows) {
                     Ok(payload) => {
                         if filters.is_empty() && having.is_empty() {
                             let cache_key = aggregate_cache_key(
@@ -212,7 +212,8 @@ impl CoreLoop {
                     row.insert(col_name.to_string(), val);
                 }
                 // Encode as msgpack to match the sparse doc format the aggregate loop expects.
-                let bytes = rmp_serde::to_vec(&serde_json::Value::Object(row)).unwrap_or_default();
+                let bytes = nodedb_types::json_to_msgpack(&serde_json::Value::Object(row))
+                    .unwrap_or_default();
                 docs.push((idx.to_string(), bytes));
             }
             Ok(docs)
@@ -225,7 +226,7 @@ impl CoreLoop {
                 let filter_predicates: Vec<ScanFilter> = if filters.is_empty() {
                     Vec::new()
                 } else {
-                    match rmp_serde::from_slice(filters) {
+                    match zerompk::from_msgpack(filters) {
                         Ok(f) => f,
                         Err(e) => {
                             tracing::warn!(core = self.core_id, error = %e, "filter predicate deserialization failed");
@@ -379,7 +380,7 @@ impl CoreLoop {
                 }
 
                 if !having.is_empty() {
-                    let having_predicates: Vec<ScanFilter> = match rmp_serde::from_slice(having) {
+                    let having_predicates: Vec<ScanFilter> = match zerompk::from_msgpack(having) {
                         Ok(f) => f,
                         Err(e) => {
                             tracing::warn!(core = self.core_id, error = %e, "HAVING predicate deserialization failed");
@@ -393,7 +394,7 @@ impl CoreLoop {
 
                 results.truncate(limit);
 
-                match super::super::response_codec::encode(&results) {
+                match super::super::response_codec::encode_json_vec(&results) {
                     Ok(payload) => {
                         // Cache the result for future identical queries.
                         if filters.is_empty() && having.is_empty() {

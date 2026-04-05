@@ -21,6 +21,7 @@ lang-all = ["lang-cjk", "lang-th", "lang-detect"]
 
 [dependencies]
 serde = { workspace = true }
+zerompk = { workspace = true }
 rust-stemmers = { workspace = true }
 unicode-normalization = { workspace = true }
 tracing = { workspace = true }

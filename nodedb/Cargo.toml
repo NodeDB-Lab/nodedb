@@ -51,7 +51,6 @@ serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 redb = { workspace = true }
 crc32c = { workspace = true }
-rmp-serde = { workspace = true }
 zerompk = { workspace = true }
 rmpv = { workspace = true }
 rkyv = { workspace = true }

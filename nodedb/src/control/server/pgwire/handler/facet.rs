@@ -280,7 +280,7 @@ fn extract_collection_and_filter(query: &str) -> PgWireResult<(String, String)> 
 /// For complex predicates, returns an empty filter (matches all).
 fn build_filter_bytes(filter_text: &str) -> PgWireResult<Vec<u8>> {
     let filters = crate::bridge::scan_filter::parse_simple_predicates(filter_text);
-    rmp_serde::to_vec_named(&filters).map_err(|e| {
+    zerompk::to_msgpack_vec(&filters).map_err(|e| {
         PgWireError::UserError(Box::new(ErrorInfo::new(
             "ERROR".to_owned(),
             "XX000".to_owned(),

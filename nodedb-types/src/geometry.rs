@@ -9,7 +9,16 @@ use serde::{Deserialize, Serialize};
 
 /// A 2D coordinate (longitude, latitude) following GeoJSON convention.
 /// Note: GeoJSON uses [lng, lat] order, NOT [lat, lng].
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct Coord {
     pub lng: f64,
     pub lat: f64,
@@ -22,7 +31,15 @@ impl Coord {
 }
 
 /// GeoJSON-compatible geometry types.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(tag = "type")]
 pub enum Geometry {
     Point {

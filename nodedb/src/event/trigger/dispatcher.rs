@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn deserialize_msgpack_payload() {
         let json = serde_json::json!({"status": "active", "count": 42});
-        let bytes = rmp_serde::to_vec(&json).unwrap();
+        let bytes = nodedb_types::json_to_msgpack(&json).unwrap();
         let map = deserialize_event_payload(&bytes).unwrap();
         assert_eq!(map.get("status").unwrap(), &serde_json::json!("active"));
     }

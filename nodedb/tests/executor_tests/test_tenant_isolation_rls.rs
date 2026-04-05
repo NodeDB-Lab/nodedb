@@ -19,7 +19,7 @@ fn rls_policies_isolated_between_tenants() {
         value: serde_json::json!("approved"),
         clauses: Vec::new(),
     };
-    let predicate = rmp_serde::to_vec_named(&vec![filter]).unwrap();
+    let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 
     store
         .create_policy(RlsPolicy {
@@ -79,7 +79,7 @@ fn rls_policy_listing_scoped() {
                 collection: "users".into(),
                 tenant_id: tid,
                 policy_type: PolicyType::Read,
-                predicate: rmp_serde::to_vec_named(&vec![filter]).unwrap(),
+                predicate: zerompk::to_msgpack_vec(&vec![filter]).unwrap(),
                 compiled_predicate: None,
                 mode: nodedb::control::security::predicate::PolicyMode::default(),
                 on_deny: Default::default(),

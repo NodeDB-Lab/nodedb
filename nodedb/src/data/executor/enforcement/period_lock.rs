@@ -83,7 +83,7 @@ fn extract_field_string(bytes: &[u8], field_name: &str) -> Option<String> {
     }
     let first = bytes[0];
     let is_msgpack = (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF;
-    if is_msgpack && let Ok(val) = rmp_serde::from_slice::<serde_json::Value>(bytes) {
+    if is_msgpack && let Ok(val) = nodedb_types::json_from_msgpack(bytes) {
         return val.get(field_name)?.as_str().map(String::from);
     }
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(bytes) {
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn extract_field_from_msgpack() {
         let doc = serde_json::json!({"fiscal_period": "2026-04", "status": "OPEN"});
-        let bytes = rmp_serde::to_vec_named(&doc).unwrap();
+        let bytes = nodedb_types::json_to_msgpack(&doc).unwrap();
         assert_eq!(
             extract_field_string(&bytes, "fiscal_period"),
             Some("2026-04".into())
