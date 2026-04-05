@@ -52,7 +52,11 @@ impl FieldIndex {
                 inner: IndexInner::Flat(entries),
             })
         } else {
-            let mut offsets = std::collections::HashMap::with_capacity(count);
+            // Cap pre-allocation: adversarial buffers may claim enormous counts.
+            // Actual insertions are bounded by the buffer size, so over-allocating
+            // wastes memory and under-allocating just triggers rehashing.
+            let cap = count.min(buf.len() / 2 + 1);
+            let mut offsets = std::collections::HashMap::with_capacity(cap);
             for _ in 0..count {
                 let key_str = if let Some((start, len)) = str_bounds(buf, pos) {
                     std::str::from_utf8(buf.get(start..start + len)?).ok()
@@ -193,6 +197,151 @@ mod tests {
             let indexed = idx.get(field);
             let sequential = crate::msgpack_scan::field::extract_field(&buf, 0, field);
             assert_eq!(indexed, sequential, "mismatch for field {field}");
+        }
+    }
+
+    // ── Fuzz-style tests ───────────────────────────────────────────────────
+
+    /// Truncate valid msgpack at every byte position — FieldIndex::build must
+    /// never panic; it should return None on truncated input.
+    #[test]
+    fn fuzz_truncated_buffers() {
+        let docs = [
+            json!({"name": "alice", "age": 30, "score": 9.5}),
+            json!({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}),
+            json!({"nested": {"inner": 42}}),
+        ];
+
+        for doc in &docs {
+            let full = encode(doc);
+            for truncate_at in 0..full.len() {
+                let slice = &full[..truncate_at];
+                // Must not panic — None is the valid outcome for truncated data.
+                let _ = FieldIndex::build(slice, 0);
+            }
+        }
+    }
+
+    /// Deterministic random byte sequences — FieldIndex::build must never panic.
+    #[test]
+    fn fuzz_random_payloads() {
+        let mut state: u64 = 0xabad1dea_deadc0de;
+        let next = |s: &mut u64| -> u8 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (*s >> 33) as u8
+        };
+
+        let mut buf = vec![0u8; 128];
+        for _ in 0..1000 {
+            let len = (next(&mut state) as usize % 128) + 1;
+            for b in buf[..len].iter_mut() {
+                *b = next(&mut state);
+            }
+            let slice = &buf[..len];
+            let idx = FieldIndex::build(slice, 0);
+            // If build succeeded, get() on the result must not panic either.
+            if let Some(ref idx) = idx {
+                let _ = idx.get("any_key");
+                let _ = idx.len();
+                let _ = idx.is_empty();
+            }
+        }
+    }
+
+    /// Adversarial map headers — FieldIndex::build must return None.
+    #[test]
+    fn fuzz_adversarial_map_count() {
+        // MAP32 claiming 0xffffffff pairs with empty body
+        let buf = [0xdfu8, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(FieldIndex::build(&buf, 0).map(|_| ()), None);
+
+        // MAP16 claiming 0xffff pairs with empty body
+        let buf = [0xdeu8, 0xff, 0xff];
+        assert_eq!(FieldIndex::build(&buf, 0).map(|_| ()), None);
+
+        // Fixmap claiming 15 pairs but only 1 byte
+        let buf = [0x8fu8];
+        assert_eq!(FieldIndex::build(&buf, 0).map(|_| ()), None);
+    }
+
+    /// Non-map inputs must return None from build.
+    #[test]
+    fn fuzz_non_map_inputs() {
+        let array_buf = encode(&json!([1, 2, 3]));
+        assert!(FieldIndex::build(&array_buf, 0).is_none());
+
+        let int_buf = encode(&json!(99));
+        assert!(FieldIndex::build(&int_buf, 0).is_none());
+
+        assert!(FieldIndex::build(&[], 0).is_none());
+
+        let nil_buf = [0xc0u8];
+        assert!(FieldIndex::build(&nil_buf, 0).is_none());
+    }
+
+    /// Out-of-bounds offset must return None.
+    #[test]
+    fn fuzz_out_of_bounds_offset() {
+        let buf = encode(&json!({"x": 1}));
+        assert!(FieldIndex::build(&buf, buf.len() + 100).is_none());
+    }
+
+    /// Threshold boundary: a 16-field doc should use Flat, 17-field should
+    /// use HashMap. Fuzz both paths with truncation.
+    #[test]
+    fn fuzz_flat_vs_hashmap_threshold_truncation() {
+        // 16 fields — uses Flat path
+        let mut map16 = serde_json::Map::new();
+        for i in 0..16 {
+            map16.insert(format!("f{i}"), json!(i));
+        }
+        let buf16 = encode(&serde_json::Value::Object(map16));
+        let idx16 = FieldIndex::build(&buf16, 0).unwrap();
+        assert!(matches!(idx16.inner, IndexInner::Flat(_)));
+        assert_eq!(idx16.len(), 16);
+
+        // Truncate the 16-field buffer
+        for t in 0..buf16.len() {
+            let _ = FieldIndex::build(&buf16[..t], 0);
+        }
+
+        // 17 fields — uses HashMap path
+        let mut map17 = serde_json::Map::new();
+        for i in 0..17 {
+            map17.insert(format!("g{i}"), json!(i));
+        }
+        let buf17 = encode(&serde_json::Value::Object(map17));
+        let idx17 = FieldIndex::build(&buf17, 0).unwrap();
+        assert!(matches!(idx17.inner, IndexInner::Map(_)));
+        assert_eq!(idx17.len(), 17);
+
+        // Truncate the 17-field buffer
+        for t in 0..buf17.len() {
+            let _ = FieldIndex::build(&buf17[..t], 0);
+        }
+    }
+
+    /// Build a valid index then look up every present and absent key.
+    #[test]
+    fn fuzz_lookup_all_present_and_absent_keys() {
+        let mut map = serde_json::Map::new();
+        for i in 0..20u64 {
+            map.insert(format!("key{i}"), json!(i));
+        }
+        let buf = encode(&serde_json::Value::Object(map));
+        let idx = FieldIndex::build(&buf, 0).unwrap();
+
+        for i in 0..20u64 {
+            let k = format!("key{i}");
+            let (start, _end) = idx.get(&k).unwrap();
+            assert_eq!(read_i64(&buf, start), Some(i as i64));
+        }
+
+        // These keys are absent
+        for absent in &["KEY0", "key20", "key-1", "", "key 0"] {
+            assert!(idx.get(absent).is_none(), "key '{absent}' should be absent");
         }
     }
 }

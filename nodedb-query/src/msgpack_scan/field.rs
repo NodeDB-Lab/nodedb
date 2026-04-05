@@ -172,4 +172,118 @@ mod tests {
         let value_bytes = &buf[start..end];
         assert!(value_bytes.len() > 1);
     }
+
+    // ── Fuzz-style tests ───────────────────────────────────────────────────
+
+    /// Truncate valid msgpack at every byte position — extract_field and
+    /// extract_path must never panic, returning None on truncated input.
+    #[test]
+    fn fuzz_truncated_buffers() {
+        let docs = [
+            json!({"name": "alice", "age": 30, "active": true}),
+            json!({"address": {"city": "tokyo", "zip": "100-0001"}}),
+            json!({"scores": [10, 20, 30], "ratio": 0.95}),
+        ];
+
+        for doc in &docs {
+            let full = encode(doc);
+            for truncate_at in 0..full.len() {
+                let slice = &full[..truncate_at];
+                let _ = extract_field(slice, 0, "name");
+                let _ = extract_field(slice, 0, "age");
+                let _ = extract_field(slice, 0, "missing");
+                let _ = extract_path(slice, 0, &["address", "city"]);
+                let _ = extract_dot_path(slice, 0, "address.city");
+            }
+        }
+    }
+
+    /// Deterministic random byte sequences — extract_field must never panic.
+    #[test]
+    fn fuzz_random_payloads() {
+        let mut state: u64 = 0xfeedface_0badf00d;
+        let next = |s: &mut u64| -> u8 {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (*s >> 33) as u8
+        };
+
+        let mut buf = vec![0u8; 128];
+        for _ in 0..1000 {
+            let len = (next(&mut state) as usize % 128) + 1;
+            for b in buf[..len].iter_mut() {
+                *b = next(&mut state);
+            }
+            let slice = &buf[..len];
+            let _ = extract_field(slice, 0, "key");
+            let _ = extract_path(slice, 0, &["a", "b", "c"]);
+            let _ = extract_dot_path(slice, 0, "x.y.z");
+        }
+    }
+
+    /// Adversarial: map header claims huge element count but buffer is tiny.
+    #[test]
+    fn fuzz_adversarial_map_count() {
+        // MAP32: tag 0xdf + 4-byte count claiming 0xffffffff pairs
+        let buf = [0xdfu8, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(extract_field(&buf, 0, "any"), None);
+
+        // MAP16: tag 0xde + 2-byte count claiming 0xffff pairs
+        let buf = [0xdeu8, 0xff, 0xff];
+        assert_eq!(extract_field(&buf, 0, "any"), None);
+
+        // Fixmap claims 15 pairs but is only 1 byte total
+        let buf = [0x8fu8];
+        assert_eq!(extract_field(&buf, 0, "key"), None);
+    }
+
+    /// Non-map input must return None for extract_field.
+    #[test]
+    fn fuzz_non_map_inputs() {
+        let array_buf = encode(&json!([1, 2, 3]));
+        assert_eq!(extract_field(&array_buf, 0, "x"), None);
+
+        let int_buf = encode(&json!(42));
+        assert_eq!(extract_field(&int_buf, 0, "x"), None);
+
+        let str_buf = encode(&json!("hello"));
+        assert_eq!(extract_field(&str_buf, 0, "x"), None);
+
+        let nil_buf = [0xc0u8];
+        assert_eq!(extract_field(&nil_buf, 0, "x"), None);
+    }
+
+    /// Out-of-bounds offset must return None.
+    #[test]
+    fn fuzz_out_of_bounds_offset() {
+        let buf = encode(&json!({"a": 1}));
+        assert_eq!(extract_field(&buf, buf.len() + 100, "a"), None);
+        assert_eq!(extract_path(&buf, buf.len() + 100, &["a"]), None);
+    }
+
+    /// Empty path and empty buffer edge cases.
+    #[test]
+    fn fuzz_edge_cases() {
+        // extract_path with empty path
+        let buf = encode(&json!({"a": 1}));
+        assert_eq!(extract_path(&buf, 0, &[]), None);
+
+        // extract_dot_path with empty dot_path string
+        assert_eq!(extract_dot_path(&buf, 0, ""), None);
+
+        // Empty buffer
+        assert_eq!(extract_field(&[], 0, "x"), None);
+        assert_eq!(extract_path(&[], 0, &["x"]), None);
+    }
+
+    /// Deeply nested path that bottoms out at a non-map value returns None
+    /// when trying to descend further.
+    #[test]
+    fn fuzz_path_descend_into_scalar() {
+        let buf = encode(&json!({"a": 42}));
+        // "a" is an integer, cannot descend into it
+        assert_eq!(extract_path(&buf, 0, &["a", "b"]), None);
+        assert_eq!(extract_dot_path(&buf, 0, "a.b"), None);
+    }
 }
