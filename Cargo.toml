@@ -129,7 +129,7 @@ flate2 = "1"
 tonic = "0.14"
 
 # Query engine
-datafusion = "53"
+datafusion = { version = "53", default-features = false, features = ["sql"] }
 datafusion-common = "53"
 datafusion-execution = "53"
 datafusion-expr = "53"
