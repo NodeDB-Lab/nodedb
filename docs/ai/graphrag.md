@@ -28,13 +28,14 @@ INSERT INTO entities VALUES (
 );
 
 -- Insert relationships using graph edges
-INSERT INTO mentions { from: 'chunks:chunk-042', to: 'entities:entity-raft' };
-INSERT INTO related_to { from: 'entities:entity-raft', to: 'entities:entity-paxos', weight: 0.85 };
+GRAPH INSERT EDGE FROM 'chunks:chunk-042' TO 'entities:entity-raft' TYPE 'mentions';
+GRAPH INSERT EDGE FROM 'entities:entity-raft' TO 'entities:entity-paxos' TYPE 'related_to'
+  PROPERTIES '{"weight": 0.85}';
 
--- MATCH pattern for bulk entity insertion from extraction results
+-- Bulk entity relationships from extraction results
 -- (Your app extracts entities and emits these statements)
-INSERT INTO related_to { from: 'entities:entity-raft', to: 'entities:entity-leader-election' };
-INSERT INTO related_to { from: 'entities:entity-raft', to: 'entities:entity-log-replication' };
+GRAPH INSERT EDGE FROM 'entities:entity-raft' TO 'entities:entity-leader-election' TYPE 'related_to';
+GRAPH INSERT EDGE FROM 'entities:entity-raft' TO 'entities:entity-log-replication' TYPE 'related_to';
 ```
 
 ## Seed Retrieval + Graph Expansion

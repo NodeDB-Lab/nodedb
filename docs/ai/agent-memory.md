@@ -125,11 +125,13 @@ A background job periodically summarizes old episodic memories into semantic fac
 -- Create a scheduled job that runs every 6 hours
 CREATE SCHEDULE memory_consolidation
     CRON '0 */6 * * *'
-    SQL 'SELECT id, content FROM episodic_memory
-         WHERE agent_id = ''agent-1''
-           AND created_at < NOW() - INTERVAL ''7 days''
-         ORDER BY created_at
-         LIMIT 100';
+    AS BEGIN
+        SELECT id, content FROM episodic_memory
+        WHERE agent_id = 'agent-1'
+          AND created_at < NOW() - INTERVAL '7 days'
+        ORDER BY created_at
+        LIMIT 100;
+    END;
 
 -- The schedule runs the SQL and your app processes the results:
 -- 1. Read old episodic memories from the schedule output

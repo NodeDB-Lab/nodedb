@@ -130,10 +130,12 @@ Use the cron scheduler to run batch inference or re-embedding on a schedule.
 -- Re-embed stale documents every night at 2 AM
 CREATE SCHEDULE nightly_reembed
     CRON '0 2 * * *'
-    SQL 'SELECT id, content FROM articles
-         WHERE updated_at > embedding_updated_at
-         ORDER BY updated_at DESC
-         LIMIT 1000';
+    AS BEGIN
+        SELECT id, content FROM articles
+        WHERE updated_at > embedding_updated_at
+        ORDER BY updated_at DESC
+        LIMIT 1000;
+    END;
 
 -- Your app polls schedule results and processes them.
 -- Show schedule execution history:

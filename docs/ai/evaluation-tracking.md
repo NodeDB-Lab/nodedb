@@ -97,14 +97,17 @@ CREATE COLLECTION model_perf (
 
 -- Continuous aggregation: 5-minute rollups for dashboards
 CREATE CONTINUOUS AGGREGATE model_perf_5m
-    ON model_perf
-    BUCKET '5m'
-    AGGREGATE
-        AVG(latency_ms) AS avg_latency,
-        AVG(score) AS avg_score,
-        SUM(CASE WHEN error THEN 1 ELSE 0 END) AS error_count,
-        COUNT(*) AS request_count
-    GROUP BY model_name, endpoint;
+ON model_perf
+AS
+    SELECT time_bucket('5 minutes', ts) AS bucket,
+           model_name,
+           endpoint,
+           AVG(latency_ms) AS avg_latency,
+           AVG(score) AS avg_score,
+           SUM(CASE WHEN error THEN 1 ELSE 0 END) AS error_count,
+           COUNT(*) AS request_count
+    FROM model_perf
+    GROUP BY bucket, model_name, endpoint;
 
 -- Dashboard query: latency trend for the last 24 hours
 SELECT ts, model_name, avg_latency, avg_score, error_count, request_count
