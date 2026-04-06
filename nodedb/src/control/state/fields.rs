@@ -236,6 +236,9 @@ pub struct SharedState {
     /// System-wide metrics (Prometheus format).
     pub system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
 
+    /// Memory governor for per-engine budget enforcement.
+    pub governor: Option<Arc<nodedb_mem::MemoryGovernor>>,
+
     /// Fork detection: tracks `lite_id → last_seen_epoch`.
     pub epoch_tracker: Mutex<std::collections::HashMap<String, u64>>,
 

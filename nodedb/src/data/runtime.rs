@@ -171,6 +171,7 @@ pub fn spawn_core(
     compaction_config: CoreCompactionConfig,
     system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
     event_producer: Option<crate::event::bus::EventProducer>,
+    governor: Arc<nodedb_mem::MemoryGovernor>,
 ) -> std::io::Result<(JoinHandle<()>, EventFdNotifier)> {
     let data_dir = data_dir.to_path_buf();
 
@@ -190,6 +191,9 @@ pub fn spawn_core(
             // 2. Open engines.
             let mut core = CoreLoop::open(core_id, request_rx, response_tx, &data_dir)
                 .expect("failed to open CoreLoop engines");
+
+            // 2b. Apply memory governor.
+            core.set_governor(governor);
 
             // 2b. Apply metrics reference.
             if let Some(m) = system_metrics {

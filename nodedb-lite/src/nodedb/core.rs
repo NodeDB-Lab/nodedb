@@ -652,6 +652,13 @@ impl<S: StorageEngine> NodeDbLite<S> {
         &self.htap
     }
 
+    /// Access the timeseries engine (continuous aggregates, ingest, flush).
+    pub fn timeseries_engine(
+        &self,
+    ) -> &Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>> {
+        &self.timeseries
+    }
+
     // -- Indexed CRUD for strict/columnar collections --
 
     /// Insert a row into a strict collection and update secondary indexes.

@@ -205,6 +205,9 @@ pub struct CoreLoop {
     /// Initialized lazily; `None` if io_uring is not available.
     pub(in crate::data::executor) uring_reader: Option<crate::data::io::uring_reader::UringReader>,
 
+    /// Memory governor for per-engine budget enforcement.
+    pub(in crate::data::executor) governor: Option<Arc<nodedb_mem::MemoryGovernor>>,
+
     /// Shared system metrics — Arc is safe for `!Send` since all fields are atomic.
     pub(in crate::data::executor) metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
 
@@ -301,6 +304,7 @@ impl CoreLoop {
                 &nodedb_types::config::tuning::KvTuning::default(),
             ),
             uring_reader: crate::data::io::uring_reader::UringReader::new(),
+            governor: None,
             metrics: None,
             event_producer: None,
             event_sequence: 0,

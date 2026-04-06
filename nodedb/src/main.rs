@@ -105,9 +105,9 @@ async fn main() -> anyhow::Result<()> {
     // Validate engine config.
     config.engines.validate()?;
 
-    // Initialize memory governor.
+    // Initialize memory governor (per-engine budgets + global ceiling).
     let byte_budgets = config.engines.to_byte_budgets(config.memory_limit);
-    let _governor = nodedb::memory::init_governor(config.memory_limit, &byte_budgets)?;
+    let governor = nodedb::memory::init_governor(config.memory_limit, &byte_budgets)?;
 
     // Open WAL (with optional encryption at rest).
     let wal_segment_target = config.checkpoint.wal_segment_target_bytes();
@@ -172,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
             compaction_cfg.clone(),
             Some(Arc::clone(&system_metrics)),
             Some(event_producer),
+            Arc::clone(&governor),
         )?;
         core_handles.push(handle);
         notifiers.push((core_id, notifier));
@@ -253,6 +254,11 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(error = %e, "cold storage init failed, tiering disabled");
             }
         }
+    }
+
+    // Wire memory governor into SharedState for observability.
+    if let Some(state) = Arc::get_mut(&mut shared) {
+        state.governor = Some(Arc::clone(&governor));
     }
 
     // Bootstrap credentials.

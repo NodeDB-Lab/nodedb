@@ -19,6 +19,11 @@ impl CoreLoop {
         self.metrics = Some(metrics);
     }
 
+    /// Set memory governor for per-engine budget enforcement.
+    pub fn set_governor(&mut self, governor: Arc<nodedb_mem::MemoryGovernor>) {
+        self.governor = Some(governor);
+    }
+
     /// Set checkpoint coordinator config (called after open, before event loop).
     pub fn set_checkpoint_config(&mut self, config: crate::storage::checkpoint::CheckpointConfig) {
         self.checkpoint_coordinator =

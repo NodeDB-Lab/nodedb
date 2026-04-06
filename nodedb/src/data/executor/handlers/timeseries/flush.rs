@@ -69,7 +69,15 @@ impl CoreLoop {
             return;
         }
 
+        // Track memtable bytes for governor release after drain.
+        let memtable_bytes = mt.memory_bytes();
+
         let drain = mt.drain();
+
+        // Release timeseries budget after drain clears the memtable.
+        if let Some(ref gov) = self.governor {
+            gov.release(nodedb_mem::EngineId::Timeseries, memtable_bytes);
+        }
 
         // Write to L1 segments.
         let segment_dir = self.data_dir.join(format!("ts/{collection}"));

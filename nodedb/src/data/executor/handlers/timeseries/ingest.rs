@@ -147,9 +147,14 @@ impl CoreLoop {
                 .get(collection)
                 .is_some_and(|mt| mt.schema().columns.len() != cols_before);
 
-        // Pre-flush: flush BEFORE ingesting if memtable is at the soft limit.
+        // Pre-flush: flush BEFORE ingesting if memtable is at the soft limit
+        // OR if the timeseries engine budget is exhausted (governor pressure).
+        let governor_pressure = self
+            .governor
+            .as_ref()
+            .is_some_and(|g| g.try_reserve(nodedb_mem::EngineId::Timeseries, 0).is_err());
         if let Some(mt) = self.columnar_memtables.get(collection)
-            && mt.memory_bytes() >= 64 * 1024 * 1024
+            && (mt.memory_bytes() >= 64 * 1024 * 1024 || governor_pressure)
         {
             self.flush_ts_collection(collection, now_ms);
         }
@@ -162,6 +167,12 @@ impl CoreLoop {
                 },
             );
         };
+        // Reserve memory budget for this batch (~24 bytes per ILP line estimate).
+        let batch_estimate = lines.len() * 24;
+        if let Some(ref gov) = self.governor {
+            let _ = gov.try_reserve(nodedb_mem::EngineId::Timeseries, batch_estimate);
+        }
+
         let lvc = self.ts_last_value_caches.get_mut(collection);
         let mut series_keys = HashMap::new();
         let (mut accepted, rejected) =
