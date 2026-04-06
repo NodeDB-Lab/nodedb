@@ -31,6 +31,21 @@ pub fn create_collection(
 
     let name_lower = parts[2].to_lowercase();
     let name = name_lower.as_str();
+
+    // Collection names must be alphanumeric, hyphens, or underscores only.
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(sqlstate_error(
+            "42601",
+            &format!(
+                "invalid collection name '{name}': only letters, digits, '-', and '_' are allowed"
+            ),
+        ));
+    }
+
     let tenant_id = identity.tenant_id;
 
     // Check if collection already exists.
@@ -51,15 +66,33 @@ pub fn create_collection(
 
     // Detect storage mode: WITH storage = 'strict' | 'columnar' | 'kv'.
     let upper = sql_upper_from_parts(parts);
+
+    // For columnar collections the typed schema (e.g. `(ts TIMESTAMP TIME_KEY, cpu FLOAT)`)
+    // is parsed to extract profile hints. We also capture its columns so they can be stored
+    // in `fields` for DataFusion schema registration — `ColumnarProfile` only keeps the
+    // profile-specific keys (time_key, geometry_column), not the full column list.
+    let mut columnar_schema_columns: Vec<(String, String)> = Vec::new();
+
     let collection_type = if upper.contains("STORAGE") && upper.contains("STRICT") {
         let schema = parse_typed_schema(sql).map_err(|e| sqlstate_error("42601", &e))?;
         nodedb_types::CollectionType::strict(schema)
-    } else if upper.contains("STORAGE") && upper.contains("COLUMNAR") {
+    } else if upper.contains("STORAGE")
+        && (upper.contains("COLUMNAR") || upper.contains("TIMESERIES") || upper.contains("SPATIAL"))
+    {
         // Infer columnar profile from column modifiers or explicit profile keyword.
         // Priority: column modifiers (TIME_KEY, SPATIAL_INDEX) > WITH profile = '...'
         let schema = parse_typed_schema(sql).ok();
         let partition_by =
             extract_with_value(sql, "partition_by").unwrap_or_else(|| "1h".to_string());
+
+        // Capture column names/types for fields storage before consuming schema.
+        if let Some(ref s) = schema {
+            columnar_schema_columns = s
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.column_type.to_string()))
+                .collect();
+        }
 
         // Check column modifiers first.
         let time_key_col = schema.as_ref().and_then(|s| {
@@ -113,7 +146,12 @@ pub fn create_collection(
     };
 
     // Parse optional FIELDS clause: CREATE COLLECTION name FIELDS (field type, ...)
-    let (fields, serial_fields) = parse_fields_clause(parts);
+    // For columnar collections using typed DDL syntax (no FIELDS keyword), fall back
+    // to the columns captured from the typed schema above.
+    let (mut fields, serial_fields) = parse_fields_clause(parts);
+    if fields.is_empty() && !columnar_schema_columns.is_empty() {
+        fields = columnar_schema_columns;
+    }
 
     // For strict/columnar/kv collections, serialize the schema as JSON in timeseries_config
     // (reused for schema storage until StoredCollection gets a dedicated schema field).
@@ -480,4 +518,39 @@ fn build_generated_column_specs(
     }
 
     specs
+}
+
+#[cfg(test)]
+mod tests {
+    /// Collection name validation: allowed chars are [a-zA-Z0-9_-].
+    fn validate_name(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    #[test]
+    fn valid_collection_names() {
+        assert!(validate_name("docs"));
+        assert!(validate_name("my_collection"));
+        assert!(validate_name("my-collection"));
+        assert!(validate_name("Collection123"));
+        assert!(validate_name("a"));
+    }
+
+    #[test]
+    fn invalid_collection_names_rejected() {
+        // Semicolons are sent by psql in multi-statement queries —
+        // must be rejected with a clear error, not stored silently.
+        assert!(!validate_name("docs;"));
+        assert!(!validate_name("bad;name"));
+        assert!(!validate_name("bad name"));
+        assert!(!validate_name("bad.name"));
+        assert!(!validate_name("bad/name"));
+        assert!(!validate_name(""));
+        // Trailing semicolon is the most common real-world case.
+        assert!(!validate_name("events;"));
+        assert!(!validate_name("orders;"));
+    }
 }
