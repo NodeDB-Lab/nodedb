@@ -22,7 +22,6 @@ pub mod memtable;
 pub mod merge;
 pub mod o3_buffer;
 pub mod packed_partition;
-pub mod parallel_scan;
 pub mod partition_registry;
 pub mod projection;
 pub mod query;
@@ -40,7 +39,6 @@ pub mod sparse_index;
 pub mod tag_autocomplete;
 pub mod time_bucket;
 pub mod ts_detect;
-pub mod vectorized_scan;
 #[cfg(test)]
 mod verification;
 
