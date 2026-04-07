@@ -33,7 +33,6 @@
 
 pub mod arena;
 pub mod budget;
-pub mod datafusion_pool;
 pub mod engine;
 pub mod error;
 pub mod governor;
@@ -43,7 +42,6 @@ pub mod pressure;
 pub mod spill;
 
 pub use budget::Budget;
-pub use datafusion_pool::GovernedMemoryPool;
 pub use engine::EngineId;
 pub use error::{MemError, Result};
 pub use governor::MemoryGovernor;

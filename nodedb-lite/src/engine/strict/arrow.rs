@@ -5,26 +5,26 @@ use std::sync::Arc;
 use nodedb_types::columnar::{ColumnType, StrictSchema};
 
 /// Convert an Arrow `DataType` from a `ColumnType` (for schema construction).
-pub fn column_type_to_arrow(ct: &ColumnType) -> datafusion::arrow::datatypes::DataType {
+pub fn column_type_to_arrow(ct: &ColumnType) -> arrow::datatypes::DataType {
     match ct {
-        ColumnType::Int64 => datafusion::arrow::datatypes::DataType::Int64,
-        ColumnType::Float64 => datafusion::arrow::datatypes::DataType::Float64,
-        ColumnType::String => datafusion::arrow::datatypes::DataType::Utf8,
-        ColumnType::Bool => datafusion::arrow::datatypes::DataType::Boolean,
-        ColumnType::Bytes | ColumnType::Geometry => datafusion::arrow::datatypes::DataType::Binary,
-        ColumnType::Timestamp => datafusion::arrow::datatypes::DataType::Timestamp(
-            datafusion::arrow::datatypes::TimeUnit::Microsecond,
+        ColumnType::Int64 => arrow::datatypes::DataType::Int64,
+        ColumnType::Float64 => arrow::datatypes::DataType::Float64,
+        ColumnType::String => arrow::datatypes::DataType::Utf8,
+        ColumnType::Bool => arrow::datatypes::DataType::Boolean,
+        ColumnType::Bytes | ColumnType::Geometry => arrow::datatypes::DataType::Binary,
+        ColumnType::Timestamp => arrow::datatypes::DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Microsecond,
             None,
         ),
-        ColumnType::Decimal => datafusion::arrow::datatypes::DataType::Utf8, // Lossless string representation
-        ColumnType::Uuid => datafusion::arrow::datatypes::DataType::Utf8,
-        ColumnType::Vector(_) => datafusion::arrow::datatypes::DataType::Binary, // Packed f32 bytes
+        ColumnType::Decimal => arrow::datatypes::DataType::Utf8, // Lossless string representation
+        ColumnType::Uuid => arrow::datatypes::DataType::Utf8,
+        ColumnType::Vector(_) => arrow::datatypes::DataType::Binary, // Packed f32 bytes
     }
 }
 
 /// Build an Arrow schema from a StrictSchema (for DataFusion table registration).
-pub fn strict_schema_to_arrow(schema: &StrictSchema) -> datafusion::arrow::datatypes::SchemaRef {
-    use datafusion::arrow::datatypes::{Field, Schema};
+pub fn strict_schema_to_arrow(schema: &StrictSchema) -> arrow::datatypes::SchemaRef {
+    use arrow::datatypes::{Field, Schema};
     let fields: Vec<Field> = schema
         .columns
         .iter()

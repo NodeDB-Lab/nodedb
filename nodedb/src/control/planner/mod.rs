@@ -5,5 +5,4 @@ pub mod physical;
 pub mod procedural;
 pub mod rls_injection;
 pub mod sql_plan_convert;
-pub mod udf;
 pub mod wasm;

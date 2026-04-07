@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use datafusion::datasource::MemTable;
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
@@ -65,22 +64,13 @@ pub fn create_temp_table(
     // Parse schema from column definitions.
     let schema = Arc::new(parse_temp_table_schema(sql)?);
 
-    // Create a DataFusion MemTable with the schema (empty initially).
-    let mem_table = MemTable::try_new(Arc::clone(&schema), vec![vec![]]).map_err(|e| {
-        PgWireError::UserError(Box::new(ErrorInfo::new(
-            "ERROR".to_owned(),
-            "XX000".to_owned(),
-            format!("failed to create temp table: {e}"),
-        )))
-    })?;
-
     sessions.register_temp_table(
         addr,
         name.clone(),
         TempTableEntry {
             schema,
             on_commit,
-            mem_table: Arc::new(mem_table),
+            batches: Vec::new(),
         },
     );
 

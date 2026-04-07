@@ -133,14 +133,6 @@ tonic = "0.14"
 # Arrow (columnar format)
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 
-# Query engine (retained for procedural executor + function body validation)
-datafusion = { version = "53", default-features = false, features = ["sql"] }
-datafusion-common = "53"
-datafusion-execution = "53"
-datafusion-expr = "53"
-datafusion-physical-plan = "53"
-datafusion-functions-window-common = "53"
-
 # Config & serialization
 toml = "0.8"
 anyhow = "1"

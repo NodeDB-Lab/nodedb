@@ -16,7 +16,6 @@ pub mod text_search;
 pub mod ts_functions;
 pub mod window;
 
-pub mod ts_udfs;
 
 pub use chunk_text::{ChunkError, ChunkStrategy, TextChunk, chunk_text};
 pub use expr::{BinaryOp, CastType, ComputedColumn, SqlExpr};

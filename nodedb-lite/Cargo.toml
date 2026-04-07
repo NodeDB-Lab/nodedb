@@ -35,7 +35,8 @@ sonic-rs = { workspace = true }
 loro = { workspace = true }
 wasmtime = { workspace = true }
 redb = { workspace = true }
-datafusion = { workspace = true }
+nodedb-sql = { workspace = true }
+arrow = { workspace = true }
 crc32c = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }

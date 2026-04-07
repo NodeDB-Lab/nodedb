@@ -1,53 +1,38 @@
 //! Per-session temporary table registry.
 //!
-//! Temporary tables are stored as DataFusion MemTables, registered in
-//! the session's DataFusion context per-query. They shadow permanent
-//! tables with the same name. Auto-dropped on disconnect.
+//! Temporary tables store data as Arrow RecordBatches in memory.
+//! Auto-dropped on disconnect.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use datafusion::datasource::MemTable;
+use arrow::record_batch::RecordBatch;
 
 use super::store::SessionStore;
 
 /// A session-local temporary table entry.
-///
-/// Holds the Arrow schema, ON COMMIT behavior, and the backing DataFusion
-/// `MemTable` that stores the actual data as Arrow RecordBatches. The MemTable
-/// supports SELECT scans and INSERT INTO appends (via DataFusion's `insert_into`).
-///
-/// Registered per-query in the DataFusion context by `execute_planned_sql` to
-/// shadow permanent tables with the same name. Auto-dropped on session disconnect
-/// via `TempTableRegistry::clear()`.
 pub struct TempTableEntry {
     /// Arrow schema of the table columns.
     pub schema: SchemaRef,
     /// Transaction-end behavior for this temp table's data.
     pub on_commit: OnCommitAction,
-    /// DataFusion MemTable backing this temp table.
-    /// Supports SELECT reads and INSERT INTO appends.
-    pub mem_table: Arc<MemTable>,
+    /// Data stored as Arrow RecordBatches.
+    pub batches: Vec<RecordBatch>,
 }
 
-// MemTable is Debug but we need a manual impl since Arc<MemTable> isn't Clone-Debug-friendly everywhere.
 impl std::fmt::Debug for TempTableEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TempTableEntry")
             .field("schema", &self.schema)
             .field("on_commit", &self.on_commit)
+            .field("batches", &self.batches.len())
             .finish()
     }
 }
 
 /// Transaction-end behavior for temporary table data.
-///
-/// PostgreSQL-compatible semantics:
-/// - `PreserveRows` (default): data persists across transactions.
-/// - `DeleteRows`: rows are deleted on COMMIT, table remains.
-/// - `Drop`: table is dropped entirely on COMMIT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnCommitAction {
     /// Keep rows (default).
@@ -60,7 +45,6 @@ pub enum OnCommitAction {
 
 /// Per-session temp table registry.
 pub struct TempTableRegistry {
-    /// Table name → entry (metadata + MemTable).
     tables: HashMap<String, TempTableEntry>,
 }
 
@@ -71,7 +55,7 @@ impl TempTableRegistry {
         }
     }
 
-    /// Register a temp table with a backing MemTable.
+    /// Register a temp table.
     pub fn register(&mut self, name: String, entry: TempTableEntry) {
         self.tables.insert(name, entry);
     }
@@ -81,17 +65,14 @@ impl TempTableRegistry {
         self.tables.contains_key(name)
     }
 
-    /// Get a temp table's MemTable for registration in a query context.
-    pub fn get_mem_table(&self, name: &str) -> Option<Arc<MemTable>> {
-        self.tables.get(name).map(|e| Arc::clone(&e.mem_table))
+    /// Get a temp table entry.
+    pub fn get(&self, name: &str) -> Option<&TempTableEntry> {
+        self.tables.get(name)
     }
 
-    /// Get all temp table names and their MemTables (for query context registration).
-    pub fn all_mem_tables(&self) -> Vec<(String, Arc<MemTable>)> {
-        self.tables
-            .iter()
-            .map(|(name, entry)| (name.clone(), Arc::clone(&entry.mem_table)))
-            .collect()
+    /// Get a mutable temp table entry (for INSERT INTO).
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut TempTableEntry> {
+        self.tables.get_mut(name)
     }
 
     /// Remove a temp table.
@@ -155,12 +136,6 @@ impl SessionStore {
     /// Get all temp table names for the session.
     pub fn temp_table_names(&self, addr: &SocketAddr) -> Vec<String> {
         self.read_session(addr, |s| s.temp_tables.names())
-            .unwrap_or_default()
-    }
-
-    /// Get all temp table MemTables for query context registration.
-    pub fn temp_mem_tables(&self, addr: &SocketAddr) -> Vec<(String, Arc<MemTable>)> {
-        self.read_session(addr, |s| s.temp_tables.all_mem_tables())
             .unwrap_or_default()
     }
 }

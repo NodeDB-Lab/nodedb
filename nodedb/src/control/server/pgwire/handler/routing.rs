@@ -50,11 +50,6 @@ impl NodeDbPgHandler {
         // planning call chain — no shared mutable state.
         let (clean_sql, has_returning) = super::returning::strip_returning(&clean_sql);
 
-        // Temp tables: planning now goes through nodedb-sql which resolves
-        // tables via SqlCatalog. Temp table support will be added to SqlCatalog.
-        let temp_tables = self.sessions.temp_mem_tables(addr);
-        let _ = &temp_tables; // suppress unused warning
-
         // Check plan cache before full planning. Cache key includes schema_version
         // for automatic invalidation on DDL. RLS policies and permissions are still
         // validated per-query after cache lookup — caching does not bypass security.
@@ -92,8 +87,6 @@ impl NodeDbPgHandler {
 
             planned
         };
-
-        // Temp tables deregistration no longer needed — planning uses nodedb-sql.
 
         if tasks.is_empty() {
             return Ok(vec![Response::Execution(Tag::new("OK"))]);

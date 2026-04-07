@@ -20,7 +20,5 @@ sonic-rs = { workspace = true }
 rust_decimal = { workspace = true }
 rust-stemmers = { workspace = true }
 unicode-normalization = { workspace = true }
-datafusion = { workspace = true }
-datafusion-functions-window-common = { workspace = true }
 
 [dev-dependencies]

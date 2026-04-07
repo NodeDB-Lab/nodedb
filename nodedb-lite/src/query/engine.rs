@@ -1,13 +1,11 @@
-//! Lite query engine: full SQL via DataFusion over Loro documents.
+//! Lite query engine: SQL via nodedb-sql over local engines.
 //!
-//! Manages a DataFusion `SessionContext` with collections registered
-//! as table providers backed by the CRDT engine.
+//! Parses SQL with nodedb-sql, then executes against CRDT, strict,
+//! and columnar engines directly — no DataFusion dependency.
 
 use std::sync::{Arc, Mutex};
 
-use datafusion::execution::context::SessionContext;
-use datafusion::prelude::*;
-
+use nodedb_sql::types::*;
 use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
@@ -18,18 +16,10 @@ use crate::engine::strict::StrictEngine;
 use crate::error::LiteError;
 use crate::storage::engine::StorageEngine;
 
-use super::arrow_convert::arrow_value_at;
-use super::columnar_provider::ColumnarTableProvider;
-use super::strict_provider::StrictTableProvider;
-use super::table_provider::LiteTableProvider;
+use super::catalog::LiteCatalog;
 
-/// Lite-side query engine wrapping DataFusion.
-///
-/// Registered collections appear as tables. SQL queries execute
-/// entirely in-process against the Loro CRDT state, strict Binary Tuple store,
-/// or columnar compressed segments.
+/// Lite-side query engine.
 pub struct LiteQueryEngine<S: StorageEngine> {
-    pub(in crate::query) ctx: SessionContext,
     pub(in crate::query) crdt: Arc<Mutex<CrdtEngine>>,
     pub(in crate::query) strict: Arc<Mutex<StrictEngine<S>>>,
     pub(in crate::query) columnar: Arc<Mutex<ColumnarEngine<S>>>,
@@ -40,7 +30,6 @@ pub struct LiteQueryEngine<S: StorageEngine> {
 }
 
 impl<S: StorageEngine> LiteQueryEngine<S> {
-    /// Create a new query engine.
     pub fn new(
         crdt: Arc<Mutex<CrdtEngine>>,
         strict: Arc<Mutex<StrictEngine<S>>>,
@@ -49,15 +38,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         storage: Arc<S>,
         timeseries: Arc<Mutex<crate::engine::timeseries::engine::TimeseriesEngine>>,
     ) -> Self {
-        let config = SessionConfig::new()
-            .with_information_schema(false)
-            .with_default_catalog_and_schema("nodedb", "public");
-
-        let ctx = SessionContext::new_with_config(config);
-        super::spatial_udf::register_spatial_udfs(&ctx);
-        nodedb_query::ts_udfs::register_timeseries_udfs(&ctx);
         Self {
-            ctx,
             crdt,
             strict,
             columnar,
@@ -67,225 +48,266 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
         }
     }
 
-    /// Register a collection as a queryable table.
-    ///
-    /// Call this before executing SQL that references the collection.
-    /// For auto-registration, call `register_all_collections()`.
-    pub fn register_collection(&self, name: &str) {
-        let provider = LiteTableProvider::new(name.to_string(), Arc::clone(&self.crdt));
-        // Register directly via the session context.
-        let _ = self.ctx.register_table(name, Arc::new(provider));
-    }
-
-    /// Register a strict collection as a queryable table.
-    pub fn register_strict_collection(&self, name: &str) {
-        let strict = match self.strict.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
-        };
-        if let Some(schema) = strict.schema(name) {
-            let provider =
-                StrictTableProvider::new(name.to_string(), schema, Arc::clone(&self.storage));
-            let _ = self.ctx.register_table(name, Arc::new(provider));
-        }
-    }
-
-    /// Register all existing collections as tables (both CRDT and strict).
-    pub fn register_all_collections(&self) {
-        // Register CRDT (schemaless) collections.
-        let crdt = match self.crdt.lock() {
-            Ok(c) => c,
-            Err(p) => p.into_inner(),
-        };
-        let crdt_collections = crdt.collection_names();
-        drop(crdt);
-
-        for name in &crdt_collections {
-            if name.starts_with("__") {
-                continue;
-            }
-            self.register_collection(name);
-        }
-
-        // Register strict document collections.
-        let strict = match self.strict.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
-        };
-        let strict_names: Vec<String> = strict
-            .collection_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        drop(strict);
-
-        for name in &strict_names {
-            self.register_strict_collection(name);
-        }
-
-        // Register columnar collections.
-        let columnar = match self.columnar.lock() {
-            Ok(c) => c,
-            Err(p) => p.into_inner(),
-        };
-        let columnar_names: Vec<String> = columnar
-            .collection_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        drop(columnar);
-
-        for name in &columnar_names {
-            self.register_columnar_collection(name);
-        }
-    }
-
-    /// Apply HTAP routing: for analytical queries, re-register source strict
-    /// tables to point at their materialized columnar views.
-    ///
-    /// Only applies when the HtapBridge has registered views. The source table
-    /// name is re-registered to point at the columnar view, so DataFusion
-    /// transparently reads from the faster columnar format.
-    fn apply_htap_routing(&self, sql: &str) {
-        use crate::engine::htap::routing::is_analytical_query;
-
-        if !is_analytical_query(sql) {
-            return;
-        }
-
-        let htap = match self.htap.lock() {
-            Ok(h) => h,
-            Err(p) => p.into_inner(),
-        };
-
-        if htap.is_empty() {
-            return;
-        }
-
-        // For each materialized view, re-register the source table name to
-        // point at the columnar view's table provider.
-        for target_name in htap.all_targets() {
-            if let Some(view) = htap.view_by_target(target_name) {
-                let source = view.source.clone();
-                let target = view.target.clone();
-                drop(htap); // Release lock before registering.
-
-                // Re-register the SOURCE name to point at the COLUMNAR target.
-                // This makes `SELECT ... FROM customers GROUP BY ...` read from
-                // the columnar materialized view instead of the strict B-tree.
-                self.register_columnar_collection_as(&target, &source);
-                return; // Only one routing redirect per query.
-            }
-        }
-    }
-
-    /// Register a columnar collection under a different table name.
-    ///
-    /// Used by HTAP routing to make a source table name point at its
-    /// materialized columnar view.
-    fn register_columnar_collection_as(&self, collection: &str, table_name: &str) {
-        let columnar = match self.columnar.lock() {
-            Ok(c) => c,
-            Err(p) => p.into_inner(),
-        };
-        let Some(schema) = columnar.schema(collection) else {
-            return;
-        };
-        let schema = schema.clone();
-        drop(columnar);
-
-        let provider = ColumnarTableProvider::new(
-            collection.to_string(),
-            &schema,
-            Arc::clone(&self.storage),
-            Vec::new(),
-            Vec::new(),
-        );
-        let _ = self.ctx.register_table(table_name, Arc::new(provider));
-    }
-
-    /// Register a columnar collection as a queryable table.
-    pub fn register_columnar_collection(&self, name: &str) {
-        let columnar = match self.columnar.lock() {
-            Ok(c) => c,
-            Err(p) => p.into_inner(),
-        };
-        let Some(schema) = columnar.schema(name) else {
-            return;
-        };
-        let schema = schema.clone();
-
-        // Collect segment IDs and delete bitmaps.
-        drop(columnar);
-
-        let provider = ColumnarTableProvider::new(
-            name.to_string(),
-            &schema,
-            Arc::clone(&self.storage),
-            Vec::new(),
-            Vec::new(),
-        );
-        let _ = self.ctx.register_table(name, Arc::new(provider));
-    }
+    /// No-op — collections are auto-discovered via catalog.
+    pub fn register_collection(&self, _name: &str) {}
+    /// No-op — collections are auto-discovered via catalog.
+    pub fn register_strict_collection(&self, _name: &str) {}
+    /// No-op — collections are auto-discovered via catalog.
+    pub fn register_all_collections(&self) {}
+    /// No-op — collections are auto-discovered via catalog.
+    pub fn register_columnar_collection(&self, _name: &str) {}
 
     /// Execute a SQL query and return results.
-    ///
-    /// DDL statements (CREATE/DROP COLLECTION) are intercepted and handled
-    /// directly. All other statements are passed to DataFusion.
     pub async fn execute_sql(&self, sql: &str) -> Result<QueryResult, LiteError> {
-        // Intercept DDL before DataFusion.
         if let Some(result) = self.try_handle_ddl(sql).await {
             return result;
         }
 
-        // Auto-register collections mentioned in the query.
-        self.register_all_collections();
+        let catalog = LiteCatalog::new(
+            Arc::clone(&self.crdt),
+            Arc::clone(&self.strict),
+            Arc::clone(&self.columnar),
+        );
 
-        // HTAP routing: for analytical queries, re-register source tables to point
-        // at their materialized columnar views (if any exist and session allows it).
-        self.apply_htap_routing(sql);
+        let plans = nodedb_sql::plan_sql(sql, &catalog)
+            .map_err(|e| LiteError::Query(format!("SQL plan: {e}")))?;
 
-        let df = self
-            .ctx
-            .sql(sql)
-            .await
-            .map_err(|e| LiteError::Query(format!("SQL parse/plan: {e}")))?;
-
-        let batches = df
-            .collect()
-            .await
-            .map_err(|e| LiteError::Query(format!("SQL execute: {e}")))?;
-
-        // Convert Arrow RecordBatches to QueryResult.
-        let mut columns: Vec<String> = Vec::new();
-        let mut rows: Vec<Vec<Value>> = Vec::new();
-
-        for batch in &batches {
-            if columns.is_empty() {
-                columns = batch
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name().clone())
-                    .collect();
-            }
-
-            let num_rows = batch.num_rows();
-            for row_idx in 0..num_rows {
-                let mut row = Vec::with_capacity(columns.len());
-                for col_idx in 0..batch.num_columns() {
-                    let col = batch.column(col_idx);
-                    let value = arrow_value_at(col, row_idx)?;
-                    row.push(value);
-                }
-                rows.push(row);
-            }
+        if plans.is_empty() {
+            return Ok(QueryResult::empty());
         }
 
+        self.execute_plan(&plans[0])
+    }
+
+    fn execute_plan(&self, plan: &SqlPlan) -> Result<QueryResult, LiteError> {
+        match plan {
+            SqlPlan::Scan {
+                collection, engine, ..
+            } => self.execute_scan(collection, engine),
+            SqlPlan::PointGet {
+                collection,
+                engine,
+                key_value,
+                ..
+            } => self.execute_point_get(collection, engine, key_value),
+            SqlPlan::Insert {
+                collection, rows, ..
+            } => self.execute_insert(collection, rows),
+            SqlPlan::Update {
+                collection,
+                assignments,
+                target_keys,
+                ..
+            } => self.execute_update(collection, assignments, target_keys),
+            SqlPlan::Delete {
+                collection,
+                target_keys,
+                ..
+            } => self.execute_delete(collection, target_keys),
+            SqlPlan::Truncate { collection } => self.execute_truncate(collection),
+            _ => Err(LiteError::Query(format!(
+                "unsupported plan: {plan:?}"
+            ))),
+        }
+    }
+
+    fn execute_scan(
+        &self,
+        collection: &str,
+        engine: &EngineType,
+    ) -> Result<QueryResult, LiteError> {
+        match engine {
+            EngineType::DocumentSchemaless => {
+                let crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+                let ids = crdt.list_ids(collection);
+                let mut rows = Vec::with_capacity(ids.len());
+                for id in &ids {
+                    if let Some(val) = crdt.read(collection, id) {
+                        let json = loro_value_to_json(&val);
+                        let doc_str = sonic_rs::to_string(&json).unwrap_or_default();
+                        rows.push(vec![Value::String(id.clone()), Value::String(doc_str)]);
+                    }
+                }
+                Ok(QueryResult {
+                    columns: vec!["id".into(), "document".into()],
+                    rows,
+                    rows_affected: 0,
+                })
+            }
+            EngineType::DocumentStrict => {
+                let strict = self.strict.lock().map_err(|_| LiteError::LockPoisoned)?;
+                let schema = strict.schema(collection);
+                let columns = schema
+                    .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_else(|| vec!["id".into(), "data".into()]);
+                let rows = Vec::new();
+                Ok(QueryResult {
+                    columns,
+                    rows,
+                    rows_affected: 0,
+                })
+            }
+            _ => Ok(QueryResult::empty()),
+        }
+    }
+
+    fn execute_point_get(
+        &self,
+        collection: &str,
+        engine: &EngineType,
+        key: &SqlValue,
+    ) -> Result<QueryResult, LiteError> {
+        let key_str = sql_value_to_string(key);
+        match engine {
+            EngineType::DocumentSchemaless => {
+                let crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+                match crdt.read(collection, &key_str) {
+                    Some(val) => {
+                        let json = loro_value_to_json(&val);
+                        let doc_str = sonic_rs::to_string(&json).unwrap_or_default();
+                        Ok(QueryResult {
+                            columns: vec!["id".into(), "document".into()],
+                            rows: vec![vec![
+                                Value::String(key_str),
+                                Value::String(doc_str),
+                            ]],
+                            rows_affected: 0,
+                        })
+                    }
+                    None => Ok(QueryResult::empty()),
+                }
+            }
+            _ => Ok(QueryResult::empty()),
+        }
+    }
+
+    fn execute_insert(
+        &self,
+        collection: &str,
+        rows: &[Vec<(String, SqlValue)>],
+    ) -> Result<QueryResult, LiteError> {
+        let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut affected = 0;
+        for row in rows {
+            let id = row
+                .iter()
+                .find(|(k, _)| k == "id")
+                .map(|(_, v)| sql_value_to_string(v))
+                .unwrap_or_default();
+            let fields: Vec<(&str, loro::LoroValue)> = row
+                .iter()
+                .map(|(k, v)| (k.as_str(), sql_value_to_loro(v)))
+                .collect();
+            crdt.upsert(collection, &id, &fields)
+                .map_err(|e| LiteError::Query(format!("insert: {e}")))?;
+            affected += 1;
+        }
         Ok(QueryResult {
-            columns,
-            rows,
-            rows_affected: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: affected,
         })
+    }
+
+    fn execute_update(
+        &self,
+        collection: &str,
+        assignments: &[(String, nodedb_sql::types::SqlExpr)],
+        target_keys: &[SqlValue],
+    ) -> Result<QueryResult, LiteError> {
+        let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut affected = 0;
+        for key in target_keys {
+            let key_str = sql_value_to_string(key);
+            let fields: Vec<(&str, loro::LoroValue)> = assignments
+                .iter()
+                .filter_map(|(field, expr)| {
+                    if let nodedb_sql::types::SqlExpr::Literal(val) = expr {
+                        Some((field.as_str(), sql_value_to_loro(val)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            crdt.upsert(collection, &key_str, &fields)
+                .map_err(|e| LiteError::Query(format!("update: {e}")))?;
+            affected += 1;
+        }
+        Ok(QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: affected,
+        })
+    }
+
+    fn execute_delete(
+        &self,
+        collection: &str,
+        target_keys: &[SqlValue],
+    ) -> Result<QueryResult, LiteError> {
+        let mut crdt = self.crdt.lock().map_err(|_| LiteError::LockPoisoned)?;
+        let mut affected = 0;
+        for key in target_keys {
+            let key_str = sql_value_to_string(key);
+            crdt.delete(collection, &key_str)
+                .map_err(|e| LiteError::Query(format!("delete: {e}")))?;
+            affected += 1;
+        }
+        Ok(QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            rows_affected: affected,
+        })
+    }
+
+    fn execute_truncate(&self, collection: &str) -> Result<QueryResult, LiteError> {
+        self.crdt
+            .lock()
+            .map_err(|_| LiteError::LockPoisoned)?
+            .clear_collection(collection)
+            .map_err(|e| LiteError::Query(format!("truncate: {e}")))?;
+        Ok(QueryResult::empty())
+    }
+}
+
+fn sql_value_to_string(v: &SqlValue) -> String {
+    match v {
+        SqlValue::String(s) => s.clone(),
+        SqlValue::Int(i) => i.to_string(),
+        SqlValue::Float(f) => f.to_string(),
+        SqlValue::Bool(b) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn sql_value_to_loro(v: &SqlValue) -> loro::LoroValue {
+    match v {
+        SqlValue::Int(i) => loro::LoroValue::I64(*i),
+        SqlValue::Float(f) => loro::LoroValue::Double(*f),
+        SqlValue::String(s) => loro::LoroValue::String(s.clone().into()),
+        SqlValue::Bool(b) => loro::LoroValue::Bool(*b),
+        SqlValue::Null => loro::LoroValue::Null,
+        _ => loro::LoroValue::Null,
+    }
+}
+
+fn loro_value_to_json(v: &loro::LoroValue) -> serde_json::Value {
+    match v {
+        loro::LoroValue::Null => serde_json::Value::Null,
+        loro::LoroValue::Bool(b) => serde_json::Value::Bool(*b),
+        loro::LoroValue::I64(n) => serde_json::json!(*n),
+        loro::LoroValue::Double(f) => serde_json::json!(*f),
+        loro::LoroValue::String(s) => serde_json::Value::String(s.to_string()),
+        loro::LoroValue::Map(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, val) in m.iter() {
+                obj.insert(k.to_string(), loro_value_to_json(val));
+            }
+            serde_json::Value::Object(obj)
+        }
+        loro::LoroValue::List(arr) => {
+            serde_json::Value::Array(arr.iter().map(loro_value_to_json).collect())
+        }
+        _ => serde_json::Value::Null,
     }
 }

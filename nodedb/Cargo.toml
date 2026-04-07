@@ -127,11 +127,7 @@ libc = { workspace = true }
 # io_uring for Data Plane batched I/O (columnar reads, WAL)
 io-uring = { workspace = true }
 
-# Query engine (Control Plane SQL/DSL planning)
-datafusion = { workspace = true }
-datafusion-common = { workspace = true }
-datafusion-expr = { workspace = true }
-datafusion-physical-plan = { workspace = true }
+# SQL parser (used by function body validation and procedural executor)
 sqlparser = "0.61"
 
 # Memory allocator

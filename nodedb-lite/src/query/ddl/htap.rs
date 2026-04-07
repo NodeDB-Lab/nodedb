@@ -104,8 +104,6 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
             })?;
         }
 
-        let _ = self.ctx.deregister_table(&target);
-
         Ok(QueryResult {
             columns: vec!["result".into()],
             rows: vec![vec![Value::String(format!(

@@ -1,4 +1,3 @@
-pub mod arrow_conv;
 pub mod bindings;
 pub mod core;
 pub mod eval;

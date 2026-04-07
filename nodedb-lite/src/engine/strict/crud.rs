@@ -265,7 +265,7 @@ impl<S: StorageEngine> StrictEngine<S> {
         &self,
         collection: &str,
         col_idx: usize,
-    ) -> Result<datafusion::arrow::array::ArrayRef, LiteError> {
+    ) -> Result<arrow::array::ArrayRef, LiteError> {
         let state = self.get_state(collection)?;
         let tuples = self.scan_raw(collection).await?;
         let refs: Vec<&[u8]> = tuples.iter().map(|t| t.as_slice()).collect();
@@ -279,7 +279,7 @@ impl<S: StorageEngine> StrictEngine<S> {
         &self,
         collection: &str,
         col_indices: &[usize],
-    ) -> Result<Vec<datafusion::arrow::array::ArrayRef>, LiteError> {
+    ) -> Result<Vec<arrow::array::ArrayRef>, LiteError> {
         let state = self.get_state(collection)?;
         let tuples = self.scan_raw(collection).await?;
         let refs: Vec<&[u8]> = tuples.iter().map(|t| t.as_slice()).collect();
