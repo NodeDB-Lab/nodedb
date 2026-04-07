@@ -39,7 +39,8 @@ pub(super) fn parse_statement(
         Some(Token::Savepoint) => parse_savepoint(tokens, pos),
         Some(Token::Release) => parse_release(tokens, pos),
         Some(Token::Ident(_)) => {
-            if *pos + 1 < tokens.len() && tokens[*pos + 1] == Token::Assign {
+            // Check for assignment: `var := expr` or `NEW.field := expr`
+            if is_assignment_ahead(tokens, *pos) {
                 parse_assign(tokens, pos)
             } else {
                 Err(ProceduralError::parse(format!(
@@ -75,9 +76,47 @@ fn parse_declare(tokens: &[Token], pos: &mut usize) -> Result<Statement, Procedu
     })
 }
 
-/// `name := expr;`
+/// Check if tokens at `pos` form an assignment: `ident := ...` or `ident.ident := ...`
+fn is_assignment_ahead(tokens: &[Token], pos: usize) -> bool {
+    let mut i = pos;
+    // Skip ident
+    if !matches!(tokens.get(i), Some(Token::Ident(_))) {
+        return false;
+    }
+    i += 1;
+    // Skip optional `.ident` chains (e.g., NEW.status)
+    while i + 1 < tokens.len() {
+        if let Some(Token::Ident(dot)) = tokens.get(i) {
+            if dot == "." {
+                i += 1; // skip dot
+                if matches!(tokens.get(i), Some(Token::Ident(_))) {
+                    i += 1; // skip field name
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    matches!(tokens.get(i), Some(Token::Assign))
+}
+
+/// `name := expr;` or `NEW.field := expr;`
 fn parse_assign(tokens: &[Token], pos: &mut usize) -> Result<Statement, ProceduralError> {
-    let target = expect_ident(tokens, pos)?;
+    // Collect dotted target: `name` or `NEW.field`
+    let mut target = expect_ident(tokens, pos)?;
+    while let Some(Token::Ident(dot)) = tokens.get(*pos) {
+        if dot == "." {
+            *pos += 1; // skip dot
+            let field = expect_ident(tokens, pos)?;
+            target = format!("{target}.{field}");
+        } else {
+            break;
+        }
+    }
     expect_token(tokens, pos, &Token::Assign)?;
     let expr = collect_sql_until(tokens, pos, &[Token::Semicolon])?;
     skip_if(tokens, pos, &Token::Semicolon);

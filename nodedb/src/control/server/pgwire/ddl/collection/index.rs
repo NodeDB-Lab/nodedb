@@ -28,7 +28,7 @@ pub fn create_index(
     let is_unique = upper.contains("UNIQUE INDEX");
     let idx_offset = if is_unique { 3 } else { 2 }; // skip "CREATE UNIQUE INDEX" vs "CREATE INDEX"
 
-    if parts.len() < idx_offset + 4 {
+    if parts.len() < idx_offset + 3 {
         return Err(sqlstate_error(
             "42601",
             "syntax: CREATE [UNIQUE] INDEX <name> ON <collection> (<field>) [WHERE ...]",
@@ -39,8 +39,26 @@ pub fn create_index(
     if !parts[idx_offset + 1].eq_ignore_ascii_case("ON") {
         return Err(sqlstate_error("42601", "expected ON after index name"));
     }
-    let collection = parts[idx_offset + 2];
-    let field = parts[idx_offset + 3].trim_matches(|c| c == '(' || c == ')');
+
+    // Handle both "collection (field)" and "collection(field)" formats.
+    let (collection, field) = {
+        let raw = parts[idx_offset + 2];
+        if let Some(paren_pos) = raw.find('(') {
+            // Combined: "indexed_col(role)"
+            let coll = &raw[..paren_pos];
+            let fld = raw[paren_pos..].trim_matches(|c| c == '(' || c == ')');
+            (coll.to_string(), fld.to_string())
+        } else if parts.len() > idx_offset + 3 {
+            // Separate: "indexed_col" "(role)"
+            let fld = parts[idx_offset + 3].trim_matches(|c| c == '(' || c == ')');
+            (raw.to_string(), fld.to_string())
+        } else {
+            return Err(sqlstate_error(
+                "42601",
+                "syntax: CREATE [UNIQUE] INDEX <name> ON <collection> (<field>) [WHERE ...]",
+            ));
+        }
+    };
 
     // Parse optional WHERE condition for conditional indexes.
     let where_condition = upper
@@ -53,7 +71,7 @@ pub fn create_index(
 
     // Verify collection exists and user has CREATE permission.
     if let Some(catalog) = state.credentials.catalog() {
-        match catalog.get_collection(tenant_id.as_u32(), collection) {
+        match catalog.get_collection(tenant_id.as_u32(), &collection) {
             Ok(Some(coll)) if coll.is_active => {
                 // Check: must be collection owner, superuser, or tenant_admin.
                 let is_owner = coll.owner == identity.username;
@@ -79,7 +97,7 @@ pub fn create_index(
     // Index ownership inherits from the collection owner.
     let catalog = state.credentials.catalog();
     let index_owner = if let Some(cat) = catalog {
-        cat.get_collection(tenant_id.as_u32(), collection)
+        cat.get_collection(tenant_id.as_u32(), &collection)
             .ok()
             .flatten()
             .map(|c| c.owner)
