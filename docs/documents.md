@@ -24,7 +24,7 @@ Flexible JSON-like documents stored as MessagePack. No schema required — field
 ### Examples
 
 ```sql
-CREATE COLLECTION users TYPE document;
+CREATE COLLECTION users;
 
 -- Fields are flexible — no schema needed
 INSERT INTO users { name: 'Alice', email: 'alice@example.com', age: 30 };
@@ -61,7 +61,7 @@ Schema-enforced documents stored as Binary Tuples with O(1) field extraction. Th
 ### Examples
 
 ```sql
-CREATE COLLECTION orders TYPE strict (
+CREATE COLLECTION orders TYPE DOCUMENT STRICT (
     id UUID DEFAULT gen_uuid_v7(),
     customer_id UUID NOT NULL,
     total DECIMAL NOT NULL,

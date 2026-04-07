@@ -57,12 +57,12 @@ curl http://localhost:6480/health
 
 ```sql
 -- Create a document collection and insert data
-CREATE COLLECTION users TYPE document;
+CREATE COLLECTION users;
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 SELECT * FROM users;
 
 -- Create a vector index and search
-CREATE COLLECTION articles TYPE document;
+CREATE COLLECTION articles;
 CREATE VECTOR INDEX articles_vec ON articles METRIC cosine DIM 384;
 SEARCH articles USING VECTOR(embedding, ARRAY[...], 10);
 ```

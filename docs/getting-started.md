@@ -196,7 +196,7 @@ Use SQL for complex queries and rapid prototyping. Use native methods for high-t
 
 ```sql
 -- Create a schemaless collection
-CREATE COLLECTION users TYPE document;
+CREATE COLLECTION users;
 
 -- Insert some data
 INSERT INTO users { name: 'Alice', email: 'alice@example.com', age: 30 };
@@ -211,7 +211,7 @@ SELECT name, email FROM users WHERE age > 25;
 
 ```sql
 -- Create a strict collection with a defined schema
-CREATE COLLECTION orders TYPE strict (
+CREATE COLLECTION orders TYPE DOCUMENT STRICT (
     id UUID DEFAULT gen_uuid_v7(),
     customer_id UUID,
     total DECIMAL,
@@ -229,7 +229,7 @@ SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC;
 
 ```sql
 -- Create a collection with a vector index
-CREATE COLLECTION articles TYPE document;
+CREATE COLLECTION articles;
 CREATE VECTOR INDEX idx_articles_embedding ON articles METRIC cosine DIM 384;
 
 -- Insert documents with embeddings
@@ -260,7 +260,7 @@ SELECT * FROM graph::pagerank('knows', { iterations: 20 });
 
 ```sql
 -- Create a KV collection
-CREATE COLLECTION sessions TYPE kv;
+CREATE COLLECTION sessions TYPE KEY_VALUE (key TEXT PRIMARY KEY);
 
 -- Set with TTL
 INSERT INTO sessions { key: 'sess_abc', user_id: 'alice', ttl: 3600 };
@@ -275,12 +275,12 @@ Columnar collections store data in compressed columns with block-level skip. Thr
 
 ```sql
 -- Plain columnar: general analytics
-CREATE COLLECTION web_events (
+CREATE COLLECTION web_events TYPE COLUMNAR (
     ts TIMESTAMP,
     user_id UUID,
     page VARCHAR,
     duration_ms INT
-) WITH (storage = 'columnar');
+);
 
 SELECT page, AVG(duration_ms), COUNT(*)
 FROM web_events
@@ -289,11 +289,11 @@ GROUP BY page
 ORDER BY COUNT(*) DESC;
 
 -- Timeseries profile: TIME_KEY column drives partition-by-time and block skip
-CREATE COLLECTION cpu_metrics (
+CREATE COLLECTION cpu_metrics TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     cpu FLOAT
-) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h');
+) WITH profile = 'timeseries', partition_by = '1h';
 
 -- CREATE TIMESERIES is a convenience alias for the timeseries profile
 -- CREATE TIMESERIES cpu_metrics;
@@ -304,10 +304,10 @@ WHERE ts > now() - INTERVAL '1 hour'
 GROUP BY bucket, host;
 
 -- Spatial profile: SPATIAL_INDEX column gets an automatic R*-tree
-CREATE COLLECTION locations (
+CREATE COLLECTION locations TYPE COLUMNAR (
     geom GEOMETRY SPATIAL_INDEX,
     name VARCHAR
-) WITH (storage = 'columnar');
+);
 
 SELECT name, ST_Distance(geom, ST_Point(-73.98, 40.75)) AS dist
 FROM locations

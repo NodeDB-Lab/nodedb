@@ -27,15 +27,15 @@ Spatial is a **columnar profile**. Collections with a `SPATIAL_INDEX` column mod
 
 ```sql
 -- Create a columnar collection with an automatic R*-tree on the geometry column
-CREATE COLLECTION restaurants (
+CREATE COLLECTION restaurants TYPE COLUMNAR (
     location GEOMETRY SPATIAL_INDEX,
     name VARCHAR,
     cuisine VARCHAR,
     rating FLOAT
-) WITH (storage = 'columnar');
+);
 
 -- Alternatively, add a spatial index to a document collection
-CREATE COLLECTION restaurants TYPE document;
+CREATE COLLECTION restaurants;
 CREATE SPATIAL INDEX ON restaurants FIELDS location;
 
 -- Insert with GeoJSON geometry
@@ -81,18 +81,18 @@ The `SPATIAL_INDEX` column modifier designates a geometry column for automatic R
 
 ```sql
 -- Spatial columnar collection
-CREATE COLLECTION locations (
+CREATE COLLECTION locations TYPE COLUMNAR (
     geom GEOMETRY SPATIAL_INDEX,
     name VARCHAR
-) WITH (storage = 'columnar');
+);
 
 -- Combine with TIME_KEY for fleet tracking or IoT
-CREATE COLLECTION fleet_positions (
+CREATE COLLECTION fleet_positions TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     vehicle_id VARCHAR,
     position GEOMETRY SPATIAL_INDEX,
     speed FLOAT
-) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1d');
+) WITH profile = 'timeseries', partition_by = '1d';
 ```
 
 **Query execution model:**

@@ -203,10 +203,10 @@ TRUNCATE users;
 
 ```sql
 -- Schemaless document collection (default)
-CREATE COLLECTION users TYPE document;
+CREATE COLLECTION users;
 
 -- Strict schema (Binary Tuple encoding, O(1) field extraction)
-CREATE COLLECTION orders TYPE strict (
+CREATE COLLECTION orders TYPE DOCUMENT STRICT (
     id UUID DEFAULT gen_uuid_v7(),
     customer_id UUID,
     total DECIMAL,
@@ -215,7 +215,8 @@ CREATE COLLECTION orders TYPE strict (
 );
 
 -- Key-Value collection
-CREATE COLLECTION sessions TYPE kv;
+CREATE COLLECTION sessions TYPE KEY_VALUE (key TEXT PRIMARY KEY);
+-- extra columns are optional typed value fields
 
 -- Graph collection
 CREATE COLLECTION knows TYPE graph;
@@ -235,7 +236,7 @@ DESCRIBE users;
 
 #### Unified Columnar DDL
 
-All columnar variants (plain, timeseries, spatial) use `CREATE COLLECTION ... WITH (storage = 'columnar', ...)`. Column modifiers designate special columns:
+All columnar variants (plain, timeseries, spatial) use `CREATE COLLECTION ... TYPE COLUMNAR (...)`. Column modifiers designate special columns:
 
 | Modifier        | Column type              | Effect                                                                                                                          |
 | --------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
@@ -244,28 +245,28 @@ All columnar variants (plain, timeseries, spatial) use `CREATE COLLECTION ... WI
 
 ```sql
 -- Plain columnar
-CREATE COLLECTION logs (
+CREATE COLLECTION logs TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     level VARCHAR,
     message VARCHAR
-) WITH (storage = 'columnar');
+);
 
 -- Timeseries profile (TIME_KEY required)
-CREATE COLLECTION metrics (
+CREATE COLLECTION metrics TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     cpu FLOAT
-) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h', retention = '90d');
+) WITH profile = 'timeseries', partition_by = '1h', retention = '90d';
 
 -- CREATE TIMESERIES is a convenience alias equivalent to profile = 'timeseries'
 CREATE TIMESERIES metrics;
 
 -- Spatial profile (SPATIAL_INDEX required)
-CREATE COLLECTION locations (
+CREATE COLLECTION locations TYPE COLUMNAR (
     geom GEOMETRY SPATIAL_INDEX,
     name VARCHAR
-) WITH (storage = 'columnar');
+);
 ```
 
 ### Schema Evolution
@@ -622,15 +623,15 @@ KV collections also support the [Redis wire protocol](kv.md#redis-compatible-acc
 ### Timeseries
 
 ```sql
--- Create (convenience alias; equivalent to WITH (storage = 'columnar', profile = 'timeseries'))
+-- Create (convenience alias; equivalent to TYPE COLUMNAR (...) WITH profile = 'timeseries')
 CREATE TIMESERIES metrics;
 
 -- Full form with TIME_KEY modifier
-CREATE COLLECTION metrics (
+CREATE COLLECTION metrics TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     cpu_load FLOAT
-) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h');
+) WITH profile = 'timeseries', partition_by = '1h';
 
 -- Ingest (also via ILP protocol on port 8086)
 INSERT INTO metrics (ts, host, cpu_load) VALUES (now(), 'server01', 0.65);

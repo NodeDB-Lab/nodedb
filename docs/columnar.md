@@ -37,37 +37,37 @@ Columnar collections can specialize via profiles:
 
 ## DDL Syntax
 
-The unified `CREATE COLLECTION` syntax for columnar collections uses `WITH (storage = 'columnar')`. Column modifiers designate special columns:
+The unified `CREATE COLLECTION` syntax for columnar collections uses `TYPE COLUMNAR (...)`. Column modifiers designate special columns:
 
-| Modifier | Applies to | Effect |
-| --- | --- | --- |
-| `TIME_KEY` | `TIMESTAMP` / `DATETIME` columns | Designates the primary time column. Enables partition-by-time, block-level skip, and retention policies. Required for the timeseries profile. |
-| `SPATIAL_INDEX` | `GEOMETRY` columns | Automatically builds and maintains an R*-tree index on this column. Required for the spatial profile. |
+| Modifier        | Applies to                       | Effect                                                                                                                                        |
+| --------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TIME_KEY`      | `TIMESTAMP` / `DATETIME` columns | Designates the primary time column. Enables partition-by-time, block-level skip, and retention policies. Required for the timeseries profile. |
+| `SPATIAL_INDEX` | `GEOMETRY` columns               | Automatically builds and maintains an R\*-tree index on this column. Required for the spatial profile.                                        |
 
 ```sql
 -- Plain columnar collection
-CREATE COLLECTION logs (
+CREATE COLLECTION logs TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     level VARCHAR,
     message VARCHAR
-) WITH (storage = 'columnar');
+);
 
 -- Timeseries profile (TIME_KEY required)
-CREATE COLLECTION metrics (
+CREATE COLLECTION metrics TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     cpu FLOAT
-) WITH (storage = 'columnar', profile = 'timeseries', partition_by = '1h');
+) WITH profile = 'timeseries', partition_by = '1h';
 
 -- Spatial profile (SPATIAL_INDEX required)
-CREATE COLLECTION locations (
+CREATE COLLECTION locations TYPE COLUMNAR (
     geom GEOMETRY SPATIAL_INDEX,
     name VARCHAR
-) WITH (storage = 'columnar');
+);
 ```
 
-`CREATE TIMESERIES <name>` remains as a convenience alias for the timeseries profile — it is equivalent to the `WITH (storage = 'columnar', profile = 'timeseries')` form.
+`CREATE TIMESERIES <name>` remains as a convenience alias for the timeseries profile — it is equivalent to the `TYPE COLUMNAR (...) WITH profile = 'timeseries'` form.
 
 ## Physical Plan Types
 
@@ -75,7 +75,7 @@ The query planner emits different physical plan nodes for columnar queries:
 
 - **`ColumnarOp`** — Base plan for plain columnar collections. All profiles extend this.
 - **`TimeseriesOp`** — Extends `ColumnarOp` with `time_range` bounds and time bucketing. Used when a `TIME_KEY` column and time predicate are present.
-- **`SpatialOp`** — Extends `ColumnarOp` with R*-tree lookup. Used when a `SPATIAL_INDEX` column is referenced in a spatial predicate.
+- **`SpatialOp`** — Extends `ColumnarOp` with R\*-tree lookup. Used when a `SPATIAL_INDEX` column is referenced in a spatial predicate.
 
 All three share the same `columnar_memtables` (the in-memory L0 structure). Profile-specific logic is layered on top.
 
@@ -83,12 +83,12 @@ All three share the same `columnar_memtables` (the in-memory L0 structure). Prof
 
 ```sql
 -- Plain columnar collection with a time column
-CREATE COLLECTION logs (
+CREATE COLLECTION logs TYPE COLUMNAR (
     ts TIMESTAMP TIME_KEY,
     host VARCHAR,
     level VARCHAR,
     message VARCHAR
-) WITH (storage = 'columnar');
+);
 
 -- Ingest
 INSERT INTO logs (ts, host, level, message)
@@ -113,13 +113,13 @@ The real power of columnar is combining it with strict documents for hybrid tran
 
 ```sql
 -- OLTP: strict collection for real-time writes
-CREATE COLLECTION orders (
+CREATE COLLECTION orders TYPE DOCUMENT STRICT (
     id UUID DEFAULT gen_uuid_v7(),
     customer_id UUID,
     total DECIMAL,
     status STRING,
     created_at DATETIME DEFAULT now()
-) WITH (storage = 'strict');
+);
 
 -- OLAP: materialized view auto-replicates to columnar via CDC
 CREATE MATERIALIZED VIEW order_analytics AS
