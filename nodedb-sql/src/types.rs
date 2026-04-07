@@ -77,6 +77,10 @@ pub enum SqlPlan {
         join_type: JoinType,
         condition: Option<SqlExpr>,
         limit: usize,
+        /// Post-join projection: column names to keep (empty = all columns).
+        projection: Vec<Projection>,
+        /// Post-join filters (from WHERE clause).
+        filters: Vec<Filter>,
     },
 
     // ── Aggregation ──

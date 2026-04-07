@@ -15,4 +15,8 @@ pub struct PhysicalTask {
 
     /// The physical operation to execute.
     pub plan: PhysicalPlan,
+
+    /// When true, results from this task batch must be deduplicated
+    /// (e.g. UNION DISTINCT across multiple sub-queries).
+    pub post_dedup: bool,
 }

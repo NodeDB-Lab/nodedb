@@ -126,6 +126,8 @@ fn plan_select(
                 join_type: sq.join_type,
                 condition: None,
                 limit: 10000,
+                projection: Vec::new(),
+                filters: Vec::new(),
             };
         }
         return Ok(plan);
@@ -159,6 +161,8 @@ fn plan_select(
             join_type: sq.join_type,
             condition: None,
             limit: 10000,
+            projection: Vec::new(),
+            filters: Vec::new(),
         };
     }
 
