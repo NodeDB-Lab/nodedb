@@ -37,8 +37,8 @@ impl CoreLoop {
             }
         };
 
-        // For now, columnar UPDATE requires PK-based access.
-        // TODO: scan-based UPDATE with filter predicates.
+        // Columnar UPDATE: scan memtable rows matching filter predicates,
+        // then apply updates via PK-based MutationEngine (delete + re-insert).
         let schema = engine.schema().clone();
         let pk_cols: Vec<usize> = schema
             .columns

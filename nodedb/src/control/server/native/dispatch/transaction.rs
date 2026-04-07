@@ -87,6 +87,7 @@ pub(crate) async fn handle_commit(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResp
             tenant_id,
             vshard_id,
             plan: PhysicalPlan::Meta(MetaOp::TransactionBatch { plans }),
+            post_dedup: false,
         };
         if let Err(e) = dispatch_utils::dispatch_to_data_plane(
             ctx.state,

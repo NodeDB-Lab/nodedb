@@ -67,6 +67,7 @@ impl NodeDbPgHandler {
                 limit,
                 ref post_group_by,
                 ref post_aggregates,
+                ..
             },
         ) = task.plan
         {

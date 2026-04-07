@@ -560,7 +560,7 @@ impl SyncSession {
                 let msg: super::shape::handler::ShapeSubscribeMsg = frame.decode_body()?;
                 let registry = super::shape::registry::ShapeRegistry::new();
                 let tenant_id = self.tenant_id.map(|t| t.as_u32()).unwrap_or(0);
-                let current_lsn = 0u64; // TODO: get from WAL when wired
+                let current_lsn = self.server_clock.values().copied().max().unwrap_or(0);
                 let response = super::shape::handler::handle_subscribe(
                     &self.session_id,
                     tenant_id,

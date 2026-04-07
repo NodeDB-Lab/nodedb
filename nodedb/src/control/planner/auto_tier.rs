@@ -225,6 +225,7 @@ fn build_scan_task(
             gap_fill: gap_fill.to_string(),
             rls_filters: Vec::new(),
         }),
+        post_dedup: false,
     }
 }
 

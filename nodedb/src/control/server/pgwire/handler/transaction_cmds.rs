@@ -120,6 +120,7 @@ impl NodeDbPgHandler {
                 plan: crate::bridge::envelope::PhysicalPlan::Meta(
                     crate::bridge::physical_plan::MetaOp::TransactionBatch { plans },
                 ),
+                post_dedup: false,
             };
             if let Err(e) = self.dispatch_task_no_wal(batch_task).await {
                 tracing::warn!(error = %e, "transaction batch dispatch failed");

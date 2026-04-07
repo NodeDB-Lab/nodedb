@@ -46,6 +46,7 @@ pub(super) async fn execute_facet_counts_sql(
             fields: parsed.fields,
             limit_per_facet: parsed.limit_per_facet,
         }),
+        post_dedup: false,
     };
 
     let resp = handler.dispatch_task(task).await.map_err(|e| {
@@ -98,6 +99,7 @@ pub(super) async fn execute_search_with_facets_sql(
             fields: parsed.facets,
             limit_per_facet: 0, // All values.
         }),
+        post_dedup: false,
     };
 
     let facet_resp = handler.dispatch_task(facet_task).await.map_err(|e| {
