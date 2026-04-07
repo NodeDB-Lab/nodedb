@@ -23,22 +23,22 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
             name: table_name.clone(),
         })?;
 
-    let columns: Vec<String> = ins.columns.iter().map(|c| normalize_ident(c)).collect();
+    let columns: Vec<String> = ins.columns.iter().map(normalize_ident).collect();
 
     // Check for INSERT...SELECT.
-    if let Some(source) = &ins.source {
-        if let ast::SetExpr::Select(select) = &*source.body {
-            let source_plan = super::select::plan_query(
-                source,
-                catalog,
-                &crate::functions::registry::FunctionRegistry::new(),
-            )?;
-            return Ok(vec![SqlPlan::InsertSelect {
-                target: table_name,
-                source: Box::new(source_plan),
-                limit: 0,
-            }]);
-        }
+    if let Some(source) = &ins.source
+        && let ast::SetExpr::Select(_select) = &*source.body
+    {
+        let source_plan = super::select::plan_query(
+            source,
+            catalog,
+            &crate::functions::registry::FunctionRegistry::new(),
+        )?;
+        return Ok(vec![SqlPlan::InsertSelect {
+            target: table_name,
+            source: Box::new(source_plan),
+            limit: 0,
+        }]);
     }
 
     // VALUES clause.
@@ -261,14 +261,14 @@ fn collect_pk_equalities(expr: &ast::Expr, pk: &str, keys: &mut Vec<SqlValue>) {
             op: ast::BinaryOperator::Eq,
             right,
         } => {
-            if is_column(left, pk) {
-                if let Ok(v) = expr_to_sql_value(right) {
-                    keys.push(v);
-                }
-            } else if is_column(right, pk) {
-                if let Ok(v) = expr_to_sql_value(left) {
-                    keys.push(v);
-                }
+            if is_column(left, pk)
+                && let Ok(v) = expr_to_sql_value(right)
+            {
+                keys.push(v);
+            } else if is_column(right, pk)
+                && let Ok(v) = expr_to_sql_value(left)
+            {
+                keys.push(v);
             }
         }
         ast::Expr::BinaryOp {

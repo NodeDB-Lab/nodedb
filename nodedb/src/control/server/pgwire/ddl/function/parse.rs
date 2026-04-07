@@ -27,64 +27,6 @@ pub(crate) fn sql_type_to_arrow(sql_type: &str) -> Option<DataType> {
     }
 }
 
-/// Map SQL type to DataFusion SQL syntax (for CREATE TABLE statements).
-pub(super) fn sql_type_to_arrow_sql(sql_type: &str) -> &'static str {
-    match sql_type.to_uppercase().as_str() {
-        "TEXT" | "VARCHAR" | "STRING" => "VARCHAR",
-        "INT" | "INT4" | "INTEGER" => "INT",
-        "INT2" | "SMALLINT" => "SMALLINT",
-        "INT8" | "BIGINT" => "BIGINT",
-        "FLOAT" | "FLOAT4" | "REAL" => "REAL",
-        "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" => "DOUBLE",
-        "BOOL" | "BOOLEAN" => "BOOLEAN",
-        "BYTEA" | "BINARY" => "BYTEA",
-        _ => "VARCHAR", // fallback
-    }
-}
-
-/// Check if a SQL type name is recognized.
-pub(super) fn is_valid_sql_type(t: &str) -> bool {
-    sql_type_to_arrow(t).is_some()
-}
-
-/// Check if two Arrow DataTypes are compatible for return type validation.
-///
-/// Allows numeric promotions (e.g. Int32 body → Float64 declared).
-pub(super) fn types_compatible(actual: &DataType, expected: &DataType) -> bool {
-    if actual == expected {
-        return true;
-    }
-    // Allow Utf8 ↔ LargeUtf8.
-    if matches!(
-        (actual, expected),
-        (DataType::Utf8, DataType::LargeUtf8) | (DataType::LargeUtf8, DataType::Utf8)
-    ) {
-        return true;
-    }
-    // Allow numeric promotions.
-    if actual.is_numeric() && expected.is_numeric() {
-        return true;
-    }
-    false
-}
-
-/// Generate default literal values for parameters (used in the dummy CREATE TABLE).
-pub(super) fn default_values_for_params(params: &[FunctionParam]) -> String {
-    params
-        .iter()
-        .map(|p| match p.data_type.to_uppercase().as_str() {
-            "TEXT" | "VARCHAR" | "STRING" => "'x'".to_string(),
-            "INT" | "INT4" | "INTEGER" | "INT2" | "SMALLINT" | "INT8" | "BIGINT" => "0".to_string(),
-            "FLOAT" | "FLOAT4" | "REAL" | "FLOAT8" | "DOUBLE" | "DOUBLE PRECISION" => {
-                "0.0".to_string()
-            }
-            "BOOL" | "BOOLEAN" => "true".to_string(),
-            _ => "NULL".to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 // ─── Identifier & parameter parsing ──────────────────────────────────────────
 
 /// Validate that a name is a legal SQL identifier (alphanumeric + underscore).
@@ -131,7 +73,7 @@ pub(super) fn parse_parameters(params_str: &str) -> PgWireResult<Vec<FunctionPar
         validate_identifier(&param_name)?;
         // Type may be multi-word (e.g., "DOUBLE PRECISION", "FLOAT[]").
         let param_type = tokens[1..].join(" ").to_uppercase();
-        if !is_valid_sql_type(&param_type) {
+        if sql_type_to_arrow(&param_type).is_none() {
             return Err(sqlstate_error(
                 "42601",
                 &format!("unsupported parameter type: '{param_type}'"),
@@ -253,13 +195,6 @@ mod tests {
         assert_eq!(sql_type_to_arrow("DOUBLE"), Some(DataType::Float64));
         assert_eq!(sql_type_to_arrow("BOOLEAN"), Some(DataType::Boolean));
         assert_eq!(sql_type_to_arrow("NONSENSE"), None);
-    }
-
-    #[test]
-    fn type_compatibility() {
-        assert!(types_compatible(&DataType::Utf8, &DataType::Utf8));
-        assert!(types_compatible(&DataType::Int32, &DataType::Float64));
-        assert!(!types_compatible(&DataType::Utf8, &DataType::Int32));
     }
 
     #[test]

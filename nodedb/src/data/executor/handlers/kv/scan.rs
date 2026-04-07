@@ -70,7 +70,15 @@ impl CoreLoop {
 
             results.push(obj);
         }
-        let payload = match super::super::super::response_codec::encode_json_vec(&results) {
+        // Wrap results with cursor for pagination support.
+        let response_obj = if next_cursor.is_empty() {
+            serde_json::json!({ "entries": results })
+        } else {
+            use base64::Engine;
+            let cursor_b64 = base64::engine::general_purpose::STANDARD.encode(&next_cursor);
+            serde_json::json!({ "entries": results, "next_cursor": cursor_b64 })
+        };
+        let payload = match super::super::super::response_codec::encode_json(&response_obj) {
             Ok(p) => p,
             Err(e) => {
                 return self.response_error(

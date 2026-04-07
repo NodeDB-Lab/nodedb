@@ -3,8 +3,8 @@
 //! Extracted from `cold.rs` — contains the download, list, and Parquet
 //! read-with-predicate operations used by the query path for cold L2 data.
 
-use bytes::Bytes;
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use tracing::warn;

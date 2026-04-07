@@ -35,8 +35,6 @@ impl NodeDbQueryParser {
         sql: &str,
         client_types: &[Option<Type>],
     ) -> (Vec<Option<Type>>, Vec<FieldInfo>) {
-        use nodedb_sql::types::SqlCatalog;
-
         let catalog = crate::control::planner::catalog_adapter::OriginCatalog::new(
             Arc::clone(&self.state.credentials),
             1, // default tenant for parse-time inference
@@ -152,9 +150,7 @@ fn infer_result_fields(
         _ => return columns_to_field_info(&info.columns),
     };
 
-    if projected_cols.is_empty()
-        || projected_cols.iter().any(|p| matches!(p, Projection::Star))
-    {
+    if projected_cols.is_empty() || projected_cols.iter().any(|p| matches!(p, Projection::Star)) {
         return columns_to_field_info(&info.columns);
     }
 

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use nodedb_sql::types::{CollectionInfo, ColumnInfo, EngineType, SqlCatalog, SqlDataType};
 
 use crate::control::security::credential::CredentialStore;
-use crate::types::TenantId;
 
 /// Adapter bridging the NodeDB catalog to the `SqlCatalog` trait.
 pub struct OriginCatalog {

@@ -13,7 +13,7 @@ use crate::types::*;
 pub fn plan_join_from_select(
     select: &Select,
     scope: &TableScope,
-    catalog: &dyn SqlCatalog,
+    _catalog: &dyn SqlCatalog,
     functions: &FunctionRegistry,
 ) -> Result<Option<SqlPlan>> {
     let from = &select.from[0];
@@ -85,8 +85,8 @@ pub fn plan_join_from_select(
 
     // Apply WHERE as filters on the join plan.
     // Apply projection.
-    let projection = super::select::convert_projection(&select.projection)?;
-    let filters = match &select.selection {
+    let _projection = super::select::convert_projection(&select.projection)?;
+    let _filters = match &select.selection {
         Some(expr) => super::select::convert_where_to_filters(expr)?,
         None => Vec::new(),
     };
@@ -118,10 +118,11 @@ pub fn plan_join_from_select(
     Ok(Some(current_plan))
 }
 
+/// (join_type, equi_keys, non-equi condition)
+type JoinSpec = (JoinType, Vec<(String, String)>, Option<SqlExpr>);
+
 /// Extract join type, equi-join keys, and non-equi condition.
-fn extract_join_spec(
-    op: &ast::JoinOperator,
-) -> Result<(JoinType, Vec<(String, String)>, Option<SqlExpr>)> {
+fn extract_join_spec(op: &ast::JoinOperator) -> Result<JoinSpec> {
     match op {
         ast::JoinOperator::Inner(constraint) => {
             let (keys, cond) = extract_join_constraint(constraint)?;
@@ -149,10 +150,11 @@ fn extract_join_spec(
     }
 }
 
+/// (equi_keys, non-equi condition)
+type JoinConstraintResult = (Vec<(String, String)>, Option<SqlExpr>);
+
 /// Extract equi-join keys from ON clause.
-fn extract_join_constraint(
-    constraint: &ast::JoinConstraint,
-) -> Result<(Vec<(String, String)>, Option<SqlExpr>)> {
+fn extract_join_constraint(constraint: &ast::JoinConstraint) -> Result<JoinConstraintResult> {
     match constraint {
         ast::JoinConstraint::On(expr) => {
             let mut keys = Vec::new();

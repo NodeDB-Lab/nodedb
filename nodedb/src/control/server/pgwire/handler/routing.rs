@@ -1,8 +1,6 @@
 //! Query routing: consistency selection, leader detection, SQL forwarding,
 //! and the execute_planned_sql entry point for DML/query dispatch.
 
-use std::sync::Arc;
-
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 

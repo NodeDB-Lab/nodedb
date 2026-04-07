@@ -15,9 +15,9 @@
 //! Called from `read_parquet_filtered()` which replaces `read_parquet_with_predicate`
 //! for queries that have filter predicates.
 
-use bytes::Bytes;
 use arrow::array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::DataType;
+use bytes::Bytes;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::file::metadata::RowGroupMetaData;
@@ -284,8 +284,7 @@ fn record_batch_row_to_json(
                 })
             }
             _ => Some(serde_json::Value::String(
-                arrow::util::display::array_value_to_string(col, row_idx)
-                    .unwrap_or_default(),
+                arrow::util::display::array_value_to_string(col, row_idx).unwrap_or_default(),
             )),
         };
 

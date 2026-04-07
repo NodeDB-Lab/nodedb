@@ -6,12 +6,12 @@ use crate::error::Result;
 use crate::functions::registry::FunctionRegistry;
 use crate::parser::normalize::normalize_ident;
 use crate::resolver::expr::convert_expr;
-use crate::types::{SortKey, SqlExpr, WindowSpec};
+use crate::types::{SortKey, WindowSpec};
 
 /// Extract window function specifications from SELECT items.
 pub fn extract_window_functions(
     items: &[ast::SelectItem],
-    functions: &FunctionRegistry,
+    _functions: &FunctionRegistry,
 ) -> Result<Vec<WindowSpec>> {
     let mut specs = Vec::new();
     for item in items {

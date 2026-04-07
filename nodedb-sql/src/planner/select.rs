@@ -20,13 +20,13 @@ pub fn plan_query(
     functions: &FunctionRegistry,
 ) -> Result<SqlPlan> {
     // Handle CTEs (WITH clause).
-    if let Some(with) = &query.with {
-        if with.recursive {
-            return super::cte::plan_recursive_cte(query, catalog, functions);
-        }
-        // Non-recursive CTEs: plan as subquery (inline expansion).
-        // For now, fall through to main SELECT — CTE references resolve via catalog.
+    if let Some(with) = &query.with
+        && with.recursive
+    {
+        return super::cte::plan_recursive_cte(query, catalog, functions);
     }
+    // Non-recursive CTEs: plan as subquery (inline expansion).
+    // For now, fall through to main SELECT — CTE references resolve via catalog.
 
     // Handle UNION.
     match &*query.body {
@@ -118,10 +118,9 @@ fn has_aggregation(select: &Select, functions: &FunctionRegistry) -> bool {
     for item in &select.projection {
         if let ast::SelectItem::UnnamedExpr(expr) | ast::SelectItem::ExprWithAlias { expr, .. } =
             item
+            && expr_contains_aggregate(expr, functions)
         {
-            if expr_contains_aggregate(expr, functions) {
-                return true;
-            }
+            return true;
         }
     }
     false
@@ -147,10 +146,10 @@ fn expr_contains_aggregate(expr: &ast::Expr, functions: &FunctionRegistry) -> bo
             // Check args recursively.
             if let ast::FunctionArguments::List(args) = &func.args {
                 for arg in &args.args {
-                    if let ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) = arg {
-                        if expr_contains_aggregate(e, functions) {
-                            return true;
-                        }
+                    if let ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) = arg
+                        && expr_contains_aggregate(e, functions)
+                    {
+                        return true;
                     }
                 }
             }
@@ -595,7 +594,7 @@ fn extract_column_name(expr: &ast::Expr) -> Result<String> {
         ast::Expr::Identifier(ident) => Ok(normalize_ident(ident)),
         ast::Expr::CompoundIdentifier(parts) => Ok(parts
             .iter()
-            .map(|p| normalize_ident(p))
+            .map(normalize_ident)
             .collect::<Vec<_>>()
             .join(".")),
         _ => Err(SqlError::Unsupported {

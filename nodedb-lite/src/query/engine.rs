@@ -105,9 +105,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 ..
             } => self.execute_delete(collection, target_keys),
             SqlPlan::Truncate { collection } => self.execute_truncate(collection),
-            _ => Err(LiteError::Query(format!(
-                "unsupported plan: {plan:?}"
-            ))),
+            _ => Err(LiteError::Query(format!("unsupported plan: {plan:?}"))),
         }
     }
 
@@ -167,10 +165,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                         let doc_str = sonic_rs::to_string(&json).unwrap_or_default();
                         Ok(QueryResult {
                             columns: vec!["id".into(), "document".into()],
-                            rows: vec![vec![
-                                Value::String(key_str),
-                                Value::String(doc_str),
-                            ]],
+                            rows: vec![vec![Value::String(key_str), Value::String(doc_str)]],
                             rows_affected: 0,
                         })
                     }

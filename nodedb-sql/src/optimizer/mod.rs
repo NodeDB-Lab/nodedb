@@ -7,6 +7,5 @@ use crate::types::SqlPlan;
 /// Apply all optimization passes to a plan.
 pub fn optimize(plan: SqlPlan) -> SqlPlan {
     let plan = point_get::optimize(plan);
-    let plan = predicate_pushdown::optimize(plan);
-    plan
+    predicate_pushdown::optimize(plan)
 }

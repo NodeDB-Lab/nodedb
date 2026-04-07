@@ -110,9 +110,7 @@ fn try_eval_constant(sql: &str) -> Option<nodedb_types::Value> {
 
     if let sqlparser::ast::Statement::Query(query) = stmt {
         if let sqlparser::ast::SetExpr::Select(select) = &*query.body {
-            if let Some(sqlparser::ast::SelectItem::UnnamedExpr(expr)) =
-                select.projection.first()
-            {
+            if let Some(sqlparser::ast::SelectItem::UnnamedExpr(expr)) = select.projection.first() {
                 return eval_expr(expr);
             }
         }
@@ -122,7 +120,7 @@ fn try_eval_constant(sql: &str) -> Option<nodedb_types::Value> {
 
 /// Recursively evaluate a sqlparser expression tree.
 fn eval_expr(expr: &sqlparser::ast::Expr) -> Option<nodedb_types::Value> {
-    use sqlparser::ast::{BinaryOperator, Expr, UnaryOperator, Value};
+    use sqlparser::ast::{Expr, UnaryOperator, Value};
 
     match expr {
         Expr::Value(v) => match &v.value {

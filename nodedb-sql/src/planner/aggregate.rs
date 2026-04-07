@@ -2,7 +2,7 @@
 
 use sqlparser::ast::{self, GroupByExpr};
 
-use crate::error::{Result, SqlError};
+use crate::error::Result;
 use crate::functions::registry::{FunctionRegistry, SearchTrigger};
 use crate::parser::normalize::normalize_ident;
 use crate::resolver::columns::ResolvedTable;
@@ -60,7 +60,7 @@ pub fn plan_aggregate(
 /// Plan a timeseries aggregate with optional time_bucket.
 fn plan_timeseries_aggregate(
     table: &ResolvedTable,
-    group_by: &[SqlExpr],
+    _group_by: &[SqlExpr],
     aggregates: &[AggregateExpr],
     filters: &[Filter],
     raw_group_by: &GroupByExpr,
@@ -154,7 +154,7 @@ fn parse_interval_to_ms(s: &str) -> i64 {
 }
 
 /// Extract time range from filters (timestamp >= X AND timestamp <= Y).
-fn extract_time_range(filters: &[Filter]) -> (i64, i64) {
+fn extract_time_range(_filters: &[Filter]) -> (i64, i64) {
     // Default: unbounded.
     (i64::MIN, i64::MAX)
 }
@@ -163,7 +163,7 @@ fn extract_time_range(filters: &[Filter]) -> (i64, i64) {
 pub fn convert_group_by(group_by: &GroupByExpr) -> Result<Vec<SqlExpr>> {
     match group_by {
         GroupByExpr::All(_) => Ok(Vec::new()),
-        GroupByExpr::Expressions(exprs, _) => exprs.iter().map(|e| convert_expr(e)).collect(),
+        GroupByExpr::Expressions(exprs, _) => exprs.iter().map(convert_expr).collect(),
     }
 }
 

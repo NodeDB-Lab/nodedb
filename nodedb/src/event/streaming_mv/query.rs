@@ -71,9 +71,7 @@ pub fn mv_state_to_record_batch(mv_state: &MvState) -> Option<RecordBatch> {
     for agg_col in &agg_arrays {
         columns.push(Arc::new(Float64Array::from(agg_col.clone())));
     }
-    columns.push(Arc::new(arrow::array::BooleanArray::from(
-        finalized_array,
-    )));
+    columns.push(Arc::new(arrow::array::BooleanArray::from(finalized_array)));
 
     RecordBatch::try_new(schema, columns).ok()
 }

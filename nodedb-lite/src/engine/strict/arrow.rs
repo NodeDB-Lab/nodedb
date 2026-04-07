@@ -12,10 +12,9 @@ pub fn column_type_to_arrow(ct: &ColumnType) -> arrow::datatypes::DataType {
         ColumnType::String => arrow::datatypes::DataType::Utf8,
         ColumnType::Bool => arrow::datatypes::DataType::Boolean,
         ColumnType::Bytes | ColumnType::Geometry => arrow::datatypes::DataType::Binary,
-        ColumnType::Timestamp => arrow::datatypes::DataType::Timestamp(
-            arrow::datatypes::TimeUnit::Microsecond,
-            None,
-        ),
+        ColumnType::Timestamp => {
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+        }
         ColumnType::Decimal => arrow::datatypes::DataType::Utf8, // Lossless string representation
         ColumnType::Uuid => arrow::datatypes::DataType::Utf8,
         ColumnType::Vector(_) => arrow::datatypes::DataType::Binary, // Packed f32 bytes

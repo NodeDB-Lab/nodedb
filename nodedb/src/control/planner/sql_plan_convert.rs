@@ -8,22 +8,38 @@ use nodedb_sql::types::{
     SqlValue,
 };
 
+use std::sync::Arc;
+
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::*;
+use crate::engine::timeseries::retention_policy::RetentionPolicyRegistry;
 use crate::types::{TenantId, VShardId};
 
 use super::physical::PhysicalTask;
 
+/// Conversion context holding optional references needed during plan conversion.
+pub struct ConvertContext {
+    pub retention_registry: Option<Arc<RetentionPolicyRegistry>>,
+}
+
 /// Convert a list of SqlPlans to PhysicalTasks.
-pub fn convert(plans: &[SqlPlan], tenant_id: TenantId) -> crate::Result<Vec<PhysicalTask>> {
+pub fn convert(
+    plans: &[SqlPlan],
+    tenant_id: TenantId,
+    ctx: &ConvertContext,
+) -> crate::Result<Vec<PhysicalTask>> {
     let mut tasks = Vec::new();
     for plan in plans {
-        tasks.extend(convert_one(plan, tenant_id)?);
+        tasks.extend(convert_one(plan, tenant_id, ctx)?);
     }
     Ok(tasks)
 }
 
-fn convert_one(plan: &SqlPlan, tenant_id: TenantId) -> crate::Result<Vec<PhysicalTask>> {
+fn convert_one(
+    plan: &SqlPlan,
+    tenant_id: TenantId,
+    ctx: &ConvertContext,
+) -> crate::Result<Vec<PhysicalTask>> {
     match plan {
         SqlPlan::Scan {
             collection,
@@ -92,7 +108,7 @@ fn convert_one(plan: &SqlPlan, tenant_id: TenantId) -> crate::Result<Vec<Physica
         SqlPlan::PointGet {
             collection,
             engine,
-            key_column,
+            key_column: _, // Column name is implicit (id/key) per engine type
             key_value,
         } => {
             let vshard = VShardId::from_collection(collection);
@@ -186,11 +202,31 @@ fn convert_one(plan: &SqlPlan, tenant_id: TenantId) -> crate::Result<Vec<Physica
             tiered,
         } => {
             let filter_bytes = serialize_filters(filters)?;
-            let proj_names = extract_projection_names(projection);
-            let agg_pairs = aggregates
+            let agg_pairs: Vec<(String, String)> = aggregates
                 .iter()
                 .map(|a| (a.function.clone(), a.alias.clone()))
                 .collect();
+
+            // AUTO_TIER: split query across retention tiers if enabled.
+            if *tiered {
+                if let Some(registry) = &ctx.retention_registry {
+                    if let Some(policy) = registry.get(tenant_id.as_u32(), collection) {
+                        if policy.auto_tier {
+                            return Ok(super::auto_tier::plan_tiered_scan(
+                                &policy,
+                                tenant_id,
+                                *time_range,
+                                filter_bytes,
+                                group_by.clone(),
+                                agg_pairs,
+                                gap_fill.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let proj_names = extract_projection_names(projection);
             let vshard = VShardId::from_collection(collection);
             Ok(vec![PhysicalTask {
                 tenant_id,
@@ -234,6 +270,7 @@ fn convert_one(plan: &SqlPlan, tenant_id: TenantId) -> crate::Result<Vec<Physica
             filters,
         } => {
             let vshard = VShardId::from_collection(collection);
+            let filter_bytes = serialize_filters(filters)?;
             Ok(vec![PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
@@ -244,7 +281,7 @@ fn convert_one(plan: &SqlPlan, tenant_id: TenantId) -> crate::Result<Vec<Physica
                     ef_search: *ef_search,
                     filter_bitmap: None,
                     field_name: field.clone(),
-                    rls_filters: Vec::new(),
+                    rls_filters: filter_bytes,
                 }),
             }])
         }
@@ -336,8 +373,10 @@ fn convert_one(plan: &SqlPlan, tenant_id: TenantId) -> crate::Result<Vec<Physica
         SqlPlan::Union { inputs, distinct } => {
             let mut all_tasks = Vec::new();
             for input in inputs {
-                all_tasks.extend(convert_one(input, tenant_id)?);
+                all_tasks.extend(convert_one(input, tenant_id, ctx)?);
             }
+            // TODO: if distinct == true, wrap in a dedup stage.
+            let _ = distinct;
             Ok(all_tasks)
         }
 
@@ -437,8 +476,35 @@ fn convert_update(
     let filter_bytes = serialize_filters(filters)?;
     let updates = assignments_to_bytes(assignments)?;
 
+    // KV engine: route to FieldSet for point updates.
+    if matches!(engine, EngineType::KeyValue) && !target_keys.is_empty() {
+        let mut tasks = Vec::new();
+        for key in target_keys {
+            let field_updates: Vec<(String, Vec<u8>)> = assignments
+                .iter()
+                .filter_map(|(field, expr)| {
+                    if let SqlExpr::Literal(val) = expr {
+                        Some((field.clone(), sql_value_to_bytes(val)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            tasks.push(PhysicalTask {
+                tenant_id,
+                vshard_id: vshard,
+                plan: PhysicalPlan::Kv(KvOp::FieldSet {
+                    collection: collection.into(),
+                    key: sql_value_to_bytes(key),
+                    updates: field_updates,
+                }),
+            });
+        }
+        return Ok(tasks);
+    }
+
     if !target_keys.is_empty() {
-        // Point updates.
+        // Point updates (document engine).
         let mut tasks = Vec::new();
         for key in target_keys {
             tasks.push(PhysicalTask {
@@ -475,6 +541,19 @@ fn convert_delete(
     tenant_id: TenantId,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
+
+    // KV engine: route to KvOp::Delete.
+    if matches!(engine, EngineType::KeyValue) && !target_keys.is_empty() {
+        let keys: Vec<Vec<u8>> = target_keys.iter().map(sql_value_to_bytes).collect();
+        return Ok(vec![PhysicalTask {
+            tenant_id,
+            vshard_id: vshard,
+            plan: PhysicalPlan::Kv(KvOp::Delete {
+                collection: collection.into(),
+                keys,
+            }),
+        }]);
+    }
 
     if !target_keys.is_empty() {
         let mut tasks = Vec::new();
@@ -637,8 +716,20 @@ fn extract_projection_names(proj: &[Projection]) -> Vec<String> {
 }
 
 fn extract_computed_columns(proj: &[Projection]) -> crate::Result<Vec<u8>> {
-    // TODO: serialize computed column expressions for Data Plane evaluation.
-    Ok(Vec::new())
+    // Collect computed projections (alias + expression string).
+    let computed: Vec<(String, String)> = proj
+        .iter()
+        .filter_map(|p| match p {
+            Projection::Computed { expr, alias } => Some((alias.clone(), format!("{expr:?}"))),
+            _ => None,
+        })
+        .collect();
+    if computed.is_empty() {
+        return Ok(Vec::new());
+    }
+    zerompk::to_msgpack_vec(&computed).map_err(|e| crate::Error::Internal {
+        detail: format!("serialize computed columns: {e}"),
+    })
 }
 
 fn serialize_window_functions(_specs: &[nodedb_sql::types::WindowSpec]) -> crate::Result<Vec<u8>> {
@@ -894,21 +985,46 @@ fn sql_expr_to_scan_filters(expr: &SqlExpr) -> Vec<nodedb_query::scan_filter::Sc
                 SqlExpr::Literal(v) => sql_value_to_nodedb_value(v),
                 _ => return vec![match_all()],
             };
-            // BETWEEN → gte AND lte
-            vec![
-                ScanFilter {
-                    field: field.clone(),
-                    op: FilterOp::Gte,
-                    value: low_val,
-                    clauses: Vec::new(),
-                },
-                ScanFilter {
-                    field,
-                    op: FilterOp::Lte,
-                    value: high_val,
-                    clauses: Vec::new(),
-                },
-            ]
+            if *negated {
+                // NOT BETWEEN → lt OR gt (outside the range)
+                // clauses is Vec<Vec<ScanFilter>> — each inner vec is an AND-group,
+                // outer is OR. So: [[field < low], [field > high]].
+                vec![ScanFilter {
+                    field: String::new(),
+                    op: FilterOp::Or,
+                    value: nodedb_types::Value::Null,
+                    clauses: vec![
+                        vec![ScanFilter {
+                            field: field.clone(),
+                            op: FilterOp::Lt,
+                            value: low_val,
+                            clauses: Vec::new(),
+                        }],
+                        vec![ScanFilter {
+                            field,
+                            op: FilterOp::Gt,
+                            value: high_val,
+                            clauses: Vec::new(),
+                        }],
+                    ],
+                }]
+            } else {
+                // BETWEEN → gte AND lte
+                vec![
+                    ScanFilter {
+                        field: field.clone(),
+                        op: FilterOp::Gte,
+                        value: low_val,
+                        clauses: Vec::new(),
+                    },
+                    ScanFilter {
+                        field,
+                        op: FilterOp::Lte,
+                        value: high_val,
+                        clauses: Vec::new(),
+                    },
+                ]
+            }
         }
         _ => vec![match_all()],
     }

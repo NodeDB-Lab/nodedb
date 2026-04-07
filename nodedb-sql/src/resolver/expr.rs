@@ -166,10 +166,10 @@ fn convert_function(func: &ast::Function) -> Result<SqlExpr> {
                 ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => {
                     Some(Ok(SqlExpr::Wildcard))
                 }
-                ast::FunctionArg::Named { arg, .. } => match arg {
-                    ast::FunctionArgExpr::Expr(e) => Some(convert_expr(e)),
-                    _ => None,
-                },
+                ast::FunctionArg::Named {
+                    arg: ast::FunctionArgExpr::Expr(e),
+                    ..
+                } => Some(convert_expr(e)),
                 _ => None,
             })
             .collect::<Result<Vec<_>>>()?,

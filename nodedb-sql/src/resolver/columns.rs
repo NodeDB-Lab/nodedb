@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::error::{Result, SqlError};
-use crate::parser::normalize::{normalize_ident, normalize_object_name, table_name_from_factor};
+use crate::parser::normalize::table_name_from_factor;
 use crate::types::{CollectionInfo, EngineType, SqlCatalog};
 
 /// Resolved table reference: name, alias, and catalog info.

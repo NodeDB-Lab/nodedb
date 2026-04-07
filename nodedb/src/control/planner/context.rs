@@ -35,8 +35,9 @@ pub struct PlanSecurityContext<'a> {
 pub struct QueryContext {
     /// nodedb-sql catalog adapter for planning.
     sql_catalog: Option<super::catalog_adapter::OriginCatalog>,
-    /// Tenant ID for nodedb-sql planning.
-    tenant_id: u32,
+    /// Retention policy registry for auto-tier routing.
+    retention_registry:
+        Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
 }
 
 impl QueryContext {
@@ -44,7 +45,7 @@ impl QueryContext {
     pub fn new() -> Self {
         Self {
             sql_catalog: None,
-            tenant_id: 0,
+            retention_registry: None,
         }
     }
 
@@ -75,12 +76,12 @@ impl QueryContext {
         let sql_catalog = super::catalog_adapter::OriginCatalog::new(
             credentials,
             tenant_id,
-            retention_policy_registry,
+            retention_policy_registry.clone(),
         );
 
         Self {
             sql_catalog: Some(sql_catalog),
-            tenant_id,
+            retention_registry: retention_policy_registry,
         }
     }
 
@@ -112,7 +113,10 @@ impl QueryContext {
         let plans = nodedb_sql::plan_sql(sql, catalog).map_err(|e| crate::Error::PlanError {
             detail: format!("{e}"),
         })?;
-        super::sql_plan_convert::convert(&plans, tenant_id)
+        let ctx = super::sql_plan_convert::ConvertContext {
+            retention_registry: self.retention_registry.clone(),
+        };
+        super::sql_plan_convert::convert(&plans, tenant_id, &ctx)
     }
 
     /// Parse SQL, inject RLS predicates, convert to physical plan.

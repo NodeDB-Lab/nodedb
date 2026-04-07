@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn invalid_body_syntax() {
-        let p = make_parsed(vec![("x", "TEXT")], "TEXT", "SELECT SELECTT x");
+        let p = make_parsed(vec![("x", "TEXT")], "TEXT", "SELECT ((");
         assert!(validate_function_body(&p).is_err());
     }
 }
