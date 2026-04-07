@@ -151,7 +151,7 @@ impl<S: StorageEngine> EncryptedStorage<S> {
     fn encrypt(&self, ns: Namespace, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, LiteError> {
         let nonce = Self::derive_nonce(ns, key);
         self.cipher
-            .encrypt(Nonce::from_slice(&nonce), plaintext)
+            .encrypt(&Nonce::from(nonce), plaintext)
             .map_err(|e| LiteError::Storage {
                 detail: format!("AES-GCM encrypt failed: {e}"),
             })
@@ -160,7 +160,7 @@ impl<S: StorageEngine> EncryptedStorage<S> {
     fn decrypt(&self, ns: Namespace, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, LiteError> {
         let nonce = Self::derive_nonce(ns, key);
         self.cipher
-            .decrypt(Nonce::from_slice(&nonce), ciphertext)
+            .decrypt(&Nonce::from(nonce), ciphertext)
             .map_err(|e| LiteError::Storage {
                 detail: format!("AES-GCM decrypt failed (wrong passphrase or corrupted data): {e}"),
             })

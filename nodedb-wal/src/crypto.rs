@@ -14,7 +14,6 @@
 //! `payload_len` includes the 16-byte auth tag.
 
 use aes_gcm::Aes256Gcm;
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, KeyInit};
 
 use crate::error::{Result, WalError};
@@ -192,7 +191,7 @@ pub const AUTH_TAG_SIZE: usize = 16;
 fn lsn_to_nonce(lsn: u64) -> aes_gcm::Nonce<aes_gcm::aead::consts::U12> {
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes[..8].copy_from_slice(&lsn.to_le_bytes());
-    *GenericArray::from_slice(&nonce_bytes)
+    nonce_bytes.into()
 }
 
 #[cfg(test)]

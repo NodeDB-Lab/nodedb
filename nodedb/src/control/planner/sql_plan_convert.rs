@@ -249,10 +249,8 @@ fn convert_one(
             tiered,
         } => {
             let filter_bytes = serialize_filters(filters)?;
-            let agg_pairs: Vec<(String, String)> = aggregates
-                .iter()
-                .map(|a| (a.function.clone(), a.alias.clone()))
-                .collect();
+            let agg_pairs: Vec<(String, String)> =
+                aggregates.iter().map(agg_expr_to_pair).collect();
 
             // AUTO_TIER: split query across retention tiers if enabled.
             if *tiered
@@ -667,10 +665,7 @@ fn convert_aggregate(
         let vshard = VShardId::from_collection(&left_collection);
 
         let group_strs = group_by_to_strings(group_by);
-        let agg_pairs = aggregates
-            .iter()
-            .map(|a| (a.function.clone(), a.alias.clone()))
-            .collect();
+        let agg_pairs = aggregates.iter().map(agg_expr_to_pair).collect();
 
         return Ok(vec![PhysicalTask {
             tenant_id,
@@ -700,10 +695,7 @@ fn convert_aggregate(
     let having_bytes = serialize_filters(having)?;
 
     let group_strs = group_by_to_strings(group_by);
-    let agg_pairs = aggregates
-        .iter()
-        .map(|a| (a.function.clone(), a.alias.clone()))
-        .collect();
+    let agg_pairs = aggregates.iter().map(agg_expr_to_pair).collect();
 
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -732,6 +724,24 @@ fn extract_collection_name(plan: &SqlPlan) -> String {
         SqlPlan::Aggregate { input, .. } => extract_collection_name(input),
         _ => String::new(),
     }
+}
+
+/// Convert an `AggregateExpr` to the `(op, field)` pair the executor expects.
+///
+/// The field is extracted from the first argument (e.g. `elapsed_ms` from
+/// `AVG(elapsed_ms)`). Wildcard args produce `"*"`. Falls back to `"*"` when
+/// there are no arguments (bare `COUNT`).
+fn agg_expr_to_pair(a: &AggregateExpr) -> (String, String) {
+    let field = a
+        .args
+        .first()
+        .map(|arg| match arg {
+            SqlExpr::Column { name, .. } => name.clone(),
+            SqlExpr::Wildcard => "*".into(),
+            _ => format!("{arg:?}"),
+        })
+        .unwrap_or_else(|| "*".into());
+    (a.function.clone(), field)
 }
 
 fn group_by_to_strings(exprs: &[SqlExpr]) -> Vec<String> {

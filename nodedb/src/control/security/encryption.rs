@@ -185,11 +185,11 @@ impl VolumeEncryption {
         let cipher = Aes256Gcm::new_from_slice(master).map_err(|e| crate::Error::Encryption {
             detail: format!("AES-GCM key init failed: {e}"),
         })?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext =
             cipher
-                .encrypt(nonce, dek.as_ref())
+                .encrypt(&nonce, dek.as_ref())
                 .map_err(|e| crate::Error::Encryption {
                     detail: format!("DEK encryption failed: {e}"),
                 })?;
@@ -230,11 +230,16 @@ impl VolumeEncryption {
         let cipher = Aes256Gcm::new_from_slice(master).map_err(|e| crate::Error::Encryption {
             detail: format!("AES-GCM key init failed: {e}"),
         })?;
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce_arr: [u8; 12] = nonce_bytes
+            .try_into()
+            .map_err(|_| crate::Error::Encryption {
+                detail: "nonce slice is not 12 bytes".into(),
+            })?;
+        let nonce = Nonce::from(nonce_arr);
 
         let plaintext =
             cipher
-                .decrypt(nonce, ciphertext)
+                .decrypt(&nonce, ciphertext)
                 .map_err(|_| crate::Error::Encryption {
                     detail: "DEK decryption failed: authentication tag mismatch".into(),
                 })?;

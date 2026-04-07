@@ -133,23 +133,33 @@ fn extract_bucket_interval(func: &ast::Function) -> Result<i64> {
     Ok(parse_interval_to_ms(&interval_str))
 }
 
-/// Parse an interval string like "1h", "15m", "30s", "1d" to milliseconds.
+/// Parse an interval string to milliseconds.
+///
+/// Accepted forms: `"1h"`, `"15m"`, `"30s"`, `"1d"`, `"1 hour"`, `"15 minutes"`,
+/// `"30 seconds"`, `"7 days"`. Plural and singular word forms both work.
 fn parse_interval_to_ms(s: &str) -> i64 {
     let s = s.trim();
     if s.is_empty() {
         return 0;
     }
-    let (num_str, suffix) = s.split_at(s.len() - 1);
-    let num: i64 = num_str.trim().parse().unwrap_or(0);
-    match suffix {
-        "s" => num * 1_000,
-        "m" => num * 60_000,
-        "h" => num * 3_600_000,
-        "d" => num * 86_400_000,
-        _ => {
-            // Try full string as seconds.
-            s.parse::<i64>().unwrap_or(0) * 1_000
+
+    // Split into numeric part and unit part (handles both "1h" and "1 hour").
+    let num_end = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let num: i64 = s[..num_end].trim().parse().unwrap_or(0);
+    let unit = s[num_end..].trim();
+
+    match unit {
+        "s" | "sec" | "second" | "seconds" => num * 1_000,
+        "m" | "min" | "minute" | "minutes" => num * 60_000,
+        "h" | "hr" | "hour" | "hours" => num * 3_600_000,
+        "d" | "day" | "days" => num * 86_400_000,
+        "" => {
+            // Bare number — treat as seconds.
+            num * 1_000
         }
+        _ => 0,
     }
 }
 
@@ -260,5 +270,12 @@ mod tests {
         assert_eq!(parse_interval_to_ms("15m"), 900_000);
         assert_eq!(parse_interval_to_ms("30s"), 30_000);
         assert_eq!(parse_interval_to_ms("7d"), 604_800_000);
+        // Word-form intervals.
+        assert_eq!(parse_interval_to_ms("1 hour"), 3_600_000);
+        assert_eq!(parse_interval_to_ms("2 hours"), 7_200_000);
+        assert_eq!(parse_interval_to_ms("15 minutes"), 900_000);
+        assert_eq!(parse_interval_to_ms("30 seconds"), 30_000);
+        assert_eq!(parse_interval_to_ms("1 day"), 86_400_000);
+        assert_eq!(parse_interval_to_ms("5 min"), 300_000);
     }
 }

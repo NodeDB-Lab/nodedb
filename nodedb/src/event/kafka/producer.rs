@@ -66,14 +66,14 @@ pub fn spawn_kafka_task(
         };
 
         // Initialize transactional producer if configured.
-        if config.transactional {
-            if let Err(e) = producer.init_transactions(Duration::from_secs(10)) {
-                warn!(
-                    stream = %stream_name,
-                    error = %e,
-                    "failed to init Kafka transactions — falling back to at-least-once"
-                );
-            }
+        if config.transactional
+            && let Err(e) = producer.init_transactions(Duration::from_secs(10))
+        {
+            warn!(
+                stream = %stream_name,
+                error = %e,
+                "failed to init Kafka transactions — falling back to at-least-once"
+            );
         }
 
         let group_name = format!("_kafka_{stream_name}");
@@ -99,11 +99,11 @@ pub fn spawn_kafka_task(
                     let batch_size = events.events.len();
 
                     // Begin transaction if configured.
-                    if config.transactional {
-                        if let Err(e) = producer.begin_transaction() {
-                            warn!(error = %e, "Kafka begin_transaction failed");
-                            continue;
-                        }
+                    if config.transactional
+                        && let Err(e) = producer.begin_transaction()
+                    {
+                        warn!(error = %e, "Kafka begin_transaction failed");
+                        continue;
                     }
 
                     let mut published = 0u32;
@@ -136,13 +136,12 @@ pub fn spawn_kafka_task(
                     }
 
                     // Commit Kafka transaction.
-                    if config.transactional && published > 0 {
-                        if let Err(e) = producer
+                    if config.transactional && published > 0
+                        && let Err(e) = producer
                             .commit_transaction(Duration::from_secs(10))
-                        {
-                            warn!(error = %e, "Kafka commit_transaction failed");
-                            continue;
-                        }
+                    {
+                        warn!(error = %e, "Kafka commit_transaction failed");
+                        continue;
                     }
 
                     // Commit consumer offsets for successfully published events.
@@ -189,7 +188,7 @@ fn create_producer(
 
     if config.transactional {
         client_config.set("enable.idempotence", "true");
-        client_config.set("transactional.id", &format!("nodedb-kafka-{stream_name}"));
+        client_config.set("transactional.id", format!("nodedb-kafka-{stream_name}"));
     }
 
     client_config
