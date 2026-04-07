@@ -189,6 +189,18 @@ pub fn json_from_msgpack(bytes: &[u8]) -> zerompk::Result<serde_json::Value> {
     read_value(&mut cursor)
 }
 
+/// Serialize a `nodedb_types::Value` to MessagePack bytes using zerompk.
+#[inline]
+pub fn value_to_msgpack(value: &crate::Value) -> zerompk::Result<Vec<u8>> {
+    zerompk::to_msgpack_vec(value)
+}
+
+/// Deserialize a `nodedb_types::Value` from MessagePack bytes using zerompk.
+#[inline]
+pub fn value_from_msgpack(bytes: &[u8]) -> zerompk::Result<crate::Value> {
+    zerompk::from_msgpack(bytes)
+}
+
 struct Cursor<'a> {
     data: &'a [u8],
     pos: usize,
