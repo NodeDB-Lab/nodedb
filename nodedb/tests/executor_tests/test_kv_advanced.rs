@@ -299,13 +299,18 @@ fn ttl_expiry_produces_expired_key_info() {
 fn kv_field_get_and_set() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    // Store a MessagePack-encoded document.
-    let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
-        "name": "alice",
-        "age": 30,
-        "region": "us-east"
-    }))
-    .unwrap();
+    // Store a zerompk-encoded Value::Object (canonical KV format).
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "name".to_string(),
+        nodedb_types::Value::String("alice".into()),
+    );
+    map.insert("age".to_string(), nodedb_types::Value::Integer(30));
+    map.insert(
+        "region".to_string(),
+        nodedb_types::Value::String("us-east".into()),
+    );
+    let doc = nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(map)).unwrap();
 
     send_ok(
         &mut core,
@@ -344,7 +349,7 @@ fn kv_field_get_and_set() {
             key: b"u1".to_vec(),
             updates: vec![(
                 "region".into(),
-                serde_json::to_vec(&serde_json::json!("eu-west")).unwrap(),
+                zerompk::to_msgpack_vec(&nodedb_types::Value::String("eu-west".into())).unwrap(),
             )],
         }),
     );
