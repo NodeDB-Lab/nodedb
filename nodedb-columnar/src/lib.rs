@@ -37,7 +37,7 @@ pub use format::{
     BLOCK_SIZE, BlockStats, ColumnMeta, MAGIC, SegmentFooter, SegmentHeader, VERSION_MAJOR,
     VERSION_MINOR,
 };
-pub use memtable::ColumnarMemtable;
+pub use memtable::{ColumnarMemtable, IngestValue, MemtableRowIter};
 pub use mutation::MutationEngine;
 pub use pk_index::PkIndex;
 pub use predicate::{

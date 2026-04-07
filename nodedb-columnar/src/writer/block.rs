@@ -52,23 +52,26 @@ fn encode_single_block(
     end: usize,
     block_row_count: usize,
 ) -> Result<(Vec<u8>, BlockStats), ColumnarError> {
+    // Get validity slice — Cow::Owned(all-true) for non-nullable columns,
+    // Cow::Borrowed for nullable columns. Generated once per flush block.
+    let full_valid = col_data.validity_or_all_true();
+
     match col_data {
-        ColumnData::Int64 { values, valid } => {
+        ColumnData::Int64 { values, .. } => {
             let slice = &values[start..end];
-            let valid_slice = &valid[start..end];
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
             let (min, max) = numeric_min_max_i64(slice, valid_slice);
             let stats =
                 BlockStats::numeric(min as f64, max as f64, null_count, block_row_count as u32);
 
-            // Encode validity bitmap + values.
             let encoded = encode_i64_with_validity(slice, valid_slice, codec)?;
             Ok((encoded, stats))
         }
-        ColumnData::Float64 { values, valid } => {
+        ColumnData::Float64 { values, .. } => {
             let slice = &values[start..end];
-            let valid_slice = &valid[start..end];
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
             let (min, max) = numeric_min_max_f64(slice, valid_slice);
@@ -77,9 +80,9 @@ fn encode_single_block(
             let encoded = encode_f64_with_validity(slice, valid_slice, codec)?;
             Ok((encoded, stats))
         }
-        ColumnData::Timestamp { values, valid } => {
+        ColumnData::Timestamp { values, .. } => {
             let slice = &values[start..end];
-            let valid_slice = &valid[start..end];
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
             let (min, max) = numeric_min_max_i64(slice, valid_slice);
@@ -89,11 +92,10 @@ fn encode_single_block(
             let encoded = encode_i64_with_validity(slice, valid_slice, codec)?;
             Ok((encoded, stats))
         }
-        ColumnData::Bool { values, valid } => {
-            let valid_slice = &valid[start..end];
+        ColumnData::Bool { values, .. } => {
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
-            // Bit-pack booleans: 1 byte per 8 values.
             let bool_slice = &values[start..end];
             let mut packed = Vec::with_capacity(bool_slice.len().div_ceil(8));
             for chunk in bool_slice.chunks(8) {
@@ -108,16 +110,11 @@ fn encode_single_block(
             let compressed = nodedb_codec::encode_bytes_pipeline(&packed, codec)?;
 
             let stats = BlockStats::non_numeric(null_count, block_row_count as u32);
-            // Prepend validity bitmap.
             let encoded = prepend_validity(valid_slice, &compressed);
             Ok((encoded, stats))
         }
-        ColumnData::String {
-            data,
-            offsets,
-            valid,
-        } => {
-            let valid_slice = &valid[start..end];
+        ColumnData::String { data, offsets, .. } => {
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
             let byte_start = offsets[start] as usize;
@@ -126,7 +123,6 @@ fn encode_single_block(
 
             let compressed = nodedb_codec::encode_bytes_pipeline(string_bytes, codec)?;
 
-            // Compute lexicographic min/max and bloom filter over non-null values.
             let stats = compute_string_block_stats(
                 data,
                 offsets,
@@ -137,7 +133,6 @@ fn encode_single_block(
                 block_row_count,
             );
 
-            // Encode offsets (relative to block start) as delta-encoded i64.
             let block_offsets: Vec<i64> = offsets[start..=end]
                 .iter()
                 .map(|&o| (o as i64) - (offsets[start] as i64))
@@ -146,24 +141,14 @@ fn encode_single_block(
             let compressed_offsets =
                 nodedb_codec::encode_i64_pipeline(&block_offsets, offset_codec)?;
 
-            // Block layout: [validity][offset_len: u32][offsets][data].
             let mut encoded = encode_validity_bitmap(valid_slice);
             encoded.extend_from_slice(&(compressed_offsets.len() as u32).to_le_bytes());
             encoded.extend_from_slice(&compressed_offsets);
             encoded.extend_from_slice(&compressed);
             Ok((encoded, stats))
         }
-        ColumnData::Bytes {
-            data,
-            offsets,
-            valid,
-        }
-        | ColumnData::Geometry {
-            data,
-            offsets,
-            valid,
-        } => {
-            let valid_slice = &valid[start..end];
+        ColumnData::Bytes { data, offsets, .. } | ColumnData::Geometry { data, offsets, .. } => {
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
             let byte_start = offsets[start] as usize;
@@ -186,11 +171,10 @@ fn encode_single_block(
             encoded.extend_from_slice(&compressed);
             Ok((encoded, stats))
         }
-        ColumnData::Decimal { values, valid } | ColumnData::Uuid { values, valid } => {
-            let valid_slice = &valid[start..end];
+        ColumnData::Decimal { values, .. } | ColumnData::Uuid { values, .. } => {
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
-            // 16-byte fixed-size values → raw + LZ4.
             let slice = &values[start..end];
             let mut raw = Vec::with_capacity(slice.len() * 16);
             for v in slice {
@@ -201,12 +185,11 @@ fn encode_single_block(
             let encoded = prepend_validity(valid_slice, &compressed);
             Ok((encoded, stats))
         }
-        ColumnData::Vector { data, dim, valid } => {
-            let valid_slice = &valid[start..end];
+        ColumnData::Vector { data, dim, .. } => {
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
             let d = *dim as usize;
 
-            // Packed f32 → raw bytes + LZ4.
             let float_start = start * d;
             let float_end = end * d;
             let float_slice = &data[float_start..float_end];
@@ -219,12 +202,11 @@ fn encode_single_block(
             let encoded = prepend_validity(valid_slice, &compressed);
             Ok((encoded, stats))
         }
-        ColumnData::DictEncoded { ids, valid, .. } => {
+        ColumnData::DictEncoded { ids, .. } => {
             let id_slice = &ids[start..end];
-            let valid_slice = &valid[start..end];
+            let valid_slice = &full_valid[start..end];
             let null_count = valid_slice.iter().filter(|&&v| !v).count() as u32;
 
-            // Cast u32 IDs to i64 for the delta+bitpack codec.
             let id_i64: Vec<i64> = id_slice.iter().map(|&id| id as i64).collect();
             let (min_id, max_id) = {
                 let mut min = i64::MAX;
@@ -243,7 +225,6 @@ fn encode_single_block(
                 null_count,
                 block_row_count as u32,
             );
-            // Encode IDs as integers: DeltaFastLanesLz4 compresses well for low-cardinality IDs.
             let encoded =
                 encode_i64_with_validity(&id_i64, valid_slice, ColumnCodec::DeltaFastLanesLz4)?;
             Ok((encoded, stats))

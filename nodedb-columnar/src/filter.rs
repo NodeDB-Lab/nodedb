@@ -23,11 +23,14 @@ use crate::memtable::ColumnData;
 use crate::reader::DecodedColumn;
 
 /// Unpacked view of a memtable `DictEncoded` column.
+///
+/// The validity slice is returned via `Cow` — `Borrowed` when the column is
+/// nullable (has an explicit bitmap), `Owned(all-true)` when non-nullable.
 type MemtableDict<'a> = (
     &'a [u32],
     &'a [String],
     &'a HashMap<String, u32>,
-    &'a [bool],
+    std::borrow::Cow<'a, [bool]>,
 );
 
 // ---------------------------------------------------------------------------
@@ -42,7 +45,7 @@ pub fn dict_eval_eq(col: &ColumnData, value: &str, row_count: usize) -> Option<V
     let (ids, _, reverse, valid) = unpack_memtable(col)?;
     match reverse.get(value) {
         None => Some(zero_mask(row_count)),
-        Some(&target_id) => Some(build_eq_mask(ids, valid, target_id, row_count)),
+        Some(&target_id) => Some(build_eq_mask(ids, &valid, target_id, row_count)),
     }
 }
 
@@ -54,8 +57,8 @@ pub fn dict_eval_eq(col: &ColumnData, value: &str, row_count: usize) -> Option<V
 pub fn dict_eval_ne(col: &ColumnData, value: &str, row_count: usize) -> Option<Vec<u64>> {
     let (ids, _, reverse, valid) = unpack_memtable(col)?;
     match reverse.get(value) {
-        None => Some(all_valid_mask(valid, row_count)),
-        Some(&target_id) => Some(build_ne_mask(ids, valid, target_id, row_count)),
+        None => Some(all_valid_mask(&valid, row_count)),
+        Some(&target_id) => Some(build_ne_mask(ids, &valid, target_id, row_count)),
     }
 }
 
@@ -72,7 +75,7 @@ pub fn dict_eval_contains(col: &ColumnData, substr: &str, row_count: usize) -> O
     if matching.is_empty() {
         return Some(zero_mask(row_count));
     }
-    Some(build_set_mask(ids, valid, &matching, row_count))
+    Some(build_set_mask(ids, &valid, &matching, row_count))
 }
 
 /// Evaluate a LIKE predicate on a memtable `DictEncoded` column.
@@ -88,7 +91,7 @@ pub fn dict_eval_like(col: &ColumnData, pattern: &str, row_count: usize) -> Opti
     if matching.is_empty() {
         return Some(zero_mask(row_count));
     }
-    Some(build_set_mask(ids, valid, &matching, row_count))
+    Some(build_set_mask(ids, &valid, &matching, row_count))
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +199,11 @@ fn unpack_memtable(col: &ColumnData) -> Option<MemtableDict<'_>> {
         valid,
     } = col
     {
-        Some((
-            ids.as_slice(),
-            dictionary.as_slice(),
-            reverse,
-            valid.as_slice(),
-        ))
+        let validity = match valid {
+            Some(v) => std::borrow::Cow::Borrowed(v.as_slice()),
+            None => std::borrow::Cow::Owned(vec![true; ids.len()]),
+        };
+        Some((ids.as_slice(), dictionary.as_slice(), reverse, validity))
     } else {
         None
     }
@@ -401,7 +403,7 @@ mod tests {
             ids,
             dictionary,
             reverse,
-            valid,
+            valid: Some(valid),
         }
     }
 
@@ -601,7 +603,7 @@ mod tests {
     fn non_dict_encoded_col_returns_none() {
         let col = ColumnData::Int64 {
             values: vec![1, 2, 3],
-            valid: vec![true, true, true],
+            valid: Some(vec![true, true, true]),
         };
         assert!(dict_eval_eq(&col, "x", 3).is_none());
         assert!(dict_eval_ne(&col, "x", 3).is_none());

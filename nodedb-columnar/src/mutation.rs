@@ -280,6 +280,36 @@ impl MutationEngine {
         self.memtable.should_flush()
     }
 
+    /// Iterate non-deleted rows in the memtable as `Vec<Value>`.
+    ///
+    /// Skips rows marked as deleted in the memtable's virtual segment
+    /// delete bitmap. For rows in flushed segments, use `SegmentReader`.
+    pub fn scan_memtable_rows(&self) -> impl Iterator<Item = Vec<Value>> + '_ {
+        let deletes = self.delete_bitmaps.get(&self.memtable_segment_id);
+        self.memtable
+            .iter_rows()
+            .enumerate()
+            .filter_map(move |(row_idx, row)| {
+                if deletes.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
+                    None
+                } else {
+                    Some(row)
+                }
+            })
+    }
+
+    /// Get a single row from the memtable by index (None if deleted).
+    pub fn get_memtable_row(&self, row_idx: usize) -> Option<Vec<Value>> {
+        if self
+            .delete_bitmaps
+            .get(&self.memtable_segment_id)
+            .is_some_and(|bm| bm.is_deleted(row_idx as u32))
+        {
+            return None;
+        }
+        self.memtable.get_row(row_idx)
+    }
+
     /// Whether a segment should be compacted based on its delete ratio.
     pub fn should_compact(&self, segment_id: u32, total_rows: u64) -> bool {
         self.delete_bitmaps
