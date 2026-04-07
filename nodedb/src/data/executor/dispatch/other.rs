@@ -42,6 +42,8 @@ impl CoreLoop {
                 on,
                 join_type,
                 limit,
+                projection,
+                post_filters,
                 ..
             }) => self.execute_hash_join(
                 task,
@@ -51,6 +53,8 @@ impl CoreLoop {
                 on,
                 join_type,
                 *limit,
+                projection,
+                post_filters,
             ),
 
             PhysicalPlan::Meta(MetaOp::WalAppend { payload }) => {
@@ -181,6 +185,8 @@ impl CoreLoop {
                     on,
                     join_type,
                     *limit,
+                    &[],
+                    &[],
                 )
             }
 

@@ -204,6 +204,8 @@ impl CoreLoop {
         on: &[(String, String)],
         join_type: &str,
         limit: usize,
+        projection: &[String],
+        post_filter_bytes: &[u8],
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -246,7 +248,7 @@ impl CoreLoop {
         let right_index = HashIndex::build(&right_docs, &right_keys);
 
         // Probe the hash index with left (probe) side.
-        let results = probe_hash_index(&ProbeParams {
+        let mut results = probe_hash_index(&ProbeParams {
             probe_docs: &left_docs,
             index: &right_index,
             index_docs: &right_docs,
@@ -256,6 +258,47 @@ impl CoreLoop {
             probe_collection: left_collection,
             index_collection: right_collection,
         });
+
+        // Apply post-join WHERE filters.
+        if !post_filter_bytes.is_empty() {
+            let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
+                match zerompk::from_msgpack(post_filter_bytes) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("post-join filter deserialization failed: {e}"),
+                            },
+                        );
+                    }
+                };
+            if !filters.is_empty() {
+                results.retain(|row| {
+                    // Convert JSON row to msgpack for ScanFilter::matches_binary.
+                    let ndb_val = nodedb_types::Value::from(row.clone());
+                    match nodedb_types::value_to_msgpack(&ndb_val) {
+                        Ok(bytes) => filters.iter().all(|f| f.matches_binary(&bytes)),
+                        Err(_) => true, // pass through on serialization failure
+                    }
+                });
+            }
+        }
+
+        // Apply post-join projection: keep only requested columns, preserving SELECT order.
+        if !projection.is_empty() {
+            for row in &mut results {
+                if let serde_json::Value::Object(map) = row {
+                    let mut reordered = serde_json::Map::with_capacity(projection.len());
+                    for col in projection {
+                        if let Some(val) = map.remove(col.as_str()) {
+                            reordered.insert(col.clone(), val);
+                        }
+                    }
+                    *row = serde_json::Value::Object(reordered);
+                }
+            }
+        }
 
         match super::super::super::response_codec::encode_json_vec(&results) {
             Ok(payload) => self.response_with_payload(task, payload),
