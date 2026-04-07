@@ -169,7 +169,7 @@ pub(super) fn compare_docs_by_keys_binary(
 /// Each entry is `Option<(usize, usize)>` — byte range of the sort key value.
 type SortKeyOffsets = Vec<Option<(usize, usize)>>;
 
-pub(super) fn sort_rows(rows: &mut [(String, Vec<u8>)], sort_keys: &[(String, bool)]) {
+pub(in crate::data::executor) fn sort_rows(rows: &mut [(String, Vec<u8>)], sort_keys: &[(String, bool)]) {
     if sort_keys.is_empty() {
         return;
     }

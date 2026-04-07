@@ -80,24 +80,73 @@ impl CoreLoop {
         limit: usize,
     ) -> Response {
         debug!(core = self.core_id, %collection, %field, limit, "range scan");
-        match self
+
+        // Try index-backed range scan first.
+        let results = match self
             .sparse
             .range_scan(tid, collection, field, lower, upper, limit)
         {
-            Ok(results) => match super::super::super::response_codec::encode(&results) {
-                Ok(payload) => self.response_with_payload(task, payload),
+            Ok(r) => r,
+            Err(e) => {
+                warn!(core = self.core_id, error = %e, "sparse range scan failed");
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                );
+            }
+        };
+
+        // If the index returned nothing, fall back to full scan + sort.
+        // This handles collections without a secondary index on `field`.
+        if results.is_empty() {
+            let scan_result = self.scan_collection(tid, collection, limit.max(1000));
+            match scan_result {
+                Ok(mut docs) => {
+                    super::super::document::sort::sort_rows(
+                        &mut docs,
+                        &[(field.to_string(), true)],
+                    );
+                    docs.truncate(limit);
+                    let rows: Vec<_> = docs
+                        .iter()
+                        .map(|(id, val)| {
+                            let data = super::super::super::doc_format::decode_document(val)
+                                .unwrap_or(serde_json::Value::Null);
+                            super::super::super::response_codec::DocumentRow {
+                                id: id.clone(),
+                                data,
+                            }
+                        })
+                        .collect();
+                    match super::super::super::response_codec::encode(&rows) {
+                        Ok(payload) => return self.response_with_payload(task, payload),
+                        Err(e) => {
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: e.to_string(),
+                                },
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
-                    warn!(core = self.core_id, error = %e, "range scan serialization failed");
-                    self.response_error(
+                    return self.response_error(
                         task,
                         ErrorCode::Internal {
                             detail: e.to_string(),
                         },
-                    )
+                    );
                 }
-            },
+            }
+        }
+
+        match super::super::super::response_codec::encode(&results) {
+            Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => {
-                warn!(core = self.core_id, error = %e, "sparse range scan failed");
+                warn!(core = self.core_id, error = %e, "range scan serialization failed");
                 self.response_error(
                     task,
                     ErrorCode::Internal {
