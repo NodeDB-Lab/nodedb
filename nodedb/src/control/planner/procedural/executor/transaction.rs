@@ -106,7 +106,7 @@ mod tests {
                 document_id: id.into(),
                 value: vec![],
             }),
-            post_dedup: false,
+            post_set_op: PostSetOp::None,
         }
     }
 

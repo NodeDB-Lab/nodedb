@@ -4,7 +4,7 @@
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
-use crate::control::planner::physical::PhysicalTask;
+use crate::control::planner::physical::{PhysicalTask, PostSetOp};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::types::{ReadConsistency, TenantId};
 
@@ -96,9 +96,10 @@ impl NodeDbPgHandler {
             return self.forward_sql(sql, tenant_id, leader).await;
         }
 
-        let needs_dedup = tasks.iter().any(|t| t.post_dedup);
+        let needs_set_op = tasks.iter().any(|t| t.post_set_op != PostSetOp::None);
         let mut dedup_payloads: Vec<Vec<u8>> = Vec::new();
         let mut dedup_plan_kind = None;
+        let mut dedup_set_op = PostSetOp::None;
         let mut responses = Vec::with_capacity(tasks.len());
         for mut task in tasks {
             if task.tenant_id != tenant_id {
@@ -134,7 +135,7 @@ impl NodeDbPgHandler {
 
             let plan_kind = describe_plan(&task.plan);
             let collection_for_si = extract_collection(&task.plan).map(String::from);
-            let resp_post_dedup = task.post_dedup;
+            let resp_post_set_op = task.post_set_op;
 
             // --- Trigger interception for DML writes ---
             let dml_info = crate::control::trigger::dml_hook::classify_dml_write(&task.plan);
@@ -255,18 +256,29 @@ impl NodeDbPgHandler {
                     .record_read(addr, collection, String::new(), resp.watermark_lsn);
             }
 
-            if needs_dedup && resp_post_dedup {
+            if needs_set_op && resp_post_set_op != PostSetOp::None {
                 dedup_payloads.push(resp.payload.to_vec());
                 dedup_plan_kind = Some(plan_kind);
+                if dedup_set_op == PostSetOp::None {
+                    dedup_set_op = resp_post_set_op;
+                }
             } else {
                 responses.push(payload_to_response(&resp.payload, plan_kind));
             }
         }
 
-        // UNION DISTINCT: merge all sub-query payloads and deduplicate rows.
-        if needs_dedup && !dedup_payloads.is_empty() {
+        // Set operations: merge sub-query payloads.
+        if needs_set_op && !dedup_payloads.is_empty() {
             let kind = dedup_plan_kind.unwrap_or(PlanKind::MultiRow);
-            let merged = dedup_union_payloads(&dedup_payloads);
+            let merged = match dedup_set_op {
+                PostSetOp::Intersect | PostSetOp::IntersectAll => {
+                    merge_set_op_payloads(&dedup_payloads, SetMergeMode::Intersect)
+                }
+                PostSetOp::Except | PostSetOp::ExceptAll => {
+                    merge_set_op_payloads(&dedup_payloads, SetMergeMode::Except)
+                }
+                _ => dedup_union_payloads(&dedup_payloads),
+            };
             responses.push(payload_to_response(&merged, kind));
         }
 
@@ -492,5 +504,105 @@ fn dedup_union_payloads(payloads: &[Vec<u8>]) -> Vec<u8> {
         out.extend_from_slice(&row);
     }
 
+    out
+}
+
+enum SetMergeMode {
+    Intersect,
+    Except,
+}
+
+/// Merge payloads for INTERSECT or EXCEPT set operations.
+///
+/// For INTERSECT: keep rows that appear in ALL payloads.
+/// For EXCEPT: keep rows from first payload that don't appear in any subsequent payload.
+fn merge_set_op_payloads(payloads: &[Vec<u8>], mode: SetMergeMode) -> Vec<u8> {
+    use nodedb_query::msgpack_scan;
+
+    if payloads.is_empty() {
+        return vec![0x90]; // empty msgpack array
+    }
+
+    // Extract rows as byte slices from each payload.
+    fn extract_rows(payload: &[u8]) -> Vec<Vec<u8>> {
+        if payload.is_empty() {
+            return Vec::new();
+        }
+        let first = payload[0];
+        let (count, hdr_len) = if (0x90..=0x9f).contains(&first) {
+            ((first & 0x0f) as usize, 1)
+        } else if first == 0xdc && payload.len() >= 3 {
+            (u16::from_be_bytes([payload[1], payload[2]]) as usize, 3)
+        } else if first == 0xdd && payload.len() >= 5 {
+            (
+                u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize,
+                5,
+            )
+        } else {
+            return vec![payload.to_vec()];
+        };
+
+        let mut rows = Vec::with_capacity(count);
+        let mut pos = hdr_len;
+        for _ in 0..count {
+            if pos >= payload.len() {
+                break;
+            }
+            let start = pos;
+            match msgpack_scan::skip_value(payload, pos) {
+                Some(next) => {
+                    rows.push(payload[start..next].to_vec());
+                    pos = next;
+                }
+                None => break,
+            }
+        }
+        rows
+    }
+
+    let first_rows = extract_rows(&payloads[0]);
+    let mut result_rows: Vec<Vec<u8>> = match mode {
+        SetMergeMode::Intersect => {
+            // Keep rows from first that appear in ALL other payloads.
+            let other_sets: Vec<std::collections::HashSet<Vec<u8>>> = payloads[1..]
+                .iter()
+                .map(|p| extract_rows(p).into_iter().collect())
+                .collect();
+            first_rows
+                .into_iter()
+                .filter(|row| other_sets.iter().all(|s| s.contains(row)))
+                .collect()
+        }
+        SetMergeMode::Except => {
+            // Keep rows from first that don't appear in ANY other payload.
+            let other_set: std::collections::HashSet<Vec<u8>> =
+                payloads[1..].iter().flat_map(|p| extract_rows(p)).collect();
+            first_rows
+                .into_iter()
+                .filter(|row| !other_set.contains(row))
+                .collect()
+        }
+    };
+
+    // Deduplicate result.
+    let mut seen = std::collections::HashSet::new();
+    result_rows.retain(|r| seen.insert(r.clone()));
+
+    // Write msgpack array.
+    let row_count = result_rows.len();
+    let total: usize = result_rows.iter().map(|r| r.len()).sum();
+    let mut out = Vec::with_capacity(total + 5);
+    if row_count < 16 {
+        out.push(0x90 | row_count as u8);
+    } else if row_count <= u16::MAX as usize {
+        out.push(0xdc);
+        out.extend_from_slice(&(row_count as u16).to_be_bytes());
+    } else {
+        out.push(0xdd);
+        out.extend_from_slice(&(row_count as u32).to_be_bytes());
+    }
+    for row in result_rows {
+        out.extend_from_slice(&row);
+    }
     out
 }

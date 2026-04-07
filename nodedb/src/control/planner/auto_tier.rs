@@ -15,7 +15,7 @@ use crate::bridge::physical_plan::TimeseriesOp;
 use crate::engine::timeseries::retention_policy::RetentionPolicyDef;
 use crate::types::{TenantId, VShardId};
 
-use super::physical::PhysicalTask;
+use super::physical::{PhysicalTask, PostSetOp};
 
 /// A time segment assigned to a specific tier.
 #[derive(Debug)]
@@ -225,7 +225,7 @@ fn build_scan_task(
             gap_fill: gap_fill.to_string(),
             rls_filters: Vec::new(),
         }),
-        post_dedup: false,
+        post_set_op: PostSetOp::None,
     }
 }
 

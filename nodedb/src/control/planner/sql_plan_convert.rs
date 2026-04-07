@@ -14,7 +14,7 @@ use crate::bridge::physical_plan::*;
 use crate::engine::timeseries::retention_policy::RetentionPolicyRegistry;
 use crate::types::{TenantId, VShardId};
 
-use super::physical::PhysicalTask;
+use super::physical::{PhysicalTask, PostSetOp};
 
 /// Conversion context holding optional references needed during plan conversion.
 pub struct ConvertContext {
@@ -56,7 +56,7 @@ fn convert_one(
                 tenant_id,
                 vshard_id: VShardId::from_collection(""),
                 plan: PhysicalPlan::Meta(MetaOp::RawResponse { payload }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -121,7 +121,7 @@ fn convert_one(
                 tenant_id,
                 vshard_id: vshard,
                 plan: physical,
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -148,7 +148,7 @@ fn convert_one(
                 tenant_id,
                 vshard_id: vshard,
                 plan: physical,
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -190,7 +190,7 @@ fn convert_one(
                 plan: PhysicalPlan::Document(DocumentOp::Truncate {
                     collection: collection.clone(),
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -224,7 +224,7 @@ fn convert_one(
                     projection: proj_names,
                     post_filters: filter_bytes,
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -286,7 +286,7 @@ fn convert_one(
                     gap_fill: gap_fill.clone(),
                     rls_filters: Vec::new(),
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -302,7 +302,7 @@ fn convert_one(
                     format: "json".into(),
                     wal_lsn: None,
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -328,7 +328,7 @@ fn convert_one(
                     field_name: field.clone(),
                     rls_filters: filter_bytes,
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -350,7 +350,7 @@ fn convert_one(
                     fuzzy: *fuzzy,
                     rls_filters: Vec::new(),
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -378,7 +378,7 @@ fn convert_one(
                     filter_bitmap: None,
                     rls_filters: Vec::new(),
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -415,7 +415,7 @@ fn convert_one(
                     projection: proj_names,
                     rls_filters: Vec::new(),
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -426,10 +426,56 @@ fn convert_one(
             }
             if *distinct {
                 for task in &mut all_tasks {
-                    task.post_dedup = true;
+                    task.post_set_op = PostSetOp::UnionDistinct;
                 }
             }
             Ok(all_tasks)
+        }
+
+        SqlPlan::Intersect { left, right, all } => {
+            let mut left_tasks = convert_one(left, tenant_id, ctx)?;
+            let mut right_tasks = convert_one(right, tenant_id, ctx)?;
+            let op = if *all {
+                PostSetOp::IntersectAll
+            } else {
+                PostSetOp::Intersect
+            };
+            for task in &mut left_tasks {
+                task.post_set_op = op;
+            }
+            for task in &mut right_tasks {
+                task.post_set_op = op;
+            }
+            left_tasks.extend(right_tasks);
+            Ok(left_tasks)
+        }
+
+        SqlPlan::Except { left, right, all } => {
+            let mut left_tasks = convert_one(left, tenant_id, ctx)?;
+            let mut right_tasks = convert_one(right, tenant_id, ctx)?;
+            let op = if *all {
+                PostSetOp::ExceptAll
+            } else {
+                PostSetOp::Except
+            };
+            for task in &mut left_tasks {
+                task.post_set_op = op;
+            }
+            for task in &mut right_tasks {
+                task.post_set_op = op;
+            }
+            left_tasks.extend(right_tasks);
+            Ok(left_tasks)
+        }
+
+        SqlPlan::InsertSelect { target, source, .. } => {
+            // Execute the source query, then insert results into target.
+            let source_tasks = convert_one(source, tenant_id, ctx)?;
+            // For now, return source tasks — the routing layer reads results
+            // and inserts them into the target collection.
+            // TODO: implement proper two-phase insert-select execution.
+            let _ = target;
+            Ok(source_tasks)
         }
 
         SqlPlan::RecursiveScan {
@@ -452,7 +498,7 @@ fn convert_one(
                     distinct: *distinct,
                     limit: *limit,
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             }])
         }
 
@@ -498,7 +544,7 @@ fn convert_insert(
                         value: value_bytes,
                         ttl_ms: 0,
                     }),
-                    post_dedup: false,
+                    post_set_op: PostSetOp::None,
                 });
             }
             _ => {
@@ -510,7 +556,7 @@ fn convert_insert(
                         document_id: doc_id,
                         value: value_bytes,
                     }),
-                    post_dedup: false,
+                    post_set_op: PostSetOp::None,
                 });
             }
         }
@@ -553,7 +599,7 @@ fn convert_update(
                     key: sql_value_to_bytes(key),
                     updates: field_updates,
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             });
         }
         return Ok(tasks);
@@ -572,7 +618,7 @@ fn convert_update(
                     updates: updates.clone(),
                     returning,
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             });
         }
         Ok(tasks)
@@ -586,7 +632,7 @@ fn convert_update(
                 updates,
                 returning,
             }),
-            post_dedup: false,
+            post_set_op: PostSetOp::None,
         }])
     }
 }
@@ -610,7 +656,7 @@ fn convert_delete(
                 collection: collection.into(),
                 keys,
             }),
-            post_dedup: false,
+            post_set_op: PostSetOp::None,
         }]);
     }
 
@@ -624,7 +670,7 @@ fn convert_delete(
                     collection: collection.into(),
                     document_id: sql_value_to_string(key),
                 }),
-                post_dedup: false,
+                post_set_op: PostSetOp::None,
             });
         }
         Ok(tasks)
@@ -637,7 +683,7 @@ fn convert_delete(
                 collection: collection.into(),
                 filters: filter_bytes,
             }),
-            post_dedup: false,
+            post_set_op: PostSetOp::None,
         }])
     }
 }
@@ -681,7 +727,7 @@ fn convert_aggregate(
                 projection: Vec::new(),
                 post_filters: Vec::new(),
             }),
-            post_dedup: false,
+            post_set_op: PostSetOp::None,
         }]);
     }
 
@@ -710,7 +756,7 @@ fn convert_aggregate(
             sub_group_by: Vec::new(),
             sub_aggregates: Vec::new(),
         }),
-        post_dedup: false,
+        post_set_op: PostSetOp::None,
     }])
 }
 

@@ -11,7 +11,7 @@ use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::QueryOp;
-use crate::control::planner::physical::PhysicalTask;
+use crate::control::planner::physical::{PhysicalTask, PostSetOp};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::types::VShardId;
 
@@ -46,7 +46,7 @@ pub(super) async fn execute_facet_counts_sql(
             fields: parsed.fields,
             limit_per_facet: parsed.limit_per_facet,
         }),
-        post_dedup: false,
+        post_set_op: PostSetOp::None,
     };
 
     let resp = handler.dispatch_task(task).await.map_err(|e| {
@@ -99,7 +99,7 @@ pub(super) async fn execute_search_with_facets_sql(
             fields: parsed.facets,
             limit_per_facet: 0, // All values.
         }),
-        post_dedup: false,
+        post_set_op: PostSetOp::None,
     };
 
     let facet_resp = handler.dispatch_task(facet_task).await.map_err(|e| {

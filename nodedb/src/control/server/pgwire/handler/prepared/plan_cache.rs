@@ -152,7 +152,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
             plan: PhysicalPlan::Meta(MetaOp::Checkpoint),
-            post_dedup: false,
+            post_set_op: PostSetOp::None,
         }]
     }
 
