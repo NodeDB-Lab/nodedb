@@ -256,22 +256,9 @@ fn parse_value_list(s: &str) -> Vec<String> {
 /// Count the number of `$N` placeholders in SQL.
 fn count_placeholders(sql: &str) -> usize {
     let mut max_idx = 0usize;
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i > start
-                && let Ok(idx) = sql[start..i].parse::<usize>()
-            {
-                max_idx = max_idx.max(idx);
-            }
-        } else {
-            i += 1;
+    for (_, _, idx) in placeholder_ranges(sql) {
+        if idx > max_idx {
+            max_idx = idx;
         }
     }
     max_idx
@@ -285,27 +272,22 @@ fn substitute_sql_params(sql: &str, values: &[String]) -> String {
         return sql.to_owned();
     }
 
-    let mut result = sql.to_owned();
+    let replacements: Vec<String> = values
+        .iter()
+        .map(|value| {
+            if value.eq_ignore_ascii_case("NULL") {
+                "NULL".to_string()
+            } else if is_numeric_or_bool(value) {
+                value.to_string()
+            } else {
+                // Quote as string literal with escaping.
+                let escaped = value.replace('\'', "''");
+                format!("'{escaped}'")
+            }
+        })
+        .collect();
 
-    // Replace from highest index to lowest to avoid $10/$1 collision.
-    for i in (0..values.len()).rev() {
-        let placeholder = format!("${}", i + 1);
-        let value = &values[i];
-
-        let replacement = if value.eq_ignore_ascii_case("NULL") {
-            "NULL".to_string()
-        } else if is_numeric_or_bool(value) {
-            value.to_string()
-        } else {
-            // Quote as string literal with escaping.
-            let escaped = value.replace('\'', "''");
-            format!("'{escaped}'")
-        };
-
-        result = result.replace(&placeholder, &replacement);
-    }
-
-    result
+    rewrite_sql_placeholders(sql, &replacements)
 }
 
 /// Check if a value looks like a number or boolean (safe to use unquoted).
@@ -317,6 +299,8 @@ fn is_numeric_or_bool(s: &str) -> bool {
     // Try parsing as a number.
     s.parse::<f64>().is_ok()
 }
+
+use super::prepared::sql_placeholder::{placeholder_ranges, rewrite_sql_placeholders};
 
 #[cfg(test)]
 mod tests {
@@ -363,6 +347,7 @@ mod tests {
         assert_eq!(count_placeholders("SELECT 1"), 0);
         assert_eq!(count_placeholders("WHERE id = $1 AND name = $1"), 1);
         assert_eq!(count_placeholders("$10 $2"), 10);
+        assert_eq!(count_placeholders("SELECT '$1', $2 -- $3"), 2);
     }
 
     #[test]
@@ -388,5 +373,16 @@ mod tests {
     fn value_list_with_quotes() {
         let values = parse_value_list("42, 'hello world', true");
         assert_eq!(values, vec!["42", "hello world", "true"]);
+    }
+
+    #[test]
+    fn substitute_params_skips_literals_and_comments() {
+        let sql = "SELECT '$1' AS literal, col FROM t WHERE id = $1 -- $1";
+        let values = vec!["42".to_string()];
+        let result = substitute_sql_params(sql, &values);
+        assert_eq!(
+            result,
+            "SELECT '$1' AS literal, col FROM t WHERE id = 42 -- $1"
+        );
     }
 }

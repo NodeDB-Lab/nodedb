@@ -109,10 +109,8 @@ impl QueryParser for NodeDbQueryParser {
 /// Count $1, $2, ... placeholders in SQL text.
 fn count_placeholders(sql: &str) -> usize {
     let mut max_idx = 0usize;
-    for part in sql.split('$') {
-        if let Some(num_str) = part.split(|c: char| !c.is_ascii_digit()).next()
-            && let Ok(idx) = num_str.parse::<usize>()
-        {
+    for (_, _, idx) in super::sql_placeholder::placeholder_ranges(sql) {
+        if idx > max_idx {
             max_idx = max_idx.max(idx);
         }
     }

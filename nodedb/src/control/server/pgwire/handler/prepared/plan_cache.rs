@@ -145,6 +145,7 @@ mod tests {
     use super::*;
     use crate::bridge::envelope::PhysicalPlan;
     use crate::bridge::physical_plan::MetaOp;
+    use crate::control::planner::physical::PostSetOp;
     use crate::types::{TenantId, VShardId};
 
     fn dummy_tasks() -> Vec<PhysicalTask> {

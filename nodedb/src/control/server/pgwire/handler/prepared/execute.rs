@@ -71,17 +71,9 @@ fn substitute_params(
         return Ok(sql.to_owned());
     }
 
-    // Replace placeholders from highest index to lowest so that replacing
-    // $10 doesn't interfere with $1.
-    let mut result = sql.to_owned();
-
-    for i in (0..params.len()).rev() {
-        let placeholder = format!("${}", i + 1);
-        if !result.contains(&placeholder) {
-            continue;
-        }
-
-        let replacement = match &params[i] {
+    let mut replacements = vec![String::new(); params.len()];
+    for (i, param) in params.iter().enumerate() {
+        replacements[i] = match param {
             None => "NULL".to_string(),
             Some(bytes) => {
                 let text = std::str::from_utf8(bytes).map_err(|_| {
@@ -100,11 +92,9 @@ fn substitute_params(
                 format_param_value(text, pg_type)
             }
         };
-
-        result = result.replace(&placeholder, &replacement);
     }
 
-    Ok(result)
+    Ok(rewrite_sql_placeholders(sql, &replacements))
 }
 
 /// Format a parameter value as a SQL literal, properly escaped.
@@ -190,6 +180,8 @@ fn is_safe_numeric_literal(s: &str) -> bool {
     has_digit && chars.peek().is_none()
 }
 
+use super::sql_placeholder::rewrite_sql_placeholders;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +250,17 @@ mod tests {
         assert_eq!(format_param_value("f", &Type::BOOL), "FALSE");
         assert_eq!(format_param_value("true", &Type::BOOL), "TRUE");
         assert_eq!(format_param_value("false", &Type::BOOL), "FALSE");
+    }
+
+    #[test]
+    fn substitute_ignores_placeholders_inside_literals_and_comments() {
+        let params = vec![Some(Bytes::from_static(b"42"))];
+        let types = vec![Some(Type::INT8)];
+        let sql = "SELECT '$1' AS literal, col FROM t WHERE id = $1 -- $1\n/* $1 */";
+        let result = substitute_params(sql, &params, &types).unwrap();
+        assert_eq!(
+            result,
+            "SELECT '$1' AS literal, col FROM t WHERE id = 42 -- $1\n/* $1 */"
+        );
     }
 }
