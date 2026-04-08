@@ -9,7 +9,9 @@ use std::cmp::Ordering;
 
 use crate::msgpack_scan::field::extract_field;
 use crate::msgpack_scan::index::FieldIndex;
-use crate::msgpack_scan::reader::{array_header, read_null, read_str, read_value, skip_value};
+use crate::msgpack_scan::reader::{
+    array_header, map_header, read_null, read_str, read_value, skip_value,
+};
 use crate::scan_filter::like::sql_like_match;
 use crate::scan_filter::{FilterOp, ScanFilter};
 
@@ -31,7 +33,14 @@ impl ScanFilter {
 
         let (start, end) = match extract_field(doc, 0, &self.field) {
             Some(r) => r,
-            None => return self.op == FilterOp::IsNull,
+            None => {
+                // Qualified-name fallback: "amount" might be stored as "orders.amount".
+                let suffix = format!(".{}", self.field);
+                match find_field_by_suffix(doc, &suffix) {
+                    Some(r) => r,
+                    None => return self.op == FilterOp::IsNull,
+                }
+            }
         };
 
         eval_op(self, doc, start, end)
@@ -124,8 +133,58 @@ fn eval_op(filter: &ScanFilter, doc: &[u8], start: usize, _end: usize) -> bool {
                 false
             }
         }
+        // Column-vs-column: extract right-side field from the same doc.
+        FilterOp::GtColumn
+        | FilterOp::GteColumn
+        | FilterOp::LtColumn
+        | FilterOp::LteColumn
+        | FilterOp::EqColumn
+        | FilterOp::NeColumn => {
+            let other_col = match &filter.value {
+                nodedb_types::Value::String(s) => s.as_str(),
+                _ => return false,
+            };
+            // Try exact field name, then qualified suffix match.
+            let other_range = extract_field(doc, 0, other_col).or_else(|| {
+                let suffix = format!(".{other_col}");
+                find_field_by_suffix(doc, &suffix)
+            });
+            let Some((other_start, _)) = other_range else {
+                return false;
+            };
+            // Read both sides as Value and compare.
+            let left = read_value(doc, start).unwrap_or(nodedb_types::Value::Null);
+            let right = read_value(doc, other_start).unwrap_or(nodedb_types::Value::Null);
+            match filter.op {
+                FilterOp::GtColumn => left.cmp_coerced(&right) == Ordering::Greater,
+                FilterOp::GteColumn => left.cmp_coerced(&right) != Ordering::Less,
+                FilterOp::LtColumn => left.cmp_coerced(&right) == Ordering::Less,
+                FilterOp::LteColumn => left.cmp_coerced(&right) != Ordering::Greater,
+                FilterOp::EqColumn => left.eq_coerced(&right),
+                FilterOp::NeColumn => !left.eq_coerced(&right),
+                _ => false,
+            }
+        }
         _ => false,
     }
+}
+
+/// Find a field in a msgpack map by suffix match (e.g., ".amount" matches "orders.amount").
+fn find_field_by_suffix(doc: &[u8], suffix: &str) -> Option<(usize, usize)> {
+    let (count, mut pos) = map_header(doc, 0)?;
+    for _ in 0..count {
+        let key = read_str(doc, pos);
+        let key_end = skip_value(doc, pos)?;
+        let val_start = key_end;
+        let val_end = skip_value(doc, val_start)?;
+        if let Some(k) = key
+            && k.ends_with(suffix)
+        {
+            return Some((val_start, val_end));
+        }
+        pos = val_end;
+    }
+    None
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────

@@ -37,6 +37,15 @@ pub enum FilterOp {
     Exists,
     NotExists,
     Or,
+    /// Column-vs-column comparison: `field` op `value` where `value` is a
+    /// `Value::String` containing the name of the other column. The comparison
+    /// reads both fields from the same document row.
+    GtColumn,
+    GteColumn,
+    LtColumn,
+    LteColumn,
+    EqColumn,
+    NeColumn,
 }
 
 impl FilterOp {
@@ -64,6 +73,12 @@ impl FilterOp {
             "exists" => Self::Exists,
             "not_exists" => Self::NotExists,
             "or" => Self::Or,
+            "gt_col" => Self::GtColumn,
+            "gte_col" => Self::GteColumn,
+            "lt_col" => Self::LtColumn,
+            "lte_col" => Self::LteColumn,
+            "eq_col" => Self::EqColumn,
+            "ne_col" => Self::NeColumn,
             _ => Self::MatchAll,
         }
     }
@@ -92,6 +107,12 @@ impl FilterOp {
             Self::Exists => "exists",
             Self::NotExists => "not_exists",
             Self::Or => "or",
+            Self::GtColumn => "gt_col",
+            Self::GteColumn => "gte_col",
+            Self::LtColumn => "lt_col",
+            Self::LteColumn => "lte_col",
+            Self::EqColumn => "eq_col",
+            Self::NeColumn => "ne_col",
         }
     }
 }
@@ -281,6 +302,33 @@ impl ScanFilter {
                     false
                 }
             }
+            // Column-vs-column comparisons: self.value is String(other_col_name).
+            FilterOp::GtColumn
+            | FilterOp::GteColumn
+            | FilterOp::LtColumn
+            | FilterOp::LteColumn
+            | FilterOp::EqColumn
+            | FilterOp::NeColumn => {
+                let other_col = match &self.value {
+                    nodedb_types::Value::String(s) => s.as_str(),
+                    _ => return false,
+                };
+                let other_val = match doc.get(other_col) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let left = nodedb_types::Value::from(field_val.clone());
+                let right = nodedb_types::Value::from(other_val.clone());
+                match self.op {
+                    FilterOp::GtColumn => left.cmp_coerced(&right) == std::cmp::Ordering::Greater,
+                    FilterOp::GteColumn => left.cmp_coerced(&right) != std::cmp::Ordering::Less,
+                    FilterOp::LtColumn => left.cmp_coerced(&right) == std::cmp::Ordering::Less,
+                    FilterOp::LteColumn => left.cmp_coerced(&right) != std::cmp::Ordering::Greater,
+                    FilterOp::EqColumn => left.eq_coerced(&right),
+                    FilterOp::NeColumn => !left.eq_coerced(&right),
+                    _ => false,
+                }
+            }
             // MatchAll/Exists/NotExists/Or handled above.
             _ => false,
         }
@@ -394,6 +442,38 @@ impl ScanFilter {
                     needles.any(|needle| field_arr.iter().any(|v| needle.eq_coerced(v)))
                 } else {
                     false
+                }
+            }
+            FilterOp::GtColumn
+            | FilterOp::GteColumn
+            | FilterOp::LtColumn
+            | FilterOp::LteColumn
+            | FilterOp::EqColumn
+            | FilterOp::NeColumn => {
+                let other_col = match &self.value {
+                    nodedb_types::Value::String(s) => s.as_str(),
+                    _ => return false,
+                };
+                let other_val = match doc.get(other_col) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                match self.op {
+                    FilterOp::GtColumn => {
+                        field_val.cmp_coerced(other_val) == std::cmp::Ordering::Greater
+                    }
+                    FilterOp::GteColumn => {
+                        field_val.cmp_coerced(other_val) != std::cmp::Ordering::Less
+                    }
+                    FilterOp::LtColumn => {
+                        field_val.cmp_coerced(other_val) == std::cmp::Ordering::Less
+                    }
+                    FilterOp::LteColumn => {
+                        field_val.cmp_coerced(other_val) != std::cmp::Ordering::Greater
+                    }
+                    FilterOp::EqColumn => field_val.eq_coerced(other_val),
+                    FilterOp::NeColumn => !field_val.eq_coerced(other_val),
+                    _ => false,
                 }
             }
             _ => false,
