@@ -91,13 +91,23 @@ fn parse_comparison_predicate(text: &str) -> Option<WherePredicate> {
 }
 
 /// Parse RETURN columns.
-pub(super) fn parse_return(text: &str) -> Vec<ReturnColumn> {
+pub(super) fn parse_return(text: &str) -> (Vec<ReturnColumn>, bool) {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed == "*" {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
-    split_top_level_commas(trimmed)
+    // Strip DISTINCT keyword.
+    let (effective, distinct) = {
+        let upper = trimmed.to_uppercase();
+        if upper.starts_with("DISTINCT ") {
+            (&trimmed[9..], true)
+        } else {
+            (trimmed, false)
+        }
+    };
+
+    let columns = split_top_level_commas(effective)
         .into_iter()
         .map(|col| {
             let col = col.trim();
@@ -116,7 +126,8 @@ pub(super) fn parse_return(text: &str) -> Vec<ReturnColumn> {
                 }
             }
         })
-        .collect()
+        .collect();
+    (columns, distinct)
 }
 
 /// Parse ORDER BY columns.

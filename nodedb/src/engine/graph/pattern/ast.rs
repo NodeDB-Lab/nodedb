@@ -22,6 +22,8 @@ pub struct MatchQuery {
     pub where_predicates: Vec<WherePredicate>,
     /// RETURN column list. Empty = return all bound variables.
     pub return_columns: Vec<ReturnColumn>,
+    /// Whether RETURN DISTINCT was specified.
+    pub distinct: bool,
     /// LIMIT on returned rows.
     pub limit: Option<usize>,
     /// ORDER BY clauses.
@@ -299,6 +301,7 @@ mod tests {
             }],
             where_predicates: vec![],
             return_columns: vec![],
+            distinct: false,
             limit: None,
             order_by: vec![],
         };
@@ -349,6 +352,7 @@ mod tests {
                 expr: "a".into(),
                 alias: None,
             }],
+            distinct: false,
             limit: Some(10),
             order_by: vec![],
         };

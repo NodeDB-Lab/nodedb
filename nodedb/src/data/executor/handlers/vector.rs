@@ -37,7 +37,7 @@ pub(in crate::data::executor) struct VectorInsertParams<'a> {
 
 impl CoreLoop {
     /// Get or create a vector collection, validating dimension compatibility.
-    fn get_or_create_vector_index(
+    pub(in crate::data::executor) fn get_or_create_vector_index(
         &mut self,
         tid: u32,
         collection: &str,

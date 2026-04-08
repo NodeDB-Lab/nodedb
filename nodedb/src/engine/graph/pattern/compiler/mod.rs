@@ -28,6 +28,7 @@ use helpers::{find_next_match_keyword, find_top_level_keyword, split_top_level_c
 pub fn parse(sql: &str) -> Result<MatchQuery, String> {
     let mut where_predicates = Vec::new();
     let mut return_columns = Vec::new();
+    let mut distinct = false;
     let mut limit = None;
     let mut order_by = Vec::new();
 
@@ -65,7 +66,9 @@ pub fn parse(sql: &str) -> Result<MatchQuery, String> {
             .min()
             .unwrap_or(trimmed.len());
         let return_section = &trimmed[rp + 6..return_end].trim();
-        return_columns = parse_return(return_section);
+        let (cols, dist) = parse_return(return_section);
+        return_columns = cols;
+        distinct = dist;
     }
 
     if let Some(lp) = limit_pos {
@@ -84,6 +87,7 @@ pub fn parse(sql: &str) -> Result<MatchQuery, String> {
         clauses,
         where_predicates,
         return_columns,
+        distinct,
         limit,
         order_by,
     })

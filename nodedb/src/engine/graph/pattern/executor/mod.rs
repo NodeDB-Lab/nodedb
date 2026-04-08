@@ -61,6 +61,14 @@ fn execute_query(
         rows = predicates::project_columns(&rows, &query.return_columns);
     }
 
+    if query.distinct {
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|row| {
+            let key = format!("{row:?}");
+            seen.insert(key)
+        });
+    }
+
     Ok(rows)
 }
 

@@ -549,6 +549,72 @@ impl CoreLoop {
             }
         }
 
+        // Vector index: if the strict schema declares Vector(dim) columns,
+        // extract float arrays and insert into HNSW so KNN search works.
+        // Collect vector fields from schema first (avoids borrow conflict).
+        let vector_fields: Vec<(String, u32)> = self
+            .doc_configs
+            .get(&config_key)
+            .and_then(|config| {
+                if let crate::bridge::physical_plan::StorageMode::Strict { ref schema } =
+                    config.storage_mode
+                {
+                    let fields: Vec<_> = schema
+                        .columns
+                        .iter()
+                        .filter_map(|col| {
+                            if let nodedb_types::columnar::ColumnType::Vector(dim) = col.column_type
+                            {
+                                Some((col.name.clone(), dim))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if fields.is_empty() {
+                        None
+                    } else {
+                        Some(fields)
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        if !vector_fields.is_empty() {
+            // Decode from MessagePack (internal format) — not JSON.
+            if let Ok(ndb_val) = nodedb_types::value_from_msgpack(value)
+                && let nodedb_types::Value::Object(ref obj) = ndb_val
+            {
+                for (field_name, dim) in &vector_fields {
+                    if let Some(nodedb_types::Value::Array(arr)) = obj.get(field_name) {
+                        let floats: Vec<f32> = arr
+                            .iter()
+                            .filter_map(|v| match v {
+                                nodedb_types::Value::Float(f) => Some(*f as f32),
+                                nodedb_types::Value::Integer(i) => Some(*i as f32),
+                                _ => None,
+                            })
+                            .collect();
+                        if floats.len() == *dim as usize {
+                            let index_key = Self::vector_index_key(tid, collection, field_name);
+                            let params = self
+                                .vector_params
+                                .get(&index_key)
+                                .cloned()
+                                .unwrap_or_default();
+                            let coll =
+                                self.vector_collections.entry(index_key).or_insert_with(|| {
+                                    nodedb_vector::VectorCollection::new(*dim as usize, params)
+                                });
+                            coll.insert_with_doc_id(floats, document_id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
