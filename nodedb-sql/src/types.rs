@@ -184,6 +184,14 @@ pub enum SqlPlan {
         distinct: bool,
         limit: usize,
     },
+
+    /// Non-recursive CTE: execute each definition, then the outer query.
+    Cte {
+        /// CTE definitions: `(name, subquery_plan)`.
+        definitions: Vec<(String, SqlPlan)>,
+        /// The outer query that references CTE names.
+        outer: Box<SqlPlan>,
+    },
 }
 
 /// Database engine type for a collection.

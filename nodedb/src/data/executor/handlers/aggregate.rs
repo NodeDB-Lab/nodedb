@@ -347,7 +347,7 @@ impl CoreLoop {
                     let having_predicates: Vec<ScanFilter> = match zerompk::from_msgpack(having) {
                         Ok(f) => f,
                         Err(e) => {
-                            tracing::warn!(core = self.core_id, error = %e, "HAVING predicate deserialization failed");
+                            tracing::warn!(core = self.core_id, error = %e, "HAVING predicate deserialization failed (schemaless)");
                             Vec::new()
                         }
                     };

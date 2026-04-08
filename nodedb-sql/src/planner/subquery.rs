@@ -359,8 +359,9 @@ fn extract_scalar_column(query: &ast::Query) -> Option<String> {
         ast::SelectItem::UnnamedExpr(expr) => match expr {
             Expr::Identifier(ident) => Some(normalize_ident(ident)),
             Expr::Function(func) => {
-                // Synthesize name from function: AVG(amount) → "avg"
-                let name = func
+                // Synthesize name matching aggregate handler convention:
+                // AVG(amount) → "avg_amount", COUNT(*) → "count_all"
+                let func_name = func
                     .name
                     .0
                     .iter()
@@ -369,8 +370,26 @@ fn extract_scalar_column(query: &ast::Query) -> Option<String> {
                         _ => String::new(),
                     })
                     .collect::<Vec<_>>()
-                    .join(".");
-                Some(name)
+                    .join(".")
+                    .to_lowercase();
+                let arg = match &func.args {
+                    ast::FunctionArguments::List(arg_list) => arg_list
+                        .args
+                        .first()
+                        .and_then(|a| match a {
+                            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
+                                Expr::Identifier(ident),
+                            )) => Some(normalize_ident(ident)),
+                            ast::FunctionArg::Unnamed(
+                                ast::FunctionArgExpr::Wildcard
+                                | ast::FunctionArgExpr::QualifiedWildcard(_),
+                            ) => Some("all".to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "all".to_string()),
+                    _ => "all".to_string(),
+                };
+                Some(format!("{func_name}_{arg}"))
             }
             _ => None,
         },

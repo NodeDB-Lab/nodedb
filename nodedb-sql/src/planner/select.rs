@@ -25,7 +25,7 @@ pub fn plan_query(
     {
         return super::cte::plan_recursive_cte(query, catalog, functions);
     }
-    // Non-recursive CTEs: wrap catalog so CTE names resolve as virtual collections.
+    // Non-recursive CTEs: plan each CTE subquery and the outer query.
     if let Some(with) = &query.with
         && !with.cte_tables.is_empty()
     {
@@ -42,16 +42,27 @@ pub fn plan_query(
             pipe_operators: query.pipe_operators.clone(),
         };
 
-        // Build CTE-aware catalog: each CTE becomes a schemaless document collection.
+        // Plan each CTE subquery.
+        let mut definitions = Vec::new();
+        let mut cte_names = Vec::new();
+        for cte in &with.cte_tables {
+            let name = normalize_ident(&cte.alias.name);
+            let cte_plan = plan_query(&cte.query, catalog, functions)?;
+            definitions.push((name.clone(), cte_plan));
+            cte_names.push(name);
+        }
+
+        // Build CTE-aware catalog so the outer query can reference CTE names.
         let cte_catalog = CteCatalog {
             inner: catalog,
-            cte_names: with
-                .cte_tables
-                .iter()
-                .map(|cte| normalize_ident(&cte.alias.name))
-                .collect(),
+            cte_names,
         };
-        return plan_query(&inner_query, &cte_catalog, functions);
+        let outer = plan_query(&inner_query, &cte_catalog, functions)?;
+
+        return Ok(SqlPlan::Cte {
+            definitions,
+            outer: Box::new(outer),
+        });
     }
 
     // Handle UNION.
