@@ -338,14 +338,14 @@ pub(super) fn encode_raw_document_rows(rows: &[(String, Vec<u8>)]) -> crate::Res
     Ok(buf)
 }
 
-/// Decode concatenated raw scan payloads into `(doc_id, msgpack_data)` pairs.
+/// Decode concatenated row payloads into `(doc_id, msgpack_data)` pairs.
 ///
-/// Input: zero or more msgpack arrays back-to-back, each produced by
-/// `encode_raw_document_rows`. Each array element is a fixmap with
-/// `{id: str, data: msgpack_map}`.
+/// Input: zero or more msgpack arrays back-to-back. Elements may be either:
+/// - raw scan rows from `encode_raw_document_rows` with `{id, data}` wrappers
+/// - plain msgpack rows from aggregate/join paths serialized via `encode_json_vec`
 ///
-/// The `data` field's raw bytes are extracted so consumers can run
-/// `extract_field` on them directly.
+/// For wrapped scan rows, the `data` field's raw bytes are extracted. For
+/// plain rows, the entire row value is returned as `msgpack_data`.
 pub(super) fn decode_raw_scan_to_docs(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     use nodedb_query::msgpack_scan;
 
@@ -382,8 +382,11 @@ pub(super) fn decode_raw_scan_to_docs(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
                 break;
             }
 
-            // Each element: fixmap {id: str, data: msgpack_map}.
+            // Scan payloads use {id, data}. Aggregate/join payloads are plain
+            // msgpack maps, so fall back to the whole element when "data" is
+            // absent.
             let elem_start = inner;
+            let elem_end = msgpack_scan::skip_value(bytes, inner).unwrap_or(bytes.len());
 
             let id = msgpack_scan::extract_field(bytes, elem_start, "id")
                 .and_then(|(s, _e)| msgpack_scan::read_value(bytes, s))
@@ -395,11 +398,11 @@ pub(super) fn decode_raw_scan_to_docs(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
 
             let data = msgpack_scan::extract_field(bytes, elem_start, "data")
                 .map(|(s, e)| bytes[s..e].to_vec())
-                .unwrap_or_default();
+                .unwrap_or_else(|| bytes[elem_start..elem_end].to_vec());
 
             results.push((id, data));
 
-            inner = msgpack_scan::skip_value(bytes, inner).unwrap_or(bytes.len());
+            inner = elem_end;
         }
         pos = inner;
     }
@@ -663,5 +666,45 @@ mod tests {
         let json = decode_payload_to_json(&encoded);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn decode_raw_scan_to_docs_accepts_plain_rows() {
+        let rows = vec![serde_json::json!({"avg_amount": 43.598})];
+        let encoded = encode_json_vec(&rows).unwrap();
+
+        let decoded = decode_raw_scan_to_docs(&encoded);
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, "");
+        let decoded_json = decode_payload_to_json(&decoded[0].1);
+        let parsed: serde_json::Value = serde_json::from_str(&decoded_json).unwrap();
+        assert_eq!(parsed["avg_amount"], 43.598);
+    }
+
+    #[test]
+    fn decode_raw_scan_to_docs_handles_mixed_arrays() {
+        let wrapped_doc = serde_json::json!({"name": "alice"});
+        let wrapped_rows = vec![(
+            "doc1".to_string(),
+            nodedb_types::json_to_msgpack(&wrapped_doc).unwrap(),
+        )];
+        let wrapped = encode_raw_document_rows(&wrapped_rows).unwrap();
+
+        let plain_rows = vec![serde_json::json!({"avg_amount": 43.598})];
+        let plain = encode_json_vec(&plain_rows).unwrap();
+
+        let mut combined = wrapped;
+        combined.extend_from_slice(&plain);
+
+        let decoded = decode_raw_scan_to_docs(&combined);
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].0, "doc1");
+        assert_eq!(decode_payload_to_json(&decoded[0].1), r#"{"name":"alice"}"#);
+        assert_eq!(decoded[1].0, "");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&decode_payload_to_json(&decoded[1].1)).unwrap();
+        assert_eq!(parsed["avg_amount"], 43.598);
     }
 }
