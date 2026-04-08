@@ -13,30 +13,141 @@ fn apply_projection(
     computed_cols: &[crate::bridge::expr_eval::ComputedColumn],
     projection: &[String],
 ) -> serde_json::Value {
-    if !computed_cols.is_empty() {
-        let doc_val = nodedb_types::Value::from(data.clone());
-        let mut out = serde_json::Map::with_capacity(computed_cols.len());
-        for cc in computed_cols {
-            out.insert(
-                cc.alias.clone(),
-                serde_json::Value::from(cc.expr.eval(&doc_val)),
-            );
-        }
-        serde_json::Value::Object(out)
-    } else if !projection.is_empty() {
-        if let serde_json::Value::Object(obj) = &data {
-            let mut out = serde_json::Map::with_capacity(projection.len());
-            for col in projection {
-                if let Some(val) = obj.get(col) {
-                    out.insert(col.clone(), val.clone());
-                }
+    match data {
+        serde_json::Value::Object(obj) => {
+            if computed_cols.is_empty() && projection.is_empty() {
+                return serde_json::Value::Object(obj);
             }
+
+            let doc_val = nodedb_types::Value::from(serde_json::Value::Object(obj.clone()));
+            let mut out = if projection.is_empty() {
+                serde_json::Map::with_capacity(computed_cols.len())
+            } else {
+                let mut projected =
+                    serde_json::Map::with_capacity(projection.len() + computed_cols.len());
+                for col in projection {
+                    if let Some(val) = obj.get(col) {
+                        projected.insert(col.clone(), val.clone());
+                    }
+                }
+                projected
+            };
+
+            for cc in computed_cols {
+                if out.contains_key(&cc.alias) {
+                    continue;
+                }
+                out.insert(
+                    cc.alias.clone(),
+                    serde_json::Value::from(cc.expr.eval(&doc_val)),
+                );
+            }
+
             serde_json::Value::Object(out)
-        } else {
-            data
         }
-    } else {
-        data
+        other => other,
+    }
+}
+
+fn decode_scanned_document(
+    value: &[u8],
+    strict_schema: Option<&nodedb_types::columnar::StrictSchema>,
+) -> serde_json::Value {
+    strict_schema
+        .and_then(|schema| super::super::super::strict_format::binary_tuple_to_json(value, schema))
+        .or_else(|| super::super::super::doc_format::decode_document(value))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_projection, decode_scanned_document};
+    use crate::bridge::expr_eval::{ComputedColumn, SqlExpr};
+    use crate::data::executor::strict_format;
+    use nodedb_types::Value;
+    use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
+
+    #[test]
+    fn apply_projection_keeps_base_fields_when_computed_columns_exist() {
+        let data = serde_json::json!({
+            "id": "u1",
+            "name": "Ada",
+            "age": 42
+        });
+        let computed = vec![ComputedColumn {
+            alias: "label".into(),
+            expr: SqlExpr::Column("name".into()),
+        }];
+        let projection = vec!["name".to_string(), "age".to_string()];
+
+        let projected = apply_projection(data, &computed, &projection);
+
+        assert_eq!(
+            projected,
+            serde_json::json!({
+                "name": "Ada",
+                "age": 42,
+                "label": "Ada"
+            })
+        );
+    }
+
+    #[test]
+    fn apply_projection_does_not_overwrite_existing_window_alias() {
+        let data = serde_json::json!({
+            "name": "Ada",
+            "age": 42,
+            "rn": 1
+        });
+        let computed = vec![ComputedColumn {
+            alias: "rn".into(),
+            expr: SqlExpr::Function {
+                name: "row_number".into(),
+                args: Vec::new(),
+            },
+        }];
+        let projection = vec!["name".to_string(), "age".to_string(), "rn".to_string()];
+
+        let projected = apply_projection(data, &computed, &projection);
+
+        assert_eq!(
+            projected,
+            serde_json::json!({
+                "name": "Ada",
+                "age": 42,
+                "rn": 1
+            })
+        );
+    }
+
+    #[test]
+    fn decode_scanned_document_uses_strict_schema_for_binary_tuple_rows() {
+        let schema = StrictSchema {
+            columns: vec![
+                ColumnDef::required("id", ColumnType::String).with_primary_key(),
+                ColumnDef::required("name", ColumnType::String),
+                ColumnDef::nullable("age", ColumnType::Int64),
+            ],
+            version: 1,
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("id".into(), Value::String("u1".into()));
+        map.insert("name".into(), Value::String("Ada".into()));
+        map.insert("age".into(), Value::Integer(42));
+
+        let tuple = strict_format::value_to_binary_tuple(&Value::Object(map), &schema)
+            .expect("encode strict tuple");
+
+        let decoded = decode_scanned_document(&tuple, Some(&schema));
+
+        assert_eq!(
+            decoded,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Ada",
+                "age": 42
+            })
+        );
     }
 }
 
@@ -207,7 +318,9 @@ impl CoreLoop {
                 // after dedup/offset/limit, so we only decode rows that are returned.
                 // This avoids double serialization (binary_tuple → JSON bytes → re-parse → MsgPack)
                 // and avoids decoding rows that will be skipped by offset/limit.
-                if let Some(ref schema) = strict_schema {
+                if let Some(ref schema) = strict_schema
+                    && window_specs.is_empty()
+                {
                     let deduped = if distinct {
                         let mut seen = std::collections::HashSet::new();
                         sorted
@@ -222,11 +335,7 @@ impl CoreLoop {
                         .skip(offset)
                         .take(limit)
                         .map(|(doc_id, val)| {
-                            let data = super::super::super::strict_format::binary_tuple_to_json(
-                                &val, schema,
-                            )
-                            .or_else(|| super::super::super::doc_format::decode_document(&val))
-                            .unwrap_or(serde_json::Value::Null);
+                            let data = decode_scanned_document(&val, Some(schema));
                             let projected = apply_projection(data, &computed_cols, projection);
                             super::super::super::response_codec::DocumentRow {
                                 id: doc_id,
@@ -243,8 +352,7 @@ impl CoreLoop {
                     let mut decoded_rows: Vec<(String, serde_json::Value)> = sorted
                         .into_iter()
                         .map(|(id, val)| {
-                            let doc = super::super::super::doc_format::decode_document(&val)
-                                .unwrap_or(serde_json::Value::Null);
+                            let doc = decode_scanned_document(&val, strict_schema.as_ref());
                             (id, doc)
                         })
                         .collect();
