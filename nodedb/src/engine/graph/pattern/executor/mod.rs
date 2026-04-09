@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use super::ast::*;
 use crate::engine::graph::csr::CsrIndex;
 use crate::engine::graph::edge_store::EdgeStore;
-use sonic_rs;
 
 /// A single result row: variable bindings.
 pub type BindingRow = HashMap<String, String>;
@@ -72,11 +71,25 @@ fn execute_query(
     Ok(rows)
 }
 
-/// Serialize binding rows to JSON for response.
-pub fn rows_to_json(rows: &[BindingRow]) -> Result<Vec<u8>, crate::Error> {
-    sonic_rs::to_vec(rows).map_err(|e| crate::Error::Internal {
-        detail: format!("match result serialization: {e}"),
-    })
+/// Serialize binding rows to MessagePack for SPSC transport.
+///
+/// The Data Plane MUST produce MessagePack so that broadcast merge
+/// (`extract_msgpack_elements`) can correctly split and re-merge rows
+/// from multiple cores. BindingRow is `HashMap<String, String>` — all
+/// values are strings, so we write raw msgpack directly.
+pub fn rows_to_msgpack(rows: &[BindingRow]) -> Result<Vec<u8>, crate::Error> {
+    use nodedb_query::msgpack_scan::{write_array_header, write_map_header, write_str};
+
+    let mut buf = Vec::with_capacity(rows.len() * 64);
+    write_array_header(&mut buf, rows.len());
+    for row in rows {
+        write_map_header(&mut buf, row.len());
+        for (k, v) in row {
+            write_str(&mut buf, k);
+            write_str(&mut buf, v);
+        }
+    }
+    Ok(buf)
 }
 
 /// Execute a single MATCH clause.
@@ -354,12 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn rows_to_json_format() {
+    fn rows_to_msgpack_format() {
         let mut row = BindingRow::new();
         row.insert("a".into(), "alice".into());
         row.insert("b".into(), "bob".into());
-        let json = rows_to_json(&[row]).unwrap();
-        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&json).unwrap();
-        assert_eq!(parsed[0]["a"], "alice");
+        let msgpack = rows_to_msgpack(&[row]).unwrap();
+        let json = nodedb_types::json_from_msgpack(&msgpack).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr[0]["a"], "alice");
     }
 }

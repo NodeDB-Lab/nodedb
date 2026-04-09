@@ -32,7 +32,7 @@ impl CoreLoop {
         // Execute the pattern match on CSR + EdgeStore.
         match crate::engine::graph::pattern::executor::execute(&query, &self.csr, &self.edge_store)
         {
-            Ok(rows) => match crate::engine::graph::pattern::executor::rows_to_json(&rows) {
+            Ok(rows) => match crate::engine::graph::pattern::executor::rows_to_msgpack(&rows) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => self.response_error(task, ErrorCode::from(e)),
             },
