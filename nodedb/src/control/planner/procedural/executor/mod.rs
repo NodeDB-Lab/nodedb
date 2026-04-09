@@ -4,6 +4,7 @@ pub mod eval;
 pub mod exception;
 pub mod fuel;
 pub mod plan_cache;
+pub mod sql_bytes;
 pub mod transaction;
 
 pub use bindings::RowBindings;

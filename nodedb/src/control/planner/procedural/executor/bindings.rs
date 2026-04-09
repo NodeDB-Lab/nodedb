@@ -176,22 +176,16 @@ impl RowBindings {
         // Replace NEW.field references.
         if let Some(ref new_row) = self.new_row {
             for (field, value) in new_row {
-                let pattern_upper = format!("NEW.{}", field.to_uppercase());
-                let pattern_lower = format!("NEW.{field}");
                 let literal = value.to_sql_literal();
-                result = replace_case_insensitive(&result, &pattern_upper, &literal);
-                result = replace_case_insensitive(&result, &pattern_lower, &literal);
+                result = replace_qualified_field_reference(&result, "NEW", field, &literal);
             }
         }
 
         // Replace OLD.field references.
         if let Some(ref old_row) = self.old_row {
             for (field, value) in old_row {
-                let pattern_upper = format!("OLD.{}", field.to_uppercase());
-                let pattern_lower = format!("OLD.{field}");
                 let literal = value.to_sql_literal();
-                result = replace_case_insensitive(&result, &pattern_upper, &literal);
-                result = replace_case_insensitive(&result, &pattern_lower, &literal);
+                result = replace_qualified_field_reference(&result, "OLD", field, &literal);
             }
         }
 
@@ -212,6 +206,75 @@ impl RowBindings {
         result
     }
 }
+
+fn replace_qualified_field_reference(
+    input: &str,
+    qualifier: &str,
+    field: &str,
+    replacement: &str,
+) -> String {
+    let bytes = input.as_bytes();
+    let qual_len = qualifier.len();
+    let field_len = field.len();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if !matches_identifier_at(input, i, qualifier) {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let mut cursor = i + qual_len;
+        cursor = skip_ascii_whitespace(bytes, cursor);
+        if bytes.get(cursor) != Some(&b'.') {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        cursor += 1;
+        cursor = skip_ascii_whitespace(bytes, cursor);
+        if !matches_identifier_at(input, cursor, field) {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let field_end = cursor + field_len;
+        if is_identifier_char(bytes.get(field_end).copied()) {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        result.push_str(replacement);
+        i = field_end;
+    }
+
+    result
+}
+
+fn matches_identifier_at(input: &str, start: usize, ident: &str) -> bool {
+    let bytes = input.as_bytes();
+    let ident_len = ident.len();
+    let Some(slice) = input.get(start..start + ident_len) else {
+        return false;
+    };
+
+    if !slice.eq_ignore_ascii_case(ident) {
+        return false;
+    }
+
+    if start > 0 && is_identifier_char(bytes.get(start - 1).copied()) {
+        return false;
+    }
+
+    !is_identifier_char(bytes.get(start + ident_len).copied())
+}
+
+use super::sql_bytes::{is_identifier_char, skip_ascii_whitespace};
 
 /// Case-insensitive string replacement (simple, not regex).
 fn replace_case_insensitive(input: &str, pattern: &str, replacement: &str) -> String {
@@ -275,5 +338,14 @@ mod tests {
         assert_eq!(Value::Integer(42).to_sql_literal(), "42");
         assert_eq!(Value::String("hello".into()).to_sql_literal(), "'hello'");
         assert_eq!(Value::String("it's".into()).to_sql_literal(), "'it''s'");
+    }
+
+    #[test]
+    fn substitute_spaced_qualified_field_reference() {
+        let mut row = HashMap::new();
+        row.insert("id".into(), Value::String("as1".into()));
+        let bindings = RowBindings::after_insert("orders", row);
+        let result = bindings.substitute("VALUES (NEW . id | | '_log', NEW . id)");
+        assert_eq!(result, "VALUES ('as1' | | '_log', 'as1')");
     }
 }

@@ -42,7 +42,7 @@ impl<'a> StatementExecutor<'a> {
     // ── DML dispatch ────────────────────────────────────────────────────
 
     pub(super) async fn execute_dml(&self, sql: &str, bindings: &RowBindings) -> crate::Result<()> {
-        let bound_sql = bindings.substitute(sql);
+        let bound_sql = fold_literal_string_concat(&bindings.substitute(sql));
 
         let ctx = crate::control::planner::context::QueryContext::for_state(
             self.state,
@@ -176,5 +176,135 @@ impl<'a> StatementExecutor<'a> {
         }
 
         Ok(())
+    }
+}
+
+fn fold_literal_string_concat(sql: &str) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] != b'\'' {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let start = i;
+        let Some((mut cursor, mut combined)) = parse_single_quoted_literal(sql, i) else {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        };
+
+        let mut folded = false;
+        loop {
+            let Some(op_end) = consume_string_concat_operator(bytes, cursor) else {
+                break;
+            };
+            let next_lit = skip_ascii_whitespace(bytes, op_end);
+            let Some((next_cursor, next_literal)) = parse_single_quoted_literal(sql, next_lit)
+            else {
+                break;
+            };
+
+            combined.push_str(&next_literal);
+            cursor = next_cursor;
+            folded = true;
+        }
+
+        if folded {
+            result.push('\'');
+            for ch in combined.chars() {
+                if ch == '\'' {
+                    result.push_str("''");
+                } else {
+                    result.push(ch);
+                }
+            }
+            result.push('\'');
+        } else {
+            result.push_str(&sql[start..cursor]);
+        }
+        i = cursor;
+    }
+
+    result
+}
+
+fn parse_single_quoted_literal(sql: &str, start: usize) -> Option<(usize, String)> {
+    let bytes = sql.as_bytes();
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+
+    let mut i = start + 1;
+    let mut literal = String::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    literal.push('\'');
+                    i += 2;
+                } else {
+                    return Some((i + 1, literal));
+                }
+            }
+            byte => {
+                literal.push(byte as char);
+                i += 1;
+            }
+        }
+    }
+
+    None
+}
+
+use super::super::sql_bytes::skip_ascii_whitespace;
+
+fn consume_string_concat_operator(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = skip_ascii_whitespace(bytes, start);
+    if bytes.get(i) != Some(&b'|') {
+        return None;
+    }
+    i += 1;
+    i = skip_ascii_whitespace(bytes, i);
+    if bytes.get(i) != Some(&b'|') {
+        return None;
+    }
+    Some(i + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fold_literal_string_concat;
+
+    #[test]
+    fn folds_adjacent_string_concat_literals() {
+        let sql = "INSERT INTO log VALUES ('as1' || '_log', 'ok')";
+        let folded = fold_literal_string_concat(sql);
+        assert_eq!(folded, "INSERT INTO log VALUES ('as1_log', 'ok')");
+    }
+
+    #[test]
+    fn folds_multiple_concat_segments() {
+        let sql = "VALUES ('a' || 'b' || 'c')";
+        let folded = fold_literal_string_concat(sql);
+        assert_eq!(folded, "VALUES ('abc')");
+    }
+
+    #[test]
+    fn folds_spaced_concat_operator_segments() {
+        let sql = "VALUES ('a' | | 'b')";
+        let folded = fold_literal_string_concat(sql);
+        assert_eq!(folded, "VALUES ('ab')");
+    }
+
+    #[test]
+    fn leaves_non_concat_literals_unchanged() {
+        let sql = "VALUES ('a', col)";
+        let folded = fold_literal_string_concat(sql);
+        assert_eq!(folded, sql);
     }
 }
