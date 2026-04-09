@@ -66,6 +66,7 @@ pub async fn alter_table_add_column(
                     schema.version = schema.version.saturating_add(1);
 
                     let mut updated = coll;
+                    updated.collection_type = nodedb_types::CollectionType::strict(schema.clone());
                     updated.timeseries_config = sonic_rs::to_string(&schema).ok();
                     catalog
                         .put_collection(&updated)
