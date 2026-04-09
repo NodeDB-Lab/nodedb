@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use nodedb_query::msgpack_scan;
+use sonic_rs;
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
 use crate::bridge::physical_plan::QueryOp;
@@ -136,6 +137,101 @@ pub async fn broadcast_to_all_cores(
     })
 }
 
+/// Broadcast a write-like plan to all cores and sum a numeric count field from
+/// each response payload (for example `{"inserted": N}`).
+pub async fn broadcast_count_to_all_cores(
+    shared: &SharedState,
+    tenant_id: TenantId,
+    plan: PhysicalPlan,
+    trace_id: u64,
+    count_key: &str,
+) -> crate::Result<Response> {
+    let num_cores = match shared.dispatcher.lock() {
+        Ok(d) => d.num_cores(),
+        Err(p) => p.into_inner().num_cores(),
+    };
+
+    let mut receivers = Vec::with_capacity(num_cores);
+    for core_id in 0..num_cores {
+        let request_id = RequestId::new(BROADCAST_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let vshard_id = VShardId::new(core_id as u16);
+        let request = Request {
+            request_id,
+            tenant_id,
+            vshard_id,
+            plan: plan.clone(),
+            deadline: Instant::now()
+                + Duration::from_secs(shared.tuning.network.default_deadline_secs),
+            priority: Priority::Normal,
+            trace_id,
+            consistency: ReadConsistency::Strong,
+            idempotency_key: None,
+            event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
+        };
+
+        let rx = shared.tracker.register_oneshot(request_id);
+        match shared.dispatcher.lock() {
+            Ok(mut d) => d.dispatch_to_core(core_id, request)?,
+            Err(p) => p.into_inner().dispatch_to_core(core_id, request)?,
+        };
+        receivers.push(rx);
+    }
+
+    let mut total = 0usize;
+    let mut max_lsn = Lsn::ZERO;
+    let mut had_error = false;
+    let mut error_msg = String::new();
+
+    for rx in receivers {
+        let resp = tokio::time::timeout(
+            Duration::from_secs(shared.tuning.network.default_deadline_secs),
+            rx,
+        )
+        .await
+        .map_err(|_| crate::Error::Dispatch {
+            detail: "broadcast count timeout".into(),
+        })?
+        .map_err(|_| crate::Error::Dispatch {
+            detail: "broadcast count channel closed".into(),
+        })?;
+
+        if resp.status == crate::bridge::envelope::Status::Error {
+            had_error = true;
+            if let Some(ref ec) = resp.error_code {
+                error_msg = format!("{ec:?}");
+            }
+            continue;
+        }
+
+        if resp.watermark_lsn > max_lsn {
+            max_lsn = resp.watermark_lsn;
+        }
+
+        total += decode_count_field(&resp.payload, count_key).unwrap_or(0);
+    }
+
+    if had_error && total == 0 {
+        return Err(crate::Error::Dispatch { detail: error_msg });
+    }
+
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(count_key, total);
+    let payload = zerompk::to_msgpack_vec(&map).map_err(|e| crate::Error::Codec {
+        detail: format!("count response serialization: {e}"),
+    })?;
+
+    Ok(Response {
+        request_id: RequestId::new(0),
+        status: crate::bridge::envelope::Status::Ok,
+        attempt: 1,
+        partial: false,
+        payload: crate::bridge::envelope::Payload::from_vec(payload),
+        watermark_lsn: max_lsn,
+        error_code: None,
+    })
+}
+
 /// Broadcast a plan to all cores and return raw binary payloads concatenated.
 ///
 /// Unlike `broadcast_to_all_cores` (which merges as JSON), this returns the
@@ -249,6 +345,17 @@ fn extract_msgpack_elements(payload: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     rows
+}
+
+fn decode_count_field(payload: &[u8], key: &str) -> Option<usize> {
+    if payload.is_empty() {
+        return Some(0);
+    }
+
+    let json = nodedb_types::json_from_msgpack(payload)
+        .ok()
+        .or_else(|| sonic_rs::from_slice::<serde_json::Value>(payload).ok())?;
+    json.get(key).and_then(|v| v.as_u64()).map(|v| v as usize)
 }
 
 fn encode_msgpack_array(rows: &[Vec<u8>]) -> Vec<u8> {
