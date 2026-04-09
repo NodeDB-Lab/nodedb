@@ -201,6 +201,20 @@ impl NodeDbPgHandler {
                 }
             }
 
+            // Extract truncate restart_identity info before task is moved into dispatch.
+            let truncate_restart_collection =
+                if let crate::bridge::physical_plan::PhysicalPlan::Document(
+                    crate::bridge::physical_plan::DocumentOp::Truncate {
+                        collection,
+                        restart_identity: true,
+                    },
+                ) = &task.plan
+                {
+                    Some(collection.clone())
+                } else {
+                    None
+                };
+
             // --- Normal dispatch ---
             let resp = self.dispatch_task(task).await.map_err(|e| {
                 let (severity, code, message) = error_to_sqlstate(&e);
@@ -219,6 +233,13 @@ impl NodeDbPgHandler {
                     code.to_owned(),
                     message,
                 ))));
+            }
+
+            // --- TRUNCATE RESTART IDENTITY: reset sequences after successful truncate ---
+            if let Some(collection) = &truncate_restart_collection {
+                self.state
+                    .sequence_registry
+                    .restart_sequences_for_collection(tenant_id.as_u32(), collection);
             }
 
             // --- SYNC AFTER triggers ---

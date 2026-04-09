@@ -72,7 +72,7 @@ pub(super) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
             target_collection: collection,
             ..
         })
-        | PhysicalPlan::Document(DocumentOp::Truncate { collection })
+        | PhysicalPlan::Document(DocumentOp::Truncate { collection, .. })
         | PhysicalPlan::Document(DocumentOp::EstimateCount { collection, .. })
         | PhysicalPlan::Columnar(ColumnarOp::Scan { collection, .. })
         | PhysicalPlan::Columnar(ColumnarOp::Insert { collection, .. })

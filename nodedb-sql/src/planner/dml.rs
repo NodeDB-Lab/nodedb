@@ -200,12 +200,17 @@ pub fn plan_truncate_stmt(stmt: &ast::Statement) -> Result<Vec<SqlPlan>> {
             detail: "expected TRUNCATE statement".into(),
         });
     };
+    let restart_identity = matches!(
+        truncate.identity,
+        Some(sqlparser::ast::TruncateIdentityOption::Restart)
+    );
     truncate
         .table_names
         .iter()
         .map(|t| {
             Ok(SqlPlan::Truncate {
                 collection: normalize_object_name(&t.name),
+                restart_identity,
             })
         })
         .collect()

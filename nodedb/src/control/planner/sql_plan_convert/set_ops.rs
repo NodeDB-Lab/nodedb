@@ -36,6 +36,7 @@ pub(super) fn convert_constant_result(
 
 pub(super) fn convert_truncate(
     collection: &str,
+    restart_identity: bool,
     tenant_id: TenantId,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
@@ -44,6 +45,7 @@ pub(super) fn convert_truncate(
         vshard_id: vshard,
         plan: PhysicalPlan::Document(DocumentOp::Truncate {
             collection: collection.into(),
+            restart_identity,
         }),
         post_set_op: PostSetOp::None,
     }])

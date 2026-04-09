@@ -108,7 +108,10 @@ pub(super) fn convert_one(
             target_keys,
         } => super::dml::convert_delete(collection, engine, filters, target_keys, tenant_id),
 
-        SqlPlan::Truncate { collection } => super::set_ops::convert_truncate(collection, tenant_id),
+        SqlPlan::Truncate {
+            collection,
+            restart_identity,
+        } => super::set_ops::convert_truncate(collection, *restart_identity, tenant_id),
 
         SqlPlan::Join {
             left,

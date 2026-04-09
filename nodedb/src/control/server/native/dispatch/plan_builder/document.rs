@@ -257,6 +257,7 @@ pub(crate) fn build_bulk_delete(
 pub(crate) fn build_truncate(collection: &str) -> crate::Result<PhysicalPlan> {
     Ok(PhysicalPlan::Document(DocumentOp::Truncate {
         collection: collection.to_string(),
+        restart_identity: false,
     }))
 }
 

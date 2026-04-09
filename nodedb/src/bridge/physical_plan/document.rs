@@ -199,7 +199,12 @@ pub enum DocumentOp {
     DropIndex { collection: String, field: String },
 
     /// Truncate: delete ALL documents in a collection.
-    Truncate { collection: String },
+    /// If `restart_identity` is true, sequences attached to this collection's
+    /// fields are reset to their start value after truncation.
+    Truncate {
+        collection: String,
+        restart_identity: bool,
+    },
 
     /// Estimate count via HLL cardinality stats.
     EstimateCount { collection: String, field: String },

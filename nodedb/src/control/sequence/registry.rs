@@ -292,6 +292,30 @@ impl SequenceRegistry {
         let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
         map.get(&key).map(|h| h.def.clone())
     }
+
+    /// Reset all sequences attached to a collection back to their start values.
+    ///
+    /// Used by `TRUNCATE ... RESTART IDENTITY`. Finds all sequences whose names
+    /// match the implicit pattern `{collection}_{field}_seq` for the given tenant
+    /// and resets each to its `start_value`.
+    pub fn restart_sequences_for_collection(&self, tenant_id: u32, collection: &str) {
+        let prefix = format!("{tenant_id}:{collection}_");
+        let suffix = "_seq";
+        let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
+
+        for (key, handle) in map.iter() {
+            if key.starts_with(&prefix) && handle.def.name.ends_with(suffix) {
+                let start = handle.def.start_value;
+                if let Err(e) = handle.setval(start) {
+                    tracing::warn!(
+                        sequence = %handle.def.name,
+                        error = %e,
+                        "failed to restart sequence during TRUNCATE RESTART IDENTITY"
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl Default for SequenceRegistry {

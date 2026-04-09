@@ -113,7 +113,7 @@ impl<S: StorageEngine> LiteQueryEngine<S> {
                 target_keys,
                 ..
             } => self.execute_delete(collection, target_keys),
-            SqlPlan::Truncate { collection } => self.execute_truncate(collection),
+            SqlPlan::Truncate { collection, .. } => self.execute_truncate(collection),
             _ => Err(LiteError::Query(format!("unsupported plan: {plan:?}"))),
         }
     }

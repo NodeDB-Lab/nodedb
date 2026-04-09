@@ -97,7 +97,7 @@ impl CoreLoop {
                 value,
             } => self.execute_upsert(task, tid, collection, document_id, value),
 
-            DocumentOp::Truncate { collection } => self.execute_truncate(task, tid, collection),
+            DocumentOp::Truncate { collection, .. } => self.execute_truncate(task, tid, collection),
 
             DocumentOp::EstimateCount { collection, field } => {
                 self.execute_estimate_count(task, tid, collection, field)

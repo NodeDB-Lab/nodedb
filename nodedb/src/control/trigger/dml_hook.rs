@@ -120,7 +120,7 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
             event: DmlEvent::Delete,
             new_fields: None,
         }),
-        DocumentOp::Truncate { collection } => Some(DmlWriteInfo {
+        DocumentOp::Truncate { collection, .. } => Some(DmlWriteInfo {
             collection: collection.clone(),
             document_id: None,
             event: DmlEvent::Delete,

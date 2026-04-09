@@ -237,7 +237,7 @@ fn extract_write_metadata(
         PhysicalPlan::Document(DocumentOp::BulkDelete { collection, .. }) => {
             Some((collection.clone(), "*".into(), ChangeOperation::Delete))
         }
-        PhysicalPlan::Document(DocumentOp::Truncate { collection }) => {
+        PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) => {
             Some((collection.clone(), "*".into(), ChangeOperation::Delete))
         }
         // Timeseries ingest: batch write. CDC is opt-in for timeseries

@@ -78,6 +78,7 @@ pub enum SqlPlan {
     },
     Truncate {
         collection: String,
+        restart_identity: bool,
     },
 
     // ── Joins ──
