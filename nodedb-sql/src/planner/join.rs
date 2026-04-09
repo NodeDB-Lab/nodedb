@@ -260,10 +260,13 @@ fn extract_equi_keys(
 fn extract_col_ref(expr: &ast::Expr) -> Option<String> {
     match expr {
         ast::Expr::Identifier(ident) => Some(normalize_ident(ident)),
-        ast::Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-            // Return just the column name for join key matching.
-            Some(normalize_ident(&parts[1]))
-        }
+        ast::Expr::CompoundIdentifier(parts) if !parts.is_empty() => Some(
+            parts
+                .iter()
+                .map(normalize_ident)
+                .collect::<Vec<_>>()
+                .join("."),
+        ),
         _ => None,
     }
 }

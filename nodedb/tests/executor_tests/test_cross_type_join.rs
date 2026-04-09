@@ -1285,7 +1285,7 @@ fn multi_core_broadcast_merge_simulation() {
 }
 
 #[test]
-fn inline_hash_join_uses_latest_matching_left_key() {
+fn inline_hash_join_honors_qualified_left_keys() {
     let mut ctx = make_ctx();
 
     for (id, name) in [("u1", "Alice"), ("u2", "Bob")] {
@@ -1376,7 +1376,7 @@ fn inline_hash_join_uses_latest_matching_left_key() {
             left_data,
             right_data,
             right_alias: None,
-            on: vec![("id".into(), "order_id".into())],
+            on: vec![("orders.id".into(), "order_id".into())],
             join_type: "inner".into(),
             limit: 100,
             projection: Vec::new(),

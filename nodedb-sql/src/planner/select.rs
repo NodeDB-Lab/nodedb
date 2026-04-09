@@ -1017,6 +1017,27 @@ mod tests {
                     primary_key: Some("id".into()),
                     has_auto_tier: false,
                 }),
+                "docs" => Some(CollectionInfo {
+                    name: "docs".into(),
+                    engine: EngineType::DocumentSchemaless,
+                    columns: Vec::new(),
+                    primary_key: Some("id".into()),
+                    has_auto_tier: false,
+                }),
+                "tags" => Some(CollectionInfo {
+                    name: "tags".into(),
+                    engine: EngineType::DocumentSchemaless,
+                    columns: Vec::new(),
+                    primary_key: Some("id".into()),
+                    has_auto_tier: false,
+                }),
+                "user_prefs" => Some(CollectionInfo {
+                    name: "user_prefs".into(),
+                    engine: EngineType::KeyValue,
+                    columns: Vec::new(),
+                    primary_key: Some("key".into()),
+                    has_auto_tier: false,
+                }),
                 _ => None,
             }
         }
@@ -1089,5 +1110,25 @@ mod tests {
             !filters.is_empty(),
             "scalar comparison should stay post-join"
         );
+    }
+
+    #[test]
+    fn chained_join_preserves_qualified_on_keys() {
+        let plan = plan_select_sql(
+            "SELECT d.name, t.tag, p.theme \
+             FROM docs d \
+             LEFT JOIN tags t ON d.id = t.doc_id \
+             INNER JOIN user_prefs p ON d.id = p.key",
+        );
+
+        let SqlPlan::Join { left, on, .. } = plan else {
+            panic!("expected outer join plan");
+        };
+        assert_eq!(on, vec![("d.id".into(), "p.key".into())]);
+
+        let SqlPlan::Join { on: inner_on, .. } = *left else {
+            panic!("expected nested left join");
+        };
+        assert_eq!(inner_on, vec![("d.id".into(), "t.doc_id".into())]);
     }
 }
