@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::pgwire_harness::TestServer;
 
 /// CREATE TRIGGER succeeds and DROP removes it.
@@ -189,4 +191,87 @@ async fn after_trigger_insert_body_parses() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_async_trigger_insert_persists_side_effect() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION after_src").await.unwrap();
+    server.exec("CREATE COLLECTION after_log").await.unwrap();
+
+    server
+        .exec(
+            "CREATE TRIGGER log_insert AFTER INSERT ON after_src \
+             FOR EACH ROW \
+             BEGIN \
+                 INSERT INTO after_log (id, src_id, action) VALUES (NEW.id || '_log', NEW.id, 'inserted'); \
+             END;",
+        )
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO after_src (id, name, val) VALUES ('as1', 'Alpha', 10)")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO after_src (id, name, val) VALUES ('as2', 'Beta', 20)")
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let rows = server
+            .query_text("SELECT id, src_id, action FROM after_log ORDER BY id")
+            .await
+            .unwrap();
+        if rows.len() == 2 {
+            assert!(rows[0].contains("\"id\":\"as1_log\""), "got: {:?}", rows);
+            assert!(rows[0].contains("\"src_id\":\"as1\""), "got: {:?}", rows);
+            assert!(rows[1].contains("\"id\":\"as2_log\""), "got: {:?}", rows);
+            assert!(rows[1].contains("\"src_id\":\"as2\""), "got: {:?}", rows);
+            break;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for async trigger side effect, got: {:?}",
+            rows
+        );
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_sync_trigger_insert_persists_side_effect() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION after_src").await.unwrap();
+    server.exec("CREATE COLLECTION after_log").await.unwrap();
+
+    server
+        .exec(
+            "CREATE SYNC TRIGGER log_insert AFTER INSERT ON after_src \
+             FOR EACH ROW \
+             BEGIN \
+                 INSERT INTO after_log (id, src_id, action) VALUES (NEW.id || '_log', NEW.id, 'inserted'); \
+             END;",
+        )
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO after_src (id, name, val) VALUES ('as1', 'Alpha', 10)")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT id, src_id, action FROM after_log ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "got: {:?}", rows);
+    assert!(rows[0].contains("\"id\":\"as1_log\""), "got: {:?}", rows);
+    assert!(rows[0].contains("\"src_id\":\"as1\""), "got: {:?}", rows);
 }

@@ -11,6 +11,7 @@ use nodedb::config::auth::AuthMode;
 use nodedb::control::server::pgwire::listener::PgListener;
 use nodedb::control::state::SharedState;
 use nodedb::data::executor::core_loop::CoreLoop;
+use nodedb::event::{EventPlane, create_event_bus};
 use nodedb::wal::WalManager;
 
 /// A running test server with a connected pgwire client.
@@ -23,6 +24,7 @@ pub struct TestServer {
     _pg_handle: tokio::task::JoinHandle<()>,
     _poller_handle: tokio::task::JoinHandle<()>,
     _core_handle: tokio::task::JoinHandle<()>,
+    _event_plane: EventPlane,
     _dir: tempfile::TempDir,
 }
 
@@ -35,6 +37,7 @@ impl TestServer {
         let wal = Arc::new(WalManager::open_for_testing(&wal_path).unwrap());
 
         let (dispatcher, data_sides) = Dispatcher::new(1, 64);
+        let (event_producers, event_consumers) = create_event_bus(1);
 
         // Use catalog-backed credential store (required for CREATE FUNCTION/TRIGGER/PROCEDURE).
         let catalog_path = dir.path().join("system.redb");
@@ -42,15 +45,17 @@ impl TestServer {
             nodedb::control::security::credential::store::CredentialStore::open(&catalog_path)
                 .unwrap(),
         );
-        let shared = SharedState::new_with_credentials(dispatcher, wal, credentials);
+        let shared = SharedState::new_with_credentials(dispatcher, Arc::clone(&wal), credentials);
 
         // Data Plane core.
         let data_side = data_sides.into_iter().next().unwrap();
         let core_dir = dir.path().to_path_buf();
+        let event_producer = event_producers.into_iter().next().unwrap();
         let (core_stop_tx, core_stop_rx) = std::sync::mpsc::channel::<()>();
         let core_handle = tokio::task::spawn_blocking(move || {
             let mut core =
                 CoreLoop::open(0, data_side.request_rx, data_side.response_tx, &core_dir).unwrap();
+            core.set_event_producer(event_producer);
             while core_stop_rx.try_recv().is_err() {
                 core.tick();
                 std::thread::sleep(Duration::from_millis(1));
@@ -69,6 +74,20 @@ impl TestServer {
                 }
             }
         });
+
+        let watermark_store =
+            Arc::new(nodedb::event::watermark::WatermarkStore::open(dir.path()).unwrap());
+        let trigger_dlq = Arc::new(std::sync::Mutex::new(
+            nodedb::event::trigger::TriggerDlq::open(dir.path()).unwrap(),
+        ));
+        let event_plane = EventPlane::spawn(
+            event_consumers,
+            Arc::clone(&wal),
+            watermark_store,
+            Arc::clone(&shared),
+            trigger_dlq,
+            Arc::clone(&shared.cdc_router),
+        );
 
         // PgWire listener.
         let pg_listener = PgListener::bind("127.0.0.1:0".parse().unwrap())
@@ -115,6 +134,7 @@ impl TestServer {
             _pg_handle: pg_handle,
             _poller_handle: poller_handle,
             _core_handle: core_handle,
+            _event_plane: event_plane,
             _dir: dir,
         }
     }
