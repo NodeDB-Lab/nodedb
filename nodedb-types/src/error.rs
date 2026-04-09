@@ -64,6 +64,7 @@ impl ErrorCode {
     pub const OVERFLOW: Self = Self(1021);
     pub const INSUFFICIENT_BALANCE: Self = Self(1022);
     pub const RATE_EXCEEDED: Self = Self(1023);
+    pub const TYPE_GUARD_VIOLATION: Self = Self(1024);
 
     // Read path (1100–1199)
     pub const COLLECTION_NOT_FOUND: Self = Self(1100);
@@ -161,6 +162,9 @@ pub enum ErrorDetails {
         collection: String,
     },
     TransitionCheckViolation {
+        collection: String,
+    },
+    TypeGuardViolation {
         collection: String,
     },
     RetentionViolation {
@@ -384,6 +388,9 @@ impl NodeDbError {
     pub fn is_type_mismatch(&self) -> bool {
         matches!(self.details, ErrorDetails::TypeMismatch { .. })
     }
+    pub fn is_type_guard_violation(&self) -> bool {
+        matches!(self.details, ErrorDetails::TypeGuardViolation { .. })
+    }
     pub fn is_overflow(&self) -> bool {
         matches!(self.details, ErrorDetails::Overflow { .. })
     }
@@ -514,6 +521,16 @@ impl NodeDbError {
             code: ErrorCode::TRANSITION_CHECK_VIOLATION,
             message: format!("transition check violation on {collection}: {detail}"),
             details: ErrorDetails::TransitionCheckViolation { collection },
+            cause: None,
+        }
+    }
+
+    pub fn type_guard_violation(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+        let collection = collection.into();
+        Self {
+            code: ErrorCode::TYPE_GUARD_VIOLATION,
+            message: format!("type guard violation on {collection}: {detail}"),
+            details: ErrorDetails::TypeGuardViolation { collection },
             cause: None,
         }
     }

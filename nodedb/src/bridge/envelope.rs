@@ -217,6 +217,8 @@ pub enum ErrorCode {
     StateTransitionViolation { collection: String, detail: String },
     /// Transition check predicate returned false.
     TransitionCheckViolation { collection: String },
+    /// Type guard violation: field type mismatch or REQUIRED absent.
+    TypeGuardViolation { collection: String, detail: String },
     /// Value type does not match expected type for operation (e.g. INCR on a string).
     TypeMismatch { collection: String, detail: String },
     /// Arithmetic overflow (e.g. i64::MAX + 1 on INCR).
@@ -265,6 +267,9 @@ impl From<crate::Error> for ErrorCode {
             crate::Error::TransitionCheckViolation { collection, .. } => {
                 Self::TransitionCheckViolation { collection }
             }
+            crate::Error::TypeGuardViolation {
+                collection, detail, ..
+            } => Self::TypeGuardViolation { collection, detail },
             crate::Error::TypeMismatch {
                 collection, detail, ..
             } => Self::TypeMismatch { collection, detail },

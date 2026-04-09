@@ -58,6 +58,9 @@ pub enum Error {
     #[error("transition check violation on {collection}: {detail}")]
     TransitionCheckViolation { collection: String, detail: String },
 
+    #[error("type guard violation on {collection}: {detail}")]
+    TypeGuardViolation { collection: String, detail: String },
+
     #[error("type mismatch on {collection} key {key}: {detail}")]
     TypeMismatch {
         collection: String,
@@ -265,6 +268,9 @@ impl From<Error> for NodeDbError {
             Error::TransitionCheckViolation {
                 collection, detail, ..
             } => NodeDbError::transition_check_violation(collection, detail),
+            Error::TypeGuardViolation {
+                collection, detail, ..
+            } => NodeDbError::type_guard_violation(collection, detail),
             Error::TypeMismatch {
                 collection, detail, ..
             } => NodeDbError::type_mismatch(collection, detail),

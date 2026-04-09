@@ -115,6 +115,11 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             "23605",
             format!("transition check violation on {collection}"),
         ),
+        ErrorCode::TypeGuardViolation { collection, detail } => (
+            "ERROR",
+            "23608",
+            format!("type guard violation on {collection}: {detail}"),
+        ),
         ErrorCode::TypeMismatch { collection, detail } => (
             "ERROR",
             "42846",
