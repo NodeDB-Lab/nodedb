@@ -39,56 +39,60 @@ impl CoreLoop {
             }
         };
 
-        // Scan source documents.
-        let source_docs = if filters.is_empty() {
-            match self
-                .sparse
-                .scan_documents(tid, source_collection, source_limit)
-            {
-                Ok(docs) => docs,
-                Err(e) => {
-                    return self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("scan source: {e}"),
-                        },
-                    );
-                }
-            }
-        } else {
-            match self.scan_matching_documents(tid, source_collection, &filters) {
-                Ok(ids) => {
-                    let mut docs = Vec::with_capacity(ids.len().min(source_limit));
-                    for doc_id in ids.iter().take(source_limit) {
-                        if let Ok(Some(data)) = self.sparse.get(tid, source_collection, doc_id) {
-                            docs.push((doc_id.clone(), data));
-                        }
-                    }
-                    docs
-                }
-                Err(e) => {
-                    return self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("scan source: {e}"),
-                        },
-                    );
-                }
+        let fetch_limit = source_limit.saturating_mul(10).max(1000);
+        let mut source_docs = match self.scan_collection(tid, source_collection, fetch_limit) {
+            Ok(docs) => docs,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("scan source: {e}"),
+                    },
+                );
             }
         };
 
-        // Preserve source IDs so INSERT ... SELECT copies the source rows instead
-        // of generating unrelated keys that break primary-key-based reads.
-        let mut inserted = 0u64;
-        for (source_id, value) in &source_docs {
-            if self
-                .sparse
-                .put(tid, target_collection, source_id, value)
-                .is_ok()
-            {
-                self.doc_cache.put(tid, target_collection, source_id, value);
-                inserted += 1;
+        if !filters.is_empty() {
+            source_docs.retain(|(_, data)| filters.iter().all(|f| f.matches_binary(data)));
+        }
+        source_docs.truncate(source_limit);
+
+        let txn = match self.sparse.begin_write() {
+            Ok(t) => t,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("begin write: {e}"),
+                    },
+                );
             }
+        };
+
+        let mut inserted = 0usize;
+        for (source_id, value) in &source_docs {
+            if let Err(e) = self.apply_point_put(&txn, tid, target_collection, source_id, value) {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                );
+            }
+            inserted += 1;
+        }
+
+        if let Err(e) = txn.commit() {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("commit: {e}"),
+                },
+            );
+        }
+
+        if inserted > 0 {
+            self.checkpoint_coordinator.mark_dirty("sparse", inserted);
         }
 
         debug!(core = self.core_id, %target_collection, inserted, "insert select complete");
