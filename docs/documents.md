@@ -38,6 +38,58 @@ SELECT * FROM users WHERE age > 25;
 SELECT name, tags FROM users WHERE role = 'admin';
 ```
 
+## Typeguards (Schemaless Validation)
+
+Typeguards add write-time validation to schemaless collections without changing the storage format. Fields are type-checked, required fields are enforced, and CHECK constraints run — but unknown fields still pass freely. Think of it as "gradually typed" documents.
+
+```sql
+CREATE TYPEGUARD ON users (
+    email STRING REQUIRED CHECK (email LIKE '%@%.%'),
+    age INT CHECK (age >= 0 AND age <= 150),
+    role STRING DEFAULT 'user',
+    updated_at TIMESTAMP VALUE now()
+);
+
+-- Valid: all guarded fields pass
+INSERT INTO users { id: 'u1', name: 'Alice', email: 'alice@example.com', age: 30 };
+
+-- Fails: email is REQUIRED
+INSERT INTO users { id: 'u2', name: 'Bob' };
+-- ERROR: field 'email' is required but absent or null
+
+-- Fails: age must be INT
+INSERT INTO users { id: 'u3', email: 'x@y.com', age: 'old' };
+-- ERROR: field 'age' must be INT, got STRING
+
+-- 'name' is NOT in the typeguard — passes freely (schemaless flexibility)
+INSERT INTO users { id: 'u4', email: 'z@w.com', extra_field: 'anything' };
+```
+
+### Typeguard Features
+
+- **DEFAULT** — inject a value when the field is absent (does not overwrite user input)
+- **VALUE** — always inject/overwrite (for computed fields like `updated_at`)
+- **CHECK** — SQL boolean expression validated at write time
+- **REQUIRED** — field must be present and non-null
+- **VALIDATE** — scan existing data for violations without blocking writes
+- **CONVERT TO strict** — typeguard fields become schema columns, CHECK constraints carry over
+
+```sql
+-- Modify guards
+ALTER TYPEGUARD ON users ADD score FLOAT CHECK (score >= 0);
+ALTER TYPEGUARD ON users DROP age;
+
+-- Introspect
+SHOW TYPEGUARD ON users;
+SHOW CONSTRAINTS ON users;
+
+-- Audit existing data
+VALIDATE TYPEGUARD ON users;
+
+-- Graduate to strict schema
+CONVERT COLLECTION users TO strict;
+```
+
 ## Strict Documents
 
 Schema-enforced documents stored as Binary Tuples with O(1) field extraction. The engine jumps directly to the byte offset of any column without parsing the rest of the row — 3-4x better cache density than MessagePack or BSON. This is what you'd use PostgreSQL for.
@@ -66,7 +118,7 @@ CREATE COLLECTION orders TYPE DOCUMENT STRICT (
     customer_id UUID NOT NULL,
     total DECIMAL NOT NULL,
     status STRING DEFAULT 'pending',
-    created_at DATETIME DEFAULT now()
+    created_at TIMESTAMP DEFAULT now()
 );
 
 INSERT INTO orders (customer_id, total, status)

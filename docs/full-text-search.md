@@ -40,34 +40,34 @@ CREATE SEARCH INDEX ON articles FIELDS title, body
     FUZZY true;
 
 -- Basic search
-SELECT title, search_score() AS score
+SELECT title, bm25_score(body, 'distributed database rust') AS score
 FROM articles
-WHERE MATCH(body, 'distributed database rust')
+WHERE text_match(body, 'distributed database rust')
 ORDER BY score DESC
 LIMIT 20;
 
 -- Fuzzy search (handles typos)
 SELECT title FROM articles
-WHERE MATCH(title, 'databse', { fuzzy: true, distance: 2 });
+WHERE text_match(title, 'databse', { fuzzy: true, distance: 2 });
 
 -- Hybrid search: BM25 + vector similarity (RRF fusion)
 SELECT title, rrf_score() AS score
 FROM articles
-WHERE MATCH(body, 'distributed systems')
+WHERE text_match(body, 'distributed systems')
   AND embedding <-> $query_vec
 LIMIT 10;
 
 -- Highlighting
-SELECT title, search_highlight(body) AS snippet
+SELECT title, search_highlight(body, 'graph traversal') AS snippet
 FROM articles
-WHERE MATCH(body, 'graph traversal')
+WHERE text_match(body, 'graph traversal')
 LIMIT 10;
 
 -- Search with synonyms
 CREATE SYNONYM GROUP db_terms AS ('database', 'db', 'datastore');
 
 SELECT title FROM articles
-WHERE MATCH(body, 'db performance');
+WHERE text_match(body, 'db performance');
 -- Also matches "database performance" and "datastore performance"
 
 -- Per-collection analyzer (German)
@@ -75,40 +75,40 @@ ALTER COLLECTION german_articles SET text_analyzer = 'german';
 
 -- CJK search (bigram tokenization automatic for CJK codepoints)
 SELECT title FROM articles
-WHERE MATCH(body, '全文検索');
+WHERE text_match(body, '全文検索');
 ```
 
 ## Analyzers
 
 Full-text indexes use analyzers to process text. An analyzer is a pipeline: Unicode normalization → lowercase → split → stop word removal → stemming. CJK text is automatically routed to the bigram tokenizer regardless of the configured analyzer.
 
-| Analyzer | What it does |
-| --- | --- |
-| `standard` | English pipeline: NFD normalize, lowercase, split, English stop words, Snowball English stem |
-| `simple` | Lowercase + whitespace split. No stemming or stop words. |
-| `keyword` | Entire input as a single lowercase token. |
-| `cjk_bigram` | CJK bigram tokenization for all CJK scripts. |
-| `ngram` / `ngram:2:4` | Character n-grams (configurable min:max). |
-| `edge_ngram` / `edge_ngram:2:5` | Prefix-anchored n-grams for autocomplete. |
+| Analyzer                        | What it does                                                                                 |
+| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| `standard`                      | English pipeline: NFD normalize, lowercase, split, English stop words, Snowball English stem |
+| `simple`                        | Lowercase + whitespace split. No stemming or stop words.                                     |
+| `keyword`                       | Entire input as a single lowercase token.                                                    |
+| `cjk_bigram`                    | CJK bigram tokenization for all CJK scripts.                                                 |
+| `ngram` / `ngram:2:4`           | Character n-grams (configurable min:max).                                                    |
+| `edge_ngram` / `edge_ngram:2:5` | Prefix-anchored n-grams for autocomplete.                                                    |
 
 ### Language-Specific Analyzers
 
 Set via `ALTER COLLECTION ... SET text_analyzer = '<name>'`:
 
-| Languages (Snowball stemming) | Codes |
-| --- | --- |
+| Languages (Snowball stemming)                                                                                                                    | Codes                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | Arabic, Danish, Dutch, English, Finnish, French, German, Hungarian, Italian, Norwegian, Portuguese, Romanian, Russian, Spanish, Swedish, Turkish | `ar`, `da`, `nl`, `en`, `fi`, `fr`, `de`, `hu`, `it`, `no`, `pt`, `ro`, `ru`, `es`, `sv`, `tr` |
 
-| Languages (stop words only, no stemmer) | Codes |
-| --- | --- |
+| Languages (stop words only, no stemmer)                     | Codes                                    |
+| ----------------------------------------------------------- | ---------------------------------------- |
 | Czech, Greek, Hebrew, Hindi, Indonesian, Polish, Vietnamese | `cs`, `el`, `he`, `hi`, `id`, `pl`, `vi` |
 
-| CJK Languages (bigram default, dictionary segmentation feature-gated) | Codes | Feature gate |
-| --- | --- | --- |
-| Chinese | `zh` | `lang-zh` (jieba-rs) |
-| Japanese | `ja` | `lang-ja` (lindera/IPADIC) |
-| Korean | `ko` | `lang-ko` (lindera/ko-dic) |
-| Thai | `th` | `lang-th` (icu_segmenter) |
+| CJK Languages (bigram default, dictionary segmentation feature-gated) | Codes | Feature gate               |
+| --------------------------------------------------------------------- | ----- | -------------------------- |
+| Chinese                                                               | `zh`  | `lang-zh` (jieba-rs)       |
+| Japanese                                                              | `ja`  | `lang-ja` (lindera/IPADIC) |
+| Korean                                                                | `ko`  | `lang-ko` (lindera/ko-dic) |
+| Thai                                                                  | `th`  | `lang-th` (icu_segmenter)  |
 
 Without the feature gate, CJK/Thai text falls back to character bigrams (high recall, zero dictionary dependency).
 
