@@ -63,16 +63,21 @@ pub fn parse_interval_to_ms(s: &str) -> Result<u64, IntervalParseError> {
         return Ok(ms);
     }
 
-    // Long-form: "15 minutes", "1 hour", "2 days", "30 seconds"
+    // Long-form: "15 minutes", "1 hour", "2 days 12 hours", "30 seconds"
+    // Supports compound: "2 hours 30 minutes" by parsing pairs of (number, unit).
     let parts: Vec<&str> = unquoted.split_whitespace().collect();
-    if parts.len() == 2 {
-        let amount: u64 = parts[0]
-            .parse()
-            .map_err(|_| IntervalParseError::InvalidAmount(parts[0].to_string()))?;
-        let unit = parts[1].to_lowercase();
-        let multiplier = unit_to_ms_multiplier(&unit)
-            .ok_or_else(|| IntervalParseError::UnknownUnit(unit.clone()))?;
-        return Ok(amount * multiplier);
+    if parts.len() >= 2 && parts.len() % 2 == 0 {
+        let mut total_ms: u64 = 0;
+        for chunk in parts.chunks(2) {
+            let amount: u64 = chunk[0]
+                .parse()
+                .map_err(|_| IntervalParseError::InvalidAmount(chunk[0].to_string()))?;
+            let unit = chunk[1].to_lowercase();
+            let multiplier = unit_to_ms_multiplier(&unit)
+                .ok_or_else(|| IntervalParseError::UnknownUnit(unit.clone()))?;
+            total_ms += amount * multiplier;
+        }
+        return Ok(total_ms);
     }
 
     // Bare number: treat as milliseconds.

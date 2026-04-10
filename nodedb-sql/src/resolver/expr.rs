@@ -147,10 +147,75 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
                 distinct: false,
             })
         }
+        Expr::Interval(interval) => {
+            // INTERVAL '1 hour' → microseconds as i64 literal.
+            // The interval value is typically a string literal.
+            let interval_str = match interval.value.as_ref() {
+                Expr::Value(v) => match &v.value {
+                    Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
+                    Value::Number(n, _) => {
+                        // INTERVAL 5 HOUR → combine number with leading_field.
+                        if let Some(ref field) = interval.leading_field {
+                            format!("{n} {field}")
+                        } else {
+                            n.clone()
+                        }
+                    }
+                    _ => {
+                        return Err(SqlError::Unsupported {
+                            detail: format!("INTERVAL value: {}", interval.value),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(SqlError::Unsupported {
+                        detail: format!("INTERVAL expression: {}", interval.value),
+                    });
+                }
+            };
+
+            // If leading_field is specified, append it: INTERVAL '5' HOUR → "5 HOUR"
+            let full_str = if interval_str.chars().all(|c| c.is_ascii_digit())
+                && let Some(ref field) = interval.leading_field
+            {
+                format!("{interval_str} {field}")
+            } else {
+                interval_str
+            };
+
+            let micros = parse_interval_to_micros(&full_str).ok_or_else(|| SqlError::Parse {
+                detail: format!("cannot parse INTERVAL '{full_str}'"),
+            })?;
+
+            Ok(SqlExpr::Literal(SqlValue::Int(micros)))
+        }
         _ => Err(SqlError::Unsupported {
             detail: format!("expression: {expr}"),
         }),
     }
+}
+
+/// Parse an interval string to microseconds.
+///
+/// Delegates to `nodedb_types::kv_parsing::parse_interval_to_ms` (ms → μs)
+/// and `NdbDuration::parse` for compound shorthand forms.
+fn parse_interval_to_micros(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Try NdbDuration::parse first (handles compound "1h30m", "500ms", "2d").
+    if let Some(dur) = nodedb_types::NdbDuration::parse(s) {
+        return Some(dur.micros);
+    }
+
+    // Delegate to shared interval parser (handles all forms including compound).
+    if let Ok(ms) = nodedb_types::kv_parsing::parse_interval_to_ms(s) {
+        return Some(ms as i64 * 1000); // ms → μs
+    }
+
+    None
 }
 
 /// Convert a sqlparser `Value` to our `SqlValue`.
@@ -258,5 +323,40 @@ fn convert_unary_op(op: &UnaryOperator) -> Result<UnaryOp> {
         _ => Err(SqlError::Unsupported {
             detail: format!("unary operator: {op}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_interval_sql_word_forms() {
+        assert_eq!(parse_interval_to_micros("1 hour"), Some(3_600_000_000));
+        assert_eq!(parse_interval_to_micros("5 days"), Some(5 * 86_400_000_000));
+        assert_eq!(
+            parse_interval_to_micros("30 minutes"),
+            Some(30 * 60_000_000)
+        );
+        assert_eq!(
+            parse_interval_to_micros("2 hours 30 minutes"),
+            Some(9_000_000_000)
+        );
+        assert_eq!(parse_interval_to_micros("1 week"), Some(604_800_000_000));
+        assert_eq!(parse_interval_to_micros("100 milliseconds"), Some(100_000));
+    }
+
+    #[test]
+    fn parse_interval_shorthand() {
+        assert_eq!(parse_interval_to_micros("1h"), Some(3_600_000_000));
+        assert_eq!(parse_interval_to_micros("30m"), Some(30 * 60_000_000));
+        assert_eq!(parse_interval_to_micros("1h30m"), Some(5_400_000_000));
+        assert_eq!(parse_interval_to_micros("500ms"), Some(500_000));
+    }
+
+    #[test]
+    fn parse_interval_invalid() {
+        assert_eq!(parse_interval_to_micros(""), None);
+        assert_eq!(parse_interval_to_micros("abc"), None);
     }
 }
