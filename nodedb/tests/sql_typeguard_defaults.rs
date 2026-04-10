@@ -276,3 +276,94 @@ async fn validate_typeguard_no_guards() {
         .unwrap();
     assert_eq!(rows.len(), 0);
 }
+
+// ── CONVERT TO strict ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn convert_to_strict_from_typeguards() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION conv_tg").await.unwrap();
+
+    // Add typeguards with types and CHECK.
+    server
+        .exec(
+            "CREATE TYPEGUARD ON conv_tg (\
+                 name STRING REQUIRED,\
+                 age INT CHECK (age >= 0)\
+             )",
+        )
+        .await
+        .unwrap();
+
+    // Insert valid data.
+    server
+        .exec("INSERT INTO conv_tg { id: 'c1', name: 'Alice', age: 25 }")
+        .await
+        .unwrap();
+
+    // Convert to strict WITHOUT explicit column defs — should infer from typeguards.
+    server
+        .exec("CONVERT COLLECTION conv_tg TO strict")
+        .await
+        .unwrap();
+
+    // Typeguards should be gone.
+    let tg_rows = server
+        .query_text("SHOW TYPEGUARD ON conv_tg")
+        .await
+        .unwrap();
+    assert_eq!(
+        tg_rows.len(),
+        0,
+        "typeguards should be cleared: {tg_rows:?}"
+    );
+
+    // CHECK constraints should be carried over.
+    let constraint_rows = server
+        .query_text("SHOW CONSTRAINTS ON conv_tg")
+        .await
+        .unwrap();
+    assert!(
+        constraint_rows.iter().any(|r| r.contains("_guard_age")),
+        "CHECK from typeguard should carry over: {constraint_rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn convert_to_strict_no_typeguards_no_cols_errors() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION conv_empty").await.unwrap();
+
+    // No typeguards, no column defs — should fail.
+    let err = server.exec("CONVERT COLLECTION conv_empty TO strict").await;
+    assert!(
+        err.is_err(),
+        "should fail without typeguards or column defs: {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn convert_to_strict_with_explicit_cols() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION conv_explicit")
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO conv_explicit { id: 'e1', val: 42 }")
+        .await
+        .unwrap();
+
+    // Convert with explicit column defs (should still work as before).
+    let result = server
+        .exec("CONVERT COLLECTION conv_explicit TO strict (id TEXT, val INT)")
+        .await;
+    if let Err(ref e) = result {
+        let _ = std::fs::write("/tmp/convert_err.log", e);
+    }
+    assert!(result.is_ok(), "explicit convert should work");
+}

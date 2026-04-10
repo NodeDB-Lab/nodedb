@@ -36,7 +36,9 @@ pub async fn validate_typeguard(
     let coll = catalog
         .get_collection(tenant_id.as_u32(), &coll_name)
         .map_err(|e| super::parse::err("XX000", &format!("catalog error: {e}")))?
-        .ok_or_else(|| super::parse::err("42P01", &format!("collection '{coll_name}' not found")))?;
+        .ok_or_else(|| {
+            super::parse::err("42P01", &format!("collection '{coll_name}' not found"))
+        })?;
 
     if coll.type_guards.is_empty() {
         // No type guards — return empty result.
@@ -86,8 +88,7 @@ pub async fn validate_typeguard(
     let mut violations = Vec::new();
 
     for chunk in &json_chunks {
-        if let Ok(serde_json::Value::Array(rows)) = sonic_rs::from_str::<serde_json::Value>(chunk)
-        {
+        if let Ok(serde_json::Value::Array(rows)) = sonic_rs::from_str::<serde_json::Value>(chunk) {
             for row in rows {
                 // Scan responses wrap documents as {"id": "...", "data": {...}}.
                 // Extract the inner document for validation.

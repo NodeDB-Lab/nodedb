@@ -142,8 +142,10 @@ pub fn check_type_guards(
                     return Err(ErrorCode::TypeGuardViolation {
                         collection: collection.to_string(),
                         detail: format!(
-                            "field '{}': expected type '{}', got {:?}",
-                            guard.field, guard.type_expr, val
+                            "field '{}' must be {}, got {}",
+                            guard.field,
+                            guard.type_expr,
+                            value_type_name(val)
                         ),
                     });
                 }
@@ -175,11 +177,14 @@ pub fn check_type_guards(
                 nodedb_types::Value::Bool(true) => {} // CHECK passed
                 nodedb_types::Value::Null => {}       // NULL passes CHECK (SQL semantics)
                 _ => {
+                    let actual_val = resolve_field(doc, &guard.field);
                     return Err(ErrorCode::TypeGuardViolation {
                         collection: collection.to_string(),
                         detail: format!(
-                            "CHECK failed on '{}': {} (got {:?})",
-                            guard.field, check_str, result
+                            "CHECK failed on '{}': {} (got {})",
+                            guard.field,
+                            check_str,
+                            value_display(actual_val)
                         ),
                     });
                 }
@@ -188,6 +193,49 @@ pub fn check_type_guards(
     }
 
     Ok(())
+}
+
+/// Human-readable type name for a Value (used in error messages).
+fn value_type_name(val: &nodedb_types::Value) -> &'static str {
+    match val {
+        nodedb_types::Value::Null => "NULL",
+        nodedb_types::Value::Bool(_) => "BOOL",
+        nodedb_types::Value::Integer(_) => "INT",
+        nodedb_types::Value::Float(_) => "FLOAT",
+        nodedb_types::Value::String(_) => "STRING",
+        nodedb_types::Value::Array(_) => "ARRAY",
+        nodedb_types::Value::Object(_) => "OBJECT",
+        nodedb_types::Value::Bytes(_) => "BYTES",
+        nodedb_types::Value::DateTime(_) => "TIMESTAMP",
+        nodedb_types::Value::Uuid(_) => "UUID",
+        nodedb_types::Value::Ulid(_) => "ULID",
+        nodedb_types::Value::Decimal(_) => "DECIMAL",
+        nodedb_types::Value::Duration(_) => "DURATION",
+        nodedb_types::Value::Geometry(_) => "GEOMETRY",
+        nodedb_types::Value::Set(_) => "SET",
+        nodedb_types::Value::Regex(_) => "REGEX",
+        nodedb_types::Value::Range { .. } => "RANGE",
+        nodedb_types::Value::Record { .. } => "RECORD",
+    }
+}
+
+/// Human-readable display of a field value for error messages.
+fn value_display(val: Option<&nodedb_types::Value>) -> String {
+    match val {
+        None => "absent".to_string(),
+        Some(nodedb_types::Value::Null) => "NULL".to_string(),
+        Some(nodedb_types::Value::Bool(b)) => b.to_string(),
+        Some(nodedb_types::Value::Integer(i)) => i.to_string(),
+        Some(nodedb_types::Value::Float(f)) => format!("{f}"),
+        Some(nodedb_types::Value::String(s)) => {
+            if s.len() > 50 {
+                format!("'{}'...", &s[..47])
+            } else {
+                format!("'{s}'")
+            }
+        }
+        Some(other) => format!("{} value", value_type_name(other)),
+    }
 }
 
 /// Resolve a dot-path field name from a document value.
