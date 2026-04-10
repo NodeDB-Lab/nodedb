@@ -262,3 +262,139 @@ async fn object_literal_matches_values_form() {
     let rows = server.query_text("SELECT * FROM equiv_docs").await.unwrap();
     assert_eq!(rows.len(), 2);
 }
+
+// ── Batch: [{ }, { }] array form ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn object_literal_batch_insert() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION batch_docs").await.unwrap();
+
+    server
+        .exec("INSERT INTO batch_docs [{ id: 'b1', name: 'Alice' }, { id: 'b2', name: 'Bob' }, { id: 'b3', name: 'Charlie' }]")
+        .await
+        .unwrap();
+
+    let rows = server.query_text("SELECT * FROM batch_docs").await.unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "batch insert should create 3 rows, got: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn object_literal_batch_insert_heterogeneous_keys() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION hetero_docs").await.unwrap();
+
+    // Different rows have different keys — union columns, NULL for missing.
+    server
+        .exec("INSERT INTO hetero_docs [{ id: 'h1', name: 'Alice', age: 30 }, { id: 'h2', name: 'Bob', role: 'admin' }]")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT * FROM hetero_docs")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "hetero batch should create 2 rows, got: {rows:?}"
+    );
+}
+
+// ── Graph edge PROPERTIES with { } ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_edge_properties_object_literal() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION graph_nodes").await.unwrap();
+
+    // Insert nodes first.
+    server
+        .exec("INSERT INTO graph_nodes { id: 'a', name: 'Alice' }")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO graph_nodes { id: 'b', name: 'Bob' }")
+        .await
+        .unwrap();
+
+    // Edge with { } properties (new form).
+    server
+        .exec("GRAPH INSERT EDGE FROM 'a' TO 'b' TYPE 'knows' PROPERTIES { since: 2020, weight: 0.9 }")
+        .await
+        .unwrap();
+
+    // Edge with quoted JSON properties (old form — still works).
+    server
+        .exec("GRAPH INSERT EDGE FROM 'b' TO 'a' TYPE 'follows' PROPERTIES '{\"year\": 2021}'")
+        .await
+        .unwrap();
+
+    // Verify edges exist via traversal.
+    let rows = server
+        .query_text("GRAPH NEIGHBORS OF 'a' DIRECTION out")
+        .await
+        .unwrap();
+    assert!(!rows.is_empty(), "node 'a' should have outbound neighbors");
+}
+
+// ── MATCH node label filtering ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn match_node_label_filtering() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION label_docs").await.unwrap();
+
+    // Insert nodes + edges (edges implicitly create graph nodes).
+    server
+        .exec("INSERT INTO label_docs { id: 'alice', name: 'Alice' }")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO label_docs { id: 'bob', name: 'Bob' }")
+        .await
+        .unwrap();
+    server
+        .exec("GRAPH INSERT EDGE FROM 'alice' TO 'bob' TYPE 'knows'")
+        .await
+        .unwrap();
+
+    // Verify unlabeled MATCH works.
+    let all = server
+        .query_text("MATCH (a)-[:knows]->(b) RETURN a, b")
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1, "unlabeled: {all:?}");
+
+    // Set labels.
+    server
+        .exec("GRAPH LABEL 'alice' AS 'Person'")
+        .await
+        .expect("GRAPH LABEL alice");
+    server
+        .exec("GRAPH LABEL 'bob' AS 'Person'")
+        .await
+        .expect("GRAPH LABEL bob");
+
+    // Labeled MATCH — both are Person.
+    let labeled = server
+        .query_text("MATCH (a:Person)-[:knows]->(b:Person) RETURN a, b")
+        .await
+        .unwrap();
+    assert_eq!(labeled.len(), 1, "Person->Person: {labeled:?}");
+
+    // Non-matching label — should return 0.
+    let none = server
+        .query_text("MATCH (a:Bot)-[:knows]->(b) RETURN a, b")
+        .await
+        .unwrap();
+    assert_eq!(none.len(), 0, "Bot src should match nothing: {none:?}");
+}

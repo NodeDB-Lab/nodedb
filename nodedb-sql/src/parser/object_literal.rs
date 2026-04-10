@@ -19,6 +19,52 @@ pub fn parse_object_literal(s: &str) -> Option<Result<HashMap<String, Value>, St
     Some(parse_object(&chars, &mut pos))
 }
 
+/// Parse `[{ ... }, { ... }]` — an array of object literals for batch insert.
+///
+/// Returns `None` if the input doesn't start with `[` (not an array literal).
+/// Returns `Some(Err(msg))` on parse errors.
+/// Returns `Some(Ok(vec))` on success — each element must be an object.
+pub fn parse_object_literal_array(s: &str) -> Option<Result<Vec<HashMap<String, Value>>, String>> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut pos = 0;
+
+    // Consume '['
+    pos += 1;
+    let mut objects = Vec::new();
+    loop {
+        skip_ws(&chars, &mut pos);
+        if pos >= chars.len() {
+            return Some(Err("unterminated array of objects".to_string()));
+        }
+        if chars[pos] == ']' {
+            break;
+        }
+        if chars[pos] == ',' {
+            pos += 1;
+            continue;
+        }
+        if chars[pos] != '{' {
+            return Some(Err(format!(
+                "expected '{{' at position {pos}, found '{}'",
+                chars[pos]
+            )));
+        }
+        match parse_object(&chars, &mut pos) {
+            Ok(obj) => objects.push(obj),
+            Err(e) => return Some(Err(e)),
+        }
+        skip_ws(&chars, &mut pos);
+        if pos < chars.len() && chars[pos] == ',' {
+            pos += 1;
+        }
+    }
+    Some(Ok(objects))
+}
+
 fn skip_ws(chars: &[char], pos: &mut usize) {
     while *pos < chars.len() && chars[*pos].is_ascii_whitespace() {
         *pos += 1;
@@ -346,5 +392,40 @@ mod tests {
     fn dotted_key() {
         let m = parse("{ metadata.source: 'web' }");
         assert_eq!(m["metadata.source"], Value::String("web".to_string()));
+    }
+
+    #[test]
+    fn parse_array_of_objects() {
+        let result = parse_object_literal_array("[{ name: 'Alice' }, { name: 'Bob' }]")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["name"], Value::String("Alice".to_string()));
+        assert_eq!(result[1]["name"], Value::String("Bob".to_string()));
+    }
+
+    #[test]
+    fn parse_array_empty() {
+        let result = parse_object_literal_array("[]").unwrap().unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_array_not_array_returns_none() {
+        assert!(parse_object_literal_array("{ name: 'Alice' }").is_none());
+    }
+
+    #[test]
+    fn parse_array_non_object_element_returns_err() {
+        let result = parse_object_literal_array("[42]");
+        assert!(matches!(result, Some(Err(_))));
+    }
+
+    #[test]
+    fn parse_array_trailing_comma() {
+        let result = parse_object_literal_array("[{ a: 1 }, { b: 2 },]")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.len(), 2);
     }
 }

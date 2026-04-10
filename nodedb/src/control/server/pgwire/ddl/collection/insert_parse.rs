@@ -64,7 +64,8 @@ pub(super) fn parse_write_statement(
     let tenant_id = identity.tenant_id;
     let is_upsert = keyword.starts_with("UPSERT");
     let after_coll_trimmed = after_into[coll_name_str.len()..].trim_start();
-    let is_object_literal = after_coll_trimmed.starts_with('{');
+    let is_object_literal =
+        after_coll_trimmed.starts_with('{') || after_coll_trimmed.starts_with('[');
     let mut coll_type: Option<nodedb_types::CollectionType> = None;
     if let Some(catalog) = state.credentials.catalog()
         && let Ok(Some(coll)) = catalog.get_collection(tenant_id.as_u32(), &coll_name)
@@ -81,7 +82,7 @@ pub(super) fn parse_write_statement(
     // If { }, rewrite to VALUES SQL via nodedb-sql's preprocess, then parse that.
     let after_coll_name = after_into[coll_name_str.len()..].trim_start();
 
-    if after_coll_name.starts_with('{') {
+    if after_coll_name.starts_with('{') || after_coll_name.starts_with('[') {
         if let Some(preprocessed) = nodedb_sql::parser::preprocess::preprocess(sql) {
             let rewritten = preprocessed.sql;
             let rewritten_upper = rewritten.to_uppercase();
