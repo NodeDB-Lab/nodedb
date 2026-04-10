@@ -9,10 +9,6 @@ members = [
   "nodedb-cluster",
   "nodedb-types",
   "nodedb-client",
-  "nodedb-lite",
-  "nodedb-lite-ffi",
-  "nodedb-lite-wasm",
-  "nodedb-cli",
   "nodedb-query",
   "nodedb-codec",
   "nodedb-spatial",
@@ -39,7 +35,6 @@ documentation = "https://docs.rs/nodedb"
 # Foundation crates (internal)
 nodedb-types = { path = "nodedb-types", version = "0.0.0-beta.1" }
 nodedb-client = { path = "nodedb-client", version = "0.0.0-beta.1" }
-nodedb-lite = { path = "nodedb-lite", version = "0.0.0-beta.1", default-features = false }
 nodedb-bridge = { path = "nodedb-bridge", version = "0.0.0-beta.1" }
 nodedb-wal = { path = "nodedb-wal", version = "0.0.0-beta.1" }
 nodedb-mem = { path = "nodedb-mem", version = "0.0.0-beta.1" }

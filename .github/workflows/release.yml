@@ -105,7 +105,7 @@ jobs:
             # For pre-release versions, pin internal dep requirements so semver
             # "0.0.0" doesn't fail to match "0.0.0-beta.1"
             if [[ "$VERSION" == *-* ]]; then
-              sed -i -E 's/(nodedb-(codec|bridge|wal|mem|crdt|raft|fts|types|vector|graph|spatial|strict|client|columnar|cluster|query|lite) = \{ [^}]*version = )"[^"]*"/\1"='"$VERSION"'"/' Cargo.toml
+              sed -i -E 's/(nodedb-(codec|bridge|wal|mem|crdt|raft|fts|types|vector|graph|spatial|strict|client|columnar|cluster|query) = \{ [^}]*version = )"[^"]*"/\1"='"$VERSION"'"/' Cargo.toml
               echo "Updated internal dep versions to =$VERSION"
             fi
 
@@ -126,9 +126,6 @@ jobs:
           TIER3="nodedb-columnar nodedb-cluster"
           # Tier 4: depends on tier 3
           TIER4="nodedb-query"
-          # Tier 5: depends on tier 4
-          TIER5="nodedb-lite"
-
           is_published() {
             curl -sf \
               -H "User-Agent: nodedb-ci (github.com/NodeDB-Lab/nodedb)" \
@@ -177,7 +174,6 @@ jobs:
           publish_tier "2 (depends on tier 1)" $TIER2
           publish_tier "3 (depends on tier 2)" $TIER3
           publish_tier "4 (depends on tier 3)" $TIER4
-          publish_tier "5 (depends on tier 4)" $TIER5
 
   # ── Build nodedb server binary (Linux only — requires io_uring) ──────────────
   build-server:
@@ -238,107 +234,10 @@ jobs:
           path: target/${{ matrix.target }}/release/nodedb-*.tar.gz
           retention-days: 1
 
-  # ── Build ndb CLI binary (all platforms) ─────────────────────────────────────
-  build-cli:
-    name: Build ndb (${{ matrix.label }})
-    needs: [validate-version, ci]
-    runs-on: ${{ matrix.runs-on }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runs-on: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            label: linux-x64
-            artifact: ndb
-          - runs-on: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            label: linux-arm64
-            artifact: ndb
-          - runs-on: macos-13
-            target: x86_64-apple-darwin
-            label: macos-x64
-            artifact: ndb
-          - runs-on: macos-latest
-            target: aarch64-apple-darwin
-            label: macos-arm64
-            artifact: ndb
-          - runs-on: windows-latest
-            target: x86_64-pc-windows-msvc
-            label: windows-x64
-            artifact: ndb.exe
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: cli-${{ matrix.target }}
-
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake clang libclang-dev pkg-config protobuf-compiler perl
-
-      - name: Install system deps (macOS)
-        if: runner.os == 'macOS'
-        run: brew install cmake protobuf
-
-      - name: Install system deps (Windows)
-        if: runner.os == 'Windows'
-        run: choco install cmake protoc --no-progress
-
-      - name: Set version from tag
-        shell: bash
-        run: |
-          VERSION="${{ needs.validate-version.outputs.version }}"
-          CURRENT=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.name == "nodedb-types") | .version')
-          if [[ "$VERSION" != "$CURRENT" ]]; then
-            perl -i -pe "if (!\$done && /^version = \"/) { s/^version = \".*\"/version = \"$VERSION\"/; \$done=1 }" Cargo.toml
-            echo "Updated workspace version: $CURRENT -> $VERSION"
-          fi
-
-      - name: Build CLI binary
-        run: cargo build -p nodedb-cli --release --target ${{ matrix.target }}
-
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cd target/${{ matrix.target }}/release
-          chmod +x ${{ matrix.artifact }}
-          tar czf ndb-${{ needs.validate-version.outputs.version }}-${{ matrix.label }}.tar.gz ${{ matrix.artifact }}
-          ls -lh ndb-*.tar.gz
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $version = "${{ needs.validate-version.outputs.version }}"
-          $label   = "${{ matrix.label }}"
-          $zipname = "ndb-${version}-${label}.zip"
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath $zipname
-          ls $zipname
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: cli-${{ matrix.label }}
-          path: |
-            target/${{ matrix.target }}/release/ndb-*.tar.gz
-            target/${{ matrix.target }}/release/ndb-*.zip
-          retention-days: 1
-
   # ── Create GitHub Release ─────────────────────────────────────────────────────
   github-release:
     name: Create GitHub Release
-    needs: [validate-version, publish-crates, build-server, build-cli]
+    needs: [validate-version, publish-crates, build-server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -349,7 +248,7 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           path: ./artifacts
-          pattern: "{server,cli}-*"
+          pattern: "server-*"
           merge-multiple: true
 
       - name: Create GitHub Release
