@@ -207,6 +207,7 @@ pub fn create_collection(
         state_constraints: Vec::new(),
         transition_checks: Vec::new(),
         type_guards: Vec::new(),
+        check_constraints: Vec::new(),
         materialized_sums: Vec::new(),
         lvc_enabled: false,
         permission_tree_def: None,

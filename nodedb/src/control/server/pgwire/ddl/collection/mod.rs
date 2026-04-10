@@ -2,6 +2,7 @@
 //! DESCRIBE, indexes, and ALTER commands.
 
 pub mod alter;
+pub mod check_constraint;
 pub mod create;
 pub mod describe;
 pub mod drop;

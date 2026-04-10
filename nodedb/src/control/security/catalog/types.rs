@@ -246,6 +246,9 @@ pub struct StoredCollection {
     /// Type guard field constraints for schemaless collections.
     #[serde(default)]
     pub type_guards: Vec<nodedb_types::TypeGuardFieldDef>,
+    /// General CHECK constraints (Control Plane enforcement, may contain subqueries).
+    #[serde(default)]
+    pub check_constraints: Vec<CheckConstraintDef>,
     /// Materialized sum definitions.
     #[serde(default)]
     pub materialized_sums: Vec<MaterializedSumDef>,
@@ -285,6 +288,7 @@ impl StoredCollection {
             state_constraints: Vec::new(),
             transition_checks: Vec::new(),
             type_guards: Vec::new(),
+            check_constraints: Vec::new(),
             materialized_sums: Vec::new(),
             lvc_enabled: false,
             permission_tree_def: None,
@@ -472,6 +476,28 @@ pub struct TransitionRule {
 pub struct TransitionCheckDef {
     pub name: String,
     pub predicate: crate::bridge::expr_eval::SqlExpr,
+}
+
+/// General CHECK constraint: SQL boolean expression evaluated on the Control Plane
+/// before writes are dispatched to the Data Plane. May contain subqueries.
+///
+/// Stored as raw SQL so subqueries can be re-planned at evaluation time.
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Debug,
+    Clone,
+)]
+pub struct CheckConstraintDef {
+    /// Constraint name (user-chosen or auto-generated).
+    pub name: String,
+    /// Raw SQL boolean expression (may contain `NEW.field` references and subqueries).
+    pub check_sql: String,
+    /// Whether this CHECK contains a subquery (SELECT). Precomputed at DDL time
+    /// to skip the heavier evaluation path for simple expressions.
+    pub has_subquery: bool,
 }
 
 /// Materialized sum: on INSERT to source, atomically add value_expr to target balance.

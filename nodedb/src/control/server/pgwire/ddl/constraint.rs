@@ -156,6 +156,144 @@ pub fn add_transition_check(
     Ok(vec![Response::Execution(Tag::new("ALTER COLLECTION"))])
 }
 
+/// Handle `ALTER COLLECTION x ADD CONSTRAINT name CHECK (expr)`.
+///
+/// The expression is stored as raw SQL. It may contain `NEW.field` references
+/// and subqueries (`SELECT ...`). Enforcement happens on the Control Plane
+/// before writes are dispatched to the Data Plane.
+pub fn add_check_constraint(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    sql: &str,
+) -> PgWireResult<Vec<Response>> {
+    let tenant_id = identity.tenant_id.as_u32();
+    let parts: Vec<&str> = sql.split_whitespace().collect();
+
+    // ALTER COLLECTION <coll> ADD CONSTRAINT <name> CHECK (...)
+    let coll_name = parts
+        .get(2)
+        .ok_or_else(|| err("42601", "missing collection name"))?
+        .to_lowercase();
+
+    let constraint_name = parts
+        .iter()
+        .position(|p| p.eq_ignore_ascii_case("CONSTRAINT"))
+        .and_then(|i| parts.get(i + 1))
+        .ok_or_else(|| err("42601", "missing constraint name after CONSTRAINT"))?
+        .to_lowercase();
+
+    // Extract the CHECK expression (everything between balanced parens after CHECK).
+    let check_sql = extract_check_expression(sql)?;
+
+    let has_subquery = {
+        let upper = check_sql.to_uppercase();
+        upper.contains("SELECT ") || upper.contains("SELECT\n") || upper.contains("SELECT\t")
+    };
+
+    // Validate subquery pattern at DDL time — only supported forms are allowed.
+    if has_subquery {
+        validate_subquery_pattern(&check_sql)?;
+    }
+
+    // Validate simple expression is parseable at DDL time.
+    if !has_subquery {
+        let bare = strip_new_prefix_for_validation(&check_sql);
+        if let Err(e) = nodedb_query::expr_parse::parse_generated_expr(&bare) {
+            return Err(err(
+                "42601",
+                &format!("CHECK expression failed to parse: {e}"),
+            ));
+        }
+    }
+
+    let def = crate::control::security::catalog::types::CheckConstraintDef {
+        name: constraint_name.clone(),
+        check_sql,
+        has_subquery,
+    };
+
+    let Some(catalog) = state.credentials.catalog() else {
+        return Err(err("XX000", "no catalog available"));
+    };
+
+    let mut coll = catalog
+        .get_collection(tenant_id, &coll_name)
+        .map_err(|e| err("XX000", &e.to_string()))?
+        .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
+
+    // Check for duplicate names across all constraint kinds.
+    if coll
+        .state_constraints
+        .iter()
+        .any(|c| c.name == constraint_name)
+        || coll
+            .transition_checks
+            .iter()
+            .any(|c| c.name == constraint_name)
+        || coll
+            .check_constraints
+            .iter()
+            .any(|c| c.name == constraint_name)
+    {
+        return Err(err(
+            "42710",
+            &format!("constraint '{constraint_name}' already exists on {coll_name}"),
+        ));
+    }
+
+    coll.check_constraints.push(def);
+    catalog
+        .put_collection(&coll)
+        .map_err(|e| err("XX000", &e.to_string()))?;
+
+    state.schema_version.bump();
+
+    Ok(vec![Response::Execution(Tag::new("ALTER COLLECTION"))])
+}
+
+/// Extract the CHECK expression from `ALTER COLLECTION ... CHECK (expr)`.
+///
+/// Finds balanced parentheses after the CHECK keyword and returns the inner expression.
+fn extract_check_expression(sql: &str) -> PgWireResult<String> {
+    let upper = sql.to_uppercase();
+    // Find CHECK keyword that isn't part of TRANSITION CHECK.
+    let check_pos = upper
+        .find("CHECK")
+        .ok_or_else(|| err("42601", "missing CHECK keyword"))?;
+    let after_check = &sql[check_pos + 5..];
+
+    let paren_start = after_check
+        .find('(')
+        .ok_or_else(|| err("42601", "CHECK requires (expression)"))?;
+
+    let body = &after_check[paren_start + 1..];
+    let mut depth = 1i32;
+    let mut end = 0;
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(err("42601", "unmatched parentheses in CHECK expression"));
+    }
+
+    let expr = body[..end].trim().to_string();
+    if expr.is_empty() {
+        return Err(err("42601", "CHECK expression cannot be empty"));
+    }
+
+    Ok(expr)
+}
+
 /// Handle `DROP CONSTRAINT name ON collection`.
 pub fn drop_constraint(
     state: &SharedState,
@@ -187,12 +325,16 @@ pub fn drop_constraint(
         .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
 
     let before_state = coll.state_constraints.len();
-    let before_check = coll.transition_checks.len();
+    let before_trans_check = coll.transition_checks.len();
+    let before_check = coll.check_constraints.len();
 
     coll.state_constraints.retain(|c| c.name != constraint_name);
     coll.transition_checks.retain(|c| c.name != constraint_name);
+    coll.check_constraints.retain(|c| c.name != constraint_name);
 
-    if coll.state_constraints.len() == before_state && coll.transition_checks.len() == before_check
+    if coll.state_constraints.len() == before_state
+        && coll.transition_checks.len() == before_trans_check
+        && coll.check_constraints.len() == before_check
     {
         return Err(err(
             "42704",
@@ -514,6 +656,54 @@ fn split_on_operator<'a>(s: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
         return Some((&s[..abs_pos], &s[abs_pos + op.len()..]));
     }
     None
+}
+
+/// Validate that a subquery CHECK expression uses a supported pattern.
+///
+/// Supported patterns:
+/// - `expr IN (SELECT col FROM tbl [WHERE ...])`
+/// - `expr NOT IN (SELECT col FROM tbl [WHERE ...])`
+///
+/// Unsupported patterns are rejected at DDL time with a clear error.
+fn validate_subquery_pattern(check_sql: &str) -> PgWireResult<()> {
+    let upper = check_sql.to_uppercase();
+
+    // Must contain IN (SELECT ...) or NOT IN (SELECT ...).
+    if upper.contains(" IN (SELECT ") || upper.contains(" IN(SELECT ") {
+        return Ok(());
+    }
+
+    Err(err(
+        "0A000",
+        &format!(
+            "unsupported subquery CHECK pattern. \
+             Supported: `expr IN (SELECT col FROM tbl)`, \
+             `expr NOT IN (SELECT col FROM tbl)`. \
+             Got: {check_sql}"
+        ),
+    ))
+}
+
+/// Strip `NEW.` prefix for validation parsing (same logic as check_constraint.rs).
+fn strip_new_prefix_for_validation(sql: &str) -> String {
+    let upper = sql.to_uppercase();
+    let bytes = sql.as_bytes();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 4 <= bytes.len() && upper[i..].starts_with("NEW.") {
+            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            i += 4;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
 }
 
 fn err(code: &str, msg: &str) -> PgWireError {

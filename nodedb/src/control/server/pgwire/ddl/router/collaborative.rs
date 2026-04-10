@@ -32,6 +32,17 @@ pub(super) async fn dispatch(
             state, identity, sql,
         ));
     }
+    // General CHECK constraint (not TRANSITIONS, not TRANSITION CHECK).
+    if upper.starts_with("ALTER COLLECTION ")
+        && upper.contains("ADD CONSTRAINT")
+        && upper.contains("CHECK")
+        && !upper.contains("TRANSITIONS")
+        && !upper.contains("TRANSITION CHECK")
+    {
+        return Some(super::super::constraint::add_check_constraint(
+            state, identity, sql,
+        ));
+    }
     if upper.starts_with("DROP CONSTRAINT ") {
         return Some(super::super::constraint::drop_constraint(
             state, identity, parts,

@@ -54,23 +54,38 @@ pub async fn upsert_document(
         Err(e) => return Some(e),
     };
 
-    // Enforce type guards for schemaless collections (after BEFORE trigger).
+    // Enforce type guards and CHECK constraints (after BEFORE trigger).
     if let Some(catalog) = state.credentials.catalog()
         && let Ok(Some(coll_def)) = catalog.get_collection(tenant_id.as_u32(), &parsed.coll_name)
-        && !coll_def.type_guards.is_empty()
     {
-        let doc = nodedb_types::Value::Object(fields.clone());
-        if let Err(violation) = crate::data::executor::enforcement::typeguard::check_type_guards(
-            &parsed.coll_name,
-            &coll_def.type_guards,
-            &doc,
-            None,
-        ) {
-            use crate::control::server::pgwire::types::error_code_to_sqlstate;
-            let (severity, code, message) = error_code_to_sqlstate(&violation);
-            return Some(Err(pgwire::error::PgWireError::UserError(Box::new(
-                pgwire::error::ErrorInfo::new(severity.to_owned(), code.to_owned(), message),
-            ))));
+        if !coll_def.type_guards.is_empty() {
+            let doc = nodedb_types::Value::Object(fields.clone());
+            if let Err(violation) = crate::data::executor::enforcement::typeguard::check_type_guards(
+                &parsed.coll_name,
+                &coll_def.type_guards,
+                &doc,
+                None,
+            ) {
+                use crate::control::server::pgwire::types::error_code_to_sqlstate;
+                let (severity, code, message) = error_code_to_sqlstate(&violation);
+                return Some(Err(pgwire::error::PgWireError::UserError(Box::new(
+                    pgwire::error::ErrorInfo::new(severity.to_owned(), code.to_owned(), message),
+                ))));
+            }
+        }
+
+        // General CHECK constraints (Control Plane enforcement, may have subqueries).
+        if !coll_def.check_constraints.is_empty() {
+            if let Err(e) = super::check_constraint::enforce_check_constraints(
+                state,
+                tenant_id,
+                &coll_def.check_constraints,
+                &fields,
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
         }
     }
 
