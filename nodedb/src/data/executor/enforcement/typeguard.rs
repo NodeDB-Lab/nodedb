@@ -8,6 +8,72 @@ use nodedb_types::TypeGuardFieldDef;
 
 use crate::bridge::envelope::ErrorCode;
 
+/// Inject DEFAULT and VALUE expressions into document fields before validation.
+///
+/// - **DEFAULT**: injected only if the field is absent or null.
+/// - **VALUE**: always injected, overwriting any user-provided value.
+///
+/// Evaluation order: DEFAULT/VALUE injection → REQUIRED → type → CHECK.
+/// This means `REQUIRED + DEFAULT` = field is always present (DEFAULT fills the gap
+/// before REQUIRED rejects absent fields).
+///
+/// Expressions are evaluated using `parse_generated_expr` + `SqlExpr::eval`,
+/// which supports cross-field references (e.g., `LOWER(REPLACE(title, ' ', '-'))`).
+pub fn inject_defaults(
+    guards: &[TypeGuardFieldDef],
+    fields: &mut std::collections::HashMap<String, nodedb_types::Value>,
+) -> Result<(), ErrorCode> {
+    for guard in guards {
+        // VALUE: always overwrite.
+        if let Some(ref expr_str) = guard.value_expr {
+            let (expr, _deps) =
+                nodedb_query::expr_parse::parse_generated_expr(expr_str).map_err(|e| {
+                    ErrorCode::TypeGuardViolation {
+                        collection: String::new(),
+                        detail: format!(
+                            "field '{}': invalid VALUE expression '{}': {e}",
+                            guard.field, expr_str
+                        ),
+                    }
+                })?;
+            let doc = nodedb_types::Value::Object(fields.clone());
+            fields.insert(guard.field.clone(), expr.eval(&doc));
+        }
+        // DEFAULT: inject only if absent or null.
+        else if let Some(ref expr_str) = guard.default_expr {
+            let is_absent = fields
+                .get(&guard.field)
+                .is_none_or(|v| matches!(v, nodedb_types::Value::Null));
+            if is_absent {
+                let (expr, _deps) = nodedb_query::expr_parse::parse_generated_expr(expr_str)
+                    .map_err(|e| ErrorCode::TypeGuardViolation {
+                        collection: String::new(),
+                        detail: format!(
+                            "field '{}': invalid DEFAULT expression '{}': {e}",
+                            guard.field, expr_str
+                        ),
+                    })?;
+                let doc = nodedb_types::Value::Object(fields.clone());
+                fields.insert(guard.field.clone(), expr.eval(&doc));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Combined inject + validate for INSERT/UPSERT (full document, no written_fields filter).
+///
+/// Runs DEFAULT/VALUE injection, then type guard validation. Returns the first error.
+pub fn inject_and_validate(
+    collection: &str,
+    guards: &[TypeGuardFieldDef],
+    fields: &mut std::collections::HashMap<String, nodedb_types::Value>,
+) -> Result<(), ErrorCode> {
+    inject_defaults(guards, fields)?;
+    let doc = nodedb_types::Value::Object(fields.clone());
+    check_type_guards(collection, guards, &doc, None)
+}
+
 /// Validate a document against type guard field definitions.
 ///
 /// `doc` is the document being written (INSERT/UPSERT: the full document,
@@ -155,6 +221,8 @@ mod tests {
             type_expr: type_expr.to_string(),
             required,
             check_expr: None,
+            default_expr: None,
+            value_expr: None,
         }
     }
 
@@ -304,5 +372,103 @@ mod tests {
             err,
             ErrorCode::TypeGuardViolation { ref detail, .. } if detail.contains("'b'")
         ));
+    }
+
+    // ── DEFAULT/VALUE injection ──
+
+    #[test]
+    fn default_injects_when_absent() {
+        let guard = TypeGuardFieldDef {
+            field: "status".to_string(),
+            type_expr: "STRING".to_string(),
+            required: false,
+            check_expr: None,
+            default_expr: Some("'draft'".to_string()),
+            value_expr: None,
+        };
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), Value::String("Alice".into()));
+        inject_defaults(&[guard], &mut fields).unwrap();
+        assert_eq!(fields.get("status"), Some(&Value::String("draft".into())));
+    }
+
+    #[test]
+    fn default_does_not_overwrite() {
+        let guard = TypeGuardFieldDef {
+            field: "status".to_string(),
+            type_expr: "STRING".to_string(),
+            required: false,
+            check_expr: None,
+            default_expr: Some("'draft'".to_string()),
+            value_expr: None,
+        };
+        let mut fields = HashMap::new();
+        fields.insert("status".to_string(), Value::String("active".into()));
+        inject_defaults(&[guard], &mut fields).unwrap();
+        assert_eq!(
+            fields.get("status"),
+            Some(&Value::String("active".into())),
+            "DEFAULT should not overwrite existing value"
+        );
+    }
+
+    #[test]
+    fn value_always_overwrites() {
+        let guard = TypeGuardFieldDef {
+            field: "updated".to_string(),
+            type_expr: "STRING".to_string(),
+            required: false,
+            check_expr: None,
+            default_expr: None,
+            value_expr: Some("'computed'".to_string()),
+        };
+        let mut fields = HashMap::new();
+        fields.insert("updated".to_string(), Value::String("user_input".into()));
+        inject_defaults(&[guard], &mut fields).unwrap();
+        assert_eq!(
+            fields.get("updated"),
+            Some(&Value::String("computed".into())),
+            "VALUE should overwrite user input"
+        );
+    }
+
+    #[test]
+    fn default_plus_required_always_present() {
+        let guard = TypeGuardFieldDef {
+            field: "version".to_string(),
+            type_expr: "INT".to_string(),
+            required: true,
+            check_expr: None,
+            default_expr: Some("1".to_string()),
+            value_expr: None,
+        };
+        let mut fields = HashMap::new();
+        // version absent — DEFAULT fills it before REQUIRED check
+        inject_defaults(std::slice::from_ref(&guard), &mut fields).unwrap();
+        assert_eq!(fields.get("version"), Some(&Value::Integer(1)));
+        // Now validate — should pass because DEFAULT filled the gap
+        let doc = obj(&[("version", Value::Integer(1))]);
+        assert!(check_type_guards("coll", std::slice::from_ref(&guard), &doc, None).is_ok());
+    }
+
+    #[test]
+    fn value_cross_field_reference() {
+        let guard = TypeGuardFieldDef {
+            field: "greeting".to_string(),
+            type_expr: "STRING".to_string(),
+            required: false,
+            check_expr: None,
+            default_expr: None,
+            value_expr: Some("name".to_string()), // references another field
+        };
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), Value::String("Alice".into()));
+        inject_defaults(&[guard], &mut fields).unwrap();
+        // SqlExpr::eval resolves "name" as a column reference → Value::String("Alice")
+        assert_eq!(
+            fields.get("greeting"),
+            Some(&Value::String("Alice".into())),
+            "VALUE should resolve cross-field references"
+        );
     }
 }

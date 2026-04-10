@@ -41,7 +41,7 @@ pub async fn upsert_document(
     }
 
     // Fire BEFORE INSERT triggers — may mutate NEW fields.
-    let fields = match fire_before_triggers(
+    let mut fields = match fire_before_triggers(
         state,
         identity,
         tenant_id,
@@ -58,20 +58,20 @@ pub async fn upsert_document(
     if let Some(catalog) = state.credentials.catalog()
         && let Ok(Some(coll_def)) = catalog.get_collection(tenant_id.as_u32(), &parsed.coll_name)
     {
-        if !coll_def.type_guards.is_empty() {
-            let doc = nodedb_types::Value::Object(fields.clone());
-            if let Err(violation) = crate::data::executor::enforcement::typeguard::check_type_guards(
-                &parsed.coll_name,
-                &coll_def.type_guards,
-                &doc,
-                None,
-            ) {
-                use crate::control::server::pgwire::types::error_code_to_sqlstate;
-                let (severity, code, message) = error_code_to_sqlstate(&violation);
-                return Some(Err(pgwire::error::PgWireError::UserError(Box::new(
-                    pgwire::error::ErrorInfo::new(severity.to_owned(), code.to_owned(), message),
-                ))));
-            }
+        // Inject DEFAULT/VALUE + validate type guards (combined).
+        if !coll_def.type_guards.is_empty()
+            && let Err(violation) =
+                crate::data::executor::enforcement::typeguard::inject_and_validate(
+                    &parsed.coll_name,
+                    &coll_def.type_guards,
+                    &mut fields,
+                )
+        {
+            use crate::control::server::pgwire::types::error_code_to_sqlstate;
+            let (severity, code, message) = error_code_to_sqlstate(&violation);
+            return Some(Err(pgwire::error::PgWireError::UserError(Box::new(
+                pgwire::error::ErrorInfo::new(severity.to_owned(), code.to_owned(), message),
+            ))));
         }
 
         // General CHECK constraints (Control Plane enforcement, may have subqueries).

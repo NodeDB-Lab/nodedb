@@ -145,14 +145,13 @@ pub(super) fn parse_single_field(s: &str) -> PgWireResult<TypeGuardFieldDef> {
         None
     };
 
-    // The type expression is everything before REQUIRED and before CHECK.
+    // The type expression is everything before REQUIRED, CHECK, DEFAULT, VALUE.
     let type_end = {
         let mut end = upper_rest.len();
-        if let Some(req_pos) = find_word_boundary(&upper_rest, "REQUIRED") {
-            end = end.min(req_pos);
-        }
-        if let Some(chk_pos) = find_word_boundary(&upper_rest, "CHECK") {
-            end = end.min(chk_pos);
+        for kw in &["REQUIRED", "CHECK", "DEFAULT", "VALUE"] {
+            if let Some(pos) = find_word_boundary(&upper_rest, kw) {
+                end = end.min(pos);
+            }
         }
         end
     };
@@ -166,11 +165,40 @@ pub(super) fn parse_single_field(s: &str) -> PgWireResult<TypeGuardFieldDef> {
         ));
     }
 
+    // Extract DEFAULT expression if present.
+    let default_expr = if let Some(def_pos) = find_word_boundary(&upper_rest, "DEFAULT") {
+        let after_default = rest[def_pos + 7..].trim_start();
+        // DEFAULT value extends until the next keyword (REQUIRED, CHECK, VALUE) or end.
+        let default_end = find_next_keyword(after_default);
+        Some(after_default[..default_end].trim().to_string())
+    } else {
+        None
+    };
+
+    // Extract VALUE expression if present.
+    let value_expr = if let Some(val_pos) = find_word_boundary(&upper_rest, "VALUE") {
+        let after_value = rest[val_pos + 5..].trim_start();
+        let value_end = find_next_keyword(after_value);
+        Some(after_value[..value_end].trim().to_string())
+    } else {
+        None
+    };
+
+    // DEFAULT and VALUE are mutually exclusive.
+    if default_expr.is_some() && value_expr.is_some() {
+        return Err(err(
+            "42601",
+            &format!("field '{field}': DEFAULT and VALUE are mutually exclusive"),
+        ));
+    }
+
     Ok(TypeGuardFieldDef {
         field,
         type_expr,
         required,
         check_expr,
+        default_expr,
+        value_expr,
     })
 }
 
@@ -195,6 +223,19 @@ fn find_word_boundary(haystack: &str, word: &str) -> Option<usize> {
         start = abs_pos + word.len();
     }
     None
+}
+
+/// Find the end of a DEFAULT/VALUE expression — stops at the next keyword
+/// (REQUIRED, CHECK, DEFAULT, VALUE) or end of string.
+fn find_next_keyword(s: &str) -> usize {
+    let upper = s.to_uppercase();
+    let mut end = s.len();
+    for kw in &["REQUIRED", "CHECK", "DEFAULT", "VALUE"] {
+        if let Some(pos) = find_word_boundary(&upper, kw) {
+            end = end.min(pos);
+        }
+    }
+    end
 }
 
 pub(super) fn err(code: &str, msg: &str) -> PgWireError {

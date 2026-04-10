@@ -31,4 +31,14 @@ pub struct TypeGuardFieldDef {
     /// Stored as text, parsed at enforcement time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_expr: Option<String>,
+    /// DEFAULT expression: injected if the field is absent on write.
+    /// Does NOT overwrite a user-provided value.
+    /// Example: `DEFAULT 'draft'`, `DEFAULT gen_uuid_v7()`, `DEFAULT now()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expr: Option<String>,
+    /// VALUE expression: always injected, even if the field is provided.
+    /// Overwrites user input — use for computed/derived fields.
+    /// Example: `VALUE now()`, `VALUE LOWER(REPLACE(title, ' ', '-'))`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_expr: Option<String>,
 }
