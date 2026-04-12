@@ -217,6 +217,14 @@ jobs:
             | jq -r '.packages[] | select(.name == "nodedb-types") | .version')
           if [[ "$VERSION" != "$CURRENT" ]]; then
             perl -i -pe "if (!\$done && /^version = \"/) { s/^version = \".*\"/version = \"$VERSION\"/; \$done=1 }" Cargo.toml
+
+            # For pre-release versions, pin internal dep requirements so semver
+            # "0" doesn't fail to match "0.0.0-beta.3"
+            if [[ "$VERSION" == *-* ]]; then
+              sed -i -E 's/(nodedb-(codec|bridge|wal|mem|crdt|raft|fts|types|vector|graph|spatial|strict|client|columnar|cluster|query|sql) = \{ [^}]*version = )"[^"]*"/\1"='"$VERSION"'"/' Cargo.toml
+              echo "Updated internal dep versions to =$VERSION"
+            fi
+
             echo "Updated workspace version: $CURRENT -> $VERSION"
           fi
 
