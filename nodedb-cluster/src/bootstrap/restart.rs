@@ -27,10 +27,20 @@ pub(super) fn restart(
             detail: "catalog is bootstrapped but routing table is missing".into(),
         })?;
 
-    // Reconstruct MultiRaft from routing table.
+    // Reconstruct MultiRaft from routing table. A restarting node
+    // may be a voter (`info.members`) OR a learner (`info.learners`)
+    // — the latter is the window between an `AddLearner` commit
+    // and the follow-up `PromoteLearner` commit during a join. A
+    // node that crashes inside that window must still come back
+    // as a learner on restart; dropping the group entirely would
+    // leave the node permanently without any copy of it and
+    // silently broken.
     let mut multi_raft = MultiRaft::new(config.node_id, routing.clone(), config.data_dir.clone());
     for (group_id, info) in routing.group_members() {
-        if info.members.contains(&config.node_id) {
+        let is_voter = info.members.contains(&config.node_id);
+        let is_learner = info.learners.contains(&config.node_id);
+
+        if is_voter {
             let peers: Vec<u64> = info
                 .members
                 .iter()
@@ -38,6 +48,18 @@ pub(super) fn restart(
                 .filter(|&id| id != config.node_id)
                 .collect();
             multi_raft.add_group(*group_id, peers)?;
+        } else if is_learner {
+            // Voters are the full member set (none of them is
+            // self). Other learners catching up alongside us are
+            // tracked for replication too.
+            let voters = info.members.clone();
+            let other_learners: Vec<u64> = info
+                .learners
+                .iter()
+                .copied()
+                .filter(|&id| id != config.node_id)
+                .collect();
+            multi_raft.add_group_as_learner(*group_id, voters, other_learners)?;
         }
     }
 

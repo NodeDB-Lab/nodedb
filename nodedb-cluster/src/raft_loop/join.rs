@@ -65,7 +65,7 @@ use crate::forward::RequestForwarder;
 use crate::health;
 use crate::multi_raft::GroupStatus;
 use crate::routing::RoutingTable;
-use crate::rpc_codec::{JoinRequest, JoinResponse};
+use crate::rpc_codec::{JoinRequest, JoinResponse, LEADER_REDIRECT_PREFIX};
 
 use super::handle_rpc::{JoinDecision, TOPOLOGY_GROUP_ID, decide_join};
 use super::loop_core::{CommitApplier, RaftLoop};
@@ -114,7 +114,7 @@ impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
                 leader_addr = %leader_addr,
                 "JoinRequest received on non-leader; redirecting"
             );
-            return reject(format!("not leader; retry at {leader_addr}"));
+            return reject(format!("{LEADER_REDIRECT_PREFIX}{leader_addr}"));
         }
 
         // 2. Validate the address.
@@ -155,19 +155,40 @@ impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
         // 4. Register transport peer so the leader can reach it.
         self.transport.register_peer(req.node_id, new_addr);
 
-        // Read the local cluster id from the catalog (if one is
-        // attached) so we can echo it on every successful
-        // `JoinResponse`. The joining node persists this id so its
-        // next boot takes the `restart()` path instead of
-        // re-bootstrapping. Zero is a benign fallback when no
-        // catalog is attached — the joining node's
-        // `is_bootstrapped` check still returns true because
-        // `load_cluster_id` reads back `Some(0)`.
-        let cluster_id = self
-            .catalog
-            .as_ref()
-            .and_then(|c| c.load_cluster_id().ok().flatten())
-            .unwrap_or(0);
+        // Read the local cluster id from the catalog and echo it
+        // on every successful `JoinResponse`. The joining node
+        // persists this value so its next boot takes the
+        // `restart()` path instead of re-bootstrapping.
+        //
+        // Strict contract:
+        //
+        // - If a catalog is attached and is missing a cluster_id,
+        //   the server is lying about being bootstrapped — this
+        //   is an invariant violation, so we reject the join
+        //   loudly instead of papering over it with a sentinel
+        //   zero that would silently collapse two different
+        //   clusters into one "cluster 0".
+        // - If a catalog is not attached (unit-test path), we
+        //   fall back to `self.node_id`. This is a test-only
+        //   affordance: it keeps the response well-formed without
+        //   inventing a cross-cluster identity, because in tests
+        //   every node id is locally unique by construction.
+        let cluster_id = match self.catalog.as_ref() {
+            Some(catalog) => match catalog.load_cluster_id() {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    return reject(
+                        "server catalog is attached but has no cluster_id — refusing to \
+                         issue a JoinResponse without a real cluster identity"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    return reject(format!("failed to read cluster_id from catalog: {e}"));
+                }
+            },
+            None => self.node_id,
+        };
 
         // 5. Admit into topology.
         {
@@ -210,10 +231,28 @@ impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
             }
         }
 
-        // 7. Wait for every conf change to commit.
+        // 7. Wait for every conf change to actually *apply* to
+        //    routing. Earlier versions of this flow polled
+        //    `commit_index_for` and relied on an unconditional
+        //    inline apply inside `propose_conf_change` — which
+        //    was racy for multi-voter groups where the commit
+        //    can be deferred until quorum replicates the log
+        //    entry. The correct semantic signal is "the new node
+        //    appears in `routing.group_info(gid).learners`",
+        //    because that's what `apply_conf_change` writes after
+        //    the commit lands. Polling this also works cleanly
+        //    for single-voter groups (the inline apply makes the
+        //    condition true on the first poll) and multi-voter
+        //    groups (the tick loop runs concurrently with this
+        //    `await`, drains `committed_entries`, and calls
+        //    `apply_conf_change` → routing update → condition
+        //    flips).
         let deadline = Instant::now() + CONF_CHANGE_COMMIT_TIMEOUT;
         for (gid, log_index) in &pending {
-            if let Err(err) = self.wait_for_commit(*gid, *log_index, deadline).await {
+            if let Err(err) = self
+                .wait_for_learner_applied(*gid, req.node_id, *log_index, deadline)
+                .await
+            {
                 return reject(err.to_string());
             }
         }
@@ -251,27 +290,41 @@ impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
         self.build_current_response(&req)
     }
 
-    /// Poll `MultiRaft::commit_index_for` until it reaches `log_index`
-    /// or the absolute `deadline` elapses.
+    /// Wait for the semantic goal of "learner is now tracked in
+    /// `routing.group_info(group_id).learners`", polling every
+    /// [`CONF_CHANGE_POLL_INTERVAL`] up to `deadline`.
     ///
-    /// Surfaces failure through [`ClusterError::JoinCommitTimeout`] and
-    /// [`ClusterError::JoinGroupDisappeared`] so the join flow can match
-    /// the cause and so the crate's central error enum owns the
-    /// human-readable rendering.
-    async fn wait_for_commit(
+    /// This is the post-apply condition that `apply_conf_change`
+    /// writes once a committed `AddLearner` entry has been
+    /// applied to the local state. Polling this rather than the
+    /// raw `commit_index` is what lets the join flow stay
+    /// correct on multi-voter groups where the commit is
+    /// deferred until quorum replicates.
+    ///
+    /// `log_index` is carried into the error enum for debugging
+    /// only; the condition is not gated on it.
+    ///
+    /// Surfaces failure through [`ClusterError::JoinCommitTimeout`]
+    /// and [`ClusterError::JoinGroupDisappeared`] so the join
+    /// flow can match the cause and so the crate's central
+    /// error enum owns the human-readable rendering.
+    async fn wait_for_learner_applied(
         &self,
         group_id: u64,
+        learner_id: u64,
         log_index: u64,
         deadline: Instant,
     ) -> Result<()> {
         loop {
-            let commit = {
+            let applied = {
                 let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-                mr.commit_index_for(group_id)
+                mr.routing()
+                    .group_info(group_id)
+                    .map(|info| info.learners.contains(&learner_id))
             };
-            match commit {
-                Some(idx) if idx >= log_index => return Ok(()),
-                Some(_) => {}
+            match applied {
+                Some(true) => return Ok(()),
+                Some(false) => {}
                 None => return Err(ClusterError::JoinGroupDisappeared { group_id }),
             }
             if Instant::now() >= deadline {
@@ -284,10 +337,31 @@ impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
         }
     }
 
-    /// Build a `JoinResponse` snapshotting the current topology and
-    /// routing. Used both by the happy-path return and by the idempotent
-    /// re-join short-circuit.
+    /// Build a `JoinResponse` snapshotting the current topology
+    /// and routing. Used both by the happy-path return and by the
+    /// idempotent re-join short-circuit. The strict cluster_id
+    /// check is the same as the one at the top of `join_flow` —
+    /// a catalog-attached server with no stamped cluster_id is an
+    /// invariant violation and we reject the join rather than
+    /// synthesise a sentinel identity.
     fn build_current_response(&self, req: &JoinRequest) -> JoinResponse {
+        let cluster_id = match self.catalog.as_ref() {
+            Some(catalog) => match catalog.load_cluster_id() {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    return reject(
+                        "server catalog is attached but has no cluster_id — refusing to \
+                         issue a JoinResponse without a real cluster identity"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    return reject(format!("failed to read cluster_id from catalog: {e}"));
+                }
+            },
+            None => self.node_id,
+        };
+
         let topology_clone = self
             .topology
             .read()
@@ -297,15 +371,11 @@ impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
             let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
             mr.routing().clone()
         };
-        let cluster_id = self
-            .catalog
-            .as_ref()
-            .and_then(|c| c.load_cluster_id().ok().flatten())
-            .unwrap_or(0);
-        // Re-use the pure builder from bootstrap/handle_join.rs.
-        // `handle_join_request` here is idempotent against the same
-        // (id, addr) — at this point the topology already contains the
-        // new node, so this call only rebuilds the wire response.
+        // Re-use the pure builder from `bootstrap/handle_join.rs`.
+        // `handle_join_request` is idempotent against the same
+        // (id, addr) — at this point the topology already
+        // contains the new node, so this call only rebuilds the
+        // wire response.
         let mut topo = topology_clone;
         handle_join_request(req, &mut topo, &routing_clone, cluster_id)
     }

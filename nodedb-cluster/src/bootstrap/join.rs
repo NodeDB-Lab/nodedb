@@ -29,7 +29,7 @@ use crate::error::{ClusterError, Result};
 use crate::lifecycle_state::ClusterLifecycleTracker;
 use crate::multi_raft::MultiRaft;
 use crate::routing::{GroupInfo, RoutingTable};
-use crate::rpc_codec::{JoinRequest, JoinResponse, RaftRpc};
+use crate::rpc_codec::{JoinRequest, JoinResponse, LEADER_REDIRECT_PREFIX, RaftRpc};
 use crate::topology::{ClusterTopology, NodeInfo, NodeState};
 use crate::transport::NexarTransport;
 
@@ -70,20 +70,19 @@ pub(crate) fn next_backoff(attempt: u32) -> Duration {
 
 /// Parse a `JoinResponse::error` string as a leader redirect hint.
 ///
-/// The producer — `raft_loop::join::join_flow` — formats non-leader
-/// rejections as exactly `"not leader; retry at <addr>"` where
-/// `<addr>` is an `std::net::SocketAddr` text form. This parser is the
-/// mirror and is the **only** place that interprets that string as a
-/// redirect. Any other kind of rejection (collision, parse error,
-/// catalog persist failure, commit timeout, etc.) is treated as a
-/// hard failure that bubbles through the normal error path.
+/// The prefix is defined as a shared constant in `rpc_codec`
+/// (`LEADER_REDIRECT_PREFIX`) so the producer side
+/// (`raft_loop::join::join_flow`) and this consumer can never
+/// drift. Any other kind of rejection (collision, parse error,
+/// catalog persist failure, commit timeout, etc.) is treated as
+/// a hard failure that bubbles through the normal error path.
 ///
-/// Returns `None` for any string that doesn't start with the expected
-/// prefix, or where the address portion does not parse as a valid
-/// `SocketAddr`.
+/// Returns `None` for any string that doesn't start with the
+/// expected prefix, or where the address portion does not parse
+/// as a valid `SocketAddr`.
 pub(crate) fn parse_leader_hint(error: &str) -> Option<SocketAddr> {
     error
-        .strip_prefix("not leader; retry at ")
+        .strip_prefix(LEADER_REDIRECT_PREFIX)
         .and_then(|s| s.trim().parse().ok())
 }
 

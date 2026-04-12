@@ -26,16 +26,31 @@ use super::core::MultiRaft;
 impl MultiRaft {
     /// Propose a configuration change to a Raft group.
     ///
-    /// The change is serialized into the group's Raft log as a regular
-    /// entry with a distinguishing prefix byte. It replicates through the
-    /// normal `AppendEntries` path and is applied by every follower
-    /// replica when the entry commits (see `apply_conf_change`).
+    /// The change is serialized into the group's Raft log as a
+    /// regular entry with a distinguishing prefix byte. It
+    /// replicates through the normal `AppendEntries` path and is
+    /// applied by every follower replica when the entry commits
+    /// (see `apply_conf_change`).
     ///
-    /// On the leader, we additionally apply the change **inline** before
-    /// returning so callers that read `routing()` / `learners()` right
-    /// after a successful propose observe the new state immediately.
-    /// The later tick-loop apply is a no-op thanks to idempotency guards
-    /// in `add_learner` / `add_group_learner` / `promote_learner`.
+    /// # Single-voter vs. multi-voter groups
+    ///
+    /// Single-voter groups commit inside `node.propose` itself
+    /// (see `nodedb_raft::node::RaftNode::propose` single-voter
+    /// branch). In that case the commit has already happened by
+    /// the time we return, so we safely apply the change inline:
+    /// any caller that reads routing immediately after the
+    /// propose sees the final state.
+    ///
+    /// Multi-voter groups commit asynchronously once enough
+    /// followers have replicated the entry. The apply then
+    /// happens on the tick loop after it observes the updated
+    /// `commit_index`. We MUST NOT inline-apply in that case —
+    /// if the leader steps down before replication completes, a
+    /// new leader may truncate the log entry and the local state
+    /// would be permanently ahead of the committed state with no
+    /// rollback path. Callers that need to wait for the apply
+    /// should poll the routing table (see
+    /// `raft_loop::join::wait_for_routing_contains_learner`).
     ///
     /// Returns `(group_id, log_index)` on success.
     pub fn propose_conf_change(
@@ -43,15 +58,24 @@ impl MultiRaft {
         group_id: u64,
         change: &ConfChange,
     ) -> Result<(u64, u64)> {
-        let node = self
-            .groups
-            .get_mut(&group_id)
-            .ok_or(ClusterError::GroupNotFound { group_id })?;
-        let data = change.to_entry_data();
-        let log_index = node.propose(data)?;
-        // Inline apply on the leader. Idempotent w.r.t. the tick-loop
-        // apply that will happen when `committed_entries` is drained.
-        self.apply_conf_change(group_id, change)?;
+        let (log_index, committed_immediately) = {
+            let node = self
+                .groups
+                .get_mut(&group_id)
+                .ok_or(ClusterError::GroupNotFound { group_id })?;
+            let data = change.to_entry_data();
+            let log_index = node.propose(data)?;
+            // A single-voter group self-commits inside `propose`:
+            // its `commit_index` is bumped to the new `log_index`
+            // before we return. Detecting this is the one safe
+            // trigger for an inline apply.
+            let committed_immediately = node.commit_index() >= log_index;
+            (log_index, committed_immediately)
+        };
+
+        if committed_immediately {
+            self.apply_conf_change(group_id, change)?;
+        }
         Ok((group_id, log_index))
     }
 

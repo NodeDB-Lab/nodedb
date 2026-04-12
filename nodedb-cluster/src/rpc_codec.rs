@@ -117,6 +117,18 @@ pub struct JoinRequest {
     pub listen_addr: String,
 }
 
+/// Wire-level redirect contract between the join-flow producer
+/// (`raft_loop::join::join_flow`) and the client-side parser
+/// (`bootstrap::join::parse_leader_hint`).
+///
+/// When a non-leader receives a `JoinRequest`, it returns a
+/// `JoinResponse { success: false, error: format!("{LEADER_REDIRECT_PREFIX}{addr}") }`.
+/// The client looks for this exact prefix to decide whether to
+/// follow a hint or treat the rejection as a hard failure. Both
+/// sides MUST import this constant — never inline the literal, or
+/// a refactor on one side will silently break the other.
+pub const LEADER_REDIRECT_PREFIX: &str = "not leader; retry at ";
+
 /// Response to a join request — carries full cluster state.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct JoinResponse {
