@@ -15,6 +15,7 @@ pub mod bootstrap_fn;
 pub mod config;
 pub mod handle_join;
 pub mod join;
+pub mod probe;
 pub mod restart;
 pub mod start;
 

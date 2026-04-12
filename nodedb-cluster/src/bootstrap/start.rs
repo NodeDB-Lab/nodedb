@@ -1,13 +1,28 @@
 //! Cluster startup entry point: dispatches to bootstrap, join, or restart.
+//!
+//! The decision tree is deliberately small and delegates every
+//! non-trivial choice to a dedicated module:
+//!
+//! - **restart** (`super::restart`) — if the catalog already reports
+//!   this node as bootstrapped, we always take the restart path,
+//!   regardless of `seed_nodes` or `force_bootstrap`. The catalog is
+//!   the authoritative source of truth once it exists.
+//! - **bootstrap** (`super::bootstrap_fn`) — taken when this node is
+//!   the elected bootstrapper (lowest-addr seed), or when the operator
+//!   forced it via `ClusterConfig::force_bootstrap`, or when no other
+//!   seed is running. See [`super::probe::should_bootstrap`].
+//! - **join** (`super::join`) — everything else. The join path owns
+//!   its own retry-with-backoff loop and leader-redirect handling, so
+//!   this dispatcher does not need to retry at this layer.
 
 use crate::catalog::ClusterCatalog;
 use crate::error::Result;
-use crate::rpc_codec::{JoinRequest, RaftRpc};
 use crate::transport::NexarTransport;
 
 use super::bootstrap_fn::bootstrap;
 use super::config::{ClusterConfig, ClusterState};
 use super::join::join;
+use super::probe::should_bootstrap;
 use super::restart::restart;
 
 /// Start the cluster — bootstrap, join, or restart depending on state.
@@ -18,12 +33,13 @@ pub async fn start_cluster(
     catalog: &ClusterCatalog,
     transport: &NexarTransport,
 ) -> Result<ClusterState> {
-    // Check if we have existing state.
+    // Authoritative catalog state wins — a previously bootstrapped
+    // node always takes the restart path on boot.
     if catalog.is_bootstrapped()? {
         return restart(config, catalog, transport);
     }
 
-    // No existing state — try bootstrap or join.
+    // No existing state — decide bootstrap vs join.
     let is_seed = config.seed_nodes.contains(&config.listen_addr);
 
     if is_seed && should_bootstrap(config, transport).await {
@@ -31,26 +47,4 @@ pub async fn start_cluster(
     } else {
         join(config, catalog, transport).await
     }
-}
-
-/// Check if this seed should bootstrap a new cluster.
-///
-/// A seed bootstraps if no other seed is already running.
-pub(super) async fn should_bootstrap(config: &ClusterConfig, transport: &NexarTransport) -> bool {
-    for addr in &config.seed_nodes {
-        if *addr == config.listen_addr {
-            continue;
-        }
-        // Try to contact another seed.
-        let probe = RaftRpc::JoinRequest(JoinRequest {
-            node_id: config.node_id,
-            listen_addr: config.listen_addr.to_string(),
-        });
-        match transport.send_rpc_to_addr(*addr, probe).await {
-            Ok(_) => return false, // Another seed is alive — join instead.
-            Err(_) => continue,    // Seed not reachable — keep checking.
-        }
-    }
-    // No other seed responded — we bootstrap.
-    true
 }

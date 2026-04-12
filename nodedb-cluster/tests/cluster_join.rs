@@ -74,6 +74,7 @@ impl TestNode {
             num_groups: 2,
             replication_factor: 3,
             data_dir: data_dir.path().to_path_buf(),
+            force_bootstrap: false,
         };
 
         let state = start_cluster(&config, &catalog, &transport).await?;

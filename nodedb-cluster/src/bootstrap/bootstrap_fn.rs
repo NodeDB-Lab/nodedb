@@ -99,6 +99,7 @@ mod tests {
             num_groups: 4,
             replication_factor: 1,
             data_dir: _dir.path().to_path_buf(),
+            force_bootstrap: false,
         };
 
         let state = bootstrap(&config, &catalog).unwrap();

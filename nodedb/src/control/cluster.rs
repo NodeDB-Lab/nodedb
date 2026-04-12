@@ -82,6 +82,7 @@ pub async fn init_cluster(
         num_groups: config.num_groups,
         replication_factor: config.replication_factor,
         data_dir: data_dir.to_path_buf(),
+        force_bootstrap: config.force_bootstrap,
     };
 
     let state = nodedb_cluster::start_cluster(&cluster_config, &catalog, &transport)
