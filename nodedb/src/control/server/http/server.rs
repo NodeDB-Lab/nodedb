@@ -27,6 +27,7 @@ fn build_router(state: AppState) -> Router {
         .route("/metrics", get(routes::metrics::metrics))
         .route("/query", post(routes::query::query))
         .route("/status", get(routes::status::status))
+        .route("/cluster/status", get(routes::cluster::cluster_status))
         .route(
             "/api/auth/exchange-key",
             post(routes::auth_key::exchange_key),

@@ -36,6 +36,43 @@ pub async fn metrics(
     output.push_str("# TYPE nodedb_node_id gauge\n");
     output.push_str(&format!("nodedb_node_id {}\n\n", state.shared.node_id));
 
+    // Cluster lifecycle observability — emitted only when cluster
+    // mode is enabled (`ClusterObserver` published by start_raft).
+    //
+    // `nodedb_cluster_state{state="..."}` is a one-hot gauge over
+    // every possible lifecycle phase so dashboards can pick out the
+    // current state without parsing an enum into a free-form label.
+    // `nodedb_cluster_members` and `nodedb_cluster_groups` are plain
+    // integer gauges pulled from the same snapshot.
+    if let Some(observer) = state.shared.cluster_observer.get() {
+        let snap = observer.snapshot();
+        let current_label = snap.lifecycle_label();
+
+        output
+            .push_str("# HELP nodedb_cluster_state One-hot gauge over cluster lifecycle phase.\n");
+        output.push_str("# TYPE nodedb_cluster_state gauge\n");
+        for label in nodedb_cluster::ClusterLifecycleState::all_labels() {
+            let v = if *label == current_label { 1 } else { 0 };
+            output.push_str(&format!("nodedb_cluster_state{{state=\"{label}\"}} {v}\n"));
+        }
+        output.push('\n');
+
+        output.push_str("# HELP nodedb_cluster_members Number of peers in the local topology.\n");
+        output.push_str("# TYPE nodedb_cluster_members gauge\n");
+        output.push_str(&format!(
+            "nodedb_cluster_members {}\n\n",
+            snap.members_count()
+        ));
+
+        output
+            .push_str("# HELP nodedb_cluster_groups Number of Raft groups hosted on this node.\n");
+        output.push_str("# TYPE nodedb_cluster_groups gauge\n");
+        output.push_str(&format!(
+            "nodedb_cluster_groups {}\n\n",
+            snap.groups_count()
+        ));
+    }
+
     // Tenant metrics — usage and quota limits.
     if let Ok(tenants) = state.shared.tenants.lock() {
         output.push_str("# HELP nodedb_tenant_active_requests Current in-flight requests.\n");

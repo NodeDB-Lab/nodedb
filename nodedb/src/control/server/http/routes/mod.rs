@@ -1,6 +1,7 @@
 pub mod auth_key;
 pub mod auth_session;
 pub mod cdc;
+pub mod cluster;
 pub mod crdt;
 pub mod document;
 pub mod health;

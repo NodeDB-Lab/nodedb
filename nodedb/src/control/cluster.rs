@@ -18,7 +18,7 @@
 //!   └── CommitApplier          ← applies committed entries to SPSC bridge
 //! ```
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tracing::info;
@@ -36,8 +36,18 @@ pub struct ClusterHandle {
     pub topology: Arc<RwLock<nodedb_cluster::ClusterTopology>>,
     /// Cluster routing table (shared with SharedState).
     pub routing: Arc<RwLock<nodedb_cluster::RoutingTable>>,
+    /// Lifecycle phase tracker shared with `start_cluster` and the
+    /// `/cluster/status` + metrics readers.
+    pub lifecycle: nodedb_cluster::ClusterLifecycleTracker,
     /// This node's ID.
     pub node_id: u64,
+    /// `MultiRaft` constructed by `start_cluster` with the correct
+    /// voter / learner membership already applied. `start_raft` takes
+    /// this via `Mutex::lock + .take()` and moves it into the
+    /// `RaftLoop`. Wrapped in `Mutex<Option<_>>` so the handle itself
+    /// stays `Clone` while still guaranteeing single-transfer
+    /// semantics at runtime.
+    pub multi_raft: Mutex<Option<nodedb_cluster::MultiRaft>>,
 }
 
 /// Initialize the cluster: create transport, open catalog, bootstrap/join/restart.
@@ -85,7 +95,8 @@ pub async fn init_cluster(
         force_bootstrap: config.force_bootstrap,
     };
 
-    let state = nodedb_cluster::start_cluster(&cluster_config, &catalog, &transport)
+    let lifecycle = nodedb_cluster::ClusterLifecycleTracker::new();
+    let state = nodedb_cluster::start_cluster(&cluster_config, &catalog, &transport, &lifecycle)
         .await
         .map_err(|e| crate::Error::Config {
             detail: format!("cluster start: {e}"),
@@ -105,44 +116,36 @@ pub async fn init_cluster(
         transport,
         topology,
         routing,
+        lifecycle,
         node_id: config.node_id,
+        multi_raft: Mutex::new(Some(state.multi_raft)),
     })
 }
 
 /// Start the Raft event loop and RPC server.
 ///
 /// Must be called after SharedState is constructed (needs the WAL and dispatcher
-/// for the CommitApplier).
+/// for the CommitApplier). Moves the `MultiRaft` out of `handle.multi_raft`
+/// into the `RaftLoop`; must be called **exactly once** per handle.
 pub fn start_raft(
     handle: &ClusterHandle,
     shared: Arc<SharedState>,
-    data_dir: &std::path::Path,
+    _data_dir: &std::path::Path,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     transport_tuning: &ClusterTransportTuning,
 ) -> crate::Result<()> {
-    // Reconstruct MultiRaft from routing table.
-    let routing = handle.routing.read().unwrap_or_else(|p| p.into_inner());
-    let mut multi_raft =
-        nodedb_cluster::MultiRaft::new(handle.node_id, routing.clone(), data_dir.to_path_buf());
-
-    for (group_id, info) in routing.group_members() {
-        if info.members.contains(&handle.node_id) {
-            let peers: Vec<u64> = info
-                .members
-                .iter()
-                .copied()
-                .filter(|&id| id != handle.node_id)
-                .collect();
-            if let Err(e) = multi_raft.add_group(*group_id, peers) {
-                tracing::warn!(
-                    group_id,
-                    error = %e,
-                    "failed to add Raft group (may already exist)"
-                );
-            }
-        }
-    }
-    drop(routing);
+    // Move the MultiRaft constructed by `start_cluster` into this
+    // function. Rebuilding it here from the routing table would lose
+    // learner membership for joining nodes (routing.members excludes
+    // learners) and would double-open per-group redb log files.
+    let multi_raft = handle
+        .multi_raft
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .ok_or_else(|| crate::Error::Config {
+            detail: "start_raft called twice: cluster multi_raft already consumed".into(),
+        })?;
 
     // Create the CommitApplier that bridges Raft commits to the SPSC bridge.
     let applier = SpscCommitApplier {
@@ -171,6 +174,22 @@ pub fn start_raft(
         )
         .with_tick_interval(tick_interval),
     );
+
+    // Publish the cluster observability handle to SharedState before
+    // any listener starts serving. `cluster_observer` is a `OnceLock`
+    // so this call is infallible-once; a second call would be a
+    // programming error (start_raft must not be called twice), and
+    // `set()` would silently fail — we surface that as a warn log.
+    let observer = Arc::new(nodedb_cluster::ClusterObserver::new(
+        handle.node_id,
+        handle.lifecycle.clone(),
+        handle.topology.clone(),
+        handle.routing.clone(),
+        raft_loop.clone() as Arc<dyn nodedb_cluster::GroupStatusProvider + Send + Sync>,
+    ));
+    if shared.cluster_observer.set(observer).is_err() {
+        tracing::warn!("cluster_observer already set — start_raft appears to have run twice");
+    }
 
     // Start the Raft tick loop.
     let rl_run = raft_loop.clone();

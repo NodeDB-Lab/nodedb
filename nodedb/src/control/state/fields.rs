@@ -1,7 +1,7 @@
 //! SharedState struct definition — all fields for the Control Plane.
 
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use nodedb_types::config::TuningConfig;
 
@@ -135,6 +135,16 @@ pub struct SharedState {
 
     /// Query Raft group statuses for observability (None in single-node mode).
     pub raft_status_fn: Option<Arc<dyn Fn() -> Vec<nodedb_cluster::GroupStatus> + Send + Sync>>,
+
+    /// Cluster observability handle — lifecycle tracker + topology +
+    /// routing + per-group status provider, bundled.
+    ///
+    /// Stored as a `OnceLock` so the main binary can populate it
+    /// **after** `SharedState::open` has returned an `Arc<SharedState>`
+    /// (at which point `Arc::get_mut` would fail because `start_raft`
+    /// has already cloned the Arc into background tasks). Set exactly
+    /// once in `control::cluster::start_raft`.
+    pub cluster_observer: OnceLock<Arc<nodedb_cluster::ClusterObserver>>,
 
     /// Migration tracker for observability (None in single-node mode).
     pub migration_tracker: Option<Arc<nodedb_cluster::MigrationTracker>>,

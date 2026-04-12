@@ -601,6 +601,19 @@ async fn main() -> anyhow::Result<()> {
     // Native protocol TLS.
     let native_tls = tls_for(native_tls_enabled);
 
+    // Signal readiness to systemd (Type=notify) and, in cluster
+    // mode, transition the lifecycle tracker to `Ready`. By this
+    // point every listener task has been spawned (pgwire, HTTP,
+    // ILP, RESP, sync WebSocket) and the Raft loop is running. The
+    // native listener is about to start accepting connections
+    // below — when systemctl returns from `start`, this is the
+    // state it observes.
+    if let Some(ref handle) = cluster_handle {
+        let nodes = handle.topology.read().map(|t| t.node_count()).unwrap_or(1);
+        handle.lifecycle.to_ready(nodes);
+    }
+    nodedb_cluster::readiness::notify_ready();
+
     // Run native listener on main task.
     let native_auth_mode = config.auth.mode.clone();
     listener
@@ -614,6 +627,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     info!("server shutting down");
+    nodedb_cluster::readiness::notify_stopping();
 
     // Data Plane cores run on std::thread (not Tokio) and block in an
     // infinite eventfd poll loop. They have no shutdown signal — they
