@@ -35,6 +35,17 @@ pub struct ClusterSettings {
     /// Default: 3. Single-node clusters use RF=1 automatically.
     #[serde(default = "default_replication_factor")]
     pub replication_factor: usize,
+
+    /// Operator escape hatch: force this node to bootstrap a new
+    /// cluster even if it is not the lexicographically smallest
+    /// seed. Set this **only** during disaster recovery when the
+    /// designated bootstrapper has been permanently lost and a
+    /// different seed must take over.
+    ///
+    /// Requires `listen` to be present in `seed_nodes` (enforced in
+    /// [`Self::validate`]). Default: `false`.
+    #[serde(default)]
+    pub force_bootstrap: bool,
 }
 
 fn default_num_groups() -> u64 {
@@ -66,6 +77,13 @@ impl ClusterSettings {
         if self.replication_factor == 0 {
             return Err(crate::Error::Config {
                 detail: "cluster.replication_factor must be at least 1".into(),
+            });
+        }
+        if self.force_bootstrap && !self.seed_nodes.contains(&self.listen) {
+            return Err(crate::Error::Config {
+                detail: "cluster.force_bootstrap requires cluster.listen to be present in \
+                     cluster.seed_nodes"
+                    .into(),
             });
         }
         Ok(())

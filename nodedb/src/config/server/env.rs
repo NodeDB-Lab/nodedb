@@ -477,6 +477,7 @@ mod tests {
             seed_nodes: vec!["127.0.0.1:9400".parse().unwrap()],
             num_groups: 4,
             replication_factor: 3,
+            force_bootstrap: false,
         }
     }
 
