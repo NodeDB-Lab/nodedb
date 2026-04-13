@@ -135,7 +135,15 @@ pub fn propose_metadata_with_timeout(
     let log_index = handle.propose(bytes)?;
 
     let watcher = shared.applied_index_watcher();
-    if !watcher.wait_for(log_index, timeout) {
+    // `wait_for` blocks the calling thread on a `Condvar`. When the
+    // caller is already inside a tokio task (pgwire handlers always
+    // are), parking the worker without telling tokio starves every
+    // other task that happens to land on the same worker — including
+    // the raft tick that would otherwise bump the watcher. Wrap the
+    // blocking section in `block_in_place` so tokio reassigns a
+    // fresh worker to keep driving the runtime.
+    let timed_out = tokio::task::block_in_place(|| !watcher.wait_for(log_index, timeout));
+    if timed_out {
         return Err(Error::Config {
             detail: format!(
                 "metadata propose timed out after {:?} waiting for log index {} (current: {})",
