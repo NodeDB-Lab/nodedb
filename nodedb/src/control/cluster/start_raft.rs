@@ -1,0 +1,138 @@
+//! Start the Raft event loop, RPC server, and both appliers.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tracing::info;
+
+use nodedb_types::config::tuning::ClusterTransportTuning;
+
+use crate::control::cluster::handle::ClusterHandle;
+use crate::control::cluster::metadata_applier::MetadataCommitApplier;
+use crate::control::cluster::spsc_applier::SpscCommitApplier;
+use crate::control::state::SharedState;
+
+/// Start the Raft event loop and RPC server.
+///
+/// Must be called after `SharedState` is constructed (needs the WAL and
+/// dispatcher for the `SpscCommitApplier`). Moves the `MultiRaft` out of
+/// `handle.multi_raft` into the `RaftLoop`; must be called **exactly
+/// once** per handle.
+pub fn start_raft(
+    handle: &ClusterHandle,
+    shared: Arc<SharedState>,
+    _data_dir: &std::path::Path,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    transport_tuning: &ClusterTransportTuning,
+) -> crate::Result<()> {
+    // Move the MultiRaft constructed by `start_cluster` into this
+    // function. Rebuilding it here from the routing table would lose
+    // learner membership for joining nodes and would double-open
+    // per-group redb log files.
+    let multi_raft = handle
+        .multi_raft
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .ok_or_else(|| crate::Error::Config {
+            detail: "start_raft called twice: cluster multi_raft already consumed".into(),
+        })?;
+
+    let data_applier = SpscCommitApplier::new(shared.clone());
+
+    // Production metadata applier: writes to the shared cache +
+    // bumps the applied-index watcher + broadcasts CatalogChangeEvent.
+    let metadata_applier: Arc<dyn nodedb_cluster::MetadataApplier> =
+        Arc::new(MetadataCommitApplier::new(
+            handle.metadata_cache.clone(),
+            handle.applied_index_watcher.clone(),
+            shared.catalog_change_tx.clone(),
+        ));
+
+    // LocalForwarder stays as the current forwarded-query executor
+    // (LEGACY path, scheduled for deletion in Phase C).
+    let forwarder = Arc::new(crate::control::LocalForwarder::new(shared.clone()));
+
+    let tick_interval = Duration::from_millis(transport_tuning.raft_tick_interval_ms);
+    let raft_loop = Arc::new(
+        nodedb_cluster::RaftLoop::with_forwarder(
+            multi_raft,
+            handle.transport.clone(),
+            handle.topology.clone(),
+            data_applier,
+            forwarder,
+        )
+        .with_metadata_applier(metadata_applier)
+        .with_tick_interval(tick_interval),
+    );
+
+    // Publish the cluster observability handle to SharedState before
+    // any listener starts serving.
+    let observer = Arc::new(nodedb_cluster::ClusterObserver::new(
+        handle.node_id,
+        handle.lifecycle.clone(),
+        handle.topology.clone(),
+        handle.routing.clone(),
+        raft_loop.clone() as Arc<dyn nodedb_cluster::GroupStatusProvider + Send + Sync>,
+    ));
+    if shared.cluster_observer.set(observer).is_err() {
+        tracing::warn!("cluster_observer already set — start_raft appears to have run twice");
+    }
+
+    // Publish the raft loop handle into SharedState so the metadata
+    // proposer (and future Phase C gateway) can reach it. The handle
+    // is type-erased behind a trait object to keep the SharedState
+    // field concrete.
+    let proposer_handle: Arc<dyn crate::control::metadata_proposer::MetadataRaftHandle> =
+        Arc::new(crate::control::metadata_proposer::RaftLoopProposerHandle::new(raft_loop.clone()));
+    if shared.metadata_raft.set(proposer_handle).is_err() {
+        tracing::warn!("metadata_raft already set — start_raft appears to have run twice");
+    }
+
+    // Start the Raft tick loop.
+    let rl_run = raft_loop.clone();
+    let sr_raft = shutdown_rx.clone();
+    tokio::spawn(async move {
+        rl_run.run(sr_raft).await;
+        info!("raft loop stopped");
+    });
+
+    // Start the RPC server (accepts inbound QUIC connections).
+    let transport_serve = handle.transport.clone();
+    let rl_handler = raft_loop.clone();
+    let sr_serve = shutdown_rx;
+    tokio::spawn(async move {
+        if let Err(e) = transport_serve.serve(rl_handler, sr_serve).await {
+            tracing::error!(error = %e, "raft RPC server failed");
+        }
+    });
+
+    // Register this node's wire version in the rolling upgrade tracker.
+    {
+        let mut vs = shared
+            .cluster_version_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        vs.report_version(handle.node_id, crate::version::WIRE_FORMAT_VERSION);
+
+        if let Ok(topo) = handle.topology.read() {
+            for node in topo.active_nodes() {
+                if node.node_id != handle.node_id {
+                    vs.report_version(node.node_id, crate::version::WIRE_FORMAT_VERSION);
+                }
+            }
+        }
+        let compat = crate::control::rolling_upgrade::should_compat_mode(&vs);
+        info!(
+            node_id = handle.node_id,
+            nodes = vs.node_count,
+            mixed = vs.is_mixed_version(),
+            compat_mode = compat,
+            "cluster version state initialized"
+        );
+    }
+
+    info!(node_id = handle.node_id, "raft loop and RPC server started");
+
+    Ok(())
+}
