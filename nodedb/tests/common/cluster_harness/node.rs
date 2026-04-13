@@ -311,6 +311,28 @@ impl TestClusterNode {
             .is_some()
     }
 
+    /// Read a procedure record from this node's local `SystemCatalog`.
+    pub fn has_procedure(&self, tenant_id: u32, name: &str) -> bool {
+        self.shared
+            .credentials
+            .catalog()
+            .as_ref()
+            .and_then(|c| c.get_procedure(tenant_id, name).ok().flatten())
+            .is_some()
+    }
+
+    /// Check whether a scheduled job with the given name exists in
+    /// this node's in-memory `schedule_registry`.
+    pub fn has_schedule(&self, tenant_id: u32, name: &str) -> bool {
+        self.shared.schedule_registry.get(tenant_id, name).is_some()
+    }
+
+    /// Check whether a change stream with the given name exists in
+    /// this node's in-memory `stream_registry`.
+    pub fn has_change_stream(&self, tenant_id: u32, name: &str) -> bool {
+        self.shared.stream_registry.get(tenant_id, name).is_some()
+    }
+
     /// Execute a simple query; returns an error message on SQL error.
     pub async fn exec(&self, sql: &str) -> Result<(), String> {
         match self.client.simple_query(sql).await {

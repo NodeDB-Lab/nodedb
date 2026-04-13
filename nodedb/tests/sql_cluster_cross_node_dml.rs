@@ -234,6 +234,165 @@ async fn trigger_create_visible_on_every_node() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn procedure_create_visible_on_every_node() {
+    // 3-node cluster. CREATE PROCEDURE on the leader; every
+    // follower's local `SystemCatalog` redb (written by the applier)
+    // must contain the procedure within 5s.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader("CREATE PROCEDURE noop_proc() BEGIN RETURN 1; END")
+        .await
+        .expect("create procedure");
+
+    wait_for(
+        "all 3 nodes see the procedure in local SystemCatalog redb",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.has_procedure(1, "noop_proc"))
+        },
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP PROCEDURE noop_proc")
+        .await
+        .expect("drop procedure");
+
+    wait_for(
+        "all 3 nodes no longer see the procedure",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| !n.has_procedure(1, "noop_proc"))
+        },
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn schedule_create_visible_on_every_node() {
+    // 3-node cluster. CREATE SCHEDULE on the leader; every
+    // follower's in-memory `schedule_registry` must contain the
+    // schedule within 5s via the `PutSchedule` post-apply hook.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE SCHEDULE nightly_cleanup CRON '0 0 * * *' AS BEGIN RETURN 1; END",
+        )
+        .await
+        .expect("create schedule");
+
+    wait_for(
+        "all 3 nodes see the schedule in schedule_registry",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.has_schedule(1, "nightly_cleanup"))
+        },
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP SCHEDULE nightly_cleanup")
+        .await
+        .expect("drop schedule");
+
+    wait_for(
+        "all 3 nodes no longer see the schedule",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| !n.has_schedule(1, "nightly_cleanup"))
+        },
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn change_stream_create_visible_on_every_node() {
+    // 3-node cluster. CREATE CHANGE STREAM on the leader; every
+    // follower's in-memory `stream_registry` must contain the
+    // stream within 5s via the `PutChangeStream` post-apply hook.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    // Change streams attach to a collection, so create one first.
+    cluster
+        .exec_ddl_on_any_leader("CREATE COLLECTION events")
+        .await
+        .expect("create collection");
+
+    wait_for(
+        "collection visible on every node",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.cached_collection_count() == 1)
+        },
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("CREATE CHANGE STREAM event_feed ON events")
+        .await
+        .expect("create change stream");
+
+    wait_for(
+        "all 3 nodes see the stream in stream_registry",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.has_change_stream(1, "event_feed"))
+        },
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP CHANGE STREAM event_feed")
+        .await
+        .expect("drop change stream");
+
+    wait_for(
+        "all 3 nodes no longer see the stream",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| !n.has_change_stream(1, "event_feed"))
+        },
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn function_create_visible_on_every_node() {
     // 3-node cluster. CREATE FUNCTION on the leader; every follower's
     // local `SystemCatalog` redb (written by the applier) must
