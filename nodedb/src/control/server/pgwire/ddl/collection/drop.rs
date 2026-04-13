@@ -42,19 +42,37 @@ pub fn drop_collection(
         ));
     }
 
-    // Mark as inactive in catalog.
+    // Verify the collection exists (read from the legacy redb — the
+    // replicated cache observes the same entries via the applier).
     if let Some(catalog) = state.credentials.catalog() {
-        if let Ok(Some(mut coll)) = catalog.get_collection(tenant_id.as_u32(), name) {
-            coll.is_active = false;
-            catalog
-                .put_collection(&coll)
-                .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
-        } else {
-            return Err(sqlstate_error(
-                "42P01",
-                &format!("collection '{name}' does not exist"),
-            ));
+        match catalog.get_collection(tenant_id.as_u32(), name) {
+            Ok(Some(coll)) if coll.is_active => {}
+            _ => {
+                return Err(sqlstate_error(
+                    "42P01",
+                    &format!("collection '{name}' does not exist"),
+                ));
+            }
         }
+    }
+
+    // Propose the drop through the metadata raft group. The applier
+    // on every node performs the `get + flip is_active + put` sequence,
+    // so the record is preserved for audit / undrop and the legacy
+    // `load_collections_for_tenant` filter hides it everywhere.
+    let entry = crate::control::metadata_proposer::collection_drop_entry(tenant_id.as_u32(), name);
+    let log_index = crate::control::metadata_proposer::propose_metadata_and_wait(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    if log_index == 0
+        && let Some(catalog) = state.credentials.catalog()
+        && let Ok(Some(mut coll)) = catalog.get_collection(tenant_id.as_u32(), name)
+    {
+        // Single-node / no-cluster fallback: same semantics the
+        // applier applies, executed directly here.
+        coll.is_active = false;
+        catalog
+            .put_collection(&coll)
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
     }
 
     // Cascade: drop implicit sequences (SERIAL/BIGSERIAL fields create {coll}_{field}_seq).
