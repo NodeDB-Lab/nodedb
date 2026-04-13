@@ -333,6 +333,19 @@ impl TestClusterNode {
         self.shared.stream_registry.get(tenant_id, name).is_some()
     }
 
+    /// Check whether a user exists and is active in this node's
+    /// in-memory `credentials` cache (which the applier writes via
+    /// `install_replicated_user`).
+    pub fn has_active_user(&self, username: &str) -> bool {
+        self.shared.credentials.get_user(username).is_some()
+    }
+
+    /// Check whether a custom role exists in this node's in-memory
+    /// `roles` cache.
+    pub fn has_role(&self, name: &str) -> bool {
+        self.shared.roles.get_role(name).is_some()
+    }
+
     /// Execute a simple query; returns an error message on SQL error.
     pub async fn exec(&self, sql: &str) -> Result<(), String> {
         match self.client.simple_query(sql).await {

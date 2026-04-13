@@ -393,6 +393,78 @@ async fn change_stream_create_visible_on_every_node() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn user_create_visible_on_every_node() {
+    // 3-node cluster. CREATE USER on the leader; every follower's
+    // in-memory `credentials` cache must contain the user within
+    // 5s via the `CatalogEntry::PutUser` post-apply hook.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader("CREATE USER alice WITH PASSWORD 'sekret123' ROLE read_write")
+        .await
+        .expect("create user");
+
+    wait_for(
+        "all 3 nodes see the replicated user in credentials",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| n.has_active_user("alice")),
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP USER alice")
+        .await
+        .expect("drop user");
+
+    wait_for(
+        "all 3 nodes see alice as deactivated",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| !n.has_active_user("alice")),
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn role_create_visible_on_every_node() {
+    // 3-node cluster. CREATE ROLE on the leader; every follower's
+    // in-memory `roles` cache must contain the role within 5s via
+    // the `CatalogEntry::PutRole` post-apply hook.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader("CREATE ROLE data_analyst")
+        .await
+        .expect("create role");
+
+    wait_for(
+        "all 3 nodes see the replicated role",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| n.has_role("data_analyst")),
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP ROLE data_analyst")
+        .await
+        .expect("drop role");
+
+    wait_for(
+        "all 3 nodes no longer see the role",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| !n.has_role("data_analyst")),
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn function_create_visible_on_every_node() {
     // 3-node cluster. CREATE FUNCTION on the leader; every follower's
     // local `SystemCatalog` redb (written by the applier) must
