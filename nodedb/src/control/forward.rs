@@ -19,15 +19,13 @@ use crate::types::{ReadConsistency, RequestId, TenantId};
 /// Executes forwarded SQL queries on the local Data Plane.
 pub struct LocalForwarder {
     state: Arc<SharedState>,
-    query_ctx: QueryContext,
     next_request_id: AtomicU64,
 }
 
 impl LocalForwarder {
-    pub fn new(state: Arc<SharedState>, query_ctx: QueryContext) -> Self {
+    pub fn new(state: Arc<SharedState>) -> Self {
         Self {
             state,
-            query_ctx,
             // Start forwarded request IDs at a high offset to avoid collision
             // with direct client request IDs.
             next_request_id: AtomicU64::new(1_000_000_000),
@@ -48,8 +46,13 @@ impl RequestForwarder for LocalForwarder {
             self.state.tuning.network.default_deadline_secs,
         ));
 
-        // Plan the SQL locally.
-        let tasks = match self.query_ctx.plan_sql(&req.sql, tenant_id).await {
+        // Plan the SQL locally. Build a fresh QueryContext per request so
+        // the OriginCatalog is scoped to the *forwarded* request's tenant
+        // (one LocalForwarder serves queries from every tenant on the
+        // cluster — a single long-lived QueryContext would pin one tenant
+        // or, with QueryContext::new(), have no catalog at all).
+        let query_ctx = QueryContext::for_state(&self.state, req.tenant_id);
+        let tasks = match query_ctx.plan_sql(&req.sql, tenant_id).await {
             Ok(t) => t,
             Err(e) => {
                 return ForwardResponse {
