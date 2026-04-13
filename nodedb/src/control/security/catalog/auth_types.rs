@@ -2,7 +2,12 @@
 
 /// Serializable user record for redb storage.
 #[derive(
-    serde::Serialize, serde::Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Debug,
+    Clone,
 )]
 pub struct StoredUser {
     pub user_id: u64,

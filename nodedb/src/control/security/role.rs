@@ -64,6 +64,81 @@ impl RoleStore {
         Ok(())
     }
 
+    // ── Cluster replication hooks ──────────────────────────────
+    //
+    // Symmetric partners to `CredentialStore::install_replicated_user`:
+    // the production metadata applier calls these on every node
+    // after writing / removing a `StoredRole` via
+    // `CatalogEntry::PutRole` / `DeleteRole`.
+
+    /// Install a replicated `StoredRole` into the in-memory cache.
+    /// Never touches the catalog — the applier handles redb
+    /// separately via `SystemCatalog::put_role`. Upsert semantics.
+    pub fn install_replicated_role(&self, stored: &StoredRole) {
+        let custom = CustomRole {
+            name: stored.name.clone(),
+            tenant_id: TenantId::new(stored.tenant_id),
+            parent: if stored.parent.is_empty() {
+                None
+            } else {
+                Some(stored.parent.clone())
+            },
+            created_at: stored.created_at,
+        };
+        let mut roles = self.roles.write().unwrap_or_else(|p| p.into_inner());
+        roles.insert(stored.name.clone(), custom);
+    }
+
+    /// Remove a replicated role from the in-memory cache.
+    pub fn install_replicated_drop_role(&self, name: &str) {
+        let mut roles = self.roles.write().unwrap_or_else(|p| p.into_inner());
+        roles.remove(name);
+    }
+
+    /// Build a `StoredRole` ready for replication via
+    /// `CatalogEntry::PutRole`, without writing to redb or the
+    /// in-memory cache. Performs the same validation
+    /// `create_role` does (built-in name rejection, duplicate
+    /// check, parent existence).
+    pub fn prepare_role(
+        &self,
+        name: &str,
+        tenant_id: TenantId,
+        parent: Option<&str>,
+    ) -> crate::Result<StoredRole> {
+        if is_builtin(name) {
+            return Err(crate::Error::BadRequest {
+                detail: format!("'{name}' is a built-in role and cannot be created"),
+            });
+        }
+        let roles = self.roles.read().map_err(|e| crate::Error::Internal {
+            detail: format!("role store lock poisoned: {e}"),
+        })?;
+        if roles.contains_key(name) {
+            return Err(crate::Error::BadRequest {
+                detail: format!("role '{name}' already exists"),
+            });
+        }
+        if let Some(parent_name) = parent
+            && !is_builtin(parent_name)
+            && !roles.contains_key(parent_name)
+        {
+            return Err(crate::Error::BadRequest {
+                detail: format!("parent role '{parent_name}' does not exist"),
+            });
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(StoredRole {
+            name: name.to_string(),
+            tenant_id: tenant_id.as_u32(),
+            parent: parent.unwrap_or("").to_string(),
+            created_at: now,
+        })
+    }
+
     /// Create a custom role. Returns error if it already exists or would create a cycle.
     pub fn create_role(
         &self,
