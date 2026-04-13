@@ -2,20 +2,23 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::metadata_group::actions::{
-    ApiKeyAction, AuditRetentionAction, ChangeStreamAction, CollectionAction, FunctionAction,
-    GrantAction, IndexAction, MaterializedViewAction, ProcedureAction, RlsAction, RoleAction,
-    ScheduleAction, SequenceAction, TenantAction, TriggerAction, UserAction,
-};
-use crate::metadata_group::descriptors::DescriptorLease;
-use crate::metadata_group::descriptors::common::DescriptorId;
+use crate::metadata_group::descriptors::{DescriptorId, DescriptorLease};
 
 /// An entry in the replicated metadata log.
 ///
-/// Every mutation to cluster-wide state — DDL, topology, routing, descriptor
-/// leases, cluster version bumps — is encoded as one of these variants,
-/// proposed against the metadata Raft group, and applied on every node by a
+/// Every mutation to cluster-wide state — DDL, topology, routing,
+/// descriptor leases, cluster version bumps — is encoded as one of
+/// these variants, proposed against the metadata Raft group, and
+/// applied on every node by a
 /// [`crate::metadata_group::applier::MetadataApplier`].
+///
+/// The `CatalogDdl` variant is the single wire shape for every DDL
+/// mutation. Its `payload` is an opaque, host-serialized
+/// `nodedb::control::catalog_entry::CatalogEntry` value — the
+/// `nodedb-cluster` crate is deliberately ignorant of the host's
+/// per-DDL-object struct shapes. This keeps the cluster crate
+/// layering-clean and makes adding new DDL object types on the
+/// host side a zero-wire-change operation.
 #[derive(
     Debug,
     Clone,
@@ -27,78 +30,11 @@ use crate::metadata_group::descriptors::common::DescriptorId;
     zerompk::FromMessagePack,
 )]
 pub enum MetadataEntry {
-    // ── DDL ────────────────────────────────────────────────────────────
-    CollectionDdl {
-        tenant_id: u32,
-        action: CollectionAction,
-        /// Opaque host-crate payload used by the production
-        /// applier to materialize the descriptor into the host's
-        /// local store (e.g. nodedb's `SystemCatalog` redb). The
-        /// `nodedb-cluster` crate treats this as an opaque blob;
-        /// the in-cluster `CacheApplier` ignores it entirely.
-        /// Empty on `Drop` (the host only needs the
-        /// `DescriptorId`) and on test fixtures that don't round
-        /// trip through the production applier.
-        host_payload: Vec<u8>,
-    },
-    IndexDdl {
-        tenant_id: u32,
-        action: IndexAction,
-    },
-    TriggerDdl {
-        tenant_id: u32,
-        action: TriggerAction,
-    },
-    SequenceDdl {
-        tenant_id: u32,
-        action: SequenceAction,
-    },
-    UserDdl {
-        tenant_id: u32,
-        action: UserAction,
-    },
-    RoleDdl {
-        tenant_id: u32,
-        action: RoleAction,
-    },
-    GrantDdl {
-        tenant_id: u32,
-        action: GrantAction,
-    },
-    RlsDdl {
-        tenant_id: u32,
-        action: RlsAction,
-    },
-    ChangeStreamDdl {
-        tenant_id: u32,
-        action: ChangeStreamAction,
-    },
-    MaterializedViewDdl {
-        tenant_id: u32,
-        action: MaterializedViewAction,
-    },
-    ScheduleDdl {
-        tenant_id: u32,
-        action: ScheduleAction,
-    },
-    FunctionDdl {
-        tenant_id: u32,
-        action: FunctionAction,
-    },
-    ProcedureDdl {
-        tenant_id: u32,
-        action: ProcedureAction,
-    },
-    TenantDdl {
-        action: TenantAction,
-    },
-    ApiKeyDdl {
-        tenant_id: u32,
-        action: ApiKeyAction,
-    },
-    AuditRetentionDdl {
-        tenant_id: u32,
-        action: AuditRetentionAction,
+    /// Single generic DDL entry carrying an opaque host-side payload.
+    /// Produced by every pgwire DDL handler via
+    /// `nodedb::control::metadata_proposer::propose_catalog_entry`.
+    CatalogDdl {
+        payload: Vec<u8>,
     },
 
     // ── Topology / routing ─────────────────────────────────────────────

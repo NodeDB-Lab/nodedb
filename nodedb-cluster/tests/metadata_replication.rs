@@ -1,93 +1,24 @@
-//! Integration test: replicated catalog via the metadata raft group.
+//! Integration test: replicated metadata group commits + cache apply.
 //!
-//! Proves the batch 1a foundation end-to-end on a real 3-node
-//! in-process cluster:
-//!
-//! 1. 3 nodes form a cluster (node 1 bootstraps; 2 + 3 join over QUIC).
-//! 2. We find whichever node has been elected leader of the metadata
-//!    group (group 0).
-//! 3. We propose `MetadataEntry::CollectionDdl::Create` through
-//!    `RaftLoop::propose_to_metadata_group` (the same entry point
-//!    the production `metadata_proposer` will use once pgwire DDL
-//!    handlers are migrated).
-//! 4. Every node's `MetadataCache` — driven by a `CacheApplier`
-//!    installed on its raft loop — must observe the new descriptor
-//!    within a short timeout.
-//! 5. We propose an `Alter { AddColumn }` and assert the descriptor
-//!    version bumps on every node.
-//! 6. We propose a `Drop` and assert the descriptor is removed from
-//!    every node's cache.
-//!
-//! This is the regression test for the DO deployment failure where
-//! `CREATE COLLECTION` on node A was invisible to nodes B and C.
+//! After batch 1e the `nodedb-cluster` crate no longer understands
+//! per-DDL-object descriptor shapes — `CatalogDdl { payload }` is
+//! opaque here. This test verifies the cluster-side plumbing
+//! (raft commit + metadata applier dispatch + cache watermark)
+//! using synthetic opaque payloads. End-to-end cross-node DDL
+//! visibility (applier decoding + redb writeback + pgwire visibility)
+//! is covered by `nodedb/tests/sql_cluster_cross_node_dml.rs`.
 
 mod common;
 
 use std::time::Duration;
 
-use nodedb_cluster::{
-    CollectionAction, CollectionAlter, CollectionDescriptor, ColumnDef, DescriptorHeader,
-    DescriptorId, DescriptorKind, MetadataEntry,
-};
-use nodedb_types::Hlc;
+use nodedb_cluster::MetadataEntry;
 
 use common::{TestNode, wait_for};
 
-const TEST_TENANT: u32 = 1;
-const COLL_NAME: &str = "users";
-
-fn coll_id() -> DescriptorId {
-    DescriptorId::new(TEST_TENANT, DescriptorKind::Collection, COLL_NAME)
-}
-
-fn make_descriptor(version: u64) -> CollectionDescriptor {
-    CollectionDescriptor {
-        header: DescriptorHeader::new_public(
-            coll_id(),
-            version,
-            Hlc::new(version.wrapping_mul(1_000_000), 0),
-        ),
-        collection_type: "document_schemaless".into(),
-        columns: vec![ColumnDef {
-            name: "name".into(),
-            data_type: "TEXT".into(),
-            nullable: true,
-            default: None,
-        }],
-        with_options: vec![],
-        primary_key: None,
-    }
-}
-
-fn create_entry() -> MetadataEntry {
-    MetadataEntry::CollectionDdl {
-        tenant_id: TEST_TENANT,
-        action: CollectionAction::Create(Box::new(make_descriptor(1))),
-        host_payload: vec![],
-    }
-}
-
-fn alter_entry() -> MetadataEntry {
-    MetadataEntry::CollectionDdl {
-        tenant_id: TEST_TENANT,
-        action: CollectionAction::Alter {
-            id: coll_id(),
-            change: CollectionAlter::AddColumn(ColumnDef {
-                name: "email".into(),
-                data_type: "TEXT".into(),
-                nullable: true,
-                default: None,
-            }),
-        },
-        host_payload: vec![],
-    }
-}
-
-fn drop_entry() -> MetadataEntry {
-    MetadataEntry::CollectionDdl {
-        tenant_id: TEST_TENANT,
-        action: CollectionAction::Drop { id: coll_id() },
-        host_payload: vec![],
+fn opaque_catalog_entry(data: &[u8]) -> MetadataEntry {
+    MetadataEntry::CatalogDdl {
+        payload: data.to_vec(),
     }
 }
 
@@ -104,8 +35,7 @@ async fn find_metadata_leader<'a>(nodes: &'a [&'a TestNode]) -> &'a TestNode {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn collection_ddl_replicates_across_3_nodes() {
-    // ── 1. Spawn a 3-node cluster ──────────────────────────────────
+async fn catalog_ddl_replicates_across_3_nodes() {
     let node1 = TestNode::spawn(1, vec![]).await.expect("node 1 bootstrap");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -125,57 +55,27 @@ async fn collection_ddl_replicates_across_3_nodes() {
     )
     .await;
 
-    // ── 2. Identify the metadata-group leader ──────────────────────
     let leader = find_metadata_leader(&nodes).await;
     eprintln!("metadata leader: node {}", leader.node_id);
 
-    // ── 3. Propose CREATE ──────────────────────────────────────────
-    let create_idx = leader
-        .propose_metadata(&create_entry())
-        .expect("propose create");
-    assert!(create_idx > 0);
+    // Propose 3 opaque CatalogDdl entries. The `CacheApplier`
+    // counts them regardless of payload shape.
+    let idx1 = leader
+        .propose_metadata(&opaque_catalog_entry(b"entry-1"))
+        .expect("propose 1");
+    let idx2 = leader
+        .propose_metadata(&opaque_catalog_entry(b"entry-2"))
+        .expect("propose 2");
+    let idx3 = leader
+        .propose_metadata(&opaque_catalog_entry(b"entry-3"))
+        .expect("propose 3");
+    assert!(idx1 > 0 && idx2 > idx1 && idx3 > idx2);
 
     wait_for(
-        "all 3 nodes see collection at version 1",
+        "all 3 nodes see 3 committed CatalogDdl entries",
         Duration::from_secs(5),
         Duration::from_millis(50),
-        || {
-            nodes
-                .iter()
-                .all(|n| n.collection_version(TEST_TENANT, COLL_NAME) == Some(1))
-        },
-    )
-    .await;
-
-    // ── 4. Propose ALTER AddColumn ─────────────────────────────────
-    let alter_idx = leader
-        .propose_metadata(&alter_entry())
-        .expect("propose alter");
-    assert!(alter_idx > create_idx);
-
-    wait_for(
-        "all 3 nodes see collection at version 2 after Alter",
-        Duration::from_secs(5),
-        Duration::from_millis(50),
-        || {
-            nodes
-                .iter()
-                .all(|n| n.collection_version(TEST_TENANT, COLL_NAME) == Some(2))
-        },
-    )
-    .await;
-
-    // ── 5. Propose DROP ────────────────────────────────────────────
-    let drop_idx = leader
-        .propose_metadata(&drop_entry())
-        .expect("propose drop");
-    assert!(drop_idx > alter_idx);
-
-    wait_for(
-        "all 3 nodes no longer see the collection",
-        Duration::from_secs(5),
-        Duration::from_millis(50),
-        || nodes.iter().all(|n| n.collection_count() == 0),
+        || nodes.iter().all(|n| n.catalog_entries_applied() >= 3),
     )
     .await;
 
@@ -184,10 +84,8 @@ async fn collection_ddl_replicates_across_3_nodes() {
     node1.shutdown().await;
 }
 
-/// Single-node variant: propose + apply on the same node. No QUIC hop,
-/// but still exercises the full raft-commit → metadata_applier pipe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn collection_ddl_single_node_applies_to_cache() {
+async fn catalog_ddl_single_node_applies_to_cache() {
     let node = TestNode::spawn(1, vec![])
         .await
         .expect("single-node bootstrap");
@@ -200,14 +98,16 @@ async fn collection_ddl_single_node_applies_to_cache() {
     )
     .await;
 
-    let idx = node.propose_metadata(&create_entry()).expect("propose");
+    let idx = node
+        .propose_metadata(&opaque_catalog_entry(b"single-node"))
+        .expect("propose");
     assert!(idx > 0);
 
     wait_for(
-        "cache sees version 1",
+        "cache applied_index bumps",
         Duration::from_secs(3),
         Duration::from_millis(25),
-        || node.collection_version(TEST_TENANT, COLL_NAME) == Some(1),
+        || node.catalog_entries_applied() >= 1,
     )
     .await;
 

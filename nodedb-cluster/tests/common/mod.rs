@@ -284,28 +284,15 @@ impl TestNode {
         false
     }
 
-    /// Number of collection descriptors currently visible in this
-    /// node's replicated metadata cache.
-    pub fn collection_count(&self) -> usize {
+    /// Number of committed `CatalogDdl` entries observed by this
+    /// node's cache applier. After batch 1e the cluster crate
+    /// treats catalog DDL payloads as opaque — this counter is
+    /// what tests assert on for replication correctness.
+    pub fn catalog_entries_applied(&self) -> u64 {
         self.metadata_cache
             .read()
             .unwrap_or_else(|p| p.into_inner())
-            .collection_count()
-    }
-
-    /// Read the current version of a collection descriptor by name,
-    /// or `None` if it is not present in the cache.
-    pub fn collection_version(&self, tenant_id: u32, name: &str) -> Option<u64> {
-        let id = nodedb_cluster::DescriptorId::new(
-            tenant_id,
-            nodedb_cluster::DescriptorKind::Collection,
-            name,
-        );
-        self.metadata_cache
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .collection(&id)
-            .map(|d| d.header.version)
+            .catalog_entries_applied
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
