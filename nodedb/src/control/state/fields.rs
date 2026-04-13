@@ -311,6 +311,15 @@ pub struct SharedState {
     /// proposer's wait loop to check for completion.
     pub lease_drain: Arc<crate::control::lease::DescriptorDrainTracker>,
 
+    /// Host-side reference count for descriptor leases.
+    /// Multiple concurrent queries holding the same descriptor
+    /// lease increment this counter on plan and decrement on
+    /// query completion; only the first holder performs the
+    /// raft acquire and only the last holder performs the
+    /// raft release. Enables drain to make progress when all
+    /// in-flight queries on a descriptor finish.
+    pub lease_refcount: Arc<crate::control::lease::LeaseRefCount>,
+
     /// Keep-alive senders for shutdown watch channels.
     pub(super) _shutdown_senders: Vec<tokio::sync::watch::Sender<bool>>,
 

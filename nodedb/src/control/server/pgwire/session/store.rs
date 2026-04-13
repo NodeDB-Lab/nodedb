@@ -58,30 +58,48 @@ impl SessionStore {
         sessions.len()
     }
 
-    /// Look up cached physical tasks for a SQL string in the session's plan cache.
-    pub fn get_cached_plan(
+    /// Look up cached physical tasks for a SQL string in the
+    /// session's plan cache. `current_version` maps each
+    /// recorded descriptor id to its current persisted version
+    /// (or `None` if dropped). The cache returns a hit only
+    /// when every recorded `(id, version)` pair still matches.
+    ///
+    /// On a hit returns both the cached tasks and the
+    /// `DescriptorVersionSet` they were built against — the
+    /// caller passes the set into
+    /// `SharedState::acquire_plan_lease_scope` so cache hits
+    /// and fresh plans share the same lease-acquisition path.
+    pub fn get_cached_plan<F>(
         &self,
         addr: &SocketAddr,
         sql: &str,
-        schema_version: u64,
-    ) -> Option<Vec<crate::control::planner::physical::PhysicalTask>> {
+        current_version: F,
+    ) -> Option<(
+        Vec<crate::control::planner::physical::PhysicalTask>,
+        crate::control::planner::descriptor_set::DescriptorVersionSet,
+    )>
+    where
+        F: Fn(&nodedb_cluster::DescriptorId) -> Option<u64>,
+    {
         let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
         sessions
             .get_mut(addr)
-            .and_then(|s| s.plan_cache.get(sql, schema_version))
+            .and_then(|s| s.plan_cache.get(sql, current_version))
     }
 
-    /// Store compiled physical tasks in the session's plan cache.
+    /// Store compiled physical tasks in the session's plan
+    /// cache along with the descriptor version set they were
+    /// built against.
     pub fn put_cached_plan(
         &self,
         addr: &SocketAddr,
         sql: &str,
         tasks: Vec<crate::control::planner::physical::PhysicalTask>,
-        schema_version: u64,
+        versions: crate::control::planner::descriptor_set::DescriptorVersionSet,
     ) {
         let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
         if let Some(session) = sessions.get_mut(addr) {
-            session.plan_cache.put(sql, tasks, schema_version);
+            session.plan_cache.put(sql, tasks, versions);
         }
     }
 

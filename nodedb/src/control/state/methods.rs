@@ -1,6 +1,6 @@
 //! SharedState impl methods: quota, audit, polling, memory estimates.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tracing::{error, warn};
 
@@ -332,6 +332,70 @@ impl SharedState {
         descriptor_ids: Vec<nodedb_cluster::DescriptorId>,
     ) -> crate::Result<()> {
         crate::control::lease::release_leases(self, descriptor_ids)
+    }
+
+    /// Acquire the descriptor leases needed to execute a plan
+    /// that reads the descriptors in `version_set`. Returns a
+    /// [`crate::control::lease::QueryLeaseScope`] whose drop
+    /// decrements each refcount and triggers a background
+    /// release for any descriptor whose count hits zero.
+    ///
+    /// This is called by the pgwire handler AFTER planning
+    /// (fresh or cache hit) and held through the query's
+    /// execute phase. Multiple concurrent queries that share
+    /// a descriptor all pay a single raft acquire (on the
+    /// first-holder call) and a single raft release (when the
+    /// last holder drops its scope).
+    ///
+    /// Errors while acquiring (drain in progress, NotLeader,
+    /// etc.) are logged at warn and the affected descriptor is
+    /// NOT added to the returned scope — the query proceeds
+    /// without a lease on that one descriptor. This matches
+    /// the best-effort semantics of the original in-adapter
+    /// acquire: a transient lease failure must not break user
+    /// queries.
+    pub fn acquire_plan_lease_scope(
+        self: &Arc<Self>,
+        version_set: &crate::control::planner::descriptor_set::DescriptorVersionSet,
+    ) -> crate::control::lease::QueryLeaseScope {
+        use crate::control::lease::{DEFAULT_LEASE_DURATION, QueryLeaseScope};
+        if version_set.is_empty() {
+            return QueryLeaseScope::empty();
+        }
+        let mut held_ids = Vec::with_capacity(version_set.len());
+        for (id, version) in version_set.iter() {
+            let count_after = self.lease_refcount.increment(id);
+            // Add the decrement-on-drop obligation to the
+            // scope BEFORE the raft acquire so any early
+            // return / panic still releases the refcount.
+            held_ids.push(id.clone());
+            if count_after == 1 {
+                // First holder on this node pays the raft
+                // round-trip.
+                let acquire_result: crate::Result<nodedb_cluster::DescriptorLease> =
+                    self.acquire_descriptor_lease(id.clone(), version, DEFAULT_LEASE_DURATION);
+                if let Err(e) = acquire_result {
+                    let msg = e.to_string();
+                    // Drain-in-progress is caught by the
+                    // planner's RetryableSchemaChanged path;
+                    // by the time we get here the plan was
+                    // already committed (cache hit or fresh
+                    // plan), so a late drain observation is
+                    // best treated as a warning. The handler
+                    // layer's retry loop would have caught it
+                    // earlier in the fresh-plan path.
+                    if !msg.contains("drain in progress") {
+                        tracing::warn!(
+                            error = %msg,
+                            descriptor = ?id,
+                            version,
+                            "acquire_plan_lease_scope: first-holder acquire failed"
+                        );
+                    }
+                }
+            }
+        }
+        QueryLeaseScope::new(held_ids, self)
     }
 
     /// Look up a single lease by `(descriptor_id, this_node_id)`,

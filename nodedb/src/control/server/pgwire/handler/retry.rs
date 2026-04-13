@@ -78,6 +78,48 @@ where
     }))
 }
 
+/// Run `op` up to `MAX_ATTEMPTS` times. Retries only on
+/// `Error::NotLeader`. Any other error is returned immediately
+/// on the first attempt. Same retry budget and backoff shape as
+/// [`retry_on_schema_change`] so client-observable latency is
+/// bounded across both retry surfaces.
+pub async fn retry_on_not_leader<F, Fut, T>(mut op: F) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Error>>,
+{
+    let mut last_err: Option<Error> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(Error::NotLeader {
+                vshard_id,
+                leader_node,
+                leader_addr,
+            }) => {
+                tracing::debug!(
+                    attempt,
+                    %leader_node,
+                    %leader_addr,
+                    "pgwire: retrying forward after NotLeader"
+                );
+                last_err = Some(Error::NotLeader {
+                    vshard_id,
+                    leader_node,
+                    leader_addr,
+                });
+                if attempt + 1 < MAX_ATTEMPTS {
+                    tokio::time::sleep(BACKOFFS[attempt]).await;
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| Error::PlanError {
+        detail: "retry_on_not_leader: no attempts recorded".into(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +171,74 @@ mod tests {
         .await;
         assert!(matches!(result, Err(Error::RetryableSchemaChanged { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn not_leader_first_attempt_success() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<i32, Error> = retry_on_not_leader(|| {
+            let c = calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(c as i32) }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn not_leader_retries_then_succeeds() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<&str, Error> = retry_on_not_leader(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(Error::NotLeader {
+                        vshard_id: crate::types::VShardId::new(0),
+                        leader_node: 1,
+                        leader_addr: "127.0.0.1:9000".into(),
+                    })
+                } else {
+                    Ok("done")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), "done");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn not_leader_exhausts_budget() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<(), Error> = retry_on_not_leader(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Err(Error::NotLeader {
+                    vshard_id: crate::types::VShardId::new(0),
+                    leader_node: 1,
+                    leader_addr: "127.0.0.1:9000".into(),
+                })
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(Error::NotLeader { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn not_leader_skips_non_matching_errors() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<(), Error> = retry_on_not_leader(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Err(Error::PlanError {
+                    detail: "syntax".into(),
+                })
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(Error::PlanError { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

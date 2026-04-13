@@ -2,18 +2,52 @@
 //! and the execute_planned_sql entry point for DML/query dispatch.
 
 mod check_enforcement;
+mod forward;
 mod set_ops;
+
+use std::sync::Arc;
 
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::planner::physical::{PhysicalTask, PostSetOp};
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::state::SharedState;
 use crate::types::{ReadConsistency, TenantId};
 
 use super::super::types::{error_to_sqlstate, response_status_to_sqlstate};
 use super::core::NodeDbPgHandler;
-use super::plan::{PlanKind, describe_plan, extract_collection, payload_to_response};
+use super::plan::{describe_plan, extract_collection, payload_to_response};
+
+/// Look up the current descriptor version for `id` against the
+/// local `SystemCatalog`. Used by the plan cache's freshness
+/// check — a cached plan is only returned when every recorded
+/// `(id, version)` still matches the current catalog.
+///
+/// Returns `None` if the descriptor has been dropped, the
+/// catalog is unavailable, or the descriptor kind is not
+/// currently tracked (only `Collection` goes through this
+/// path today; other kinds do not land in the plan cache).
+fn current_descriptor_version(
+    state: &SharedState,
+    tenant_id: u32,
+    id: &nodedb_cluster::DescriptorId,
+) -> Option<u64> {
+    if id.tenant_id != tenant_id {
+        return None;
+    }
+    let catalog = state.credentials.catalog();
+    let catalog = catalog.as_ref()?;
+    match id.kind {
+        nodedb_cluster::DescriptorKind::Collection => catalog
+            .get_collection(tenant_id, &id.name)
+            .ok()
+            .flatten()
+            .filter(|c| c.is_active)
+            .map(|c| c.descriptor_version.max(1)),
+        _ => None,
+    }
+}
 
 impl NodeDbPgHandler {
     /// Plan and dispatch SQL after quota and DDL checks have passed.
@@ -78,11 +112,24 @@ impl NodeDbPgHandler {
         self.enforce_check_constraints_if_needed(&clean_sql, tenant_id)
             .await?;
 
-        // Check plan cache before full planning.
-        let schema_ver = self.state.schema_version.current();
-        let cached_tasks = self.sessions.get_cached_plan(addr, &clean_sql, schema_ver);
+        // Check plan cache before full planning. The cache
+        // hits are per-descriptor-version: unrelated DDLs do
+        // not invalidate unrelated cached plans.
+        let cached_tasks = {
+            let state = Arc::clone(&self.state);
+            let tenant = tenant_id.as_u32();
+            self.sessions.get_cached_plan(addr, &clean_sql, move |id| {
+                current_descriptor_version(&state, tenant, id)
+            })
+        };
 
-        let tasks = if !params.is_empty() {
+        // Produce `(tasks, lease_scope)` for both the cache-hit
+        // and fresh-plan paths so the scope binding can outlive
+        // the planning block. The parameterised path
+        // (prepared statements with bound params) currently
+        // skips the plan cache and the refcounted lease — that
+        // is preserved by returning an empty scope for it.
+        let (tasks, _plan_lease_scope) = if !params.is_empty() {
             let perm_cache = self.state.permission_cache.read().await;
             let sec = crate::control::planner::context::PlanSecurityContext {
                 identity,
@@ -92,7 +139,8 @@ impl NodeDbPgHandler {
                 roles: &self.state.roles,
                 permission_cache: Some(&*perm_cache),
             };
-            self.query_ctx
+            let tasks = self
+                .query_ctx
                 .plan_sql_with_params_and_rls(&clean_sql, params, tenant_id, &sec)
                 .await
                 .map_err(|e| {
@@ -102,19 +150,25 @@ impl NodeDbPgHandler {
                         code.to_owned(),
                         message,
                     )))
-                })?
-        } else if let Some(tasks) = cached_tasks {
-            tasks
+                })?;
+            (tasks, crate::control::lease::QueryLeaseScope::empty())
+        } else if let Some((tasks, versions)) = cached_tasks {
+            // Cache hit: tasks were compiled by a prior query
+            // that has since dropped its scope. Re-acquire the
+            // refcount for this query's duration so drain
+            // still sees "leases held" while we execute.
+            let scope = self.state.acquire_plan_lease_scope(&versions);
+            (tasks, scope)
         } else {
             // Retry transparently on `RetryableSchemaChanged`
             // so pgwire clients see a stable view of DDL in
-            // flight. The retry helper re-runs the entire plan,
-            // which re-acquires all needed descriptor leases
-            // (drain may have cleared by the next attempt). Each
-            // iteration re-reads the permission cache because the
-            // RwLock guard cannot be held across awaits inside
-            // the closure.
-            let planned = super::retry::retry_on_schema_change(|| async {
+            // flight. The retry helper re-runs the entire
+            // plan, which re-reads each descriptor and
+            // records its current version. Each iteration
+            // re-reads the permission cache because the
+            // RwLock guard cannot be held across awaits
+            // inside the closure.
+            let (planned, versions) = super::retry::retry_on_schema_change(|| async {
                 let perm_cache = self.state.permission_cache.read().await;
                 let sec = crate::control::planner::context::PlanSecurityContext {
                     identity,
@@ -125,7 +179,7 @@ impl NodeDbPgHandler {
                     permission_cache: Some(&*perm_cache),
                 };
                 self.query_ctx
-                    .plan_sql_with_rls_returning(&clean_sql, tenant_id, &sec, has_returning)
+                    .plan_sql_with_rls_and_versions(&clean_sql, tenant_id, &sec, has_returning)
                     .await
             })
             .await
@@ -138,10 +192,15 @@ impl NodeDbPgHandler {
                 )))
             })?;
 
-            self.sessions
-                .put_cached_plan(addr, &clean_sql, planned.clone(), schema_ver);
+            // Acquire the scope BEFORE writing the plan into
+            // the cache so a concurrent cache-hit cannot race
+            // us into an empty scope.
+            let scope = self.state.acquire_plan_lease_scope(&versions);
 
-            planned
+            self.sessions
+                .put_cached_plan(addr, &clean_sql, planned.clone(), versions);
+
+            (planned, scope)
         };
 
         if tasks.is_empty() {
@@ -358,119 +417,6 @@ impl NodeDbPgHandler {
             ReadConsistency::Strong
         } else {
             ReadConsistency::BoundedStaleness(std::time::Duration::from_secs(5))
-        }
-    }
-
-    /// Check if all tasks target a single remote leader.
-    fn remote_leader_for_tasks(
-        &self,
-        tasks: &[PhysicalTask],
-        consistency: ReadConsistency,
-    ) -> Option<u64> {
-        let routing = self.state.cluster_routing.as_ref()?;
-        let routing = routing.read().unwrap_or_else(|p| p.into_inner());
-        let my_node = self.state.node_id;
-
-        let mut remote_leader: Option<u64> = None;
-
-        for task in tasks {
-            let vshard_id = task.vshard_id.as_u16();
-            let group_id = routing.group_for_vshard(vshard_id).ok()?;
-            let info = routing.group_info(group_id)?;
-            let leader = info.leader;
-
-            if leader == my_node {
-                return None;
-            }
-            if !consistency.requires_leader() && info.members.contains(&my_node) {
-                return None;
-            }
-            if leader == 0 {
-                return None;
-            }
-
-            match remote_leader {
-                None => remote_leader = Some(leader),
-                Some(prev) if prev != leader => return None,
-                _ => {}
-            }
-        }
-
-        remote_leader
-    }
-
-    /// Forward a SQL query to a remote leader node via QUIC.
-    async fn forward_sql(
-        &self,
-        sql: &str,
-        tenant_id: TenantId,
-        leader: u64,
-    ) -> PgWireResult<Vec<Response>> {
-        let transport = match &self.state.cluster_transport {
-            Some(t) => t,
-            None => {
-                return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                    "ERROR".to_owned(),
-                    "55000".to_owned(),
-                    "cluster transport not available".to_owned(),
-                ))));
-            }
-        };
-
-        let req = nodedb_cluster::rpc_codec::RaftRpc::ForwardRequest(
-            nodedb_cluster::rpc_codec::ForwardRequest {
-                sql: sql.to_owned(),
-                tenant_id: tenant_id.as_u32(),
-                deadline_remaining_ms: std::time::Duration::from_secs(
-                    self.state.tuning.network.default_deadline_secs,
-                )
-                .as_millis() as u64,
-                trace_id: 0,
-            },
-        );
-
-        let leader_addr = self
-            .state
-            .cluster_topology
-            .as_ref()
-            .and_then(|t| {
-                let topo = t.read().unwrap_or_else(|p| p.into_inner());
-                topo.get_node(leader).map(|n| n.addr.clone())
-            })
-            .unwrap_or_else(|| format!("node-{leader}"));
-
-        let resp = transport.send_rpc(leader, req).await.map_err(|e| {
-            PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "01R01".to_owned(),
-                format!("not leader; redirect to {leader_addr} (forward failed: {e})"),
-            )))
-        })?;
-
-        match resp {
-            nodedb_cluster::rpc_codec::RaftRpc::ForwardResponse(fwd) => {
-                if !fwd.success {
-                    return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                        "ERROR".to_owned(),
-                        "XX000".to_owned(),
-                        format!("remote execution failed: {}", fwd.error_message),
-                    ))));
-                }
-
-                let mut responses = Vec::with_capacity(fwd.payloads.len());
-                for payload in &fwd.payloads {
-                    responses.push(payload_to_response(payload, PlanKind::MultiRow));
-                }
-                if responses.is_empty() {
-                    responses.push(Response::Execution(Tag::new("OK")));
-                }
-                Ok(responses)
-            }
-            other => Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "XX000".to_owned(),
-                format!("unexpected response from leader: {other:?}"),
-            )))),
         }
     }
 }

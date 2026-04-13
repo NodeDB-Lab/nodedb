@@ -40,12 +40,17 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::MemoryExhausted { .. } => ("ERROR", "53200", err.to_string()),
         crate::Error::FanOutExceeded { .. } => ("ERROR", "54001", err.to_string()),
         crate::Error::NoLeader { .. } => ("ERROR", "55P03", err.to_string()),
-        // SQLSTATE 01R01: custom — "not leader" with redirect hint.
-        // The message contains the leader's address so clients can reconnect.
+        // SQLSTATE 57P04: admin_shutdown — the closest Postgres
+        // canonical code for "try again later, different node".
+        // Client libraries that recognise the 57P* family treat
+        // this as retryable transient unavailability, which is
+        // exactly the semantics we want. The message carries the
+        // hinted leader address so an operator inspecting logs
+        // can see the redirect target.
         crate::Error::NotLeader { leader_addr, .. } => (
             "ERROR",
-            "01R01",
-            format!("not leader; redirect to {leader_addr}"),
+            "57P04",
+            format!("cluster in leader election; leader hint: {leader_addr}"),
         ),
         _ => ("ERROR", "XX000", err.to_string()),
     }
