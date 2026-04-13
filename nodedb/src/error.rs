@@ -119,6 +119,14 @@ pub enum Error {
     #[error("query plan error: {detail}")]
     PlanError { detail: String },
 
+    /// The planner tried to acquire a descriptor lease at a version
+    /// being drained by an in-flight DDL. The pgwire layer catches
+    /// this variant and retries the whole statement up to
+    /// `PLAN_RETRY_BUDGET` times with backoff. If every retry
+    /// fails, the error surfaces to the client.
+    #[error("retryable schema change on {descriptor}")]
+    RetryableSchemaChanged { descriptor: String },
+
     #[error("execution limit exceeded: {detail}")]
     ExecutionLimitExceeded { detail: String },
 
@@ -306,6 +314,9 @@ impl From<Error> for NodeDbError {
             // Client input
             Error::BadRequest { detail } => NodeDbError::bad_request(detail),
             Error::PlanError { detail } => NodeDbError::plan_error(detail),
+            Error::RetryableSchemaChanged { descriptor } => {
+                NodeDbError::plan_error(format!("retryable schema change on {descriptor}"))
+            }
             Error::ExecutionLimitExceeded { detail } => NodeDbError::bad_request(detail),
 
             // Infrastructure — flatten to opaque public variants

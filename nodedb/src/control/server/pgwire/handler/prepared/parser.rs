@@ -137,9 +137,14 @@ fn infer_result_fields(
         _ => return Vec::new(),
     };
 
+    // `infer_result_fields` runs on a successful plan so any
+    // `RetryableSchemaChanged` drain signal would have surfaced
+    // earlier. Treat any error here as "no field info", same as
+    // None — the caller is non-critical (prepared-stmt
+    // description fallback).
     let info = match catalog.get_collection(collection) {
-        Some(i) => i,
-        None => return Vec::new(),
+        Ok(Some(i)) => i,
+        Ok(None) | Err(_) => return Vec::new(),
     };
 
     // Check if projection specifies columns.

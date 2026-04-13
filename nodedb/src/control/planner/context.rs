@@ -49,12 +49,15 @@ impl QueryContext {
         }
     }
 
-    /// Create a query context from SharedState.
-    ///
-    /// After batch 1e, `OriginCatalog` reads directly from the
-    /// local `SystemCatalog` redb — the `MetadataCommitApplier`
-    /// writes through to it on every node, so cross-node DDL
-    /// visibility works without a separate in-memory cache.
+    /// Create a query context from `SharedState` without lease
+    /// integration. Used by internal sub-planners (check
+    /// constraints, type guards, ANALYZE, procedural DML, event
+    /// trigger dispatch) that run inside a pgwire handler whose
+    /// outer query already acquired leases. Re-acquiring via a
+    /// sub-planner would be redundant — the lease store's fast
+    /// path would return instantly anyway, but going through the
+    /// sub-planner without a direct `Arc<SharedState>` reference
+    /// would require threading one through every call site.
     pub fn for_state(state: &crate::control::state::SharedState, tenant_id: u32) -> Self {
         Self::with_catalog(
             Arc::clone(&state.credentials),
@@ -63,12 +66,35 @@ impl QueryContext {
         )
     }
 
+    /// Create a query context with descriptor lease integration.
+    /// Used by the top-level pgwire dispatch so every user
+    /// query's plan acquires descriptor leases before execution.
+    /// Callers must hold an `Arc<SharedState>` — the adapter
+    /// downgrades to `Weak` internally.
+    pub fn for_state_with_lease(
+        state: &Arc<crate::control::state::SharedState>,
+        tenant_id: u32,
+    ) -> Self {
+        let sql_catalog = super::catalog_adapter::OriginCatalog::new_with_lease(
+            state,
+            tenant_id,
+            Some(Arc::clone(&state.retention_policy_registry)),
+        );
+        Self {
+            sql_catalog: Some(sql_catalog),
+            retention_registry: Some(Arc::clone(&state.retention_policy_registry)),
+        }
+    }
+
     /// Override the default rounding mode for `ROUND()`.
     ///
     /// No-op: rounding mode is handled at execution time, not planning.
     pub fn set_rounding_mode(&self, _mode: &str) {}
 
-    /// Create a query context with catalog integration.
+    /// Create a query context with catalog integration but no
+    /// lease acquisition. Private — use `for_state` or
+    /// `for_state_with_lease` depending on whether the caller
+    /// is the top-level pgwire dispatch or an internal sub-planner.
     pub fn with_catalog(
         credentials: Arc<CredentialStore>,
         tenant_id: u32,
@@ -113,8 +139,13 @@ impl QueryContext {
                 });
             }
         };
-        let plans = nodedb_sql::plan_sql(sql, catalog).map_err(|e| crate::Error::PlanError {
-            detail: format!("{e}"),
+        let plans = nodedb_sql::plan_sql(sql, catalog).map_err(|e| match e {
+            nodedb_sql::SqlError::RetryableSchemaChanged { descriptor } => {
+                crate::Error::RetryableSchemaChanged { descriptor }
+            }
+            other => crate::Error::PlanError {
+                detail: format!("{other}"),
+            },
         })?;
         let ctx = super::sql_plan_convert::ConvertContext {
             retention_registry: self.retention_registry.clone(),

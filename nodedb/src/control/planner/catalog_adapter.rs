@@ -1,26 +1,69 @@
-//! Implements `nodedb_sql::SqlCatalog` for Origin using CredentialStore.
+//! Implements `nodedb_sql::SqlCatalog` for Origin.
 //!
-//! After the batch 1e unification, the planner reads directly from
-//! the local `SystemCatalog` redb. Cross-node DDL visibility works
-//! because the `MetadataCommitApplier` on every node writes through
-//! to the local redb via `CatalogEntry::apply_to` — so `SystemCatalog`
-//! is authoritatively replicated and a single read path is sufficient.
+//! The adapter acquires a descriptor lease at plan time. The
+//! lease is what binds an in-flight query to the descriptor
+//! version it was planned against: while the lease is held, no
+//! DDL can bump the descriptor (drain blocks until the lease
+//! releases or expires). This is the mechanism that closes the
+//! planner-side race between "read descriptor" and "execute plan".
+//!
+//! Lease ownership is per-node, not per-query. Every call to
+//! `get_collection` goes through `force-refresh the lease` via
+//! the `lease::acquire_lease` fast path: if a valid lease
+//! already exists, returns instantly with zero raft round-trips.
+//! The first query on a cold collection pays one raft round-trip
+//! to acquire; subsequent queries within the lease window read
+//! from the in-memory cache. The renewal loop keeps held leases
+//! alive indefinitely.
+//!
+//! **Drain interaction**: if the descriptor is being drained at
+//! the version we read, `acquire_descriptor_lease` returns
+//! `Err::Config { "drain in progress" }`. We translate that to
+//! `SqlCatalogError::RetryableSchemaChanged`, which the pgwire
+//! handler catches and retries the whole plan (up to the retry
+//! budget). On any other lease-acquire failure we log and
+//! proceed with the descriptor we read — lease acquisition is
+//! best-effort; the planner's primary job is still to produce
+//! a plan, and a transient lease glitch should not break user
+//! queries.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use nodedb_sql::types::{CollectionInfo, ColumnInfo, EngineType, SqlCatalog, SqlDataType};
+use nodedb_cluster::{DescriptorId, DescriptorKind};
+use nodedb_sql::{
+    SqlCatalog, SqlCatalogError,
+    types::{CollectionInfo, ColumnInfo, EngineType, SqlDataType},
+};
 
+use crate::control::lease::DEFAULT_LEASE_DURATION;
 use crate::control::security::credential::CredentialStore;
+use crate::control::state::SharedState;
 
 /// Adapter bridging the NodeDB catalog to the `SqlCatalog` trait.
+///
+/// The optional `shared` field holds a `Weak<SharedState>` so
+/// long-lived `QueryContext`s do not pin the global
+/// `SharedState` alive past process shutdown. When present, the
+/// adapter calls `acquire_descriptor_lease` on every
+/// `get_collection` call to bind the plan to the descriptor
+/// version it reads.
+///
+/// When absent, the adapter behaves as a pure redb reader.
+/// Sub-planners invoked from inside a pgwire DDL handler that
+/// already holds leases use the no-lease constructor so we
+/// don't double-acquire.
 pub struct OriginCatalog {
     credentials: Arc<CredentialStore>,
+    shared: Option<Weak<SharedState>>,
     tenant_id: u32,
     retention_policy_registry:
         Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
 }
 
 impl OriginCatalog {
+    /// Construct an adapter without lease integration. Used by
+    /// internal sub-planners that run inside a pgwire handler
+    /// which already leased the outer query's descriptors.
     pub fn new(
         credentials: Arc<CredentialStore>,
         tenant_id: u32,
@@ -30,6 +73,26 @@ impl OriginCatalog {
     ) -> Self {
         Self {
             credentials,
+            shared: None,
+            tenant_id,
+            retention_policy_registry,
+        }
+    }
+
+    /// Construct an adapter with descriptor lease integration.
+    /// Used by the top-level pgwire dispatch (sql_exec,
+    /// prepared parser) so every user-initiated query plan
+    /// acquires leases on the collections it touches.
+    pub fn new_with_lease(
+        shared: &Arc<SharedState>,
+        tenant_id: u32,
+        retention_policy_registry: Option<
+            Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>,
+        >,
+    ) -> Self {
+        Self {
+            credentials: Arc::clone(&shared.credentials),
+            shared: Some(Arc::downgrade(shared)),
             tenant_id,
             retention_policy_registry,
         }
@@ -47,27 +110,80 @@ impl OriginCatalog {
 }
 
 impl SqlCatalog for OriginCatalog {
-    fn get_collection(&self, name: &str) -> Option<CollectionInfo> {
+    fn get_collection(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<CollectionInfo>, SqlCatalogError> {
         // Read through the local `SystemCatalog` redb. On cluster
         // followers, the `MetadataCommitApplier` has already
         // written the replicated record here via
-        // `CatalogEntry::apply_to`, so a single read path works for
-        // both single-node and cluster modes.
-        let catalog = self.credentials.catalog().as_ref()?;
-        let stored = catalog.get_collection(self.tenant_id, name).ok()??;
+        // `CatalogEntry::apply_to`, so a single read path works
+        // for both single-node and cluster modes.
+        let catalog_ref = self.credentials.catalog();
+        let Some(catalog) = catalog_ref.as_ref() else {
+            return Ok(None);
+        };
+        let Some(stored) = catalog.get_collection(self.tenant_id, name).ok().flatten() else {
+            return Ok(None);
+        };
         if !stored.is_active {
-            return None;
+            return Ok(None);
+        }
+
+        // Lease acquisition (only if constructed via
+        // `new_with_lease`). Fast path (lease already valid at
+        // this version or higher) returns instantly. Slow path
+        // proposes a `DescriptorLeaseGrant` through the metadata
+        // raft group.
+        //
+        // Version 0 is the sentinel for "legacy record, version
+        // unknown" — we lease at 1 in that case so the drain gate
+        // can still reject acquires at v1 and trigger re-planning.
+        if let Some(shared_weak) = &self.shared
+            && let Some(shared) = shared_weak.upgrade()
+        {
+            let descriptor_id = DescriptorId::new(
+                self.tenant_id,
+                DescriptorKind::Collection,
+                stored.name.clone(),
+            );
+            let version = stored.descriptor_version.max(1);
+            match shared.acquire_descriptor_lease(descriptor_id, version, DEFAULT_LEASE_DURATION) {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("drain in progress") {
+                        return Err(SqlCatalogError::RetryableSchemaChanged {
+                            descriptor: format!("collection {name}"),
+                        });
+                    }
+                    // Non-drain failure: log at warn and proceed
+                    // with the descriptor we read. Treating the
+                    // planner as best-effort-leased on non-drain
+                    // errors means a transient lease failure
+                    // (e.g. a brief leader election during which
+                    // `force_refresh_lease` returns NotLeader
+                    // without a hint) doesn't break user queries.
+                    tracing::warn!(
+                        error = %msg,
+                        descriptor = %name,
+                        version,
+                        "OriginCatalog: lease acquire failed, proceeding without lease"
+                    );
+                }
+            }
         }
 
         let (engine, columns, primary_key) = convert_collection_type(&stored);
+        let auto_tier = self.has_auto_tier(name);
 
-        Some(CollectionInfo {
+        Ok(Some(CollectionInfo {
             name: stored.name,
             engine,
             columns,
             primary_key,
-            has_auto_tier: self.has_auto_tier(name),
-        })
+            has_auto_tier: auto_tier,
+        }))
     }
 }
 
