@@ -109,10 +109,28 @@ pub fn create_user(
         }
     }
 
-    state
+    // Build the full `StoredUser` locally (hash + salt + user_id).
+    // Followers cannot reproduce the random salt, so this step
+    // MUST happen on the proposer node. The computed record is
+    // then replicated verbatim.
+    let stored = state
         .credentials
-        .create_user(username, &password, tenant_id, vec![role])
+        .prepare_user(username, &password, tenant_id, vec![role])
         .map_err(|e| sqlstate_error("42710", &e.to_string()))?;
+
+    let entry = crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0
+        && let Some(catalog) = state.credentials.catalog()
+    {
+        // Single-node / no-cluster fallback: write the record
+        // directly and install it into the in-memory cache.
+        catalog
+            .put_user(&stored)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        state.credentials.install_replicated_user(&stored);
+    }
 
     state.audit_record(
         AuditEvent::PrivilegeChange,
@@ -231,10 +249,36 @@ pub fn drop_user(
         .map(|u| u.tenant_id)
         .unwrap_or(identity.tenant_id);
 
-    let dropped = state
-        .credentials
-        .deactivate_user(username)
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    // Pre-check existence so a DROP USER on a missing user is a
+    // clean error that doesn't touch raft.
+    let exists_before = state.credentials.get_user(username).is_some();
+    if !exists_before {
+        return Err(sqlstate_error(
+            "42704",
+            &format!("user '{username}' does not exist"),
+        ));
+    }
+
+    let entry = crate::control::catalog_entry::CatalogEntry::DeactivateUser {
+        username: username.to_string(),
+    };
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    let dropped = if log_index == 0 {
+        // Single-node fallback.
+        state
+            .credentials
+            .deactivate_user(username)
+            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?
+    } else {
+        // Cluster mode: the raft entry committed, so the
+        // deactivation WILL be applied on every node. The
+        // `post_apply` hook that updates the local in-memory
+        // cache runs in a spawned tokio task and may not be
+        // visible by the time this function returns — trust the
+        // log index rather than re-reading the cache.
+        true
+    };
 
     if dropped {
         // Reassign owned collections to the tenant_admin of the user's tenant.
