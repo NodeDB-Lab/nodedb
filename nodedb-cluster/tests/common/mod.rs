@@ -34,8 +34,8 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use nodedb_cluster::{
-    ClusterCatalog, ClusterConfig, ClusterLifecycleState, ClusterLifecycleTracker, ClusterTopology,
-    NexarTransport, NoopForwarder, RaftLoop, start_cluster,
+    CacheApplier, ClusterCatalog, ClusterConfig, ClusterLifecycleState, ClusterLifecycleTracker,
+    ClusterTopology, MetadataCache, NexarTransport, NoopForwarder, RaftLoop, start_cluster,
 };
 use nodedb_raft::message::LogEntry;
 use tempfile::TempDir;
@@ -69,6 +69,16 @@ pub struct TestNode {
     pub topology: Arc<RwLock<ClusterTopology>>,
     pub lifecycle: ClusterLifecycleTracker,
     pub node_id: u64,
+    /// Live view of the replicated metadata state. Shared with the
+    /// `CacheApplier` installed on the `RaftLoop`; tests read from
+    /// this to assert that DDL committed on one node has been
+    /// applied on every other node.
+    pub metadata_cache: Arc<RwLock<MetadataCache>>,
+    /// Handle to the `MultiRaft` behind the raft loop, so tests can
+    /// propose metadata entries directly without going through a
+    /// pgwire client. Matches the production path — pgwire handlers
+    /// will call into the same `MultiRaft::propose_to_group`.
+    pub multi_raft: Arc<std::sync::Mutex<nodedb_cluster::MultiRaft>>,
     /// Held so tests can call `begin_shutdown` directly on the
     /// raft loop rather than relying on the external watch
     /// channel to propagate. This is the production-shaped path
@@ -173,6 +183,12 @@ impl TestNode {
         lifecycle.to_ready(state.topology.node_count());
 
         let topology = Arc::new(RwLock::new(state.topology));
+        // Real in-memory metadata cache, driven by a `CacheApplier`
+        // installed on the raft loop. Every test can read this
+        // directly to assert DDL replication.
+        let metadata_cache = Arc::new(RwLock::new(MetadataCache::new()));
+        let metadata_applier: Arc<dyn nodedb_cluster::MetadataApplier> =
+            Arc::new(CacheApplier::new(metadata_cache.clone()));
         // Use `with_forwarder` so the type is concrete
         // (`RaftLoop<NoopApplier, NoopForwarder>`), matching the
         // `raft_loop` field on `TestNode`. Without the explicit
@@ -188,6 +204,7 @@ impl TestNode {
                 NoopApplier,
                 Arc::new(NoopForwarder),
             )
+            .with_metadata_applier(metadata_applier)
             // Attach the catalog so the server-side `join_flow`
             // can read the real `cluster_id` from it and echo it
             // back on every `JoinResponse`. Without this, joined
@@ -199,6 +216,7 @@ impl TestNode {
             // a successful `AddLearner` commit.
             .with_catalog(catalog.clone()),
         );
+        let multi_raft = raft_loop.multi_raft_handle();
 
         // transport.serve(raft_loop) runs the inbound RPC handler
         // end-to-end — the production code path this whole harness
@@ -232,11 +250,62 @@ impl TestNode {
             topology,
             lifecycle,
             node_id,
+            metadata_cache,
+            multi_raft,
             raft_loop,
             shutdown_tx,
             serve_handle,
             run_handle,
         })
+    }
+
+    /// Propose a `MetadataEntry` directly to the metadata Raft group
+    /// on this node. Fails if this node is not the group-0 leader.
+    ///
+    /// This is the path integration tests use to inject replicated
+    /// DDL without bringing up a pgwire client. Production uses the
+    /// same underlying `RaftLoop::propose_to_metadata_group`.
+    pub fn propose_metadata(
+        &self,
+        entry: &nodedb_cluster::MetadataEntry,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let bytes = nodedb_cluster::encode_entry(entry)?;
+        Ok(self.raft_loop.propose_to_metadata_group(bytes)?)
+    }
+
+    /// `true` if this node currently believes itself to be the
+    /// leader of the metadata raft group (group 0).
+    pub fn is_metadata_leader(&self) -> bool {
+        for status in self.raft_loop.group_statuses() {
+            if status.group_id == nodedb_cluster::METADATA_GROUP_ID {
+                return status.leader_id == self.node_id;
+            }
+        }
+        false
+    }
+
+    /// Number of collection descriptors currently visible in this
+    /// node's replicated metadata cache.
+    pub fn collection_count(&self) -> usize {
+        self.metadata_cache
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .collection_count()
+    }
+
+    /// Read the current version of a collection descriptor by name,
+    /// or `None` if it is not present in the cache.
+    pub fn collection_version(&self, tenant_id: u32, name: &str) -> Option<u64> {
+        let id = nodedb_cluster::DescriptorId::new(
+            tenant_id,
+            nodedb_cluster::DescriptorKind::Collection,
+            name,
+        );
+        self.metadata_cache
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .collection(&id)
+            .map(|d| d.header.version)
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
