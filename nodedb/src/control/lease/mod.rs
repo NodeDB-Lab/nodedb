@@ -30,6 +30,7 @@ pub mod drain_propose;
 pub mod propose;
 pub mod release;
 pub mod renewal;
+pub mod shutdown_release;
 
 /// Wall-clock nanoseconds since Unix epoch. Shared helper used by
 /// every code path in this module that needs a "real time now"

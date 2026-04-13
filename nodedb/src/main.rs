@@ -501,6 +501,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(shapes = shapes.len(), "persisting shape subscriptions");
         }
 
+        // Release every descriptor lease held by this node via a
+        // single batched raft entry. Best-effort — bounded to 2
+        // seconds so a wedged cluster doesn't block shutdown. On
+        // failure, leases drain via TTL.
+        nodedb::control::lease::shutdown_release::release_all_local_leases(
+            Arc::clone(&shared_signal),
+            nodedb::control::lease::shutdown_release::DEFAULT_SHUTDOWN_RELEASE_TIMEOUT,
+        )
+        .await;
+
         let _ = shutdown_tx.send(true);
 
         // Second Ctrl+C: force exit immediately.

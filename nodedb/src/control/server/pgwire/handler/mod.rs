@@ -5,6 +5,7 @@ mod facet;
 pub mod listen_notify;
 mod plan;
 pub mod prepared;
+mod retry;
 mod returning;
 mod routing;
 mod session_cmds;

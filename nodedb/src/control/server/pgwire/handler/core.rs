@@ -55,7 +55,13 @@ pub struct NodeDbPgHandler {
 
 impl NodeDbPgHandler {
     pub fn new(state: Arc<SharedState>, auth_mode: AuthMode) -> Self {
-        let query_ctx = QueryContext::for_state(&state, 1); // default tenant for name resolution
+        // Every top-level user query goes through this handler's
+        // shared `query_ctx`, which acquires descriptor leases so
+        // in-flight plans are protected from concurrent DDL.
+        // Sub-planners (check constraints, type guards, ANALYZE,
+        // procedural DML) build their own no-lease `QueryContext`
+        // via `for_state`.
+        let query_ctx = QueryContext::for_state_with_lease(&state, 1);
         let query_parser = Arc::new(NodeDbQueryParser::new(Arc::clone(&state)));
         Self {
             state,

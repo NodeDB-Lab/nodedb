@@ -106,27 +106,37 @@ impl NodeDbPgHandler {
         } else if let Some(tasks) = cached_tasks {
             tasks
         } else {
-            let perm_cache = self.state.permission_cache.read().await;
-            let sec = crate::control::planner::context::PlanSecurityContext {
-                identity,
-                auth: &auth_ctx,
-                rls_store: &self.state.rls,
-                permissions: &self.state.permissions,
-                roles: &self.state.roles,
-                permission_cache: Some(&*perm_cache),
-            };
-            let planned = self
-                .query_ctx
-                .plan_sql_with_rls_returning(&clean_sql, tenant_id, &sec, has_returning)
-                .await
-                .map_err(|e| {
-                    let (severity, code, message) = error_to_sqlstate(&e);
-                    PgWireError::UserError(Box::new(ErrorInfo::new(
-                        severity.to_owned(),
-                        code.to_owned(),
-                        message,
-                    )))
-                })?;
+            // Retry transparently on `RetryableSchemaChanged`
+            // so pgwire clients see a stable view of DDL in
+            // flight. The retry helper re-runs the entire plan,
+            // which re-acquires all needed descriptor leases
+            // (drain may have cleared by the next attempt). Each
+            // iteration re-reads the permission cache because the
+            // RwLock guard cannot be held across awaits inside
+            // the closure.
+            let planned = super::retry::retry_on_schema_change(|| async {
+                let perm_cache = self.state.permission_cache.read().await;
+                let sec = crate::control::planner::context::PlanSecurityContext {
+                    identity,
+                    auth: &auth_ctx,
+                    rls_store: &self.state.rls,
+                    permissions: &self.state.permissions,
+                    roles: &self.state.roles,
+                    permission_cache: Some(&*perm_cache),
+                };
+                self.query_ctx
+                    .plan_sql_with_rls_returning(&clean_sql, tenant_id, &sec, has_returning)
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                let (severity, code, message) = error_to_sqlstate(&e);
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    severity.to_owned(),
+                    code.to_owned(),
+                    message,
+                )))
+            })?;
 
             self.sessions
                 .put_cached_plan(addr, &clean_sql, planned.clone(), schema_ver);
