@@ -139,6 +139,27 @@ async fn sequence_create_visible_on_every_node() {
     )
     .await;
 
+    // ALTER SEQUENCE RESTART WITH 500 should propagate via
+    // `PutSequenceState` so every node's in-memory counter
+    // converges on 500.
+    cluster
+        .exec_ddl_on_any_leader("ALTER SEQUENCE order_id RESTART WITH 500")
+        .await
+        .expect("alter sequence restart");
+
+    wait_for(
+        "all 3 nodes see sequence counter == 500",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.sequence_current_value(1, "order_id") == Some(500))
+        },
+    )
+    .await;
+
     cluster
         .exec_ddl_on_any_leader("DROP SEQUENCE order_id")
         .await
@@ -149,6 +170,101 @@ async fn sequence_create_visible_on_every_node() {
         Duration::from_secs(5),
         Duration::from_millis(50),
         || cluster.nodes.iter().all(|n| !n.has_sequence(1, "order_id")),
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn trigger_create_visible_on_every_node() {
+    // 3-node cluster. CREATE TRIGGER on the leader; every follower's
+    // in-memory `trigger_registry` must see the trigger within 5s
+    // via the `CatalogEntry::PutTrigger` → post-apply hook.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    // Triggers attach to a collection, so create one first.
+    cluster
+        .exec_ddl_on_any_leader("CREATE COLLECTION audits")
+        .await
+        .expect("create collection");
+
+    wait_for(
+        "collection visible on every node",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.cached_collection_count() == 1)
+        },
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE TRIGGER audit_ins AFTER INSERT ON audits FOR EACH ROW BEGIN RETURN 1; END",
+        )
+        .await
+        .expect("create trigger");
+
+    wait_for(
+        "all 3 nodes see the replicated trigger in trigger_registry",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| n.has_trigger(1, "audit_ins")),
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP TRIGGER audit_ins")
+        .await
+        .expect("drop trigger");
+
+    wait_for(
+        "all 3 nodes unregister the trigger",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| !n.has_trigger(1, "audit_ins")),
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn function_create_visible_on_every_node() {
+    // 3-node cluster. CREATE FUNCTION on the leader; every follower's
+    // local `SystemCatalog` redb (written by the applier) must
+    // contain the function within 5s.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE FUNCTION add_one(x INT) RETURNS INT AS BEGIN RETURN x + 1; END",
+        )
+        .await
+        .expect("create function");
+
+    wait_for(
+        "all 3 nodes see the function in local SystemCatalog redb",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| n.has_function(1, "add_one")),
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP FUNCTION add_one")
+        .await
+        .expect("drop function");
+
+    wait_for(
+        "all 3 nodes no longer see the function",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| !n.has_function(1, "add_one")),
     )
     .await;
 

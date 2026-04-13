@@ -279,6 +279,38 @@ impl TestClusterNode {
         self.shared.sequence_registry.exists(tenant_id, name)
     }
 
+    /// Read the current counter of a sequence from this node's
+    /// in-memory registry, if present.
+    pub fn sequence_current_value(&self, tenant_id: u32, name: &str) -> Option<i64> {
+        self.shared
+            .sequence_registry
+            .list(tenant_id)
+            .into_iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, current, _)| current)
+    }
+
+    /// Check whether a trigger with the given name exists in this
+    /// node's in-memory trigger registry.
+    pub fn has_trigger(&self, tenant_id: u32, name: &str) -> bool {
+        self.shared
+            .trigger_registry
+            .list_for_tenant(tenant_id)
+            .iter()
+            .any(|t| t.name == name)
+    }
+
+    /// Read a function record from this node's local `SystemCatalog`
+    /// redb (which the applier writes through on every node).
+    pub fn has_function(&self, tenant_id: u32, name: &str) -> bool {
+        self.shared
+            .credentials
+            .catalog()
+            .as_ref()
+            .and_then(|c| c.get_function(tenant_id, name).ok().flatten())
+            .is_some()
+    }
+
     /// Execute a simple query; returns an error message on SQL error.
     pub async fn exec(&self, sql: &str) -> Result<(), String> {
         match self.client.simple_query(sql).await {
