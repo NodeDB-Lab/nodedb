@@ -232,6 +232,7 @@ impl SharedState {
         let ep_topic_registry = crate::event::topic::EpTopicRegistry::new();
         let mv_registry = Arc::new(crate::event::streaming_mv::MvRegistry::new());
         let sequence_registry = Arc::new(crate::control::sequence::SequenceRegistry::new());
+        let rls_store = RlsPolicyStore::new();
         let mut audit_start_seq = 1u64;
         if let Some(catalog) = credentials.catalog() {
             api_keys.load_from(catalog)?;
@@ -249,6 +250,31 @@ impl SharedState {
             ep_topic_registry.load_from_catalog(catalog);
             mv_registry.load_from_catalog(catalog);
             sequence_registry.load_from_catalog(catalog);
+            match catalog.load_all_rls_policies() {
+                Ok(stored) => {
+                    let mut loaded = 0usize;
+                    for s in &stored {
+                        match s.to_runtime() {
+                            Ok(p) => {
+                                rls_store.install_replicated_policy(p);
+                                loaded += 1;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    name = %s.name,
+                                    collection = %s.collection,
+                                    error = %e,
+                                    "boot replay: skipped invalid RLS policy"
+                                );
+                            }
+                        }
+                    }
+                    if loaded > 0 {
+                        tracing::info!(rls_policies = loaded, "loaded RLS policies from catalog");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to load RLS policies"),
+            }
             let max_seq = catalog.load_audit_max_seq()?;
             if max_seq > 0 {
                 audit_start_seq = max_seq + 1;
@@ -346,7 +372,7 @@ impl SharedState {
             raft_status_fn: None,
             cluster_observer: std::sync::OnceLock::new(),
             migration_tracker: None,
-            rls: RlsPolicyStore::new(),
+            rls: rls_store,
             blacklist,
             auth_users: crate::control::security::jit::auth_user::AuthUserStore::new(),
             orgs: crate::control::security::org::store::OrgStore::new(),

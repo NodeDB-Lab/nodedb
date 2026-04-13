@@ -71,6 +71,27 @@ impl SystemCatalog {
         write_txn.commit().map_err(|e| catalog_err("commit", e))
     }
 
+    /// Hard-delete a tenant identity record. Returns `true` if a row existed.
+    pub fn delete_tenant(&self, tenant_id: u32) -> crate::Result<bool> {
+        let key = tenant_id.to_string();
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| catalog_err("write txn", e))?;
+        let existed;
+        {
+            let mut table = write_txn
+                .open_table(TENANTS)
+                .map_err(|e| catalog_err("open tenants", e))?;
+            existed = table
+                .remove(key.as_str())
+                .map_err(|e| catalog_err("remove tenant", e))?
+                .is_some();
+        }
+        write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        Ok(existed)
+    }
+
     pub fn load_all_tenants(&self) -> crate::Result<Vec<StoredTenant>> {
         let read_txn = self
             .db

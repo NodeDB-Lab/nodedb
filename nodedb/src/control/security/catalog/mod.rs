@@ -17,6 +17,7 @@ pub mod orgs;
 pub mod procedure_types;
 pub mod procedures;
 pub mod retention_policy;
+pub mod rls;
 pub mod schedules;
 pub mod scopes;
 pub mod security;
@@ -40,6 +41,7 @@ pub use function_types::{
 };
 pub use orgs::{StoredOrg, StoredOrgMember};
 pub use procedure_types::StoredProcedure;
+pub use rls::StoredRlsPolicy;
 pub use scopes::{StoredScope, StoredScopeGrant};
 pub use sequence_types::{SequenceState, StoredSequence};
 pub use system_catalog::SystemCatalog;

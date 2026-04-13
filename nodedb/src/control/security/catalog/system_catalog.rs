@@ -104,6 +104,9 @@ impl SystemCatalog {
             let _ = write_txn
                 .open_table(STREAMING_MVS)
                 .map_err(|e| catalog_err("init streaming_mvs table", e))?;
+            let _ = write_txn
+                .open_table(super::rls::RLS_POLICIES)
+                .map_err(|e| catalog_err("init rls_policies table", e))?;
         }
         write_txn
             .commit()
