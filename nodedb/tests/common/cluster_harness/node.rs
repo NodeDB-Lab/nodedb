@@ -249,13 +249,34 @@ impl TestClusterNode {
             .unwrap_or(0)
     }
 
-    /// Number of committed collections visible in this node's replicated cache.
+    /// Number of active collections visible on this node (read through
+    /// the local `SystemCatalog` redb — populated by the
+    /// `MetadataCommitApplier` on every node via
+    /// `CatalogEntry::apply_to`).
     pub fn cached_collection_count(&self) -> usize {
-        self.shared
-            .metadata_cache
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .collection_count()
+        let Some(catalog) = self.shared.credentials.catalog() else {
+            return 0;
+        };
+        // `load_collections_for_tenant` filters out `is_active = false`
+        // records, so a deactivated collection drops out of the count.
+        catalog
+            .load_collections_for_tenant(1)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// Number of sequences visible in this node's in-memory
+    /// `sequence_registry`. After the applier spawns its
+    /// post-apply side effect for a `PutSequence`, the registry
+    /// should see the new record on every node.
+    pub fn sequence_count(&self, tenant_id: u32) -> usize {
+        self.shared.sequence_registry.list(tenant_id).len()
+    }
+
+    /// Check whether a sequence with the given name exists in this
+    /// node's in-memory registry.
+    pub fn has_sequence(&self, tenant_id: u32, name: &str) -> bool {
+        self.shared.sequence_registry.exists(tenant_id, name)
     }
 
     /// Execute a simple query; returns an error message on SQL error.

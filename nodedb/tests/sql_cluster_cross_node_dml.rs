@@ -113,3 +113,44 @@ async fn create_on_any_node_is_visible_on_every_node() {
 
     cluster.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn sequence_create_visible_on_every_node() {
+    // 3-node cluster. CREATE SEQUENCE on the leader; every follower's
+    // in-memory `sequence_registry` must see the replicated definition
+    // within 5s via the `CatalogEntry::PutSequence` → post-apply hook.
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    for node in &cluster.nodes {
+        assert_eq!(node.sequence_count(1), 0);
+    }
+
+    let leader_idx = cluster
+        .exec_ddl_on_any_leader("CREATE SEQUENCE order_id START 100")
+        .await
+        .expect("create sequence");
+    eprintln!("CREATE SEQUENCE accepted by node {}", leader_idx + 1);
+
+    wait_for(
+        "all 3 nodes see the replicated sequence in their in-memory registry",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| n.has_sequence(1, "order_id")),
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("DROP SEQUENCE order_id")
+        .await
+        .expect("drop sequence");
+
+    wait_for(
+        "all 3 nodes remove the sequence from their registry",
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        || cluster.nodes.iter().all(|n| !n.has_sequence(1, "order_id")),
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
