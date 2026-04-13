@@ -5,7 +5,7 @@
 //! Not evaluated on INSERT — only CHECK constraints apply to inserts.
 
 use crate::bridge::envelope::ErrorCode;
-use crate::control::security::catalog::types::TransitionCheckDef;
+use crate::control::security::catalog::TransitionCheckDef;
 
 /// Check all transition check predicates for an UPDATE operation.
 ///

@@ -1,14 +1,21 @@
 //! System catalog type definitions: table constants, collection metadata,
-//! constraint types, and field definitions.
+//! checkpoint records, and helpers.
 //!
-//! Auth types (users, roles, permissions) are in `auth_types.rs`.
-//! SystemCatalog struct is in `system_catalog.rs`.
+//! - Auth types (users, roles, permissions) live in `auth_types.rs`.
+//! - `SystemCatalog` struct lives in `system_catalog.rs`.
+//! - Constraint definitions (balanced, CHECK, state transitions, etc.)
+//!   and field/event definitions live in `collection_constraints.rs`.
 
+use nodedb_types::Hlc;
 use redb::TableDefinition;
 use sonic_rs;
 
 // Re-export types from split modules so internal `use super::types::*` still works.
 pub use super::auth_types::*;
+pub use super::collection_constraints::{
+    BalancedConstraintDef, CheckConstraintDef, EventDefinition, FieldDefinition, LegalHold,
+    MaterializedSumDef, PeriodLockDef, StateTransitionDef, TransitionCheckDef, TransitionRule,
+};
 pub use super::system_catalog::SystemCatalog;
 
 // ── Table definitions ─────────────────────────────────────────────────
@@ -200,6 +207,17 @@ pub struct StoredCollection {
     pub name: String,
     pub owner: String,
     pub created_at: u64,
+    /// Monotonic descriptor version. Starts at 1 on create, bumped on
+    /// every `PutCollection` apply (which doubles as alter). A value
+    /// of `0` is the sentinel for "legacy entry written before
+    /// `DISTRIBUTED_CATALOG_VERSION >= 3`, version unknown" and
+    /// forces resolvers to re-fetch.
+    #[serde(default)]
+    pub descriptor_version: u64,
+    /// Hybrid Logical Clock timestamp assigned by the metadata
+    /// applier at commit time. Strictly monotonic per descriptor.
+    #[serde(default)]
+    pub modification_hlc: Hlc,
     /// Optional field type declarations. Empty = schemaless.
     #[serde(default)]
     pub fields: Vec<(String, String)>,
@@ -262,6 +280,11 @@ pub struct StoredCollection {
 
 impl StoredCollection {
     /// Create a minimal collection entry (schemaless document, no fields).
+    ///
+    /// `descriptor_version` and `modification_hlc` are left at their
+    /// defaults (`0` / `Hlc::ZERO`) and assigned by the metadata
+    /// applier at commit time. Callers must NOT set them manually;
+    /// the cluster-wide applied sequence determines the stamp.
     pub fn new(tenant_id: u32, name: &str, owner: &str) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -272,6 +295,8 @@ impl StoredCollection {
             name: name.to_string(),
             owner: owner.to_string(),
             created_at: now,
+            descriptor_version: 0,
+            modification_hlc: Hlc::ZERO,
             fields: Vec::new(),
             field_defs: Vec::new(),
             event_defs: Vec::new(),
@@ -303,61 +328,7 @@ impl StoredCollection {
     }
 }
 
-// ── Field + event definitions ─────────────────────────────────────────
-
-/// Extended field definition supporting DEFAULT, VALUE, ASSERT, and TYPE constraints.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-pub struct FieldDefinition {
-    pub name: String,
-    /// Type constraint: "int", "float", "string", etc. Empty = any.
-    #[serde(default)]
-    pub field_type: String,
-    /// Default expression (evaluated when field is missing on insert).
-    #[serde(default)]
-    pub default_expr: String,
-    /// Computed value expression (evaluated on every read, not stored).
-    #[serde(default)]
-    pub value_expr: String,
-    /// Assertion expression (must evaluate to true for writes to succeed).
-    #[serde(default)]
-    pub assert_expr: String,
-    /// Whether the field is read-only (cannot be set by user).
-    #[serde(default)]
-    pub readonly: bool,
-    /// Sequence name for auto-generated values on INSERT.
-    #[serde(default)]
-    pub sequence_name: Option<String>,
-    /// If true, this field is a stored generated column (materialized on write).
-    /// `value_expr` contains the serialized SqlExpr for write-time evaluation.
-    #[serde(default)]
-    pub is_generated: bool,
-    /// Column names this generated column depends on (for UPDATE recomputation).
-    #[serde(default)]
-    pub generated_deps: Vec<String>,
-}
-
-/// Table event/trigger definition.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-pub struct EventDefinition {
-    pub name: String,
-    pub collection: String,
-    pub when_condition: String,
-    pub then_action: String,
-}
+// ── Materialized view metadata ────────────────────────────────────────
 
 /// A materialized view: strict → columnar CDC bridge.
 #[derive(
@@ -377,142 +348,14 @@ pub struct StoredMaterializedView {
     pub refresh_mode: String,
     pub owner: String,
     pub created_at: u64,
+    /// Monotonic descriptor version. See [`StoredCollection::descriptor_version`].
+    #[serde(default)]
+    pub descriptor_version: u64,
+    /// HLC assigned by the metadata applier. See [`StoredCollection::modification_hlc`].
+    #[serde(default)]
+    pub modification_hlc: Hlc,
 }
 
 fn default_refresh_mode() -> String {
     "auto".into()
-}
-
-// ── Constraint types ──────────────────────────────────────────────────
-
-/// Double-entry balance constraint.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct BalancedConstraintDef {
-    pub group_key_column: String,
-    pub debit_value: String,
-    pub credit_value: String,
-    pub amount_column: String,
-    pub entry_type_column: String,
-}
-
-/// Period lock: binds a period column to a reference table for status checks.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct PeriodLockDef {
-    pub period_column: String,
-    pub ref_table: String,
-    pub ref_pk: String,
-    pub status_column: String,
-    pub allowed_statuses: Vec<String>,
-}
-
-/// A legal hold tag preventing deletion.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct LegalHold {
-    pub tag: String,
-    pub created_at: u64,
-    pub created_by: String,
-}
-
-/// State transition constraint: column value can only change along declared paths.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct StateTransitionDef {
-    pub name: String,
-    pub column: String,
-    pub transitions: Vec<TransitionRule>,
-}
-
-/// A single allowed state transition, optionally guarded by a role.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct TransitionRule {
-    pub from: String,
-    pub to: String,
-    pub required_role: Option<String>,
-}
-
-/// Transition check predicate: evaluated on UPDATE with OLD and NEW access.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct TransitionCheckDef {
-    pub name: String,
-    pub predicate: crate::bridge::expr_eval::SqlExpr,
-}
-
-/// General CHECK constraint: SQL boolean expression evaluated on the Control Plane
-/// before writes are dispatched to the Data Plane. May contain subqueries.
-///
-/// Stored as raw SQL so subqueries can be re-planned at evaluation time.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct CheckConstraintDef {
-    /// Constraint name (user-chosen or auto-generated).
-    pub name: String,
-    /// Raw SQL boolean expression (may contain `NEW.field` references and subqueries).
-    pub check_sql: String,
-    /// Whether this CHECK contains a subquery (SELECT). Precomputed at DDL time
-    /// to skip the heavier evaluation path for simple expressions.
-    pub has_subquery: bool,
-}
-
-/// Materialized sum: on INSERT to source, atomically add value_expr to target balance.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
-pub struct MaterializedSumDef {
-    pub target_collection: String,
-    pub target_column: String,
-    pub source_collection: String,
-    pub join_column: String,
-    pub value_expr: crate::bridge::expr_eval::SqlExpr,
 }

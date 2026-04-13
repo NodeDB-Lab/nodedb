@@ -5,7 +5,7 @@
 //! If the transition requires a role, verifies the user holds it.
 
 use crate::bridge::envelope::ErrorCode;
-use crate::control::security::catalog::types::StateTransitionDef;
+use crate::control::security::catalog::StateTransitionDef;
 
 /// Check all state transition constraints for an UPDATE operation.
 ///
@@ -82,7 +82,7 @@ pub fn check_state_transitions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::security::catalog::types::TransitionRule;
+    use crate::control::security::catalog::TransitionRule;
 
     fn invoice_constraint() -> StateTransitionDef {
         StateTransitionDef {

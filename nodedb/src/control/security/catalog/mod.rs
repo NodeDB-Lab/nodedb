@@ -5,6 +5,7 @@ pub mod auth_users;
 pub mod blacklist;
 pub mod change_streams;
 pub mod checkpoints;
+pub mod collection_constraints;
 pub mod collections;
 pub mod column_stats;
 pub mod consumer_groups;
@@ -36,6 +37,10 @@ pub use auth_types::{
     StoredApiKey, StoredAuditEntry, StoredAuthUser, StoredBlacklistEntry, StoredOwner,
     StoredPermission, StoredRole, StoredTenant, StoredUser,
 };
+pub use collection_constraints::{
+    BalancedConstraintDef, CheckConstraintDef, EventDefinition, FieldDefinition, LegalHold,
+    MaterializedSumDef, PeriodLockDef, StateTransitionDef, TransitionCheckDef, TransitionRule,
+};
 pub use function_types::{
     FunctionLanguage, FunctionParam, FunctionSecurity, FunctionVolatility, StoredFunction,
 };
@@ -46,8 +51,4 @@ pub use scopes::{StoredScope, StoredScopeGrant};
 pub use sequence_types::{SequenceState, StoredSequence};
 pub use system_catalog::SystemCatalog;
 pub use trigger_types::StoredTrigger;
-pub use types::{
-    BalancedConstraintDef, LegalHold, MaterializedSumDef, PeriodLockDef, StateTransitionDef,
-    StoredCollection, StoredMaterializedView, TransitionCheckDef, TransitionRule, catalog_err,
-    owner_key,
-};
+pub use types::{StoredCollection, StoredMaterializedView, catalog_err, owner_key};
