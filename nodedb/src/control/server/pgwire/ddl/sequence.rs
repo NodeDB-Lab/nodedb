@@ -173,20 +173,55 @@ pub fn alter_sequence(
                 .unwrap_or(1)
         };
 
-        state
+        // RESTART touches the sequence *state* (current counter),
+        // not the definition. Propose a `PutSequenceState` entry
+        // through the metadata raft group so every node's
+        // in-memory registry converges on the new counter value.
+        // The proposing node applies locally via the applier too,
+        // so we don't need a pre-local-restart.
+        let def = state
             .sequence_registry
-            .restart(tenant_id, &name, restart_value)
+            .get_def(tenant_id, &name)
+            .ok_or_else(|| {
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "42P01".to_owned(),
+                    format!("sequence \"{name}\" does not exist"),
+                )))
+            })?;
+        let new_state = crate::control::security::catalog::sequence_types::SequenceState {
+            tenant_id,
+            name: name.clone(),
+            current_value: restart_value,
+            is_called: false,
+            epoch: def.epoch,
+            period_key: String::new(),
+        };
+        let entry =
+            crate::control::catalog_entry::CatalogEntry::PutSequenceState(Box::new(new_state));
+        let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
             .map_err(|e| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
-                    "22023".to_owned(),
+                    "XX000".to_owned(),
                     e.to_string(),
                 )))
             })?;
-
-        // Persist updated state.
-        if let Some(catalog) = state.credentials.catalog() {
-            state.sequence_registry.persist_all(catalog);
+        if log_index == 0 {
+            // Single-node fallback.
+            state
+                .sequence_registry
+                .restart(tenant_id, &name, restart_value)
+                .map_err(|e| {
+                    PgWireError::UserError(Box::new(ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "22023".to_owned(),
+                        e.to_string(),
+                    )))
+                })?;
+            if let Some(catalog) = state.credentials.catalog() {
+                state.sequence_registry.persist_all(catalog);
+            }
         }
 
         return Ok(vec![Response::Execution(Tag::new("ALTER SEQUENCE"))]);
@@ -208,16 +243,31 @@ pub fn alter_sequence(
                         format!("invalid FORMAT: {e}"),
                     )))
                 })?;
-            // Update the stored definition with new format.
+            // FORMAT alters the stored *definition*, not the
+            // counter — ship the whole updated `StoredSequence`
+            // through `PutSequence` and let every node's applier
+            // replace it in redb + registry via post_apply.
             if let Some(mut def) = state.sequence_registry.get_def(tenant_id, &name) {
                 def.format_template = Some(tokens);
-                // Re-persist to catalog.
-                if let Some(catalog) = state.credentials.catalog() {
-                    let _ = catalog.put_sequence(&def);
+                let entry =
+                    crate::control::catalog_entry::CatalogEntry::PutSequence(Box::new(def.clone()));
+                let log_index =
+                    crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+                        .map_err(|e| {
+                            PgWireError::UserError(Box::new(ErrorInfo::new(
+                                "ERROR".to_owned(),
+                                "XX000".to_owned(),
+                                e.to_string(),
+                            )))
+                        })?;
+                if log_index == 0 {
+                    // Single-node fallback.
+                    if let Some(catalog) = state.credentials.catalog() {
+                        let _ = catalog.put_sequence(&def);
+                    }
+                    let _ = state.sequence_registry.remove(tenant_id, &name);
+                    let _ = state.sequence_registry.create(def);
                 }
-                // Re-create in registry with updated def.
-                let _ = state.sequence_registry.remove(tenant_id, &name);
-                let _ = state.sequence_registry.create(def);
             }
             return Ok(vec![Response::Execution(Tag::new("ALTER SEQUENCE"))]);
         }

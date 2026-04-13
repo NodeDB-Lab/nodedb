@@ -99,9 +99,19 @@ pub fn create_function(
         created_at: now,
     };
 
-    catalog
-        .put_function(&stored)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    // Propose through the metadata raft group. Every node's applier
+    // writes the function record to local redb and clears the
+    // parsed block cache so subsequent calls re-parse the new body.
+    // (The WASM binary itself, if any, stays on the proposing node
+    // only until a future batch adds replicated WASM distribution.)
+    let entry = crate::control::catalog_entry::CatalogEntry::PutFunction(Box::new(stored.clone()));
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .put_function(&stored)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    }
 
     // Set function ownership so the permission system can check it.
     state

@@ -100,11 +100,20 @@ pub fn create_trigger(
         created_at: now,
     };
 
-    catalog
-        .put_trigger(&stored)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
-
-    state.trigger_registry.register(stored.clone());
+    // Propose through the metadata raft group. On every node the
+    // applier decodes `CatalogEntry::PutTrigger`, writes the record
+    // to local redb, and calls `trigger_registry.register` so the
+    // trigger fires on every node's DML paths immediately.
+    let entry = crate::control::catalog_entry::CatalogEntry::PutTrigger(Box::new(stored.clone()));
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        // Single-node fallback: write directly and register.
+        catalog
+            .put_trigger(&stored)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        state.trigger_registry.register(stored.clone());
+    }
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

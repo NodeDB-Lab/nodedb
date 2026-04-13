@@ -25,26 +25,41 @@ pub fn drop_trigger(
         .as_ref()
         .ok_or_else(|| sqlstate_error("XX000", "system catalog not available"))?;
 
-    let existed = catalog
-        .delete_trigger(tenant_id, &name)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
-
-    if !existed && !if_exists {
+    // Check existence before proposing (so `IF EXISTS` + missing
+    // trigger returns a clean success without touching raft).
+    let exists_before = catalog
+        .get_trigger(tenant_id, &name)
+        .map_err(|e| sqlstate_error("XX000", &format!("catalog read: {e}")))?
+        .is_some();
+    if !exists_before && !if_exists {
         return Err(sqlstate_error(
             "42704",
             &format!("trigger '{name}' does not exist"),
         ));
     }
-
-    if existed {
-        state.trigger_registry.unregister(tenant_id, &name);
-        state.audit_record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(identity.tenant_id),
-            &identity.username,
-            &format!("DROP TRIGGER {name}"),
-        );
+    if !exists_before {
+        return Ok(vec![Response::Execution(Tag::new("DROP TRIGGER"))]);
     }
+
+    let entry = crate::control::catalog_entry::CatalogEntry::DeleteTrigger {
+        tenant_id,
+        name: name.clone(),
+    };
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .delete_trigger(tenant_id, &name)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        state.trigger_registry.unregister(tenant_id, &name);
+    }
+
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(identity.tenant_id),
+        &identity.username,
+        &format!("DROP TRIGGER {name}"),
+    );
 
     Ok(vec![Response::Execution(Tag::new("DROP TRIGGER"))])
 }

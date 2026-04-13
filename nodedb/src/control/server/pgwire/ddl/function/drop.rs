@@ -72,9 +72,20 @@ pub fn drop_function(
     }
 
     // Delete function definition + dependencies + ownership.
-    catalog
-        .delete_function(tenant_id, &name)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    // Replicate the deletion through the metadata raft group;
+    // followers' applier clears their block cache and deletes
+    // the record from their local redb.
+    let entry = crate::control::catalog_entry::CatalogEntry::DeleteFunction {
+        tenant_id,
+        name: name.clone(),
+    };
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .delete_function(tenant_id, &name)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    }
     let _ = catalog.delete_dependencies("function", tenant_id, &name);
 
     state.audit_record(
