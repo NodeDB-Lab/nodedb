@@ -7,9 +7,9 @@
 //! has advanced the applied watermark to at least the proposed index.
 //!
 //! This is the stepping stone for CRDB-style "DDL is done when every
-//! node has applied the entry". In batch 1b we wait for **this node**'s
-//! applied watermark; follower-acknowledgement waits are Phase B
-//! (descriptor leases).
+//! node has applied the entry". Today we wait for **this node**'s
+//! applied watermark; follower-acknowledgement waits layer on top via
+//! the descriptor lease path.
 //!
 //! The watcher uses `std::sync::Condvar` so it is safe to call from
 //! synchronous pgwire handler code without entering a tokio reactor.

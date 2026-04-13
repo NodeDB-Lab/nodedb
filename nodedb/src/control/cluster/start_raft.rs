@@ -58,7 +58,7 @@ pub fn start_raft(
         metadata_applier_concrete.clone();
 
     // LocalForwarder stays as the current forwarded-query executor
-    // (LEGACY path, scheduled for deletion in Phase C).
+    // (LEGACY path, scheduled for future deletion).
     let forwarder = Arc::new(crate::control::LocalForwarder::new(shared.clone()));
 
     let tick_interval = Duration::from_millis(transport_tuning.raft_tick_interval_ms);
@@ -88,9 +88,8 @@ pub fn start_raft(
     }
 
     // Publish the raft loop handle into SharedState so the metadata
-    // proposer (and future Phase C gateway) can reach it. The handle
-    // is type-erased behind a trait object to keep the SharedState
-    // field concrete.
+    // proposer can reach it. The handle is type-erased behind a
+    // trait object to keep the SharedState field concrete.
     let proposer_handle: Arc<dyn crate::control::metadata_proposer::MetadataRaftHandle> =
         Arc::new(crate::control::metadata_proposer::RaftLoopProposerHandle::new(raft_loop.clone()));
     if shared.metadata_raft.set(proposer_handle).is_err() {

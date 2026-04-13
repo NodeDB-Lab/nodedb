@@ -137,9 +137,9 @@ pub enum CatalogEntry {
     // ── Tenant ─────────────────────────────────────────────────────
     /// Upsert a tenant identity record. Quotas are NOT part of
     /// `StoredTenant`; they live in the in-memory `TenantStore` and
-    /// quota replication is intentionally out of scope for batch 1k.
-    /// Post-apply seeds default quota on every node so reads work
-    /// immediately after creation.
+    /// quota replication is handled separately. Post-apply seeds
+    /// default quota on every node so reads work immediately after
+    /// creation.
     PutTenant(Box<StoredTenant>),
     /// Hard-delete a tenant identity record. Tenant data is not
     /// purged — that is a separate `PURGE TENANT CONFIRM` Data

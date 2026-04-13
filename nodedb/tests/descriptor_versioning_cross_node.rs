@@ -1,12 +1,12 @@
-//! End-to-end cluster tests for descriptor versioning (Phase B.1).
+//! End-to-end cluster tests for descriptor versioning.
 //!
 //! Asserts that every `Stored*` descriptor written through the
 //! metadata raft group is stamped with a monotonic
 //! `descriptor_version` and a strictly-advancing `modification_hlc`,
 //! and that every node observes the same stamp once the entry has
-//! propagated. This is the load-bearing invariant for Phase B
-//! (lease drain + execution-time version check) — without it, the
-//! later phases have no version to lease against.
+//! propagated. This is the load-bearing invariant for descriptor
+//! lease drain and execution-time version checks — without it,
+//! there is no version to lease against.
 //!
 //! The applier reads the prior persisted record under the same
 //! txn that writes the new one, increments by one (or assigns 1 on
@@ -56,7 +56,7 @@ async fn create_collection_stamps_version_one_on_every_node() {
     // because the stamp is computed locally by each node's
     // applier. What we DO assert is that every node sees
     // `descriptor_version == 1` and a non-zero HLC. Lease drain
-    // (Phase B.4) builds on the version, not the wall clock.
+    // builds on the version, not the wall clock.
     let stamps: Vec<_> = cluster
         .nodes
         .iter()

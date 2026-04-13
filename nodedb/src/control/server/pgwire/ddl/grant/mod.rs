@@ -1,7 +1,6 @@
 //! `GRANT` / `REVOKE` DDL handlers.
 //!
-//! Three sub-handlers, all migrated to the metadata raft path in
-//! batch 1l:
+//! Three sub-handlers, all driven through the metadata raft path:
 //!
 //! - `GRANT/REVOKE ROLE x TO/FROM user` — see [`role`]. Reuses the
 //!   existing `CatalogEntry::PutUser` variant via

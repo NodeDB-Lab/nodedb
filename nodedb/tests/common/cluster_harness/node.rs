@@ -421,8 +421,8 @@ impl TestClusterNode {
 
     /// Whether this node's `lease_drain` tracker currently holds
     /// an ACTIVE drain entry (not expired) for the given
-    /// `(descriptor_id, min_version)`. Used by the Phase B.4
-    /// drain tests to assert replicated drain state.
+    /// `(descriptor_id, min_version)`. Used by the drain tests
+    /// to assert replicated drain state.
     pub fn has_drain_for(
         &self,
         descriptor_id: &nodedb_cluster::DescriptorId,

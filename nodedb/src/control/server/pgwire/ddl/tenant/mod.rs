@@ -1,10 +1,8 @@
 //! Tenant DDL handlers.
 //!
-//! - [`create`] — `CREATE TENANT` (proposes `CatalogEntry::PutTenant`
-//!   in phase 1k.6 to fix the pre-existing persistence bug).
+//! - [`create`] — `CREATE TENANT` (proposes `CatalogEntry::PutTenant`).
 //! - [`alter`] — `ALTER TENANT SET QUOTA` (in-memory; quota is not
-//!   part of `StoredTenant` and replication of quotas is intentionally
-//!   out of scope for batch 1k).
+//!   part of `StoredTenant` — quota replication is a separate concern).
 //! - [`drop`] — `DROP TENANT` (proposes `DeleteTenant`).
 //! - [`purge`] — `PURGE TENANT <id> CONFIRM` (Data Plane meta op).
 //! - [`show`] — `SHOW TENANT USAGE` / `SHOW TENANT QUOTA` reads.

@@ -18,7 +18,7 @@
 //!    log index on success.
 //! 3. If this node is NOT the leader, returns
 //!    `Error::Config { detail: "metadata propose: not leader ..." }`.
-//!    Phase C gateway-side redirection will make this transparent.
+//!    Gateway-side redirection will make this transparent.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -157,7 +157,7 @@ pub fn propose_catalog_entry_with_timeout(
         }
     }
 
-    // Phase B.4 drain: for `Put*` variants that carry
+    // Drain gate: for `Put*` variants that carry
     // `descriptor_version`, wait until all prior-version leases
     // have drained before committing the new descriptor. Reads
     // the prior version from the local `SystemCatalog` and

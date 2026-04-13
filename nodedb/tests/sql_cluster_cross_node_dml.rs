@@ -1,10 +1,8 @@
 //! End-to-end cluster test: CREATE / INSERT / SELECT across 3 pgwire
 //! clients, one per node.
 //!
-//! This is the acceptance gate for batch 1d / Phase A per
-//! `resource/SQL_CLUSTER_CHECKLIST.md`. It replays the exact
-//! production failure mode from the DO deployment that motivated
-//! this checklist:
+//! Acceptance gate for the replicated catalog path. Replays the
+//! production failure mode that motivated it:
 //!
 //! > CREATE COLLECTION on node 1, SELECT on node 2 → "unknown table"
 //!

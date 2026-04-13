@@ -1,4 +1,4 @@
-//! End-to-end cluster tests for descriptor lease drain (Phase B.4).
+//! End-to-end cluster tests for descriptor lease drain.
 //!
 //! Covers the full drain lifecycle on a real 3-node cluster:
 //!

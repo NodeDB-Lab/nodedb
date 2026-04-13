@@ -2,8 +2,7 @@
 //!
 //! `PutTenant` seeds the in-memory `TenantStore` with default quota
 //! so reads work immediately on every node. Quota replication itself
-//! is not part of `StoredTenant` — that is a separate (out-of-scope)
-//! feature, see `SQL_CLUSTER_CHECKLIST.md` batch 1k.
+//! is not part of `StoredTenant` — that is a separate concern.
 //!
 //! `DeleteTenant` removes the in-memory quota entry. Tenant data is
 //! left in place — operators must call `PURGE TENANT <id> CONFIRM`

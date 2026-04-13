@@ -1,4 +1,4 @@
-//! Descriptor lease drain state (Phase B.4).
+//! Descriptor lease drain state.
 //!
 //! While a descriptor is being drained, any new lease acquire at
 //! `version <= up_to_version` must be rejected cluster-wide so the

@@ -1,4 +1,4 @@
-//! Descriptor lease drain proposer flow (Phase B.4).
+//! Descriptor lease drain proposer flow.
 //!
 //! Wraps the replicated `DescriptorDrainStart` / `DescriptorDrainEnd`
 //! raft path with a synchronous wait loop:
@@ -29,7 +29,7 @@
 //! `cluster_version_state.can_activate_feature(DESCRIPTOR_DRAIN_VERSION)`
 //! and returns `Ok(())` immediately in compat mode — the same
 //! "degrade to no drain" fallback catalog DDL uses. Mixed clusters
-//! behave like pre-B.4 NodeDB: DDL proceeds without drain safety.
+//! behave without drain safety until all nodes are upgraded.
 
 use std::time::{Duration, Instant};
 

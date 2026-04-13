@@ -87,10 +87,10 @@ pub fn force_refresh_lease(
     version: u64,
     duration: Duration,
 ) -> Result<DescriptorLease, Error> {
-    // Phase B.4 drain gate: reject new acquires at versions
-    // being drained by an in-flight DDL. The caller is supposed
-    // to retry with the bumped version once the DDL commits and
-    // publishes the new descriptor_version.
+    // Drain gate: reject new acquires at versions being drained
+    // by an in-flight DDL. The caller is supposed to retry with
+    // the bumped version once the DDL commits and publishes the
+    // new descriptor_version.
     //
     // Wall-clock comparison, not `hlc_clock.peek()`, for the
     // same reason the renewal loop uses wall clock: peek is

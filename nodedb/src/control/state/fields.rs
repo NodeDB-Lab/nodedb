@@ -302,7 +302,7 @@ pub struct SharedState {
     /// before every stamp so cross-node causality is preserved.
     pub hlc_clock: Arc<nodedb_types::HlcClock>,
 
-    /// Replicated descriptor lease drain state (Phase B.4).
+    /// Replicated descriptor lease drain state.
     /// Written by the metadata applier on `DescriptorDrainStart`
     /// / `DescriptorDrainEnd` raft entries (and implicitly
     /// cleared on successful `Put*` apply). Read by the lease

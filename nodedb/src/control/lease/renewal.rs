@@ -20,7 +20,7 @@
 //! back. The `spawn` constructor returns `None` in that case so
 //! the embedded usage path doesn't carry an idle tokio task.
 //!
-//! Phase B.4 (DDL drain) reads `metadata_cache.leases` to decide
+//! The DDL drain gate reads `metadata_cache.leases` to decide
 //! when a `Put*` of a new descriptor version may commit. The
 //! renewal loop is what keeps that map populated past initial
 //! acquisition.

@@ -56,7 +56,7 @@ pub enum MetadataEntry {
         descriptor_ids: Vec<DescriptorId>,
     },
 
-    // ── Descriptor lease drain (Phase B.4) ────────────────────────────
+    // ── Descriptor lease drain ────────────────────────────────────────
     /// Begin draining leases on a descriptor. While a drain entry
     /// is active, any `acquire_descriptor_lease` at
     /// `version <= up_to_version` must be rejected cluster-wide so

@@ -1,8 +1,8 @@
 //! `ALTER TENANT <id> SET QUOTA <field> = <value>` handler.
 //!
 //! Tenant quotas live in the in-memory `TenantStore` and are not part
-//! of `StoredTenant`. Quota replication is intentionally out of scope
-//! for batch 1k — see `SQL_CLUSTER_CHECKLIST.md`.
+//! of `StoredTenant`. Quota replication is handled separately from
+//! the tenant identity record.
 
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::PgWireResult;

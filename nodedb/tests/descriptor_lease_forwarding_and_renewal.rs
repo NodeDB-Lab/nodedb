@@ -1,5 +1,5 @@
 //! End-to-end tests for descriptor lease leader-forwarding and the
-//! renewal loop (Phase B.3 — part 1).
+//! renewal loop.
 //!
 //! Two focused cases on a 3-node cluster:
 //!
