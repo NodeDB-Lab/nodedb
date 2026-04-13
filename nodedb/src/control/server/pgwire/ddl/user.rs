@@ -310,26 +310,49 @@ pub fn drop_user(
     };
 
     if dropped {
-        // Reassign owned collections to the tenant_admin of the user's tenant.
+        // Reassign owned collections to the tenant_admin of the
+        // user's tenant. Mutating the parent `StoredCollection`
+        // and re-proposing `PutCollection` is the durable path —
+        // a bare `PutOwner` would be silently overwritten the
+        // next time anyone re-proposed the parent (see
+        // `pgwire/ddl/ownership.rs` for the same pattern).
         let admin_name = format!("{}_admin", user_tenant.as_u32());
         let grants = state.permissions.grants_for(&format!("user:{username}"));
-        let catalog = state.credentials.catalog();
-        for grant in &grants {
-            // Find collections owned by this user and reassign.
-            if let Some(owner) = extract_collection_from_target(&grant.target)
-                && state
+        if let Some(catalog) = state.credentials.catalog() {
+            for grant in &grants {
+                let Some(owner_obj) = extract_collection_from_target(&grant.target) else {
+                    continue;
+                };
+                if state
                     .permissions
-                    .get_owner("collection", user_tenant, owner)
+                    .get_owner("collection", user_tenant, owner_obj)
                     .as_deref()
-                    == Some(username)
-            {
-                let _ = state.permissions.set_owner(
-                    "collection",
-                    user_tenant,
-                    owner,
-                    &admin_name,
-                    catalog.as_ref(),
-                );
+                    != Some(username)
+                {
+                    continue;
+                }
+                let mut stored = match catalog.get_collection(user_tenant.as_u32(), owner_obj) {
+                    Ok(Some(c)) => c,
+                    _ => continue,
+                };
+                stored.owner = admin_name.clone();
+                let entry = crate::control::catalog_entry::CatalogEntry::PutCollection(Box::new(
+                    stored.clone(),
+                ));
+                if let Ok(idx) =
+                    crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+                    && idx == 0
+                {
+                    let _ = catalog.put_collection(&stored);
+                    state.permissions.install_replicated_owner(
+                        &crate::control::security::catalog::StoredOwner {
+                            object_type: "collection".into(),
+                            object_name: stored.name.clone(),
+                            tenant_id: stored.tenant_id,
+                            owner_username: stored.owner.clone(),
+                        },
+                    );
+                }
             }
         }
 

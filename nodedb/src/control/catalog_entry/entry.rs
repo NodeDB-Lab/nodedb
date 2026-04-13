@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::security::catalog::{
     StoredCollection, StoredMaterializedView, StoredRlsPolicy,
-    auth_types::{StoredApiKey, StoredRole, StoredTenant, StoredUser},
+    auth_types::{
+        StoredApiKey, StoredOwner, StoredPermission, StoredRole, StoredTenant, StoredUser,
+    },
     function_types::StoredFunction,
     procedure_types::StoredProcedure,
     sequence_types::{SequenceState, StoredSequence},
@@ -156,6 +158,36 @@ pub enum CatalogEntry {
         collection: String,
         name: String,
     },
+
+    // ── Permission grant ───────────────────────────────────────────
+    /// Upsert an explicit permission grant
+    /// (`GRANT <perm> ON <target> TO <grantee>`). The catalog row is
+    /// the authoritative copy on every node; the in-memory
+    /// `PermissionStore.grants` set is rebuilt from it on apply.
+    PutPermission(Box<StoredPermission>),
+    /// Delete a permission grant by `(target, grantee, permission)`.
+    /// `permission` is the lowercase canonical name
+    /// (`read|write|create|drop|alter|admin|monitor|execute`).
+    DeletePermission {
+        target: String,
+        grantee: String,
+        permission: String,
+    },
+
+    // ── Object ownership ───────────────────────────────────────────
+    /// Upsert an ownership record. Used by handlers whose object
+    /// has no replicated parent variant (indexes, spatial indexes,
+    /// `ALTER OBJECT OWNER`). Objects that already ship a parent
+    /// `Stored*` carrying an `owner` field replicate ownership via
+    /// the parent's post_apply instead — this variant is only for
+    /// the orphan path.
+    PutOwner(Box<StoredOwner>),
+    /// Delete an ownership record by `(object_type, tenant_id, object_name)`.
+    DeleteOwner {
+        object_type: String,
+        tenant_id: u32,
+        object_name: String,
+    },
 }
 
 impl CatalogEntry {
@@ -190,6 +222,10 @@ impl CatalogEntry {
             Self::DeleteTenant { .. } => "delete_tenant",
             Self::PutRlsPolicy(_) => "put_rls_policy",
             Self::DeleteRlsPolicy { .. } => "delete_rls_policy",
+            Self::PutPermission(_) => "put_permission",
+            Self::DeletePermission { .. } => "delete_permission",
+            Self::PutOwner(_) => "put_owner",
+            Self::DeleteOwner { .. } => "delete_owner",
         }
     }
 }

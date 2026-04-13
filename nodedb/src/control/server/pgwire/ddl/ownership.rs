@@ -1,6 +1,8 @@
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::PgWireResult;
 
+use crate::control::catalog_entry::CatalogEntry;
+use crate::control::metadata_proposer::propose_catalog_entry;
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
@@ -61,17 +63,45 @@ pub fn alter_collection_owner(
         ));
     }
 
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .set_owner(
-            "collection",
-            identity.tenant_id,
-            collection,
-            new_owner,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    // Mutate the parent `StoredCollection` and re-propose it: the
+    // `OWNERS` redb table is canonical at boot time
+    // (`PermissionStore::load_from`), but the `post_apply` for
+    // `PutCollection` rewrites it from `stored.owner` on every
+    // node — so the only way to keep an owner change durable
+    // through subsequent ALTER COLLECTION calls is to also mutate
+    // the parent record. A separate `PutOwner` would be silently
+    // overwritten the next time anyone re-proposed the collection.
+    let catalog_ref = state.credentials.catalog();
+    let catalog = catalog_ref
+        .as_ref()
+        .ok_or_else(|| sqlstate_error("XX000", "catalog unavailable for ALTER COLLECTION OWNER"))?;
+    let mut stored = match catalog.get_collection(identity.tenant_id.as_u32(), collection) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Err(sqlstate_error(
+                "42P01",
+                &format!("collection '{collection}' does not exist"),
+            ));
+        }
+        Err(e) => return Err(sqlstate_error("XX000", &format!("catalog read: {e}"))),
+    };
+    stored.owner = new_owner.to_string();
+    let entry = CatalogEntry::PutCollection(Box::new(stored.clone()));
+    let log_index = propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .put_collection(&stored)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        state.permissions.install_replicated_owner(
+            &crate::control::security::catalog::StoredOwner {
+                object_type: "collection".into(),
+                object_name: stored.name.clone(),
+                tenant_id: stored.tenant_id,
+                owner_username: stored.owner.clone(),
+            },
+        );
+    }
 
     state.audit_record(
         AuditEvent::PrivilegeChange,

@@ -50,18 +50,13 @@ pub fn create_spatial_index(
         let _precision = 6;
     }
 
-    // Store index metadata in catalog.
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .set_owner(
-            "spatial_index",
-            tenant_id,
-            index_name,
-            &identity.username,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    super::owner_propose::propose_owner(
+        state,
+        "spatial_index",
+        tenant_id,
+        index_name,
+        &identity.username,
+    )?;
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

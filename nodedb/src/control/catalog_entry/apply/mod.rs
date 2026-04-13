@@ -12,6 +12,8 @@ pub mod change_stream;
 pub mod collection;
 pub mod function;
 pub mod materialized_view;
+pub mod owner;
+pub mod permission;
 pub mod procedure;
 pub mod rls;
 pub mod role;
@@ -77,5 +79,17 @@ pub fn apply_to(entry: &CatalogEntry, catalog: &SystemCatalog) {
             collection,
             name,
         } => rls::delete(*tenant_id, collection, name, catalog),
+        CatalogEntry::PutPermission(stored) => permission::put(stored, catalog),
+        CatalogEntry::DeletePermission {
+            target,
+            grantee,
+            permission: perm,
+        } => permission::delete(target, grantee, perm, catalog),
+        CatalogEntry::PutOwner(stored) => owner::put(stored, catalog),
+        CatalogEntry::DeleteOwner {
+            object_type,
+            tenant_id,
+            object_name,
+        } => owner::delete(object_type, *tenant_id, object_name, catalog),
     }
 }

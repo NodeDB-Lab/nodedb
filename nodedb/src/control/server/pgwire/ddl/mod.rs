@@ -32,6 +32,7 @@ pub mod match_ops;
 pub mod materialized_view;
 pub mod metering_ddl;
 pub mod org_ddl;
+pub mod owner_propose;
 pub mod ownership;
 pub(crate) mod parse_utils;
 pub mod period_lock;

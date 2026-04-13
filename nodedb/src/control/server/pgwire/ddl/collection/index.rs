@@ -142,16 +142,13 @@ pub fn create_index(
         identity.username.clone()
     };
 
-    state
-        .permissions
-        .set_owner(
-            "index",
-            tenant_id,
-            &index_name,
-            &index_owner,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    super::super::owner_propose::propose_owner(
+        state,
+        "index",
+        tenant_id,
+        &index_name,
+        &index_owner,
+    )?;
 
     let kind = if is_unique { "unique index" } else { "index" };
     let ci = if case_insensitive {
@@ -203,12 +200,7 @@ pub fn drop_index(
         ));
     }
 
-    // Remove ownership record.
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .remove_owner("index", tenant_id, index_name, catalog.as_ref())
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    super::super::owner_propose::propose_delete_owner(state, "index", tenant_id, index_name)?;
 
     state.audit_record(
         AuditEvent::AdminAction,

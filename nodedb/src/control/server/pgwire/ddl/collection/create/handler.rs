@@ -167,18 +167,11 @@ pub fn create_collection(
             .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
     }
 
-    // Set ownership.
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .set_owner(
-            "collection",
-            tenant_id,
-            name,
-            &identity.username,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    // Ownership replicates through the parent `PutCollection`
+    // post_apply on every node — handlers no longer call
+    // `set_owner` directly here. The owner field is already
+    // carried in `coll.owner` and installed in
+    // `post_apply::collection::put`.
 
     // If vector fields are declared, log their auto-configuration.
     // SetVectorParams is dispatched later when the first insert

@@ -111,17 +111,10 @@ pub fn create_function(
             .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
     }
 
-    // Set function ownership so the permission system can check it.
-    state
-        .permissions
-        .set_owner(
-            "function",
-            identity.tenant_id,
-            &stored.name,
-            &identity.username,
-            Some(catalog),
-        )
-        .map_err(|e| sqlstate_error("XX000", &format!("set ownership: {e}")))?;
+    // Ownership replicates through the parent `PutFunction`
+    // post_apply on every node — `stored.owner` carries the
+    // creator and `post_apply::function::put` installs the owner
+    // record cluster-wide.
 
     // Extract and store dependencies (referenced functions in the body).
     let deps = extract_dependencies(&stored);

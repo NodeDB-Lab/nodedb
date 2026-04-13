@@ -10,6 +10,13 @@ use crate::control::security::catalog::sequence_types::{SequenceState, StoredSeq
 use crate::control::state::SharedState;
 
 pub fn put(stored: StoredSequence, shared: Arc<SharedState>) {
+    super::owner::install_from_parent(
+        "sequence",
+        stored.tenant_id,
+        &stored.name,
+        &stored.owner,
+        &shared,
+    );
     if let Err(e) = shared.sequence_registry.create(stored.clone()) {
         debug!(
             sequence = %stored.name,
@@ -29,6 +36,9 @@ pub fn delete(tenant_id: u32, name: String, shared: Arc<SharedState>) {
             "catalog_entry: sequence_registry remove (ignored)"
         );
     }
+    shared
+        .permissions
+        .install_replicated_remove_owner("sequence", tenant_id, &name);
 }
 
 pub fn put_state(state: SequenceState, shared: Arc<SharedState>) {

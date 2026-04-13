@@ -13,6 +13,8 @@ pub mod change_stream;
 pub mod collection;
 pub mod function;
 pub mod materialized_view;
+pub mod owner;
+pub mod permission;
 pub mod procedure;
 pub mod rls;
 pub mod role;
@@ -117,6 +119,26 @@ pub fn spawn_post_apply_side_effects(entry: CatalogEntry, shared: Arc<SharedStat
                 name,
             } => {
                 rls::delete(tenant_id, collection, name, shared);
+            }
+            CatalogEntry::PutPermission(stored) => {
+                permission::put(*stored, shared);
+            }
+            CatalogEntry::DeletePermission {
+                target,
+                grantee,
+                permission: perm,
+            } => {
+                permission::delete(target, grantee, perm, shared);
+            }
+            CatalogEntry::PutOwner(stored) => {
+                owner::put(*stored, shared);
+            }
+            CatalogEntry::DeleteOwner {
+                object_type,
+                tenant_id,
+                object_name,
+            } => {
+                owner::delete(object_type, tenant_id, object_name, shared);
             }
         }
     });

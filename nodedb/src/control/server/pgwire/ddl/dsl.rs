@@ -255,18 +255,13 @@ pub async fn create_vector_index(
     let ef_construction = find_param_usize(&upper_parts, "EF_CONSTRUCTION").unwrap_or(200);
     let dim = find_param_usize(&upper_parts, "DIM").unwrap_or(0);
 
-    // Store index metadata in catalog via ownership system.
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .set_owner(
-            "vector_index",
-            tenant_id,
-            index_name,
-            &identity.username,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    super::owner_propose::propose_owner(
+        state,
+        "vector_index",
+        tenant_id,
+        index_name,
+        &identity.username,
+    )?;
 
     // Dispatch SetParams to the Data Plane so vector_params is populated.
     // This enables schemaless collections to index vector fields on INSERT.
@@ -327,17 +322,13 @@ pub fn create_fulltext_index(
     let field = parts[6].trim_matches(|c| c == '(' || c == ')');
     let tenant_id = identity.tenant_id;
 
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .set_owner(
-            "fulltext_index",
-            tenant_id,
-            index_name,
-            &identity.username,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    super::owner_propose::propose_owner(
+        state,
+        "fulltext_index",
+        tenant_id,
+        index_name,
+        &identity.username,
+    )?;
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
@@ -401,17 +392,13 @@ pub fn create_search_index(
     for field in &fields {
         let index_name = format!("fts_{}_{}", collection, field);
 
-        let catalog = state.credentials.catalog();
-        state
-            .permissions
-            .set_owner(
-                "fulltext_index",
-                tenant_id,
-                &index_name,
-                &identity.username,
-                catalog.as_ref(),
-            )
-            .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+        super::owner_propose::propose_owner(
+            state,
+            "fulltext_index",
+            tenant_id,
+            &index_name,
+            &identity.username,
+        )?;
 
         state.audit_record(
             crate::control::security::audit::AuditEvent::AdminAction,
@@ -464,17 +451,13 @@ pub fn create_sparse_index(
 
     let tenant_id = identity.tenant_id;
 
-    let catalog = state.credentials.catalog();
-    state
-        .permissions
-        .set_owner(
-            "sparse_index",
-            tenant_id,
-            &index_name,
-            &identity.username,
-            catalog.as_ref(),
-        )
-        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    super::owner_propose::propose_owner(
+        state,
+        "sparse_index",
+        tenant_id,
+        &index_name,
+        &identity.username,
+    )?;
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
