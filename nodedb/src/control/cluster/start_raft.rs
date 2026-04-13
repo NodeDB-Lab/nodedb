@@ -43,14 +43,19 @@ pub fn start_raft(
     // Production metadata applier: writes to the shared cache,
     // writes back to the `SystemCatalog` redb so every non-cache
     // reader observes the change, bumps the applied-index watcher,
-    // and broadcasts `CatalogChangeEvent`.
+    // broadcasts `CatalogChangeEvent`, and spawns Data Plane
+    // `Register` dispatches on committed `CollectionDdl::Create`.
+    let metadata_applier_concrete = Arc::new(MetadataCommitApplier::new(
+        handle.metadata_cache.clone(),
+        handle.applied_index_watcher.clone(),
+        shared.catalog_change_tx.clone(),
+        shared.credentials.clone(),
+    ));
+    // Install the Weak<SharedState> before the raft loop starts
+    // ticking so no commit can reach the applier without it.
+    metadata_applier_concrete.install_shared(Arc::downgrade(&shared));
     let metadata_applier: Arc<dyn nodedb_cluster::MetadataApplier> =
-        Arc::new(MetadataCommitApplier::new(
-            handle.metadata_cache.clone(),
-            handle.applied_index_watcher.clone(),
-            shared.catalog_change_tx.clone(),
-            shared.credentials.clone(),
-        ));
+        metadata_applier_concrete.clone();
 
     // LocalForwarder stays as the current forwarded-query executor
     // (LEGACY path, scheduled for deletion in Phase C).

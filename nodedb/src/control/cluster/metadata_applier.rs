@@ -22,7 +22,7 @@
 //! carry a fresh full `StoredCollection` so the applier can overwrite
 //! the record atomically.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
@@ -33,6 +33,7 @@ use nodedb_cluster::{MetadataApplier, MetadataCache, MetadataEntry, decode_entry
 use crate::control::cluster::applied_index_watcher::AppliedIndexWatcher;
 use crate::control::security::catalog::StoredCollection;
 use crate::control::security::credential::CredentialStore;
+use crate::control::state::SharedState;
 
 /// Broadcast channel capacity — small, because consumers are internal
 /// subsystems that keep up or are lagged intentionally.
@@ -50,6 +51,14 @@ pub struct MetadataCommitApplier {
     watcher: Arc<AppliedIndexWatcher>,
     catalog_change_tx: broadcast::Sender<CatalogChangeEvent>,
     credentials: Arc<CredentialStore>,
+    /// Weak handle to `SharedState`. Installed by `start_raft` after
+    /// construction so the applier can spawn a `DocumentOp::Register`
+    /// dispatch into this node's Data Plane whenever a replicated
+    /// `CollectionDdl::Create` commits — the follower-side path that
+    /// makes cross-node INSERTs work without waiting for lazy
+    /// registration. Weak to break the Arc cycle (SharedState → raft
+    /// loop → applier → SharedState). `None` in unit tests.
+    shared: OnceLock<Weak<SharedState>>,
 }
 
 impl MetadataCommitApplier {
@@ -64,7 +73,42 @@ impl MetadataCommitApplier {
             watcher,
             catalog_change_tx,
             credentials,
+            shared: OnceLock::new(),
         }
+    }
+
+    /// Install a weak handle to `SharedState` so the applier can
+    /// spawn Data Plane `Register` dispatches after committing
+    /// replicated `CollectionDdl::Create` entries. Must be called
+    /// **before** the raft loop starts ticking — `start_raft` does
+    /// this as part of its construction sequence.
+    pub fn install_shared(&self, shared: Weak<SharedState>) {
+        let _ = self.shared.set(shared);
+    }
+
+    /// Spawn a `DocumentOp::Register` for `stored` into this node's
+    /// Data Plane. Called after a replicated `Create` has been
+    /// persisted to the local `SystemCatalog` redb. Requires
+    /// [`Self::install_shared`] to have been called; otherwise the
+    /// spawn is silently skipped (unit-test mode).
+    fn spawn_register(&self, stored: StoredCollection) {
+        let Some(weak) = self.shared.get() else {
+            return;
+        };
+        let Some(shared) = weak.upgrade() else {
+            return;
+        };
+        let coll_name = stored.name.clone();
+        tokio::spawn(async move {
+            crate::control::server::pgwire::ddl::collection::create::dispatch_register_from_stored(
+                &shared, &stored,
+            )
+            .await;
+            debug!(
+                collection = %coll_name,
+                "metadata applier: Register dispatched to local Data Plane"
+            );
+        });
     }
 
     /// Apply the host-side side effects of a single decoded entry.
@@ -114,7 +158,12 @@ impl MetadataCommitApplier {
                                 error = %e,
                                 "metadata applier: put_collection on Create failed"
                             );
+                            return;
                         }
+                        // Tell this node's Data Plane about the new
+                        // collection so the first cross-node INSERT
+                        // doesn't need to rediscover the storage mode.
+                        self.spawn_register(stored);
                     }
                     Err(e) => warn!(
                         collection = %desc.header.id.name,
@@ -154,28 +203,44 @@ impl MetadataCommitApplier {
             }
             CollectionAction::Alter { id, change } => {
                 if !host_payload.is_empty() {
-                    // Full-descriptor alter: overwrite the stored record.
-                    if let Ok(stored) = zerompk::from_msgpack::<StoredCollection>(host_payload) {
-                        if let Err(e) = catalog.put_collection(&stored) {
+                    // Full-descriptor alter: overwrite the stored
+                    // record and re-register with the local Data
+                    // Plane so schema / enforcement changes are
+                    // picked up immediately (new strict columns,
+                    // updated retention, new materialized_sum, etc.).
+                    match zerompk::from_msgpack::<StoredCollection>(host_payload) {
+                        Ok(stored) => {
+                            if let Err(e) = catalog.put_collection(&stored) {
+                                warn!(
+                                    collection = %id.name,
+                                    error = %e,
+                                    "metadata applier: put_collection on Alter failed"
+                                );
+                                return;
+                            }
+                            self.spawn_register(stored);
+                            return;
+                        }
+                        Err(e) => {
                             warn!(
                                 collection = %id.name,
                                 error = %e,
-                                "metadata applier: put_collection on Alter failed"
+                                "metadata applier: failed to decode Alter host_payload"
                             );
+                            return;
                         }
-                        return;
                     }
                 }
-                // Batch 1d: in-place alter via the specific
-                // `change` variant (add_column, rename, etc.)
-                // without shipping a whole fresh StoredCollection.
-                // Cache-side bump already happened above; redb
-                // stays at the previous version until the full
-                // migration lands.
+                // In-place alter via a specific `change` variant
+                // (add_column, rename, etc.) without shipping a
+                // whole fresh StoredCollection. The cache-side bump
+                // already happened; redb stays at the previous
+                // version until a handler migration attaches a
+                // payload.
                 debug!(
                     collection = %id.name,
                     ?change,
-                    "metadata applier: Alter without host_payload — redb unchanged until batch 1d"
+                    "metadata applier: Alter without host_payload — cache-only"
                 );
             }
         }

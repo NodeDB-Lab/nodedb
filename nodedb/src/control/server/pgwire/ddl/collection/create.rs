@@ -319,6 +319,50 @@ pub async fn dispatch_register_if_needed(
     let Ok(Some(coll)) = catalog.get_collection(tenant_id.as_u32(), &name) else {
         return;
     };
+    // Parse index paths from FIELDS clause (if any) — these are only
+    // present in the leader-side pgwire path. Follower applier calls
+    // [`dispatch_register_from_stored`] directly with index paths
+    // derived from `coll.fields`.
+    let (fields, _serial_fields) = super::super::schema_validation::parse_fields_clause(parts);
+    let index_paths: Vec<String> = fields
+        .iter()
+        .map(|(name, _ty)| format!("$.{name}"))
+        .collect();
+    let _ = sql; // Reserved for future CRDT detection from SQL.
+    dispatch_register_from_stored_inner(state, tenant_id, &coll, index_paths).await;
+}
+
+/// Applier-side entry point: dispatch `DocumentOp::Register` using a
+/// fully-populated [`StoredCollection`]. Called from the production
+/// `MetadataCommitApplier` after it materializes a replicated
+/// `CollectionDdl::Create` into local `SystemCatalog` redb, so every
+/// follower's Data Plane knows about the collection before the first
+/// cross-node INSERT arrives.
+///
+/// Derives `index_paths` from `coll.fields` (the same source the
+/// leader-side handler uses after parsing the FIELDS clause — the
+/// fields are already persisted on the StoredCollection by the time
+/// this runs).
+pub async fn dispatch_register_from_stored(state: &SharedState, coll: &StoredCollection) {
+    let tenant_id = crate::types::TenantId::new(coll.tenant_id);
+    let index_paths: Vec<String> = coll
+        .fields
+        .iter()
+        .map(|(name, _ty)| format!("$.{name}"))
+        .collect();
+    dispatch_register_from_stored_inner(state, tenant_id, coll, index_paths).await;
+}
+
+async fn dispatch_register_from_stored_inner(
+    state: &SharedState,
+    tenant_id: crate::types::TenantId,
+    coll: &StoredCollection,
+    index_paths: Vec<String>,
+) {
+    let name = coll.name.clone();
+    let Some(catalog) = state.credentials.catalog() else {
+        return;
+    };
 
     // Determine storage mode from collection type — exhaustive match
     // ensures new CollectionType variants get a compile error here.
@@ -339,14 +383,6 @@ pub async fn dispatch_register_if_needed(
         }
     };
 
-    // Parse index paths from FIELDS clause (if any).
-    let (fields, _serial_fields) = super::super::schema_validation::parse_fields_clause(parts);
-    let index_paths: Vec<String> = fields
-        .iter()
-        .map(|(name, _ty)| format!("$.{name}"))
-        .collect();
-
-    let _ = sql; // Reserved for future CRDT detection from SQL.
     let crdt_enabled = false;
 
     // Build enforcement options from the stored collection metadata.
@@ -383,7 +419,7 @@ pub async fn dispatch_register_if_needed(
             tenant_id.as_u32(),
             &name,
         ),
-        generated_columns: build_generated_column_specs(&coll),
+        generated_columns: build_generated_column_specs(coll),
     };
 
     let vshard = crate::types::VShardId::from_collection(&name);
