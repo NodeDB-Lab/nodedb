@@ -74,9 +74,19 @@ pub fn create_schedule(
         .as_ref()
         .ok_or_else(|| sqlstate_error("XX000", "system catalog not available"))?;
 
-    catalog
-        .put_schedule(&def)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    // Replicate through the metadata raft group. Every node's
+    // applier writes the record to local redb and registers it in
+    // the in-memory `schedule_registry` so the cron executor picks
+    // it up on its next tick — cluster-wide.
+    let entry = crate::control::catalog_entry::CatalogEntry::PutSchedule(Box::new(def.clone()));
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .put_schedule(&def)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        state.schedule_registry.register(def.clone());
+    }
 
     // Emit schedule definition as CRDT sync delta for Lite visibility.
     // Lite devices receive this but NEVER execute Origin schedules —
@@ -95,8 +105,6 @@ pub fn create_schedule(
         };
         state.crdt_sync_delivery.enqueue(tenant_id, delta);
     }
-
-    state.schedule_registry.register(def);
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

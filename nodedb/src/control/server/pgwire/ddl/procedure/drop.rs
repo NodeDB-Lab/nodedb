@@ -46,25 +46,40 @@ pub fn drop_procedure(
         .as_ref()
         .ok_or_else(|| sqlstate_error("XX000", "system catalog not available"))?;
 
-    let existed = catalog
-        .delete_procedure(tenant_id, &name)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
-
-    if !existed && !if_exists {
+    // Pre-check existence so `IF EXISTS` on a missing procedure is
+    // a clean no-op that never touches raft.
+    let exists_before = catalog
+        .get_procedure(tenant_id, &name)
+        .map_err(|e| sqlstate_error("XX000", &format!("catalog read: {e}")))?
+        .is_some();
+    if !exists_before && !if_exists {
         return Err(sqlstate_error(
             "42883",
             &format!("procedure '{name}' does not exist"),
         ));
     }
-
-    if existed {
-        state.audit_record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(identity.tenant_id),
-            &identity.username,
-            &format!("DROP PROCEDURE {name}"),
-        );
+    if !exists_before {
+        return Ok(vec![Response::Execution(Tag::new("DROP PROCEDURE"))]);
     }
+
+    let entry = crate::control::catalog_entry::CatalogEntry::DeleteProcedure {
+        tenant_id,
+        name: name.clone(),
+    };
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        let _ = catalog
+            .delete_procedure(tenant_id, &name)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    }
+
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(identity.tenant_id),
+        &identity.username,
+        &format!("DROP PROCEDURE {name}"),
+    );
 
     Ok(vec![Response::Execution(Tag::new("DROP PROCEDURE"))])
 }

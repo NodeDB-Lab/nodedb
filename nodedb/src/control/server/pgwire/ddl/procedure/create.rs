@@ -65,9 +65,17 @@ pub fn create_procedure(
         created_at: now,
     };
 
-    catalog
-        .put_procedure(&stored)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    // Replicate through the metadata raft group. Every node's
+    // applier writes the record to local redb and clears the
+    // parsed block cache so the next CALL re-parses the new body.
+    let entry = crate::control::catalog_entry::CatalogEntry::PutProcedure(Box::new(stored.clone()));
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .put_procedure(&stored)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    }
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

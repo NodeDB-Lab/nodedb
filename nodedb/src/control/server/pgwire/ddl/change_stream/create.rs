@@ -78,11 +78,20 @@ pub fn create_change_stream(
     let kafka_config = def.kafka.clone();
     let stream_name_owned = parsed.name.clone();
 
-    catalog
-        .put_change_stream(&def)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
-
-    state.stream_registry.register(def);
+    // Replicate through the metadata raft group. Every node's
+    // applier writes the record to local redb and registers it in
+    // the in-memory `stream_registry` so the Event Plane starts
+    // routing matching WriteEvents into this stream's buffer on
+    // every node immediately.
+    let entry = crate::control::catalog_entry::CatalogEntry::PutChangeStream(Box::new(def.clone()));
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        catalog
+            .put_change_stream(&def)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        state.stream_registry.register(def.clone());
+    }
 
     // Start webhook delivery task if configured.
     if has_webhook {

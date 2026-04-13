@@ -39,18 +39,32 @@ pub fn drop_schedule(
         .as_ref()
         .ok_or_else(|| sqlstate_error("XX000", "system catalog not available"))?;
 
-    let existed = catalog
-        .delete_schedule(tenant_id, &name)
-        .map_err(|e| sqlstate_error("XX000", &format!("catalog delete: {e}")))?;
-
-    if !existed && !if_exists {
+    // Pre-check existence: `IF EXISTS` + missing is a no-op that
+    // doesn't touch raft. Check via the in-memory registry since
+    // `schedules.rs` has no `get_schedule` method today.
+    let existed_before = state.schedule_registry.get(tenant_id, &name).is_some();
+    if !existed_before && !if_exists {
         return Err(sqlstate_error(
             "42704",
             &format!("schedule '{name}' does not exist"),
         ));
     }
+    if !existed_before {
+        return Ok(vec![Response::Execution(Tag::new("DROP SCHEDULE"))]);
+    }
 
-    state.schedule_registry.unregister(tenant_id, &name);
+    let entry = crate::control::catalog_entry::CatalogEntry::DeleteSchedule {
+        tenant_id,
+        name: name.clone(),
+    };
+    let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        let _ = catalog
+            .delete_schedule(tenant_id, &name)
+            .map_err(|e| sqlstate_error("XX000", &format!("catalog delete: {e}")))?;
+        state.schedule_registry.unregister(tenant_id, &name);
+    }
 
     // Emit tombstone delta for Lite visibility (removes schedule from Lite catalog).
     {
