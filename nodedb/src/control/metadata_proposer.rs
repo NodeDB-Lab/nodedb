@@ -157,26 +157,15 @@ pub fn propose_catalog_entry_with_timeout(
         }
     }
 
-    // Drain gate: for `Put*` variants that carry
-    // `descriptor_version`, wait until all prior-version leases
-    // have drained before committing the new descriptor. Reads
-    // the prior version from the local `SystemCatalog` and
-    // passes it to `lease::drain_for_ddl`, which in turn proposes
-    // a `DescriptorDrainStart` raft entry, polls
-    // `metadata_cache.leases` for completion, and either returns
-    // `Ok(())` on success or `Err` on timeout. On timeout
-    // `drain_for_ddl` emits an explicit `DescriptorDrainEnd` so
-    // the cluster isn't left blocking new acquires.
-    //
-    // `descriptor_id_and_prior_version` returns `None` for
-    // variants that don't carry descriptor versioning (users,
-    // roles, permissions, owners, schedules, change streams,
-    // tenants, RLS policies, API keys). Those skip the drain
-    // call entirely.
-    //
-    // If `prior_version == 0` the DDL is creating a new
-    // descriptor and there are no prior leases to drain — the
-    // drain helper returns `Ok(())` immediately in that case.
+    // Drain for Put* variants that carry descriptor_version.
+    // Leases acquired at plan time are refcounted and held
+    // through execute; when the last in-flight query using a
+    // descriptor completes, its `QueryLeaseScope` drops and the
+    // refcount hits zero, releasing the lease. Drain is what
+    // makes this an actual barrier: the proposer waits for all
+    // prior-version leases to release before committing the new
+    // `Put*`, giving long-running in-flight queries a bounded
+    // window (DEFAULT_DRAIN_TIMEOUT) to finish.
     if let Some((descriptor_id, prior_version)) =
         crate::control::lease::descriptor_id_and_prior_version(entry, shared)
         && prior_version > 0

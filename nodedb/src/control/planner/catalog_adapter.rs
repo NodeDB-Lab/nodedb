@@ -27,7 +27,7 @@
 //! a plan, and a transient lease glitch should not break user
 //! queries.
 
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex};
 
 use nodedb_cluster::{DescriptorId, DescriptorKind};
 use nodedb_sql::{
@@ -35,35 +35,60 @@ use nodedb_sql::{
     types::{CollectionInfo, ColumnInfo, EngineType, SqlDataType},
 };
 
-use crate::control::lease::DEFAULT_LEASE_DURATION;
+use crate::control::planner::descriptor_set::DescriptorVersionSet;
 use crate::control::security::credential::CredentialStore;
 use crate::control::state::SharedState;
 
 /// Adapter bridging the NodeDB catalog to the `SqlCatalog` trait.
 ///
-/// The optional `shared` field holds a `Weak<SharedState>` so
-/// long-lived `QueryContext`s do not pin the global
-/// `SharedState` alive past process shutdown. When present, the
-/// adapter calls `acquire_descriptor_lease` on every
-/// `get_collection` call to bind the plan to the descriptor
-/// version it reads.
-///
-/// When absent, the adapter behaves as a pure redb reader.
-/// Sub-planners invoked from inside a pgwire DDL handler that
-/// already holds leases use the no-lease constructor so we
-/// don't double-acquire.
+/// The adapter reads descriptors from the local `SystemCatalog`
+/// redb and records each observed descriptor into
+/// `recorded_versions` for use as the plan-cache key. It does
+/// NOT acquire leases itself — `SharedState::acquire_plan_lease_scope`
+/// is called by the pgwire handler after planning finishes
+/// (for both cache hits and fresh plans) so leases are held
+/// through the execute phase via a refcounted
+/// `QueryLeaseScope`.
 pub struct OriginCatalog {
     credentials: Arc<CredentialStore>,
-    shared: Option<Weak<SharedState>>,
     tenant_id: u32,
     retention_policy_registry:
         Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
+    /// Optional reference to the host's drain tracker. When
+    /// present, `get_collection` checks for an active drain
+    /// on each descriptor it reads and returns
+    /// `RetryableSchemaChanged` so the planner's retry loop
+    /// re-plans. When absent (sub-planners that don't thread
+    /// an `Arc<SharedState>`), drain is not observable at
+    /// plan time — the outer query's scope is still protecting
+    /// the lease.
+    drain_tracker: Option<Arc<crate::control::lease::DescriptorDrainTracker>>,
+    /// Descriptors read during planning, in stable order. Filled
+    /// by `get_collection`, drained by the caller via
+    /// `take_recorded_versions` once planning finishes. The
+    /// resulting set becomes the cache key for the plan cache so
+    /// DDL on unrelated descriptors does not invalidate cached
+    /// plans.
+    ///
+    /// Wrapped in `Mutex` (not `RefCell`) because `SqlCatalog`
+    /// is used through `&self` and the adapter must be `Sync`
+    /// for axum / tokio handler bounds. Mutex overhead is
+    /// negligible — `get_collection` is called only a handful
+    /// of times per plan.
+    recorded_versions: Mutex<DescriptorVersionSet>,
 }
 
 impl OriginCatalog {
-    /// Construct an adapter without lease integration. Used by
-    /// internal sub-planners that run inside a pgwire handler
-    /// which already leased the outer query's descriptors.
+    /// Construct an adapter that reads from the local redb
+    /// catalog and records descriptor versions for the plan
+    /// cache key. Lease acquisition happens in a separate,
+    /// post-plan step — see
+    /// `SharedState::acquire_plan_lease_scope`.
+    /// Construct an adapter that reads from the local redb
+    /// catalog WITHOUT drain observation. Used by internal
+    /// sub-planners invoked inside a pgwire DDL handler
+    /// whose outer query already holds leases through its
+    /// `QueryLeaseScope`.
     pub fn new(
         credentials: Arc<CredentialStore>,
         tenant_id: u32,
@@ -73,16 +98,18 @@ impl OriginCatalog {
     ) -> Self {
         Self {
             credentials,
-            shared: None,
             tenant_id,
             retention_policy_registry,
+            drain_tracker: None,
+            recorded_versions: Mutex::new(DescriptorVersionSet::new()),
         }
     }
 
-    /// Construct an adapter with descriptor lease integration.
-    /// Used by the top-level pgwire dispatch (sql_exec,
-    /// prepared parser) so every user-initiated query plan
-    /// acquires leases on the collections it touches.
+    /// Construct an adapter with drain observation. Used by
+    /// the top-level pgwire dispatch so every user-initiated
+    /// query's plan sees `RetryableSchemaChanged` when any
+    /// descriptor it reads is being drained by an in-flight
+    /// DDL; the pgwire handler's retry loop then re-plans.
     pub fn new_with_lease(
         shared: &Arc<SharedState>,
         tenant_id: u32,
@@ -92,10 +119,22 @@ impl OriginCatalog {
     ) -> Self {
         Self {
             credentials: Arc::clone(&shared.credentials),
-            shared: Some(Arc::downgrade(shared)),
             tenant_id,
             retention_policy_registry,
+            drain_tracker: Some(Arc::clone(&shared.lease_drain)),
+            recorded_versions: Mutex::new(DescriptorVersionSet::new()),
         }
+    }
+
+    /// Drain the recorded descriptor-version set and return it.
+    /// Callers capture this after planning finishes and use it
+    /// as the plan cache key + freshness witness.
+    pub fn take_recorded_versions(&self) -> DescriptorVersionSet {
+        let mut guard = self
+            .recorded_versions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut *guard)
     }
 
     fn has_auto_tier(&self, collection: &str) -> bool {
@@ -130,47 +169,56 @@ impl SqlCatalog for OriginCatalog {
             return Ok(None);
         }
 
-        // Lease acquisition (only if constructed via
-        // `new_with_lease`). Fast path (lease already valid at
-        // this version or higher) returns instantly. Slow path
-        // proposes a `DescriptorLeaseGrant` through the metadata
-        // raft group.
+        // Record the observed descriptor version so the caller
+        // can use the resulting set as a per-descriptor plan
+        // cache key. The set is drained via
+        // `take_recorded_versions` once planning finishes.
         //
-        // Version 0 is the sentinel for "legacy record, version
-        // unknown" — we lease at 1 in that case so the drain gate
-        // can still reject acquires at v1 and trigger re-planning.
-        if let Some(shared_weak) = &self.shared
-            && let Some(shared) = shared_weak.upgrade()
+        // Version 0 is the pre-B.1 sentinel; we record it as 1
+        // so the cache's freshness check uses the same floor
+        // that the drain gate uses. If the descriptor later
+        // stamps its first real version 1, the cache stays
+        // valid; if it bumps to 2+, the cache correctly
+        // invalidates.
+        let descriptor_id = DescriptorId::new(
+            self.tenant_id,
+            DescriptorKind::Collection,
+            stored.name.clone(),
+        );
+        let version = stored.descriptor_version.max(1);
         {
-            let descriptor_id = DescriptorId::new(
-                self.tenant_id,
-                DescriptorKind::Collection,
-                stored.name.clone(),
-            );
-            let version = stored.descriptor_version.max(1);
-            match shared.acquire_descriptor_lease(descriptor_id, version, DEFAULT_LEASE_DURATION) {
-                Ok(_) => {}
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("drain in progress") {
-                        return Err(SqlCatalogError::RetryableSchemaChanged {
-                            descriptor: format!("collection {name}"),
-                        });
-                    }
-                    // Non-drain failure: log at warn and proceed
-                    // with the descriptor we read. Treating the
-                    // planner as best-effort-leased on non-drain
-                    // errors means a transient lease failure
-                    // (e.g. a brief leader election during which
-                    // `force_refresh_lease` returns NotLeader
-                    // without a hint) doesn't break user queries.
-                    tracing::warn!(
-                        error = %msg,
-                        descriptor = %name,
-                        version,
-                        "OriginCatalog: lease acquire failed, proceeding without lease"
-                    );
-                }
+            let mut guard = self
+                .recorded_versions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            guard.record(descriptor_id.clone(), version);
+        }
+
+        // Drain observation: if a DDL is currently draining
+        // this descriptor at the version we just read, return
+        // `RetryableSchemaChanged` so the pgwire handler's
+        // retry loop re-plans. Without this check the planner
+        // would compile a plan against a version that's about
+        // to be retired, and the post-plan lease acquisition
+        // would either hit a "drain in progress" error (which
+        // is too late to retry) or (worse) succeed on first
+        // holder because the drain finished just before the
+        // refcount check.
+        //
+        // Leases themselves are NOT acquired here anymore.
+        // The handler calls
+        // `SharedState::acquire_plan_lease_scope` after
+        // planning finishes (or after a cache hit returns a
+        // pre-recorded version set), which increments
+        // refcounts, performs a single raft acquire per
+        // descriptor (on first-holder), and returns a
+        // `QueryLeaseScope` the handler holds through execute.
+        if let Some(drain) = &self.drain_tracker {
+            let now_wall_ns = crate::control::lease::wall_now_ns();
+            if drain.is_draining(&descriptor_id, version, now_wall_ns) {
+                return Err(SqlCatalogError::RetryableSchemaChanged {
+                    descriptor: format!("collection {name}"),
+                });
             }
         }
 

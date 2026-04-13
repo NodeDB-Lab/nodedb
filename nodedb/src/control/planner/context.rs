@@ -32,19 +32,58 @@ pub struct PlanSecurityContext<'a> {
 /// to `PhysicalPlan` variants for dispatch to the Data Plane.
 ///
 /// This type is `Send + Sync` — lives on the Control Plane (Tokio).
+///
+/// The catalog adapter is **constructed per-plan**, not cached on
+/// the context, because the adapter's `recorded_versions` field
+/// is per-plan state. Holding a shared adapter across concurrent
+/// plans would interleave their recorded descriptor sets and
+/// poison the plan-cache keys. The context stores the inputs
+/// needed to construct an adapter (credentials, optional
+/// `Weak<SharedState>` for lease integration, tenant id,
+/// retention registry) and builds a fresh one on every planning
+/// call.
 pub struct QueryContext {
-    /// nodedb-sql catalog adapter for planning.
-    sql_catalog: Option<super::catalog_adapter::OriginCatalog>,
+    catalog_inputs: Option<CatalogInputs>,
     /// Retention policy registry for auto-tier routing.
     retention_registry:
         Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
+}
+
+/// Inputs needed to construct an `OriginCatalog` per plan call.
+#[derive(Clone)]
+struct CatalogInputs {
+    credentials: Arc<CredentialStore>,
+    shared: Option<std::sync::Weak<crate::control::state::SharedState>>,
+    tenant_id: u32,
+    retention_policy_registry:
+        Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
+}
+
+impl CatalogInputs {
+    fn build_adapter(&self) -> super::catalog_adapter::OriginCatalog {
+        if let Some(weak) = &self.shared
+            && let Some(shared) = weak.upgrade()
+        {
+            super::catalog_adapter::OriginCatalog::new_with_lease(
+                &shared,
+                self.tenant_id,
+                self.retention_policy_registry.clone(),
+            )
+        } else {
+            super::catalog_adapter::OriginCatalog::new(
+                Arc::clone(&self.credentials),
+                self.tenant_id,
+                self.retention_policy_registry.clone(),
+            )
+        }
+    }
 }
 
 impl QueryContext {
     /// Create a new query context without catalog integration.
     pub fn new() -> Self {
         Self {
-            sql_catalog: None,
+            catalog_inputs: None,
             retention_registry: None,
         }
     }
@@ -75,14 +114,15 @@ impl QueryContext {
         state: &Arc<crate::control::state::SharedState>,
         tenant_id: u32,
     ) -> Self {
-        let sql_catalog = super::catalog_adapter::OriginCatalog::new_with_lease(
-            state,
-            tenant_id,
-            Some(Arc::clone(&state.retention_policy_registry)),
-        );
+        let retention = Some(Arc::clone(&state.retention_policy_registry));
         Self {
-            sql_catalog: Some(sql_catalog),
-            retention_registry: Some(Arc::clone(&state.retention_policy_registry)),
+            catalog_inputs: Some(CatalogInputs {
+                credentials: Arc::clone(&state.credentials),
+                shared: Some(Arc::downgrade(state)),
+                tenant_id,
+                retention_policy_registry: retention.clone(),
+            }),
+            retention_registry: retention,
         }
     }
 
@@ -92,9 +132,8 @@ impl QueryContext {
     pub fn set_rounding_mode(&self, _mode: &str) {}
 
     /// Create a query context with catalog integration but no
-    /// lease acquisition. Private — use `for_state` or
-    /// `for_state_with_lease` depending on whether the caller
-    /// is the top-level pgwire dispatch or an internal sub-planner.
+    /// lease acquisition. Used by `for_state` and by callers
+    /// that construct a context without an `Arc<SharedState>`.
     pub fn with_catalog(
         credentials: Arc<CredentialStore>,
         tenant_id: u32,
@@ -102,14 +141,15 @@ impl QueryContext {
             Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>,
         >,
     ) -> Self {
-        let sql_catalog = super::catalog_adapter::OriginCatalog::new(
+        let catalog_inputs = Some(CatalogInputs {
             credentials,
+            shared: None,
             tenant_id,
-            retention_policy_registry.clone(),
-        );
+            retention_policy_registry: retention_policy_registry.clone(),
+        });
 
         Self {
-            sql_catalog: Some(sql_catalog),
+            catalog_inputs,
             retention_registry: retention_policy_registry,
         }
     }
@@ -122,24 +162,39 @@ impl QueryContext {
         sql: &str,
         tenant_id: crate::types::TenantId,
     ) -> crate::Result<Vec<super::physical::PhysicalTask>> {
-        self.plan_with_nodedb_sql(sql, tenant_id)
+        self.plan_with_nodedb_sql(sql, tenant_id).map(|(t, _)| t)
     }
 
     /// Core planning via nodedb-sql: parse → plan → optimize → convert.
+    ///
+    /// Returns the compiled physical tasks and the
+    /// [`super::descriptor_set::DescriptorVersionSet`] recording
+    /// every descriptor the planner touched. The version set is
+    /// used as the plan-cache key AND as the input to
+    /// `SharedState::acquire_plan_lease_scope` so cache hits
+    /// and fresh plans share the same lease-acquisition path.
     fn plan_with_nodedb_sql(
         &self,
         sql: &str,
         tenant_id: crate::types::TenantId,
-    ) -> crate::Result<Vec<super::physical::PhysicalTask>> {
-        let catalog: &dyn nodedb_sql::SqlCatalog = match &self.sql_catalog {
-            Some(c) => c,
+    ) -> crate::Result<(
+        Vec<super::physical::PhysicalTask>,
+        super::descriptor_set::DescriptorVersionSet,
+    )> {
+        let inputs = match &self.catalog_inputs {
+            Some(i) => i,
             None => {
                 return Err(crate::Error::PlanError {
                     detail: "no catalog available for SQL planning".into(),
                 });
             }
         };
-        let plans = nodedb_sql::plan_sql(sql, catalog).map_err(|e| match e {
+        // Fresh adapter per plan call: the adapter's
+        // `recorded_versions` field is per-plan state, and
+        // two concurrent plans through a shared QueryContext
+        // would otherwise interleave their recorded sets.
+        let catalog = inputs.build_adapter();
+        let plans = nodedb_sql::plan_sql(sql, &catalog).map_err(|e| match e {
             nodedb_sql::SqlError::RetryableSchemaChanged { descriptor } => {
                 crate::Error::RetryableSchemaChanged { descriptor }
             }
@@ -147,10 +202,12 @@ impl QueryContext {
                 detail: format!("{other}"),
             },
         })?;
+        let version_set = catalog.take_recorded_versions();
         let ctx = super::sql_plan_convert::ConvertContext {
             retention_registry: self.retention_registry.clone(),
         };
-        super::sql_plan_convert::convert(&plans, tenant_id, &ctx)
+        let tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
+        Ok((tasks, version_set))
     }
 
     /// Parse SQL, inject RLS predicates, convert to physical plan.
@@ -173,9 +230,30 @@ impl QueryContext {
         sql: &str,
         tenant_id: crate::types::TenantId,
         sec: &PlanSecurityContext<'_>,
-        _returning: bool,
+        returning: bool,
     ) -> crate::Result<Vec<super::physical::PhysicalTask>> {
-        let mut tasks = self.plan_with_nodedb_sql(sql, tenant_id)?;
+        self.plan_sql_with_rls_and_versions(sql, tenant_id, sec, returning)
+            .await
+            .map(|(tasks, _)| tasks)
+    }
+
+    /// Variant of [`plan_sql_with_rls_returning`] that also
+    /// returns the `DescriptorVersionSet` recorded during
+    /// planning. The pgwire plan cache uses the set as its
+    /// freshness witness, and the handler feeds it into
+    /// `SharedState::acquire_plan_lease_scope` to take the
+    /// refcounts that must stay non-zero through execute.
+    pub async fn plan_sql_with_rls_and_versions(
+        &self,
+        sql: &str,
+        tenant_id: crate::types::TenantId,
+        sec: &PlanSecurityContext<'_>,
+        _returning: bool,
+    ) -> crate::Result<(
+        Vec<super::physical::PhysicalTask>,
+        super::descriptor_set::DescriptorVersionSet,
+    )> {
+        let (mut tasks, version_set) = self.plan_with_nodedb_sql(sql, tenant_id)?;
 
         // Inject RLS predicates.
         super::rls_injection::inject_rls(&mut tasks, sec.rls_store, sec.auth)?;
@@ -185,7 +263,7 @@ impl QueryContext {
             super::rls_injection::inject_permission_tree(&mut tasks, cache, sec.auth)?;
         }
 
-        Ok(tasks)
+        Ok((tasks, version_set))
     }
 
     /// Plan SQL with bound parameters and RLS injection.
@@ -199,15 +277,23 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         sec: &PlanSecurityContext<'_>,
     ) -> crate::Result<Vec<super::physical::PhysicalTask>> {
-        let catalog: &dyn nodedb_sql::SqlCatalog = match &self.sql_catalog {
-            Some(c) => c,
+        let inputs = match &self.catalog_inputs {
+            Some(i) => i,
             None => {
                 return Err(crate::Error::PlanError {
                     detail: "no catalog available for SQL planning".into(),
                 });
             }
         };
-        let plans = nodedb_sql::plan_sql_with_params(sql, params, catalog).map_err(|e| {
+        // Fresh adapter per plan call: same rationale as
+        // `plan_with_nodedb_sql`. The params-and-rls path does
+        // not currently surface the recorded version set to
+        // callers (prepared statements with bound parameters go
+        // through a different cache key), but constructing the
+        // adapter fresh keeps the adapter's state per-plan and
+        // allows future extension.
+        let catalog = inputs.build_adapter();
+        let plans = nodedb_sql::plan_sql_with_params(sql, params, &catalog).map_err(|e| {
             crate::Error::PlanError {
                 detail: format!("{e}"),
             }
