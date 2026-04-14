@@ -28,6 +28,12 @@ impl ScanFilter {
                     .iter()
                     .any(|clause| clause.iter().all(|f| f.matches_binary(doc)));
             }
+            FilterOp::Expr => {
+                return match (self.expr.as_ref(), nodedb_types::value_from_msgpack(doc)) {
+                    (Some(expr), Ok(value)) => crate::value_ops::is_truthy(&expr.eval(&value)),
+                    _ => false,
+                };
+            }
             _ => {}
         }
 
@@ -57,6 +63,12 @@ impl ScanFilter {
                     .clauses
                     .iter()
                     .any(|clause| clause.iter().all(|f| f.matches_binary_indexed(doc, idx)));
+            }
+            FilterOp::Expr => {
+                return match (self.expr.as_ref(), nodedb_types::value_from_msgpack(doc)) {
+                    (Some(expr), Ok(value)) => crate::value_ops::is_truthy(&expr.eval(&value)),
+                    _ => false,
+                };
             }
             _ => {}
         }
@@ -263,6 +275,7 @@ mod tests {
             op: op.into(),
             value,
             clauses: vec![],
+            expr: None,
         }
     }
 
@@ -271,6 +284,18 @@ mod tests {
         let doc = encode(&json!({"age": 25}));
         assert!(filter("age", "eq", nodedb_types::Value::Integer(25)).matches_binary(&doc));
         assert!(!filter("age", "eq", nodedb_types::Value::Integer(30)).matches_binary(&doc));
+    }
+
+    #[test]
+    fn eq_coerces_string_to_integer() {
+        let doc = encode(&json!({"age": 25}));
+        assert!(filter("age", "eq", nodedb_types::Value::String("25".into())).matches_binary(&doc));
+    }
+
+    #[test]
+    fn gt_coerces_string_to_integer() {
+        let doc = encode(&json!({"score": "90"}));
+        assert!(filter("score", "gt", nodedb_types::Value::Integer(80)).matches_binary(&doc));
     }
 
     #[test]
@@ -381,7 +406,8 @@ mod tests {
                 field: "status".into(),
                 op: "in".into(),
                 value: vals.clone(),
-                clauses: vec![]
+                clauses: vec![],
+                expr: None
             }
             .matches_binary(&doc)
         );
@@ -392,7 +418,8 @@ mod tests {
                 field: "status".into(),
                 op: "not_in".into(),
                 value: vals,
-                clauses: vec![]
+                clauses: vec![],
+                expr: None
             }
             .matches_binary(&doc2)
         );
@@ -431,7 +458,8 @@ mod tests {
                 field: "tags".into(),
                 op: "array_contains_all".into(),
                 value: needles,
-                clauses: vec![]
+                clauses: vec![],
+                expr: None
             }
             .matches_binary(&doc)
         );
@@ -449,7 +477,8 @@ mod tests {
                 field: "tags".into(),
                 op: "array_overlap".into(),
                 value: needles,
-                clauses: vec![]
+                clauses: vec![],
+                expr: None
             }
             .matches_binary(&doc)
         );
@@ -466,6 +495,7 @@ mod tests {
                 vec![filter("x", "eq", nodedb_types::Value::Integer(10))],
                 vec![filter("x", "eq", nodedb_types::Value::Integer(5))],
             ],
+            expr: None,
         };
         assert!(f.matches_binary(&doc));
     }
