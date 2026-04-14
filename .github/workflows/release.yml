@@ -328,3 +328,58 @@ jobs:
             --tag farhansyah/nodedb:latest \
             farhansyah/nodedb:${VERSION}-amd64 \
             farhansyah/nodedb:${VERSION}-arm64
+
+  # ── Notify Discord ────────────────────────────────────────────────────────────
+  notify-discord:
+    name: Notify Discord
+    needs: [validate-version, publish-crates, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build changelog and post to Discord
+        env:
+          DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          VERSION: ${{ needs.validate-version.outputs.version }}
+          IS_FULL: ${{ needs.validate-version.outputs.is_full_release }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+
+          if [[ -n "$PREV_TAG" ]]; then
+            RANGE="${PREV_TAG}..${TAG}"
+            COMPARE_URL="https://github.com/${REPO}/compare/${PREV_TAG}...${TAG}"
+          else
+            RANGE="${TAG}"
+            COMPARE_URL="https://github.com/${REPO}/releases/tag/${TAG}"
+          fi
+
+          COMMITS=$(git log "$RANGE" --pretty=format:'- %s (%h)' --no-merges | head -n 25)
+          [[ -z "$COMMITS" ]] && COMMITS="- (no commits found)"
+
+          COUNT=$(git rev-list --count --no-merges "$RANGE" 2>/dev/null || echo 0)
+
+          if [[ "$IS_FULL" == "true" ]]; then
+            COLOR=3066993   # green
+            TITLE="🚀 New Release: NodeDB ${VERSION}"
+          else
+            COLOR=15844367  # amber
+            TITLE="🚧 New Pre-Release: NodeDB ${VERSION}"
+          fi
+
+          DESC=$(printf '**Changes since %s** (%s commits)\n%s\n\n[Full changelog](%s) · [Release notes](https://github.com/%s/releases/tag/%s)' \
+            "${PREV_TAG:-start}" "$COUNT" "$COMMITS" "$COMPARE_URL" "$REPO" "$TAG")
+
+          PAYLOAD=$(jq -n \
+            --arg title "$TITLE" \
+            --arg desc "$DESC" \
+            --arg url "https://github.com/${REPO}/releases/tag/${TAG}" \
+            --argjson color "$COLOR" \
+            '{embeds:[{title:$title,url:$url,description:$desc,color:$color}]}')
+
+          curl -fsS -H "Content-Type: application/json" \
+            -X POST -d "$PAYLOAD" "$DISCORD_RELEASE_WEBHOOK_URL"
