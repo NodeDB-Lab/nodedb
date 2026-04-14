@@ -148,7 +148,8 @@ For development or contributing:
 git clone https://github.com/NodeDB-Lab/nodedb.git
 cd nodedb
 cargo build --release
-cargo test --all-features
+cargo install cargo-nextest --locked  # one-time
+cargo nextest run --all-features
 ```
 
 ## Status

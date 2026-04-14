@@ -1,10 +1,20 @@
 # Getting Started
 
-This guide walks you through starting a NodeDB server and running your first queries.
+This guide walks you through starting a NodeDB server and running your first queries. NodeDB requires Linux kernel ≥ 5.1 (for io_uring) regardless of how you run it.
 
-## Run with Docker (recommended)
+There are three ways to install NodeDB:
 
-The fastest way to get started. Requires Linux kernel ≥ 5.1 (for io_uring).
+1. [Prebuilt binary](#run-a-prebuilt-binary-linux) — **recommended on Linux.** Direct kernel access to io_uring, no virtualization overhead, best raw performance.
+2. [Docker](#run-with-docker) — **recommended on macOS / Windows / WSL2**, or when you want a one-command setup with zero host configuration.
+3. [Build from source](#build-from-source) — for development or custom features.
+
+All three share the same [configuration](#configuration), [connection](#connect), and [query](#first-queries) sections below.
+
+## Run with Docker
+
+The easiest way to get started, and the right choice on macOS, Windows, or any host where you don't want to manage a binary directly. On native Linux, the [prebuilt binary](#run-a-prebuilt-binary-linux) gives you better performance.
+
+### Docker Compose
 
 ```bash
 docker compose up -d
@@ -23,6 +33,22 @@ To stop and wipe all data:
 ```bash
 docker compose down -v
 ```
+
+### Plain `docker run`
+
+If you'd rather not use Compose:
+
+```bash
+docker run -d --name nodedb \
+  -p 6432:6432 \
+  -p 6433:6433 \
+  -p 6480:6480 \
+  -p 9090:9090 \
+  -v nodedb-data:/var/lib/nodedb \
+  farhansyah/nodedb
+```
+
+The container entrypoint runs as root just long enough to fix ownership on the data volume, then drops privileges to the `nodedb` user (uid 10001). To skip the root step, pass `--user 10001:10001` and pre-create the volume with matching ownership.
 
 ### Default ports
 
@@ -61,6 +87,70 @@ Set them under `environment:` in `docker-compose.yml` or pass with `-e` to `dock
 
 ---
 
+## Run a prebuilt binary (Linux)
+
+Each tagged release ships a static `nodedb` tarball on GitHub for `linux-x64` and `linux-arm64`. macOS and Windows users should use Docker until those targets ship.
+
+```bash
+# Resolve the latest tag and your architecture
+TAG=$(curl -fsSL https://api.github.com/repos/NodeDB-Lab/nodedb/releases/latest \
+        | grep '"tag_name"' | cut -d'"' -f4)
+ARCH=$(uname -m | sed 's/aarch64/arm64/; s/x86_64/x64/')
+
+# Download and extract
+curl -L -o nodedb.tar.gz \
+  "https://github.com/NodeDB-Lab/nodedb/releases/download/${TAG}/nodedb-${TAG#v}-linux-${ARCH}.tar.gz"
+tar -xzf nodedb.tar.gz
+
+# Optional: install system-wide
+sudo mv nodedb /usr/local/bin/
+
+# Run with all defaults (data goes to ~/.nodedb/data)
+nodedb
+```
+
+If you have the [GitHub CLI](https://cli.github.com/) installed, this is one command:
+
+```bash
+gh release download --repo NodeDB-Lab/nodedb --pattern 'nodedb-*-linux-x64.tar.gz' \
+  && tar -xzf nodedb-*-linux-x64.tar.gz
+```
+
+To run with a config file or a custom data directory:
+
+```bash
+# Point at an explicit data dir
+NODEDB_DATA_DIR=/var/lib/nodedb nodedb
+
+# Or load a config file (env vars still override TOML keys)
+nodedb --config /etc/nodedb/nodedb.toml
+```
+
+For a long-running server, drop a unit file at `/etc/systemd/system/nodedb.service`:
+
+```ini
+[Unit]
+Description=NodeDB
+After=network.target
+
+[Service]
+Type=simple
+User=nodedb
+Group=nodedb
+ExecStart=/usr/local/bin/nodedb --config /etc/nodedb/nodedb.toml
+Restart=on-failure
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then `sudo systemctl enable --now nodedb`. The user/group must be able to read the config file and write `data_dir`.
+
+> For a specific version or to browse changelogs, see the release page: <https://github.com/NodeDB-Lab/nodedb/releases>. The SQL surface is still pre-1.0 and changes between tags, so pin a version in production.
+
+---
+
 ## Build from Source
 
 ```bash
@@ -70,8 +160,9 @@ cd nodedb
 # Release build (all crates)
 cargo build --release
 
-# Run tests
-cargo test --all-features
+# Run tests (use nextest — see .config/nextest.toml)
+cargo install cargo-nextest --locked  # one-time
+cargo nextest run --all-features
 ```
 
 Requires Rust 1.94+ and Linux (the Data Plane uses io_uring). The build produces two binaries:
@@ -84,7 +175,21 @@ Requires Rust 1.94+ and Linux (the Data Plane uses io_uring). The build produces
 ```bash
 # Single-node, default ports
 ./target/release/nodedb
+
+# Or with a config file
+./target/release/nodedb --config nodedb.toml
 ```
+
+---
+
+## Configuration
+
+This section applies to **every** install method — Docker, prebuilt binary, and source builds all read the same TOML schema and respond to the same environment variables. Pick whichever is convenient:
+
+- **TOML file** — pass `--config /path/to/nodedb.toml` on the command line. Best for production / systemd / pre-baked images.
+- **Environment variables** — prefix `NODEDB_*`. Best for Docker (`-e`), Compose (`environment:`), and Kubernetes. Env vars **override** values from the TOML file when both are set.
+
+### Default ports
 
 By default, NodeDB listens on:
 
@@ -98,11 +203,11 @@ Two additional protocols are available but **disabled by default**:
 - **RESP** (Redis-compatible KV protocol) — `GET`/`SET`/`DEL`/`EXPIRE`/`SCAN`/`SUBSCRIBE`
 - **ILP** (InfluxDB Line Protocol) — high-throughput timeseries ingest
 
-Enable them by setting a listen address in config or via env var (see below).
+Enable them by setting a listen address in the config or via env var (see below).
 
-### Configuration
+### Example config file
 
-All protocols share one bind address (`host`). Only the port differs per protocol. Env vars take precedence over the TOML file.
+All protocols share one bind address (`host`). Only the port differs per protocol.
 
 ```toml
 # nodedb.toml
@@ -133,19 +238,19 @@ ilp = false                       # Example: disable TLS for ILP ingest
 
 **Server settings:**
 
-| Config field       | Environment variable      | Default          |
-| ------------------ | ------------------------- | ---------------- |
-| `host`             | `NODEDB_HOST`             | `127.0.0.1`      |
-| `ports.native`     | `NODEDB_PORT_NATIVE`      | `6433`           |
-| `ports.pgwire`     | `NODEDB_PORT_PGWIRE`      | `6432`           |
-| `ports.http`       | `NODEDB_PORT_HTTP`        | `6480`           |
-| `ports.resp`       | `NODEDB_PORT_RESP`        | disabled         |
-| `ports.ilp`        | `NODEDB_PORT_ILP`         | disabled         |
-| `data_dir`         | `NODEDB_DATA_DIR`         | `~/.nodedb/data` |
-| `memory_limit`     | `NODEDB_MEMORY_LIMIT`     | `1GiB`           |
-| `data_plane_cores` | `NODEDB_DATA_PLANE_CORES` | CPUs - 1         |
-| `max_connections`  | `NODEDB_MAX_CONNECTIONS`  | `1024`           |
-| `log_format`       | `NODEDB_LOG_FORMAT`       | `text`           |
+| Config field       | Environment variable      | Default                                               |
+| ------------------ | ------------------------- | ----------------------------------------------------- |
+| `host`             | `NODEDB_HOST`             | `127.0.0.1`                                           |
+| `ports.native`     | `NODEDB_PORT_NATIVE`      | `6433`                                                |
+| `ports.pgwire`     | `NODEDB_PORT_PGWIRE`      | `6432`                                                |
+| `ports.http`       | `NODEDB_PORT_HTTP`        | `6480`                                                |
+| `ports.resp`       | `NODEDB_PORT_RESP`        | disabled                                              |
+| `ports.ilp`        | `NODEDB_PORT_ILP`         | disabled                                              |
+| `data_dir`         | `NODEDB_DATA_DIR`         | `~/.nodedb/data` (binary), `/var/lib/nodedb` (Docker) |
+| `memory_limit`     | `NODEDB_MEMORY_LIMIT`     | `1GiB`                                                |
+| `data_plane_cores` | `NODEDB_DATA_PLANE_CORES` | CPUs - 1                                              |
+| `max_connections`  | `NODEDB_MAX_CONNECTIONS`  | `1024`                                                |
+| `log_format`       | `NODEDB_LOG_FORMAT`       | `text`                                                |
 
 **Per-protocol TLS** (only applies when `[server.tls]` is configured):
 

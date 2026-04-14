@@ -36,9 +36,11 @@ FROM debian:bookworm-slim AS runtime
 
 # ca-certificates: needed for JWKS fetch, OTLP export, S3 archival
 # curl: needed for HEALTHCHECK
+# gosu: drop privileges from root after fixing data-dir ownership in entrypoint
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user
@@ -51,12 +53,18 @@ RUN mkdir -p /var/lib/nodedb /etc/nodedb \
 
 COPY --from=builder /build/target/release/nodedb /usr/local/bin/nodedb
 
+# Entrypoint: when started as root, fix data-dir ownership and drop to the
+# nodedb user. When already started as a non-root user (e.g. `--user 10001`),
+# exec directly. This makes `-v <named-volume>:/var/lib/nodedb` work even
+# when Docker initialises the volume as root-owned (common on Linux hosts).
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Bind to all interfaces (required for Docker port mapping)
 # Point data dir at the declared volume
 ENV NODEDB_HOST=0.0.0.0 \
     NODEDB_DATA_DIR=/var/lib/nodedb
 
-USER nodedb
 WORKDIR /var/lib/nodedb
 
 # pgwire | native protocol | HTTP API | WebSocket sync | OTLP gRPC | OTLP HTTP
@@ -67,4 +75,5 @@ VOLUME ["/var/lib/nodedb"]
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
     CMD curl -f http://localhost:6480/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/nodedb"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/usr/local/bin/nodedb"]

@@ -55,5 +55,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake clang libclang-dev pkg-config protobuf-compiler perl \
             libcurl4-openssl-dev libsasl2-dev
+      # nextest is required — `.config/nextest.toml` defines the
+      # `cluster` test-group that serializes 3-node integration tests
+      # and the `ci` profile that retries flaky cluster tests once and
+      # writes a JUnit report. Plain `cargo test` ignores all of that
+      # and will hang/fail on the cluster suite.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - name: Run tests
-        run: cargo test --all-features --profile ci
+        run: cargo nextest run --all-features --cargo-profile ci --profile ci
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
