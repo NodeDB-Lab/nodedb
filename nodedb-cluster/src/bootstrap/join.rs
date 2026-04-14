@@ -143,15 +143,30 @@ async fn try_join_once(
     transport: &NexarTransport,
     req_template: &JoinRequest,
 ) -> Result<ClusterState> {
-    // Work list: start with the configured seeds, prepend leader hints
-    // as they arrive. `HashSet` deduplicates so a redirect loop can't
-    // consume all attempts against the same address.
-    let mut work: Vec<SocketAddr> = config.seed_nodes.clone();
+    // Work list: try seeds in sorted order so the lexicographically
+    // smallest address — the designated bootstrapper under the
+    // single-elected-bootstrapper rule — is contacted first. This is
+    // critical during the initial 5-node race: every other seed points
+    // at a node that is itself still joining, so asking them first
+    // eats the full RPC timeout per non-bootstrapper before we reach
+    // the one peer that can actually answer. `HashSet` deduplicates
+    // so a redirect loop can't consume all attempts against the same
+    // address.
+    let mut work: std::collections::VecDeque<SocketAddr> =
+        config.seed_nodes.iter().copied().collect();
+    {
+        // Sort so the designated bootstrapper surfaces first. Leader
+        // redirects get prepended with push_front below, keeping the
+        // "most likely to answer" candidate at the head.
+        let mut sorted: Vec<SocketAddr> = work.drain(..).collect();
+        sorted.sort();
+        work.extend(sorted);
+    }
     let mut visited: HashSet<SocketAddr> = HashSet::new();
     let mut redirects: u32 = 0;
     let mut last_err: Option<ClusterError> = None;
 
-    while let Some(addr) = work.pop() {
+    while let Some(addr) = work.pop_front() {
         if !visited.insert(addr) {
             continue;
         }
@@ -172,7 +187,7 @@ async fn try_join_once(
                             "following leader redirect"
                         );
                         redirects += 1;
-                        work.push(leader);
+                        work.push_front(leader);
                         continue;
                     }
                     debug!(

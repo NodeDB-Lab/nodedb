@@ -267,7 +267,23 @@ impl NexarTransport {
     }
 
     /// Send an RPC to an address directly (for bootstrap/join before peer IDs are known).
+    ///
+    /// The **entire** operation — handshake, stream open, write, read — is
+    /// bounded by `self.rpc_timeout`. Previously only the response read was
+    /// timed out, which meant a QUIC handshake against an unreachable peer
+    /// could block for the transport's internal idle timeout (~30 s per
+    /// address). That was fatal to cluster join races where every non-
+    /// bootstrapper seed points at another non-bootstrapper: each attempt
+    /// would stall 30 s × (N-1) peers, compounding across retry passes.
     pub async fn send_rpc_to_addr(&self, addr: SocketAddr, rpc: RaftRpc) -> Result<RaftRpc> {
+        tokio::time::timeout(self.rpc_timeout, self.send_rpc_to_addr_inner(addr, rpc))
+            .await
+            .map_err(|_| ClusterError::Transport {
+                detail: format!("RPC timeout ({}ms) to {addr}", self.rpc_timeout.as_millis()),
+            })?
+    }
+
+    async fn send_rpc_to_addr_inner(&self, addr: SocketAddr, rpc: RaftRpc) -> Result<RaftRpc> {
         let frame = rpc_codec::encode(&rpc)?;
 
         let conn = self
@@ -295,12 +311,7 @@ impl NexarTransport {
             detail: format!("finish send to {addr}: {e}"),
         })?;
 
-        let response_frame = tokio::time::timeout(self.rpc_timeout, server::read_frame(&mut recv))
-            .await
-            .map_err(|_| ClusterError::Transport {
-                detail: format!("RPC timeout ({}ms) to {addr}", self.rpc_timeout.as_millis()),
-            })??;
-
+        let response_frame = server::read_frame(&mut recv).await?;
         rpc_codec::decode(&response_frame)
     }
 
