@@ -151,7 +151,17 @@ pub async fn handle_alter_vector_index_compact(
     Ok(vec![Response::Execution(Tag::new("COMPACT"))])
 }
 
-/// Handle `ALTER VECTOR INDEX ON collection.column SET (m = 32, ef_construction = 400)`.
+/// Handle `ALTER VECTOR INDEX ON collection.column SET (...)`.
+///
+/// Supported keys: `m`, `m0`, `ef_construction`, `index_type`, `pq_m`,
+/// `ivf_cells`, `ivf_nprobe`. Quantization-shape keys (`index_type`, `pq_m`,
+/// `ivf_cells`, `ivf_nprobe`) route through `VectorOp::SetParams`, which
+/// updates the stored `IndexConfig` before the collection materializes. HNSW
+/// parameter keys (`m`, `m0`, `ef_construction`) route through
+/// `VectorOp::Rebuild`, which performs an in-place index rebuild against the
+/// already-materialized collection. A single ALTER may specify both groups —
+/// they are dispatched independently. Zero / omitted fields preserve the
+/// existing stored values (see `execute_set_vector_params`).
 pub async fn handle_alter_vector_index_set(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -179,12 +189,16 @@ pub async fn handle_alter_vector_index_set(
     let mut m = 0usize;
     let mut m0 = 0usize;
     let mut ef_construction = 0usize;
+    let mut index_type: Option<String> = None;
+    let mut pq_m = 0usize;
+    let mut ivf_cells = 0usize;
+    let mut ivf_nprobe = 0usize;
 
     for pair in inner.split(',') {
         let pair = pair.trim();
         if let Some((key, val)) = pair.split_once('=') {
             let key = key.trim().to_lowercase();
-            let val = val.trim();
+            let val = val.trim().trim_matches('\'').trim_matches('"');
             match key.as_str() {
                 "m" => {
                     m = val.parse().map_err(|_| {
@@ -204,20 +218,54 @@ pub async fn handle_alter_vector_index_set(
                         )
                     })?;
                 }
+                "index_type" => {
+                    let lower = val.to_lowercase();
+                    if !matches!(lower.as_str(), "hnsw" | "hnsw_pq" | "ivf_pq") {
+                        return Err(sqlstate_error(
+                            "42601",
+                            &format!(
+                                "unknown index_type '{val}'; supported: hnsw, hnsw_pq, ivf_pq"
+                            ),
+                        ));
+                    }
+                    index_type = Some(lower);
+                }
+                "pq_m" => {
+                    pq_m = val.parse().map_err(|_| {
+                        sqlstate_error("22023", &format!("invalid value for pq_m: {val}"))
+                    })?;
+                }
+                "ivf_cells" => {
+                    ivf_cells = val.parse().map_err(|_| {
+                        sqlstate_error("22023", &format!("invalid value for ivf_cells: {val}"))
+                    })?;
+                }
+                "ivf_nprobe" => {
+                    ivf_nprobe = val.parse().map_err(|_| {
+                        sqlstate_error("22023", &format!("invalid value for ivf_nprobe: {val}"))
+                    })?;
+                }
                 other => {
                     return Err(sqlstate_error(
                         "42601",
-                        &format!("unknown parameter '{other}'; supported: m, m0, ef_construction"),
+                        &format!(
+                            "unknown parameter '{other}'; supported: m, m0, ef_construction, \
+                             index_type, pq_m, ivf_cells, ivf_nprobe"
+                        ),
                     ));
                 }
             }
         }
     }
 
-    if m == 0 && m0 == 0 && ef_construction == 0 {
+    let has_rebuild = m > 0 || m0 > 0 || ef_construction > 0;
+    let has_quantization = index_type.is_some() || pq_m > 0 || ivf_cells > 0 || ivf_nprobe > 0;
+
+    if !has_rebuild && !has_quantization {
         return Err(sqlstate_error(
             "42601",
-            "SET clause must specify at least one parameter (m, m0, ef_construction)",
+            "SET clause must specify at least one parameter (m, m0, ef_construction, \
+             index_type, pq_m, ivf_cells, ivf_nprobe)",
         ));
     }
 
@@ -229,19 +277,44 @@ pub async fn handle_alter_vector_index_set(
     let tenant_id = identity.tenant_id;
     let vshard = crate::types::VShardId::from_collection(&collection);
 
-    let plan = PhysicalPlan::Vector(VectorOp::Rebuild {
-        collection,
-        field_name,
-        m,
-        m0,
-        ef_construction,
-    });
+    // Quantization changes route through SetParams (updates stored IndexConfig
+    // before the collection materializes). HNSW parameter changes route through
+    // Rebuild (in-place index rebuild).
+    if has_quantization {
+        // Zero / empty = preserve existing stored value. The handler reads the
+        // current IndexConfig and only overrides fields that were explicitly set.
+        let set_plan = PhysicalPlan::Vector(VectorOp::SetParams {
+            collection: collection.clone(),
+            m,
+            ef_construction,
+            metric: String::new(),
+            index_type: index_type.unwrap_or_default(),
+            pq_m,
+            ivf_cells,
+            ivf_nprobe,
+        });
+        crate::control::server::dispatch_utils::dispatch_to_data_plane(
+            state, tenant_id, vshard, set_plan, 0,
+        )
+        .await
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    }
 
-    crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state, tenant_id, vshard, plan, 0,
-    )
-    .await
-    .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    if has_rebuild {
+        let plan = PhysicalPlan::Vector(VectorOp::Rebuild {
+            collection,
+            field_name,
+            m,
+            m0,
+            ef_construction,
+        });
+
+        crate::control::server::dispatch_utils::dispatch_to_data_plane(
+            state, tenant_id, vshard, plan, 0,
+        )
+        .await
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    }
 
     Ok(vec![Response::Execution(Tag::new("ALTER VECTOR INDEX"))])
 }

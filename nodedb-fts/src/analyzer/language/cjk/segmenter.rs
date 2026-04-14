@@ -6,7 +6,7 @@
 //!
 //! Feature gates:
 //! - `lang-ja`: lindera with IPADIC for Japanese
-//! - `lang-zh`: jieba-rs for Chinese
+//! - `lang-zh`: currently falls back to CJK bigrams (see Cargo.toml)
 //! - `lang-ko`: lindera with ko-dic for Korean
 //! - `lang-th`: icu_segmenter for Thai
 
@@ -37,16 +37,9 @@ fn segment_japanese(text: &str) -> Vec<String> {
     }
 }
 
-/// Chinese segmentation: jieba when `lang-zh` is enabled, bigrams otherwise.
+/// Chinese segmentation: CJK bigrams (dictionary segmentation temporarily disabled).
 fn segment_chinese(text: &str) -> Vec<String> {
-    #[cfg(feature = "lang-zh")]
-    {
-        jieba_segment(text)
-    }
-    #[cfg(not(feature = "lang-zh"))]
-    {
-        tokenize_cjk(text)
-    }
+    tokenize_cjk(text)
 }
 
 /// Korean segmentation: lindera/ko-dic when `lang-ko` is enabled, bigrams otherwise.
@@ -92,18 +85,6 @@ fn lindera_segment(text: &str, _dict: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(feature = "lang-zh")]
-fn jieba_segment(text: &str) -> Vec<String> {
-    use jieba_rs::Jieba;
-    let jieba = Jieba::new();
-    jieba
-        .cut(text, false)
-        .into_iter()
-        .map(|s| s.to_string())
-        .filter(|s| !s.trim().is_empty())
-        .collect()
-}
-
 #[cfg(feature = "lang-th")]
 fn icu_segment_thai(text: &str) -> Vec<String> {
     use icu_segmenter::WordSegmenter;
@@ -124,19 +105,9 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(feature = "lang-zh"))]
-    fn fallback_to_bigrams_chinese() {
-        // Without lang-zh feature, should use CJK bigrams.
+    fn bigrams_chinese() {
         let tokens = segment("全文検索", "zh");
         assert_eq!(tokens, vec!["全文", "文検", "検索"]);
-    }
-
-    #[test]
-    #[cfg(feature = "lang-zh")]
-    fn dictionary_segmentation_chinese() {
-        // With lang-zh feature, jieba produces dictionary-based tokens.
-        let tokens = segment("全文検索", "zh");
-        assert!(!tokens.is_empty());
     }
 
     #[test]
