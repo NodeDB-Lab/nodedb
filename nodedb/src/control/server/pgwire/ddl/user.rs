@@ -121,15 +121,41 @@ pub fn create_user(
     let entry = crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
     let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
         .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
-    if log_index == 0
-        && let Some(catalog) = state.credentials.catalog()
-    {
-        // Single-node / no-cluster fallback: write the record
-        // directly and install it into the in-memory cache.
-        catalog
-            .put_user(&stored)
-            .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+    if log_index == 0 {
+        // Single-node / no-cluster fallback: install into the
+        // in-memory cache so subsequent reads see the user.
+        // Persist to redb when a catalog is wired up — the
+        // catalog write is best-effort durability, not a gate
+        // on the cache update. Test fixtures (and any future
+        // fully-in-memory deployment) can run without a redb
+        // catalog and still get correct read-after-write.
+        if let Some(catalog) = state.credentials.catalog() {
+            catalog
+                .put_user(&stored)
+                .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+        }
         state.credentials.install_replicated_user(&stored);
+    } else {
+        // Cluster mode: `propose_catalog_entry` waits for the
+        // entry to be applied on THIS node, which runs the
+        // synchronous post_apply (`install_replicated_user`)
+        // inline BEFORE the applied-index watermark bumps. So if
+        // our entry really committed, `get_user` must see it now.
+        //
+        // If `get_user` returns None, the Raft log entry at the
+        // index our leader assigned has been truncated and
+        // overwritten with a noop from a new leader term (a known
+        // Raft subtlety: `propose` returns the assigned log index
+        // without waiting for commit; if leadership changes
+        // before the quorum ack, the entry is dropped). Return a
+        // retryable error so `exec_ddl_on_any_leader` re-proposes
+        // on the next attempt against whoever is now leader.
+        if state.credentials.get_user(username).is_none() {
+            return Err(sqlstate_error(
+                "40001",
+                "transient: metadata entry truncated by leader change, retry",
+            ));
+        }
     }
 
     state.audit_record(
@@ -190,12 +216,12 @@ pub fn alter_user(
                 crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
             let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
                 .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
-            if log_index == 0
-                && let Some(catalog) = state.credentials.catalog()
-            {
-                catalog
-                    .put_user(&stored)
-                    .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+            if log_index == 0 {
+                if let Some(catalog) = state.credentials.catalog() {
+                    catalog
+                        .put_user(&stored)
+                        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+                }
                 state.credentials.install_replicated_user(&stored);
             }
 
@@ -228,12 +254,12 @@ pub fn alter_user(
                 crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
             let log_index = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
                 .map_err(|e| sqlstate_error("XX000", &format!("metadata propose: {e}")))?;
-            if log_index == 0
-                && let Some(catalog) = state.credentials.catalog()
-            {
-                catalog
-                    .put_user(&stored)
-                    .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+            if log_index == 0 {
+                if let Some(catalog) = state.credentials.catalog() {
+                    catalog
+                        .put_user(&stored)
+                        .map_err(|e| sqlstate_error("XX000", &format!("catalog write: {e}")))?;
+                }
                 state.credentials.install_replicated_user(&stored);
             }
 

@@ -65,8 +65,8 @@ where
                     "pgwire: retrying plan after schema change"
                 );
                 last_err = Some(Error::RetryableSchemaChanged { descriptor });
-                if attempt + 1 < MAX_ATTEMPTS {
-                    tokio::time::sleep(BACKOFFS[attempt]).await;
+                if let Some(backoff) = BACKOFFS.get(attempt) {
+                    tokio::time::sleep(*backoff).await;
                 }
             }
             Err(other) => return Err(other),
@@ -108,8 +108,8 @@ where
                     leader_node,
                     leader_addr,
                 });
-                if attempt + 1 < MAX_ATTEMPTS {
-                    tokio::time::sleep(BACKOFFS[attempt]).await;
+                if let Some(backoff) = BACKOFFS.get(attempt) {
+                    tokio::time::sleep(*backoff).await;
                 }
             }
             Err(other) => return Err(other),

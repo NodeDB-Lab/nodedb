@@ -157,7 +157,7 @@ impl MetadataCommitApplier {
             if compat {
                 catalog_entry
             } else {
-                catalog_entry::descriptor_stamp::stamp(catalog_entry, &shared.hlc_clock, &catalog)
+                catalog_entry::descriptor_stamp::stamp(catalog_entry, &shared.hlc_clock, catalog)
             }
         } else {
             // Unit tests construct the applier without a SharedState.
@@ -183,7 +183,19 @@ impl MetadataCommitApplier {
             {
                 shared.lease_drain.install_end(&drained_id);
             }
-            catalog_entry::post_apply::spawn_post_apply_side_effects(stamped, shared);
+            // Run synchronous post-apply side effects INLINE so every
+            // in-memory cache update (install_replicated_user,
+            // install_replicated_owner, etc.) is visible before the
+            // watcher bump. Any reader that observes `applied_index`
+            // moving past `last` is guaranteed to see the sync side
+            // effects of every entry up to `last`.
+            //
+            // The async tail (today: Data Plane Register dispatches
+            // for PutCollection) is spawned separately and is NOT
+            // part of the applied-index contract — it's a
+            // performance optimisation, not a correctness gate.
+            catalog_entry::post_apply::apply_post_apply_side_effects_sync(&stamped, &shared);
+            catalog_entry::post_apply::spawn_post_apply_async_side_effects(stamped, shared);
         }
     }
 }

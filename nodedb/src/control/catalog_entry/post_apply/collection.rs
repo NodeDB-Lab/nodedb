@@ -7,19 +7,11 @@ use tracing::debug;
 use crate::control::security::catalog::{StoredCollection, StoredOwner};
 use crate::control::state::SharedState;
 
-pub async fn put(stored: StoredCollection, shared: Arc<SharedState>) {
-    // Tell this node's Data Plane about the new collection so the
-    // first cross-node INSERT doesn't need to rediscover the
-    // storage mode.
-    crate::control::server::pgwire::ddl::collection::create::dispatch_register_from_stored(
-        &shared, &stored,
-    )
-    .await;
-    debug!(
-        collection = %stored.name,
-        "catalog_entry: Register dispatched to local Data Plane"
-    );
-
+/// Synchronous half of `PutCollection` post-apply: install the owner
+/// record into the in-memory `PermissionStore`. Called inline by the
+/// metadata applier BEFORE the applied-index watcher bump so readers
+/// of `applied_index` observe the ownership consistently.
+pub fn put_owner_sync(stored: &StoredCollection, shared: Arc<SharedState>) {
     // Replicate the owner record on every node so cluster-wide
     // `is_owner` / `check` evaluations succeed. Handlers no longer
     // call `set_owner` directly — ownership is entirely a side
@@ -30,6 +22,22 @@ pub async fn put(stored: StoredCollection, shared: Arc<SharedState>) {
         tenant_id: stored.tenant_id,
         owner_username: stored.owner.clone(),
     });
+}
+
+/// Asynchronous half: dispatch a `Register` request to this node's
+/// Data Plane so the first cross-node INSERT doesn't need to
+/// rediscover the storage mode. Spawned as a best-effort task —
+/// correctness does not depend on it completing before the
+/// `applied_index` watcher bumps, only performance does.
+pub async fn put_async(stored: StoredCollection, shared: Arc<SharedState>) {
+    crate::control::server::pgwire::ddl::collection::create::dispatch_register_from_stored(
+        &shared, &stored,
+    )
+    .await;
+    debug!(
+        collection = %stored.name,
+        "catalog_entry: Register dispatched to local Data Plane"
+    );
 }
 
 pub fn deactivate(tenant_id: u32, name: String, shared: Arc<SharedState>) {
