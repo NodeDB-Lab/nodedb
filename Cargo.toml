@@ -234,3 +234,12 @@ incremental = false
 [profile.debugging]
 inherits = "dev"
 debug = true
+
+# core2 0.4.0 is yanked on crates.io but no 0.4.1+ exists, and libflate /
+# libflate_lz77 (pulled in via the `jieba` feature of nodedb-fts →
+# include-flate → include-flate-compress) still require `core2 ^0.4`.
+# Point cargo at the upstream git source so fresh resolution (CI without
+# a committed lockfile) succeeds — git sources bypass the registry's yank
+# check. Safe to remove once libflate releases a bump off core2.
+[patch.crates-io]
+core2 = { git = "https://github.com/technocreatives/core2", rev = "545e84bcb0f235b12e21351e0c69767958efe2a7" }

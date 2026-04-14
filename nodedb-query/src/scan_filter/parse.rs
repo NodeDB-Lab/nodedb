@@ -42,6 +42,7 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
                 op: super::FilterOp::parse_op(op),
                 value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
                 clauses: Vec::new(),
+                expr: None,
             });
         }
     }
@@ -55,6 +56,7 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
             op: super::FilterOp::Like,
             value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
             clauses: Vec::new(),
+            expr: None,
         });
     }
     if let Some(pos) = upper.find(" ILIKE ") {
@@ -65,6 +67,7 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
             op: super::FilterOp::Ilike,
             value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
             clauses: Vec::new(),
+            expr: None,
         });
     }
 

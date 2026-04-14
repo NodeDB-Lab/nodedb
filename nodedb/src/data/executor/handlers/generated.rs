@@ -38,8 +38,10 @@ pub fn evaluate_generated_columns(
 /// Check that an UPDATE doesn't directly modify any generated column.
 ///
 /// Returns an error if any of the update field names matches a generated column.
-pub fn check_generated_readonly(
-    update_fields: &[(String, Vec<u8>)],
+/// Generic over the payload type so both `Vec<u8>` literal updates and the
+/// new `UpdateValue` carrier can share one implementation.
+pub fn check_generated_readonly<V>(
+    update_fields: &[(String, V)],
     specs: &[GeneratedColumnSpec],
 ) -> Result<(), ErrorCode> {
     for (field, _) in update_fields {
@@ -58,8 +60,8 @@ pub fn check_generated_readonly(
 /// Check if any of the updated fields are dependencies of generated columns.
 ///
 /// Returns `true` if generated columns need recomputation after this UPDATE.
-pub fn needs_recomputation(
-    update_fields: &[(String, Vec<u8>)],
+pub fn needs_recomputation<V>(
+    update_fields: &[(String, V)],
     specs: &[GeneratedColumnSpec],
 ) -> bool {
     for (field, _) in update_fields {

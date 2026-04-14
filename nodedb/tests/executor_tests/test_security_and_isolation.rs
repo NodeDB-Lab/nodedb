@@ -62,6 +62,7 @@ fn security_rls_policy_enforcement() {
         op: "eq".into(),
         value: nodedb_types::Value::String("approved".into()),
         clauses: Vec::new(),
+        expr: None,
     };
     let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 

@@ -322,6 +322,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("active".into()),
             clauses: Vec::new(),
+            expr: None,
         };
         let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 
@@ -355,6 +356,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("active".into()),
             clauses: Vec::new(),
+            expr: None,
         };
         let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 

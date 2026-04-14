@@ -36,6 +36,7 @@ fn aggregate_output_uses_user_alias_but_having_reads_canonical_key() {
         op: FilterOp::Gt,
         value: nodedb_types::Value::Integer(1),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 

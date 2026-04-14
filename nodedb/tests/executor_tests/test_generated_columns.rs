@@ -186,7 +186,9 @@ fn update_recomputes_generated_column() {
             document_id: "p1".into(),
             updates: vec![(
                 "price".to_string(),
-                nodedb_types::json_to_msgpack(&serde_json::json!(200.0)).unwrap(),
+                nodedb::bridge::physical_plan::UpdateValue::Literal(
+                    nodedb_types::json_to_msgpack(&serde_json::json!(200.0)).unwrap(),
+                ),
             )],
             returning: false,
         }),
@@ -236,7 +238,9 @@ fn update_generated_column_directly_rejected() {
             document_id: "p1".into(),
             updates: vec![(
                 "price_with_tax".to_string(),
-                nodedb_types::json_to_msgpack(&serde_json::json!(999.0)).unwrap(),
+                nodedb::bridge::physical_plan::UpdateValue::Literal(
+                    nodedb_types::json_to_msgpack(&serde_json::json!(999.0)).unwrap(),
+                ),
             )],
             returning: false,
         }),

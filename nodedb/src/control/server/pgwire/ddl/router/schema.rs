@@ -88,6 +88,47 @@ pub(super) async fn dispatch(
         );
     }
 
+    // ALTER COLLECTION ADD COLUMN — same catalog-generic handler, but only
+    // when this isn't a specialised variant (MATERIALIZED_SUM is routed
+    // earlier via the collaborative dispatcher).
+    if upper.starts_with("ALTER COLLECTION ")
+        && upper.contains("ADD COLUMN")
+        && !upper.contains("MATERIALIZED_SUM")
+    {
+        return Some(
+            super::super::collection::alter_table_add_column(state, identity, parts, sql).await,
+        );
+    }
+
+    // ALTER COLLECTION DROP COLUMN — strict-schema column removal.
+    if upper.starts_with("ALTER COLLECTION ") && upper.contains("DROP COLUMN") {
+        return Some(
+            super::super::collection::alter_collection_drop_column(state, identity, parts, sql)
+                .await,
+        );
+    }
+
+    // ALTER COLLECTION RENAME COLUMN — metadata-only rename.
+    if upper.starts_with("ALTER COLLECTION ") && upper.contains("RENAME COLUMN") {
+        return Some(
+            super::super::collection::alter_collection_rename_column(state, identity, parts, sql)
+                .await,
+        );
+    }
+
+    // ALTER COLLECTION ALTER COLUMN ... TYPE ... — type alias change.
+    if upper.starts_with("ALTER COLLECTION ")
+        && upper.contains("ALTER COLUMN")
+        && upper.contains(" TYPE ")
+    {
+        return Some(
+            super::super::collection::alter_collection_alter_column_type(
+                state, identity, parts, sql,
+            )
+            .await,
+        );
+    }
+
     // RLS policies.
     if upper.starts_with("CREATE RLS POLICY ") {
         return Some(super::super::rls::create_rls_policy(state, identity, parts));

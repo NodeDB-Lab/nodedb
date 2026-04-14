@@ -9,7 +9,7 @@ use crate::types::{TenantId, VShardId};
 use super::super::physical::{PhysicalTask, PostSetOp};
 use super::filter::serialize_filters;
 use super::value::{
-    assignments_to_bytes, row_to_msgpack, rows_to_msgpack_array, sql_value_to_bytes,
+    assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array, sql_value_to_bytes,
     sql_value_to_msgpack, sql_value_to_string, write_msgpack_map_header, write_msgpack_str,
     write_msgpack_value,
 };
@@ -110,10 +110,20 @@ pub(super) fn convert_upsert(
     engine: &EngineType,
     rows: &[Vec<(String, SqlValue)>],
     _column_defaults: &[(String, String)],
+    on_conflict_updates: &[(String, SqlExpr)],
     tenant_id: TenantId,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let mut tasks = Vec::new();
+
+    // The ON CONFLICT assignments travel alongside the insert bytes. Each
+    // non-literal RHS becomes an `UpdateValue::Expr` that the Data Plane
+    // evaluates against the *existing* row at apply time.
+    let on_conflict_values = if on_conflict_updates.is_empty() {
+        Vec::new()
+    } else {
+        assignments_to_update_values(on_conflict_updates)?
+    };
 
     for row in rows {
         let doc_id = row
@@ -132,6 +142,7 @@ pub(super) fn convert_upsert(
                         collection: collection.into(),
                         document_id: doc_id,
                         value: value_bytes,
+                        on_conflict_updates: on_conflict_values.clone(),
                     }),
                     post_set_op: PostSetOp::None,
                 });
@@ -205,10 +216,24 @@ pub(super) fn convert_update(
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let filter_bytes = serialize_filters(filters)?;
-    let updates = assignments_to_bytes(assignments)?;
+    let updates = assignments_to_update_values(assignments)?;
 
     // KV engine: route to FieldSet for point updates.
     if matches!(engine, EngineType::KeyValue) && !target_keys.is_empty() {
+        // KV FieldSet doesn't yet evaluate per-row expressions — any
+        // non-literal RHS must be rejected loudly rather than silently
+        // dropped (which would update no fields and return "ok").
+        if let Some((field, _)) = assignments
+            .iter()
+            .find(|(_, expr)| !matches!(expr, SqlExpr::Literal(_)))
+        {
+            return Err(crate::Error::BadRequest {
+                detail: format!(
+                    "UPDATE with non-literal RHS on KV engine (field '{field}') \
+                     is not yet supported; use a literal value"
+                ),
+            });
+        }
         let mut tasks = Vec::new();
         for key in target_keys {
             let field_updates: Vec<(String, Vec<u8>)> = assignments

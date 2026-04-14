@@ -89,6 +89,7 @@ fn columnar_having_uses_canonical_key_but_output_keeps_user_alias() {
         op: FilterOp::Gt,
         value: nodedb_types::Value::Integer(1),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 

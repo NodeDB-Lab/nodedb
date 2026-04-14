@@ -84,7 +84,15 @@ pub(super) fn convert_one(
             engine,
             rows,
             column_defaults,
-        } => super::dml::convert_upsert(collection, engine, rows, column_defaults, tenant_id),
+            on_conflict_updates,
+        } => super::dml::convert_upsert(
+            collection,
+            engine,
+            rows,
+            column_defaults,
+            on_conflict_updates,
+            tenant_id,
+        ),
 
         SqlPlan::KvInsert {
             collection,

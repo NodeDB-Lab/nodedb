@@ -88,7 +88,7 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         filter_bytes: &[u8],
-        updates: &[(String, Vec<u8>)],
+        updates: &[(String, crate::bridge::physical_plan::UpdateValue)],
         returning: bool,
     ) -> Response {
         debug!(core = self.core_id, %collection, returning, "bulk update");
@@ -104,15 +104,20 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        let filters: Vec<ScanFilter> = match zerompk::from_msgpack(filter_bytes) {
-            Ok(f) => f,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("deserialize filters: {e}"),
-                    },
-                );
+        // Empty `filter_bytes` means "no WHERE clause" — match every row.
+        let filters: Vec<ScanFilter> = if filter_bytes.is_empty() {
+            Vec::new()
+        } else {
+            match zerompk::from_msgpack(filter_bytes) {
+                Ok(f) => f,
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("deserialize filters: {e}"),
+                        },
+                    );
+                }
             }
         };
 
@@ -164,13 +169,25 @@ impl CoreLoop {
                             None => continue,
                         }
                     };
+                    // Snapshot the current row for expression evaluation. All
+                    // expression assignments see the pre-update state — multiple
+                    // assignments in the same UPDATE do not observe each other,
+                    // matching PostgreSQL semantics.
+                    let eval_doc: nodedb_types::Value = doc.clone().into();
                     if let Some(obj) = doc.as_object_mut() {
-                        for (field, value_bytes) in updates {
-                            let val: serde_json::Value =
-                                match nodedb_types::json_from_msgpack(value_bytes) {
-                                    Ok(v) => v,
-                                    Err(_) => continue,
-                                };
+                        for (field, update_val) in updates {
+                            let val: serde_json::Value = match update_val {
+                                crate::bridge::physical_plan::UpdateValue::Literal(bytes) => {
+                                    match nodedb_types::json_from_msgpack(bytes) {
+                                        Ok(v) => v,
+                                        Err(_) => continue,
+                                    }
+                                }
+                                crate::bridge::physical_plan::UpdateValue::Expr(expr) => {
+                                    let result: nodedb_types::Value = expr.eval(&eval_doc);
+                                    result.into()
+                                }
+                            };
                             obj.insert(field.clone(), val);
                         }
                     }
@@ -273,15 +290,20 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, "bulk delete");
 
-        let filters: Vec<ScanFilter> = match zerompk::from_msgpack(filter_bytes) {
-            Ok(f) => f,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("deserialize filters: {e}"),
-                    },
-                );
+        // Empty `filter_bytes` means "no WHERE clause" — match every row.
+        let filters: Vec<ScanFilter> = if filter_bytes.is_empty() {
+            Vec::new()
+        } else {
+            match zerompk::from_msgpack(filter_bytes) {
+                Ok(f) => f,
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("deserialize filters: {e}"),
+                        },
+                    );
+                }
             }
         };
 

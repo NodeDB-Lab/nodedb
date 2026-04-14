@@ -38,3 +38,21 @@ pub fn sql_like_match(input: &str, pattern: &str, case_insensitive: bool) -> boo
 
     j == pattern.len()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sql_like_match;
+
+    #[test]
+    fn like_basic() {
+        assert!(sql_like_match("hello world", "%world", false));
+        assert!(sql_like_match("hello world", "hello%", false));
+        assert!(!sql_like_match("hello world", "xyz%", false));
+    }
+
+    #[test]
+    fn ilike_case_insensitive() {
+        assert!(sql_like_match("Hello", "hello", true));
+        assert!(sql_like_match("WORLD", "%world%", true));
+    }
+}

@@ -68,6 +68,127 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
             }
         }
         SqlExpr::Wildcard => BExpr::Column("*".into()),
+
+        // NOT e / -e → evaluator's Negate (handles both bool and numeric).
+        SqlExpr::UnaryOp { expr, .. } => BExpr::Negate(Box::new(sql_expr_to_bridge_expr(expr))),
+
+        // `e IS NULL` / `e IS NOT NULL` — direct passthrough.
+        SqlExpr::IsNull { expr, negated } => BExpr::IsNull {
+            expr: Box::new(sql_expr_to_bridge_expr(expr)),
+            negated: *negated,
+        },
+
+        // `e BETWEEN low AND high` desugars to `e >= low AND e <= high`
+        // (or `e < low OR e > high` when negated). The evaluator has no
+        // native Between variant, so the planner must lower it here.
+        SqlExpr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
+            let e = sql_expr_to_bridge_expr(expr);
+            let l = sql_expr_to_bridge_expr(low);
+            let h = sql_expr_to_bridge_expr(high);
+            if *negated {
+                let lt = BExpr::BinaryOp {
+                    left: Box::new(e.clone()),
+                    op: crate::bridge::expr_eval::BinaryOp::Lt,
+                    right: Box::new(l),
+                };
+                let gt = BExpr::BinaryOp {
+                    left: Box::new(e),
+                    op: crate::bridge::expr_eval::BinaryOp::Gt,
+                    right: Box::new(h),
+                };
+                BExpr::BinaryOp {
+                    left: Box::new(lt),
+                    op: crate::bridge::expr_eval::BinaryOp::Or,
+                    right: Box::new(gt),
+                }
+            } else {
+                let ge = BExpr::BinaryOp {
+                    left: Box::new(e.clone()),
+                    op: crate::bridge::expr_eval::BinaryOp::GtEq,
+                    right: Box::new(l),
+                };
+                let le = BExpr::BinaryOp {
+                    left: Box::new(e),
+                    op: crate::bridge::expr_eval::BinaryOp::LtEq,
+                    right: Box::new(h),
+                };
+                BExpr::BinaryOp {
+                    left: Box::new(ge),
+                    op: crate::bridge::expr_eval::BinaryOp::And,
+                    right: Box::new(le),
+                }
+            }
+        }
+
+        // `e IN (a, b, c)` desugars to `e = a OR e = b OR e = c` — each
+        // element may itself be a non-literal expression, so we must
+        // recursively convert and OR the comparisons together. `NOT IN`
+        // is `e <> a AND e <> b AND e <> c`.
+        SqlExpr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let target = sql_expr_to_bridge_expr(expr);
+            if list.is_empty() {
+                // Empty list: `e IN ()` = false, `e NOT IN ()` = true.
+                return BExpr::Literal(nodedb_types::Value::Bool(*negated));
+            }
+            let (eq_op, combine_op) = if *negated {
+                (
+                    crate::bridge::expr_eval::BinaryOp::NotEq,
+                    crate::bridge::expr_eval::BinaryOp::And,
+                )
+            } else {
+                (
+                    crate::bridge::expr_eval::BinaryOp::Eq,
+                    crate::bridge::expr_eval::BinaryOp::Or,
+                )
+            };
+            // Empty list is handled above, so `list` is guaranteed non-empty
+            // here: we reduce `(target eq list[0]) op (target eq list[1]) op ...`
+            // without touching `.unwrap()` or `.expect()`.
+            list.iter()
+                .map(|item| BExpr::BinaryOp {
+                    left: Box::new(target.clone()),
+                    op: eq_op,
+                    right: Box::new(sql_expr_to_bridge_expr(item)),
+                })
+                .reduce(|acc, next| BExpr::BinaryOp {
+                    left: Box::new(acc),
+                    op: combine_op,
+                    right: Box::new(next),
+                })
+                // Unreachable: `list.is_empty()` returns early above.
+                .unwrap_or(BExpr::Literal(nodedb_types::Value::Bool(*negated)))
+        }
+
+        // `e LIKE pattern` — no direct evaluator variant; route through a
+        // function call so the shared function dispatcher handles it.
+        SqlExpr::Like {
+            expr,
+            pattern,
+            negated,
+        } => {
+            let call = BExpr::Function {
+                name: "like".into(),
+                args: vec![
+                    sql_expr_to_bridge_expr(expr),
+                    sql_expr_to_bridge_expr(pattern),
+                ],
+            };
+            if *negated {
+                BExpr::Negate(Box::new(call))
+            } else {
+                call
+            }
+        }
+
         _ => BExpr::Literal(nodedb_types::Value::Null),
     }
 }

@@ -102,6 +102,7 @@ mod tests {
             op: "gt".into(),
             value: nodedb_types::Value::Float(200.0),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_dense(&mt, &[f], 30).unwrap();
         let passing: usize = mask.iter().filter(|&&b| b).count();
@@ -117,6 +118,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("db-1".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_sparse(&mt, &[f], &indices).unwrap();
         let passing: usize = mask.iter().filter(|&&b| b).count();
@@ -132,6 +134,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("nonexistent".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_sparse(&mt, &[f], &indices).unwrap();
         let passing: usize = mask.iter().filter(|&&b| b).count();
@@ -148,12 +151,14 @@ mod tests {
                 op: "gte".into(),
                 value: nodedb_types::Value::Float(100.0),
                 clauses: vec![],
+                expr: None,
             },
             ScanFilter {
                 field: "host".into(),
                 op: "eq".into(),
                 value: nodedb_types::Value::String("web-1".into()),
                 clauses: vec![],
+                expr: None,
             },
         ];
         let mask = eval_filters_sparse(&mt, &filters, &indices).unwrap();
@@ -173,7 +178,9 @@ mod tests {
                 op: "gt".into(),
                 value: nodedb_types::Value::Float(100.0),
                 clauses: vec![],
+                expr: None,
             }]],
+            expr: None,
         };
         assert!(eval_filters_dense(&mt, &[f], 30).is_none());
     }
@@ -208,6 +215,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("web-1".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_dense(&src, &[f], 6).unwrap();
         let passing: usize = mask.iter().filter(|&&b| b).count();
@@ -243,6 +251,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("z".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_dense(&src, &[f], 4).unwrap();
         assert!(mask.iter().all(|&b| !b));
@@ -276,6 +285,7 @@ mod tests {
             op: "contains".into(),
             value: nodedb_types::Value::String("web".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_dense(&src, &[f], 6).unwrap();
         let passing: usize = mask.iter().filter(|&&b| b).count();
@@ -310,6 +320,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("alpha".into()),
             clauses: vec![],
+            expr: None,
         };
         let bm = eval_filters_bitmask(&src, &[f], 8).unwrap();
         // bits 0,2,4,6 should be set (alpha rows)
@@ -344,6 +355,7 @@ mod tests {
             op: "ne".into(),
             value: nodedb_types::Value::String("y".into()),
             clauses: vec![],
+            expr: None,
         };
         let bm = eval_filters_bitmask(&src, &[f], 5).unwrap();
         let indices = nodedb_query::simd_filter::bitmask_to_indices(&bm);
@@ -377,6 +389,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("a".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_dense(&src, &[f], 4).unwrap();
         // Only rows 0 and 2 are valid and match.
@@ -421,6 +434,7 @@ mod tests {
             op: "gt".into(),
             value: nodedb_types::Value::Float(500.0),
             clauses: vec![],
+            expr: None,
         };
         let mask = eval_filters_sparse(&src, &[f], &indices).unwrap();
         let passing: usize = mask.iter().filter(|&&b| b).count();
@@ -432,6 +446,7 @@ mod tests {
             op: "eq".into(),
             value: nodedb_types::Value::String("alpha".into()),
             clauses: vec![],
+            expr: None,
         };
         let mask2 = eval_filters_sparse(&src, &[f2], &indices).unwrap();
         let passing2: usize = mask2.iter().filter(|&&b| b).count();

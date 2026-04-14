@@ -123,6 +123,7 @@ fn cross_model_query_vector_graph_relational() {
         op: "gte".into(),
         value: nodedb_types::Value::Integer(2023),
         clauses: Vec::new(),
+        expr: None,
     }];
     let filter_bytes = zerompk::to_msgpack_vec(&filter).unwrap();
     let scan_payload = send_ok(

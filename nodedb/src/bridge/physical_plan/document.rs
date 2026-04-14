@@ -2,6 +2,54 @@
 
 use nodedb_types::columnar::StrictSchema;
 
+/// Right-hand side of an UPDATE ... SET field = <...> assignment.
+///
+/// The planner turns each assignment into one of these before it crosses
+/// the SPSC bridge:
+///
+/// - `Literal` — pre-encoded msgpack bytes for constant RHS. This is the
+///   fast path: the Data Plane can merge these at the binary level for
+///   non-strict collections without decoding the current row.
+/// - `Expr` — a `SqlExpr` that must be evaluated against the *current*
+///   document at apply time. Used for arithmetic (`col + 1`), functions
+///   (`LOWER(col)`, `NOW()`), `CASE`, concatenation, and anything else
+///   whose result depends on the row being updated.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum UpdateValue {
+    Literal(Vec<u8>),
+    Expr(crate::bridge::expr_eval::SqlExpr),
+}
+
+impl zerompk::ToMessagePack for UpdateValue {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        writer.write_array_len(2)?;
+        match self {
+            UpdateValue::Literal(bytes) => {
+                writer.write_u8(0)?;
+                bytes.write(writer)
+            }
+            UpdateValue::Expr(expr) => {
+                writer.write_u8(1)?;
+                expr.write(writer)
+            }
+        }
+    }
+}
+
+impl<'a> zerompk::FromMessagePack<'a> for UpdateValue {
+    fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
+        reader.check_array_len(2)?;
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => Ok(UpdateValue::Literal(Vec::<u8>::read(reader)?)),
+            1 => Ok(UpdateValue::Expr(crate::bridge::expr_eval::SqlExpr::read(
+                reader,
+            )?)),
+            _ => Err(zerompk::Error::InvalidMarker(tag)),
+        }
+    }
+}
+
 /// Storage encoding mode for a document collection.
 ///
 /// Determines how documents are serialized before storage in the sparse engine.
@@ -139,8 +187,8 @@ pub enum DocumentOp {
     PointUpdate {
         collection: String,
         document_id: String,
-        /// Field name → new JSON value.
-        updates: Vec<(String, Vec<u8>)>,
+        /// Field name → assignment RHS (literal bytes or row-scope expression).
+        updates: Vec<(String, UpdateValue)>,
         /// If true, return the post-update document as payload (for RETURNING clause).
         returning: bool,
     },
@@ -217,18 +265,22 @@ pub enum DocumentOp {
         source_limit: usize,
     },
 
-    /// Upsert: insert or merge.
+    /// Upsert: insert or merge. When `on_conflict_updates` is non-empty,
+    /// the conflict branch evaluates those assignments against the
+    /// *existing* document instead of merging the inserted value —
+    /// the `INSERT ... ON CONFLICT DO UPDATE SET ...` path.
     Upsert {
         collection: String,
         document_id: String,
         value: Vec<u8>,
+        on_conflict_updates: Vec<(String, UpdateValue)>,
     },
 
     /// Bulk update: scan + apply field updates to all matches.
     BulkUpdate {
         collection: String,
         filters: Vec<u8>,
-        updates: Vec<(String, Vec<u8>)>,
+        updates: Vec<(String, UpdateValue)>,
         /// If true, return updated documents as JSON array payload (for RETURNING clause).
         returning: bool,
     },

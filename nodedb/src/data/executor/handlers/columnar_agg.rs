@@ -593,6 +593,7 @@ mod tests {
             op: "gt".into(),
             value: nodedb_types::Value::Float(5000.0),
             clauses: vec![],
+            expr: None,
         };
         let result = try_columnar_aggregate(
             &mt,

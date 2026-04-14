@@ -299,6 +299,7 @@ mod tests {
             op: FilterOp::LtColumn,
             value: nodedb_types::Value::String("b.id".into()),
             clauses: Vec::new(),
+            expr: None,
         }];
 
         assert!(binary_row_matches_filters(&merged, &filters));

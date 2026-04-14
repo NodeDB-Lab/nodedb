@@ -14,7 +14,10 @@ pub mod upsert;
 pub mod vector_metadata;
 
 // Re-export all public functions so existing callers via `super::collection::*` continue to work.
-pub use alter::{alter_collection_enforcement, alter_table_add_column};
+pub use alter::{
+    alter_collection_alter_column_type, alter_collection_drop_column, alter_collection_enforcement,
+    alter_collection_rename_column, alter_table_add_column,
+};
 pub use create::{create_collection, dispatch_register_if_needed};
 pub use describe::{describe_collection, show_collections};
 pub use drop::drop_collection;

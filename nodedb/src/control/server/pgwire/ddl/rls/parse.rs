@@ -121,6 +121,7 @@ pub fn parse_create_rls_policy(
             op: op.into(),
             value: nodedb_types::Value::String(value_str),
             clauses: Vec::new(),
+            expr: None,
         };
         let predicate = zerompk::to_msgpack_vec(&vec![filter])
             .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;

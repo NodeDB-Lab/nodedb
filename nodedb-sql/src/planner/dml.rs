@@ -8,8 +8,45 @@ use crate::parser::normalize::{normalize_ident, normalize_object_name};
 use crate::resolver::expr::{convert_expr, convert_value};
 use crate::types::*;
 
+/// Extract `ON CONFLICT (...) DO UPDATE SET` assignments from an AST
+/// insert, or `None` if this is a plain INSERT.
+fn extract_on_conflict_updates(ins: &ast::Insert) -> Result<Option<Vec<(String, SqlExpr)>>> {
+    let Some(on) = ins.on.as_ref() else {
+        return Ok(None);
+    };
+    let ast::OnInsert::OnConflict(oc) = on else {
+        return Ok(None);
+    };
+    let ast::OnConflictAction::DoUpdate(do_update) = &oc.action else {
+        // DO NOTHING maps to "ignore conflict" — currently unsupported.
+        return Err(SqlError::Unsupported {
+            detail: "ON CONFLICT DO NOTHING is not yet supported".into(),
+        });
+    };
+    let mut pairs = Vec::with_capacity(do_update.assignments.len());
+    for a in &do_update.assignments {
+        let name = match &a.target {
+            ast::AssignmentTarget::ColumnName(obj) => normalize_object_name(obj),
+            _ => {
+                return Err(SqlError::Unsupported {
+                    detail: "ON CONFLICT DO UPDATE SET target must be a column name".into(),
+                });
+            }
+        };
+        let expr = convert_expr(&a.value)?;
+        pairs.push((name, expr));
+    }
+    Ok(Some(pairs))
+}
+
 /// Plan an INSERT statement.
 pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+    // `INSERT ... ON CONFLICT DO UPDATE SET` reroutes to the upsert path
+    // with the assignments carried through. Detected before any other
+    // work so both planning paths share the `ast::Insert` decode below.
+    if let Some(on_conflict_updates) = extract_on_conflict_updates(ins)? {
+        return plan_upsert_with_on_conflict(ins, catalog, on_conflict_updates);
+    }
     let table_name = match &ins.table {
         ast::TableObject::TableName(name) => normalize_object_name(name),
         ast::TableObject::TableFunction(_) => {
@@ -190,6 +227,60 @@ pub fn plan_upsert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
         columns,
         rows,
         column_defaults,
+        on_conflict_updates: Vec::new(),
+    })
+}
+
+/// Plan an `INSERT ... ON CONFLICT DO UPDATE SET` statement. Identical to
+/// `plan_upsert` except the assignments are carried onto the upsert plan
+/// so the Data Plane can evaluate them against the existing row instead
+/// of merging the would-be-inserted values.
+fn plan_upsert_with_on_conflict(
+    ins: &ast::Insert,
+    catalog: &dyn SqlCatalog,
+    on_conflict_updates: Vec<(String, SqlExpr)>,
+) -> Result<Vec<SqlPlan>> {
+    let table_name = match &ins.table {
+        ast::TableObject::TableName(name) => normalize_object_name(name),
+        ast::TableObject::TableFunction(_) => {
+            return Err(SqlError::Unsupported {
+                detail: "INSERT ... ON CONFLICT on a table function is not supported".into(),
+            });
+        }
+    };
+    let info = catalog
+        .get_collection(&table_name)?
+        .ok_or_else(|| SqlError::UnknownTable {
+            name: table_name.clone(),
+        })?;
+
+    let columns: Vec<String> = ins.columns.iter().map(normalize_ident).collect();
+
+    let source = ins.source.as_ref().ok_or_else(|| SqlError::Parse {
+        detail: "INSERT ... ON CONFLICT requires VALUES".into(),
+    })?;
+    let rows_ast = match &*source.body {
+        ast::SetExpr::Values(values) => &values.rows,
+        _ => {
+            return Err(SqlError::Unsupported {
+                detail: "INSERT ... ON CONFLICT source must be VALUES".into(),
+            });
+        }
+    };
+
+    let rows = convert_value_rows(&columns, rows_ast)?;
+    let column_defaults: Vec<(String, String)> = info
+        .columns
+        .iter()
+        .filter_map(|c| c.default.as_ref().map(|d| (c.name.clone(), d.clone())))
+        .collect();
+    let rules = engine_rules::resolve_engine_rules(info.engine);
+    rules.plan_upsert(engine_rules::UpsertParams {
+        collection: table_name,
+        columns,
+        rows,
+        column_defaults,
+        on_conflict_updates,
     })
 }
 

@@ -74,6 +74,7 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
             collection,
             document_id,
             value,
+            ..
         } => {
             let new_fields = deserialize_value_to_fields(value);
             Some(DmlWriteInfo {
@@ -190,13 +191,18 @@ pub fn patch_task_with_mutated_fields(
             *value = new_bytes;
         }
         PhysicalPlan::Document(DocumentOp::PointUpdate { updates, .. }) => {
-            // Re-derive field-level updates from the full mutated row.
+            // Re-derive field-level updates from the full mutated row. Trigger
+            // mutations are fully-evaluated post-trigger values, so they ship
+            // as `UpdateValue::Literal`.
             *updates = mutated
                 .iter()
                 .filter_map(|(k, v)| {
-                    nodedb_types::value_to_msgpack(v)
-                        .ok()
-                        .map(|b| (k.clone(), b))
+                    nodedb_types::value_to_msgpack(v).ok().map(|b| {
+                        (
+                            k.clone(),
+                            crate::bridge::physical_plan::UpdateValue::Literal(b),
+                        )
+                    })
                 })
                 .collect();
         }

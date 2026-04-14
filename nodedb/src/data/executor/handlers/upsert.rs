@@ -25,8 +25,15 @@ impl CoreLoop {
         collection: &str,
         document_id: &str,
         value: &[u8],
+        on_conflict_updates: &[(String, crate::bridge::physical_plan::UpdateValue)],
     ) -> Response {
-        debug!(core = self.core_id, %collection, %document_id, "upsert");
+        debug!(
+            core = self.core_id,
+            %collection,
+            %document_id,
+            has_on_conflict = !on_conflict_updates.is_empty(),
+            "upsert"
+        );
 
         // Detect strict storage mode for this collection.
         let config_key = format!("{tid}:{collection}");
@@ -94,8 +101,15 @@ impl CoreLoop {
                     }
                 };
 
-                // Merge: overlay new fields onto existing.
-                let merged = merge_values(existing_val, new_val);
+                // Conflict branch: if `ON CONFLICT DO UPDATE SET` assignments
+                // are present, evaluate each against the *existing* row and
+                // apply only those fields. Otherwise fall back to the plain
+                // merge semantics used by `UPSERT INTO` / no-action upserts.
+                let merged = if on_conflict_updates.is_empty() {
+                    merge_values(existing_val, new_val)
+                } else {
+                    apply_on_conflict_updates(existing_val, on_conflict_updates)
+                };
 
                 // Encode merged value for storage.
                 let stored_bytes = if let Some(ref schema) = strict_schema {
@@ -183,6 +197,40 @@ impl CoreLoop {
             ),
         }
     }
+}
+
+/// Apply `ON CONFLICT DO UPDATE SET` assignments against the existing row.
+///
+/// Each assignment's RHS is evaluated via `SqlExpr::eval` — identical to
+/// the UPDATE handler's path — so arithmetic (`n = n + 1`), functions
+/// (`name = UPPER(name)`), `CASE`, and concatenation all work. Literal
+/// assignments bypass the evaluator and decode their msgpack directly.
+fn apply_on_conflict_updates(
+    existing: nodedb_types::Value,
+    updates: &[(String, crate::bridge::physical_plan::UpdateValue)],
+) -> nodedb_types::Value {
+    let mut obj = match existing {
+        nodedb_types::Value::Object(map) => map,
+        // If the existing row isn't an object (shouldn't happen for
+        // document engines) fall back to the assignments as a blank slate.
+        _ => std::collections::HashMap::new(),
+    };
+    // Snapshot the row before any assignment applies, so all assignments
+    // see the pre-update state — matches PostgreSQL semantics.
+    let snapshot = nodedb_types::Value::Object(obj.clone());
+    for (field, update_val) in updates {
+        let new_val: nodedb_types::Value = match update_val {
+            crate::bridge::physical_plan::UpdateValue::Literal(bytes) => {
+                match nodedb_types::value_from_msgpack(bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            }
+            crate::bridge::physical_plan::UpdateValue::Expr(expr) => expr.eval(&snapshot),
+        };
+        obj.insert(field.clone(), new_val);
+    }
+    nodedb_types::Value::Object(obj)
 }
 
 /// Merge two `nodedb_types::Value` objects: overlay `new` fields onto `existing`.

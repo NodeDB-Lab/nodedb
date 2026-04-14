@@ -434,6 +434,7 @@ mod tests {
             op: "gt".into(),
             value: nodedb_types::Value::Integer(25),
             clauses: vec![],
+            expr: None,
         }];
 
         let batches = read_parquet_filtered(&parquet, &filters, &[]).unwrap();

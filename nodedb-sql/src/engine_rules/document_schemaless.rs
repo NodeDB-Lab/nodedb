@@ -22,6 +22,7 @@ impl EngineRules for SchemalessRules {
             engine: EngineType::DocumentSchemaless,
             rows: p.rows,
             column_defaults: p.column_defaults,
+            on_conflict_updates: p.on_conflict_updates,
         }])
     }
 

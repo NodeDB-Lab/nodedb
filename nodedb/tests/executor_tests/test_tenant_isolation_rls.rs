@@ -18,6 +18,7 @@ fn rls_policies_isolated_between_tenants() {
         op: "eq".into(),
         value: nodedb_types::Value::String("approved".into()),
         clauses: Vec::new(),
+        expr: None,
     };
     let predicate = zerompk::to_msgpack_vec(&vec![filter]).unwrap();
 
@@ -72,6 +73,7 @@ fn rls_policy_listing_scoped() {
             op: "eq".into(),
             value: nodedb_types::Value::String("admin".into()),
             clauses: Vec::new(),
+            expr: None,
         };
         store
             .create_policy(RlsPolicy {

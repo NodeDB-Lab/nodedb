@@ -65,6 +65,11 @@ pub enum SqlPlan {
         engine: EngineType,
         rows: Vec<Vec<(String, SqlValue)>>,
         column_defaults: Vec<(String, String)>,
+        /// `ON CONFLICT (...) DO UPDATE SET field = expr` assignments.
+        /// When empty, upsert is a plain merge: new columns overwrite existing.
+        /// When non-empty, the engine applies these per-row against the
+        /// *existing* document instead of merging the inserted values.
+        on_conflict_updates: Vec<(String, SqlExpr)>,
     },
     InsertSelect {
         target: String,

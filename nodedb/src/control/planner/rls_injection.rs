@@ -352,6 +352,7 @@ fn inject_permission_tree_for_plan(
                 .collect(),
         ),
         clauses: Vec::new(),
+        expr: None,
     };
 
     let filter_bytes =

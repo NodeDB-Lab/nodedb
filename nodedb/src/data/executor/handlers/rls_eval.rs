@@ -67,6 +67,7 @@ mod tests {
             op: op.into(),
             value,
             clauses: Vec::new(),
+            expr: None,
         };
         zerompk::to_msgpack_vec(&vec![filter]).unwrap()
     }
@@ -113,12 +114,14 @@ mod tests {
                 op: "eq".into(),
                 value: nodedb_types::Value::String("42".into()),
                 clauses: Vec::new(),
+                expr: None,
             },
             ScanFilter {
                 field: "status".into(),
                 op: "eq".into(),
                 value: nodedb_types::Value::String("active".into()),
                 clauses: Vec::new(),
+                expr: None,
             },
         ];
         let rls = zerompk::to_msgpack_vec(&filters).unwrap();

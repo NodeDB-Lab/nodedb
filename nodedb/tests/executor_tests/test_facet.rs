@@ -69,6 +69,7 @@ fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
         op: op.into(),
         value,
         clauses: Vec::new(),
+        expr: None,
     }
 }
 

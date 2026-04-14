@@ -30,6 +30,7 @@ pub fn substitute_to_scan_filters(
             op: "match_all".into(),
             value: nodedb_types::Value::Null,
             clauses: Vec::new(),
+            expr: None,
         }]),
 
         RlsPredicate::AlwaysFalse => {
@@ -39,6 +40,7 @@ pub fn substitute_to_scan_filters(
                 op: "is_not_null".into(),
                 value: nodedb_types::Value::Null,
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -58,6 +60,7 @@ pub fn substitute_to_scan_filters(
                 op: op.as_filter_op().into(),
                 value: nodedb_types::Value::from(resolved),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -91,6 +94,7 @@ pub fn substitute_to_scan_filters(
                     op: "is_not_null".into(),
                     value: nodedb_types::Value::Null,
                     clauses: Vec::new(),
+                    expr: None,
                 }]);
             }
 
@@ -103,6 +107,7 @@ pub fn substitute_to_scan_filters(
                 op: "or".into(),
                 value: nodedb_types::Value::Null,
                 clauses: clause_groups,
+                expr: None,
             }])
         }
 
@@ -173,6 +178,7 @@ fn substitute_contains(
                         op: "match_all".into(),
                         value: nodedb_types::Value::Null,
                         clauses: Vec::new(),
+                        expr: None,
                     }])
                 } else {
                     Some(vec![ScanFilter {
@@ -180,6 +186,7 @@ fn substitute_contains(
                         op: "is_not_null".into(),
                         value: nodedb_types::Value::Null,
                         clauses: Vec::new(),
+                        expr: None,
                     }])
                 }
             } else {
@@ -197,6 +204,7 @@ fn substitute_contains(
                         op: "match_all".into(),
                         value: nodedb_types::Value::Null,
                         clauses: Vec::new(),
+                        expr: None,
                     }])
                 } else {
                     Some(vec![ScanFilter {
@@ -204,6 +212,7 @@ fn substitute_contains(
                         op: "is_not_null".into(),
                         value: nodedb_types::Value::Null,
                         clauses: Vec::new(),
+                        expr: None,
                     }])
                 }
             } else {
@@ -219,6 +228,7 @@ fn substitute_contains(
                 op: "contains".into(),
                 value: nodedb_types::Value::from(auth_val),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -230,6 +240,7 @@ fn substitute_contains(
                 op: "contains".into(),
                 value: nodedb_types::Value::from(auth_val),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -240,6 +251,7 @@ fn substitute_contains(
                 op: "contains".into(),
                 value: nodedb_types::Value::from(lit.clone()),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -262,6 +274,7 @@ fn substitute_intersects(
                 op: "any_in".into(),
                 value: nodedb_types::Value::from(auth_val),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -273,6 +286,7 @@ fn substitute_intersects(
                 op: "any_in".into(),
                 value: nodedb_types::Value::from(auth_val),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
         (PredicateValue::AuthFunc { .. }, PredicateValue::Field(doc_field)) => {
@@ -282,6 +296,7 @@ fn substitute_intersects(
                 op: "any_in".into(),
                 value: nodedb_types::Value::from(auth_val),
                 clauses: Vec::new(),
+                expr: None,
             }])
         }
 
@@ -302,6 +317,7 @@ fn substitute_intersects(
                     op: "match_all".into(),
                     value: nodedb_types::Value::Null,
                     clauses: Vec::new(),
+                    expr: None,
                 }])
             } else {
                 Some(vec![ScanFilter {
@@ -309,6 +325,7 @@ fn substitute_intersects(
                     op: "is_not_null".into(),
                     value: nodedb_types::Value::Null,
                     clauses: Vec::new(),
+                    expr: None,
                 }])
             }
         }
@@ -332,6 +349,7 @@ fn substitute_intersects(
                     op: "match_all".into(),
                     value: nodedb_types::Value::Null,
                     clauses: Vec::new(),
+                    expr: None,
                 }])
             } else {
                 Some(vec![ScanFilter {
@@ -339,6 +357,7 @@ fn substitute_intersects(
                     op: "is_not_null".into(),
                     value: nodedb_types::Value::Null,
                     clauses: Vec::new(),
+                    expr: None,
                 }])
             }
         }

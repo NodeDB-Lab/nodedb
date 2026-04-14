@@ -59,6 +59,10 @@ pub struct UpsertParams {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<(String, SqlValue)>>,
     pub column_defaults: Vec<(String, String)>,
+    /// `ON CONFLICT (...) DO UPDATE SET` assignments. Empty for plain
+    /// `UPSERT INTO ...`; populated when the caller is
+    /// `INSERT ... ON CONFLICT ... DO UPDATE SET`.
+    pub on_conflict_updates: Vec<(String, SqlExpr)>,
 }
 
 /// Parameters for planning an AGGREGATE operation.

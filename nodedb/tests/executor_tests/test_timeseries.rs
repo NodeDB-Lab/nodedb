@@ -290,6 +290,7 @@ fn where_predicate_filters_count() {
             op: "eq".into(),
             value: nodedb_types::Value::String("A".into()),
             clauses: vec![],
+            expr: None,
         }],
     );
     let filtered_count = filtered[0]["count(*)"].as_u64().unwrap();

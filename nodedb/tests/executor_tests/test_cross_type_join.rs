@@ -428,6 +428,7 @@ fn single_core_self_join_respects_aliases_in_filter_and_projection() {
         op: FilterOp::LtColumn,
         value: nodedb_types::Value::String("b.id".into()),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 
@@ -571,6 +572,7 @@ fn schemaless_self_join_matches_on_canonicalized_object_fields() {
         op: FilterOp::LtColumn,
         value: nodedb_types::Value::String("b.id".into()),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 
@@ -651,6 +653,7 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
         op: FilterOp::GtColumn,
         value: nodedb_types::Value::String("avg_score".into()),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 
@@ -738,6 +741,7 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
         op: FilterOp::GtColumn,
         value: nodedb_types::Value::String("avg(amount)".into()),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 
@@ -843,6 +847,7 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
         op: FilterOp::GtColumn,
         value: nodedb_types::Value::String("avg(amount)".into()),
         clauses: Vec::new(),
+        expr: None,
     }])
     .unwrap();
 

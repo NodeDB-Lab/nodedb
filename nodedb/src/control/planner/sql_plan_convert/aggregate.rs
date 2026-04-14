@@ -345,8 +345,43 @@ pub(super) fn serialize_window_functions(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_computed_columns, extract_projection_names};
-    use nodedb_sql::types::{Projection, SqlExpr, WindowSpec};
+    use super::{agg_expr_to_spec, extract_computed_columns, extract_projection_names};
+    use nodedb_sql::types::{AggregateExpr, BinaryOp, Projection, SqlExpr, SqlValue, WindowSpec};
+
+    #[test]
+    fn aggregate_spec_preserves_alias_and_case_expression() {
+        let agg = AggregateExpr {
+            function: "sum".into(),
+            args: vec![SqlExpr::Case {
+                operand: None,
+                when_then: vec![(
+                    SqlExpr::BinaryOp {
+                        left: Box::new(SqlExpr::Column {
+                            table: None,
+                            name: "category".into(),
+                        }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(SqlExpr::Literal(SqlValue::String("tools".into()))),
+                    },
+                    SqlExpr::Literal(SqlValue::Int(1)),
+                )],
+                else_expr: Some(Box::new(SqlExpr::Literal(SqlValue::Int(0)))),
+            }],
+            alias: "tools_count".into(),
+            distinct: false,
+        };
+
+        let spec = agg_expr_to_spec(&agg);
+
+        assert_eq!(spec.function, "sum");
+        assert_eq!(spec.alias, "sum(*)");
+        assert_eq!(spec.user_alias.as_deref(), Some("tools_count"));
+        assert_eq!(spec.field, "*");
+        assert!(matches!(
+            spec.expr,
+            Some(crate::bridge::expr_eval::SqlExpr::Case { .. })
+        ));
+    }
 
     #[test]
     fn window_aliases_stay_in_projection_and_out_of_computed_columns() {

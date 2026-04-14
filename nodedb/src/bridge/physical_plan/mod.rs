@@ -20,7 +20,7 @@ pub use columnar::ColumnarOp;
 pub use crdt::CrdtOp;
 pub use document::{
     BalancedDef, DocumentOp, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding,
-    PeriodLockConfig, StorageMode,
+    PeriodLockConfig, StorageMode, UpdateValue,
 };
 pub use graph::GraphOp;
 pub use kv::KvOp;

@@ -95,7 +95,15 @@ impl CoreLoop {
                 collection,
                 document_id,
                 value,
-            } => self.execute_upsert(task, tid, collection, document_id, value),
+                on_conflict_updates,
+            } => self.execute_upsert(
+                task,
+                tid,
+                collection,
+                document_id,
+                value,
+                on_conflict_updates,
+            ),
 
             DocumentOp::Truncate { collection, .. } => self.execute_truncate(task, tid, collection),
 

@@ -170,13 +170,20 @@ pub(crate) fn build_batch_insert(
 
 pub(crate) fn build_update(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
-    let updates = fields
+    let updates: Vec<(String, crate::bridge::physical_plan::UpdateValue)> = fields
         .updates
         .as_ref()
         .ok_or_else(|| crate::Error::BadRequest {
             detail: "missing 'updates'".to_string(),
         })?
-        .clone();
+        .iter()
+        .map(|(f, b)| {
+            (
+                f.clone(),
+                crate::bridge::physical_plan::UpdateValue::Literal(b.clone()),
+            )
+        })
+        .collect();
     Ok(PhysicalPlan::Document(DocumentOp::PointUpdate {
         collection: collection.to_string(),
         document_id: doc_id,
@@ -208,6 +215,9 @@ pub(crate) fn build_upsert(fields: &TextFields, collection: &str) -> crate::Resu
         collection: collection.to_string(),
         document_id: doc_id,
         value,
+        // The native text protocol carries no ON CONFLICT clause; plain
+        // merge semantics apply.
+        on_conflict_updates: Vec::new(),
     }))
 }
 
@@ -222,13 +232,20 @@ pub(crate) fn build_bulk_update(
             detail: "missing 'filters'".to_string(),
         })?
         .clone();
-    let updates = fields
+    let updates: Vec<(String, crate::bridge::physical_plan::UpdateValue)> = fields
         .updates
         .as_ref()
         .ok_or_else(|| crate::Error::BadRequest {
             detail: "missing 'updates'".to_string(),
         })?
-        .clone();
+        .iter()
+        .map(|(f, b)| {
+            (
+                f.clone(),
+                crate::bridge::physical_plan::UpdateValue::Literal(b.clone()),
+            )
+        })
+        .collect();
     Ok(PhysicalPlan::Document(DocumentOp::BulkUpdate {
         collection: collection.to_string(),
         filters,

@@ -95,6 +95,7 @@ pub fn try_parse_when_to_filter(condition: &str) -> Option<(WhenTarget, ScanFilt
                     op: FilterOp::IsNotNull,
                     value: Value::Null,
                     clauses: vec![],
+                    expr: None,
                 },
             ));
         }
@@ -110,6 +111,7 @@ pub fn try_parse_when_to_filter(condition: &str) -> Option<(WhenTarget, ScanFilt
                     op: FilterOp::IsNull,
                     value: Value::Null,
                     clauses: vec![],
+                    expr: None,
                 },
             ));
         }
@@ -144,6 +146,7 @@ pub fn try_parse_when_to_filter(condition: &str) -> Option<(WhenTarget, ScanFilt
                     op: *op,
                     value,
                     clauses: vec![],
+                    expr: None,
                 },
             ));
         }
