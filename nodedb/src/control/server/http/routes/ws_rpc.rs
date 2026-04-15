@@ -31,6 +31,8 @@ use tracing::debug;
 
 use super::super::auth::AppState;
 use crate::control::change_stream::ChangeEvent;
+use crate::control::gateway::GatewayErrorMap;
+use crate::control::gateway::core::QueryContext;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
@@ -249,7 +251,7 @@ async fn process_message(
 
             let response = match execute_sql(shared, query_ctx, tenant_id, sql, trace_id).await {
                 Ok(result) => serde_json::json!({"id": id, "result": result}).to_string(),
-                Err(e) => error_response(id, &e.to_string()),
+                Err(e) => ws_error_from_gateway(&id, &e),
             };
             (response, None)
         }
@@ -306,6 +308,10 @@ async fn process_message(
 }
 
 /// Execute SQL and return result as JSON.
+///
+/// Routes through the gateway when available (cluster-aware dispatch);
+/// falls back to direct local SPSC dispatch on single-node boot before
+/// the gateway is initialised.
 async fn execute_sql(
     shared: &SharedState,
     query_ctx: &crate::control::planner::context::QueryContext,
@@ -322,23 +328,38 @@ async fn execute_sql(
 
     let mut results = Vec::new();
     for task in tasks {
-        let resp = crate::control::server::dispatch_utils::dispatch_to_data_plane(
-            shared,
-            task.tenant_id,
-            task.vshard_id,
-            task.plan,
-            trace_id,
-        )
-        .await;
+        let payloads: crate::Result<Vec<Vec<u8>>> = match shared.gateway.as_ref() {
+            Some(gw) => {
+                let gw_ctx = QueryContext {
+                    tenant_id: task.tenant_id,
+                    trace_id,
+                };
+                gw.execute(&gw_ctx, task.plan).await
+            }
+            None => {
+                // Single-node boot: gateway not yet initialised — dispatch locally.
+                crate::control::server::dispatch_utils::dispatch_to_data_plane(
+                    shared,
+                    task.tenant_id,
+                    task.vshard_id,
+                    task.plan,
+                    trace_id,
+                )
+                .await
+                .map(|r| vec![r.payload.to_vec()])
+            }
+        };
 
-        match resp {
-            Ok(r) => {
-                if !r.payload.is_empty() {
-                    let json =
-                        crate::data::executor::response_codec::decode_payload_to_json(&r.payload);
-                    match sonic_rs::from_str::<serde_json::Value>(&json) {
-                        Ok(v) => results.push(v),
-                        Err(_) => results.push(serde_json::Value::String(json)),
+        match payloads {
+            Ok(vecs) => {
+                for payload in vecs {
+                    if !payload.is_empty() {
+                        let json =
+                            crate::data::executor::response_codec::decode_payload_to_json(&payload);
+                        match sonic_rs::from_str::<serde_json::Value>(&json) {
+                            Ok(v) => results.push(v),
+                            Err(_) => results.push(serde_json::Value::String(json)),
+                        }
                     }
                 }
             }
@@ -359,6 +380,15 @@ async fn execute_sql(
             .unwrap_or(serde_json::Value::Null)),
         _ => Ok(serde_json::Value::Array(results)),
     }
+}
+
+/// Format a WS error frame using the gateway error mapping.
+///
+/// Ensures the error message is derived from `GatewayErrorMap::to_http`
+/// for consistent HTTP-status-aligned error shapes across the wire.
+fn ws_error_from_gateway(id: &serde_json::Value, err: &crate::Error) -> String {
+    let (_status, msg) = GatewayErrorMap::to_http(err);
+    error_response(id.clone(), &msg)
 }
 
 /// Extract collection name from SQL (first word after FROM, case-insensitive).

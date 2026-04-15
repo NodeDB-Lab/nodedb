@@ -4,13 +4,12 @@ use sonic_rs;
 
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::bridge::physical_plan::KvOp;
-use crate::control::server::dispatch_utils;
-use crate::control::server::wal_dispatch;
 use crate::control::state::SharedState;
-use crate::types::VShardId;
 
 use super::codec::RespValue;
 use super::command::RespCommand;
+// Re-export for sub-handlers that import via `super::handler::dispatch_kv` etc.
+pub(super) use super::gateway_dispatch::{dispatch_kv, dispatch_kv_write, parse_json_field_i64};
 use super::session::RespSession;
 
 /// Execute a RESP command and return the response.
@@ -412,59 +411,4 @@ async fn handle_info(_cmd: &RespCommand, session: &RespSession, _state: &SharedS
         session.collection
     );
     RespValue::bulk(info.into_bytes())
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch helpers (used by handler_kv and handler_hash)
-// ---------------------------------------------------------------------------
-
-/// Dispatch a read-only KV operation to the Data Plane.
-///
-/// Bridge/dispatch errors are mapped to `Error::Bridge` with a "BUSY" detail
-/// so the RESP handler can return `-BUSY` to the Redis client.
-pub(super) async fn dispatch_kv(
-    state: &SharedState,
-    session: &RespSession,
-    plan: PhysicalPlan,
-) -> crate::Result<crate::bridge::envelope::Response> {
-    let vshard = VShardId::from_collection(&session.collection);
-    dispatch_utils::dispatch_to_data_plane(state, session.tenant_id, vshard, plan, 0)
-        .await
-        .map_err(map_busy_error)
-}
-
-/// Dispatch a KV write operation: WAL append first, then Data Plane.
-pub(super) async fn dispatch_kv_write(
-    state: &SharedState,
-    session: &RespSession,
-    plan: PhysicalPlan,
-) -> crate::Result<crate::bridge::envelope::Response> {
-    let vshard = VShardId::from_collection(&session.collection);
-    wal_dispatch::wal_append_if_write(&state.wal, session.tenant_id, vshard, &plan)?;
-    dispatch_utils::dispatch_to_data_plane(state, session.tenant_id, vshard, plan, 0)
-        .await
-        .map_err(map_busy_error)
-}
-
-/// Map bridge/dispatch errors to a BUSY error for Redis client compatibility.
-///
-/// When the SPSC ring buffer is full or the Data Plane core is overloaded,
-/// the Redis client receives `-BUSY NodeDB is processing requests, retry later`
-/// which Redis clients handle with automatic retry (same as Redis Cluster BUSY).
-fn map_busy_error(e: crate::Error) -> crate::Error {
-    match &e {
-        crate::Error::Bridge { .. } | crate::Error::Dispatch { .. } => crate::Error::Bridge {
-            detail: "BUSY NodeDB is processing requests, retry later".into(),
-        },
-        _ => e,
-    }
-}
-
-/// Parse a JSON payload and extract an integer field.
-pub(super) fn parse_json_field_i64(
-    payload: &crate::bridge::envelope::Payload,
-    field: &str,
-) -> Option<i64> {
-    let json: serde_json::Value = sonic_rs::from_slice(payload).ok()?;
-    json.get(field)?.as_i64()
 }

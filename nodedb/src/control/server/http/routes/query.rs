@@ -7,11 +7,13 @@
 //! full SQL queries (SELECT, INSERT, UPDATE, DELETE) via DataFusion.
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use sonic_rs;
 
 use crate::bridge::envelope::{PhysicalPlan, Status};
+use crate::control::gateway::GatewayErrorMap;
+use crate::control::gateway::core::QueryContext;
 use crate::control::security::identity::{required_permission, role_grants_permission};
 use crate::types::VShardId;
 
@@ -115,32 +117,55 @@ pub async fn query(
             // WAL append for write operations.
             wal_append_if_write(&state, &task)?;
 
-            // Dispatch to Data Plane.
-            let response =
-                dispatch_to_data_plane(&state, task.tenant_id, task.vshard_id, task.plan, trace_id)
+            // Dispatch: prefer gateway when available (cluster-aware routing),
+            // fall back to direct local SPSC dispatch on single-node boot.
+            let payloads = match state.shared.gateway.as_ref() {
+                Some(gw) => {
+                    let gw_ctx = QueryContext {
+                        tenant_id: task.tenant_id,
+                        trace_id,
+                    };
+                    gw.execute(&gw_ctx, task.plan).await.map_err(|e| {
+                        let (status, msg) = GatewayErrorMap::to_http(&e);
+                        ApiError::HttpStatus(status, msg)
+                    })?
+                }
+                None => {
+                    // Single-node boot: gateway not yet initialised — dispatch locally.
+                    let response = dispatch_to_data_plane(
+                        &state,
+                        task.tenant_id,
+                        task.vshard_id,
+                        task.plan,
+                        trace_id,
+                    )
                     .await
-                    .map_err(|e| ApiError::Internal(format!("dispatch failed: {e}")))?;
+                    .map_err(|e| {
+                        let (status, msg) = GatewayErrorMap::to_http(&e);
+                        ApiError::HttpStatus(status, msg)
+                    })?;
+                    if response.status != Status::Ok {
+                        let detail = response
+                            .error_code
+                            .as_ref()
+                            .map(|c| format!("{c:?}"))
+                            .unwrap_or_else(|| "unknown error".into());
+                        return Err(ApiError::Internal(detail));
+                    }
+                    vec![response.payload.to_vec()]
+                }
+            };
 
-            // Check response status.
-            if response.status != Status::Ok {
-                let detail = response
-                    .error_code
-                    .as_ref()
-                    .map(|c| format!("{c:?}"))
-                    .unwrap_or_else(|| "unknown error".into());
-                return Err(ApiError::Internal(detail));
-            }
-
-            // Decode payload to JSON.
-            let payload = response.payload.as_ref();
-            if !payload.is_empty() {
-                match decode_payload_to_json(payload) {
-                    Ok(value) => result_rows.push(value),
-                    Err(_) => {
-                        // Binary payload — base64 encode.
-                        use base64::Engine;
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
-                        result_rows.push(serde_json::json!({ "data": encoded }));
+            for payload in &payloads {
+                if !payload.is_empty() {
+                    match decode_payload_to_json(payload) {
+                        Ok(value) => result_rows.push(value),
+                        Err(_) => {
+                            // Binary payload — base64 encode.
+                            use base64::Engine;
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+                            result_rows.push(serde_json::json!({ "data": encoded }));
+                        }
                     }
                 }
             }
@@ -171,7 +196,9 @@ fn wal_append_if_write(
     .map_err(|e| ApiError::Internal(format!("WAL append: {e}")))
 }
 
-/// Dispatch a physical plan to the Data Plane and await the response.
+/// Dispatch a physical plan locally (single-node fallback path).
+///
+/// Called only when `shared.gateway` is `None` (pre-cluster-init boot).
 async fn dispatch_to_data_plane(
     state: &AppState,
     tenant_id: crate::types::TenantId,
@@ -246,7 +273,6 @@ pub async fn query_ndjson(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
     use axum::response::Response;
 
     let identity = match resolve_identity(&headers, &state, "http") {
@@ -293,36 +319,55 @@ pub async fn query_ndjson(
 
     state.shared.tenant_request_start(tenant_id);
 
+    let trace_id = crate::control::trace_context::generate_trace_id();
     let mut ndjson = String::new();
     for task in tasks {
-        match crate::control::server::dispatch_utils::dispatch_to_data_plane(
-            &state.shared,
-            task.tenant_id,
-            task.vshard_id,
-            task.plan,
-            0,
-        )
-        .await
-        {
-            Ok(resp) if !resp.payload.is_empty() => {
-                let json_str =
-                    crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-                // Try to parse as array and emit each element as a line.
-                if let Ok(serde_json::Value::Array(items)) =
-                    sonic_rs::from_str::<serde_json::Value>(&json_str)
-                {
-                    for item in &items {
-                        ndjson.push_str(&item.to_string());
-                        ndjson.push('\n');
+        let dispatch_result: crate::Result<Vec<Vec<u8>>> = match state.shared.gateway.as_ref() {
+            Some(gw) => {
+                let gw_ctx = QueryContext {
+                    tenant_id: task.tenant_id,
+                    trace_id,
+                };
+                gw.execute(&gw_ctx, task.plan).await
+            }
+            None => {
+                // Single-node boot: gateway not yet initialised — dispatch locally.
+                crate::control::server::dispatch_utils::dispatch_to_data_plane(
+                    &state.shared,
+                    task.tenant_id,
+                    task.vshard_id,
+                    task.plan,
+                    trace_id,
+                )
+                .await
+                .map(|r| vec![r.payload.to_vec()])
+            }
+        };
+
+        match dispatch_result {
+            Ok(payloads) => {
+                for payload in &payloads {
+                    if !payload.is_empty() {
+                        let json_str =
+                            crate::data::executor::response_codec::decode_payload_to_json(payload);
+                        // Try to parse as array and emit each element as a line.
+                        if let Ok(serde_json::Value::Array(items)) =
+                            sonic_rs::from_str::<serde_json::Value>(&json_str)
+                        {
+                            for item in &items {
+                                ndjson.push_str(&item.to_string());
+                                ndjson.push('\n');
+                            }
+                        } else {
+                            ndjson.push_str(&json_str);
+                            ndjson.push('\n');
+                        }
                     }
-                } else {
-                    ndjson.push_str(&json_str);
-                    ndjson.push('\n');
                 }
             }
-            Ok(_) => {}
             Err(e) => {
-                ndjson.push_str(&serde_json::json!({"error": e.to_string()}).to_string());
+                let (_status, msg) = GatewayErrorMap::to_http(&e);
+                ndjson.push_str(&serde_json::json!({"error": msg}).to_string());
                 ndjson.push('\n');
             }
         }

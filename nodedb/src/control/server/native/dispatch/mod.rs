@@ -7,6 +7,7 @@ mod pgwire_bridge;
 mod plan_builder;
 mod session_ops;
 mod sql;
+mod sql_gateway;
 mod transaction;
 
 pub(crate) use auth::{handle_auth, handle_ping};

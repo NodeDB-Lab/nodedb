@@ -55,13 +55,33 @@ impl Listener {
         auth_mode: crate::config::auth::AuthMode,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         conn_semaphore: Arc<Semaphore>,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        startup_gate: Arc<crate::control::startup::StartupGate>,
+        bus: crate::control::shutdown::ShutdownBus,
     ) -> crate::Result<()> {
+        let drain_guard = bus.register_task(
+            crate::control::shutdown::ShutdownPhase::DrainingListeners,
+            "native",
+            None,
+        );
+        let mut shutdown_handle = bus.handle();
+
         let tls_label = if tls_acceptor.is_some() {
             "tls"
         } else {
             "plain"
         };
+        info!(
+            addr = %self.addr,
+            tls = tls_label,
+            "native listener bound — waiting for GatewayEnable"
+        );
+
+        // Block until startup is complete before accepting real connections.
+        startup_gate
+            .await_phase(crate::control::startup::StartupPhase::GatewayEnable)
+            .await
+            .map_err(crate::Error::from)?;
+
         info!(
             addr = %self.addr,
             tls = tls_label,
@@ -138,15 +158,13 @@ impl Listener {
                         info!(%peer_addr, "native connection closed");
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(
-                            addr = %self.addr,
-                            active = connections.len(),
-                            "shutdown signal, draining native connections"
-                        );
-                        break;
-                    }
+                _ = shutdown_handle.await_phase(crate::control::shutdown::ShutdownPhase::DrainingListeners) => {
+                    info!(
+                        addr = %self.addr,
+                        active = connections.len(),
+                        "shutdown signal, draining native connections"
+                    );
+                    break;
                 }
             }
         }
@@ -180,6 +198,7 @@ impl Listener {
         }
 
         info!(addr = %self.addr, "native listener stopped");
+        drain_guard.report_drained();
         Ok(())
     }
 }

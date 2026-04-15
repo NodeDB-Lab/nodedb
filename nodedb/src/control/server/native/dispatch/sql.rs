@@ -1,7 +1,5 @@
 //! SQL dispatch: DataFusion planning + Data Plane execution.
 
-use std::sync::Arc;
-
 use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
@@ -12,6 +10,7 @@ use crate::data::executor::response_codec;
 
 use super::super::super::dispatch_utils;
 use super::pgwire_bridge::pgwire_result_to_native;
+use super::sql_gateway::dispatch_task_via_gateway;
 use super::transaction::{handle_begin, handle_commit, handle_rollback};
 use super::{DispatchCtx, error_to_native};
 
@@ -206,8 +205,11 @@ async fn execute_planned(ctx: &DispatchCtx<'_>, seq: u64, sql: &str) -> NativeRe
     }
 }
 
-/// Dispatch a single PhysicalTask (WAL + Data Plane, or Raft).
-/// Scan operations are broadcast to all cores; point operations use single-core dispatch.
+/// Dispatch a single PhysicalTask.
+///
+/// Broadcast plans (scans, InsertSelect) are handled locally; all other tasks
+/// flow through `dispatch_task_via_gateway` which routes via the gateway when
+/// available, or falls back to the local SPSC path on single-node boot.
 async fn dispatch_task(ctx: &DispatchCtx<'_>, task: PhysicalTask) -> crate::Result<Response> {
     if matches!(
         task.plan,
@@ -225,82 +227,16 @@ async fn dispatch_task(ctx: &DispatchCtx<'_>, task: PhysicalTask) -> crate::Resu
         .await;
     }
 
-    // Broadcast scans to all cores so we find data regardless of which core stored it.
+    // Broadcast scans must fan-out to all cores regardless of gateway state.
     if task.plan.is_broadcast_scan() {
         return dispatch_utils::broadcast_to_all_cores(ctx.state, task.tenant_id, task.plan, 0)
             .await;
     }
-    // Raft path for replicated writes.
-    if let (Some(proposer), Some(tracker)) = (&ctx.state.raft_proposer, &ctx.state.propose_tracker)
-        && let Some(entry) = crate::control::wal_replication::to_replicated_entry(
-            task.tenant_id,
-            task.vshard_id,
-            &task.plan,
-        )
-    {
-        let data = entry.to_bytes();
-        let vshard_id = entry.vshard_id;
 
-        let (group_id, log_index) =
-            proposer(vshard_id, data).map_err(|e| crate::Error::Dispatch {
-                detail: format!("raft propose failed: {e}"),
-            })?;
-
-        let rx = tracker.register(group_id, log_index);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await
-            .map_err(|_| crate::Error::Dispatch {
-                detail: format!("raft commit timeout for group {group_id} index {log_index}"),
-            })?
-            .map_err(|_| crate::Error::Dispatch {
-                detail: "propose waiter channel closed".into(),
-            })?;
-
-        return match result {
-            Ok(payload) => Ok(Response {
-                request_id: crate::types::RequestId::new(0),
-                status: Status::Ok,
-                attempt: 1,
-                partial: false,
-                payload: payload.into(),
-                watermark_lsn: crate::types::Lsn::new(log_index),
-                error_code: None,
-            }),
-            Err(err_msg) => {
-                let err_str = err_msg.to_string();
-                Ok(Response {
-                    request_id: crate::types::RequestId::new(0),
-                    status: Status::Error,
-                    attempt: 1,
-                    partial: false,
-                    payload: crate::bridge::envelope::Payload::from_arc(Arc::from(
-                        err_str.as_bytes(),
-                    )),
-                    watermark_lsn: crate::types::Lsn::new(0),
-                    error_code: Some(crate::bridge::envelope::ErrorCode::Internal {
-                        detail: err_str,
-                    }),
-                })
-            }
-        };
-    }
-
-    // Local path: WAL append + Data Plane dispatch.
-    dispatch_utils::wal_append_if_write(
-        &ctx.state.wal,
-        task.tenant_id,
-        task.vshard_id,
-        &task.plan,
-    )?;
-
-    dispatch_utils::dispatch_to_data_plane(
-        ctx.state,
-        task.tenant_id,
-        task.vshard_id,
-        task.plan,
-        0, // trace_id
-    )
-    .await
+    // All other tasks — point ops, writes, Raft-replicated writes — route
+    // through the gateway when available (cluster-aware routing + retry),
+    // or via the local SPSC path when the gateway is not yet wired.
+    dispatch_task_via_gateway(ctx, task).await
 }
 
 // ─── SET / SHOW / RESET (SQL form) ─────────────────────────────────

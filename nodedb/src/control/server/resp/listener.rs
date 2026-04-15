@@ -58,13 +58,28 @@ impl RespListener {
         state: Arc<SharedState>,
         conn_semaphore: Arc<Semaphore>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        startup_gate: Arc<crate::control::startup::StartupGate>,
+        bus: crate::control::shutdown::ShutdownBus,
     ) -> crate::Result<()> {
+        let drain_guard = bus.register_task(
+            crate::control::shutdown::ShutdownPhase::DrainingListeners,
+            "resp",
+            None,
+        );
+        let mut shutdown_handle = bus.handle();
+
         let tls_label = if tls_acceptor.is_some() {
             "tls"
         } else {
             "plain"
         };
+        info!(addr = %self.addr, tls = tls_label, "RESP listener bound — waiting for GatewayEnable");
+
+        startup_gate
+            .await_phase(crate::control::startup::StartupPhase::GatewayEnable)
+            .await
+            .map_err(crate::Error::from)?;
+
         info!(addr = %self.addr, tls = tls_label, "RESP listener accepting connections");
 
         let mut connections = tokio::task::JoinSet::new();
@@ -115,7 +130,7 @@ impl RespListener {
                         }
                     }
                 }
-                _ = shutdown.changed() => {
+                _ = shutdown_handle.await_phase(crate::control::shutdown::ShutdownPhase::DrainingListeners) => {
                     info!("RESP listener shutting down");
                     break;
                 }
@@ -138,6 +153,7 @@ impl RespListener {
             }
         }
 
+        drain_guard.report_drained();
         Ok(())
     }
 }

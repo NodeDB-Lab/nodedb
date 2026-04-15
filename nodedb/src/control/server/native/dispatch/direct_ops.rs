@@ -2,8 +2,11 @@
 
 use nodedb_types::protocol::{NativeResponse, OpCode, TextFields};
 
-use crate::bridge::envelope::{Response, Status};
+use crate::bridge::envelope::{Payload, Response, Status};
+use crate::control::gateway::GatewayErrorMap;
+use crate::control::gateway::core::QueryContext as GatewayQueryContext;
 use crate::data::executor::response_codec;
+use crate::types::{Lsn, RequestId};
 
 use super::super::super::dispatch_utils;
 use super::{DispatchCtx, error_to_native};
@@ -44,23 +47,61 @@ pub(crate) async fn handle_direct_op(
         return NativeResponse::error(seq, "42501", e.to_string());
     }
 
-    // WAL append for writes.
-    if let Err(e) = dispatch_utils::wal_append_if_write(&ctx.state.wal, tenant_id, vshard_id, &plan)
+    // WAL append for writes (local path; gateway handles its own WAL on the
+    // target node, but we still append locally for the boot/single-node path).
+    if ctx.state.gateway.is_none()
+        && let Err(e) =
+            dispatch_utils::wal_append_if_write(&ctx.state.wal, tenant_id, vshard_id, &plan)
     {
         return error_to_native(seq, &e);
     }
 
     ctx.state.tenant_request_start(tenant_id);
-    let result = match dispatch_utils::dispatch_to_data_plane(
-        ctx.state, tenant_id, vshard_id, plan, 0,
-    )
-    .await
-    {
-        Ok(resp) => data_plane_response_to_native(seq, &resp),
-        Err(e) => error_to_native(seq, &e),
+    let result = match ctx.state.gateway.as_ref() {
+        Some(gw) => {
+            let gw_ctx = GatewayQueryContext {
+                tenant_id,
+                trace_id: 0,
+            };
+            match gw.execute(&gw_ctx, plan).await {
+                Ok(payloads) => {
+                    data_plane_response_to_native(seq, &gateway_payloads_to_response(payloads))
+                }
+                Err(e) => {
+                    let (_code, msg) = GatewayErrorMap::to_native(&e);
+                    NativeResponse::error(seq, "XX000", msg)
+                }
+            }
+        }
+        None => {
+            match dispatch_utils::dispatch_to_data_plane(ctx.state, tenant_id, vshard_id, plan, 0)
+                .await
+            {
+                Ok(resp) => data_plane_response_to_native(seq, &resp),
+                Err(e) => error_to_native(seq, &e),
+            }
+        }
     };
     ctx.state.tenant_request_end(tenant_id);
     result
+}
+
+/// Convert gateway `Vec<Vec<u8>>` payloads into a synthetic `Response`.
+fn gateway_payloads_to_response(payloads: Vec<Vec<u8>>) -> Response {
+    let payload = payloads
+        .into_iter()
+        .next()
+        .map(Payload::from_vec)
+        .unwrap_or_else(Payload::empty);
+    Response {
+        request_id: RequestId::new(0),
+        status: Status::Ok,
+        attempt: 0,
+        partial: false,
+        payload,
+        watermark_lsn: Lsn::new(0),
+        error_code: None,
+    }
 }
 
 fn data_plane_response_to_native(seq: u64, resp: &Response) -> NativeResponse {

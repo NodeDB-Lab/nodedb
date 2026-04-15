@@ -65,7 +65,7 @@ pub async fn search_fusion(
 
     let plan = PhysicalPlan::Graph(GraphOp::RagFusion {
         collection: collection.to_string(),
-        query_vector: Arc::from(query_vector.as_slice()),
+        query_vector: query_vector.clone(),
         vector_top_k,
         edge_label,
         direction: crate::engine::graph::edge_store::Direction::Out,

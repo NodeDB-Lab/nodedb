@@ -199,7 +199,7 @@ pub fn merge_traversal_results(
 ///
 /// # Cluster mode only
 ///
-/// This function assumes `shared.cluster_routing` and `shared.cluster_transport`
+/// This function assumes `shared.cluster_routing` and `shared.gateway`
 /// are `Some`. Callers must check `shared.cluster_routing.is_some()` before
 /// calling this function.
 /// Parameters for a cross-shard graph traversal hop.
@@ -263,7 +263,7 @@ pub async fn coordinate_cross_shard_hop(
         }
     };
 
-    // Acquire the routing table and transport once.
+    // Acquire the routing table and gateway once.
     let routing = match &shared.cluster_routing {
         Some(r) => r,
         None => {
@@ -272,10 +272,10 @@ pub async fn coordinate_cross_shard_hop(
             return Ok((local_nodes, meta));
         }
     };
-    let transport = match &shared.cluster_transport {
-        Some(t) => t.clone(),
+    let gateway = match &shared.gateway {
+        Some(g) => g.clone(),
         None => {
-            warn!("coordinate_cross_shard_hop called without cluster transport");
+            warn!("coordinate_cross_shard_hop called without gateway");
             return Ok((local_nodes, meta));
         }
     };
@@ -318,7 +318,9 @@ pub async fn coordinate_cross_shard_hop(
             continue;
         }
 
-        let transport_clone = transport.clone();
+        let gateway_clone = gateway.clone();
+        let credentials_clone = std::sync::Arc::clone(&shared.credentials);
+        let retention_clone = std::sync::Arc::clone(&shared.retention_policy_registry);
         let tenant_id_u32 = tenant_id.as_u32();
         let label_sql = label_clause.clone();
         let direction_sql = direction_word.to_string();
@@ -331,50 +333,59 @@ pub async fn coordinate_cross_shard_hop(
                 let sql = format!(
                     "GRAPH TRAVERSE FROM '{node_id}' DEPTH {hop_depth}{label_sql} DIRECTION {direction_sql}"
                 );
-                let fwd = nodedb_cluster::rpc_codec::ForwardRequest {
-                    sql,
-                    tenant_id: tenant_id_u32,
-                    deadline_remaining_ms: 25_000,
+
+                let gw_ctx = crate::control::gateway::core::QueryContext {
+                    tenant_id: crate::types::TenantId::new(tenant_id_u32),
                     trace_id: 0,
                 };
 
-                match transport_clone
-                    .send_rpc(leader_node, nodedb_cluster::rpc_codec::RaftRpc::ForwardRequest(fwd))
-                    .await
-                {
-                    Ok(nodedb_cluster::rpc_codec::RaftRpc::ForwardResponse(resp)) => {
-                        if resp.success {
-                            for payload in resp.payloads {
-                                if let Ok(nodes) =
-                                    sonic_rs::from_slice::<Vec<String>>(&payload)
-                                {
-                                    shard_results.extend(nodes);
-                                }
-                            }
-                        } else {
-                            warn!(
-                                node = leader_node,
-                                shard = %shard_id,
-                                error = %resp.error_message,
-                                "remote graph traverse failed"
-                            );
-                            any_error = true;
-                        }
-                    }
-                    Ok(unexpected) => {
+                // Build a fresh QueryContext per traversal using cloned inputs
+                // (same pattern as QueryContext::for_state but without &SharedState).
+                let plan_ctx = crate::control::planner::context::QueryContext::with_catalog(
+                    std::sync::Arc::clone(&credentials_clone),
+                    tenant_id_u32,
+                    Some(std::sync::Arc::clone(&retention_clone)),
+                );
+
+                let sql_for_plan = sql.clone();
+                let plan_result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                        plan_ctx.plan_sql(
+                            &sql_for_plan,
+                            crate::types::TenantId::new(tenant_id_u32),
+                        ),
+                    )
+                });
+
+                let physical_plan = match plan_result {
+                    Ok(tasks) => match tasks.into_iter().next().map(|t| t.plan) {
+                        Some(p) => p,
+                        None => continue,
+                    },
+                    Err(e) => {
                         warn!(
-                            node = leader_node,
-                            ?unexpected,
-                            "unexpected RPC response for graph traverse"
+                            shard = %shard_id,
+                            error = %e,
+                            "remote graph traverse plan failed"
                         );
                         any_error = true;
+                        continue;
+                    }
+                };
+
+                match gateway_clone.execute(&gw_ctx, physical_plan).await {
+                    Ok(payloads) => {
+                        for payload in payloads {
+                            if let Ok(nodes) = sonic_rs::from_slice::<Vec<String>>(&payload) {
+                                shard_results.extend(nodes);
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!(
-                            node = leader_node,
                             shard = %shard_id,
                             error = %e,
-                            "transport error during cross-shard graph traverse"
+                            "remote graph traverse dispatch failed"
                         );
                         any_error = true;
                     }

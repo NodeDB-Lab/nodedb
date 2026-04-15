@@ -5,11 +5,11 @@
 //!
 //! **Cluster-wide:** When a specific partition is requested and the vShard
 //! leader for that partition is on another node, the request is forwarded
-//! via `ForwardRequest` (QUIC). The remote node executes the same
-//! `consume_stream()` locally and returns serialized events. This makes
-//! change streams cluster-wide — consumers on any node can read any partition.
+//! via `gateway.execute_sql` (C-δ.6). The remote node executes the stream
+//! SELECT locally and returns serialised events. This makes change streams
+//! cluster-wide — consumers on any node can read any partition.
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::control::state::SharedState;
 use crate::event::cdc::event::CdcEvent;
@@ -39,7 +39,8 @@ pub struct ConsumeResult {
 /// Does NOT auto-commit offsets — the caller must explicitly COMMIT OFFSET.
 ///
 /// **Cluster-aware:** If a specific partition is requested and the vShard
-/// leader is remote, forwards the read to the leader node via `ForwardRequest`.
+/// leader is remote, returns `ConsumeError::RemotePartition` so the caller
+/// can use `consume_remote` which routes through `gateway.execute_sql`.
 pub fn consume_stream(
     state: &SharedState,
     params: &ConsumeParams<'_>,
@@ -88,8 +89,8 @@ pub fn consume_stream(
 /// Consume events from a local stream buffer.
 ///
 /// This is the core logic, always reads from the local `CdcRouter` buffers.
-/// Used directly for local partitions and by the ForwardRequest handler
-/// on the remote node.
+/// Used directly for local partitions and by `consume_remote` on the remote
+/// node after the gateway routes and executes the stream SELECT.
 pub fn consume_local(
     state: &SharedState,
     params: &ConsumeParams<'_>,
@@ -162,7 +163,7 @@ fn remote_partition_leader(state: &SharedState, partition_id: u16) -> Option<u64
 ///
 /// The remote node executes this as a normal SQL query, which routes back
 /// through the pgwire handler → `consume_stream()` → local buffer read.
-pub fn build_forward_sql(params: &ConsumeParams<'_>) -> String {
+pub fn build_consume_sql(params: &ConsumeParams<'_>) -> String {
     // For topic buffers, the stream name already has "topic:" prefix handled
     // by the DDL layer. We forward the raw stream/topic name.
     if let Some(partition_id) = params.partition {
@@ -178,64 +179,75 @@ pub fn build_forward_sql(params: &ConsumeParams<'_>) -> String {
     }
 }
 
-/// Forward a consume request to a remote node via QUIC ForwardRequest.
+/// Forward a consume request to the remote partition leader via the gateway.
 ///
-/// Returns the deserialized events from the remote node's response.
+/// Routes the stream SELECT SQL through `gateway.execute_sql`, which plans it
+/// locally and dispatches it as an `ExecuteRequest` over QUIC to the correct
+/// leader node. The `leader_node` parameter is accepted for caller
+/// compatibility but is ignored — the gateway handles node selection.
 pub async fn consume_remote(
     state: &SharedState,
     params: &ConsumeParams<'_>,
-    leader_node: u64,
+    _leader_node: u64,
 ) -> Result<ConsumeResult, ConsumeError> {
-    let Some(ref transport) = state.cluster_transport else {
-        return Err(ConsumeError::NoClusterTransport);
-    };
+    let gateway = state
+        .gateway
+        .as_ref()
+        .ok_or(ConsumeError::NoClusterTransport)?;
 
-    let sql = build_forward_sql(params);
-    let forward_req = nodedb_cluster::rpc_codec::ForwardRequest {
-        sql,
-        tenant_id: params.tenant_id,
-        deadline_remaining_ms: 5000,
+    let sql = build_consume_sql(params);
+    let tenant_id = params.tenant_id;
+
+    let gw_ctx = crate::control::gateway::core::QueryContext {
+        tenant_id: crate::types::TenantId::new(tenant_id),
         trace_id: 0,
     };
 
-    let rpc = nodedb_cluster::RaftRpc::ForwardRequest(forward_req);
-    match transport.send_rpc(leader_node, rpc).await {
-        Ok(nodedb_cluster::RaftRpc::ForwardResponse(resp)) => {
-            if !resp.success {
-                warn!(
-                    remote_node = leader_node,
-                    error = %resp.error_message,
-                    "remote consume failed"
-                );
-                return Err(ConsumeError::RemoteError(resp.error_message));
-            }
+    let query_ctx = crate::control::planner::context::QueryContext::for_state(state, tenant_id);
 
-            // Deserialize events from the response payloads.
-            // ForwardResponse.payloads contains msgpack-serialized Vec<CdcEvent>.
-            let events = if let Some(payload) = resp.payloads.first() {
-                zerompk::from_msgpack::<Vec<CdcEvent>>(payload).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            // Compute partition offsets from the returned events.
-            let mut partition_offsets: std::collections::BTreeMap<u16, u64> =
-                std::collections::BTreeMap::new();
-            for e in &events {
-                let entry = partition_offsets.entry(e.partition).or_insert(0);
-                if e.lsn > *entry {
-                    *entry = e.lsn;
-                }
-            }
-
-            Ok(ConsumeResult {
-                events,
-                partition_offsets: partition_offsets.into_iter().collect(),
+    let payloads = gateway
+        .execute_sql(&gw_ctx, &sql, &[], || {
+            let tasks = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(query_ctx.plan_sql(&sql, crate::types::TenantId::new(tenant_id)))
             })
+            .map_err(|e| crate::Error::PlanError {
+                detail: e.to_string(),
+            })?;
+            // Take the first task's plan (stream reads are single-task).
+            tasks
+                .into_iter()
+                .next()
+                .map(|t| t.plan)
+                .ok_or_else(|| crate::Error::PlanError {
+                    detail: "stream SELECT produced no physical tasks".into(),
+                })
+        })
+        .await
+        .map_err(|e| ConsumeError::RemoteError(e.to_string()))?;
+
+    // Deserialize events from the response payloads.
+    // Payloads contain msgpack-serialised Vec<CdcEvent>.
+    let events = if let Some(payload) = payloads.first() {
+        zerompk::from_msgpack::<Vec<CdcEvent>>(payload).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // Compute per-partition max LSN for the returned batch.
+    let mut partition_offsets: std::collections::BTreeMap<u16, u64> =
+        std::collections::BTreeMap::new();
+    for e in &events {
+        let entry = partition_offsets.entry(e.partition).or_insert(0);
+        if e.lsn > *entry {
+            *entry = e.lsn;
         }
-        Ok(_) => Err(ConsumeError::RemoteError("unexpected response type".into())),
-        Err(e) => Err(ConsumeError::RemoteError(e.to_string())),
     }
+
+    Ok(ConsumeResult {
+        events,
+        partition_offsets: partition_offsets.into_iter().collect(),
+    })
 }
 
 /// Errors from stream consumption.
@@ -252,7 +264,7 @@ pub enum ConsumeError {
     },
     /// Remote consume failed.
     RemoteError(String),
-    /// Cluster transport not available.
+    /// Gateway not available (cluster transport not ready).
     NoClusterTransport,
 }
 
@@ -274,7 +286,7 @@ impl std::fmt::Display for ConsumeError {
                 )
             }
             Self::RemoteError(e) => write!(f, "remote consume error: {e}"),
-            Self::NoClusterTransport => write!(f, "cluster transport not available"),
+            Self::NoClusterTransport => write!(f, "gateway not available for remote stream read"),
         }
     }
 }
@@ -300,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn build_forward_sql_with_partition() {
+    fn build_consume_sql_with_partition() {
         let params = ConsumeParams {
             tenant_id: 1,
             stream_name: "orders_stream",
@@ -308,7 +320,7 @@ mod tests {
             partition: Some(5),
             limit: 100,
         };
-        let sql = build_forward_sql(&params);
+        let sql = build_consume_sql(&params);
         assert_eq!(
             sql,
             "SELECT * FROM STREAM orders_stream PARTITION 5 CONSUMER GROUP analytics LIMIT 100"
@@ -316,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn build_forward_sql_all_partitions() {
+    fn build_consume_sql_all_partitions() {
         let params = ConsumeParams {
             tenant_id: 1,
             stream_name: "orders_stream",
@@ -324,7 +336,7 @@ mod tests {
             partition: None,
             limit: 50,
         };
-        let sql = build_forward_sql(&params);
+        let sql = build_consume_sql(&params);
         assert_eq!(
             sql,
             "SELECT * FROM STREAM orders_stream CONSUMER GROUP analytics LIMIT 50"

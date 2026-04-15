@@ -16,11 +16,13 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
-use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
 use crate::bridge::physical_plan::TimeseriesOp;
+use crate::control::gateway::GatewayErrorMap;
+use crate::control::gateway::core::QueryContext;
 use crate::control::server::conn_stream::ConnStream;
 use crate::control::state::SharedState;
-use crate::types::{TenantId, VShardId};
+use crate::types::{Lsn, RequestId, TenantId, VShardId};
 
 /// ILP TCP listener.
 pub struct IlpListener {
@@ -32,8 +34,17 @@ impl IlpListener {
     /// Bind to the given address.
     pub async fn bind(addr: SocketAddr) -> crate::Result<Self> {
         let tcp = TcpListener::bind(addr).await.map_err(crate::Error::Io)?;
-        info!(%addr, "ILP TCP listener bound");
-        Ok(Self { tcp, addr })
+        let local_addr = tcp.local_addr().map_err(crate::Error::Io)?;
+        info!(%local_addr, "ILP TCP listener bound");
+        Ok(Self {
+            tcp,
+            addr: local_addr,
+        })
+    }
+
+    /// Returns the local address the listener is bound to.
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.addr
     }
 
     /// Run the accept loop until shutdown.
@@ -42,13 +53,28 @@ impl IlpListener {
         state: Arc<SharedState>,
         conn_semaphore: Arc<Semaphore>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        startup_gate: Arc<crate::control::startup::StartupGate>,
+        bus: crate::control::shutdown::ShutdownBus,
     ) -> crate::Result<()> {
+        let drain_guard = bus.register_task(
+            crate::control::shutdown::ShutdownPhase::DrainingListeners,
+            "ilp",
+            None,
+        );
+        let mut shutdown_handle = bus.handle();
+
         let tls_label = if tls_acceptor.is_some() {
             "tls"
         } else {
             "plain"
         };
+        info!(addr = %self.addr, tls = tls_label, "ILP listener bound — waiting for GatewayEnable");
+
+        startup_gate
+            .await_phase(crate::control::startup::StartupPhase::GatewayEnable)
+            .await
+            .map_err(crate::Error::from)?;
+
         info!(addr = %self.addr, tls = tls_label, "ILP listener accepting connections");
 
         let mut connections = tokio::task::JoinSet::new();
@@ -99,7 +125,7 @@ impl IlpListener {
                     }
                 }
                 _ = connections.join_next(), if !connections.is_empty() => {}
-                _ = shutdown.changed() => {
+                _ = shutdown_handle.await_phase(crate::control::shutdown::ShutdownPhase::DrainingListeners) => {
                     info!(addr = %self.addr, "ILP listener shutting down");
                     break;
                 }
@@ -111,6 +137,7 @@ impl IlpListener {
             while connections.join_next().await.is_some() {}
         });
         let _ = drain.await;
+        drain_guard.report_drained();
         Ok(())
     }
 }
@@ -350,10 +377,47 @@ async fn flush_ilp_batch_inner(
             wal_lsn,
         });
 
-        let response = crate::control::server::dispatch_utils::dispatch_to_data_plane(
-            state, tenant_id, vshard_id, plan, 0,
-        )
-        .await?;
+        let response = match state.gateway.as_ref() {
+            Some(gw) => {
+                let gw_ctx = QueryContext {
+                    tenant_id,
+                    trace_id: 0,
+                };
+                gw.execute(&gw_ctx, plan)
+                    .await
+                    .inspect_err(|err| {
+                        let msg = GatewayErrorMap::to_resp(err);
+                        warn!(
+                            collection = %collection,
+                            shard_id = shard_id,
+                            error = %msg,
+                            "ILP gateway dispatch error (batch dropped)"
+                        );
+                    })
+                    .map(|payloads| {
+                        let payload = payloads
+                            .into_iter()
+                            .next()
+                            .map(Payload::from_vec)
+                            .unwrap_or_else(Payload::empty);
+                        Response {
+                            request_id: RequestId::new(0),
+                            status: Status::Ok,
+                            attempt: 0,
+                            partial: false,
+                            payload,
+                            watermark_lsn: Lsn::new(0),
+                            error_code: None,
+                        }
+                    })?
+            }
+            None => {
+                crate::control::server::dispatch_utils::dispatch_to_data_plane(
+                    state, tenant_id, vshard_id, plan, 0,
+                )
+                .await?
+            }
+        };
 
         if !response.payload.is_empty()
             && let Ok(v) = sonic_rs::from_slice::<serde_json::Value>(&response.payload)

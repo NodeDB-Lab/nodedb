@@ -1,6 +1,7 @@
 //! HTTP API server using axum + axum-server (for TLS).
 //!
 //! Endpoints:
+//! - GET  /healthz      — k8s readiness/liveness (always reachable; 503 until GatewayEnable)
 //! - GET  /health       — liveness
 //! - GET  /health/ready — readiness (WAL recovered)
 //! - GET  /metrics      — Prometheus-format metrics (requires monitor role)
@@ -10,6 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::State;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use tracing::info;
 
@@ -22,6 +26,8 @@ use super::routes;
 /// Build the axum router with all endpoints.
 fn build_router(state: AppState) -> Router {
     let router = Router::new()
+        // /healthz is always reachable — returns 503 during startup, 200 after.
+        .route("/healthz", get(routes::health::healthz))
         .route("/health", get(routes::health::health))
         .route("/health/ready", get(routes::health::ready))
         .route("/metrics", get(routes::metrics::metrics))
@@ -82,7 +88,95 @@ fn build_router(state: AppState) -> Router {
             post(routes::promql::annotations),
         );
 
-    router.with_state(state)
+    router
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            startup_gate_middleware,
+        ))
+        .with_state(state)
+}
+
+/// Axum middleware that gates non-health routes on [`StartupPhase::GatewayEnable`].
+///
+/// `/healthz`, `/health`, and `/health/ready` are always let through so k8s
+/// readiness probes can observe startup progress. All other routes receive a
+/// `503 Service Unavailable` until the node reaches `GatewayEnable`.
+async fn startup_gate_middleware(
+    State(app_state): State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let path = req.uri().path();
+    // Health-probe paths bypass the gate — these must be reachable during startup.
+    let is_health_path = path == "/healthz" || path == "/health" || path.starts_with("/health/");
+
+    if !is_health_path {
+        let gate = &app_state.shared.startup;
+        let snap = gate.current_phase();
+        if let Some(err) = gate.is_failed() {
+            let body = serde_json::json!({
+                "status": "failed",
+                "error": err.to_string(),
+            });
+            return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
+        }
+        if snap < crate::control::startup::StartupPhase::GatewayEnable {
+            let body = serde_json::json!({
+                "status": "starting",
+                "phase": snap.name(),
+            });
+            return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response();
+        }
+    }
+
+    next.run(req).await
+}
+
+/// Start the HTTP API server from an already-bound [`tokio::net::TcpListener`].
+///
+/// Useful in tests where an ephemeral-port listener is bound before the server
+/// task is spawned, making the port available to the test without a race.
+pub async fn run_with_listener(
+    listener: tokio::net::TcpListener,
+    shared: Arc<SharedState>,
+    auth_mode: AuthMode,
+    tls_settings: Option<&crate::config::server::TlsSettings>,
+    bus: crate::control::shutdown::ShutdownBus,
+) -> crate::Result<()> {
+    if tls_settings.is_some() {
+        return Err(crate::Error::Config {
+            detail: "run_with_listener does not support TLS; use run() instead".into(),
+        });
+    }
+    let drain_guard = bus.register_task(
+        crate::control::shutdown::ShutdownPhase::DrainingListeners,
+        "http",
+        None,
+    );
+    let mut shutdown_rx = bus.handle().flat_watch().raw_receiver();
+
+    let query_ctx = Arc::new(crate::control::planner::context::QueryContext::for_state(
+        &shared, 1,
+    ));
+    let state = AppState {
+        shared,
+        auth_mode,
+        query_ctx,
+    };
+    let router = build_router(state);
+    let local_addr = listener.local_addr()?;
+    info!(%local_addr, "HTTP API server listening (pre-bound listener)");
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.changed().await;
+        })
+        .await
+        .map_err(crate::Error::Io)?;
+    drain_guard.report_drained();
+    Ok(())
 }
 
 /// Start the HTTP API server (plain HTTP or HTTPS).
@@ -94,8 +188,15 @@ pub async fn run(
     shared: Arc<SharedState>,
     auth_mode: AuthMode,
     tls_settings: Option<&crate::config::server::TlsSettings>,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    bus: crate::control::shutdown::ShutdownBus,
 ) -> crate::Result<()> {
+    let drain_guard = bus.register_task(
+        crate::control::shutdown::ShutdownPhase::DrainingListeners,
+        "http",
+        None,
+    );
+    let mut shutdown_rx = bus.handle().flat_watch().raw_receiver();
+
     let query_ctx = Arc::new(crate::control::planner::context::QueryContext::for_state(
         &shared, 1,
     ));
@@ -120,7 +221,7 @@ pub async fn run(
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
         tokio::spawn(async move {
-            let _ = shutdown.changed().await;
+            let _ = shutdown_rx.changed().await;
             shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
         });
 
@@ -137,11 +238,12 @@ pub async fn run(
 
         axum::serve(listener, router)
             .with_graceful_shutdown(async move {
-                let _ = shutdown.changed().await;
+                let _ = shutdown_rx.changed().await;
             })
             .await
             .map_err(crate::Error::Io)?;
     }
 
+    drain_guard.report_drained();
     Ok(())
 }

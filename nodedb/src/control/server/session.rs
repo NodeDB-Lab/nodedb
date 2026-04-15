@@ -268,7 +268,7 @@ impl Session {
                 let top_k = body["top_k"].as_u64().unwrap_or(10) as usize;
                 PhysicalPlan::Vector(VectorOp::Search {
                     collection,
-                    query_vector: Arc::from(query_vector.into_boxed_slice()),
+                    query_vector,
                     top_k,
                     ef_search: 0,
                     filter_bitmap: None,
@@ -350,7 +350,7 @@ impl Session {
                 let graph_k = body["graph_k"].as_f64().unwrap_or(10.0);
                 PhysicalPlan::Graph(GraphOp::RagFusion {
                     collection,
-                    query_vector: Arc::from(query_vector.into_boxed_slice()),
+                    query_vector,
                     vector_top_k,
                     edge_label,
                     direction,

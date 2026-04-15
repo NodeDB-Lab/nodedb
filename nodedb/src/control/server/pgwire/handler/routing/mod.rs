@@ -1,8 +1,13 @@
-//! Query routing: consistency selection, leader detection, SQL forwarding,
-//! and the execute_planned_sql entry point for DML/query dispatch.
+//! Query routing: consistency selection, and the execute_planned_sql entry
+//! point for DML/query dispatch.
+//!
+//! Cross-node forwarding is handled by the gateway (`SharedState.gateway`).
+//! The old `forward_sql` / `remote_leader_for_tasks` helpers have been
+//! replaced by `gateway.execute(ctx, plan)` which ships the pre-planned
+//! physical plan via `ExecuteRequest` instead of a raw SQL string.
 
 mod check_enforcement;
-mod forward;
+mod gateway_dispatch;
 mod set_ops;
 
 use std::sync::Arc;
@@ -209,8 +214,11 @@ impl NodeDbPgHandler {
 
         let consistency = self.consistency_for_tasks(&tasks);
 
-        if let Some(leader) = self.remote_leader_for_tasks(&tasks, consistency) {
-            return self.forward_sql(sql, tenant_id, leader).await;
+        // When all tasks target a remote leader, route through the gateway.
+        // The gateway ships the pre-planned PhysicalPlan via ExecuteRequest
+        // (plan bytes over QUIC) instead of the old SQL-string ForwardRequest.
+        if self.should_forward_via_gateway(&tasks, consistency) {
+            return self.dispatch_tasks_via_gateway(tasks, tenant_id).await;
         }
 
         let needs_set_op = tasks.iter().any(|t| t.post_set_op != PostSetOp::None);

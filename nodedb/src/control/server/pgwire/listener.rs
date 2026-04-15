@@ -54,16 +54,42 @@ impl PgListener {
         auth_mode: AuthMode,
         tls_acceptor: Option<pgwire::tokio::TlsAcceptor>,
         conn_semaphore: Arc<Semaphore>,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        startup_gate: Arc<crate::control::startup::StartupGate>,
+        bus: crate::control::shutdown::ShutdownBus,
     ) -> crate::Result<()> {
         let conn_state = Arc::clone(&state);
         let factory = Arc::new(NodeDbPgHandlerFactory::new(state, auth_mode));
+
+        // Register with the shutdown bus so the sequencer waits for us to drain
+        // before advancing past DrainingListeners.
+        let drain_guard = bus.register_task(
+            crate::control::shutdown::ShutdownPhase::DrainingListeners,
+            "pgwire",
+            None,
+        );
+        let mut shutdown_handle = bus.handle();
 
         let tls_label = if tls_acceptor.is_some() {
             "tls"
         } else {
             "plain"
         };
+        info!(
+            addr = %self.addr,
+            tls = tls_label,
+            "pgwire listener bound — waiting for GatewayEnable"
+        );
+
+        // Block here until GatewayEnable fires. The socket is already bound
+        // so the OS accepts the TCP SYN; the three-way handshake completes
+        // but the application call to `accept()` is deferred until startup
+        // finishes. This satisfies the k8s pattern: port appears open (no
+        // connection refused) but /healthz still returns 503.
+        startup_gate
+            .await_phase(crate::control::startup::StartupPhase::GatewayEnable)
+            .await
+            .map_err(crate::Error::from)?;
+
         info!(
             addr = %self.addr,
             tls = tls_label,
@@ -113,15 +139,13 @@ impl PgListener {
                         info!(%peer_addr, "pgwire connection closed");
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!(
-                            addr = %self.addr,
-                            active = connections.len(),
-                            "shutdown signal, draining pgwire connections"
-                        );
-                        break;
-                    }
+                _ = shutdown_handle.await_phase(crate::control::shutdown::ShutdownPhase::DrainingListeners) => {
+                    info!(
+                        addr = %self.addr,
+                        active = connections.len(),
+                        "shutdown signal, draining pgwire connections"
+                    );
+                    break;
                 }
             }
         }
@@ -155,6 +179,7 @@ impl PgListener {
         }
 
         info!(addr = %self.addr, "pgwire listener stopped");
+        drain_guard.report_drained();
         Ok(())
     }
 }

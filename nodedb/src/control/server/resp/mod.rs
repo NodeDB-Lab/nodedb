@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod command;
+mod gateway_dispatch;
 pub mod handler;
 mod handler_hash;
 mod handler_kv;

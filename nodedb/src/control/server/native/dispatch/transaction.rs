@@ -4,6 +4,8 @@ use nodedb_types::protocol::NativeResponse;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::MetaOp;
+use crate::control::gateway::GatewayErrorMap;
+use crate::control::gateway::core::QueryContext as GatewayQueryContext;
 use crate::control::planner::physical::{PhysicalTask, PostSetOp};
 
 use super::super::super::dispatch_utils;
@@ -83,22 +85,45 @@ pub(crate) async fn handle_commit(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResp
 
         // Dispatch as atomic TransactionBatch.
         let plans: Vec<PhysicalPlan> = buffered.iter().map(|t| t.plan.clone()).collect();
-        let batch_task = PhysicalTask {
-            tenant_id,
-            vshard_id,
-            plan: PhysicalPlan::Meta(MetaOp::TransactionBatch { plans }),
-            post_set_op: PostSetOp::None,
+        let batch_plan = PhysicalPlan::Meta(MetaOp::TransactionBatch { plans });
+
+        let dispatch_err = match ctx.state.gateway.as_ref() {
+            Some(gw) => {
+                let gw_ctx = GatewayQueryContext {
+                    tenant_id,
+                    trace_id: 0,
+                };
+                gw.execute(&gw_ctx, batch_plan).await.err().map(|e| {
+                    let (_code, msg) = GatewayErrorMap::to_native(&e);
+                    msg
+                })
+            }
+            None => {
+                let batch_task = PhysicalTask {
+                    tenant_id,
+                    vshard_id,
+                    plan: batch_plan,
+                    post_set_op: PostSetOp::None,
+                };
+                dispatch_utils::dispatch_to_data_plane(
+                    ctx.state,
+                    batch_task.tenant_id,
+                    batch_task.vshard_id,
+                    batch_task.plan,
+                    0,
+                )
+                .await
+                .err()
+                .map(|e| e.to_string())
+            }
         };
-        if let Err(e) = dispatch_utils::dispatch_to_data_plane(
-            ctx.state,
-            batch_task.tenant_id,
-            batch_task.vshard_id,
-            batch_task.plan,
-            0,
-        )
-        .await
-        {
-            return NativeResponse::error(seq, "40001", format!("transaction commit failed: {e}"));
+
+        if let Some(msg) = dispatch_err {
+            return NativeResponse::error(
+                seq,
+                "40001",
+                format!("transaction commit failed: {msg}"),
+            );
         }
     }
 

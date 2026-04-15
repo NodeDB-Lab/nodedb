@@ -159,6 +159,13 @@ impl NativeSession {
             return dispatch::handle_ping(seq);
         }
 
+        // Status requires no auth — returns current startup phase.
+        if op == OpCode::Status {
+            let health = crate::control::startup::health::observe(&self.state.startup);
+            let native_status = crate::control::startup::health::to_native_status(&health);
+            return NativeResponse::status_row(seq, native_status.to_string());
+        }
+
         // All other ops require authentication.
         if self.identity.is_none() {
             if self.auth_mode == AuthMode::Trust {
@@ -338,8 +345,8 @@ impl NativeSession {
                 dispatch::handle_sql(&ctx, seq, sql).await
             }
 
-            // Auth/Ping handled above.
-            OpCode::Auth | OpCode::Ping => unreachable!(),
+            // Auth/Ping/Status handled above.
+            OpCode::Auth | OpCode::Ping | OpCode::Status => unreachable!(),
         }
     }
 

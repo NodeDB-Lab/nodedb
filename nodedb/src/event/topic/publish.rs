@@ -5,8 +5,8 @@
 //!
 //! **Cluster-wide:** Each topic has a "home node" determined by hashing
 //! the topic name to a vShard. PUBLISH on a non-home node forwards the
-//! request to the home node via `ForwardRequest`. This ensures all messages
-//! for a topic live on one node's buffer, maintaining ordering.
+//! request to the home node via the gateway (`ExecuteRequest`). This ensures
+//! all messages for a topic live on one node's buffer, maintaining ordering.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -125,42 +125,58 @@ fn topic_home_node(state: &SharedState, topic_name: &str) -> Option<u64> {
     routing.leader_for_vshard(vshard_id).ok()
 }
 
-/// Forward a PUBLISH to the topic's home node via QUIC ForwardRequest.
+/// Forward a PUBLISH to the topic's home node via the gateway.
+///
+/// Routes the PUBLISH SQL through `gateway.execute_sql`, which plans it
+/// locally and dispatches it as an `ExecuteRequest` over QUIC to the
+/// correct home node. The `leader_node` parameter is accepted for caller
+/// compatibility but is ignored — the gateway handles node selection.
 pub async fn publish_remote(
     state: &SharedState,
     tenant_id: u32,
     topic_name: &str,
     payload: &str,
-    leader_node: u64,
+    _leader_node: u64,
 ) -> Result<u64, PublishError> {
-    let Some(ref transport) = state.cluster_transport else {
-        return Err(PublishError::RemoteError("no cluster transport".into()));
-    };
+    let gateway = state
+        .gateway
+        .as_ref()
+        .ok_or_else(|| PublishError::RemoteError("gateway not available".into()))?;
 
     let sql = format!(
         "PUBLISH TO {} '{}'",
         topic_name,
         payload.replace('\'', "''") // Escape single quotes in payload.
     );
-    let forward_req = nodedb_cluster::rpc_codec::ForwardRequest {
-        sql,
-        tenant_id,
-        deadline_remaining_ms: 5000,
+
+    let gw_ctx = crate::control::gateway::core::QueryContext {
+        tenant_id: crate::types::TenantId::new(tenant_id),
         trace_id: 0,
     };
 
-    let rpc = nodedb_cluster::RaftRpc::ForwardRequest(forward_req);
-    match transport.send_rpc(leader_node, rpc).await {
-        Ok(nodedb_cluster::RaftRpc::ForwardResponse(resp)) => {
-            if resp.success {
-                Ok(0) // Sequence from remote not returned in ForwardResponse.
-            } else {
-                Err(PublishError::RemoteError(resp.error_message))
-            }
-        }
-        Ok(_) => Err(PublishError::RemoteError("unexpected response type".into())),
-        Err(e) => Err(PublishError::RemoteError(e.to_string())),
-    }
+    let query_ctx = crate::control::planner::context::QueryContext::for_state(state, tenant_id);
+
+    gateway
+        .execute_sql(&gw_ctx, &sql, &[], || {
+            let tasks = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(query_ctx.plan_sql(&sql, crate::types::TenantId::new(tenant_id)))
+            })
+            .map_err(|e| crate::Error::PlanError {
+                detail: e.to_string(),
+            })?;
+            tasks
+                .into_iter()
+                .next()
+                .map(|t| t.plan)
+                .ok_or_else(|| crate::Error::PlanError {
+                    detail: "PUBLISH produced no physical tasks".into(),
+                })
+        })
+        .await
+        .map_err(|e| PublishError::RemoteError(e.to_string()))?;
+
+    Ok(0) // Sequence not returned by gateway execute; home node assigns it.
 }
 
 #[derive(Debug)]

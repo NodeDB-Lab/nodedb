@@ -131,6 +131,11 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
             PlanKind::SingleDocument
         }
 
+        // Constant-result expressions (SELECT 1, SELECT 'hello', etc.)
+        // are compiled to RawResponse with a msgpack-encoded row. Treat
+        // as a multi-row scan so the payload is decoded and streamed back.
+        PhysicalPlan::Meta(MetaOp::RawResponse { .. }) => PlanKind::MultiRow,
+
         // DML operations that return affected row count.
         PhysicalPlan::Document(DocumentOp::PointPut { .. })
         | PhysicalPlan::Document(DocumentOp::BatchInsert { .. })

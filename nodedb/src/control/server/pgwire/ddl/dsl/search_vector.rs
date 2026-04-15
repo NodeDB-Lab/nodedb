@@ -83,14 +83,12 @@ pub async fn search_vector(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(10);
 
-    let filter_bitmap: Option<std::sync::Arc<[u8]>> = None;
-
     let plan = PhysicalPlan::Vector(VectorOp::Search {
         collection: collection.to_string(),
-        query_vector: Arc::from(query_vector.as_slice()),
+        query_vector: query_vector.clone(),
         top_k,
         ef_search: 0,
-        filter_bitmap,
+        filter_bitmap: None,
         field_name,
         rls_filters: Vec::new(),
     });

@@ -24,7 +24,7 @@ use super::super::types::{sqlstate_error, text_field};
 /// Handle `SELECT * FROM STREAM <stream> CONSUMER GROUP <group> [PARTITION <p>] [LIMIT <n>]`
 ///
 /// Cluster-aware: if the requested partition is on a remote node, forwards
-/// the consume request to the leader via QUIC `ForwardRequest`.
+/// the consume request to the leader via the gateway (C-δ.6: `ExecuteRequest`).
 pub async fn select_from_stream(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
