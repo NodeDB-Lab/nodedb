@@ -111,6 +111,7 @@ mod tests {
             data_dir: _dir.path().to_path_buf(),
             force_bootstrap: false,
             join_retry: Default::default(),
+            swim_udp_addr: None,
         };
 
         // Bootstrap first.

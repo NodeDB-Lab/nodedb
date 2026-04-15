@@ -449,6 +449,7 @@ mod tests {
             data_dir: _dir1.path().to_path_buf(),
             force_bootstrap: false,
             join_retry: Default::default(),
+            swim_udp_addr: None,
         };
         let state1 = bootstrap(&config1, &catalog1).unwrap();
 
@@ -497,6 +498,7 @@ mod tests {
             data_dir: _dir2.path().to_path_buf(),
             force_bootstrap: false,
             join_retry: Default::default(),
+            swim_udp_addr: None,
         };
 
         let lifecycle = ClusterLifecycleTracker::new();

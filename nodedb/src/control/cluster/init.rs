@@ -74,6 +74,7 @@ pub async fn init_cluster_with_transport(
         data_dir: data_dir.to_path_buf(),
         force_bootstrap: config.force_bootstrap,
         join_retry: join_retry_policy_from_env(),
+        swim_udp_addr: None,
     };
 
     let lifecycle = nodedb_cluster::ClusterLifecycleTracker::new();

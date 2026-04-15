@@ -78,4 +78,7 @@ pub use lifecycle::{
 pub use rdma_transport::{RdmaConfig, RdmaTransport};
 pub use rebalance_scheduler::{NodeMetrics, RebalanceScheduler, RebalanceTrigger, SchedulerConfig};
 pub use shard_split::{SplitPlan, SplitStrategy, plan_graph_split, plan_vector_split};
-pub use swim::{Incarnation, Member, MemberState, MembershipList, SwimConfig, SwimError};
+pub use swim::{
+    Incarnation, Member, MemberState, MembershipList, SwimConfig, SwimError, SwimHandle,
+    UdpTransport, spawn as spawn_swim,
+};

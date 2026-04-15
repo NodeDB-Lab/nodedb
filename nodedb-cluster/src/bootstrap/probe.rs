@@ -222,6 +222,7 @@ mod tests {
             data_dir: std::env::temp_dir(),
             force_bootstrap: false,
             join_retry: Default::default(),
+            swim_udp_addr: None,
         }
     }
 

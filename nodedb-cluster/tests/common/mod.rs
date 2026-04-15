@@ -186,6 +186,7 @@ impl TestNode {
                 max_attempts: 8,
                 max_backoff_secs: 2,
             },
+            swim_udp_addr: None,
         };
 
         let lifecycle = ClusterLifecycleTracker::new();

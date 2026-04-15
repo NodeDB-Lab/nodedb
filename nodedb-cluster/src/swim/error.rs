@@ -58,6 +58,17 @@ pub enum SwimError {
     /// causes: truncated datagram, version skew, random UDP noise.
     #[error("swim: decode failure: {detail}")]
     Decode { detail: String },
+
+    /// Transport backend has been closed; no further I/O is possible.
+    /// Returned by [`super::detector::Transport::recv`] on shutdown.
+    #[error("swim: transport closed")]
+    TransportClosed,
+
+    /// The in-flight probe map is full. Should never happen in practice —
+    /// the detector caps concurrent probes at a few tens — but the error
+    /// exists so a runaway bug cannot corrupt the detector state.
+    #[error("swim: probe inflight table overflow")]
+    ProbeInflightOverflow,
 }
 
 impl From<SwimError> for crate::error::ClusterError {

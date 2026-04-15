@@ -39,6 +39,17 @@ pub struct SwimConfig {
     /// Seed incarnation for a freshly-booted local node. Always `0` in
     /// production; exposed for deterministic unit tests.
     pub initial_incarnation: Incarnation,
+
+    /// Maximum number of membership deltas to piggyback on a single
+    /// outgoing SWIM datagram. Caps per-message bandwidth and bounds
+    /// the encoded payload size below a UDP MTU.
+    pub max_piggyback: usize,
+
+    /// Gossip fanout multiplier (`lambda` in Das §4.3). The
+    /// dissemination queue drops a rumour after it has been carried
+    /// on `ceil(fanout_lambda * log2(n+1))` outgoing messages, which
+    /// with high probability reaches every member.
+    pub fanout_lambda: u32,
 }
 
 impl SwimConfig {
@@ -51,6 +62,8 @@ impl SwimConfig {
             suspicion_mult: 4,
             min_suspicion: Duration::from_secs(2),
             initial_incarnation: Incarnation::ZERO,
+            max_piggyback: 6,
+            fanout_lambda: 3,
         }
     }
 
@@ -86,6 +99,18 @@ impl SwimConfig {
             return Err(SwimError::InvalidConfig {
                 field: "min_suspicion",
                 reason: "must be non-zero",
+            });
+        }
+        if self.max_piggyback == 0 {
+            return Err(SwimError::InvalidConfig {
+                field: "max_piggyback",
+                reason: "must be at least 1",
+            });
+        }
+        if self.fanout_lambda == 0 {
+            return Err(SwimError::InvalidConfig {
+                field: "fanout_lambda",
+                reason: "must be at least 1",
             });
         }
         Ok(())
@@ -167,6 +192,32 @@ mod tests {
             cfg.validate(),
             Err(SwimError::InvalidConfig {
                 field: "min_suspicion",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_max_piggyback_rejected() {
+        let mut cfg = SwimConfig::production();
+        cfg.max_piggyback = 0;
+        assert!(matches!(
+            cfg.validate(),
+            Err(SwimError::InvalidConfig {
+                field: "max_piggyback",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_fanout_lambda_rejected() {
+        let mut cfg = SwimConfig::production();
+        cfg.fanout_lambda = 0;
+        assert!(matches!(
+            cfg.validate(),
+            Err(SwimError::InvalidConfig {
+                field: "fanout_lambda",
                 ..
             })
         ));

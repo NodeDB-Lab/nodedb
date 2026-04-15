@@ -84,6 +84,13 @@ pub struct ClusterConfig {
     /// (`8` attempts, `32 s` ceiling). Tests override this with a
     /// faster policy.
     pub join_retry: JoinRetryPolicy,
+    /// Optional UDP bind address for the SWIM failure detector. `None`
+    /// disables SWIM entirely — cluster startup then relies solely on
+    /// the existing raft transport for membership observations. When
+    /// `Some`, the operator is expected to spawn SWIM separately via
+    /// [`crate::spawn_swim`] after the cluster is up and feed the
+    /// seed list from `seed_nodes`.
+    pub swim_udp_addr: Option<SocketAddr>,
 }
 
 /// Result of cluster startup — everything needed to run the Raft loop.
