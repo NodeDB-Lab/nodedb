@@ -8,5 +8,6 @@ description = "SQL parser, planner, and optimizer for NodeDB"
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-query = { workspace = true }
 sqlparser = "0.61"
 thiserror = { workspace = true }

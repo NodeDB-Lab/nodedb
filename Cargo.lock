@@ -3931,6 +3931,7 @@ dependencies = [
 name = "nodedb-sql"
 version = "0.0.3"
 dependencies = [
+ "nodedb-query",
  "nodedb-types",
  "sqlparser",
  "thiserror 2.0.18",

@@ -471,8 +471,19 @@ fn expr_to_sql_value(expr: &ast::Expr) -> Result<SqlValue> {
                     }
                 }
                 _ => {
-                    // Other functions like now() — store as string for runtime eval.
-                    Ok(SqlValue::String(format!("{expr}")))
+                    // Try folding via the shared scalar evaluator. Handles
+                    // `now()`, `current_timestamp`, `date_add(now(),'1h')`,
+                    // etc. — Postgres semantics: one snapshot per statement.
+                    // Unknown or non-foldable functions fall back to the
+                    // legacy string passthrough so existing behavior for
+                    // other callers is preserved.
+                    if let Ok(sql_expr) = crate::resolver::expr::convert_expr(expr)
+                        && let Some(v) = super::const_fold::fold_constant_default(&sql_expr)
+                    {
+                        Ok(v)
+                    } else {
+                        Ok(SqlValue::String(format!("{expr}")))
+                    }
                 }
             }
         }

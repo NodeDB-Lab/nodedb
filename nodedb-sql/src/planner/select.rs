@@ -105,7 +105,7 @@ fn plan_select(
             match proj {
                 Projection::Computed { expr, alias } => {
                     columns.push(alias.clone());
-                    values.push(eval_constant_expr(expr));
+                    values.push(eval_constant_expr(expr, functions));
                 }
                 Projection::Column(name) => {
                     columns.push(name.clone());
@@ -797,36 +797,12 @@ pub(crate) fn extract_func_args(func: &ast::Function) -> Result<Vec<ast::Expr>> 
     }
 }
 
-/// Evaluate a constant SqlExpr to a SqlValue.
-fn eval_constant_expr(expr: &SqlExpr) -> SqlValue {
-    match expr {
-        SqlExpr::Literal(v) => v.clone(),
-        SqlExpr::UnaryOp {
-            op: UnaryOp::Neg,
-            expr,
-        } => match eval_constant_expr(expr) {
-            SqlValue::Int(i) => SqlValue::Int(-i),
-            SqlValue::Float(f) => SqlValue::Float(-f),
-            other => other,
-        },
-        SqlExpr::BinaryOp { left, op, right } => {
-            let l = eval_constant_expr(left);
-            let r = eval_constant_expr(right);
-            match (l, op, r) {
-                (SqlValue::Int(a), BinaryOp::Add, SqlValue::Int(b)) => SqlValue::Int(a + b),
-                (SqlValue::Int(a), BinaryOp::Sub, SqlValue::Int(b)) => SqlValue::Int(a - b),
-                (SqlValue::Int(a), BinaryOp::Mul, SqlValue::Int(b)) => SqlValue::Int(a * b),
-                (SqlValue::Float(a), BinaryOp::Add, SqlValue::Float(b)) => SqlValue::Float(a + b),
-                (SqlValue::Float(a), BinaryOp::Sub, SqlValue::Float(b)) => SqlValue::Float(a - b),
-                (SqlValue::Float(a), BinaryOp::Mul, SqlValue::Float(b)) => SqlValue::Float(a * b),
-                (SqlValue::String(a), BinaryOp::Concat, SqlValue::String(b)) => {
-                    SqlValue::String(format!("{a}{b}"))
-                }
-                _ => SqlValue::Null,
-            }
-        }
-        _ => SqlValue::Null,
-    }
+/// Evaluate a constant SqlExpr to a SqlValue. Delegates to the shared
+/// `const_fold::fold_constant` helper so that zero-arg scalar functions
+/// like `now()` and `current_timestamp` go through the same evaluator
+/// as the runtime expression path.
+fn eval_constant_expr(expr: &SqlExpr, functions: &FunctionRegistry) -> SqlValue {
+    super::const_fold::fold_constant(expr, functions).unwrap_or(SqlValue::Null)
 }
 
 /// Extract a geometry argument: handles ST_Point(lon, lat), ST_GeomFromGeoJSON('...'),
