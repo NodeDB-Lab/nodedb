@@ -2,8 +2,6 @@
 //!
 //! Tenant A inserts vectors. Tenant B searches — must get zero results.
 
-use std::sync::Arc;
-
 use nodedb::bridge::envelope::{PhysicalPlan, Status};
 use nodedb::bridge::physical_plan::VectorOp;
 
@@ -41,7 +39,7 @@ fn vector_search_isolated() {
         TENANT_A,
         PhysicalPlan::Vector(VectorOp::Search {
             collection: "embeddings".into(),
-            query_vector: Arc::from([5.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![5.0f32, 0.0, 0.0],
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,
@@ -60,7 +58,7 @@ fn vector_search_isolated() {
         TENANT_B,
         PhysicalPlan::Vector(VectorOp::Search {
             collection: "embeddings".into(),
-            query_vector: Arc::from([5.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![5.0f32, 0.0, 0.0],
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,

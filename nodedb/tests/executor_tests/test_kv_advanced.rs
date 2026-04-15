@@ -158,7 +158,6 @@ fn kv_protocol_command_sequence() {
 #[test]
 fn kv_and_vector_coexist() {
     use nodedb::bridge::physical_plan::VectorOp;
-    use std::sync::Arc;
 
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
@@ -213,7 +212,7 @@ fn kv_and_vector_coexist() {
         &mut rx,
         PhysicalPlan::Vector(VectorOp::Search {
             collection: "embeddings".into(),
-            query_vector: Arc::from([3.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![3.0f32, 0.0, 0.0],
             top_k: 2,
             ef_search: 0,
             filter_bitmap: None,

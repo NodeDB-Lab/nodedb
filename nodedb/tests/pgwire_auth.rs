@@ -477,8 +477,11 @@ async fn pgwire_ddl_roundtrip() {
             .unwrap();
     let port = pg_listener.local_addr().port();
 
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_bus, _) =
+        nodedb::control::shutdown::ShutdownBus::new(Arc::clone(&state.shutdown));
     let shared_pg = Arc::clone(&state);
+    let test_startup_gate = Arc::clone(&state.startup);
+    let bus_pg = shutdown_bus.clone();
     tokio::spawn(async move {
         pg_listener
             .run(
@@ -486,7 +489,8 @@ async fn pgwire_ddl_roundtrip() {
                 nodedb::config::auth::AuthMode::Trust,
                 None,
                 Arc::new(tokio::sync::Semaphore::new(128)),
-                shutdown_rx,
+                test_startup_gate,
+                bus_pg,
             )
             .await
             .unwrap();

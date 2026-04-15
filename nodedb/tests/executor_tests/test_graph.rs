@@ -1,7 +1,5 @@
 //! Integration tests for graph engine operations.
 
-use std::sync::Arc;
-
 use nodedb::bridge::dispatch::BridgeRequest;
 use nodedb::bridge::envelope::PhysicalPlan;
 use nodedb::bridge::physical_plan::{GraphOp, VectorOp};
@@ -219,7 +217,7 @@ fn graph_rag_fusion_pipeline() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::RagFusion {
             collection: "docs".into(),
-            query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![1.0f32, 0.0, 0.0],
             vector_top_k: 3,
             edge_label: Some("CITES".into()),
             direction: Direction::Out,

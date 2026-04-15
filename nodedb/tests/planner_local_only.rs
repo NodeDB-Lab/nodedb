@@ -18,8 +18,8 @@ use common::cluster_harness::TestClusterNode;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn planning_does_not_issue_cluster_rpcs() {
     // Single-node cluster: we own all the descriptors locally
-    // and no `forward_sql` path is taken because there are no
-    // remote leaders.
+    // and all gateway routes are local (no remote leaders).
+    // The SQL-string forwarding path was deleted in C-δ.6.
     let node = TestClusterNode::spawn(1, vec![])
         .await
         .expect("single-node spawn");

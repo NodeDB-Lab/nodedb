@@ -1,7 +1,5 @@
 //! Integration tests for vector engine operations.
 
-use std::sync::Arc;
-
 use nodedb::bridge::dispatch::BridgeRequest;
 use nodedb::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
 use nodedb::bridge::physical_plan::VectorOp;
@@ -41,7 +39,7 @@ fn vector_insert_and_search() {
         &mut rx,
         PhysicalPlan::Vector(VectorOp::Search {
             collection: "embeddings".into(),
-            query_vector: Arc::from([5.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![5.0f32, 0.0, 0.0],
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,
@@ -64,7 +62,7 @@ fn vector_search_no_index_returns_not_found() {
         &mut rx,
         PhysicalPlan::Vector(VectorOp::Search {
             collection: "nonexistent".into(),
-            query_vector: Arc::from([1.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![1.0f32, 0.0, 0.0],
             top_k: 5,
             ef_search: 0,
             filter_bitmap: None,

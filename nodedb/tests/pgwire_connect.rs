@@ -55,8 +55,11 @@ async fn pgwire_connect_and_query() {
         .unwrap();
     let pg_addr = pg_listener.local_addr();
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_bus, _) =
+        nodedb::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown));
     let shared_pg = Arc::clone(&shared);
+    let test_startup_gate = Arc::clone(&shared.startup);
+    let bus_pg = shutdown_bus.clone();
     let pg_handle = tokio::spawn(async move {
         pg_listener
             .run(
@@ -64,7 +67,8 @@ async fn pgwire_connect_and_query() {
                 AuthMode::Trust,
                 None,
                 Arc::new(tokio::sync::Semaphore::new(128)),
-                shutdown_rx,
+                test_startup_gate,
+                bus_pg,
             )
             .await
             .unwrap();
@@ -132,7 +136,7 @@ async fn pgwire_connect_and_query() {
     // Clean up — signal all background tasks to stop.
     drop(client);
     let _ = conn_handle.await;
-    let _ = shutdown_tx.send(true);
+    shutdown_bus.initiate();
     let _ = pg_handle.await;
     let _ = poller_shutdown_tx.send(true);
     let _ = poller_handle.await;

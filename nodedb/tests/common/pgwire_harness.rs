@@ -18,7 +18,7 @@ use nodedb::wal::WalManager;
 pub struct TestServer {
     pub client: tokio_postgres::Client,
     _conn_handle: tokio::task::JoinHandle<()>,
-    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    shutdown_bus: nodedb::control::shutdown::ShutdownBus,
     poller_shutdown_tx: tokio::sync::watch::Sender<bool>,
     core_stop_tx: std::sync::mpsc::Sender<()>,
     _pg_handle: tokio::task::JoinHandle<()>,
@@ -90,6 +90,7 @@ impl TestServer {
             Arc::clone(&shared),
             trigger_dlq,
             Arc::clone(&shared.cdc_router),
+            Arc::clone(&shared.shutdown),
         );
 
         // PgWire listener.
@@ -98,8 +99,15 @@ impl TestServer {
             .unwrap();
         let pg_addr = pg_listener.local_addr();
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        // Create a shutdown bus wrapping the shared.shutdown watch so that
+        // bus.initiate() also signals the flat ShutdownWatch.
+        let (shutdown_bus, _) =
+            nodedb::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown));
         let shared_pg = Arc::clone(&shared);
+        // Use the startup gate already on SharedState (a pre-fired placeholder
+        // from `new_inner`). The listener starts accepting immediately.
+        let test_startup_gate = Arc::clone(&shared.startup);
+        let bus_pg = shutdown_bus.clone();
         let pg_handle = tokio::spawn(async move {
             pg_listener
                 .run(
@@ -107,7 +115,8 @@ impl TestServer {
                     AuthMode::Trust,
                     None,
                     Arc::new(tokio::sync::Semaphore::new(128)),
-                    shutdown_rx,
+                    test_startup_gate,
+                    bus_pg,
                 )
                 .await
                 .unwrap();
@@ -131,7 +140,7 @@ impl TestServer {
         Self {
             client,
             _conn_handle: conn_handle,
-            shutdown_tx,
+            shutdown_bus,
             poller_shutdown_tx,
             core_stop_tx,
             _pg_handle: pg_handle,
@@ -201,7 +210,7 @@ fn pg_error_detail(e: &tokio_postgres::Error) -> String {
 
 impl Drop for TestServer {
     fn drop(&mut self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_bus.initiate();
         let _ = self.poller_shutdown_tx.send(true);
         let _ = self.core_stop_tx.send(());
     }

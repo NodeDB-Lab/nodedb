@@ -344,7 +344,7 @@ fn mixed_engine_isolation_no_cross_eviction() {
         &mut rx,
         PhysicalPlan::Vector(VectorOp::Search {
             collection: "mixed".into(),
-            query_vector: std::sync::Arc::from([25.0f32, 0.0, 0.0].as_slice()),
+            query_vector: vec![25.0f32, 0.0, 0.0],
             top_k: 3,
             ef_search: 0,
             filter_bitmap: None,

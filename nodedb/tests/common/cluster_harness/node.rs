@@ -47,7 +47,7 @@ pub struct TestClusterNode {
     pub shared: Arc<SharedState>,
     _data_dir: tempfile::TempDir,
     _conn_handle: tokio::task::JoinHandle<()>,
-    pg_shutdown_tx: tokio::sync::watch::Sender<bool>,
+    pg_shutdown_bus: nodedb::control::shutdown::ShutdownBus,
     poller_shutdown_tx: tokio::sync::watch::Sender<bool>,
     cluster_shutdown_tx: tokio::sync::watch::Sender<bool>,
     core_stop_tx: std::sync::mpsc::Sender<()>,
@@ -201,6 +201,7 @@ impl TestClusterNode {
             Arc::clone(&shared),
             trigger_dlq,
             Arc::clone(&shared.cdc_router),
+            Arc::clone(&shared.shutdown),
         );
 
         // Start Raft + install MetadataCommitApplier.
@@ -224,11 +225,45 @@ impl TestClusterNode {
             cluster_shutdown_rx,
         );
 
+        // Construct the gateway and install it (plus its DDL invalidator) on
+        // SharedState, mirroring what main.rs does before listeners bind.
+        //
+        // We use a raw-pointer write because `shared` has already been cloned
+        // by the response poller task, making `Arc::get_mut` return None.
+        // This is sound at this point in setup because:
+        //   1. The response poller only calls `poll_and_route_responses()`,
+        //      which never touches the `gateway` or `gateway_invalidator` fields.
+        //   2. No other concurrent task reads those fields before the pgwire
+        //      listener binds (a few lines below).
+        //   3. The write completes before the pgwire listener spawns, so the
+        //      happens-before relationship is guaranteed.
+        {
+            let shared_for_gw = Arc::clone(&shared);
+            let gateway = Arc::new(nodedb::control::gateway::Gateway::new(shared_for_gw));
+            let invalidator = Arc::new(nodedb::control::gateway::PlanCacheInvalidator::new(
+                &gateway.plan_cache,
+            ));
+            // SAFETY: no concurrent reads of `gateway` / `gateway_invalidator`
+            // at this point (see comment above). Fields start as `None` and
+            // are written once here before any listener starts.
+            unsafe {
+                let state = Arc::as_ptr(&shared) as *mut nodedb::control::state::SharedState;
+                (*state).gateway = Some(Arc::clone(&gateway));
+                (*state).gateway_invalidator = Some(invalidator);
+            }
+        }
+
         // pgwire listener.
+        // In the test harness, use the startup gate already on SharedState
+        // (a pre-fired placeholder from `new_inner`). This means the listener
+        // accepts immediately without a startup-phase delay.
         let pg_listener = PgListener::bind("127.0.0.1:0".parse()?).await?;
         let pg_addr = pg_listener.local_addr();
-        let (pg_shutdown_tx, pg_shutdown_rx) = tokio::sync::watch::channel(false);
+        let (pg_shutdown_bus, _) =
+            nodedb::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown));
         let shared_pg = Arc::clone(&shared);
+        let test_startup_gate = Arc::clone(&shared.startup);
+        let bus_pg = pg_shutdown_bus.clone();
         let pg_handle = tokio::spawn(async move {
             let _ = pg_listener
                 .run(
@@ -236,7 +271,8 @@ impl TestClusterNode {
                     AuthMode::Trust,
                     None,
                     Arc::new(tokio::sync::Semaphore::new(128)),
-                    pg_shutdown_rx,
+                    test_startup_gate,
+                    bus_pg,
                 )
                 .await;
         });
@@ -264,7 +300,7 @@ impl TestClusterNode {
             shared,
             _data_dir: data_dir,
             _conn_handle: conn_handle,
-            pg_shutdown_tx,
+            pg_shutdown_bus,
             poller_shutdown_tx,
             cluster_shutdown_tx,
             core_stop_tx,
@@ -633,6 +669,35 @@ impl TestClusterNode {
             .unwrap_or(false)
     }
 
+    /// Force the routing table on this node to point `group_id` at `fake_leader`,
+    /// creating a stale route.
+    ///
+    /// When the gateway on this node next dispatches to `group_id`, it will send
+    /// the request to `fake_leader` instead of the real leader. The remote node
+    /// (which is NOT the leader for that group) will return `TypedClusterError::NotLeader`,
+    /// causing `retry_not_leader` to update the routing table and retry against
+    /// the real leader. This is the canonical way to exercise the NotLeader retry
+    /// path in tests without needing a real leadership change (which is slow and
+    /// flaky).
+    pub fn force_stale_route_for_test(&self, group_id: u64, fake_leader: u64) {
+        if let Some(ref routing) = self.shared.cluster_routing {
+            let mut table = routing.write().unwrap_or_else(|p| p.into_inner());
+            table.set_leader(group_id, fake_leader);
+        }
+    }
+
+    /// Read the current `not_leader_retry_count` from this node's shared gateway.
+    ///
+    /// Returns 0 if the gateway has not been constructed yet (shouldn't happen
+    /// in tests since the harness wires the gateway during spawn).
+    pub fn not_leader_retry_count(&self) -> u64 {
+        self.shared
+            .gateway
+            .as_ref()
+            .map(|gw| gw.not_leader_retry_count())
+            .unwrap_or(0)
+    }
+
     /// Execute a simple query; returns an error message on SQL error.
     pub async fn exec(&self, sql: &str) -> Result<(), String> {
         match self.client.simple_query(sql).await {
@@ -643,7 +708,7 @@ impl TestClusterNode {
 
     /// Cooperatively shut down every background task this node owns.
     pub async fn shutdown(self) {
-        let _ = self.pg_shutdown_tx.send(true);
+        self.pg_shutdown_bus.initiate();
         let _ = self.cluster_shutdown_tx.send(true);
         let _ = self.poller_shutdown_tx.send(true);
         let _ = self.core_stop_tx.send(());
@@ -678,7 +743,7 @@ impl TestClusterNode {
 /// in milliseconds instead of minutes.
 impl Drop for TestClusterNode {
     fn drop(&mut self) {
-        let _ = self.pg_shutdown_tx.send(true);
+        self.pg_shutdown_bus.initiate();
         let _ = self.cluster_shutdown_tx.send(true);
         let _ = self.poller_shutdown_tx.send(true);
         // `core_stop_tx` is a std mpsc Sender; dropping it disconnects
