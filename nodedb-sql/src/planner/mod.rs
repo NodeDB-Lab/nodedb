@@ -1,4 +1,5 @@
 pub mod aggregate;
+pub mod const_fold;
 pub mod cte;
 pub mod dml;
 pub mod join;

@@ -45,6 +45,7 @@ binary(/cluster/)
 | binary(descriptor_versioning_cross_node)
 | binary(prepared_cache_invalidation)
 | binary(sql_cluster_cross_node_dml)
+| binary(pgwire_gateway_migration)
 '''
 test-group = 'cluster'
 threads-required = 'num-test-threads'

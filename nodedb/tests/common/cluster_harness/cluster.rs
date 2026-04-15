@@ -86,6 +86,39 @@ impl TestCluster {
         )
         .await;
 
+        // CRITICAL: wait for the metadata Raft group to elect a leader
+        // and for every node's local view to agree on the same leader id.
+        //
+        // Topology convergence + rolling-upgrade exit only guarantees
+        // membership and wire version are agreed; they say nothing about
+        // election state. Under heavy host load (e.g. running this test
+        // immediately after another full-suite cluster test exits and
+        // the unit-test pool ramps back up), the initial Raft heartbeat
+        // window can be missed and the first `acquire`/`propose` issued
+        // by the test races a re-election — surfacing as
+        // `raft error: not leader (leader hint: None)` from a
+        // descriptor-lease or DDL call.
+        //
+        // Waiting until every node reports the same non-zero leader id
+        // closes the window deterministically. Symmetric to the
+        // rolling-upgrade wait above: no retries, no flakes, no
+        // wasted CI minutes on cleanup of a doomed cluster bringup.
+        wait_for(
+            "metadata group has stable leader visible on every node",
+            Duration::from_secs(10),
+            Duration::from_millis(20),
+            || {
+                let leaders: Vec<u64> = cluster
+                    .nodes
+                    .iter()
+                    .map(|n| n.metadata_group_leader())
+                    .collect();
+                let first = leaders[0];
+                first != 0 && leaders.iter().all(|&l| l == first)
+            },
+        )
+        .await;
+
         Ok(cluster)
     }
 
