@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use nodedb_cluster::{
     CacheApplier, ClusterCatalog, ClusterConfig, ClusterLifecycleState, ClusterLifecycleTracker,
-    ClusterTopology, MetadataCache, NexarTransport, NoopForwarder, RaftLoop, start_cluster,
+    ClusterTopology, MetadataCache, NexarTransport, RaftLoop, start_cluster,
 };
 
 /// Build a `NexarTransport` with a tighter-than-production RPC
@@ -100,7 +100,7 @@ pub struct TestNode {
     /// cooperative-shutdown watch and exits on signal, which is
     /// what lets per-group redb log files release their locks in
     /// time for a subsequent in-process restart.
-    raft_loop: Arc<RaftLoop<NoopApplier, NoopForwarder>>,
+    raft_loop: Arc<RaftLoop<NoopApplier>>,
     shutdown_tx: watch::Sender<bool>,
     serve_handle: tokio::task::JoinHandle<()>,
     run_handle: tokio::task::JoinHandle<()>,
@@ -203,20 +203,12 @@ impl TestNode {
         let metadata_cache = Arc::new(RwLock::new(MetadataCache::new()));
         let metadata_applier: Arc<dyn nodedb_cluster::MetadataApplier> =
             Arc::new(CacheApplier::new(metadata_cache.clone()));
-        // Use `with_forwarder` so the type is concrete
-        // (`RaftLoop<NoopApplier, NoopForwarder>`), matching the
-        // `raft_loop` field on `TestNode`. Without the explicit
-        // forwarder the default generic parameter makes the type
-        // inference fall through the elided generic, which works
-        // at the use site but can't be stored in a non-generic
-        // struct field.
         let raft_loop = Arc::new(
-            RaftLoop::with_forwarder(
+            RaftLoop::new(
                 state.multi_raft,
                 transport.clone(),
                 topology.clone(),
                 NoopApplier,
-                Arc::new(NoopForwarder),
             )
             .with_metadata_applier(metadata_applier)
             // Attach the catalog so the server-side `join_flow`

@@ -15,7 +15,7 @@ use nodedb_raft::message::LogEntry;
 use crate::catalog::ClusterCatalog;
 use crate::conf_change::ConfChange;
 use crate::error::Result;
-use crate::forward::RequestForwarder;
+use crate::forward::{NoopPlanExecutor, PlanExecutor};
 use crate::metadata_group::applier::{MetadataApplier, NoopMetadataApplier};
 use crate::multi_raft::MultiRaft;
 use crate::topology::ClusterTopology;
@@ -53,17 +53,20 @@ pub type VShardEnvelopeHandler = Arc<
 /// ticks. Implements [`crate::transport::RaftRpcHandler`] (in
 /// [`super::handle_rpc`]) so it can be passed directly to
 /// [`NexarTransport::serve`] for incoming RPC dispatch.
-pub struct RaftLoop<A: CommitApplier, F: RequestForwarder = crate::forward::NoopForwarder> {
+///
+/// The `F: RequestForwarder` generic parameter was removed in C-δ.6 when the
+/// SQL-string forwarding path was retired. Cross-node SQL routing now goes
+/// through `gateway.execute / ExecuteRequest` (C-β path).
+pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     pub(super) node_id: u64,
     pub(super) multi_raft: Arc<Mutex<MultiRaft>>,
     pub(super) transport: Arc<NexarTransport>,
     pub(super) topology: Arc<RwLock<ClusterTopology>>,
     pub(super) applier: A,
     /// Applies committed entries from the metadata Raft group (group 0).
-    /// Every node has one; defaults to a no-op until the host crate wires
-    /// in a real [`MetadataApplier`] via [`Self::with_metadata_applier`].
     pub(super) metadata_applier: Arc<dyn MetadataApplier>,
-    pub(super) forwarder: Arc<F>,
+    /// Executes incoming `ExecuteRequest` RPCs without SQL re-planning.
+    pub(super) plan_executor: Arc<P>,
     pub(super) tick_interval: Duration,
     /// Optional handler for incoming VShardEnvelope messages.
     /// Set when the Event Plane or other subsystems need cross-node messaging.
@@ -119,7 +122,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             topology,
             applier,
             metadata_applier: Arc::new(NoopMetadataApplier),
-            forwarder: Arc::new(crate::forward::NoopForwarder),
+            plan_executor: Arc::new(NoopPlanExecutor),
             tick_interval: DEFAULT_TICK_INTERVAL,
             vshard_handler: None,
             catalog: None,
@@ -129,31 +132,22 @@ impl<A: CommitApplier> RaftLoop<A> {
     }
 }
 
-impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
-    /// Create a RaftLoop with a custom request forwarder (for cluster mode).
-    pub fn with_forwarder(
-        multi_raft: MultiRaft,
-        transport: Arc<NexarTransport>,
-        topology: Arc<RwLock<ClusterTopology>>,
-        applier: A,
-        forwarder: Arc<F>,
-    ) -> Self {
-        let node_id = multi_raft.node_id();
-        let (shutdown_watch, _) = tokio::sync::watch::channel(false);
-        let (ready_watch, _) = tokio::sync::watch::channel(false);
-        Self {
-            node_id,
-            multi_raft: Arc::new(Mutex::new(multi_raft)),
-            transport,
-            topology,
-            applier,
-            metadata_applier: Arc::new(NoopMetadataApplier),
-            forwarder,
-            tick_interval: DEFAULT_TICK_INTERVAL,
-            vshard_handler: None,
-            catalog: None,
-            shutdown_watch,
-            ready_watch,
+impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
+    /// Install a custom plan executor (for cluster mode — C-β path).
+    pub fn with_plan_executor<P2: PlanExecutor>(self, executor: Arc<P2>) -> RaftLoop<A, P2> {
+        RaftLoop {
+            node_id: self.node_id,
+            multi_raft: self.multi_raft,
+            transport: self.transport,
+            topology: self.topology,
+            applier: self.applier,
+            metadata_applier: self.metadata_applier,
+            plan_executor: executor,
+            tick_interval: self.tick_interval,
+            vshard_handler: self.vshard_handler,
+            catalog: self.catalog,
+            shutdown_watch: self.shutdown_watch,
+            ready_watch: self.ready_watch,
         }
     }
 

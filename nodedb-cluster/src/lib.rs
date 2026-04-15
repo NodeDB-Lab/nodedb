@@ -43,7 +43,7 @@ pub use cluster_info::{
 };
 pub use conf_change::{ConfChange, ConfChangeType};
 pub use error::{ClusterError, Result};
-pub use forward::{NoopForwarder, RequestForwarder};
+pub use forward::{NoopPlanExecutor, PlanExecutor};
 pub use ghost::{GhostStub, GhostTable};
 pub use health::{HealthConfig, HealthMonitor};
 pub use lifecycle_state::{ClusterLifecycleState, ClusterLifecycleTracker};

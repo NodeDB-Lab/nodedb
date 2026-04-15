@@ -1,40 +1,40 @@
-//! Query forwarding trait for leader-based request routing.
+//! Physical-plan execution trait for leader-based request routing.
 //!
-//! When a client connects to a non-leader node, the query is forwarded
-//! to the leader for the target vShard. The [`RequestForwarder`] trait
-//! abstracts local execution so the cluster crate doesn't depend on the
-//! main binary's SharedState or pgwire infrastructure.
+//! [`PlanExecutor`]: the physical-plan execution path introduced in C-β.
+//! The legacy [`RequestForwarder`] SQL-string path was deleted in C-δ.6.
 
-use crate::rpc_codec::{ForwardRequest, ForwardResponse};
+use crate::rpc_codec::{ExecuteRequest, ExecuteResponse};
 
-/// Trait for executing forwarded SQL queries on the local Data Plane.
+// ── Physical-plan execution (C-β) ────────────────────────────────────────────
+
+/// Trait for executing a pre-planned `PhysicalPlan` on the local Data Plane.
 ///
-/// Implemented by the main binary crate using SharedState + QueryContext.
-/// The cluster RPC handler calls this when it receives a `ForwardRequest`.
-pub trait RequestForwarder: Send + Sync + 'static {
-    /// Execute a forwarded SQL query locally and return the result.
-    ///
-    /// The implementation should:
-    /// 1. Create a synthetic identity from the tenant_id (trusted node-to-node)
-    /// 2. Plan the SQL through DataFusion
-    /// 3. Dispatch to the local Data Plane
-    /// 4. Collect response payloads
-    /// 5. Return them in a ForwardResponse
-    fn execute_forwarded(
+/// Implemented in `nodedb/src/control/exec_receiver.rs` by `LocalPlanExecutor`.
+/// The cluster RPC handler calls this when it receives an `ExecuteRequest`.
+///
+/// Responsibilities:
+/// 1. Validate that `deadline_remaining_ms > 0`.
+/// 2. For each `DescriptorVersionEntry`, verify the local descriptor version matches.
+/// 3. Decode `plan_bytes` via `nodedb::bridge::physical_plan::wire::decode`.
+/// 4. Dispatch through the local SPSC bridge.
+/// 5. Collect response payloads.
+/// 6. Map errors to `TypedClusterError`.
+pub trait PlanExecutor: Send + Sync + 'static {
+    fn execute_plan(
         &self,
-        req: ForwardRequest,
-    ) -> impl std::future::Future<Output = ForwardResponse> + Send;
+        req: ExecuteRequest,
+    ) -> impl std::future::Future<Output = ExecuteResponse> + Send;
 }
 
-/// No-op forwarder for single-node mode or testing.
-pub struct NoopForwarder;
+/// No-op executor for single-node mode or testing.
+pub struct NoopPlanExecutor;
 
-impl RequestForwarder for NoopForwarder {
-    async fn execute_forwarded(&self, _req: ForwardRequest) -> ForwardResponse {
-        ForwardResponse {
-            success: false,
-            payloads: vec![],
-            error_message: "query forwarding not available (single-node mode)".into(),
-        }
+impl PlanExecutor for NoopPlanExecutor {
+    async fn execute_plan(&self, _req: ExecuteRequest) -> ExecuteResponse {
+        use crate::rpc_codec::TypedClusterError;
+        ExecuteResponse::err(TypedClusterError::Internal {
+            code: 0,
+            message: "plan execution not available (single-node mode)".into(),
+        })
     }
 }

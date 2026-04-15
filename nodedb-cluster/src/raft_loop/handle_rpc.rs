@@ -6,7 +6,7 @@
 //! orchestration in [`super::join`].
 
 use crate::error::{ClusterError, Result};
-use crate::forward::RequestForwarder;
+use crate::forward::PlanExecutor;
 use crate::health;
 use crate::rpc_codec::RaftRpc;
 use crate::transport::RaftRpcHandler;
@@ -61,7 +61,7 @@ pub(super) fn decide_join(
     }
 }
 
-impl<A: CommitApplier, F: RequestForwarder> RaftRpcHandler for RaftLoop<A, F> {
+impl<A: CommitApplier, P: PlanExecutor> RaftRpcHandler for RaftLoop<A, P> {
     async fn handle_rpc(&self, rpc: RaftRpc) -> Result<RaftRpc> {
         match rpc {
             // Raft consensus RPCs — lock MultiRaft (sync, never across await).
@@ -135,10 +135,11 @@ impl<A: CommitApplier, F: RequestForwarder> RaftRpcHandler for RaftLoop<A, F> {
                 }
                 Ok(ack)
             }
-            // Query forwarding — execute locally via the RequestForwarder.
-            RaftRpc::ForwardRequest(req) => {
-                let resp = self.forwarder.execute_forwarded(req).await;
-                Ok(RaftRpc::ForwardResponse(resp))
+            // Physical-plan execution (C-β) — execute locally via the PlanExecutor,
+            // skipping SQL re-planning entirely.
+            RaftRpc::ExecuteRequest(req) => {
+                let resp = self.plan_executor.execute_plan(req).await;
+                Ok(RaftRpc::ExecuteResponse(resp))
             }
             // Metadata-group proposal forwarding — apply locally if
             // we're the metadata leader, otherwise return a

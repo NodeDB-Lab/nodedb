@@ -27,11 +27,11 @@ use tracing::{debug, warn};
 use nodedb_raft::transport::RaftTransport;
 
 use crate::conf_change::{ConfChange, ConfChangeType};
-use crate::forward::RequestForwarder;
+use crate::forward::PlanExecutor;
 
 use super::loop_core::{CommitApplier, RaftLoop};
 
-impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
+impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// Execute a single tick: drive Raft, dispatch outbound messages,
     /// apply commits, promote caught-up learners.
     pub(super) fn do_tick(&self) {

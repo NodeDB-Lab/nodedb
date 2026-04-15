@@ -61,7 +61,7 @@ use tracing::{debug, info, warn};
 use crate::bootstrap::handle_join_request;
 use crate::conf_change::{ConfChange, ConfChangeType};
 use crate::error::{ClusterError, Result};
-use crate::forward::RequestForwarder;
+use crate::forward::PlanExecutor;
 use crate::health;
 use crate::multi_raft::GroupStatus;
 use crate::routing::RoutingTable;
@@ -78,7 +78,7 @@ const CONF_CHANGE_COMMIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Polling interval for the commit-wait loop.
 const CONF_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-impl<A: CommitApplier, F: RequestForwarder> RaftLoop<A, F> {
+impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// Full server-side `JoinRequest` handler. See module docs for the
     /// phase-by-phase description.
     pub(super) async fn join_flow(&self, req: JoinRequest) -> JoinResponse {

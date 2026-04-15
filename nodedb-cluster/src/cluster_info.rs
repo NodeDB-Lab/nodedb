@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::forward::RequestForwarder;
+use crate::forward::PlanExecutor;
 use crate::lifecycle_state::{ClusterLifecycleState, ClusterLifecycleTracker};
 use crate::multi_raft::GroupStatus;
 use crate::raft_loop::{CommitApplier, RaftLoop};
@@ -25,16 +25,16 @@ use crate::topology::ClusterTopology;
 /// Implemented for every `RaftLoop` via a blanket impl so the main
 /// binary can coerce `Arc<RaftLoop<...>>` to `Arc<dyn
 /// GroupStatusProvider + Send + Sync>` without thinking about the
-/// `CommitApplier` / `RequestForwarder` type parameters.
+/// `CommitApplier` / `PlanExecutor` type parameters.
 pub trait GroupStatusProvider: Send + Sync {
     /// Current status of every Raft group hosted on this node.
     fn group_statuses(&self) -> Vec<GroupStatus>;
 }
 
-impl<A, F> GroupStatusProvider for RaftLoop<A, F>
+impl<A, P> GroupStatusProvider for RaftLoop<A, P>
 where
     A: CommitApplier,
-    F: RequestForwarder,
+    P: PlanExecutor,
 {
     fn group_statuses(&self) -> Vec<GroupStatus> {
         RaftLoop::group_statuses(self)
