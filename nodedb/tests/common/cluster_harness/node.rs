@@ -320,6 +320,25 @@ impl TestClusterNode {
             .unwrap_or(0)
     }
 
+    /// Observed metadata-group leader id from this node's local Raft
+    /// state, or `0` if no leader is known yet (election in progress).
+    /// Polled by the cluster harness `spawn_three()` to gate test
+    /// execution on a stable leader — otherwise tests racing the first
+    /// election see `not leader (leader hint: None)` errors when CPU
+    /// pressure delays the initial heartbeats past topology convergence.
+    pub fn metadata_group_leader(&self) -> u64 {
+        let Some(observer) = self.shared.cluster_observer.get() else {
+            return 0;
+        };
+        observer
+            .group_status
+            .group_statuses()
+            .into_iter()
+            .find(|g| g.group_id == nodedb_cluster::METADATA_GROUP_ID)
+            .map(|g| g.leader_id)
+            .unwrap_or(0)
+    }
+
     /// Number of active collections visible on this node (read through
     /// the local `SystemCatalog` redb — populated by the
     /// `MetadataCommitApplier` on every node via
