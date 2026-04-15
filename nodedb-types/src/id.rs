@@ -116,6 +116,8 @@ impl fmt::Display for DocumentId {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
 )]
 pub struct NodeId(String);
 
