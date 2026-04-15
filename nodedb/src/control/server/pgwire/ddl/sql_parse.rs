@@ -67,7 +67,80 @@ pub(super) fn parse_sql_value(val: &str) -> nodedb_types::Value {
     if let Ok(f) = trimmed.parse::<f64>() {
         return nodedb_types::Value::Float(f);
     }
+    // Scalar function call like `now()` or `date_add(now(), '1h')`, or a
+    // bare identifier like `current_timestamp` that SQL treats as a
+    // zero-arg function. Route through the shared evaluator so the
+    // UPSERT fast-path stays aligned with the SQL planner's VALUES path.
+    // Unknown names fall through to the legacy string behavior.
+    if let Some(v) = try_eval_scalar_function(trimmed) {
+        return v;
+    }
     nodedb_types::Value::String(trimmed.to_string())
+}
+
+/// Evaluate a scalar function expression like `now()` or a bare SQL
+/// keyword like `current_timestamp` via the shared `nodedb_query`
+/// evaluator. Returns `None` if the input isn't a recognizable call
+/// form or the function is unknown.
+fn try_eval_scalar_function(s: &str) -> Option<nodedb_types::Value> {
+    // Bare identifier: SQL treats `current_timestamp`, `current_date`,
+    // etc. as zero-arg function references without parentheses.
+    let is_bare_ident = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !s.is_empty()
+        && !s.chars().next().is_some_and(|c| c.is_ascii_digit());
+
+    if is_bare_ident {
+        let name = s.to_lowercase();
+        // Only fold if the registry knows this name. Gate via nodedb-sql's
+        // registry so we don't accidentally evaluate user identifiers.
+        let registry = nodedb_sql::planner::const_fold::default_registry();
+        if registry.lookup(&name).is_some() {
+            let val = nodedb_query::functions::eval_function(&name, &[]);
+            if !matches!(val, nodedb_types::Value::Null) {
+                return Some(val);
+            }
+        }
+        return None;
+    }
+
+    // Call form `name(args...)`. Parse via sqlparser + fold via const_fold.
+    if !s.ends_with(')') || !s.contains('(') {
+        return None;
+    }
+    let stmt_sql = format!("SELECT {s}");
+    let dialect = sqlparser::dialect::PostgreSqlDialect {};
+    let stmts = sqlparser::parser::Parser::parse_sql(&dialect, &stmt_sql).ok()?;
+    let stmt = stmts.into_iter().next()?;
+    let sqlparser::ast::Statement::Query(query) = stmt else {
+        return None;
+    };
+    let sqlparser::ast::SetExpr::Select(select) = *query.body else {
+        return None;
+    };
+    let item = select.projection.into_iter().next()?;
+    let ast_expr = match item {
+        sqlparser::ast::SelectItem::UnnamedExpr(e)
+        | sqlparser::ast::SelectItem::ExprWithAlias { expr: e, .. } => e,
+        _ => return None,
+    };
+    let sql_expr = nodedb_sql::resolver::expr::convert_expr(&ast_expr).ok()?;
+    let folded = nodedb_sql::planner::const_fold::fold_constant_default(&sql_expr)?;
+    Some(sql_value_to_ndb_value(folded))
+}
+
+fn sql_value_to_ndb_value(v: nodedb_sql::types::SqlValue) -> nodedb_types::Value {
+    use nodedb_sql::types::SqlValue;
+    match v {
+        SqlValue::Null => nodedb_types::Value::Null,
+        SqlValue::Bool(b) => nodedb_types::Value::Bool(b),
+        SqlValue::Int(i) => nodedb_types::Value::Integer(i),
+        SqlValue::Float(f) => nodedb_types::Value::Float(f),
+        SqlValue::String(s) => nodedb_types::Value::String(s),
+        SqlValue::Bytes(b) => nodedb_types::Value::Bytes(b),
+        SqlValue::Array(a) => {
+            nodedb_types::Value::Array(a.into_iter().map(sql_value_to_ndb_value).collect())
+        }
+    }
 }
 
 /// Extract a clause value delimited by known keywords.
