@@ -84,6 +84,32 @@ impl RetentionPolicyRegistry {
             .collect()
     }
 
+    /// List all policies (all tenants, enabled and disabled).
+    /// Used by the recovery verifier.
+    pub fn list_all(&self) -> Vec<RetentionPolicyDef> {
+        self.policies
+            .read()
+            .expect("registry lock poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Clear and reload from catalog. Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::types::SystemCatalog,
+    ) -> crate::Result<()> {
+        let fresh = catalog.load_all_retention_policies()?;
+        let mut map = self.policies.write().expect("registry lock poisoned");
+        map.clear();
+        for p in fresh {
+            let key = (p.tenant_id, p.name.clone());
+            map.insert(key, p);
+        }
+        Ok(())
+    }
+
     /// List all policies for a tenant.
     pub fn list_for_tenant(&self, tenant_id: u32) -> Vec<RetentionPolicyDef> {
         self.policies

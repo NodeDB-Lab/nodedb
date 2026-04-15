@@ -101,6 +101,36 @@ impl RlsPolicyStore {
             .unwrap_or_default()
     }
 
+    /// Flat list of all policies (all tenants, all collections).
+    /// Used by the recovery verifier.
+    pub fn list_all_flat(&self) -> Vec<RlsPolicy> {
+        let policies = self.lock_read();
+        policies.values().flat_map(|v| v.iter().cloned()).collect()
+    }
+
+    /// Clear all in-memory policies and reload from the catalog.
+    /// Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::SystemCatalog,
+    ) -> crate::Result<()> {
+        let stored = catalog.load_all_rls_policies()?;
+        let mut policies = self.lock_write();
+        policies.clear();
+        for s in stored {
+            match s.to_runtime() {
+                Ok(rp) => {
+                    let key = super::types::policy_key(rp.tenant_id, &rp.collection);
+                    policies.entry(key).or_default().push(rp);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "rls_store.clear_and_reload: skipping unparseable policy");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Total policies across all collections.
     pub fn policy_count(&self) -> usize {
         self.policies

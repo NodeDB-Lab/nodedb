@@ -87,6 +87,15 @@ impl ConsumerHandle {
         self.join_handle.abort();
     }
 
+    /// Abort the task and await its termination, consuming the handle so the
+    /// task future (and every `Arc` it held) is definitely dropped by the
+    /// time this returns. Used in shutdown paths that must observe `Drop`
+    /// side effects before reopening resources (e.g. redb file locks).
+    pub async fn abort_and_join(self) {
+        self.join_handle.abort();
+        let _ = self.join_handle.await;
+    }
+
     pub fn events_processed(&self) -> u64 {
         use std::sync::atomic::Ordering;
         self.metrics.events_processed.load(Ordering::Relaxed)

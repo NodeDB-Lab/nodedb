@@ -79,6 +79,30 @@ impl MvRegistry {
             .collect()
     }
 
+    /// Clear all entries and reload from catalog.
+    /// Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::types::SystemCatalog,
+    ) -> crate::Result<()> {
+        let fresh = catalog.load_all_streaming_mvs()?;
+        let mut defs = self.defs.write().unwrap_or_else(|p| p.into_inner());
+        let mut states = self.states.write().unwrap_or_else(|p| p.into_inner());
+        defs.clear();
+        states.clear();
+        for mv in fresh {
+            let key = (mv.tenant_id, mv.name.clone());
+            let state = std::sync::Arc::new(crate::event::streaming_mv::state::MvState::new(
+                mv.name.clone(),
+                mv.group_by_columns.clone(),
+                mv.aggregates.clone(),
+            ));
+            defs.insert(key.clone(), mv);
+            states.insert(key, state);
+        }
+        Ok(())
+    }
+
     /// List all MV definitions (all tenants).
     pub fn list_all(&self) -> Vec<StreamingMvDef> {
         let defs = self.defs.read().unwrap_or_else(|p| p.into_inner());

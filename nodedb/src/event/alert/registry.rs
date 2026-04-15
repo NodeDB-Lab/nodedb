@@ -57,6 +57,27 @@ impl AlertRegistry {
             .collect()
     }
 
+    /// List all alerts (all tenants, enabled and disabled).
+    /// Used by the recovery verifier.
+    pub fn list_all(&self) -> Vec<AlertDef> {
+        self.read_map().values().cloned().collect()
+    }
+
+    /// Clear and reload from catalog. Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::types::SystemCatalog,
+    ) -> crate::Result<()> {
+        let fresh = catalog.load_all_alert_rules()?;
+        let mut map = self.write_map();
+        map.clear();
+        for alert in fresh {
+            let key = (alert.tenant_id, alert.name.clone());
+            map.insert(key, alert);
+        }
+        Ok(())
+    }
+
     /// List all alerts for a tenant.
     pub fn list_for_tenant(&self, tenant_id: u32) -> Vec<AlertDef> {
         self.read_map()

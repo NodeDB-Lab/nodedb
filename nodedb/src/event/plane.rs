@@ -18,6 +18,7 @@ use super::consumer::{ConsumerConfig, ConsumerHandle, spawn_consumer};
 use super::metrics::{AggregateMetrics, CoreMetrics};
 use super::trigger::dlq::TriggerDlq;
 use super::watermark::WatermarkStore;
+use crate::control::shutdown::ShutdownWatch;
 use crate::control::state::SharedState;
 use crate::wal::WalManager;
 
@@ -25,12 +26,13 @@ use crate::wal::WalManager;
 ///
 /// Created during server startup. Owns per-core consumer tasks,
 /// the watermark store, and provides aggregate metrics.
+///
+/// The Event Plane subscribes to the node-wide [`ShutdownWatch`] held on
+/// `SharedState` instead of creating its own private `watch::channel`.
+/// This ensures all subsystems drain through the unified shutdown bus.
 pub struct EventPlane {
     consumers: Vec<ConsumerHandle>,
     watermark_store: Arc<WatermarkStore>,
-    /// Kept alive so consumer watch receivers can detect shutdown.
-    /// Sends `true` on Drop to signal graceful shutdown before aborting.
-    shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl EventPlane {
@@ -39,6 +41,11 @@ impl EventPlane {
     /// On startup, each consumer loads its persisted watermark and replays
     /// WAL entries from that point forward. `consumers_rx` must have exactly
     /// one entry per core, in core-ID order.
+    ///
+    /// `shutdown` is the node-wide [`ShutdownWatch`] from `SharedState`.
+    /// All Event Plane subsystems subscribe to this watch instead of a
+    /// private channel, so the unified shutdown bus controls all drain
+    /// signalling.
     pub fn spawn(
         consumers_rx: Vec<EventConsumerRx>,
         wal: Arc<WalManager>,
@@ -46,9 +53,9 @@ impl EventPlane {
         shared_state: Arc<SharedState>,
         trigger_dlq: Arc<std::sync::Mutex<TriggerDlq>>,
         cdc_router: Arc<CdcRouter>,
+        shutdown: Arc<ShutdownWatch>,
     ) -> Self {
         let num_cores = consumers_rx.len();
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let slab_budget = Arc::new(super::slab_budget::SlabBudget::for_cores(num_cores));
         let mut slab_accounts: Vec<Arc<super::slab_budget::ConsumerSlabAccount>> = Vec::new();
@@ -61,7 +68,7 @@ impl EventPlane {
                 slab_accounts.push(Arc::clone(&account));
                 spawn_consumer(ConsumerConfig {
                     rx,
-                    shutdown: shutdown_rx.clone(),
+                    shutdown: shutdown.raw_receiver(),
                     wal: Arc::clone(&wal),
                     watermark_store: Arc::clone(&watermark_store),
                     shared_state: Arc::clone(&shared_state),
@@ -77,7 +84,7 @@ impl EventPlane {
         {
             let budget = Arc::clone(&slab_budget);
             let accounts = slab_accounts.clone();
-            let mut shutdown = shutdown_rx.clone();
+            let mut shutdown_rx = shutdown.raw_receiver();
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
@@ -86,8 +93,8 @@ impl EventPlane {
                                 accounts.iter().map(|a| a.as_ref()).collect();
                             budget.check_and_shed(&refs);
                         }
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() { return; }
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() { return; }
                         }
                     }
                 }
@@ -99,7 +106,7 @@ impl EventPlane {
             Arc::clone(&shared_state),
             Arc::clone(&shared_state.schedule_registry),
             Arc::clone(&shared_state.job_history),
-            shutdown_rx.clone(),
+            shutdown.raw_receiver(),
         );
 
         // Spawn the retention policy enforcement loop.
@@ -107,21 +114,21 @@ impl EventPlane {
             crate::engine::timeseries::retention_policy::enforcement::spawn_enforcement_loop(
                 Arc::clone(&shared_state),
                 Arc::clone(&shared_state.retention_policy_registry),
-                shutdown_rx.clone(),
+                shutdown.raw_receiver(),
             );
 
         // Spawn the alert evaluation loop.
         let _alert_handle = super::alert::executor::spawn_alert_eval_loop(
             Arc::clone(&shared_state),
             Arc::clone(&shared_state.alert_registry),
-            shutdown_rx.clone(),
+            shutdown.raw_receiver(),
         );
 
         // Spawn the CDC log compaction background task.
         let _compaction_handle = super::cdc::compaction::spawn_compaction_task(
             Arc::clone(&shared_state.stream_registry),
             Arc::clone(&cdc_router),
-            shutdown_rx.clone(),
+            shutdown.raw_receiver(),
         );
 
         // Restore streaming MV state from redb (from last shutdown).
@@ -134,7 +141,7 @@ impl EventPlane {
             Arc::clone(&shared_state.mv_persistence),
             Arc::clone(&shared_state.mv_registry),
             Arc::clone(&shared_state.watermark_tracker),
-            shutdown_rx.clone(),
+            shutdown.raw_receiver(),
         );
 
         // Spawn cross-shard dispatcher task (cluster mode only).
@@ -150,7 +157,7 @@ impl EventPlane {
                 Arc::clone(metrics),
                 Arc::clone(dlq),
                 Arc::clone(&shared_state.event_plane_budget),
-                shutdown_rx.clone(),
+                shutdown.raw_receiver(),
             );
             info!("cross-shard dispatcher task started");
         }
@@ -158,7 +165,7 @@ impl EventPlane {
         // Spawn CRDT sync delivery maintenance task.
         let _crdt_sync_handle = super::crdt_sync::delivery::spawn_delivery_task(
             Arc::clone(&shared_state.crdt_sync_delivery),
-            shutdown_rx.clone(),
+            shutdown.raw_receiver(),
         );
 
         // Set the origin peer ID for CRDT delta packaging.
@@ -167,7 +174,6 @@ impl EventPlane {
         let plane = Self {
             consumers,
             watermark_store,
-            shutdown_tx: Some(shutdown_tx),
         };
 
         info!(num_cores, "event plane started");
@@ -214,14 +220,27 @@ impl EventPlane {
     pub fn watermark_store(&self) -> &Arc<WatermarkStore> {
         &self.watermark_store
     }
+
+    /// Abort every consumer task and await its termination, consuming the
+    /// plane so all `Arc<WatermarkStore>` / `Arc<WalManager>` clones held
+    /// by the consumer futures are dropped by the time this returns.
+    ///
+    /// Use this instead of `drop(plane)` when the caller needs to reopen a
+    /// resource the consumers held (e.g. the watermark redb file) without
+    /// racing against Tokio's abort propagation.
+    pub async fn shutdown_and_join(mut self) {
+        let consumers = std::mem::take(&mut self.consumers);
+        for consumer in consumers {
+            consumer.abort_and_join().await;
+        }
+        debug!("event plane shutdown_and_join complete");
+    }
 }
 
 impl Drop for EventPlane {
     fn drop(&mut self) {
-        // Signal graceful shutdown first, then abort as fallback.
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(true);
-        }
+        // The unified ShutdownWatch (SharedState.shutdown) signals all
+        // consumers. Abort is a safety fallback for abnormal teardown.
         for consumer in &self.consumers {
             consumer.abort();
         }
@@ -257,6 +276,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (wal, watermark_store, shared_state, trigger_dlq, cdc_router) =
             crate::event::test_utils::event_test_deps(&dir);
+        let shutdown = Arc::new(crate::control::shutdown::ShutdownWatch::new());
 
         let plane = EventPlane::spawn(
             consumers,
@@ -265,6 +285,7 @@ mod tests {
             shared_state,
             trigger_dlq,
             cdc_router,
+            shutdown,
         );
         assert_eq!(plane.num_consumers(), 2);
 
@@ -288,6 +309,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (wal, watermark_store, shared_state, trigger_dlq, cdc_router) =
             crate::event::test_utils::event_test_deps(&dir);
+        let shutdown = Arc::new(crate::control::shutdown::ShutdownWatch::new());
 
         let plane = EventPlane::spawn(
             consumers,
@@ -296,6 +318,7 @@ mod tests {
             shared_state,
             trigger_dlq,
             cdc_router,
+            shutdown,
         );
         drop(plane); // Should not panic.
     }

@@ -51,6 +51,28 @@ impl ScheduleRegistry {
         map.values().filter(|s| s.enabled).cloned().collect()
     }
 
+    /// List all schedules (all tenants, enabled and disabled).
+    /// Used by the recovery verifier.
+    pub fn list_all(&self) -> Vec<ScheduleDef> {
+        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
+        map.values().cloned().collect()
+    }
+
+    /// Clear and reload from catalog. Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::types::SystemCatalog,
+    ) -> crate::Result<()> {
+        let fresh = catalog.load_all_schedules()?;
+        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
+        map.clear();
+        for sched in fresh {
+            let key = (sched.tenant_id, sched.name.clone());
+            map.insert(key, sched);
+        }
+        Ok(())
+    }
+
     /// List all schedules for a tenant.
     pub fn list_for_tenant(&self, tenant_id: u32) -> Vec<ScheduleDef> {
         let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());

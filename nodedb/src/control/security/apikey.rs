@@ -137,6 +137,19 @@ impl ApiKeyStore {
         Ok(())
     }
 
+    /// Clear the in-memory key map and re-run `load_from`.
+    /// Used by the catalog recovery sanity checker to repair
+    /// a divergent registry.
+    pub(crate) fn clear_and_reload(&self, catalog: &SystemCatalog) -> crate::Result<()> {
+        {
+            let mut keys = self.keys.write().map_err(|e| crate::Error::Internal {
+                detail: format!("api key lock poisoned during repair: {e}"),
+            })?;
+            keys.clear();
+        }
+        self.load_from(catalog)
+    }
+
     /// Persist a single key record to the catalog.
     fn persist_to(&self, catalog: &SystemCatalog, record: &ApiKeyRecord) -> crate::Result<()> {
         catalog.put_api_key(&record.to_stored())

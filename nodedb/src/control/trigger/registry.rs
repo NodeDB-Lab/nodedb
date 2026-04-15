@@ -152,6 +152,51 @@ impl TriggerRegistry {
         }
     }
 
+    /// Replace the entire in-memory trigger map with `rows`.
+    /// Used by the catalog recovery sanity checker to repair
+    /// a divergent registry by re-loading from redb. Callers
+    /// keep their existing `&TriggerRegistry` reference.
+    pub(crate) fn clear_and_install_all(&self, rows: Vec<StoredTrigger>) {
+        let mut map = match self.by_collection.write() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        map.clear();
+        for trigger in rows {
+            let key = (trigger.tenant_id, trigger.collection.clone());
+            map.entry(key).or_default().push(trigger);
+        }
+        for list in map.values_mut() {
+            list.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        }
+    }
+
+    /// Deterministic snapshot of every trigger across every
+    /// tenant, sorted by `(tenant_id, collection, name)` so the
+    /// recovery sanity checker can diff against
+    /// `catalog.load_all_triggers()` without caring about
+    /// HashMap iteration order.
+    pub fn snapshot_all(&self) -> Vec<StoredTrigger> {
+        let map = match self.by_collection.read() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        let mut result: Vec<StoredTrigger> = Vec::new();
+        for list in map.values() {
+            for t in list {
+                result.push(t.clone());
+            }
+        }
+        result.sort_by(|a, b| {
+            (a.tenant_id, a.collection.clone(), a.name.clone()).cmp(&(
+                b.tenant_id,
+                b.collection.clone(),
+                b.name.clone(),
+            ))
+        });
+        result
+    }
+
     /// List all triggers for a tenant (for SHOW TRIGGERS).
     pub fn list_for_tenant(&self, tenant_id: u32) -> Vec<StoredTrigger> {
         let map = match self.by_collection.read() {

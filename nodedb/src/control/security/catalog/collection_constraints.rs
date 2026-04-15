@@ -88,7 +88,7 @@ pub struct LegalHold {
 }
 
 /// State transition constraint: column value can only change along declared paths.
-#[derive(Serialize, Deserialize, ToMessagePack, FromMessagePack, Debug, Clone)]
+#[derive(Serialize, Deserialize, ToMessagePack, FromMessagePack, Debug, Clone, PartialEq)]
 pub struct StateTransitionDef {
     pub name: String,
     pub column: String,
@@ -96,7 +96,7 @@ pub struct StateTransitionDef {
 }
 
 /// A single allowed state transition, optionally guarded by a role.
-#[derive(Serialize, Deserialize, ToMessagePack, FromMessagePack, Debug, Clone)]
+#[derive(Serialize, Deserialize, ToMessagePack, FromMessagePack, Debug, Clone, PartialEq)]
 pub struct TransitionRule {
     pub from: String,
     pub to: String,
@@ -104,7 +104,7 @@ pub struct TransitionRule {
 }
 
 /// Transition check predicate: evaluated on UPDATE with OLD and NEW access.
-#[derive(Serialize, Deserialize, ToMessagePack, FromMessagePack, Debug, Clone)]
+#[derive(Serialize, Deserialize, ToMessagePack, FromMessagePack, Debug, Clone, PartialEq)]
 pub struct TransitionCheckDef {
     pub name: String,
     pub predicate: SqlExpr,

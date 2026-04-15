@@ -281,6 +281,30 @@ impl BlacklistStore {
             .collect()
     }
 
+    /// All in-memory entries (including potentially expired ones that
+    /// haven't been lazily evicted yet). Used by the recovery verifier
+    /// for exact redb↔memory comparison.
+    pub fn list_all_entries(&self) -> Vec<BlacklistEntry> {
+        let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
+        entries.values().cloned().collect()
+    }
+
+    /// Clear all in-memory entries and reload from catalog.
+    /// Used by the recovery verifier repair path.
+    pub fn clear_and_reload(&self, catalog: &SystemCatalog) -> crate::Result<()> {
+        // Reload by clearing first then re-applying — load_from only appends.
+        let stored = catalog.load_all_blacklist_entries()?;
+        let mut entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        entries.clear();
+        for s in stored {
+            let entry = BlacklistEntry::from_stored(&s);
+            if !entry.is_expired() {
+                entries.insert(entry.key.clone(), entry);
+            }
+        }
+        Ok(())
+    }
+
     /// Total active entries.
     pub fn count(&self) -> usize {
         let entries = self.entries.read().unwrap_or_else(|p| p.into_inner());

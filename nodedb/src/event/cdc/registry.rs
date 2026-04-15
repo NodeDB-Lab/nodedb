@@ -58,6 +58,27 @@ impl StreamRegistry {
             .collect()
     }
 
+    /// List all streams (all tenants). Used by the recovery verifier.
+    pub fn list_all(&self) -> Vec<ChangeStreamDef> {
+        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
+        map.values().cloned().collect()
+    }
+
+    /// Clear and reload from catalog. Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::types::SystemCatalog,
+    ) -> crate::Result<()> {
+        let fresh = catalog.load_all_change_streams()?;
+        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
+        map.clear();
+        for stream in fresh {
+            let key = (stream.tenant_id, stream.name.clone());
+            map.insert(key, stream);
+        }
+        Ok(())
+    }
+
     /// List all streams for a tenant.
     pub fn list_for_tenant(&self, tenant_id: u32) -> Vec<ChangeStreamDef> {
         let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());

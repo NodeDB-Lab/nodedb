@@ -157,6 +157,83 @@ impl PermissionStore {
             .collect()
     }
 
+    /// Replace the entire in-memory grants + owners state
+    /// with the contents of `other`. Used by the catalog
+    /// recovery sanity checker to repair a divergent registry
+    /// by loading a fresh `PermissionStore` from redb and then
+    /// swapping its contents into `self`. Callers keep their
+    /// existing `Arc<PermissionStore>` reference stable.
+    pub(crate) fn clear_and_install_from(&self, other: &Self) {
+        let fresh_grants = other.snapshot_grants();
+        let fresh_owners = other.snapshot_owners();
+        let mut grants = match self.grants.write() {
+            Ok(g) => g,
+            Err(p) => {
+                tracing::error!("permission grants lock poisoned during repair — recovering");
+                p.into_inner()
+            }
+        };
+        grants.clear();
+        for g in fresh_grants {
+            grants.insert(g);
+        }
+        drop(grants);
+        let mut owners = match self.owners.write() {
+            Ok(o) => o,
+            Err(p) => {
+                tracing::error!("owner store lock poisoned during repair — recovering");
+                p.into_inner()
+            }
+        };
+        owners.clear();
+        for (k, v) in fresh_owners {
+            owners.insert(k, v);
+        }
+    }
+
+    /// Deterministic snapshot of every grant held in memory,
+    /// sorted by `(target, grantee, permission)` so diff-based
+    /// callers (the recovery sanity checker) can compare
+    /// against a catalog load without caring about HashSet
+    /// iteration order.
+    pub fn snapshot_grants(&self) -> Vec<Grant> {
+        let grants = match self.grants.read() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut out: Vec<Grant> = grants.iter().cloned().collect();
+        out.sort_by(|a, b| {
+            let a_key = (
+                a.target.clone(),
+                a.grantee.clone(),
+                format_permission(a.permission),
+            );
+            let b_key = (
+                b.target.clone(),
+                b.grantee.clone(),
+                format_permission(b.permission),
+            );
+            a_key.cmp(&b_key)
+        });
+        out
+    }
+
+    /// Deterministic snapshot of every owner held in memory as
+    /// `(owner_key, username)` pairs, sorted by key.
+    /// `owner_key` is the internal `"collection:{tenant}:{name}"`
+    /// composite — used by the sanity checker to cross-check
+    /// against `catalog.load_all_owners()`.
+    pub fn snapshot_owners(&self) -> Vec<(String, String)> {
+        let owners = match self.owners.read() {
+            Ok(o) => o,
+            Err(p) => p.into_inner(),
+        };
+        let mut out: Vec<(String, String)> =
+            owners.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// List all grants on a target.
     pub fn grants_on(&self, target: &str) -> Vec<Grant> {
         let grants = match self.grants.read() {

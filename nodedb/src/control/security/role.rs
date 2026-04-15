@@ -64,6 +64,20 @@ impl RoleStore {
         Ok(())
     }
 
+    /// Clear the in-memory role map and re-run `load_from`.
+    /// Used by the catalog recovery sanity checker to repair
+    /// a divergent registry. Callers keep their existing
+    /// `&RoleStore` reference.
+    pub(crate) fn clear_and_reload(&self, catalog: &SystemCatalog) -> crate::Result<()> {
+        {
+            let mut roles = self.roles.write().map_err(|e| crate::Error::Internal {
+                detail: format!("role store lock poisoned during repair: {e}"),
+            })?;
+            roles.clear();
+        }
+        self.load_from(catalog)
+    }
+
     // ── Cluster replication hooks ──────────────────────────────
     //
     // Symmetric partners to `CredentialStore::install_replicated_user`:

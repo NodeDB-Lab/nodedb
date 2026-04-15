@@ -43,6 +43,31 @@ impl GroupRegistry {
         map.get(&key).cloned()
     }
 
+    /// List all groups (all tenants, all streams). Used by the recovery verifier.
+    pub fn list_all(&self) -> Vec<ConsumerGroupDef> {
+        let map = self.groups.read().unwrap_or_else(|p| p.into_inner());
+        map.values().cloned().collect()
+    }
+
+    /// Clear and reload from catalog. Used by the recovery verifier repair path.
+    pub fn clear_and_reload(
+        &self,
+        catalog: &crate::control::security::catalog::types::SystemCatalog,
+    ) -> crate::Result<()> {
+        let fresh = catalog.load_all_consumer_groups()?;
+        let mut map = self.groups.write().unwrap_or_else(|p| p.into_inner());
+        map.clear();
+        for group in fresh {
+            let key = (
+                group.tenant_id,
+                group.stream_name.clone(),
+                group.name.clone(),
+            );
+            map.insert(key, group);
+        }
+        Ok(())
+    }
+
     /// List all groups for a given stream.
     pub fn list_for_stream(&self, tenant_id: u32, stream: &str) -> Vec<ConsumerGroupDef> {
         let map = self.groups.read().unwrap_or_else(|p| p.into_inner());

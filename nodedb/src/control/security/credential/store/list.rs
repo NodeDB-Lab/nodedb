@@ -15,6 +15,37 @@ impl CredentialStore {
         users.values().filter(|u| u.is_active).cloned().collect()
     }
 
+    /// List ALL user records (active and inactive). Used by the
+    /// recovery verifier for a complete redb↔memory comparison.
+    pub fn list_all_user_details(&self) -> Vec<UserRecord> {
+        let users = match read_lock(&self.users) {
+            Ok(u) => u,
+            Err(_) => return Vec::new(),
+        };
+        users.values().cloned().collect()
+    }
+
+    /// Reload all users from the given catalog into the in-memory cache.
+    /// Used by the recovery verifier repair path.
+    pub fn reload_from_catalog(&self, catalog: &SystemCatalog) -> crate::Result<()> {
+        use super::super::record::UserRecord;
+        let stored_users = catalog.load_all_users()?;
+        let mut users = match self.users.write() {
+            Ok(u) => u,
+            Err(_) => {
+                return Err(crate::Error::Internal {
+                    detail: "credential store write lock poisoned in reload_from_catalog".into(),
+                });
+            }
+        };
+        users.clear();
+        for stored in stored_users {
+            let record = UserRecord::from_stored(stored);
+            users.insert(record.username.clone(), record);
+        }
+        Ok(())
+    }
+
     /// List all active usernames.
     pub fn list_users(&self) -> Vec<String> {
         let users = match read_lock(&self.users) {
