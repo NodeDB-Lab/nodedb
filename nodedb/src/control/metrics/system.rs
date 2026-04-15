@@ -3,6 +3,8 @@
 //! All fields are atomic — safe for concurrent reads/writes from
 //! Control Plane, Data Plane handlers, and the HTTP metrics endpoint.
 
+use std::collections::HashMap;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::histogram::AtomicHistogram;
@@ -117,6 +119,16 @@ pub struct SystemMetrics {
 
     // ── Checkpoints ──
     pub checkpoints: AtomicU64,
+
+    // ── Catalog sanity check ──
+    /// Labeled counter: (registry, outcome) → total.
+    /// `outcome` is one of "ok", "warning", "error".
+    pub catalog_sanity_check_totals: RwLock<HashMap<(String, String), u64>>,
+
+    // ── Shutdown ──
+    /// Gauge: phase name → last observed drain duration in milliseconds.
+    /// Updated once per phase transition during graceful shutdown.
+    pub shutdown_phase_durations_ms: RwLock<HashMap<String, u64>>,
 }
 
 impl SystemMetrics {
@@ -421,11 +433,85 @@ impl SystemMetrics {
         self.mmap_rss_bytes.store(bytes, Ordering::Relaxed);
     }
 
+    // ── Catalog sanity check ──
+
+    /// Record the outcome of one registry's catalog sanity check.
+    ///
+    /// `outcome` must be `"ok"`, `"warning"`, or `"error"`.
+    pub fn record_catalog_sanity_check(&self, registry: &str, outcome: &str) {
+        let mut m = self
+            .catalog_sanity_check_totals
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        *m.entry((registry.to_string(), outcome.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    /// Record the duration of a single shutdown phase.
+    ///
+    /// Called by `ShutdownBus::initiate()` after each phase drains.
+    /// The value is overwritten on each shutdown so `/metrics` always
+    /// shows the most recent run.
+    pub fn record_shutdown_phase_duration(&self, phase: &str, duration_ms: u64) {
+        let mut m = self
+            .shutdown_phase_durations_ms
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        m.insert(phase.to_string(), duration_ms);
+    }
+
     /// Serialize all metrics as Prometheus text format 0.0.4.
     pub fn to_prometheus(&self) -> String {
         let mut out = String::with_capacity(8192);
         self.prometheus_core(&mut out);
         self.prometheus_engines(&mut out);
+        self.prometheus_catalog_sanity(&mut out);
+        self.prometheus_shutdown_phases(&mut out);
         out
+    }
+
+    /// Emit `shutdown_last_duration_ms{phase}` gauges.
+    fn prometheus_shutdown_phases(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        let m = self
+            .shutdown_phase_durations_ms
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        if m.is_empty() {
+            return;
+        }
+        let _ = out.write_str(
+            "# HELP shutdown_last_duration_ms Duration of each shutdown phase in the last graceful shutdown\n\
+             # TYPE shutdown_last_duration_ms gauge\n",
+        );
+        let mut pairs: Vec<_> = m.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (phase, ms) in pairs {
+            let _ = writeln!(out, r#"shutdown_last_duration_ms{{phase="{phase}"}} {ms}"#);
+        }
+    }
+
+    /// Emit `catalog_sanity_check_total{registry,outcome}` labeled counters.
+    fn prometheus_catalog_sanity(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        let m = self
+            .catalog_sanity_check_totals
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        if m.is_empty() {
+            return;
+        }
+        let _ = out.write_str(
+            "# HELP catalog_sanity_check_total Catalog sanity check outcomes per registry\n\
+             # TYPE catalog_sanity_check_total counter\n",
+        );
+        let mut pairs: Vec<_> = m.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for ((registry, outcome), count) in pairs {
+            let _ = writeln!(
+                out,
+                r#"catalog_sanity_check_total{{registry="{registry}",outcome="{outcome}"}} {count}"#
+            );
+        }
     }
 }

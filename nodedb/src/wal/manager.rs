@@ -359,6 +359,46 @@ impl WalManager {
         Lsn::new(wal.next_lsn())
     }
 
+    /// Validate each WAL segment for startup integrity.
+    ///
+    /// Returns `Err` if any non-empty segment contains no valid WAL records —
+    /// a reliable signal that the segment was corrupted (wrong magic, truncated
+    /// header, etc.) rather than simply rolled over empty.
+    ///
+    /// This check is intentionally strict: a segment file with content that
+    /// does not parse as WAL records is treated as fatal corruption, not as an
+    /// empty WAL. The WAL replay path is lenient (stops at the first invalid
+    /// record) — this method is the complementary hard check run at startup.
+    pub fn validate_for_startup(&self) -> crate::Result<()> {
+        let segments =
+            nodedb_wal::segment::discover_segments(&self.wal_dir).map_err(crate::Error::Wal)?;
+
+        for seg in &segments {
+            let file_len = std::fs::metadata(&seg.path).map(|m| m.len()).unwrap_or(0);
+
+            if file_len == 0 {
+                // Fresh / empty segment — not an error.
+                continue;
+            }
+
+            // Use recovery scan: counts valid records at the committed prefix.
+            let info = nodedb_wal::recovery::recover(&seg.path).map_err(crate::Error::Wal)?;
+
+            if info.end_offset == 0 {
+                // Non-empty file with no valid WAL records → corruption.
+                return Err(crate::Error::SegmentCorrupted {
+                    detail: format!(
+                        "WAL segment '{}' is non-empty ({file_len} bytes) but contains no valid \
+                         WAL records — the segment appears to be corrupted",
+                        seg.path.display()
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Replay all committed records from the WAL.
     ///
     /// Returns records in LSN order across all segments. Used during crash recovery.

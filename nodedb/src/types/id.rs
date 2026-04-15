@@ -8,7 +8,18 @@ pub use nodedb_types::id::{DocumentId, TenantId};
 // ── Origin-only types (not needed on Lite) ──
 
 /// Identifies a virtual shard (0..1023). Data is hashed to vShards by shard key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct VShardId(u16);
 
 impl VShardId {
@@ -54,7 +65,18 @@ impl fmt::Display for VShardId {
 }
 
 /// Globally unique request identifier. Monotonic per connection, unique for >= 24h.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct RequestId(u64);
 
 impl RequestId {

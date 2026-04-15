@@ -312,7 +312,7 @@ pub(super) fn convert_vector_search(
         vshard_id: vshard,
         plan: PhysicalPlan::Vector(VectorOp::Search {
             collection: collection.into(),
-            query_vector: query_vector.to_vec().into(),
+            query_vector: query_vector.to_vec(),
             top_k: *top_k,
             ef_search: *ef_search,
             filter_bitmap: None,
@@ -362,7 +362,7 @@ pub(super) fn convert_hybrid_search(p: HybridSearchParams<'_>) -> crate::Result<
         vshard_id: vshard,
         plan: PhysicalPlan::Text(TextOp::HybridSearch {
             collection: collection.into(),
-            query_vector: query_vector.to_vec().into(),
+            query_vector: query_vector.to_vec(),
             query_text: query_text.to_string(),
             top_k: *top_k,
             ef_search: *ef_search,

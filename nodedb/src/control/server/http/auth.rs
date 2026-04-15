@@ -150,6 +150,8 @@ pub enum ApiError {
         message: String,
         retry_after_secs: u64,
     },
+    /// Arbitrary HTTP status from gateway error mapping.
+    HttpStatus(u16, String),
 }
 
 impl IntoResponse for ApiError {
@@ -173,6 +175,10 @@ impl IntoResponse for ApiError {
                     ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
                     ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
                     ApiError::RateLimited { .. } => unreachable!(),
+                    ApiError::HttpStatus(code, msg) => (
+                        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                        msg,
+                    ),
                 };
                 let body = serde_json::json!({ "error": message });
                 (status, axum::Json(body)).into_response()

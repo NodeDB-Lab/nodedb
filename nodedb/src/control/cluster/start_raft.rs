@@ -57,19 +57,18 @@ pub fn start_raft(
     let metadata_applier: Arc<dyn nodedb_cluster::MetadataApplier> =
         metadata_applier_concrete.clone();
 
-    // LocalForwarder stays as the current forwarded-query executor
-    // (LEGACY path, scheduled for future deletion).
-    let forwarder = Arc::new(crate::control::LocalForwarder::new(shared.clone()));
+    // LocalPlanExecutor is the C-β physical-plan execution path (C-δ.6: sole execution path).
+    let plan_executor = Arc::new(crate::control::LocalPlanExecutor::new(shared.clone()));
 
     let tick_interval = Duration::from_millis(transport_tuning.raft_tick_interval_ms);
     let raft_loop = Arc::new(
-        nodedb_cluster::RaftLoop::with_forwarder(
+        nodedb_cluster::RaftLoop::new(
             multi_raft,
             handle.transport.clone(),
             handle.topology.clone(),
             data_applier,
-            forwarder,
         )
+        .with_plan_executor(plan_executor)
         .with_metadata_applier(metadata_applier)
         .with_tick_interval(tick_interval),
     );

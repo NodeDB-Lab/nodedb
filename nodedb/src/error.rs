@@ -339,6 +339,79 @@ impl From<Error> for NodeDbError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TypedClusterError ↔ Error conversions
+// ---------------------------------------------------------------------------
+
+/// Convert a wire-level typed cluster error into the internal `Error` type.
+///
+/// Used by the C-β gateway layer (C-γ) to translate remote executor errors
+/// into actionable local errors. The `NotLeader` variant preserves the
+/// machine-readable group/term fields so the gateway retry loop can update
+/// its routing table.
+impl From<nodedb_cluster::rpc_codec::TypedClusterError> for Error {
+    fn from(e: nodedb_cluster::rpc_codec::TypedClusterError) -> Self {
+        use nodedb_cluster::rpc_codec::TypedClusterError;
+        match e {
+            TypedClusterError::NotLeader {
+                group_id,
+                leader_node_id,
+                leader_addr,
+                ..
+            } => Error::NotLeader {
+                // Clamp group_id to valid vShard range — group IDs may exceed 1024
+                // for cluster-managed Raft groups; best-effort for display purposes.
+                vshard_id: crate::types::VShardId::new(
+                    (group_id as u16).min(crate::types::VShardId::COUNT - 1),
+                ),
+                leader_node: leader_node_id.unwrap_or(0),
+                leader_addr: leader_addr.unwrap_or_default(),
+            },
+            TypedClusterError::DescriptorMismatch { collection, .. } => {
+                Error::RetryableSchemaChanged {
+                    descriptor: collection,
+                }
+            }
+            TypedClusterError::DeadlineExceeded { .. } => Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
+            },
+            TypedClusterError::Internal { message, .. } => Error::Internal { detail: message },
+        }
+    }
+}
+
+/// Build a `TypedClusterError::NotLeader` from an `Error::NotLeader`.
+impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
+    fn from(e: Error) -> Self {
+        use nodedb_cluster::rpc_codec::TypedClusterError;
+        match e {
+            Error::NotLeader {
+                vshard_id,
+                leader_node,
+                leader_addr,
+            } => TypedClusterError::NotLeader {
+                group_id: vshard_id.as_u16() as u64,
+                leader_node_id: if leader_node == 0 {
+                    None
+                } else {
+                    Some(leader_node)
+                },
+                leader_addr: if leader_addr.is_empty() {
+                    None
+                } else {
+                    Some(leader_addr)
+                },
+                term: 0,
+            },
+            Error::DeadlineExceeded { .. } => TypedClusterError::DeadlineExceeded { elapsed_ms: 0 },
+            other => TypedClusterError::Internal {
+                code: 0,
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

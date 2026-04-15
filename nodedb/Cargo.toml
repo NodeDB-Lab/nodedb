@@ -144,6 +144,7 @@ tempfile = "3"
 tokio-postgres = { workspace = true }
 proptest = "1"
 nodedb-types = { workspace = true }
+reqwest = { workspace = true }
 
 [features]
 default = []

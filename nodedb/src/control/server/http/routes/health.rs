@@ -7,6 +7,18 @@ use serde_json::json;
 
 use super::super::auth::AppState;
 
+/// GET /healthz — k8s-style readiness/liveness probe.
+///
+/// Returns `200 OK` when the node has reached `GatewayEnable` and is
+/// serving traffic. Returns `503 Service Unavailable` during startup or if
+/// startup has failed. This endpoint bypasses the startup gate middleware
+/// and is always reachable, making it suitable as a k8s readiness probe.
+pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
+    let health = crate::control::startup::health::observe(&state.shared.startup);
+    let (status, body) = crate::control::startup::health::to_http_response(&health);
+    (status, axum::Json(body))
+}
+
 /// GET /health — liveness check.
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Derive both the node count and version view from the live

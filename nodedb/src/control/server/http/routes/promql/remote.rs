@@ -10,12 +10,13 @@ use axum::response::{IntoResponse, Response};
 use prost::Message;
 
 use crate::bridge::physical_plan::{PhysicalPlan, TimeseriesOp};
+use crate::control::gateway::GatewayErrorMap;
+use crate::control::gateway::core::QueryContext;
 use crate::control::promql::remote_proto::{
     self, Label, MatchType, QueryResult, ReadRequest, ReadResponse, Sample, TimeSeries,
     WriteRequest,
 };
 use crate::control::promql::{self, types::DEFAULT_LOOKBACK_MS};
-use crate::control::server::dispatch_utils::dispatch_to_data_plane;
 use crate::control::server::http::auth::AppState;
 use crate::types::{TenantId, VShardId};
 
@@ -69,15 +70,42 @@ pub async fn remote_write(
 
         let vshard = VShardId::from_collection(&collection);
         let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection,
+            collection: collection.clone(),
             payload: ilp_payload.into_bytes(),
             format: "ilp".into(),
             wal_lsn: None,
         });
-        match dispatch_to_data_plane(&state.shared, TenantId::new(1), vshard, plan, 0).await {
+
+        // Route through gateway when available (cluster-aware dispatch);
+        // fall back to direct local SPSC dispatch on single-node boot.
+        let dispatch_result = match state.shared.gateway.as_ref() {
+            Some(gw) => {
+                let gw_ctx = QueryContext {
+                    tenant_id: TenantId::new(1),
+                    trace_id: 0,
+                };
+                gw.execute(&gw_ctx, plan).await
+            }
+            None => crate::control::server::dispatch_utils::dispatch_to_data_plane(
+                &state.shared,
+                TenantId::new(1),
+                vshard,
+                plan,
+                0,
+            )
+            .await
+            .map(|_| vec![]),
+        };
+
+        match dispatch_result {
             Ok(_) => total_accepted += ts.samples.len() as u64,
             Err(e) => {
-                tracing::warn!(error = %e, collection = %ts.metric_name(), "remote write dispatch failed");
+                let (_status, msg) = GatewayErrorMap::to_http(&e);
+                tracing::warn!(
+                    error = %msg,
+                    collection = %collection,
+                    "remote write dispatch failed"
+                );
                 total_rejected += ts.samples.len() as u64;
             }
         }

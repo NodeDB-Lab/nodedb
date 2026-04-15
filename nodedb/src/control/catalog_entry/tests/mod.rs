@@ -2,6 +2,7 @@
 //! file never grows unboundedly as new variants land.
 
 mod collection;
+mod invalidation;
 mod kind_labels;
 mod sequence;
 

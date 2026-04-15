@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 use nodedb::ServerConfig;
 use nodedb::bridge::dispatch::Dispatcher;
 use nodedb::config::server::apply_env_overrides;
+use nodedb::control::startup::{StartupPhase, StartupSequencer};
 use nodedb::control::state::SharedState;
 use nodedb::data::runtime::spawn_core;
 use nodedb::wal::WalManager;
@@ -71,10 +72,14 @@ async fn main() -> anyhow::Result<()> {
     if config.log_format == "json" {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_writer(std::io::stderr)
             .json()
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
     }
 
     // Re-apply env overrides now that tracing is initialised so that
@@ -105,6 +110,33 @@ async fn main() -> anyhow::Result<()> {
     // Validate engine config.
     config.engines.validate()?;
 
+    // Construct the gate-based startup sequencer. Gates for each phase are
+    // registered before the subsystem that owns that phase begins its work,
+    // and fired immediately after it reports ready. The `startup_gate` is
+    // installed on `SharedState` after `open()` returns so every code path
+    // that calls `await_phase` can observe phase transitions in real time.
+    let (startup_seq, startup_gate) = StartupSequencer::new();
+
+    // Register all gates up-front so the sequencer knows every phase has
+    // an owner. Phases that have no concurrent sub-tasks get a single gate
+    // that is fired inline.
+    let wal_gate = startup_seq.register_gate(StartupPhase::WalRecovery, "wal");
+    let catalog_gate =
+        startup_seq.register_gate(StartupPhase::ClusterCatalogOpen, "cluster-catalog");
+    let raft_gate =
+        startup_seq.register_gate(StartupPhase::RaftMetadataReplay, "raft-metadata-replay");
+    let schema_gate =
+        startup_seq.register_gate(StartupPhase::SchemaCacheWarmup, "schema-cache-warmup");
+    let sanity_gate =
+        startup_seq.register_gate(StartupPhase::CatalogSanityCheck, "catalog-sanity-check");
+    let data_groups_gate =
+        startup_seq.register_gate(StartupPhase::DataGroupsReplay, "data-groups-replay");
+    let transport_gate = startup_seq.register_gate(StartupPhase::TransportBind, "transport-bind");
+    let warm_peers_gate = startup_seq.register_gate(StartupPhase::WarmPeers, "warm-peers");
+    let health_loop_gate = startup_seq.register_gate(StartupPhase::HealthLoopStart, "health-loop");
+    let gateway_enable_gate =
+        startup_seq.register_gate(StartupPhase::GatewayEnable, "gateway-enable");
+
     // Initialize memory governor (per-engine budgets + global ceiling).
     let byte_budgets = config.engines.to_byte_budgets(config.memory_limit);
     let governor = nodedb::memory::init_governor(config.memory_limit, &byte_budgets)?;
@@ -128,6 +160,19 @@ async fn main() -> anyhow::Result<()> {
     };
     info!(next_lsn = %wal.next_lsn(), "WAL ready");
 
+    // Strict integrity check: any non-empty segment that contains no valid
+    // WAL records is treated as fatal corruption. This fires before wal_gate
+    // so the sequencer never reaches GatewayEnable on a corrupted WAL.
+    if let Err(e) = wal.validate_for_startup() {
+        tracing::error!(
+            error = %e,
+            "StartupError: WAL validation failed — cannot start with corrupted WAL segments"
+        );
+        std::process::exit(1);
+    }
+
+    wal_gate.fire();
+
     // Replay WAL records for crash recovery (shared across all cores).
     let wal_records: Arc<[nodedb_wal::WalRecord]> = match wal.replay() {
         Ok(records) => {
@@ -137,8 +182,11 @@ async fn main() -> anyhow::Result<()> {
             Arc::from(records.into_boxed_slice())
         }
         Err(e) => {
-            tracing::warn!(error = %e, "WAL replay failed, starting with empty state");
-            Arc::from(Vec::new().into_boxed_slice())
+            tracing::error!(
+                error = %e,
+                "StartupError: WAL replay failed — cannot start with a corrupt or unreadable WAL"
+            );
+            std::process::exit(1);
         }
     };
 
@@ -220,16 +268,15 @@ async fn main() -> anyhow::Result<()> {
         config.tuning.clone(),
     )?;
 
-    // WAL has already been opened and replayed above; record the
-    // phase transition now that the sequencer exists on
-    // `SharedState`. The sequencer rejects regressions / skips, so
-    // any missing advance below will surface at startup rather
-    // than silently leave the node in a half-advanced state.
-    use nodedb::control::startup::StartupPhase;
-    shared.startup.advance_to(StartupPhase::WalRecovery)?;
-    shared
-        .startup
-        .advance_to(StartupPhase::ClusterCatalogOpen)?;
+    // Install the real startup gate on SharedState so listeners and health
+    // checks read live phase transitions. The placeholder gate created
+    // inside `SharedState::open` is discarded here.
+    if let Some(state) = Arc::get_mut(&mut shared) {
+        state.startup = Arc::clone(&startup_gate);
+    }
+
+    // System catalog (redb) is open — fire the ClusterCatalogOpen gate.
+    catalog_gate.fire();
 
     // Wire cluster handles into SharedState so that every code path
     // which checks `state.cluster_topology` / `state.cluster_transport`
@@ -293,6 +340,24 @@ async fn main() -> anyhow::Result<()> {
         state.governor = Some(Arc::clone(&governor));
     }
 
+    // Construct the gateway and install it (plus its DDL invalidator) on
+    // SharedState. Must happen after cluster topology is wired and before
+    // listeners bind. Arc::get_mut is valid here because no listener has
+    // cloned `shared` yet.
+    {
+        // Clone before the mutable borrow so the Gateway can hold its own Arc.
+        let shared_for_gateway = Arc::clone(&shared);
+        if let Some(state) = Arc::get_mut(&mut shared) {
+            let gateway =
+                std::sync::Arc::new(nodedb::control::gateway::Gateway::new(shared_for_gateway));
+            let invalidator = std::sync::Arc::new(
+                nodedb::control::gateway::PlanCacheInvalidator::new(&gateway.plan_cache),
+            );
+            state.gateway = Some(Arc::clone(&gateway));
+            state.gateway_invalidator = Some(invalidator);
+        }
+    }
+
     // Bootstrap credentials.
     let auth_mode = config.auth.mode.clone();
     match config.auth.resolve_superuser_password() {
@@ -325,6 +390,33 @@ async fn main() -> anyhow::Result<()> {
     // keep their `watch::Receiver<bool>` parameter unchanged.
     // New code SHOULD use `shared.shutdown.subscribe()`.
     let shutdown_rx = shared.shutdown.raw_receiver();
+
+    // Unified shutdown bus: phased drain with per-phase 500 ms budgets.
+    // `ShutdownBus::initiate()` signals the flat `ShutdownWatch` so all
+    // existing `watch::Receiver<bool>` subscribers wake up as well.
+    let (shutdown_bus, _shutdown_bus_handle) =
+        nodedb::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown));
+    // Wire system metrics so the bus records `shutdown_last_duration_ms{phase}`
+    // for each phase transition during graceful shutdown.
+    shutdown_bus.set_metrics(Arc::clone(&system_metrics));
+
+    // Test-only injection: if NODEDB_TEST_SLOW_DRAIN_TASK=1, register a drain
+    // task that sleeps for 2s without calling report_drained, to verify the
+    // offender-abort path in integration tests. This code path is guarded
+    // by an env var so it is never activated in production.
+    if std::env::var("NODEDB_TEST_SLOW_DRAIN_TASK").as_deref() == Ok("1") {
+        let mut guard = shutdown_bus.register_task(
+            nodedb::control::shutdown::ShutdownPhase::DrainingListeners,
+            "test_slow_task",
+            None,
+        );
+        tokio::spawn(async move {
+            guard.await_signal().await;
+            // Intentionally do NOT call report_drained — tests the offender path.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            drop(guard); // This will log the "dropped without report_drained" warning.
+        });
+    }
 
     // Start cluster Raft loop if in cluster mode. The returned
     // receiver flips to `true` after the metadata raft group has
@@ -423,6 +515,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&shared),
         trigger_dlq,
         Arc::clone(&shared.cdc_router),
+        Arc::clone(&shared.shutdown),
     );
     info!(num_cores, "event plane running");
 
@@ -553,12 +646,40 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("  Press Ctrl+C to stop.");
     eprintln!();
 
-    // Handle Ctrl+C with two-stage shutdown.
+    // Handle Ctrl+C and SIGTERM with phased shutdown via ShutdownBus.
+    //
+    // The first SIGTERM or Ctrl+C initiates the shutdown bus, which:
+    //   1. Signals the flat ShutdownWatch (all watch::Receiver<bool> loops wake)
+    //   2. Advances through shutdown phases with 500ms per-phase budgets
+    //   3. Awaits loop_registry for any loops that don't participate in phased drain
+    //
+    // Second Ctrl+C or SIGTERM (only after the first has been fully received and
+    // initiate() called) force-exits immediately. We use a oneshot to ensure the
+    // force-stop handler only arms itself after the graceful handler has received
+    // the first signal — this eliminates the race where both handlers receive the
+    // same SIGTERM delivery, the force-stop handler fires first, and exits with
+    // code 1 before the graceful path runs.
+    let (force_stop_tx, force_stop_rx) = tokio::sync::oneshot::channel::<()>();
     let max_conns = config.max_connections;
     let sem_clone = Arc::clone(&conn_semaphore);
     let shared_signal = Arc::clone(&shared);
+    let bus_for_signal = shutdown_bus.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        // Wait for first Ctrl+C or SIGTERM — whichever arrives first.
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
 
         let active = max_conns - sem_clone.available_permits();
         if active > 0 {
@@ -587,10 +708,23 @@ async fn main() -> anyhow::Result<()> {
         )
         .await;
 
-        // Flip the canonical watch, then await every registered
-        // background loop with the configured deadline. Async
-        // laggards are aborted; blocking laggards are logged.
-        shared_signal.shutdown.signal();
+        // Initiate phased shutdown. This also signals the flat ShutdownWatch
+        // so all existing watch::Receiver<bool> subscribers wake up. The
+        // returned JoinHandle resolves when the sequencer has walked every
+        // phase (including offender-abort-at-budget logging) — we MUST
+        // await it before `process::exit(0)` or the sequencer gets killed
+        // mid-phase and offender aborts never fire.
+        let sequencer_handle = bus_for_signal.initiate();
+
+        // Arm the force-stop handler now that we have received the first
+        // signal and called initiate(). Any *subsequent* signal will be
+        // a genuine user request for an immediate stop.
+        let _ = force_stop_tx.send(());
+
+        // Also await the flat loop_registry for any loops registered via
+        // spawn_loop that are not in the phased bus. Both paths converge:
+        // the bus signals the flat watch, which the loop_registry loops
+        // observe. shutdown_all awaits their join handles.
         let report = shared_signal
             .loop_registry
             .shutdown_all(shared_signal.tuning.shutdown.deadline())
@@ -610,8 +744,50 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
-        // Second Ctrl+C: force exit immediately.
-        tokio::signal::ctrl_c().await.ok();
+        // Await the phased-bus sequencer so offender-abort-at-budget logs
+        // get written before the process dies. Bounded to 2s as a safety
+        // net — the per-phase 500ms budget × 7 phases should never exceed
+        // ~3.5s, but we cap at 2s because a wedged bus shouldn't block
+        // shutdown indefinitely. If it hits the cap, log and exit anyway.
+        match tokio::time::timeout(std::time::Duration::from_secs(2), sequencer_handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(join_err)) => {
+                tracing::error!(error = %join_err, "shutdown sequencer task panicked");
+            }
+            Err(_) => {
+                tracing::error!("shutdown sequencer exceeded 2s cap — forcing exit");
+            }
+        }
+
+        std::process::exit(0);
+    });
+
+    // Force-exit on a SECOND Ctrl+C or SIGTERM (only after the first has been
+    // received and initiate() called). The oneshot `force_stop_rx` is sent by
+    // the graceful handler above after it calls `bus.initiate()`, so this task
+    // never races with the first signal delivery.
+    tokio::spawn(async move {
+        // Wait until the graceful handler has armed us (i.e., received the
+        // first signal). This prevents the race where both tasks receive the
+        // same OS signal delivery and this task calls process::exit(1) before
+        // the graceful path can complete.
+        let _ = force_stop_rx.await;
+
+        // Now listen for a second signal (genuine user override during drain).
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install second SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
         eprintln!("  Force stop.");
         std::process::exit(1);
     });
@@ -661,13 +837,15 @@ async fn main() -> anyhow::Result<()> {
                 info!("metadata raft group ready — opening client listeners");
             }
             Ok(Err(_)) => {
-                shared.startup.fail();
+                raft_gate.fail("raft readiness watch dropped before signalling ready");
                 return Err(anyhow::anyhow!(
                     "raft readiness watch dropped before signalling ready"
                 ));
             }
             Err(_) => {
-                shared.startup.fail();
+                raft_gate.fail(format!(
+                    "raft readiness timeout after {RAFT_READY_TIMEOUT:?}"
+                ));
                 return Err(anyhow::anyhow!(
                     "raft readiness timeout after {RAFT_READY_TIMEOUT:?} — \
                      metadata group failed to apply first entry"
@@ -678,12 +856,25 @@ async fn main() -> anyhow::Result<()> {
     // Metadata raft group has applied its first entry (or we're
     // in single-node mode with no raft). The post-apply hooks
     // have rebuilt in-memory registries from redb.
-    shared
-        .startup
-        .advance_to(StartupPhase::RaftMetadataReplay)?;
-    shared.startup.advance_to(StartupPhase::SchemaCacheWarmup)?;
-    shared.startup.advance_to(StartupPhase::DataGroupsReplay)?;
-    shared.startup.advance_to(StartupPhase::TransportBind)?;
+    raft_gate.fire();
+    schema_gate.fire();
+
+    // Catalog sanity check: applied-index gate, redb
+    // cross-table integrity, and in-memory registry ⇔ redb
+    // verification. Any unrepairable divergence or any redb
+    // integrity violation aborts startup.
+    let verify_report = nodedb::control::cluster::verify_and_repair(&shared).await?;
+    if verify_report.is_acceptable() {
+        info!(report = %verify_report, "catalog sanity check passed");
+    } else {
+        sanity_gate.fail(format!("catalog sanity check failed: {verify_report}"));
+        return Err(anyhow::anyhow!(
+            "catalog sanity check failed: {verify_report}"
+        ));
+    }
+    sanity_gate.fire();
+    data_groups_gate.fire();
+    transport_gate.fire();
 
     // Warm the QUIC peer cache so the first replicated request
     // after boot doesn't pay a cold dial.
@@ -713,15 +904,16 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-    shared.startup.advance_to(StartupPhase::WarmPeers)?;
-    shared.startup.advance_to(StartupPhase::HealthLoopStart)?;
-    shared.startup.advance_to(StartupPhase::GatewayEnable)?;
+    warm_peers_gate.fire();
+    health_loop_gate.fire();
+    gateway_enable_gate.fire();
 
     // Run pgwire listener in a separate task.
     let shared_pg = Arc::clone(&shared);
-    let shutdown_rx_pg = shutdown_rx.clone();
     let conn_sem_pg = Arc::clone(&conn_semaphore);
     let pgwire_tls = tls_for(pgwire_tls_enabled);
+    let startup_gate_pg = Arc::clone(&startup_gate);
+    let bus_pg = shutdown_bus.clone();
     tokio::spawn(async move {
         if let Err(e) = pg_listener
             .run(
@@ -729,7 +921,8 @@ async fn main() -> anyhow::Result<()> {
                 auth_mode,
                 pgwire_tls,
                 conn_sem_pg,
-                shutdown_rx_pg,
+                startup_gate_pg,
+                bus_pg,
             )
             .await
         {
@@ -738,6 +931,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Run HTTP API server.
+    // HTTP is NOT gated at the accept-loop level: /healthz must respond
+    // during startup (k8s readiness probe requirement). Instead, a
+    // startup-gate middleware on the router rejects non-health routes
+    // with 503 until `GatewayEnable` fires.
     let shared_http = Arc::clone(&shared);
     let http_auth_mode = config.auth.mode.clone();
     let http_listen = config.http_addr();
@@ -747,14 +944,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let shutdown_rx_http = shutdown_rx.clone();
+    let bus_http = shutdown_bus.clone();
     tokio::spawn(async move {
         if let Err(e) = nodedb::control::server::http::server::run(
             http_listen,
             shared_http,
             http_auth_mode,
             http_tls.as_ref(),
-            shutdown_rx_http,
+            bus_http,
         )
         .await
         {
@@ -767,10 +964,11 @@ async fn main() -> anyhow::Result<()> {
         let shared_ilp = Arc::clone(&shared);
         let conn_sem_ilp = Arc::clone(&conn_semaphore);
         let ilp_tls = tls_for(ilp_tls_enabled);
-        let shutdown_rx_ilp = shutdown_rx.clone();
+        let startup_gate_ilp = Arc::clone(&startup_gate);
+        let bus_ilp = shutdown_bus.clone();
         tokio::spawn(async move {
             if let Err(e) = ilp
-                .run(shared_ilp, conn_sem_ilp, ilp_tls, shutdown_rx_ilp)
+                .run(shared_ilp, conn_sem_ilp, ilp_tls, startup_gate_ilp, bus_ilp)
                 .await
             {
                 tracing::error!(error = %e, "ILP listener failed");
@@ -783,10 +981,17 @@ async fn main() -> anyhow::Result<()> {
         let shared_resp = Arc::clone(&shared);
         let conn_sem_resp = Arc::clone(&conn_semaphore);
         let resp_tls = tls_for(resp_tls_enabled);
-        let shutdown_rx_resp = shutdown_rx.clone();
+        let startup_gate_resp = Arc::clone(&startup_gate);
+        let bus_resp = shutdown_bus.clone();
         tokio::spawn(async move {
             if let Err(e) = resp
-                .run(shared_resp, conn_sem_resp, resp_tls, shutdown_rx_resp)
+                .run(
+                    shared_resp,
+                    conn_sem_resp,
+                    resp_tls,
+                    startup_gate_resp,
+                    bus_resp,
+                )
                 .await
             {
                 tracing::error!(error = %e, "RESP listener failed");
@@ -838,12 +1043,28 @@ async fn main() -> anyhow::Result<()> {
             native_auth_mode,
             native_tls,
             conn_semaphore,
-            shutdown_rx,
+            Arc::clone(&startup_gate),
+            shutdown_bus.clone(),
         )
         .await?;
 
     info!("server shutting down");
     nodedb_cluster::readiness::notify_stopping();
+
+    // The native listener returned because the phased shutdown bus signaled
+    // DrainingListeners. The signal handler task is concurrently awaiting
+    // the bus sequencer to walk every phase (including offender-abort at
+    // budget). If we `exit(0)` here, the signal handler gets killed
+    // mid-sequence and offender-abort logs never get emitted.
+    //
+    // Wait for the bus to reach `Closed` before exiting. The signal handler
+    // also calls `exit(0)` after its sequencer await — whichever reaches
+    // it first wins the race, and both paths guarantee the sequencer has
+    // completed first.
+    shutdown_bus
+        .handle()
+        .await_phase(nodedb::control::shutdown::ShutdownPhase::Closed)
+        .await;
 
     // Data Plane cores run on std::thread (not Tokio) and block in an
     // infinite eventfd poll loop. They have no shutdown signal — they

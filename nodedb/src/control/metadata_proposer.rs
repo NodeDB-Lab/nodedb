@@ -61,7 +61,7 @@ pub struct RaftLoopProposerHandle {
     raft_loop: Arc<
         nodedb_cluster::RaftLoop<
             crate::control::cluster::SpscCommitApplier,
-            crate::control::LocalForwarder,
+            crate::control::LocalPlanExecutor,
         >,
     >,
     watcher: OnceLock<Arc<AppliedIndexWatcher>>,
@@ -72,7 +72,7 @@ impl RaftLoopProposerHandle {
         raft_loop: Arc<
             nodedb_cluster::RaftLoop<
                 crate::control::cluster::SpscCommitApplier,
-                crate::control::LocalForwarder,
+                crate::control::LocalPlanExecutor,
             >,
         >,
     ) -> Self {
