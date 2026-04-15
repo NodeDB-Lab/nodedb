@@ -48,7 +48,7 @@ impl NativeSession {
         state: Arc<SharedState>,
         auth_mode: AuthMode,
     ) -> Self {
-        let query_ctx = QueryContext::for_state(&state, 1); // default tenant
+        let query_ctx = QueryContext::for_state(&state);
         Self {
             stream,
             peer_addr,

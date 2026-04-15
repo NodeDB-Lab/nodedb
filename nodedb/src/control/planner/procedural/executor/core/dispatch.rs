@@ -44,10 +44,7 @@ impl<'a> StatementExecutor<'a> {
     pub(super) async fn execute_dml(&self, sql: &str, bindings: &RowBindings) -> crate::Result<()> {
         let bound_sql = fold_literal_string_concat(&bindings.substitute(sql));
 
-        let ctx = crate::control::planner::context::QueryContext::for_state(
-            self.state,
-            self.tenant_id.as_u32(),
-        );
+        let ctx = crate::control::planner::context::QueryContext::for_state(self.state);
         let tasks = ctx.plan_sql(&bound_sql, self.tenant_id).await?;
 
         if let Some(ref tx_ctx) = self.tx_ctx {

@@ -29,22 +29,40 @@ impl NodeDbQueryParser {
         Self { state }
     }
 
-    /// Infer parameter and result types using nodedb-sql catalog.
+    /// Infer parameter and result types using nodedb-sql catalog, scoped to
+    /// the connecting user's tenant so a tenant-N user's Parse message
+    /// resolves against tenant-N's catalog (not tenant 1).
     fn try_infer_types(
         &self,
         sql: &str,
         client_types: &[Option<Type>],
+        tenant_id: u32,
     ) -> (Vec<Option<Type>>, Vec<FieldInfo>) {
         let catalog = crate::control::planner::catalog_adapter::OriginCatalog::new(
             Arc::clone(&self.state.credentials),
-            1, // default tenant for parse-time inference
+            tenant_id,
             Some(Arc::clone(&self.state.retention_policy_registry)),
         );
 
-        // Parse and plan to get collection info for result schema.
+        // Placeholder inference runs unconditionally so an unplannable
+        // SQL string (e.g. `WHERE id = $1` where the planner needs bound
+        // params to typecheck) still reports the right number of
+        // parameter slots in Describe.
+        let param_count = count_placeholders(sql);
+        let mut param_types = vec![None; param_count.max(client_types.len())];
+        for (i, ct) in client_types.iter().enumerate() {
+            if let Some(t) = ct {
+                param_types[i] = Some(t.clone());
+            }
+        }
+
+        // Parse and plan to get collection info for result schema. A plan
+        // failure here is not fatal — Describe callers only need the
+        // parameter count to bind, and execution re-plans with bound
+        // params anyway.
         let plans = match nodedb_sql::plan_sql(sql, &catalog) {
             Ok(p) => p,
-            Err(_) => return (client_types.to_vec(), Vec::new()),
+            Err(_) => return (param_types, Vec::new()),
         };
 
         // Infer result fields from the first plan.
@@ -53,15 +71,6 @@ impl NodeDbQueryParser {
         } else {
             Vec::new()
         };
-
-        // Placeholder inference: count $N placeholders in SQL.
-        let param_count = count_placeholders(sql);
-        let mut param_types = vec![None; param_count.max(client_types.len())];
-        for (i, ct) in client_types.iter().enumerate() {
-            if let Some(t) = ct {
-                param_types[i] = Some(t.clone());
-            }
-        }
 
         (param_types, result_fields)
     }
@@ -73,14 +82,35 @@ impl QueryParser for NodeDbQueryParser {
 
     async fn parse_sql<C>(
         &self,
-        _client: &C,
+        client: &C,
         sql: &str,
         types: &[Option<Type>],
     ) -> PgWireResult<Self::Statement>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let (param_types, result_fields) = self.try_infer_types(sql, types);
+        // Resolve the connecting user's tenant from pgwire metadata so
+        // parse-time catalog lookups are scoped to the right tenant.
+        // Unknown users fall back to tenant 1 only during bootstrap
+        // (credential store empty) — otherwise parse-time inference
+        // returns empty field info, which is the safe default.
+        let tenant_id = client
+            .metadata()
+            .get("user")
+            .and_then(|u| {
+                self.state
+                    .credentials
+                    .to_identity(u, crate::control::security::identity::AuthMethod::Trust)
+                    .or_else(|| {
+                        self.state.credentials.to_identity(
+                            u,
+                            crate::control::security::identity::AuthMethod::ScramSha256,
+                        )
+                    })
+            })
+            .map(|id| id.tenant_id.as_u32())
+            .unwrap_or(1);
+        let (param_types, result_fields) = self.try_infer_types(sql, types, tenant_id);
 
         Ok(ParsedStatement {
             sql: sql.to_owned(),

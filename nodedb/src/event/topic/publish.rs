@@ -154,7 +154,7 @@ pub async fn publish_remote(
         trace_id: 0,
     };
 
-    let query_ctx = crate::control::planner::context::QueryContext::for_state(state, tenant_id);
+    let query_ctx = crate::control::planner::context::QueryContext::for_state(state);
 
     gateway
         .execute_sql(&gw_ctx, &sql, &[], || {

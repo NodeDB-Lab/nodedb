@@ -102,8 +102,7 @@ async fn enforce_subquery_check(
     // General fallback: wrap in subselect.
     let restructured = restructure_subquery_check(&substituted);
 
-    let query_ctx =
-        crate::control::planner::context::QueryContext::for_state(state, tenant_id.as_u32());
+    let query_ctx = crate::control::planner::context::QueryContext::for_state(state);
 
     let tasks = match query_ctx.plan_sql(&restructured.sql, tenant_id).await {
         Ok(t) => t,

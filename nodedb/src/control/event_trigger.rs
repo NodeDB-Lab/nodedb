@@ -124,7 +124,7 @@ async fn execute_then_action(
         .replace("$collection", &event.collection)
         .replace("$operation", event.operation.as_str());
 
-    let query_ctx = QueryContext::for_state(shared, 1);
+    let query_ctx = QueryContext::for_state(shared);
 
     match query_ctx.plan_sql(&sql, event.tenant_id).await {
         Ok(tasks) => {

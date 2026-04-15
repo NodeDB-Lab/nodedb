@@ -19,6 +19,7 @@ use pgwire::api::store::PortalStore;
 use pgwire::api::{ClientInfo, ClientPortalStore};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
+use pgwire::messages::PgWireFrontendMessage;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::config::auth::AuthMode;
@@ -61,7 +62,7 @@ impl NodeDbPgHandler {
         // Sub-planners (check constraints, type guards, ANALYZE,
         // procedural DML) build their own no-lease `QueryContext`
         // via `for_state`.
-        let query_ctx = QueryContext::for_state_with_lease(&state, 1);
+        let query_ctx = QueryContext::for_state_with_lease(&state);
         let query_parser = Arc::new(NodeDbQueryParser::new(Arc::clone(&state)));
         Self {
             state,
@@ -90,22 +91,20 @@ impl NodeDbPgHandler {
 
         match self.auth_mode {
             AuthMode::Trust => {
-                if let Some(identity) = self
-                    .state
+                // Strict resolution: `post_startup` has already ensured the
+                // user exists (either because it was already in the store
+                // or via the bootstrap auto-create path on an empty store),
+                // so any miss here is a genuine unknown user.
+                self.state
                     .credentials
                     .to_identity(&username, AuthMethod::Trust)
-                {
-                    Ok(identity)
-                } else {
-                    Ok(AuthenticatedIdentity {
-                        user_id: 0,
-                        username,
-                        tenant_id: TenantId::new(1),
-                        auth_method: AuthMethod::Trust,
-                        roles: vec![Role::Superuser],
-                        is_superuser: true,
+                    .ok_or_else(|| {
+                        PgWireError::UserError(Box::new(ErrorInfo::new(
+                            "FATAL".to_owned(),
+                            "28000".to_owned(),
+                            format!("trust auth: user '{username}' does not exist"),
+                        )))
                     })
-                }
             }
             AuthMode::Password | AuthMode::Md5Password | AuthMode::Certificate => self
                 .state
@@ -310,5 +309,66 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
     }
 }
 
-// Trust mode: NoopStartupHandler (no authentication).
-impl NoopStartupHandler for NodeDbPgHandler {}
+// Trust mode: NoopStartupHandler skips password verification but still
+// resolves the connecting username against the credential store, matching
+// PostgreSQL's `trust` method semantics. Unknown users are rejected before
+// the server sends ReadyForQuery.
+#[async_trait]
+impl NoopStartupHandler for NodeDbPgHandler {
+    async fn post_startup<C>(
+        &self,
+        client: &mut C,
+        _message: PgWireFrontendMessage,
+    ) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        if !matches!(self.auth_mode, AuthMode::Trust) {
+            return Ok(());
+        }
+
+        let username = client
+            .metadata()
+            .get("user")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if self
+            .state
+            .credentials
+            .to_identity(&username, AuthMethod::Trust)
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Bootstrap: an empty credential store admits the first connecting
+        // user as a tenant-1 superuser and persists them so subsequent
+        // queries on the same connection (and any reconnect) resolve
+        // through the normal strict path.
+        if self.state.credentials.is_empty() {
+            let _ = self.state.credentials.create_user(
+                &username,
+                "",
+                TenantId::new(1),
+                vec![Role::Superuser],
+            );
+            return Ok(());
+        }
+
+        let source = client.socket_addr().to_string();
+        self.state.audit_record(
+            AuditEvent::AuthFailure,
+            None,
+            &source,
+            &format!("trust auth: user '{username}' does not exist"),
+        );
+        Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+            "FATAL".to_owned(),
+            "28000".to_owned(),
+            format!("trust auth: user '{username}' does not exist"),
+        ))))
+    }
+}

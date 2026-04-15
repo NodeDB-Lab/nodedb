@@ -57,8 +57,7 @@ pub async fn validate_typeguard(
 
     // Scan all documents.
     let scan_sql = format!("SELECT * FROM {coll_name}");
-    let query_ctx =
-        crate::control::planner::context::QueryContext::for_state(state, tenant_id.as_u32());
+    let query_ctx = crate::control::planner::context::QueryContext::for_state(state);
     let tasks = query_ctx
         .plan_sql(&scan_sql, tenant_id)
         .await

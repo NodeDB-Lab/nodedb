@@ -50,29 +50,33 @@ pub struct QueryContext {
 }
 
 /// Inputs needed to construct an `OriginCatalog` per plan call.
+///
+/// Tenant is intentionally **not** stored here: every plan call passes the
+/// effective tenant to `build_adapter`, so a single `QueryContext` shared
+/// across a pgwire handler can serve queries from connections belonging to
+/// different tenants without cross-tenant catalog resolution.
 #[derive(Clone)]
 struct CatalogInputs {
     credentials: Arc<CredentialStore>,
     shared: Option<std::sync::Weak<crate::control::state::SharedState>>,
-    tenant_id: u32,
     retention_policy_registry:
         Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
 }
 
 impl CatalogInputs {
-    fn build_adapter(&self) -> super::catalog_adapter::OriginCatalog {
+    fn build_adapter(&self, tenant_id: u32) -> super::catalog_adapter::OriginCatalog {
         if let Some(weak) = &self.shared
             && let Some(shared) = weak.upgrade()
         {
             super::catalog_adapter::OriginCatalog::new_with_lease(
                 &shared,
-                self.tenant_id,
+                tenant_id,
                 self.retention_policy_registry.clone(),
             )
         } else {
             super::catalog_adapter::OriginCatalog::new(
                 Arc::clone(&self.credentials),
-                self.tenant_id,
+                tenant_id,
                 self.retention_policy_registry.clone(),
             )
         }
@@ -97,10 +101,9 @@ impl QueryContext {
     /// path would return instantly anyway, but going through the
     /// sub-planner without a direct `Arc<SharedState>` reference
     /// would require threading one through every call site.
-    pub fn for_state(state: &crate::control::state::SharedState, tenant_id: u32) -> Self {
+    pub fn for_state(state: &crate::control::state::SharedState) -> Self {
         Self::with_catalog(
             Arc::clone(&state.credentials),
-            tenant_id,
             Some(Arc::clone(&state.retention_policy_registry)),
         )
     }
@@ -110,16 +113,12 @@ impl QueryContext {
     /// query's plan acquires descriptor leases before execution.
     /// Callers must hold an `Arc<SharedState>` — the adapter
     /// downgrades to `Weak` internally.
-    pub fn for_state_with_lease(
-        state: &Arc<crate::control::state::SharedState>,
-        tenant_id: u32,
-    ) -> Self {
+    pub fn for_state_with_lease(state: &Arc<crate::control::state::SharedState>) -> Self {
         let retention = Some(Arc::clone(&state.retention_policy_registry));
         Self {
             catalog_inputs: Some(CatalogInputs {
                 credentials: Arc::clone(&state.credentials),
                 shared: Some(Arc::downgrade(state)),
-                tenant_id,
                 retention_policy_registry: retention.clone(),
             }),
             retention_registry: retention,
@@ -136,7 +135,6 @@ impl QueryContext {
     /// that construct a context without an `Arc<SharedState>`.
     pub fn with_catalog(
         credentials: Arc<CredentialStore>,
-        tenant_id: u32,
         retention_policy_registry: Option<
             Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>,
         >,
@@ -144,7 +142,6 @@ impl QueryContext {
         let catalog_inputs = Some(CatalogInputs {
             credentials,
             shared: None,
-            tenant_id,
             retention_policy_registry: retention_policy_registry.clone(),
         });
 
@@ -193,7 +190,7 @@ impl QueryContext {
         // `recorded_versions` field is per-plan state, and
         // two concurrent plans through a shared QueryContext
         // would otherwise interleave their recorded sets.
-        let catalog = inputs.build_adapter();
+        let catalog = inputs.build_adapter(tenant_id.as_u32());
         let plans = nodedb_sql::plan_sql(sql, &catalog).map_err(|e| match e {
             nodedb_sql::SqlError::RetryableSchemaChanged { descriptor } => {
                 crate::Error::RetryableSchemaChanged { descriptor }
@@ -292,7 +289,7 @@ impl QueryContext {
         // through a different cache key), but constructing the
         // adapter fresh keeps the adapter's state per-plan and
         // allows future extension.
-        let catalog = inputs.build_adapter();
+        let catalog = inputs.build_adapter(tenant_id.as_u32());
         let plans = nodedb_sql::plan_sql_with_params(sql, params, &catalog).map_err(|e| {
             crate::Error::PlanError {
                 detail: format!("{e}"),

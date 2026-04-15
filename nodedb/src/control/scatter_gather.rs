@@ -343,7 +343,6 @@ pub async fn coordinate_cross_shard_hop(
                 // (same pattern as QueryContext::for_state but without &SharedState).
                 let plan_ctx = crate::control::planner::context::QueryContext::with_catalog(
                     std::sync::Arc::clone(&credentials_clone),
-                    tenant_id_u32,
                     Some(std::sync::Arc::clone(&retention_clone)),
                 );
 

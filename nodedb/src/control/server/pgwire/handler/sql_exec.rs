@@ -375,10 +375,8 @@ impl NodeDbPgHandler {
         identity: &AuthenticatedIdentity,
     ) -> PgWireResult<Vec<String>> {
         let tenant_id = identity.tenant_id;
-        let query_ctx = crate::control::planner::context::QueryContext::for_state_with_lease(
-            &self.state,
-            tenant_id.as_u32(),
-        );
+        let query_ctx =
+            crate::control::planner::context::QueryContext::for_state_with_lease(&self.state);
 
         if let Some(mode) = self.sessions.get_parameter(_addr, "rounding_mode") {
             query_ctx.set_rounding_mode(&mode);

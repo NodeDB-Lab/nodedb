@@ -159,7 +159,7 @@ pub async fn run_with_listener(
     let mut shutdown_rx = bus.handle().flat_watch().raw_receiver();
 
     let query_ctx = Arc::new(crate::control::planner::context::QueryContext::for_state(
-        &shared, 1,
+        &shared,
     ));
     let state = AppState {
         shared,
@@ -198,7 +198,7 @@ pub async fn run(
     let mut shutdown_rx = bus.handle().flat_watch().raw_receiver();
 
     let query_ctx = Arc::new(crate::control::planner::context::QueryContext::for_state(
-        &shared, 1,
+        &shared,
     ));
     let state = AppState {
         shared,

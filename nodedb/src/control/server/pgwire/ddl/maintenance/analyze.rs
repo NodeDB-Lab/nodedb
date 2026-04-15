@@ -69,7 +69,7 @@ pub async fn handle_analyze(
 
     // Dispatch a scan to the Data Plane to collect all rows.
     let scan_sql = format!("SELECT * FROM {collection}");
-    let query_ctx = crate::control::planner::context::QueryContext::for_state(state, tenant_id);
+    let query_ctx = crate::control::planner::context::QueryContext::for_state(state);
     let rows = match query_ctx.plan_sql(&scan_sql, identity.tenant_id).await {
         Ok(tasks) => {
             let mut json_rows = Vec::new();
