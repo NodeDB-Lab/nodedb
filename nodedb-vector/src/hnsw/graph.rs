@@ -8,6 +8,11 @@ use crate::distance::distance;
 // Re-export shared params from nodedb-types.
 pub use nodedb_types::hnsw::HnswParams;
 
+/// Hard cap on the layer assigned to any node during insertion.
+/// Standard HNSW practice — prevents pathological RNG draws from inflating
+/// `max_layer` and slowing every subsequent search.
+pub const MAX_LAYER_CAP: usize = 16;
+
 /// Result of a k-NN search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -254,10 +259,15 @@ impl HnswIndex {
     }
 
     /// Assign a random layer using the exponential distribution.
+    ///
+    /// Capped at `MAX_LAYER_CAP` to prevent pathological RNG draws from
+    /// promoting the index's `max_layer` to hundreds or thousands, which
+    /// would make every search's Phase-1 greedy descent O(max_layer).
     pub(crate) fn random_layer(&mut self) -> usize {
         let ml = 1.0 / (self.params.m as f64).ln();
         let r = self.rng.next_f64().max(f64::MIN_POSITIVE);
-        (-r.ln() * ml).floor() as usize
+        let layer = (-r.ln() * ml).floor() as usize;
+        layer.min(MAX_LAYER_CAP)
     }
 
     /// Compute distance between a query vector and a stored node.
@@ -279,10 +289,22 @@ impl HnswIndex {
     }
 
     /// Compact the index by removing all tombstoned nodes.
+    ///
+    /// Returns the number of removed nodes. See `compact_with_map` for the
+    /// variant that also returns the old→new id remapping.
     pub fn compact(&mut self) -> usize {
+        self.compact_with_map().0
+    }
+
+    /// Compact and return both the removed count and the old→new id map.
+    ///
+    /// `id_map[old_local]` = new_local, or `u32::MAX` if the node was
+    /// tombstoned (removed).
+    pub fn compact_with_map(&mut self) -> (usize, Vec<u32>) {
         let tombstone_count = self.tombstone_count();
         if tombstone_count == 0 {
-            return 0;
+            let identity: Vec<u32> = (0..self.nodes.len() as u32).collect();
+            return (0, identity);
         }
         self.ensure_mutable_neighbors();
 
@@ -348,7 +370,7 @@ impl HnswIndex {
             .unwrap_or(0);
 
         self.nodes = new_nodes;
-        tombstone_count
+        (tombstone_count, id_map)
     }
 }
 
