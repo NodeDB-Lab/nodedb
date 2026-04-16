@@ -4,6 +4,7 @@ pub mod circuit_breaker;
 pub mod cluster_info;
 pub mod conf_change;
 pub mod cross_shard_txn;
+pub mod decommission;
 pub mod distributed_document;
 pub mod distributed_graph;
 pub mod distributed_join;
@@ -25,6 +26,7 @@ pub mod quic_transport;
 pub mod raft_loop;
 pub mod raft_storage;
 pub mod rdma_transport;
+pub mod reachability;
 pub mod readiness;
 pub mod rebalance;
 pub mod rebalance_scheduler;
@@ -44,6 +46,10 @@ pub use cluster_info::{
     ClusterInfoSnapshot, ClusterObserver, GroupSnapshot, GroupStatusProvider, PeerSnapshot,
 };
 pub use conf_change::{ConfChange, ConfChangeType};
+pub use decommission::{
+    DecommissionCoordinator, DecommissionObserver, DecommissionPlan, DecommissionRunResult,
+    DecommissionSafetyError, MetadataProposer, check_can_decommission, plan_full_decommission,
+};
 pub use error::{ClusterError, Result};
 pub use forward::{NoopPlanExecutor, PlanExecutor};
 pub use ghost::{GhostStub, GhostTable};
@@ -55,6 +61,9 @@ pub use migration_executor::{
 };
 pub use multi_raft::{GroupStatus, MultiRaft};
 pub use raft_loop::{CommitApplier, RaftLoop, VShardEnvelopeHandler};
+pub use reachability::{
+    NoopProber, ReachabilityDriver, ReachabilityDriverConfig, ReachabilityProber, TransportProber,
+};
 pub use rebalance::{RebalancePlan, compute_plan, plan_to_requests};
 pub use routing::RoutingTable;
 pub use routing_liveness::{NodeIdResolver, RoutingLivenessHook};

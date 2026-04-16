@@ -123,4 +123,11 @@ pub enum RoutingChange {
         group_id: u64,
         new_leader_node_id: u64,
     },
+    /// Remove a node from a Raft group's member and learner sets.
+    ///
+    /// Used by the decommission flow to strip a draining node out of
+    /// every group it belongs to. Proposing this is only safe once
+    /// `safety::check_can_decommission` has confirmed the group will
+    /// still satisfy the configured replication factor.
+    RemoveMember { group_id: u64, node_id: u64 },
 }

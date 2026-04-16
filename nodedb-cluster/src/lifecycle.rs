@@ -15,7 +15,7 @@
 use tracing::{info, warn};
 
 use crate::error::{ClusterError, Result};
-use crate::metadata_group::{MetadataEntry, RoutingChange, TopologyChange};
+use crate::metadata_group::{MetadataEntry, TopologyChange};
 use crate::routing::RoutingTable;
 use crate::topology::{ClusterTopology, NodeInfo, NodeState};
 
@@ -27,55 +27,34 @@ pub struct DecommissionResult {
     pub completed: bool,
 }
 
-/// Plan a node decommission: compute which vShards to migrate and where.
-///
-/// Produces a sequence of [`MetadataEntry`] values to be proposed against
-/// the metadata Raft group in order. Steps:
-/// 1. Start decommission (topology transition).
-/// 2. Transfer leadership of all Raft groups led by this node.
+/// Plan a node decommission — thin wrapper over
+/// [`crate::decommission::plan_full_decommission`] that returns the
+/// full ordered sequence of metadata entries. Kept as a public
+/// convenience for older call sites; new code should use the
+/// `decommission` module directly.
 pub fn plan_decommission(
     node_id: u64,
     topology: &ClusterTopology,
     routing: &RoutingTable,
 ) -> Result<Vec<MetadataEntry>> {
-    let node = topology.get_node(node_id).ok_or(ClusterError::Transport {
-        detail: format!("node {node_id} not found in topology"),
-    })?;
-
-    if node.state == NodeState::Decommissioned {
-        return Err(ClusterError::Transport {
-            detail: format!("node {node_id} is already decommissioned"),
-        });
-    }
-
-    let mut entries = Vec::new();
-
-    // Step 1: Start decommission.
-    entries.push(MetadataEntry::TopologyChange(
-        TopologyChange::StartDecommission { node_id },
-    ));
-
-    // Step 2: Leadership transfers for groups led by this node.
-    for group_id in routing.group_ids() {
-        if let Some(info) = routing.group_info(group_id)
-            && info.leader == node_id
-            && let Some(&new_leader) = info.members.iter().find(|&&m| m != node_id)
-        {
-            entries.push(MetadataEntry::RoutingChange(
-                RoutingChange::LeadershipTransfer {
-                    group_id,
-                    new_leader_node_id: new_leader,
-                },
-            ));
-        }
-    }
-
+    // Historical callers assumed the full-cluster RF; derive a safe
+    // lower bound from the smallest existing group so the check is
+    // never stricter than the cluster is already running under.
+    let rf = routing
+        .group_members()
+        .values()
+        .map(|info| info.members.len())
+        .min()
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .max(1);
+    let plan = crate::decommission::plan_full_decommission(node_id, topology, routing, rf)?;
     info!(
         node_id,
-        metadata_entries = entries.len(),
+        metadata_entries = plan.entries.len(),
         "decommission plan computed"
     );
-    Ok(entries)
+    Ok(plan.entries)
 }
 
 /// Check if a node can be safely removed from the cluster.
