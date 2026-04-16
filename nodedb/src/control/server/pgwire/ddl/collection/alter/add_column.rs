@@ -62,8 +62,11 @@ pub async fn alter_table_add_column(
                             &format!("column '{}' already exists", column.name),
                         ));
                     }
+                    let new_version = schema.version.saturating_add(1);
+                    let mut column = column;
+                    column.added_at_version = new_version;
                     schema.columns.push(column);
-                    schema.version = schema.version.saturating_add(1);
+                    schema.version = new_version;
 
                     let mut updated = coll;
                     updated.collection_type = nodedb_types::CollectionType::strict(schema.clone());

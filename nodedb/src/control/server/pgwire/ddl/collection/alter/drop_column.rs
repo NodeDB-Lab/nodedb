@@ -79,8 +79,16 @@ pub async fn alter_collection_drop_column(
         ));
     }
 
-    schema.columns.remove(idx);
-    schema.version = schema.version.saturating_add(1);
+    let dropped_def = schema.columns.remove(idx);
+    let new_version = schema.version.saturating_add(1);
+    schema
+        .dropped_columns
+        .push(nodedb_types::columnar::DroppedColumn {
+            def: dropped_def,
+            position: idx,
+            dropped_at_version: new_version,
+        });
+    schema.version = new_version;
 
     let mut updated = coll;
     updated.collection_type = nodedb_types::CollectionType::strict(schema.clone());

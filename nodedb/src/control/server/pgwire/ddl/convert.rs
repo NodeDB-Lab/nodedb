@@ -92,6 +92,7 @@ pub async fn convert_collection(
             let schema = nodedb_types::columnar::StrictSchema {
                 columns,
                 version: 1,
+                dropped_columns: Vec::new(),
             };
             if target_type == "kv" {
                 nodedb_types::CollectionType::kv(schema)
