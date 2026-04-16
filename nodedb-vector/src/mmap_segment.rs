@@ -171,13 +171,18 @@ impl MmapVectorSegment {
             Some(v) => v,
             None => return,
         };
-        let offset = match self
-            .data_offset
-            .checked_add(idx.checked_mul(byte_len).unwrap_or(usize::MAX))
-        {
-            Some(v) if v.checked_add(byte_len).is_some_and(|e| e <= self.mmap_size) => v,
-            _ => return,
+        let Some(idx_bytes) = idx.checked_mul(byte_len) else {
+            return;
         };
+        let Some(offset) = self.data_offset.checked_add(idx_bytes) else {
+            return;
+        };
+        if offset
+            .checked_add(byte_len)
+            .is_none_or(|e| e > self.mmap_size)
+        {
+            return;
+        }
         let page_start = offset & !(4095);
         let len = (byte_len + 4095) & !(4095);
         unsafe {

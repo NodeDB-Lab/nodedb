@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let key = test_key();
-        let epoch = key.epoch().clone();
+        let epoch = *key.epoch();
         let header = test_header(1);
         let plaintext = b"hello nodedb encryption";
 
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn wrong_key_fails() {
         let key1 = WalEncryptionKey::from_bytes(&[0x01; 32]);
-        let epoch1 = key1.epoch().clone();
+        let epoch1 = *key1.epoch();
         let key2 = WalEncryptionKey::from_bytes(&[0x02; 32]);
         let header = test_header(1);
 
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn wrong_lsn_fails() {
         let key = test_key();
-        let epoch = key.epoch().clone();
+        let epoch = *key.epoch();
         let header = test_header(1);
 
         let ciphertext = key.encrypt(1, &header, b"secret").unwrap();
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn tampered_ciphertext_fails() {
         let key = test_key();
-        let epoch = key.epoch().clone();
+        let epoch = *key.epoch();
         let header = test_header(1);
 
         let mut ciphertext = key.encrypt(1, &header, b"secret").unwrap();
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn tampered_header_fails() {
         let key = test_key();
-        let epoch = key.epoch().clone();
+        let epoch = *key.epoch();
         let header1 = test_header(1);
 
         let ciphertext = key.encrypt(1, &header1, b"secret").unwrap();
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn empty_payload() {
         let key = test_key();
-        let epoch = key.epoch().clone();
+        let epoch = *key.epoch();
         let header = test_header(1);
 
         let ciphertext = key.encrypt(1, &header, b"").unwrap();
