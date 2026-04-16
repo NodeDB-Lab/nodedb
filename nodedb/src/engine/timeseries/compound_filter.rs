@@ -93,7 +93,7 @@ impl CompoundTagIndex {
             .iter()
             .map(|(k, &v)| (k.clone(), v))
             .collect();
-        combos.sort_by(|a, b| b.1.cmp(&a.1));
+        combos.sort_by_key(|c| std::cmp::Reverse(c.1));
         combos.truncate(n);
         combos
     }

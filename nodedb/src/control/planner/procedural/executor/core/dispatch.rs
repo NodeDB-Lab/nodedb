@@ -196,10 +196,7 @@ fn fold_literal_string_concat(sql: &str) -> String {
         };
 
         let mut folded = false;
-        loop {
-            let Some(op_end) = consume_string_concat_operator(bytes, cursor) else {
-                break;
-            };
+        while let Some(op_end) = consume_string_concat_operator(bytes, cursor) {
             let next_lit = skip_ascii_whitespace(bytes, op_end);
             let Some((next_cursor, next_literal)) = parse_single_quoted_literal(sql, next_lit)
             else {

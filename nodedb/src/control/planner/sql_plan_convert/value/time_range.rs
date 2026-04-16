@@ -23,15 +23,15 @@ fn extract_time_bounds_from_filter(expr: &FilterExpr, min_ts: &mut i64, max_ts: 
         FilterExpr::Comparison { field, op, value } if is_time_field(field) => {
             if let Some(ms) = sql_value_to_timestamp_ms(value) {
                 match op {
-                    nodedb_sql::types::CompareOp::Ge | nodedb_sql::types::CompareOp::Gt => {
-                        if ms > *min_ts {
-                            *min_ts = ms;
-                        }
+                    nodedb_sql::types::CompareOp::Ge | nodedb_sql::types::CompareOp::Gt
+                        if ms > *min_ts =>
+                    {
+                        *min_ts = ms;
                     }
-                    nodedb_sql::types::CompareOp::Le | nodedb_sql::types::CompareOp::Lt => {
-                        if ms < *max_ts {
-                            *max_ts = ms;
-                        }
+                    nodedb_sql::types::CompareOp::Le | nodedb_sql::types::CompareOp::Lt
+                        if ms < *max_ts =>
+                    {
+                        *max_ts = ms;
                     }
                     nodedb_sql::types::CompareOp::Eq => {
                         *min_ts = ms;

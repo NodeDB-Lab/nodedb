@@ -91,7 +91,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
 
     // Build result sorted by coreness descending.
     let mut scored: Vec<(usize, usize)> = coreness.into_iter().enumerate().collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|&(_, k)| std::cmp::Reverse(k));
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::KCore);
     for (node, k) in scored {

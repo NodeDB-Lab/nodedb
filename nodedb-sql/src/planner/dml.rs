@@ -548,12 +548,10 @@ fn collect_pk_equalities(expr: &ast::Expr, pk: &str, keys: &mut Vec<SqlValue>) {
             expr: inner,
             list,
             negated: false,
-        } => {
-            if is_column(inner, pk) {
-                for item in list {
-                    if let Ok(v) = expr_to_sql_value(item) {
-                        keys.push(v);
-                    }
+        } if is_column(inner, pk) => {
+            for item in list {
+                if let Ok(v) = expr_to_sql_value(item) {
+                    keys.push(v);
                 }
             }
         }

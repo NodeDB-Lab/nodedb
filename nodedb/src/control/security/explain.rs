@@ -166,13 +166,12 @@ pub fn lint_predicate(predicate: &super::predicate::RlsPredicate) -> Vec<String>
         super::predicate::RlsPredicate::AlwaysFalse => {
             warnings.push("contradiction: predicate is always false (blocks everything)".into());
         }
-        super::predicate::RlsPredicate::Compare { value, .. } => {
-            if !value.is_auth_ref() && matches!(value, super::predicate::PredicateValue::Literal(_))
-            {
-                warnings.push(
-                    "static predicate: no $auth reference — same result for all users".into(),
-                );
-            }
+        super::predicate::RlsPredicate::Compare { value, .. }
+            if !value.is_auth_ref()
+                && matches!(value, super::predicate::PredicateValue::Literal(_)) =>
+        {
+            warnings
+                .push("static predicate: no $auth reference — same result for all users".into());
         }
         super::predicate::RlsPredicate::And(children)
         | super::predicate::RlsPredicate::Or(children) => {

@@ -14,10 +14,8 @@ pub fn extract_indexable_text(doc: &serde_json::Value) -> String {
 
 pub(super) fn collect_text(val: &serde_json::Value, parts: &mut Vec<String>) {
     match val {
-        serde_json::Value::String(s) => {
-            if !s.is_empty() {
-                parts.push(s.clone());
-            }
+        serde_json::Value::String(s) if !s.is_empty() => {
+            parts.push(s.clone());
         }
         serde_json::Value::Object(map) => {
             for v in map.values() {
