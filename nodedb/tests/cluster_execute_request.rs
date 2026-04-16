@@ -162,8 +162,19 @@ async fn execute_request_cross_node_dispatch() {
         .await
         .expect("create collection");
 
-    // Give the metadata applier on all nodes a moment to replicate.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Wait for the collection to be visible on every node.
+    common::cluster_harness::wait_for(
+        "cross_node_kv visible on all nodes",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.cached_collection_count() >= 1)
+        },
+    )
+    .await;
 
     // Node 2 sends the request; node 1 (bootstrap leader) receives it.
     let sender_transport = cluster.nodes[1]

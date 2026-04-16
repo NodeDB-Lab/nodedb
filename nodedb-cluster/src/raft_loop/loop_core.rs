@@ -580,35 +580,38 @@ mod tests {
         let sr1h = shutdown_tx.subscribe();
         tokio::spawn(async move { t1.serve(rl1_h, sr1h).await });
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        assert!(
-            rl1.applier.count() >= 1,
-            "node 1 should have committed at least the no-op, got {}",
-            rl1.applier.count()
-        );
+        // Poll until node 1 commits at least the no-op (election done).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if rl1.applier.count() >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "node 1 should have committed at least the no-op, got {}",
+                rl1.applier.count()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let (_gid, idx) = rl1.propose(0, b"distributed-cmd".to_vec()).unwrap();
         assert!(idx >= 2);
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        assert!(
-            rl1.applier.count() >= 2,
-            "node 1: expected >= 2 applied, got {}",
-            rl1.applier.count()
-        );
-
-        assert!(
-            rl2.applier.count() >= 1,
-            "node 2: expected >= 1 applied, got {}",
-            rl2.applier.count()
-        );
-        assert!(
-            rl3.applier.count() >= 1,
-            "node 3: expected >= 1 applied, got {}",
-            rl3.applier.count()
-        );
+        // Poll until all nodes replicate the proposed command.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if rl1.applier.count() >= 2 && rl2.applier.count() >= 1 && rl3.applier.count() >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "replication timed out: n1={}, n2={}, n3={}",
+                rl1.applier.count(),
+                rl2.applier.count(),
+                rl3.applier.count()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         shutdown_tx.send(true).unwrap();
     }

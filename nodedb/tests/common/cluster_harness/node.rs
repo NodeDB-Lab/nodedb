@@ -129,6 +129,7 @@ impl TestClusterNode {
             &cluster_settings,
             transport.clone(),
             &data_dir_path,
+            &tuning,
         )
         .await?;
 

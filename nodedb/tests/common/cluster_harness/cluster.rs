@@ -17,7 +17,18 @@ impl TestCluster {
     /// via node 1's pre-bound address. Waits until every node sees
     /// topology_size == 3 (10s deadline).
     pub async fn spawn_three() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::spawn_three_with_tuning(ClusterTransportTuning::default()).await
+        Self::spawn_three_with_tuning(ClusterTransportTuning {
+            // Fast health pings so the HealthMonitor re-broadcasts
+            // topology within ~1s if the initial join broadcast was missed.
+            health_ping_interval_secs: 1,
+            // Fast election timeouts so the metadata Raft group elects a
+            // leader well within the 10s convergence deadline, even under
+            // heavy parallel test load.
+            election_timeout_min_secs: 1,
+            election_timeout_max_secs: 2,
+            ..ClusterTransportTuning::default()
+        })
+        .await
     }
 
     /// Spawn a 3-node cluster with a custom `ClusterTransportTuning`.
@@ -29,12 +40,34 @@ impl TestCluster {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let node1 = TestClusterNode::spawn_with_tuning(1, vec![], tuning.clone()).await?;
 
-        // Give node 1's transport + raft loop a moment to start
-        // accepting before peers dial in.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait until node 1 has bootstrapped (topology shows itself)
+        // before peers try to join. The old fixed 200ms sleep was too
+        // short under heavy host load (e.g. 500+ parallel unit tests
+        // sharing the same CPU pool), causing peers to dial before
+        // node 1's transport was ready — failing topology convergence.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while node1.topology_size() < 1 {
+            if std::time::Instant::now() >= deadline {
+                return Err("node 1 failed to bootstrap within 10s".into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let seeds = vec![node1.listen_addr];
         let node2 = TestClusterNode::spawn_with_tuning(2, seeds.clone(), tuning.clone()).await?;
+
+        // Wait for node 2's join to be reflected before spawning node 3.
+        // Under load, spawning both peers simultaneously can overwhelm the
+        // bootstrap leader's join handler, causing neither join to complete
+        // within the topology convergence deadline.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while node1.topology_size() < 2 {
+            if std::time::Instant::now() >= deadline {
+                return Err("node 2 failed to join within 10s".into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
         let node3 = TestClusterNode::spawn_with_tuning(3, seeds, tuning).await?;
 
         let cluster = Self {
@@ -44,7 +77,7 @@ impl TestCluster {
         wait_for(
             "all 3 nodes report topology_size == 3",
             Duration::from_secs(10),
-            Duration::from_millis(100),
+            Duration::from_millis(50),
             || cluster.nodes.iter().all(|n| n.topology_size() == 3),
         )
         .await;

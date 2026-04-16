@@ -413,13 +413,16 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn indirect_ack_saves_target() {
+        // No `start_paused` — paused time auto-advances timeouts
+        // before polling channel-woken tasks, making the indirect
+        // path race the timeout. With real time, the 40ms probe
+        // timeout is ample for the in-memory fabric (sub-µs delivery).
         let fab = TransportFabric::new();
-        let local = Arc::new(fab.bind(addr(7000)).await) as Arc<dyn Transport>;
-        // Target bound but silent on the direct channel.
+        let local = Arc::new(fab.bind(addr(7000)).await);
         let _silent = fab.bind(addr(7001)).await;
-        let helper = fab.bind(addr(7002)).await;
+        let helper = Arc::new(fab.bind(addr(7002)).await);
         let list = membership_with_peers(
             "local",
             7000,
@@ -432,38 +435,74 @@ mod tests {
         let mut sched = ProbeScheduler::with_seed(1);
         let inflight = Arc::new(InflightProbes::new());
 
-        // Helper task: forwards any PingReq it sees into an Ack via the
-        // inflight registry. Paused-runtime auto-advance drives the
-        // direct-ping timeout on the main task.
-        let inflight_helper = Arc::clone(&inflight);
+        // Helper task: respond to Ping (direct probe) with Ack and to
+        // PingReq (indirect probe) with a forwarded Ack — mirrors the
+        // production runner recv-loop + handle_ping_req path. The
+        // scheduler may pick n2 as direct target or as indirect helper
+        // depending on the shuffle seed, so both must be handled.
+        let helper_t: Arc<dyn Transport> = helper.clone();
         let responder = tokio::spawn(async move {
             loop {
-                let (_from, msg) = match helper.recv().await {
+                let (from, msg) = match helper_t.recv().await {
                     Ok(v) => v,
                     Err(_) => return,
                 };
-                if let SwimMessage::PingReq(req) = msg {
-                    inflight_helper
-                        .resolve(
-                            req.probe_id,
-                            SwimMessage::Ack(Ack {
-                                probe_id: req.probe_id,
-                                from: req.target.clone(),
-                                incarnation: Incarnation::new(9),
-                                piggyback: vec![],
-                            }),
-                        )
-                        .await;
-                    return;
+                match msg {
+                    SwimMessage::Ping(ping) => {
+                        let _ = helper_t
+                            .send(
+                                from,
+                                SwimMessage::Ack(Ack {
+                                    probe_id: ping.probe_id,
+                                    from: NodeId::new("n2"),
+                                    incarnation: Incarnation::new(9),
+                                    piggyback: vec![],
+                                }),
+                            )
+                            .await;
+                        return;
+                    }
+                    SwimMessage::PingReq(req) => {
+                        let _ = helper_t
+                            .send(
+                                from,
+                                SwimMessage::Ack(Ack {
+                                    probe_id: req.probe_id,
+                                    from: req.target.clone(),
+                                    incarnation: Incarnation::new(9),
+                                    piggyback: vec![],
+                                }),
+                            )
+                            .await;
+                        return;
+                    }
+                    _ => {}
                 }
             }
         });
 
+        // Recv-loop on the local endpoint: resolves inflight probes
+        // when Acks arrive — mirrors the production runner recv-loop.
+        let recv_t: Arc<dyn Transport> = local.clone();
+        let recv_inflight = Arc::clone(&inflight);
+        let recv_loop = tokio::spawn(async move {
+            loop {
+                let (_from, msg) = match recv_t.recv().await {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                if let SwimMessage::Ack(ref ack) = msg {
+                    recv_inflight.resolve(ack.probe_id, msg).await;
+                }
+            }
+        });
+
+        let local_dyn: Arc<dyn Transport> = local.clone();
         let dissemination = Arc::new(DisseminationQueue::new());
         let outcome = ProbeRound {
             scheduler: &mut sched,
             membership: &list,
-            transport: &local,
+            transport: &local_dyn,
             inflight: &inflight,
             dissemination: &dissemination,
             probe_timeout: cfg().probe_timeout,
@@ -476,9 +515,8 @@ mod tests {
         .execute()
         .await
         .expect("run");
-        let _ = responder.await;
-        // Either direct (unlikely — n1 is silent) or indirect ack via n2.
-        // Whichever path fires, the outcome must be Acked.
+        responder.abort();
+        recv_loop.abort();
         assert!(matches!(outcome, ProbeOutcome::Acked { .. }));
     }
 

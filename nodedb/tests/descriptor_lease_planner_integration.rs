@@ -16,7 +16,7 @@ use common::cluster_harness::{TestCluster, wait_for};
 use nodedb_cluster::{DescriptorId, DescriptorKind};
 
 const TENANT: u32 = 1;
-const WAIT_BUDGET: Duration = Duration::from_secs(3);
+const WAIT_BUDGET: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);
 
 fn coll_id(name: &str) -> DescriptorId {
