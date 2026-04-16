@@ -270,12 +270,14 @@ fn value_to_json(value: &nodedb_types::Value) -> String {
 fn find_matching_brace(chars: &[char], start: usize) -> Option<usize> {
     let mut depth = 0;
     let mut in_string = false;
-    for i in start..chars.len() {
+    let mut i = start;
+    while i < chars.len() {
         match chars[i] {
             '\'' if !in_string => in_string = true,
             '\'' if in_string => {
                 if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                    // Skip escaped quote.
+                    // Skip '' escape — advance past both quotes.
+                    i += 2;
                     continue;
                 }
                 in_string = false;
@@ -289,6 +291,7 @@ fn find_matching_brace(chars: &[char], start: usize) -> Option<usize> {
             }
             _ => {}
         }
+        i += 1;
     }
     None
 }

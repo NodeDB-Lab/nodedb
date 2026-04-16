@@ -271,24 +271,24 @@ fn restructure_subquery_check(expr: &str) -> RestructuredCheck {
 /// Converts `NEW.amount > 0` → `amount > 0` so the expression can be parsed
 /// as bare column references by `parse_generated_expr`.
 fn strip_new_prefix(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
     let mut result = String::with_capacity(sql.len());
-    let upper = sql.to_uppercase();
-    let bytes = sql.as_bytes();
     let mut i = 0;
 
-    while i < bytes.len() {
-        if i + 4 <= bytes.len() && upper[i..].starts_with("NEW.") {
-            // Check word boundary before.
-            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-                result.push(bytes[i] as char);
-                i += 1;
+    while i < chars.len() {
+        if i + 4 <= chars.len() {
+            let window: String = chars[i..i + 4].iter().collect();
+            if window.eq_ignore_ascii_case("NEW.") {
+                if i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_') {
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                i += 4;
                 continue;
             }
-            // Skip "NEW." (4 chars).
-            i += 4;
-            continue;
         }
-        result.push(bytes[i] as char);
+        result.push(chars[i]);
         i += 1;
     }
     result
@@ -330,33 +330,35 @@ fn substitute_new_refs(sql: &str, fields: &HashMap<String, nodedb_types::Value>)
 
 /// Replace any remaining `NEW.xxx` references (not matched by known fields) with NULL.
 fn replace_remaining_new_refs(text: &str) -> String {
-    let upper = text.to_uppercase();
+    let chars: Vec<char> = text.chars().collect();
     let mut result = String::with_capacity(text.len());
     let mut i = 0;
-    let bytes = text.as_bytes();
 
-    while i < bytes.len() {
+    while i < chars.len() {
         // Check for "NEW." prefix (case insensitive).
-        if i + 4 <= bytes.len() && upper[i..].starts_with("NEW.") {
-            // Check word boundary before.
-            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-                result.push(bytes[i] as char);
-                i += 1;
-                continue;
-            }
-            // Find the end of the identifier after "NEW.".
-            let start = i + 4;
-            let mut end = start;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
-            }
-            if end > start {
-                result.push_str("NULL");
-                i = end;
-                continue;
+        if i + 4 <= chars.len() {
+            let window: String = chars[i..i + 4].iter().collect();
+            if window.eq_ignore_ascii_case("NEW.") {
+                if i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_') {
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                // Find the end of the identifier after "NEW.".
+                let start = i + 4;
+                let mut end = start;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                if end > start {
+                    result.push_str("NULL");
+                    i = end;
+                    continue;
+                }
             }
         }
-        result.push(bytes[i] as char);
+        result.push(chars[i]);
         i += 1;
     }
     result

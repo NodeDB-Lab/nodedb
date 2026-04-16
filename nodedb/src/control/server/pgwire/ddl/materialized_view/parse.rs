@@ -50,16 +50,11 @@ pub fn parse_create_mv(sql: &str) -> PgWireResult<(String, String, String, Strin
         .ok_or_else(|| sqlstate_error("42601", "expected AS SELECT ... clause"))?;
     let query_start = after_on_start + as_pos + KW_AS.len();
 
-    // Find end of query: WITH clause or end of string.
-    let remaining = &upper[query_start..];
-    let with_pos = remaining.find(" WITH").or_else(|| {
-        if remaining.trim_start().starts_with("WITH") {
-            Some(0)
-        } else {
-            None
-        }
-    });
-    let query_end = with_pos.map(|p| query_start + p).unwrap_or(sql.len());
+    // Find end of query: a trailing `WITH (...)` options clause, or end of string.
+    // We must not match a CTE `WITH cte AS (...)` inside the SELECT body.
+    // The options clause is always `WITH (` — a CTE `WITH` is followed by
+    // an identifier, never `(`.
+    let query_end = find_trailing_with_options(&upper, query_start).unwrap_or(sql.len());
     let query_sql = sql[query_start..query_end].trim().to_string();
 
     if query_sql.is_empty() {
@@ -69,6 +64,35 @@ pub fn parse_create_mv(sql: &str) -> PgWireResult<(String, String, String, Strin
     let refresh_mode = extract_refresh_mode(&upper, sql);
 
     Ok((name, source, query_sql, refresh_mode))
+}
+
+/// Find a trailing `WITH (...)` options clause that is NOT a CTE.
+///
+/// Scans backward from the end of the string for `WITH` followed (after
+/// optional whitespace) by `(`. CTE syntax is `WITH <name> AS (...)` — the
+/// word after `WITH` is an identifier, not `(`.
+fn find_trailing_with_options(upper: &str, query_start: usize) -> Option<usize> {
+    let region = &upper[query_start..];
+    // Search backward for the last " WITH" or "WITH" that is followed by "(".
+    let mut search_end = region.len();
+    loop {
+        let pos = region[..search_end].rfind("WITH")?;
+        // Verify word boundary before WITH.
+        if pos > 0 {
+            let before = region.as_bytes()[pos - 1];
+            if before.is_ascii_alphanumeric() || before == b'_' {
+                search_end = pos;
+                continue;
+            }
+        }
+        // Check that WITH is followed by `(` (possibly with whitespace).
+        let after_with = region[pos + 4..].trim_start();
+        if after_with.starts_with('(') {
+            return Some(query_start + pos);
+        }
+        // This WITH is a CTE or identifier — keep searching backward.
+        search_end = pos;
+    }
 }
 
 /// Extract refresh mode from WITH clause.

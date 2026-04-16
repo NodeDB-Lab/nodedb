@@ -29,21 +29,23 @@ pub(super) fn validate_subquery_pattern(check_sql: &str) -> PgWireResult<()> {
 
 /// Strip `NEW.` prefix for validation parsing.
 pub(super) fn strip_new_prefix_for_validation(sql: &str) -> String {
-    let upper = sql.to_uppercase();
-    let bytes = sql.as_bytes();
+    let chars: Vec<char> = sql.chars().collect();
     let mut result = String::with_capacity(sql.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if i + 4 <= bytes.len() && upper[i..].starts_with("NEW.") {
-            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-                result.push(bytes[i] as char);
-                i += 1;
+    while i < chars.len() {
+        if i + 4 <= chars.len() {
+            let window: String = chars[i..i + 4].iter().collect();
+            if window.eq_ignore_ascii_case("NEW.") {
+                if i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_') {
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                i += 4;
                 continue;
             }
-            i += 4;
-            continue;
         }
-        result.push(bytes[i] as char);
+        result.push(chars[i]);
         i += 1;
     }
     result
