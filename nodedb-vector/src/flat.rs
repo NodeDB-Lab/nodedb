@@ -105,6 +105,21 @@ impl FlatIndex {
 
     /// Search with a pre-filter bitmap (byte-array format).
     pub fn search_filtered(&self, query: &[f32], top_k: usize, bitmap: &[u8]) -> Vec<SearchResult> {
+        self.search_filtered_offset(query, top_k, bitmap, 0)
+    }
+
+    /// Search with a pre-filter bitmap applying a global id offset.
+    ///
+    /// The bitmap is interpreted in a shifted id space: bit `i + id_offset`
+    /// tests local id `i`. Used by multi-segment collections where the
+    /// bitmap holds GLOBAL vector ids.
+    pub fn search_filtered_offset(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        bitmap: &[u8],
+        id_offset: u32,
+    ) -> Vec<SearchResult> {
         assert_eq!(query.len(), self.dim);
         let n = self.len();
         if n == 0 || top_k == 0 {
@@ -116,8 +131,9 @@ impl FlatIndex {
             if self.deleted[i] {
                 continue;
             }
-            let byte_idx = i / 8;
-            let bit_idx = i % 8;
+            let global = i + id_offset as usize;
+            let byte_idx = global / 8;
+            let bit_idx = global % 8;
             if byte_idx >= bitmap.len() || (bitmap[byte_idx] & (1 << bit_idx)) == 0 {
                 continue;
             }
@@ -160,12 +176,45 @@ impl FlatIndex {
 
     pub fn get_vector(&self, id: u32) -> Option<&[f32]> {
         let idx = id as usize;
+        if idx < self.deleted.len() && !self.deleted[idx] {
+            let start = idx * self.dim;
+            Some(&self.data[start..start + self.dim])
+        } else {
+            None
+        }
+    }
+
+    /// Raw access bypassing tombstone filter — used by snapshot/restore.
+    pub fn get_vector_raw(&self, id: u32) -> Option<&[f32]> {
+        let idx = id as usize;
         if idx < self.deleted.len() {
             let start = idx * self.dim;
             Some(&self.data[start..start + self.dim])
         } else {
             None
         }
+    }
+
+    /// Whether the given local id has been tombstoned.
+    pub fn is_deleted(&self, id: u32) -> bool {
+        let idx = id as usize;
+        idx < self.deleted.len() && self.deleted[idx]
+    }
+
+    /// Insert a vector that is already tombstoned (for checkpoint restore).
+    pub fn insert_tombstoned(&mut self, vector: Vec<f32>) -> u32 {
+        assert_eq!(
+            vector.len(),
+            self.dim,
+            "dimension mismatch: expected {}, got {}",
+            self.dim,
+            vector.len()
+        );
+        let id = self.len() as u32;
+        self.data.extend_from_slice(&vector);
+        self.deleted.push(true);
+        // No live_count increment — it's dead on arrival.
+        id
     }
 
     pub fn dim(&self) -> usize {
