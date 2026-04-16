@@ -3994,6 +3994,7 @@ dependencies = [
  "aes-gcm",
  "crc32c",
  "fluxbench",
+ "getrandom 0.3.4",
  "io-uring",
  "libc",
  "memmap2",

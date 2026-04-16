@@ -176,7 +176,7 @@ pub fn read_encrypted_segment(
     if let Some(key) = key {
         let mut aad = [0u8; nodedb_wal::record::HEADER_SIZE];
         aad[..4].copy_from_slice(b"SEGM");
-        key.decrypt(footer.min_lsn.as_u64(), &aad, data)
+        key.decrypt(key.epoch(), footer.min_lsn.as_u64(), &aad, data)
             .map_err(|e| crate::Error::Storage {
                 engine: "segment".into(),
                 detail: format!("segment decryption failed: {e}"),

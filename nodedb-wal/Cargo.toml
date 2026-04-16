@@ -21,6 +21,7 @@ libc = { workspace = true }
 memmap2 = { workspace = true }
 io-uring = { workspace = true, optional = true }
 aes-gcm = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

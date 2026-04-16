@@ -49,65 +49,67 @@ impl MmapWalReader {
     pub fn next_record(&mut self) -> Result<Option<WalRecord>> {
         let data = &self.mmap[..];
 
-        // Check if we have enough bytes for a header.
-        if self.offset + HEADER_SIZE > data.len() {
-            return Ok(None);
-        }
-
-        // Parse header.
-        let header_bytes: &[u8; HEADER_SIZE] = data[self.offset..self.offset + HEADER_SIZE]
-            .try_into()
-            .map_err(|_| {
-                WalError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "header slice conversion failed",
-                ))
-            })?;
-        let header = RecordHeader::from_bytes(header_bytes);
-
-        // Validate magic — corruption or end of valid data.
-        if header.magic != WAL_MAGIC {
-            return Ok(None);
-        }
-
-        // Validate version.
-        if header.validate(self.offset as u64).is_err() {
-            return Ok(None);
-        }
-
-        let payload_len = header.payload_len as usize;
-        let record_end = self.offset + HEADER_SIZE + payload_len;
-
-        // Check if payload is fully within the mmap'd region.
-        if record_end > data.len() {
-            return Ok(None); // Torn write at segment end.
-        }
-
-        // Extract payload (copies from mmap to owned Vec).
-        let payload = data[self.offset + HEADER_SIZE..record_end].to_vec();
-        self.offset = record_end;
-
-        let record = WalRecord { header, payload };
-
-        // Verify checksum.
-        if record.verify_checksum().is_err() {
-            return Ok(None); // Corruption — end of committed prefix.
-        }
-
-        // Check record type.
-        let logical_type = record.logical_record_type();
-        if RecordType::from_raw(logical_type).is_none() {
-            if RecordType::is_required(logical_type) {
-                return Err(WalError::UnknownRequiredRecordType {
-                    record_type: header.record_type,
-                    lsn: header.lsn,
-                });
+        loop {
+            // Check if we have enough bytes for a header.
+            if self.offset + HEADER_SIZE > data.len() {
+                return Ok(None);
             }
-            // Unknown optional record — skip and continue.
-            return self.next_record();
-        }
 
-        Ok(Some(record))
+            // Parse header.
+            let header_bytes: &[u8; HEADER_SIZE] = data[self.offset..self.offset + HEADER_SIZE]
+                .try_into()
+                .map_err(|_| {
+                    WalError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "header slice conversion failed",
+                    ))
+                })?;
+            let header = RecordHeader::from_bytes(header_bytes);
+
+            // Validate magic — corruption or end of valid data.
+            if header.magic != WAL_MAGIC {
+                return Ok(None);
+            }
+
+            // Validate version.
+            if header.validate(self.offset as u64).is_err() {
+                return Ok(None);
+            }
+
+            let payload_len = header.payload_len as usize;
+            let record_end = self.offset + HEADER_SIZE + payload_len;
+
+            // Check if payload is fully within the mmap'd region.
+            if record_end > data.len() {
+                return Ok(None); // Torn write at segment end.
+            }
+
+            // Extract payload (copies from mmap to owned Vec).
+            let payload = data[self.offset + HEADER_SIZE..record_end].to_vec();
+            self.offset = record_end;
+
+            let record = WalRecord { header, payload };
+
+            // Verify checksum.
+            if record.verify_checksum().is_err() {
+                return Ok(None); // Corruption — end of committed prefix.
+            }
+
+            // Check record type.
+            let logical_type = record.logical_record_type();
+            if RecordType::from_raw(logical_type).is_none() {
+                if RecordType::is_required(logical_type) {
+                    return Err(WalError::UnknownRequiredRecordType {
+                        record_type: header.record_type,
+                        lsn: header.lsn,
+                    });
+                }
+                // Unknown optional record — skip and continue loop.
+                continue;
+            }
+
+            return Ok(Some(record));
+        }
     }
 
     /// Iterator over all valid records in the mmap'd segment.

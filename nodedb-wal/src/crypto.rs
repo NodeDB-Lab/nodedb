@@ -4,7 +4,8 @@
 //! - Header stays plaintext (needed for recovery scanning — magic, lsn, tenant_id)
 //! - Payload is encrypted before CRC computation
 //! - CRC covers the ciphertext (detects corruption of encrypted data)
-//! - Nonce derived from LSN (deterministic — no extra storage, enables replay)
+//! - Nonce = `[4-byte random epoch][8-byte LSN]` — epoch is generated per WAL
+//!   lifetime to prevent nonce reuse after snapshot restore or WAL truncation
 //! - Additional Authenticated Data (AAD) = header bytes (binds ciphertext to its header)
 //!
 //! On-disk format for encrypted payload:
@@ -19,17 +20,27 @@ use aes_gcm::aead::{Aead, KeyInit};
 use crate::error::{Result, WalError};
 use crate::record::HEADER_SIZE;
 
-/// AES-256-GCM key: exactly 32 bytes.
+/// AES-256-GCM key with a random per-lifetime epoch for nonce disambiguation.
+///
+/// The epoch is generated randomly at construction time. Each WAL lifetime
+/// (process start, snapshot restore, segment creation) gets a fresh epoch,
+/// ensuring that nonces are never reused even if LSNs restart from 1.
 #[derive(Clone)]
 pub struct WalEncryptionKey {
     cipher: Aes256Gcm,
+    /// Random 4-byte epoch: occupies the high 4 bytes of the 12-byte nonce.
+    /// Disambiguates nonces across WAL lifetimes with the same key.
+    epoch: [u8; 4],
 }
 
 impl WalEncryptionKey {
-    /// Create from a 32-byte key.
+    /// Create from a 32-byte key with a fresh random epoch.
     pub fn from_bytes(key: &[u8; 32]) -> Self {
+        let mut epoch = [0u8; 4];
+        getrandom::fill(&mut epoch).expect("getrandom failed");
         Self {
             cipher: Aes256Gcm::new(key.into()),
+            epoch,
         }
     }
 
@@ -60,7 +71,7 @@ impl WalEncryptionKey {
         header_bytes: &[u8; HEADER_SIZE],
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
-        let nonce = lsn_to_nonce(lsn);
+        let nonce = lsn_to_nonce(&self.epoch, lsn);
         self.cipher
             .encrypt(
                 &nonce,
@@ -74,18 +85,25 @@ impl WalEncryptionKey {
             })
     }
 
+    /// The random epoch for this key instance.
+    pub fn epoch(&self) -> &[u8; 4] {
+        &self.epoch
+    }
+
     /// Decrypt a payload. Input is ciphertext + auth_tag (16 bytes at end).
     ///
+    /// - `epoch`: the epoch that was used during encryption (from the segment header)
     /// - `lsn`: must match the LSN used during encryption
     /// - `header_bytes`: must match the header used during encryption (AAD)
     /// - `ciphertext`: the encrypted payload (includes 16-byte auth tag)
     pub fn decrypt(
         &self,
+        epoch: &[u8; 4],
         lsn: u64,
         header_bytes: &[u8; HEADER_SIZE],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
-        let nonce = lsn_to_nonce(lsn);
+        let nonce = lsn_to_nonce(epoch, lsn);
         self.cipher
             .decrypt(
                 &nonce,
@@ -140,27 +158,23 @@ impl KeyRing {
 
     /// Decrypt: try current key first, then previous (if set).
     ///
+    /// `epoch` is the encryption epoch stored in the WAL segment header.
     /// This enables seamless key rotation — old data encrypted with the
     /// previous key can still be read while new data uses the current key.
     pub fn decrypt(
         &self,
+        epoch: &[u8; 4],
         lsn: u64,
         header_bytes: &[u8; HEADER_SIZE],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
-        match self.current.decrypt(lsn, header_bytes, ciphertext) {
-            Ok(plaintext) => Ok(plaintext),
-            Err(_) if self.previous.is_some() => {
-                // Current key failed — try previous key.
-                if let Some(prev) = self.previous.as_ref() {
-                    prev.decrypt(lsn, header_bytes, ciphertext)
-                } else {
-                    Err(crate::error::WalError::EncryptionError {
-                        detail: "key rotation state inconsistent".into(),
-                    })
-                }
-            }
-            Err(e) => Err(e),
+        match (
+            self.current.decrypt(epoch, lsn, header_bytes, ciphertext),
+            self.previous.as_ref(),
+        ) {
+            (Ok(plaintext), _) => Ok(plaintext),
+            (Err(_), Some(prev)) => prev.decrypt(epoch, lsn, header_bytes, ciphertext),
+            (Err(e), None) => Err(e),
         }
     }
 
@@ -183,14 +197,16 @@ impl KeyRing {
 /// AES-256-GCM auth tag size in bytes.
 pub const AUTH_TAG_SIZE: usize = 16;
 
-/// Derive a 12-byte nonce from an LSN.
+/// Derive a 12-byte nonce from an epoch and LSN.
 ///
-/// AES-256-GCM requires a 96-bit (12 byte) nonce. Since LSNs are monotonically
-/// increasing and globally unique, they make ideal deterministic nonces.
-/// We zero-pad the 8-byte LSN to 12 bytes.
-fn lsn_to_nonce(lsn: u64) -> aes_gcm::Nonce<aes_gcm::aead::consts::U12> {
+/// AES-256-GCM requires a 96-bit (12 byte) nonce that must never repeat
+/// for the same key. Layout: `[4-byte random epoch][8-byte LSN]`.
+/// The epoch is generated randomly per WAL lifetime, so even if LSNs
+/// restart from 1 after a snapshot restore, the nonces remain unique.
+fn lsn_to_nonce(epoch: &[u8; 4], lsn: u64) -> aes_gcm::Nonce<aes_gcm::aead::consts::U12> {
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..8].copy_from_slice(&lsn.to_le_bytes());
+    nonce_bytes[..4].copy_from_slice(epoch);
+    nonce_bytes[4..12].copy_from_slice(&lsn.to_le_bytes());
     nonce_bytes.into()
 }
 
@@ -211,6 +227,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let key = test_key();
+        let epoch = key.epoch().clone();
         let header = test_header(1);
         let plaintext = b"hello nodedb encryption";
 
@@ -218,43 +235,47 @@ mod tests {
         assert_ne!(&ciphertext[..plaintext.len()], plaintext);
         assert_eq!(ciphertext.len(), plaintext.len() + AUTH_TAG_SIZE);
 
-        let decrypted = key.decrypt(1, &header, &ciphertext).unwrap();
+        let decrypted = key.decrypt(&epoch, 1, &header, &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
     #[test]
     fn wrong_key_fails() {
         let key1 = WalEncryptionKey::from_bytes(&[0x01; 32]);
+        let epoch1 = key1.epoch().clone();
         let key2 = WalEncryptionKey::from_bytes(&[0x02; 32]);
         let header = test_header(1);
 
         let ciphertext = key1.encrypt(1, &header, b"secret").unwrap();
-        assert!(key2.decrypt(1, &header, &ciphertext).is_err());
+        assert!(key2.decrypt(&epoch1, 1, &header, &ciphertext).is_err());
     }
 
     #[test]
     fn wrong_lsn_fails() {
         let key = test_key();
+        let epoch = key.epoch().clone();
         let header = test_header(1);
 
         let ciphertext = key.encrypt(1, &header, b"secret").unwrap();
         // Different LSN = different nonce = decryption fails.
-        assert!(key.decrypt(2, &header, &ciphertext).is_err());
+        assert!(key.decrypt(&epoch, 2, &header, &ciphertext).is_err());
     }
 
     #[test]
     fn tampered_ciphertext_fails() {
         let key = test_key();
+        let epoch = key.epoch().clone();
         let header = test_header(1);
 
         let mut ciphertext = key.encrypt(1, &header, b"secret").unwrap();
         ciphertext[0] ^= 0xFF;
-        assert!(key.decrypt(1, &header, &ciphertext).is_err());
+        assert!(key.decrypt(&epoch, 1, &header, &ciphertext).is_err());
     }
 
     #[test]
     fn tampered_header_fails() {
         let key = test_key();
+        let epoch = key.epoch().clone();
         let header1 = test_header(1);
 
         let ciphertext = key.encrypt(1, &header1, b"secret").unwrap();
@@ -262,18 +283,19 @@ mod tests {
         // Tamper the AAD (header).
         let mut header2 = header1;
         header2[0] = 0xFF;
-        assert!(key.decrypt(1, &header2, &ciphertext).is_err());
+        assert!(key.decrypt(&epoch, 1, &header2, &ciphertext).is_err());
     }
 
     #[test]
     fn empty_payload() {
         let key = test_key();
+        let epoch = key.epoch().clone();
         let header = test_header(1);
 
         let ciphertext = key.encrypt(1, &header, b"").unwrap();
         assert_eq!(ciphertext.len(), AUTH_TAG_SIZE); // Just the tag.
 
-        let decrypted = key.decrypt(1, &header, &ciphertext).unwrap();
+        let decrypted = key.decrypt(&epoch, 1, &header, &ciphertext).unwrap();
         assert!(decrypted.is_empty());
     }
 
@@ -285,5 +307,28 @@ mod tests {
         let ct1 = key.encrypt(1, &test_header(1), plaintext).unwrap();
         let ct2 = key.encrypt(2, &test_header(2), plaintext).unwrap();
         assert_ne!(ct1, ct2);
+    }
+
+    #[test]
+    fn same_lsn_different_wal_lifetimes_produce_different_ciphertext() {
+        // Simulate two WAL lifetimes: same key bytes, same LSN=1, but
+        // separate WalEncryptionKey instances (each gets a fresh random epoch).
+        // This models: write at LSN=1, wipe WAL, restart with same key,
+        // write at LSN=1 again. The two ciphertexts must differ.
+        let key_bytes = [0x42u8; 32];
+        let key1 = WalEncryptionKey::from_bytes(&key_bytes);
+        let key2 = WalEncryptionKey::from_bytes(&key_bytes);
+        let header = test_header(1);
+        let pt = b"same plaintext in two wal lifetimes";
+
+        let ct1 = key1.encrypt(1, &header, pt).unwrap();
+        let ct2 = key2.encrypt(1, &header, pt).unwrap();
+
+        // SPEC: different WAL lifetimes (different epochs) must produce
+        // different ciphertext even with the same key bytes and LSN.
+        assert_ne!(
+            ct1, ct2,
+            "nonce reuse: same (key_bytes, lsn) must not produce identical ciphertext across WAL lifetimes"
+        );
     }
 }

@@ -316,25 +316,32 @@ impl WalWriter {
             self.buffer.as_slice()
         };
 
-        // Use pwrite to write at the exact offset.
+        // Use pwrite to write at the exact offset, retrying on short writes.
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
             let fd = self.file.as_raw_fd();
-            let written = unsafe {
-                libc::pwrite(
-                    fd,
-                    data.as_ptr() as *const libc::c_void,
-                    data.len(),
-                    self.file_offset as libc::off_t,
-                )
-            };
-            if written < 0 {
-                return Err(WalError::Io(std::io::Error::last_os_error()));
+            let mut remaining = data;
+            let mut write_offset = self.file_offset;
+            while !remaining.is_empty() {
+                let written = unsafe {
+                    libc::pwrite(
+                        fd,
+                        remaining.as_ptr() as *const libc::c_void,
+                        remaining.len(),
+                        write_offset as libc::off_t,
+                    )
+                };
+                if written < 0 {
+                    return Err(WalError::Io(std::io::Error::last_os_error()));
+                }
+                let n = written as usize;
+                remaining = &remaining[n..];
+                write_offset += n as u64;
             }
         }
 
-        self.file_offset += self.buffer.len() as u64;
+        self.file_offset += data.len() as u64;
         self.buffer.clear();
         Ok(())
     }

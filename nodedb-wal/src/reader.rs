@@ -53,72 +53,69 @@ impl WalReader {
     /// Returns `None` at EOF (clean end) or at the first corruption point.
     /// Returns `Err` only for I/O errors or unknown required record types.
     pub fn next_record(&mut self) -> Result<Option<WalRecord>> {
-        // Read header.
-        let mut header_buf = [0u8; HEADER_SIZE];
-        match self.read_exact(&mut header_buf) {
-            Ok(()) => {}
-            Err(WalError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // Clean EOF.
-            }
-            Err(e) => return Err(e),
-        }
-
-        let header = RecordHeader::from_bytes(&header_buf);
-
-        // Validate magic and version.
-        if header.validate(self.offset - HEADER_SIZE as u64).is_err() {
-            // Corruption or end of valid data — treat as end of committed prefix.
-            return Ok(None);
-        }
-
-        // Read payload.
-        let mut payload = vec![0u8; header.payload_len as usize];
-        if !payload.is_empty() {
-            match self.read_exact(&mut payload) {
+        loop {
+            // Read header.
+            let mut header_buf = [0u8; HEADER_SIZE];
+            match self.read_exact(&mut header_buf) {
                 Ok(()) => {}
                 Err(WalError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Torn write — record is incomplete. This is the end of committed prefix.
-                    return Ok(None);
+                    return Ok(None); // Clean EOF.
                 }
                 Err(e) => return Err(e),
             }
-        }
 
-        let record = WalRecord { header, payload };
+            let header = RecordHeader::from_bytes(&header_buf);
 
-        // Verify checksum.
-        if record.verify_checksum().is_err() {
-            // Checksum mismatch — torn write or corruption.
-            // Try to recover from double-write buffer if available.
-            if let Some(dwb) = &mut self.double_write
-                && let Ok(Some(recovered)) = dwb.recover_record(header.lsn)
-            {
-                tracing::info!(
-                    lsn = header.lsn,
-                    "recovered torn write from double-write buffer"
-                );
-                self.offset += recovered.payload.len() as u64;
-                return Ok(Some(recovered));
+            // Validate magic and version.
+            if header.validate(self.offset - HEADER_SIZE as u64).is_err() {
+                // Corruption or end of valid data — treat as end of committed prefix.
+                return Ok(None);
             }
-            // No DWB recovery possible — end of committed prefix.
-            return Ok(None);
-        }
 
-        // Check if the record type is known (strip encrypted flag for lookup).
-        let logical_type = record.logical_record_type();
-        if RecordType::from_raw(logical_type).is_none() {
-            if RecordType::is_required(logical_type) {
-                return Err(WalError::UnknownRequiredRecordType {
-                    record_type: header.record_type,
-                    lsn: header.lsn,
-                });
+            // Read payload.
+            let mut payload = vec![0u8; header.payload_len as usize];
+            if !payload.is_empty() {
+                match self.read_exact(&mut payload) {
+                    Ok(()) => {}
+                    Err(WalError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            // Unknown optional record — skip it and continue.
-            // (The record is already consumed, so just recurse.)
-            return self.next_record();
-        }
 
-        Ok(Some(record))
+            let record = WalRecord { header, payload };
+
+            // Verify checksum.
+            if record.verify_checksum().is_err() {
+                if let Some(dwb) = &mut self.double_write
+                    && let Ok(Some(recovered)) = dwb.recover_record(header.lsn)
+                {
+                    tracing::info!(
+                        lsn = header.lsn,
+                        "recovered torn write from double-write buffer"
+                    );
+                    self.offset += recovered.payload.len() as u64;
+                    return Ok(Some(recovered));
+                }
+                return Ok(None);
+            }
+
+            // Check if the record type is known (strip encrypted flag for lookup).
+            let logical_type = record.logical_record_type();
+            if RecordType::from_raw(logical_type).is_none() {
+                if RecordType::is_required(logical_type) {
+                    return Err(WalError::UnknownRequiredRecordType {
+                        record_type: header.record_type,
+                        lsn: header.lsn,
+                    });
+                }
+                // Unknown optional record — skip and continue loop.
+                continue;
+            }
+
+            return Ok(Some(record));
+        }
     }
 
     /// Iterator over all valid records in the WAL.
@@ -245,5 +242,40 @@ mod tests {
         let records: Vec<_> = reader.records().collect::<Result<_>>().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].payload, b"good-record");
+    }
+
+    #[test]
+    fn skip_many_unknown_optional_records_is_iterative() {
+        // Record type 99 has bit 15 clear (99 & 0x8000 == 0) and is not a
+        // known variant, so the reader must skip it as an unknown optional.
+        // With the current recursive implementation (line 118: `return
+        // self.next_record()`), 50 000 consecutive unknown optional records
+        // exhaust the stack and panic. After the fix converts the skip to a
+        // loop, all 50 000 are skipped without overflow and the one valid
+        // record at the end is returned.
+        const UNKNOWN_OPTIONAL: u16 = 99; // no 0x8000 bit → optional, not in enum
+        const SKIP_COUNT: usize = 50_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many_unknown.wal");
+
+        {
+            let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
+            for _ in 0..SKIP_COUNT {
+                writer.append(UNKNOWN_OPTIONAL, 1, 0, b"skip-me").unwrap();
+            }
+            writer
+                .append(RecordType::Put as u16, 1, 0, b"keep-me")
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let reader = WalReader::open(&path).unwrap();
+        let records: Vec<_> = reader.records().collect::<Result<_>>().unwrap();
+
+        // Only the single known Put record survives; all unknown optional
+        // records are silently discarded.
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].payload, b"keep-me");
     }
 }

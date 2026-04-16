@@ -263,9 +263,11 @@ impl WalRecord {
 
     /// Decrypt the payload if the record is encrypted.
     ///
+    /// `epoch` is the encryption epoch from the WAL segment header.
     /// Returns the plaintext payload. If not encrypted, returns the payload as-is.
     pub fn decrypt_payload(
         &self,
+        epoch: &[u8; 4],
         encryption_key: Option<&crate::crypto::WalEncryptionKey>,
     ) -> Result<Vec<u8>> {
         if !self.is_encrypted() {
@@ -284,14 +286,19 @@ impl WalRecord {
         aad_header.crc32c = 0;
         let header_bytes = aad_header.to_bytes();
 
-        key.decrypt(self.header.lsn, &header_bytes, &self.payload)
+        key.decrypt(epoch, self.header.lsn, &header_bytes, &self.payload)
     }
 
     /// Decrypt the payload using a key ring (supports dual-key rotation).
     ///
+    /// `epoch` is the encryption epoch from the WAL segment header.
     /// Tries the current key first, then falls back to the previous key.
     /// Returns the plaintext payload. If not encrypted, returns the payload as-is.
-    pub fn decrypt_payload_ring(&self, ring: Option<&crate::crypto::KeyRing>) -> Result<Vec<u8>> {
+    pub fn decrypt_payload_ring(
+        &self,
+        epoch: &[u8; 4],
+        ring: Option<&crate::crypto::KeyRing>,
+    ) -> Result<Vec<u8>> {
         if !self.is_encrypted() {
             return Ok(self.payload.clone());
         }
@@ -306,7 +313,7 @@ impl WalRecord {
         aad_header.crc32c = 0;
         let header_bytes = aad_header.to_bytes();
 
-        ring.decrypt(self.header.lsn, &header_bytes, &self.payload)
+        ring.decrypt(epoch, self.header.lsn, &header_bytes, &self.payload)
     }
 
     /// Whether this record's payload is encrypted.
