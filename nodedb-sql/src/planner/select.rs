@@ -572,25 +572,24 @@ fn try_extract_sort_search(
                     },
                 }));
             }
-            SearchTrigger::TextSearch => {
-                if args.len() >= 2 {
-                    let query_text = extract_string_literal(&args[1])?;
-                    let limit = match plan {
-                        SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
-                        _ => 10,
-                    };
-                    return Ok(Some(SqlPlan::TextSearch {
-                        collection,
-                        query: query_text,
-                        top_k: limit,
-                        fuzzy: true,
-                        filters: match plan {
-                            SqlPlan::Scan { filters, .. } => filters.clone(),
-                            _ => Vec::new(),
-                        },
-                    }));
-                }
+            SearchTrigger::TextSearch if args.len() >= 2 => {
+                let query_text = extract_string_literal(&args[1])?;
+                let limit = match plan {
+                    SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
+                    _ => 10,
+                };
+                return Ok(Some(SqlPlan::TextSearch {
+                    collection,
+                    query: query_text,
+                    top_k: limit,
+                    fuzzy: true,
+                    filters: match plan {
+                        SqlPlan::Scan { filters, .. } => filters.clone(),
+                        _ => Vec::new(),
+                    },
+                }));
             }
+            SearchTrigger::TextSearch => {}
             SearchTrigger::HybridSearch => {
                 return plan_hybrid_from_sort(&args, &collection, plan, functions);
             }

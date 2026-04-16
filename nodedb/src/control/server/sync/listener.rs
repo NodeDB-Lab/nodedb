@@ -316,9 +316,9 @@ async fn handle_sync_session(
                 }
             }
             Ok(Message::Ping(data)) => {
-                if ws.send(Message::Pong(data)).await.is_err() {
+                let Ok(_) = ws.send(Message::Pong(data)).await else {
                     break;
-                }
+                };
             }
             Ok(Message::Close(_)) => break,
             Err(e) => {

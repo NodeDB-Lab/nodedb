@@ -16,8 +16,11 @@
 //!
 //! Determinism validation: rejects `NOW()`, `RANDOM()`, `NEXTVAL()`, `UUID()`.
 
+mod tokenizer;
+
 use super::expr::{BinaryOp, SqlExpr};
 use nodedb_types::Value;
+use tokenizer::{Token, TokenKind, tokenize};
 
 /// Parse a SQL expression string into an SqlExpr AST.
 ///
@@ -46,160 +49,11 @@ pub fn parse_generated_expr(text: &str) -> Result<(SqlExpr, Vec<String>), String
     Ok((expr, deps))
 }
 
-// ── Tokenizer ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct Token {
-    text: String,
-    kind: TokenKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TokenKind {
-    Ident,
-    Number,
-    StringLit,
-    LParen,
-    RParen,
-    Comma,
-    Op,
-}
-
-fn tokenize(input: &str) -> Result<Vec<Token>, String> {
-    let bytes = input.as_bytes();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-
-        // Skip whitespace.
-        if b.is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-
-        // Single-char tokens.
-        if b == b'(' {
-            tokens.push(Token {
-                text: "(".into(),
-                kind: TokenKind::LParen,
-            });
-            i += 1;
-            continue;
-        }
-        if b == b')' {
-            tokens.push(Token {
-                text: ")".into(),
-                kind: TokenKind::RParen,
-            });
-            i += 1;
-            continue;
-        }
-        if b == b',' {
-            tokens.push(Token {
-                text: ",".into(),
-                kind: TokenKind::Comma,
-            });
-            i += 1;
-            continue;
-        }
-
-        // Two-char operators.
-        if i + 1 < bytes.len() {
-            let two = &input[i..i + 2];
-            if matches!(two, "<=" | ">=" | "!=" | "<>") {
-                tokens.push(Token {
-                    text: two.into(),
-                    kind: TokenKind::Op,
-                });
-                i += 2;
-                continue;
-            }
-            if two == "||" {
-                tokens.push(Token {
-                    text: "||".into(),
-                    kind: TokenKind::Op,
-                });
-                i += 2;
-                continue;
-            }
-        }
-
-        // Single-char operators.
-        if matches!(b, b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'<' | b'>') {
-            tokens.push(Token {
-                text: (b as char).to_string(),
-                kind: TokenKind::Op,
-            });
-            i += 1;
-            continue;
-        }
-
-        // String literal.
-        if b == b'\'' {
-            let mut s = String::new();
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\'' {
-                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                        s.push('\'');
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
-                    break;
-                }
-                s.push(bytes[i] as char);
-                i += 1;
-            }
-            tokens.push(Token {
-                text: s,
-                kind: TokenKind::StringLit,
-            });
-            continue;
-        }
-
-        // Number.
-        if b.is_ascii_digit() || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
-        {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                i += 1;
-            }
-            tokens.push(Token {
-                text: input[start..i].to_string(),
-                kind: TokenKind::Number,
-            });
-            continue;
-        }
-
-        // Identifier or keyword.
-        if b.is_ascii_alphabetic() || b == b'_' {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                i += 1;
-            }
-            tokens.push(Token {
-                text: input[start..i].to_string(),
-                kind: TokenKind::Ident,
-            });
-            continue;
-        }
-
-        return Err(format!("unexpected character: '{}'", b as char));
-    }
-
-    Ok(tokens)
-}
-
 // ── Recursive descent parser ──────────────────────────────────────────
 
 /// Maximum recursion depth for nested parentheses / sub-expressions.
-/// Exceeding this limit returns `Err` instead of overflowing the stack.
 const MAX_EXPR_DEPTH: usize = 128;
 
-/// Parse an expression (lowest precedence: OR).
 fn parse_expr(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
     parse_or(tokens, pos, depth)
 }
@@ -304,13 +158,11 @@ fn parse_multiplicative(
 }
 
 fn parse_unary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
-    // Unary minus.
     if *pos < tokens.len() && tokens[*pos].kind == TokenKind::Op && tokens[*pos].text == "-" {
         *pos += 1;
         let expr = parse_primary(tokens, pos, depth)?;
         return Ok(SqlExpr::Negate(Box::new(expr)));
     }
-    // NOT
     if peek_keyword(tokens, *pos, "NOT") {
         *pos += 1;
         let expr = parse_primary(tokens, pos, depth)?;
@@ -327,7 +179,6 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result
     let token = &tokens[*pos];
 
     match token.kind {
-        // Parenthesized expression.
         TokenKind::LParen => {
             *depth += 1;
             if *depth > MAX_EXPR_DEPTH {
@@ -342,7 +193,6 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result
             Ok(expr)
         }
 
-        // Number literal.
         TokenKind::Number => {
             *pos += 1;
             if let Ok(i) = token.text.parse::<i64>() {
@@ -354,13 +204,11 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result
             }
         }
 
-        // String literal.
         TokenKind::StringLit => {
             *pos += 1;
             Ok(SqlExpr::Literal(Value::String(token.text.clone())))
         }
 
-        // Identifier: column ref, function call, keyword (NULL, TRUE, FALSE, CASE, COALESCE).
         TokenKind::Ident => {
             let name = token.text.clone();
             let upper = name.to_uppercase();
@@ -376,7 +224,6 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result
                     Ok(SqlExpr::Coalesce(args))
                 }
                 _ => {
-                    // Function call: IDENT(args).
                     if *pos < tokens.len() && tokens[*pos].kind == TokenKind::LParen {
                         let args = parse_arg_list(tokens, pos, depth)?;
                         Ok(SqlExpr::Function {
@@ -384,7 +231,6 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result
                             args,
                         })
                     } else {
-                        // Column reference.
                         Ok(SqlExpr::Column(name.to_lowercase()))
                     }
                 }
@@ -395,7 +241,6 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result
     }
 }
 
-/// Parse `CASE WHEN cond THEN result [WHEN ... THEN ...] [ELSE result] END`.
 fn parse_case(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
     let mut when_thens = Vec::new();
     let mut else_expr = None;
@@ -429,7 +274,6 @@ fn parse_case(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<Sq
     })
 }
 
-/// Parse a parenthesized, comma-separated argument list: `(expr, expr, ...)`.
 fn parse_arg_list(
     tokens: &[Token],
     pos: &mut usize,
@@ -488,7 +332,6 @@ fn expect_token(
 
 // ── Validation ────────────────────────────────────────────────────────
 
-/// Non-deterministic functions that are rejected in GENERATED ALWAYS AS.
 const NON_DETERMINISTIC: &[&str] = &[
     "now",
     "current_timestamp",
@@ -613,7 +456,6 @@ mod tests {
         assert_eq!(deps, vec!["price", "tax_rate"]);
         let doc = Value::from(serde_json::json!({"price": 100.0, "tax_rate": 0.08}));
         let result = expr.eval(&doc);
-        // eval returns integer when result is whole number.
         assert_eq!(result.as_f64(), Some(108.0));
     }
 
@@ -693,15 +535,27 @@ mod tests {
 
     #[test]
     fn deeply_nested_parentheses_return_error_not_stack_overflow() {
-        // Spec: the parser must enforce a recursion depth limit so that
-        // pathologically deep nesting returns Err rather than overflowing the
-        // call stack and causing a process crash.
         let depth = 10_000;
-        let input = format!("{}x{}", "(".repeat(depth), ")".repeat(depth),);
+        let input = format!("{}x{}", "(".repeat(depth), ")".repeat(depth));
         let result = parse_generated_expr(&input);
         assert!(
             result.is_err(),
-            "parse_generated_expr must return Err for {depth}-deep nesting, not stack overflow"
+            "parse_generated_expr must return Err for {depth}-deep nesting"
         );
+    }
+
+    #[test]
+    fn cjk_string_in_concat() {
+        let (expr, _) = parse_ok("CONCAT('你好', name)");
+        let doc = Value::from(serde_json::json!({"name": "world"}));
+        assert_eq!(expr.eval(&doc), Value::String("你好world".into()));
+    }
+
+    #[test]
+    fn comparison_with_utf8_literal() {
+        let (expr, deps) = parse_ok("name != '禁止'");
+        assert_eq!(deps, vec!["name"]);
+        let doc = Value::from(serde_json::json!({"name": "allowed"}));
+        assert_eq!(expr.eval(&doc), Value::Bool(true));
     }
 }

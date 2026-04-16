@@ -418,17 +418,12 @@ fn chunk_large_response(
     };
     let sample_bytes = codec::encode_response(&sample_resp, format)?;
     let sample_count = total_rows.min(100);
-    let per_row_estimate = if sample_count > 0 {
-        sample_bytes.len() / sample_count
-    } else {
-        256 // fallback
-    };
+    let per_row_estimate = sample_bytes.len().checked_div(sample_count).unwrap_or(256);
 
-    let rows_per_chunk = if per_row_estimate > 0 {
-        (target_size / per_row_estimate).max(1)
-    } else {
-        1000
-    };
+    let rows_per_chunk = target_size
+        .checked_div(per_row_estimate)
+        .map(|v| v.max(1))
+        .unwrap_or(1000);
 
     let mut frames = Vec::new();
     let chunks: Vec<_> = rows.chunks(rows_per_chunk).collect();

@@ -32,14 +32,10 @@ impl ExecutionBudget {
         }
     }
 
-    /// Create an unlimited budget (for triggers with no explicit limits).
-    pub fn unlimited() -> Self {
-        Self {
-            fuel_remaining: u64::MAX,
-            deadline: Instant::now() + std::time::Duration::from_secs(3600),
-            max_iterations: u64::MAX,
-            timeout_secs: 3600,
-        }
+    /// Default budget for trigger bodies. Caps iterations and wall-clock
+    /// time to prevent runaway loops from pinning Control Plane workers.
+    pub fn trigger_default() -> Self {
+        Self::new(100_000, 10)
     }
 
     /// Consume one iteration of fuel. Returns error if exhausted.
@@ -103,8 +99,8 @@ mod tests {
     }
 
     #[test]
-    fn unlimited() {
-        let mut budget = ExecutionBudget::unlimited();
+    fn trigger_default_allows_bounded_loops() {
+        let mut budget = ExecutionBudget::trigger_default();
         for _ in 0..10_000 {
             budget.consume_iteration().unwrap();
         }

@@ -25,6 +25,28 @@ pub use error::{Result, SqlError};
 pub use params::ParamValue;
 pub use types::*;
 
+/// Parse a standalone SQL expression string into an `SqlExpr`.
+///
+/// Used by the DEFAULT expression evaluator to handle arbitrary expressions
+/// (e.g. `upper('x')`, `1 + 2`) that don't match the hard-coded keyword list.
+pub fn parse_expr_string(expr_text: &str) -> Result<SqlExpr> {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = GenericDialect {};
+    let ast_expr = Parser::new(&dialect)
+        .try_with_sql(expr_text)
+        .map_err(|e| SqlError::Parse {
+            detail: e.to_string(),
+        })?
+        .parse_expr()
+        .map_err(|e| SqlError::Parse {
+            detail: e.to_string(),
+        })?;
+
+    resolver::expr::convert_expr(&ast_expr)
+}
+
 use functions::registry::FunctionRegistry;
 use parser::preprocess;
 use parser::statement::{StatementKind, classify, parse_sql};

@@ -259,27 +259,23 @@ async fn handle_scan(cmd: &RespCommand, session: &RespSession, state: &SharedSta
                 i += 2;
             }
             // NodeDB extension: SCAN 0 FILTER <field> = <value>
-            Some(ref flag) if flag == "FILTER" => {
+            Some(ref flag) if flag == "FILTER" && i + 4 <= cmd.argc() => {
                 // Parse simple "field = value" predicate (needs 4 args: FILTER field = value).
-                if i + 4 <= cmd.argc() {
-                    let field = cmd.arg_str(i + 1).unwrap_or("");
-                    let _op = cmd.arg_str(i + 2).unwrap_or(""); // "=" expected
-                    let value = cmd.arg_str(i + 3).unwrap_or("");
-                    let scan_filter = serde_json::json!([{
-                        "field": field,
-                        "op": "eq",
-                        "value": value,
-                    }]);
-                    match nodedb_types::json_to_msgpack(&scan_filter) {
-                        Ok(bytes) => filter_bytes = bytes,
-                        Err(_) => {
-                            return RespValue::err("ERR filter serialization failed");
-                        }
+                let field = cmd.arg_str(i + 1).unwrap_or("");
+                let _op = cmd.arg_str(i + 2).unwrap_or(""); // "=" expected
+                let value = cmd.arg_str(i + 3).unwrap_or("");
+                let scan_filter = serde_json::json!([{
+                    "field": field,
+                    "op": "eq",
+                    "value": value,
+                }]);
+                match nodedb_types::json_to_msgpack(&scan_filter) {
+                    Ok(bytes) => filter_bytes = bytes,
+                    Err(_) => {
+                        return RespValue::err("ERR filter serialization failed");
                     }
-                    i += 4;
-                } else {
-                    i += 1;
                 }
+                i += 4;
             }
             _ => {
                 i += 1;

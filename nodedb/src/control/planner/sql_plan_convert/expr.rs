@@ -6,13 +6,36 @@ use super::value::sql_value_to_nodedb_value;
 
 /// Convert a `nodedb_sql::types::SqlExpr` (parser AST) to a
 /// `nodedb_query::expr::SqlExpr` (bridge evaluation type).
+///
+/// Column references use the **bare** name (no table qualifier) for
+/// single-collection evaluation contexts (WHERE, CHECK, GENERATED).
+/// For join contexts where the merged document uses qualified keys
+/// (`"t1.col"`), use [`sql_expr_to_bridge_expr_qualified`] instead.
 pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eval::SqlExpr {
+    convert_expr_inner(expr, false)
+}
+
+/// Like [`sql_expr_to_bridge_expr`] but qualifies column references
+/// with their table name (`t.col` → `"t.col"`) for join merged docs.
+pub(super) fn sql_expr_to_bridge_expr_qualified(
+    expr: &SqlExpr,
+) -> crate::bridge::expr_eval::SqlExpr {
+    convert_expr_inner(expr, true)
+}
+
+fn convert_expr_inner(expr: &SqlExpr, qualify: bool) -> crate::bridge::expr_eval::SqlExpr {
     use crate::bridge::expr_eval::SqlExpr as BExpr;
     match expr {
-        SqlExpr::Column { name, .. } => BExpr::Column(name.clone()),
+        SqlExpr::Column { table, name } => {
+            if qualify {
+                BExpr::Column(nodedb_sql::planner::qualified_name(table.as_deref(), name))
+            } else {
+                BExpr::Column(name.clone())
+            }
+        }
         SqlExpr::Literal(v) => BExpr::Literal(sql_value_to_nodedb_value(v)),
         SqlExpr::BinaryOp { left, op, right } => BExpr::BinaryOp {
-            left: Box::new(sql_expr_to_bridge_expr(left)),
+            left: Box::new(convert_expr_inner(left, qualify)),
             op: match op {
                 nodedb_sql::types::BinaryOp::Add => crate::bridge::expr_eval::BinaryOp::Add,
                 nodedb_sql::types::BinaryOp::Sub => crate::bridge::expr_eval::BinaryOp::Sub,
@@ -29,11 +52,14 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
                 nodedb_sql::types::BinaryOp::Or => crate::bridge::expr_eval::BinaryOp::Or,
                 nodedb_sql::types::BinaryOp::Concat => crate::bridge::expr_eval::BinaryOp::Concat,
             },
-            right: Box::new(sql_expr_to_bridge_expr(right)),
+            right: Box::new(convert_expr_inner(right, qualify)),
         },
         SqlExpr::Function { name, args, .. } => BExpr::Function {
             name: name.clone(),
-            args: args.iter().map(sql_expr_to_bridge_expr).collect(),
+            args: args
+                .iter()
+                .map(|a| convert_expr_inner(a, qualify))
+                .collect(),
         },
         SqlExpr::Case {
             operand,
@@ -42,14 +68,19 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
         } => BExpr::Case {
             operand: operand
                 .as_ref()
-                .map(|e| Box::new(sql_expr_to_bridge_expr(e))),
+                .map(|e| Box::new(convert_expr_inner(e, qualify))),
             when_thens: when_then
                 .iter()
-                .map(|(w, t)| (sql_expr_to_bridge_expr(w), sql_expr_to_bridge_expr(t)))
+                .map(|(w, t)| {
+                    (
+                        convert_expr_inner(w, qualify),
+                        convert_expr_inner(t, qualify),
+                    )
+                })
                 .collect(),
             else_expr: else_expr
                 .as_ref()
-                .map(|e| Box::new(sql_expr_to_bridge_expr(e))),
+                .map(|e| Box::new(convert_expr_inner(e, qualify))),
         },
         SqlExpr::Cast { expr, to_type } => {
             let cast_type = match to_type.to_uppercase().as_str() {
@@ -63,18 +94,18 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
                 _ => crate::bridge::expr_eval::CastType::String,
             };
             BExpr::Cast {
-                expr: Box::new(sql_expr_to_bridge_expr(expr)),
+                expr: Box::new(convert_expr_inner(expr, qualify)),
                 to_type: cast_type,
             }
         }
         SqlExpr::Wildcard => BExpr::Column("*".into()),
 
         // NOT e / -e → evaluator's Negate (handles both bool and numeric).
-        SqlExpr::UnaryOp { expr, .. } => BExpr::Negate(Box::new(sql_expr_to_bridge_expr(expr))),
+        SqlExpr::UnaryOp { expr, .. } => BExpr::Negate(Box::new(convert_expr_inner(expr, qualify))),
 
         // `e IS NULL` / `e IS NOT NULL` — direct passthrough.
         SqlExpr::IsNull { expr, negated } => BExpr::IsNull {
-            expr: Box::new(sql_expr_to_bridge_expr(expr)),
+            expr: Box::new(convert_expr_inner(expr, qualify)),
             negated: *negated,
         },
 
@@ -87,9 +118,9 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
             high,
             negated,
         } => {
-            let e = sql_expr_to_bridge_expr(expr);
-            let l = sql_expr_to_bridge_expr(low);
-            let h = sql_expr_to_bridge_expr(high);
+            let e = convert_expr_inner(expr, qualify);
+            let l = convert_expr_inner(low, qualify);
+            let h = convert_expr_inner(high, qualify);
             if *negated {
                 let lt = BExpr::BinaryOp {
                     left: Box::new(e.clone()),
@@ -134,7 +165,7 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
             list,
             negated,
         } => {
-            let target = sql_expr_to_bridge_expr(expr);
+            let target = convert_expr_inner(expr, qualify);
             if list.is_empty() {
                 // Empty list: `e IN ()` = false, `e NOT IN ()` = true.
                 return BExpr::Literal(nodedb_types::Value::Bool(*negated));
@@ -157,7 +188,7 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
                 .map(|item| BExpr::BinaryOp {
                     left: Box::new(target.clone()),
                     op: eq_op,
-                    right: Box::new(sql_expr_to_bridge_expr(item)),
+                    right: Box::new(convert_expr_inner(item, qualify)),
                 })
                 .reduce(|acc, next| BExpr::BinaryOp {
                     left: Box::new(acc),
@@ -178,8 +209,8 @@ pub(super) fn sql_expr_to_bridge_expr(expr: &SqlExpr) -> crate::bridge::expr_eva
             let call = BExpr::Function {
                 name: "like".into(),
                 args: vec![
-                    sql_expr_to_bridge_expr(expr),
-                    sql_expr_to_bridge_expr(pattern),
+                    convert_expr_inner(expr, qualify),
+                    convert_expr_inner(pattern, qualify),
                 ],
             };
             if *negated {

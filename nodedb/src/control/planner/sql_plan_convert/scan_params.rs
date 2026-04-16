@@ -26,11 +26,24 @@ pub(super) struct JoinPlanParams<'a> {
     pub right: &'a SqlPlan,
     pub on: &'a [(String, String)],
     pub join_type: &'a nodedb_sql::types::JoinType,
+    pub condition: &'a Option<nodedb_sql::types::SqlExpr>,
     pub limit: &'a usize,
     pub projection: &'a [Projection],
     pub filters: &'a [Filter],
     pub tenant_id: TenantId,
     pub ctx: &'a ConvertContext,
+}
+
+/// Parameters for `convert_recursive_scan`.
+pub(super) struct RecursiveScanParams<'a> {
+    pub collection: &'a str,
+    pub base_filters: &'a [Filter],
+    pub recursive_filters: &'a [Filter],
+    pub join_link: &'a Option<(String, String)>,
+    pub max_iterations: &'a usize,
+    pub distinct: &'a bool,
+    pub limit: &'a usize,
+    pub tenant_id: TenantId,
 }
 
 /// Parameters for `convert_timeseries_scan`.

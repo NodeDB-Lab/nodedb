@@ -190,7 +190,7 @@ impl SparseEngine {
         }
 
         let mut result: Vec<(String, usize)> = groups.into_iter().collect();
-        result.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count descending (most popular first).
+        result.sort_by_key(|r| std::cmp::Reverse(r.1)); // Sort by count descending (most popular first).
         debug!(
             collection,
             field,

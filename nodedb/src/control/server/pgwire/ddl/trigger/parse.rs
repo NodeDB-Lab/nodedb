@@ -320,21 +320,42 @@ fn extract_dollar_quoted_body(s: &str) -> Option<(&str, String)> {
 
 fn find_begin_pos(s: &str) -> Option<usize> {
     let upper = s.to_uppercase();
-    let mut search_from = 0;
-    loop {
-        let pos = upper[search_from..].find("BEGIN")?;
-        let abs_pos = search_from + pos;
-        let before_ok = abs_pos == 0
-            || !s.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
-                && s.as_bytes()[abs_pos - 1] != b'_';
-        let after_pos = abs_pos + 5;
-        let after_ok = after_pos >= s.len()
-            || !s.as_bytes()[after_pos].is_ascii_alphanumeric() && s.as_bytes()[after_pos] != b'_';
-        if before_ok && after_ok {
-            return Some(abs_pos);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Skip single-quoted string literals so that 'BEGIN' inside a
+        // string (e.g. in a WHEN clause) is not mistaken for the body start.
+        if bytes[i] == b'\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    // Handle '' escape.
+                    if i < bytes.len() && bytes[i] == b'\'' {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            continue;
         }
-        search_from = abs_pos + 5;
+
+        // Check for "BEGIN" keyword at this position.
+        if i + 5 <= bytes.len() && &upper[i..i + 5] == "BEGIN" {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after_pos = i + 5;
+            let after_ok = after_pos >= bytes.len()
+                || !bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_';
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        i += 1;
     }
+    None
 }
 
 #[cfg(test)]

@@ -174,11 +174,11 @@ fn eval_binary_op(
 
     match (l, r) {
         (Value::Integer(a), Value::Integer(b)) => match op {
-            Plus => Some(Value::Integer(a + b)),
-            Minus => Some(Value::Integer(a - b)),
-            Multiply => Some(Value::Integer(a * b)),
-            Divide if *b != 0 => Some(Value::Integer(a / b)),
-            Modulo if *b != 0 => Some(Value::Integer(a % b)),
+            Plus => Some(Value::Integer(a.checked_add(*b)?)),
+            Minus => Some(Value::Integer(a.checked_sub(*b)?)),
+            Multiply => Some(Value::Integer(a.checked_mul(*b)?)),
+            Divide if *b != 0 => Some(Value::Integer(a.checked_div(*b)?)),
+            Modulo if *b != 0 => Some(Value::Integer(a.checked_rem(*b)?)),
             Gt => Some(Value::Bool(a > b)),
             GtEq => Some(Value::Bool(a >= b)),
             Lt => Some(Value::Bool(a < b)),
@@ -191,7 +191,14 @@ fn eval_binary_op(
             Plus => Some(Value::Float(a + b)),
             Minus => Some(Value::Float(a - b)),
             Multiply => Some(Value::Float(a * b)),
-            Divide if *b != 0.0 => Some(Value::Float(a / b)),
+            Divide if *b != 0.0 && b.is_finite() && *b != -0.0 => {
+                let result = a / b;
+                if result.is_finite() {
+                    Some(Value::Float(result))
+                } else {
+                    None
+                }
+            }
             Gt => Some(Value::Bool(a > b)),
             GtEq => Some(Value::Bool(a >= b)),
             Lt => Some(Value::Bool(a < b)),

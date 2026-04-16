@@ -27,6 +27,7 @@ struct CacheInner {
 }
 
 struct CacheEntry {
+    body_sql: String,
     block: Arc<ProceduralBlock>,
 }
 
@@ -58,9 +59,16 @@ impl ProcedureBlockCache {
         // is uncontended in the cache-hit path (early return).
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
 
-        // Cache hit — return immediately.
+        // Cache hit — verify the body matches (not just the hash) to guard
+        // against 64-bit hash collisions returning the wrong block.
         if let Some(entry) = inner.entries.get(&key) {
-            return Ok(Arc::clone(&entry.block));
+            if entry.body_sql == body_sql {
+                return Ok(Arc::clone(&entry.block));
+            }
+            // Hash collision with different body — evict the stale entry
+            // and fall through to re-parse.
+            inner.entries.remove(&key);
+            inner.order.retain(|k| *k != key);
         }
 
         // Cache miss — parse, cache, return.
@@ -76,6 +84,7 @@ impl ProcedureBlockCache {
         inner.entries.insert(
             key,
             CacheEntry {
+                body_sql: body_sql.to_string(),
                 block: Arc::clone(&arc),
             },
         );

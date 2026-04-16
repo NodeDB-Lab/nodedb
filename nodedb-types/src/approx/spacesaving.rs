@@ -55,7 +55,7 @@ impl SpaceSaving {
             .iter()
             .map(|(&item, &(count, error))| (item, count, error))
             .collect();
-        result.sort_by(|a, b| b.1.cmp(&a.1));
+        result.sort_by_key(|item| std::cmp::Reverse(item.1));
         result
     }
 

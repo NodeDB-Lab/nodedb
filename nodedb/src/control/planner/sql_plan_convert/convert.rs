@@ -134,15 +134,16 @@ pub(super) fn convert_one(
             right,
             on,
             join_type,
+            condition,
             limit,
             projection,
             filters,
-            ..
         } => super::scan::convert_join(super::scan_params::JoinPlanParams {
             left,
             right,
             on,
             join_type,
+            condition,
             limit,
             projection,
             filters,
@@ -275,18 +276,20 @@ pub(super) fn convert_one(
             collection,
             base_filters,
             recursive_filters,
+            join_link,
             max_iterations,
             distinct,
             limit,
-        } => super::scan::convert_recursive_scan(
+        } => super::scan::convert_recursive_scan(super::scan_params::RecursiveScanParams {
             collection,
             base_filters,
             recursive_filters,
+            join_link,
             max_iterations,
             distinct,
             limit,
             tenant_id,
-        ),
+        }),
 
         SqlPlan::Cte { definitions, outer } => {
             super::set_ops::convert_cte(definitions, outer, tenant_id, ctx)

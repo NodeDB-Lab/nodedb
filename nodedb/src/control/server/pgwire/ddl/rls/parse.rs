@@ -70,10 +70,7 @@ pub fn parse_create_rls_policy(
         .map(|i| using_idx + 1 + i)
         .unwrap_or(parts.len());
 
-    let predicate_str = parts[using_idx + 1..pred_end]
-        .join(" ")
-        .trim_matches(|c: char| c == '(' || c == ')')
-        .to_string();
+    let predicate_str = strip_outer_parens(&parts[using_idx + 1..pred_end].join(" "));
 
     let is_restrictive = parts[pred_end..]
         .iter()
@@ -114,7 +111,7 @@ pub fn parse_create_rls_policy(
 
         let field = pred_parts[0];
         let op = pred_parts[1];
-        let value_str = pred_parts[2..].join(" ").trim_matches('\'').to_string();
+        let value_str = strip_single_quotes(&pred_parts[2..].join(" "));
 
         let filter = crate::bridge::scan_filter::ScanFilter {
             field: field.to_string(),
@@ -160,4 +157,49 @@ pub fn parse_create_rls_policy(
         is_restrictive,
         on_deny,
     })
+}
+
+/// Strip at most one matched pair of outer single quotes.
+///
+/// `"'hello'"` → `"hello"`, `"no_quotes"` → `"no_quotes"`.
+fn strip_single_quotes(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Strip at most one matched pair of outer parentheses. Unlike
+/// `trim_matches('(' | ')')`, this preserves balanced inner parens.
+///
+/// `"((x > 0) AND (y = 1))"` → `"(x > 0) AND (y = 1)"`
+/// `"(x > 0)"` → `"x > 0"`
+/// `"x > 0"` → `"x > 0"` (no outer parens)
+fn strip_outer_parens(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        // Verify the outer parens are actually matched (not two separate groups).
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let mut depth = 0i32;
+        let mut balanced = true;
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        balanced = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if balanced && depth == 0 {
+            return inner.trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }

@@ -16,6 +16,7 @@ pub(crate) fn build_recursive_scan(
         collection: collection.to_string(),
         base_filters,
         recursive_filters: Vec::new(),
+        join_link: None,
         max_iterations: 100,
         distinct: true,
         limit,

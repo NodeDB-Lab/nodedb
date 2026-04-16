@@ -187,6 +187,11 @@ pub enum QueryOp {
         base_filters: Vec<u8>,
         /// Recursive step filters (applied to working table each iteration).
         recursive_filters: Vec<u8>,
+        /// Equi-join link for tree-traversal recursion:
+        /// `(collection_field, working_table_field)`.
+        /// Each iteration finds rows where `collection_field` value
+        /// matches a `working_table_field` value from the previous iteration.
+        join_link: Option<(String, String)>,
         /// Maximum iterations to prevent infinite loops. Default: 100.
         max_iterations: usize,
         /// Whether to deduplicate results (UNION vs UNION ALL).

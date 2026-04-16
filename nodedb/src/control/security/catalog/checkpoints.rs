@@ -110,7 +110,7 @@ impl SystemCatalog {
         }
 
         // Sort by created_at descending (most recent first).
-        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        records.sort_by_key(|r| std::cmp::Reverse(r.created_at));
 
         if records.len() > limit && limit > 0 {
             records.truncate(limit);

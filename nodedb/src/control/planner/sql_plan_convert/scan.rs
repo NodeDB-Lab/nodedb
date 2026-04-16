@@ -13,14 +13,48 @@ use super::aggregate::{
 };
 use super::convert::convert_one;
 use super::expr::convert_sort_keys;
-use super::filter::serialize_filters;
+use super::filter::{expr_filter_qualified, serialize_filters};
 use super::scan_params::{
-    HybridSearchParams, JoinPlanParams, ScanParams, SpatialScanParams, TimeseriesScanParams,
+    HybridSearchParams, JoinPlanParams, RecursiveScanParams, ScanParams, SpatialScanParams,
+    TimeseriesScanParams,
 };
 use super::value::{
     extract_time_range, row_to_msgpack, sql_value_to_bytes, sql_value_to_string,
     write_msgpack_array_header,
 };
+
+/// Serialize WHERE filters + non-equi join condition into a single `Vec<u8>`.
+///
+/// The non-equi condition (from the ON clause) is appended as a
+/// `FilterOp::Expr` ScanFilter so the join executor evaluates it on
+/// merged rows alongside any post-join WHERE filters.
+fn serialize_join_filters(
+    filters: &[Filter],
+    condition: &Option<nodedb_sql::types::SqlExpr>,
+) -> crate::Result<Vec<u8>> {
+    match condition {
+        None => serialize_filters(filters),
+        Some(cond) => {
+            // Deserialize existing filters (if any), append condition, re-serialize.
+            let mut scan_filters: Vec<nodedb_query::scan_filter::ScanFilter> =
+                if !filters.is_empty() {
+                    let base = serialize_filters(filters)?;
+                    if base.is_empty() {
+                        Vec::new()
+                    } else {
+                        zerompk::from_msgpack(&base).unwrap_or_default()
+                    }
+                } else {
+                    Vec::new()
+                };
+            scan_filters.push(expr_filter_qualified(cond));
+            zerompk::to_msgpack_vec(&scan_filters).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("join filter serialization: {e}"),
+            })
+        }
+    }
+}
 
 pub(super) fn convert_scan(p: ScanParams<'_>) -> crate::Result<Vec<PhysicalTask>> {
     let ScanParams {
@@ -153,6 +187,7 @@ pub(super) fn convert_join(p: JoinPlanParams<'_>) -> crate::Result<Vec<PhysicalT
         right,
         on,
         join_type,
+        condition,
         limit,
         projection,
         filters,
@@ -164,7 +199,7 @@ pub(super) fn convert_join(p: JoinPlanParams<'_>) -> crate::Result<Vec<PhysicalT
     let mut left_alias = extract_scan_alias(left);
     let mut right_alias = extract_scan_alias(right);
     let join_projection = extract_join_projection_specs(projection);
-    let filter_bytes = serialize_filters(filters)?;
+    let filter_bytes = serialize_join_filters(filters, condition)?;
 
     // Check if the left side is a nested join (multi-way join).
     // If so, convert the inner join to a physical plan and pass it
@@ -179,9 +214,12 @@ pub(super) fn convert_join(p: JoinPlanParams<'_>) -> crate::Result<Vec<PhysicalT
 
     // RIGHT JOIN → swap sides and convert to LEFT JOIN.
     let mut on_keys = on.to_vec();
+    let mut inline_left = inline_left;
+    let mut inline_right = inline_right;
     let effective_join_type = if join_type.as_str() == "right" {
         std::mem::swap(&mut left_collection, &mut right_collection);
         std::mem::swap(&mut left_alias, &mut right_alias);
+        std::mem::swap(&mut inline_left, &mut inline_right);
         on_keys = on_keys.into_iter().map(|(l, r)| (r, l)).collect();
         "left".to_string()
     } else {
@@ -415,25 +453,20 @@ pub(super) fn convert_spatial_scan(p: SpatialScanParams<'_>) -> crate::Result<Ve
 }
 
 pub(super) fn convert_recursive_scan(
-    collection: &str,
-    base_filters: &[Filter],
-    recursive_filters: &[Filter],
-    max_iterations: &usize,
-    distinct: &bool,
-    limit: &usize,
-    tenant_id: TenantId,
+    p: RecursiveScanParams<'_>,
 ) -> crate::Result<Vec<PhysicalTask>> {
-    let vshard = VShardId::from_collection(collection);
+    let vshard = VShardId::from_collection(p.collection);
     Ok(vec![PhysicalTask {
-        tenant_id,
+        tenant_id: p.tenant_id,
         vshard_id: vshard,
         plan: PhysicalPlan::Query(QueryOp::RecursiveScan {
-            collection: collection.into(),
-            base_filters: serialize_filters(base_filters)?,
-            recursive_filters: serialize_filters(recursive_filters)?,
-            max_iterations: *max_iterations,
-            distinct: *distinct,
-            limit: *limit,
+            collection: p.collection.into(),
+            base_filters: serialize_filters(p.base_filters)?,
+            recursive_filters: serialize_filters(p.recursive_filters)?,
+            join_link: p.join_link.clone(),
+            max_iterations: *p.max_iterations,
+            distinct: *p.distinct,
+            limit: *p.limit,
         }),
         post_set_op: PostSetOp::None,
     }])

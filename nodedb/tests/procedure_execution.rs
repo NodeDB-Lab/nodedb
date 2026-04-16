@@ -390,10 +390,10 @@ fn execution_budget_exhaustion() {
 }
 
 #[test]
-fn execution_budget_unlimited() {
+fn execution_budget_trigger_default() {
     use nodedb::control::planner::procedural::executor::fuel::ExecutionBudget;
 
-    let mut budget = ExecutionBudget::unlimited();
+    let mut budget = ExecutionBudget::trigger_default();
     for _ in 0..1000 {
         assert!(budget.consume_iteration().is_ok());
     }

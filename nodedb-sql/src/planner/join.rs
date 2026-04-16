@@ -204,7 +204,16 @@ fn extract_join_constraint(constraint: &ast::JoinConstraint) -> Result<JoinConst
             let cond = if non_equi.is_empty() {
                 None
             } else {
-                Some(convert_expr(non_equi.first().unwrap())?)
+                // Fold ALL non-equi predicates with AND — not just the first.
+                let mut combined = convert_expr(&non_equi[0])?;
+                for pred in &non_equi[1..] {
+                    combined = SqlExpr::BinaryOp {
+                        left: Box::new(combined),
+                        op: crate::types::BinaryOp::And,
+                        right: Box::new(convert_expr(pred)?),
+                    };
+                }
+                Some(combined)
             };
             Ok((keys, cond))
         }
@@ -218,8 +227,12 @@ fn extract_join_constraint(constraint: &ast::JoinConstraint) -> Result<JoinConst
                 .collect();
             Ok((keys, None))
         }
-        ast::JoinConstraint::Natural => Ok((Vec::new(), None)),
-        ast::JoinConstraint::None => Ok((Vec::new(), None)),
+        ast::JoinConstraint::Natural => Err(crate::error::SqlError::Unsupported {
+            detail: "NATURAL JOIN is not supported; use explicit ON or USING clause".into(),
+        }),
+        ast::JoinConstraint::None => Err(crate::error::SqlError::Unsupported {
+            detail: "implicit cross join (no ON/USING clause) is not supported".into(),
+        }),
     }
 }
 

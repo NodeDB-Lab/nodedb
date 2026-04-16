@@ -122,13 +122,25 @@ fn filter_to_scan_filters(expr: &FilterExpr) -> Vec<nodedb_query::scan_filter::S
 /// Build a `ScanFilter` carrying a full expression predicate. Used whenever
 /// the planner cannot reduce the WHERE expression to a simple
 /// `(field, op, value)` tuple.
-fn expr_filter(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
+pub(super) fn expr_filter(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
     nodedb_query::scan_filter::ScanFilter {
         field: String::new(),
         op: nodedb_query::scan_filter::FilterOp::Expr,
         value: nodedb_types::Value::Null,
         clauses: Vec::new(),
         expr: Some(sql_expr_to_bridge_expr(expr)),
+    }
+}
+
+/// Like [`expr_filter`] but qualifies column references with table names
+/// for evaluation against join-merged documents.
+pub(super) fn expr_filter_qualified(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
+    nodedb_query::scan_filter::ScanFilter {
+        field: String::new(),
+        op: nodedb_query::scan_filter::FilterOp::Expr,
+        value: nodedb_types::Value::Null,
+        clauses: Vec::new(),
+        expr: Some(super::expr::sql_expr_to_bridge_expr_qualified(expr)),
     }
 }
 

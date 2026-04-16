@@ -197,6 +197,11 @@ pub enum SqlPlan {
         collection: String,
         base_filters: Vec<Filter>,
         recursive_filters: Vec<Filter>,
+        /// Equi-join link for tree-traversal recursion:
+        /// `(collection_field, working_table_field)`.
+        /// e.g. `("parent_id", "id")` means each iteration finds rows
+        /// where `collection.parent_id` matches a `working_table.id`.
+        join_link: Option<(String, String)>,
         max_iterations: usize,
         distinct: bool,
         limit: usize,

@@ -100,7 +100,7 @@ impl<'a> StatementExecutor<'a> {
         block: &ProceduralBlock,
         bindings: &RowBindings,
     ) -> crate::Result<()> {
-        let mut budget = ExecutionBudget::unlimited();
+        let mut budget = ExecutionBudget::trigger_default();
         self.execute_block_with_exceptions(
             &block.statements,
             &block.exception_handlers,
