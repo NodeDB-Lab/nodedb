@@ -4,64 +4,137 @@
 //! Queried by the CDC router on every WriteEvent for matching streams.
 //!
 //! Thread-safe (RwLock) — reads are concurrent, writes are exclusive.
+//!
+//! Streams are indexed by `(tenant_id, collection)` so the CDC router's
+//! hot path scans only the matching bucket rather than the full fleet.
+//! Wildcard (`*`) streams live in a per-tenant wildcard bucket and are
+//! merged into every lookup for that tenant.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use super::stream_def::ChangeStreamDef;
 
-/// In-memory change stream registry for fast routing.
-///
-/// Streams are indexed by `(tenant_id, stream_name)` for DDL operations,
-/// and by `(tenant_id, collection)` for event routing (multiple streams
-/// can watch the same collection).
+/// Wildcard collection literal — matches every collection in the tenant.
+const WILDCARD: &str = "*";
+
+struct Inner {
+    /// Canonical store, keyed by `(tenant_id, stream_name)`.
+    by_name: HashMap<(u32, String), Arc<ChangeStreamDef>>,
+    /// Routing index: `(tenant_id, collection)` → matching streams.
+    /// Wildcard streams are stored under `(tenant_id, "*")`.
+    by_collection: HashMap<(u32, String), Vec<Arc<ChangeStreamDef>>>,
+}
+
+impl Inner {
+    fn new() -> Self {
+        Self {
+            by_name: HashMap::new(),
+            by_collection: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, def: ChangeStreamDef) {
+        let key_name = (def.tenant_id, def.name.clone());
+        let key_coll = (def.tenant_id, def.collection.clone());
+        let def_arc = Arc::new(def);
+
+        // Replace any prior entry under this name — removes its collection-index entry first.
+        if let Some(prev) = self.by_name.remove(&key_name) {
+            let prev_coll_key = (prev.tenant_id, prev.collection.clone());
+            if let Some(bucket) = self.by_collection.get_mut(&prev_coll_key) {
+                bucket.retain(|d| d.name != prev.name);
+                if bucket.is_empty() {
+                    self.by_collection.remove(&prev_coll_key);
+                }
+            }
+        }
+
+        self.by_collection
+            .entry(key_coll)
+            .or_default()
+            .push(Arc::clone(&def_arc));
+        self.by_name.insert(key_name, def_arc);
+    }
+
+    fn remove(&mut self, tenant_id: u32, name: &str) -> bool {
+        let key_name = (tenant_id, name.to_string());
+        let Some(prev) = self.by_name.remove(&key_name) else {
+            return false;
+        };
+        let key_coll = (prev.tenant_id, prev.collection.clone());
+        if let Some(bucket) = self.by_collection.get_mut(&key_coll) {
+            bucket.retain(|d| d.name != prev.name);
+            if bucket.is_empty() {
+                self.by_collection.remove(&key_coll);
+            }
+        }
+        true
+    }
+}
+
 pub struct StreamRegistry {
-    /// All stream definitions, keyed by `(tenant_id, stream_name)`.
-    by_name: RwLock<HashMap<(u32, String), ChangeStreamDef>>,
+    inner: RwLock<Inner>,
 }
 
 impl StreamRegistry {
     pub fn new() -> Self {
         Self {
-            by_name: RwLock::new(HashMap::new()),
+            inner: RwLock::new(Inner::new()),
         }
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
+        self.inner.write().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Register a new change stream.
     pub fn register(&self, def: ChangeStreamDef) {
-        let key = (def.tenant_id, def.name.clone());
-        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
-        map.insert(key, def);
+        self.write().insert(def);
     }
 
     /// Unregister a change stream by name. Returns true if it existed.
     pub fn unregister(&self, tenant_id: u32, name: &str) -> bool {
-        let key = (tenant_id, name.to_string());
-        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
-        map.remove(&key).is_some()
+        self.write().remove(tenant_id, name)
     }
 
     /// Get a stream definition by name.
     pub fn get(&self, tenant_id: u32, name: &str) -> Option<ChangeStreamDef> {
         let key = (tenant_id, name.to_string());
-        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
-        map.get(&key).cloned()
+        self.read().by_name.get(&key).map(|a| (**a).clone())
     }
 
-    /// Find all streams that match a given (tenant_id, collection) pair.
-    /// Used by the CDC router on every event for routing.
-    pub fn find_matching(&self, tenant_id: u32, collection: &str) -> Vec<ChangeStreamDef> {
-        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
-        map.values()
-            .filter(|def| def.tenant_id == tenant_id && def.matches_collection(collection))
-            .cloned()
-            .collect()
+    /// Find all streams matching `(tenant_id, collection)`. Returns shared
+    /// `Arc<ChangeStreamDef>` handles so the router hot path is
+    /// O(matching_streams refcount bumps), not a deep clone per match.
+    pub fn find_matching(&self, tenant_id: u32, collection: &str) -> Vec<Arc<ChangeStreamDef>> {
+        let inner = self.read();
+        let mut out: Vec<Arc<ChangeStreamDef>> = Vec::new();
+        if let Some(bucket) = inner
+            .by_collection
+            .get(&(tenant_id, collection.to_string()))
+        {
+            out.extend(bucket.iter().cloned());
+        }
+        if collection != WILDCARD
+            && let Some(bucket) = inner.by_collection.get(&(tenant_id, WILDCARD.to_string()))
+        {
+            out.extend(bucket.iter().cloned());
+        }
+        out
     }
 
     /// List all streams (all tenants). Used by the recovery verifier.
     pub fn list_all(&self) -> Vec<ChangeStreamDef> {
-        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
-        map.values().cloned().collect()
+        self.read()
+            .by_name
+            .values()
+            .map(|a| (**a).clone())
+            .collect()
     }
 
     /// Clear and reload from catalog. Used by the recovery verifier repair path.
@@ -70,21 +143,21 @@ impl StreamRegistry {
         catalog: &crate::control::security::catalog::types::SystemCatalog,
     ) -> crate::Result<()> {
         let fresh = catalog.load_all_change_streams()?;
-        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
-        map.clear();
+        let mut inner = self.write();
+        *inner = Inner::new();
         for stream in fresh {
-            let key = (stream.tenant_id, stream.name.clone());
-            map.insert(key, stream);
+            inner.insert(stream);
         }
         Ok(())
     }
 
     /// List all streams for a tenant.
     pub fn list_for_tenant(&self, tenant_id: u32) -> Vec<ChangeStreamDef> {
-        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
-        map.values()
-            .filter(|def| def.tenant_id == tenant_id)
-            .cloned()
+        self.read()
+            .by_name
+            .iter()
+            .filter(|((tid, _), _)| *tid == tenant_id)
+            .map(|(_, a)| (**a).clone())
             .collect()
     }
 
@@ -103,18 +176,20 @@ impl StreamRegistry {
         if streams.is_empty() {
             return;
         }
-        let mut map = self.by_name.write().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.write();
+        let count_before = inner.by_name.len();
         for stream in streams {
-            let key = (stream.tenant_id, stream.name.clone());
-            map.insert(key, stream);
+            inner.insert(stream);
         }
-        tracing::info!(count = map.len(), "loaded change streams from catalog");
+        tracing::info!(
+            count = inner.by_name.len() - count_before,
+            "loaded change streams from catalog"
+        );
     }
 
     /// Total number of registered streams.
     pub fn len(&self) -> usize {
-        let map = self.by_name.read().unwrap_or_else(|p| p.into_inner());
-        map.len()
+        self.read().by_name.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -189,7 +264,7 @@ mod tests {
         let reg = StreamRegistry::new();
         reg.register(sample_def("s1", "orders"));
         assert!(reg.unregister(1, "s1"));
-        assert!(!reg.unregister(1, "s1")); // Already gone.
+        assert!(!reg.unregister(1, "s1"));
         assert!(reg.is_empty());
     }
 }

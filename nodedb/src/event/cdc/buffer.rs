@@ -3,8 +3,15 @@
 //! Each change stream has its own buffer that holds recent events for
 //! consumer consumption. Oldest events are evicted when the buffer
 //! exceeds its capacity (max_events) or age limit (max_age_secs).
+//!
+//! Events are stored as `Arc<CdcEvent>` so fan-out across matching streams
+//! and repeated consumer polls (webhook, Kafka, SHOW, commit) share one
+//! allocation per event — deep-cloning a `CdcEvent` (with its
+//! `serde_json::Value` payload and field diffs) per subscriber or poll is
+//! the hot-path cost the Arc layer exists to eliminate.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,7 +23,7 @@ pub struct StreamBuffer {
     /// Stream name (for logging).
     name: String,
     /// Buffered events (oldest at front, newest at back).
-    events: RwLock<VecDeque<CdcEvent>>,
+    events: RwLock<VecDeque<Arc<CdcEvent>>>,
     /// Retention config.
     retention: RetentionConfig,
     /// Total events ever pushed (monotonic counter).
@@ -39,7 +46,12 @@ impl StreamBuffer {
     }
 
     /// Push a new event into the buffer. Evicts oldest if at capacity.
-    pub fn push(&self, event: CdcEvent) {
+    ///
+    /// Accepts anything that can be turned into an `Arc<CdcEvent>`. The
+    /// router hands the SAME `Arc` to every matching stream's buffer so
+    /// fan-out across N subscribers is N refcount bumps, not N deep clones.
+    pub fn push(&self, event: impl Into<Arc<CdcEvent>>) {
+        let event = event.into();
         let mut events = self.events.write().unwrap_or_else(|p| {
             tracing::warn!(stream = %self.name, "StreamBuffer RwLock poisoned, recovering");
             p.into_inner()
@@ -70,8 +82,9 @@ impl StreamBuffer {
     }
 
     /// Read events from a given LSN forward (for consumer polling).
-    /// Returns events with LSN > `from_lsn`, up to `limit`.
-    pub fn read_from_lsn(&self, from_lsn: u64, limit: usize) -> Vec<CdcEvent> {
+    /// Returns shared `Arc<CdcEvent>` handles so repeated polls by webhook
+    /// and Kafka producers share the underlying allocation.
+    pub fn read_from_lsn(&self, from_lsn: u64, limit: usize) -> Vec<Arc<CdcEvent>> {
         let events = self.events.read().unwrap_or_else(|p| p.into_inner());
         events
             .iter()
@@ -88,7 +101,7 @@ impl StreamBuffer {
         partition_id: u16,
         from_lsn: u64,
         limit: usize,
-    ) -> Vec<CdcEvent> {
+    ) -> Vec<Arc<CdcEvent>> {
         let events = self.events.read().unwrap_or_else(|p| p.into_inner());
         events
             .iter()
@@ -101,8 +114,6 @@ impl StreamBuffer {
     /// Compact the buffer: deduplicate by key field, keeping only the latest
     /// event per key value. DELETE events are retained as tombstones until
     /// they exceed `tombstone_grace_secs` age, then removed.
-    ///
-    /// This is called periodically by the background compaction task.
     pub fn compact(&self, key_field: &str, tombstone_grace_secs: u64) -> u32 {
         let mut events = self.events.write().unwrap_or_else(|p| {
             tracing::warn!(stream = %self.name, "StreamBuffer RwLock poisoned during compact, recovering");
@@ -116,28 +127,22 @@ impl StreamBuffer {
             .as_millis() as u64;
         let tombstone_cutoff_ms = now_ms.saturating_sub(tombstone_grace_secs * 1000);
 
-        // Build a map of key_value → index of latest event.
         let mut latest: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (idx, event) in events.iter().enumerate() {
             let key_value = extract_key_value(event, key_field);
             latest.insert(key_value, idx);
         }
 
-        // Keep only the latest event per key, plus tombstones within grace period.
         let mut keep = vec![false; events.len()];
         for (idx, event) in events.iter().enumerate() {
             let key_value = extract_key_value(event, key_field);
             let is_latest = latest.get(&key_value) == Some(&idx);
             let is_tombstone = event.op == "DELETE";
-
-            // Keep the latest event unless it's an expired tombstone.
             if is_latest && !(is_tombstone && event.event_time < tombstone_cutoff_ms) {
                 keep[idx] = true;
             }
-            // Non-latest events are discarded (compacted).
         }
 
-        // Rebuild the buffer with only kept events.
         let mut new_events = VecDeque::with_capacity(events.len());
         for (idx, event) in events.drain(..).enumerate() {
             if keep[idx] {
@@ -154,23 +159,19 @@ impl StreamBuffer {
         removed
     }
 
-    /// Current number of buffered events.
     pub fn len(&self) -> usize {
-        let events = self.events.read().unwrap_or_else(|p| p.into_inner());
-        events.len()
+        self.events.read().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Earliest LSN in the buffer, or None if empty.
     pub fn earliest_lsn(&self) -> Option<u64> {
         let events = self.events.read().unwrap_or_else(|p| p.into_inner());
         events.front().map(|e| e.lsn)
     }
 
-    /// Latest LSN in the buffer, or None if empty.
     pub fn latest_lsn(&self) -> Option<u64> {
         let events = self.events.read().unwrap_or_else(|p| p.into_inner());
         events.back().map(|e| e.lsn)
@@ -190,11 +191,7 @@ impl StreamBuffer {
     }
 }
 
-/// Extract a key value from a CdcEvent for compaction deduplication.
-/// Looks in `new_value` (for INSERT/UPDATE) or `old_value` (for DELETE)
-/// for the specified field path.
 fn extract_key_value(event: &CdcEvent, key_field: &str) -> String {
-    // Try new_value first, then old_value.
     let value = event.new_value.as_ref().or(event.old_value.as_ref());
 
     if let Some(obj) = value.and_then(|v| v.as_object())
@@ -206,7 +203,6 @@ fn extract_key_value(event: &CdcEvent, key_field: &str) -> String {
         };
     }
 
-    // Fallback: key field not found in event — use row_id.
     tracing::warn!(
         collection = %event.collection,
         row_id = %event.row_id,
@@ -231,7 +227,7 @@ mod tests {
             collection: "test".into(),
             op: "INSERT".into(),
             row_id: format!("row-{seq}"),
-            event_time: now_ms + seq * 1000, // Future timestamps so they don't expire.
+            event_time: now_ms + seq * 1000,
             lsn,
             tenant_id: 1,
             new_value: None,
@@ -260,7 +256,7 @@ mod tests {
         assert_eq!(buf.latest_lsn(), Some(50));
 
         let events = buf.read_from_lsn(20, 10);
-        assert_eq!(events.len(), 3); // LSN 30, 40, 50
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].lsn, 30);
     }
 
@@ -279,7 +275,7 @@ mod tests {
         }
 
         assert_eq!(buf.len(), 3);
-        assert_eq!(buf.earliest_lsn(), Some(30)); // events 1 and 2 evicted
+        assert_eq!(buf.earliest_lsn(), Some(30));
         assert_eq!(buf.total_evicted(), 2);
     }
 
@@ -295,5 +291,14 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].lsn, 10);
         assert_eq!(events[2].lsn, 30);
+    }
+
+    #[test]
+    fn push_arc_shares_identity_with_read() {
+        let buf = StreamBuffer::new("test".into(), RetentionConfig::default());
+        let shared = Arc::new(make_event(1, 10));
+        buf.push(Arc::clone(&shared));
+        let read = buf.read_from_lsn(0, 10).into_iter().next().unwrap();
+        assert!(Arc::ptr_eq(&shared, &read));
     }
 }

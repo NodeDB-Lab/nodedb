@@ -63,12 +63,45 @@ impl CdcRouter {
             .as_ref()
             .and_then(|v| deserialize_to_json(v));
 
+        // Compute the UPDATE field diffs once per WriteEvent (shared across fan-out).
+        let field_diffs = if op_str == "UPDATE" {
+            match (&old_value, &new_value) {
+                (Some(old), Some(new)) => {
+                    let diffs = crate::event::field_diff::compute_field_diffs(old, new);
+                    if diffs.is_empty() { None } else { Some(diffs) }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Build the CdcEvent once and share the same Arc across every matching
+        // stream. Fan-out to N streams becomes N refcount bumps, not N deep
+        // copies of the payload + diffs.
+        let cdc_event = Arc::new(CdcEvent {
+            sequence: event.sequence,
+            partition: event.vshard_id.as_u16(),
+            collection: event.collection.to_string(),
+            op: op_str.clone(),
+            row_id: event.row_id.as_str().to_string(),
+            event_time: now_ms,
+            lsn: event.lsn.as_u64(),
+            tenant_id: event.tenant_id.as_u32(),
+            new_value: new_value.clone(),
+            old_value: old_value.clone(),
+            schema_version: 0,
+            field_diffs,
+        });
+
+        // RECOMPUTE correction (only built if any stream actually needs it).
+        let mut recompute: Option<Arc<CdcEvent>> = None;
+
         for def in &matching {
             if !def.op_filter.matches(&op_str) {
                 continue;
             }
 
-            // Late-data policy enforcement.
             let partition_wm = watermark_tracker.partition_watermark(event.vshard_id.as_u16());
             let is_late = event.lsn.as_u64() <= partition_wm && partition_wm > 0;
 
@@ -83,65 +116,33 @@ impl CdcRouter {
                         );
                         continue;
                     }
-                    LateDataPolicy::Allow => {
-                        // Process normally — no special handling.
-                    }
-                    LateDataPolicy::Recompute => {
-                        // Process the late event normally (it will update MV aggregates
-                        // via the consumer's MV processing). Then emit a RECOMPUTE
-                        // correction event so downstream consumers know a previously-
-                        // emitted aggregate was updated.
-                    }
+                    LateDataPolicy::Allow => {}
+                    LateDataPolicy::Recompute => {}
                 }
             }
 
-            // Compute field-level diffs for UPDATE operations.
-            let field_diffs = if op_str == "UPDATE" {
-                match (&old_value, &new_value) {
-                    (Some(old), Some(new)) => {
-                        let diffs = crate::event::field_diff::compute_field_diffs(old, new);
-                        if diffs.is_empty() { None } else { Some(diffs) }
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            let cdc_event = CdcEvent {
-                sequence: event.sequence,
-                partition: event.vshard_id.as_u16(),
-                collection: event.collection.to_string(),
-                op: op_str.clone(),
-                row_id: event.row_id.as_str().to_string(),
-                event_time: now_ms,
-                lsn: event.lsn.as_u64(),
-                tenant_id: event.tenant_id.as_u32(),
-                new_value: new_value.clone(),
-                old_value: old_value.clone(),
-                schema_version: 0,
-                field_diffs: field_diffs.clone(),
-            };
-
             let buffer = self.get_or_create_buffer(def.tenant_id, &def.name, &def.retention);
-            buffer.push(cdc_event);
+            buffer.push(Arc::clone(&cdc_event));
 
-            // Recompute: emit a correction event after the original event.
             if is_late && def.late_data == LateDataPolicy::Recompute {
-                let correction = CdcEvent {
-                    sequence: event.sequence,
-                    partition: event.vshard_id.as_u16(),
-                    collection: event.collection.to_string(),
-                    op: "RECOMPUTE".to_string(),
-                    row_id: event.row_id.as_str().to_string(),
-                    event_time: now_ms,
-                    lsn: event.lsn.as_u64(),
-                    tenant_id: event.tenant_id.as_u32(),
-                    new_value: new_value.clone(),
-                    old_value: None,
-                    schema_version: 0,
-                    field_diffs: None,
-                };
+                let correction = recompute
+                    .get_or_insert_with(|| {
+                        Arc::new(CdcEvent {
+                            sequence: event.sequence,
+                            partition: event.vshard_id.as_u16(),
+                            collection: event.collection.to_string(),
+                            op: "RECOMPUTE".to_string(),
+                            row_id: event.row_id.as_str().to_string(),
+                            event_time: now_ms,
+                            lsn: event.lsn.as_u64(),
+                            tenant_id: event.tenant_id.as_u32(),
+                            new_value: new_value.clone(),
+                            old_value: None,
+                            schema_version: 0,
+                            field_diffs: None,
+                        })
+                    })
+                    .clone();
                 buffer.push(correction);
                 trace!(
                     stream = %def.name,

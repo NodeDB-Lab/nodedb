@@ -11,6 +11,8 @@
 
 use tracing::debug;
 
+use std::sync::Arc;
+
 use crate::control::state::SharedState;
 use crate::event::cdc::event::CdcEvent;
 
@@ -27,8 +29,9 @@ pub struct ConsumeParams<'a> {
 
 /// Result of consuming events from a stream.
 pub struct ConsumeResult {
-    /// The events read from the buffer.
-    pub events: Vec<CdcEvent>,
+    /// The events read from the buffer. Events are shared `Arc<CdcEvent>`
+    /// so consumer fan-out (webhook, Kafka, SHOW, commit) doesn't deep-clone.
+    pub events: Vec<Arc<CdcEvent>>,
     /// Per-partition latest LSN seen in this batch (for offset tracking).
     pub partition_offsets: Vec<(u16, u64)>,
 }
@@ -228,8 +231,12 @@ pub async fn consume_remote(
 
     // Deserialize events from the response payloads.
     // Payloads contain msgpack-serialised Vec<CdcEvent>.
-    let events = if let Some(payload) = payloads.first() {
-        zerompk::from_msgpack::<Vec<CdcEvent>>(payload).unwrap_or_default()
+    let events: Vec<Arc<CdcEvent>> = if let Some(payload) = payloads.first() {
+        zerompk::from_msgpack::<Vec<CdcEvent>>(payload)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Arc::new)
+            .collect()
     } else {
         Vec::new()
     };
