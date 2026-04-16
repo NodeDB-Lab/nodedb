@@ -351,11 +351,14 @@ impl CoreLoop {
     }
 }
 
+/// Maximum allowed ef_search value. Prevents DoS via unbounded beam width.
+const MAX_EF_SEARCH: usize = 8192;
+
 /// Compute effective ef parameter for HNSW search.
 fn effective_ef(ef_search: usize, top_k: usize) -> usize {
     if ef_search > 0 {
-        ef_search.max(top_k)
+        ef_search.max(top_k).min(MAX_EF_SEARCH)
     } else {
-        top_k.saturating_mul(4).max(64)
+        top_k.saturating_mul(4).max(64).min(MAX_EF_SEARCH)
     }
 }

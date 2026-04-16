@@ -12,6 +12,10 @@ use std::sync::Arc;
 
 use sonic_rs;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Maximum byte length of a single ILP line. Lines exceeding this are
+/// rejected and the connection is dropped to prevent memory exhaustion.
+const MAX_ILP_LINE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
@@ -96,15 +100,23 @@ impl IlpListener {
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    match acceptor.accept(stream).await {
-                                        Ok(tls_stream) => {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        acceptor.accept(stream),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(tls_stream)) => {
                                             let cs = ConnStream::tls(tls_stream);
                                             if let Err(e) = handle_ilp_connection(cs, peer, &state).await {
                                                 warn!(%peer, error = %e, "ILP TLS connection error (data may be lost)");
                                             }
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             warn!(%peer, error = %e, "ILP TLS handshake failed");
+                                        }
+                                        Err(_) => {
+                                            warn!(%peer, "ILP TLS handshake timed out");
                                         }
                                     }
                                     drop(permit);
@@ -158,8 +170,8 @@ async fn handle_ilp_connection(
 ) -> crate::Result<()> {
     debug!(%peer, "ILP connection accepted");
 
-    let reader = BufReader::new(stream);
-    let mut lines = reader.lines();
+    let mut reader = BufReader::new(stream);
+    let mut line_buf: Vec<u8> = Vec::with_capacity(4096);
     let mut batch = String::new();
     let mut line_count = 0u64;
     let mut total_ingested = 0u64;
@@ -181,17 +193,46 @@ async fn handle_ilp_connection(
 
     loop {
         tokio::select! {
-            // Read next line.
-            result = lines.next_line() => {
+            // Read next line with an enforced byte-length cap.
+            result = reader.read_until(b'\n', &mut line_buf) => {
                 match result {
-                    Ok(Some(line)) => {
+                    Ok(0) => break, // Connection closed (EOF).
+                    Ok(_) => {
+                        // Enforce line length limit before any allocation.
+                        if line_buf.len() > MAX_ILP_LINE_BYTES {
+                            warn!(
+                                %peer,
+                                len = line_buf.len(),
+                                limit = MAX_ILP_LINE_BYTES,
+                                "ILP line exceeds maximum length — dropping connection"
+                            );
+                            break;
+                        }
+
+                        // Strip trailing newline / CRLF.
+                        let line_bytes = line_buf
+                            .strip_suffix(b"\r\n")
+                            .or_else(|| line_buf.strip_suffix(b"\n"))
+                            .unwrap_or(&line_buf);
+
+                        let line = match std::str::from_utf8(line_bytes) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                warn!(%peer, "ILP line is not valid UTF-8 — skipping");
+                                line_buf.clear();
+                                continue;
+                            }
+                        };
+
                         if line.is_empty() || line.starts_with('#') {
+                            line_buf.clear();
                             continue;
                         }
 
-                        batch.push_str(&line);
+                        batch.push_str(line);
                         batch.push('\n');
                         line_count += 1;
+                        line_buf.clear();
 
                         // Flush when batch reaches adaptive target.
                         if line_count >= batch_target {
@@ -212,8 +253,7 @@ async fn handle_ilp_connection(
                             );
                         }
                     }
-                    Ok(None) => break, // Connection closed.
-                    Err(_) => break,   // Read error.
+                    Err(_) => break, // Read error.
                 }
             }
             // Timer-based flush (for low-rate connections).

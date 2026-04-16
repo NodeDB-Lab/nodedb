@@ -102,15 +102,23 @@ impl RespListener {
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    match acceptor.accept(stream).await {
-                                        Ok(tls_stream) => {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(10),
+                                        acceptor.accept(stream),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(tls_stream)) => {
                                             let cs = ConnStream::tls(tls_stream);
                                             if let Err(e) = handle_connection(cs, peer, &state).await {
                                                 debug!(%peer, error = %e, "RESP TLS connection error");
                                             }
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             warn!(%peer, error = %e, "RESP TLS handshake failed");
+                                        }
+                                        Err(_) => {
+                                            warn!(%peer, "RESP TLS handshake timed out");
                                         }
                                     }
                                     drop(permit);

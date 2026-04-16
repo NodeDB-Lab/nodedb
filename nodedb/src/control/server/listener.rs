@@ -120,15 +120,23 @@ impl Listener {
                             if let Some(ref acceptor) = tls_acceptor {
                                 let acceptor = acceptor.clone();
                                 connections.spawn(async move {
-                                    match acceptor.accept(stream).await {
-                                        Ok(tls_stream) => {
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(10),
+                                        acceptor.accept(stream),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(tls_stream)) => {
                                             let session = NativeSession::new_tls(tls_stream, peer_addr, state_clone, mode);
                                             if let Err(e) = session.run().await {
                                                 warn!(%peer_addr, error = %e, "TLS session terminated with error");
                                             }
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             warn!(%peer_addr, error = %e, "native TLS handshake failed");
+                                        }
+                                        Err(_) => {
+                                            warn!(%peer_addr, "native TLS handshake timed out");
                                         }
                                     }
                                     // Permit is held for the session's lifetime and

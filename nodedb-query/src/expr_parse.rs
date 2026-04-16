@@ -26,7 +26,7 @@ use nodedb_types::Value;
 pub fn parse_generated_expr(text: &str) -> Result<(SqlExpr, Vec<String>), String> {
     let tokens = tokenize(text)?;
     let mut pos = 0;
-    let expr = parse_expr(&tokens, &mut pos)?;
+    let expr = parse_expr(&tokens, &mut pos, &mut 0)?;
     if pos < tokens.len() {
         return Err(format!(
             "unexpected token after expression: '{}'",
@@ -195,16 +195,20 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
 // ── Recursive descent parser ──────────────────────────────────────────
 
+/// Maximum recursion depth for nested parentheses / sub-expressions.
+/// Exceeding this limit returns `Err` instead of overflowing the stack.
+const MAX_EXPR_DEPTH: usize = 128;
+
 /// Parse an expression (lowest precedence: OR).
-fn parse_expr(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
-    parse_or(tokens, pos)
+fn parse_expr(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
+    parse_or(tokens, pos, depth)
 }
 
-fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
-    let mut left = parse_and(tokens, pos)?;
+fn parse_or(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
+    let mut left = parse_and(tokens, pos, depth)?;
     while peek_keyword(tokens, *pos, "OR") {
         *pos += 1;
-        let right = parse_and(tokens, pos)?;
+        let right = parse_and(tokens, pos, depth)?;
         left = SqlExpr::BinaryOp {
             left: Box::new(left),
             op: BinaryOp::Or,
@@ -214,11 +218,11 @@ fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
     Ok(left)
 }
 
-fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
-    let mut left = parse_comparison(tokens, pos)?;
+fn parse_and(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
+    let mut left = parse_comparison(tokens, pos, depth)?;
     while peek_keyword(tokens, *pos, "AND") {
         *pos += 1;
-        let right = parse_comparison(tokens, pos)?;
+        let right = parse_comparison(tokens, pos, depth)?;
         left = SqlExpr::BinaryOp {
             left: Box::new(left),
             op: BinaryOp::And,
@@ -228,8 +232,12 @@ fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
     Ok(left)
 }
 
-fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
-    let left = parse_additive(tokens, pos)?;
+fn parse_comparison(
+    tokens: &[Token],
+    pos: &mut usize,
+    depth: &mut usize,
+) -> Result<SqlExpr, String> {
+    let left = parse_additive(tokens, pos, depth)?;
     if *pos < tokens.len() && tokens[*pos].kind == TokenKind::Op {
         let op = match tokens[*pos].text.as_str() {
             "=" => BinaryOp::Eq,
@@ -241,7 +249,7 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String
             _ => return Ok(left),
         };
         *pos += 1;
-        let right = parse_additive(tokens, pos)?;
+        let right = parse_additive(tokens, pos, depth)?;
         return Ok(SqlExpr::BinaryOp {
             left: Box::new(left),
             op,
@@ -251,8 +259,8 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String
     Ok(left)
 }
 
-fn parse_additive(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
-    let mut left = parse_multiplicative(tokens, pos)?;
+fn parse_additive(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
+    let mut left = parse_multiplicative(tokens, pos, depth)?;
     while *pos < tokens.len() && tokens[*pos].kind == TokenKind::Op {
         let op = match tokens[*pos].text.as_str() {
             "+" => BinaryOp::Add,
@@ -261,7 +269,7 @@ fn parse_additive(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> 
             _ => break,
         };
         *pos += 1;
-        let right = parse_multiplicative(tokens, pos)?;
+        let right = parse_multiplicative(tokens, pos, depth)?;
         left = SqlExpr::BinaryOp {
             left: Box::new(left),
             op,
@@ -271,8 +279,12 @@ fn parse_additive(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> 
     Ok(left)
 }
 
-fn parse_multiplicative(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
-    let mut left = parse_unary(tokens, pos)?;
+fn parse_multiplicative(
+    tokens: &[Token],
+    pos: &mut usize,
+    depth: &mut usize,
+) -> Result<SqlExpr, String> {
+    let mut left = parse_unary(tokens, pos, depth)?;
     while *pos < tokens.len() && tokens[*pos].kind == TokenKind::Op {
         let op = match tokens[*pos].text.as_str() {
             "*" => BinaryOp::Mul,
@@ -281,7 +293,7 @@ fn parse_multiplicative(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, St
             _ => break,
         };
         *pos += 1;
-        let right = parse_unary(tokens, pos)?;
+        let right = parse_unary(tokens, pos, depth)?;
         left = SqlExpr::BinaryOp {
             left: Box::new(left),
             op,
@@ -291,23 +303,23 @@ fn parse_multiplicative(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, St
     Ok(left)
 }
 
-fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
+fn parse_unary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
     // Unary minus.
     if *pos < tokens.len() && tokens[*pos].kind == TokenKind::Op && tokens[*pos].text == "-" {
         *pos += 1;
-        let expr = parse_primary(tokens, pos)?;
+        let expr = parse_primary(tokens, pos, depth)?;
         return Ok(SqlExpr::Negate(Box::new(expr)));
     }
     // NOT
     if peek_keyword(tokens, *pos, "NOT") {
         *pos += 1;
-        let expr = parse_primary(tokens, pos)?;
+        let expr = parse_primary(tokens, pos, depth)?;
         return Ok(SqlExpr::Negate(Box::new(expr)));
     }
-    parse_primary(tokens, pos)
+    parse_primary(tokens, pos, depth)
 }
 
-fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
+fn parse_primary(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
     if *pos >= tokens.len() {
         return Err("unexpected end of expression".into());
     }
@@ -317,8 +329,15 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
     match token.kind {
         // Parenthesized expression.
         TokenKind::LParen => {
+            *depth += 1;
+            if *depth > MAX_EXPR_DEPTH {
+                return Err(format!(
+                    "expression nesting depth exceeds maximum of {MAX_EXPR_DEPTH}"
+                ));
+            }
             *pos += 1;
-            let expr = parse_expr(tokens, pos)?;
+            let expr = parse_expr(tokens, pos, depth)?;
+            *depth -= 1;
             expect_token(tokens, pos, TokenKind::RParen, ")")?;
             Ok(expr)
         }
@@ -351,15 +370,15 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
                 "NULL" => Ok(SqlExpr::Literal(Value::Null)),
                 "TRUE" => Ok(SqlExpr::Literal(Value::Bool(true))),
                 "FALSE" => Ok(SqlExpr::Literal(Value::Bool(false))),
-                "CASE" => parse_case(tokens, pos),
+                "CASE" => parse_case(tokens, pos, depth),
                 "COALESCE" => {
-                    let args = parse_arg_list(tokens, pos)?;
+                    let args = parse_arg_list(tokens, pos, depth)?;
                     Ok(SqlExpr::Coalesce(args))
                 }
                 _ => {
                     // Function call: IDENT(args).
                     if *pos < tokens.len() && tokens[*pos].kind == TokenKind::LParen {
-                        let args = parse_arg_list(tokens, pos)?;
+                        let args = parse_arg_list(tokens, pos, depth)?;
                         Ok(SqlExpr::Function {
                             name: name.to_lowercase(),
                             args,
@@ -377,20 +396,20 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
 }
 
 /// Parse `CASE WHEN cond THEN result [WHEN ... THEN ...] [ELSE result] END`.
-fn parse_case(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
+fn parse_case(tokens: &[Token], pos: &mut usize, depth: &mut usize) -> Result<SqlExpr, String> {
     let mut when_thens = Vec::new();
     let mut else_expr = None;
 
     loop {
         if peek_keyword(tokens, *pos, "WHEN") {
             *pos += 1;
-            let cond = parse_expr(tokens, pos)?;
+            let cond = parse_expr(tokens, pos, depth)?;
             expect_keyword(tokens, pos, "THEN")?;
-            let then = parse_expr(tokens, pos)?;
+            let then = parse_expr(tokens, pos, depth)?;
             when_thens.push((cond, then));
         } else if peek_keyword(tokens, *pos, "ELSE") {
             *pos += 1;
-            else_expr = Some(Box::new(parse_expr(tokens, pos)?));
+            else_expr = Some(Box::new(parse_expr(tokens, pos, depth)?));
         } else if peek_keyword(tokens, *pos, "END") {
             *pos += 1;
             break;
@@ -411,7 +430,11 @@ fn parse_case(tokens: &[Token], pos: &mut usize) -> Result<SqlExpr, String> {
 }
 
 /// Parse a parenthesized, comma-separated argument list: `(expr, expr, ...)`.
-fn parse_arg_list(tokens: &[Token], pos: &mut usize) -> Result<Vec<SqlExpr>, String> {
+fn parse_arg_list(
+    tokens: &[Token],
+    pos: &mut usize,
+    depth: &mut usize,
+) -> Result<Vec<SqlExpr>, String> {
     expect_token(tokens, pos, TokenKind::LParen, "(")?;
     let mut args = Vec::new();
     if *pos < tokens.len() && tokens[*pos].kind == TokenKind::RParen {
@@ -419,7 +442,7 @@ fn parse_arg_list(tokens: &[Token], pos: &mut usize) -> Result<Vec<SqlExpr>, Str
         return Ok(args);
     }
     loop {
-        args.push(parse_expr(tokens, pos)?);
+        args.push(parse_expr(tokens, pos, depth)?);
         if *pos < tokens.len() && tokens[*pos].kind == TokenKind::Comma {
             *pos += 1;
         } else {
@@ -666,5 +689,19 @@ mod tests {
         let (expr, _) = parse_ok("ROUND(price * (1 - COALESCE(discount, 0)), 2)");
         let doc = Value::from(serde_json::json!({"price": 49.99}));
         assert_eq!(expr.eval(&doc), Value::Float(49.99));
+    }
+
+    #[test]
+    fn deeply_nested_parentheses_return_error_not_stack_overflow() {
+        // Spec: the parser must enforce a recursion depth limit so that
+        // pathologically deep nesting returns Err rather than overflowing the
+        // call stack and causing a process crash.
+        let depth = 10_000;
+        let input = format!("{}x{}", "(".repeat(depth), ")".repeat(depth),);
+        let result = parse_generated_expr(&input);
+        assert!(
+            result.is_err(),
+            "parse_generated_expr must return Err for {depth}-deep nesting, not stack overflow"
+        );
     }
 }

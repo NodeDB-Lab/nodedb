@@ -6,8 +6,30 @@ use crate::error::{Result, SqlError};
 use crate::parser::normalize::normalize_ident;
 use crate::types::*;
 
+/// Maximum AST nesting depth accepted by `convert_expr`.
+/// Exceeding this limit returns `Err` instead of overflowing the stack.
+const MAX_CONVERT_DEPTH: usize = 128;
+
 /// Convert a sqlparser `Expr` to our `SqlExpr`.
 pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
+    convert_expr_depth(expr, &mut 0)
+}
+
+/// Internal recursive helper that carries a depth counter to enforce
+/// `MAX_CONVERT_DEPTH` and prevent stack overflow on malformed ASTs.
+fn convert_expr_depth(expr: &Expr, depth: &mut usize) -> Result<SqlExpr> {
+    *depth += 1;
+    if *depth > MAX_CONVERT_DEPTH {
+        return Err(SqlError::Unsupported {
+            detail: format!("expression nesting depth exceeds maximum of {MAX_CONVERT_DEPTH}"),
+        });
+    }
+    let result = convert_expr_inner(expr, depth);
+    *depth -= 1;
+    result
+}
+
+fn convert_expr_inner(expr: &Expr, depth: &mut usize) -> Result<SqlExpr> {
     match expr {
         Expr::Identifier(ident) => Ok(SqlExpr::Column {
             table: None,
@@ -19,22 +41,22 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
         }),
         Expr::Value(val) => Ok(SqlExpr::Literal(convert_value(&val.value)?)),
         Expr::BinaryOp { left, op, right } => Ok(SqlExpr::BinaryOp {
-            left: Box::new(convert_expr(left)?),
+            left: Box::new(convert_expr_depth(left, depth)?),
             op: convert_binary_op(op)?,
-            right: Box::new(convert_expr(right)?),
+            right: Box::new(convert_expr_depth(right, depth)?),
         }),
         Expr::UnaryOp { op, expr } => Ok(SqlExpr::UnaryOp {
             op: convert_unary_op(op)?,
-            expr: Box::new(convert_expr(expr)?),
+            expr: Box::new(convert_expr_depth(expr, depth)?),
         }),
-        Expr::Function(func) => convert_function(func),
-        Expr::Nested(inner) => convert_expr(inner),
+        Expr::Function(func) => convert_function_depth(func, depth),
+        Expr::Nested(inner) => convert_expr_depth(inner, depth),
         Expr::IsNull(inner) => Ok(SqlExpr::IsNull {
-            expr: Box::new(convert_expr(inner)?),
+            expr: Box::new(convert_expr_depth(inner, depth)?),
             negated: false,
         }),
         Expr::IsNotNull(inner) => Ok(SqlExpr::IsNull {
-            expr: Box::new(convert_expr(inner)?),
+            expr: Box::new(convert_expr_depth(inner, depth)?),
             negated: true,
         }),
         Expr::InList {
@@ -42,8 +64,11 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
             list,
             negated,
         } => Ok(SqlExpr::InList {
-            expr: Box::new(convert_expr(expr)?),
-            list: list.iter().map(convert_expr).collect::<Result<_>>()?,
+            expr: Box::new(convert_expr_depth(expr, depth)?),
+            list: list
+                .iter()
+                .map(|e| convert_expr_depth(e, depth))
+                .collect::<Result<_>>()?,
             negated: *negated,
         }),
         Expr::Between {
@@ -52,9 +77,9 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
             high,
             negated,
         } => Ok(SqlExpr::Between {
-            expr: Box::new(convert_expr(expr)?),
-            low: Box::new(convert_expr(low)?),
-            high: Box::new(convert_expr(high)?),
+            expr: Box::new(convert_expr_depth(expr, depth)?),
+            low: Box::new(convert_expr_depth(low, depth)?),
+            high: Box::new(convert_expr_depth(high, depth)?),
             negated: *negated,
         }),
         Expr::Like {
@@ -63,8 +88,8 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
             negated,
             ..
         } => Ok(SqlExpr::Like {
-            expr: Box::new(convert_expr(expr)?),
-            pattern: Box::new(convert_expr(pattern)?),
+            expr: Box::new(convert_expr_depth(expr, depth)?),
+            pattern: Box::new(convert_expr_depth(pattern, depth)?),
             negated: *negated,
         }),
         Expr::ILike {
@@ -73,8 +98,8 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
             negated,
             ..
         } => Ok(SqlExpr::Like {
-            expr: Box::new(convert_expr(expr)?),
-            pattern: Box::new(convert_expr(pattern)?),
+            expr: Box::new(convert_expr_depth(expr, depth)?),
+            pattern: Box::new(convert_expr_depth(pattern, depth)?),
             negated: *negated,
         }),
         Expr::Case {
@@ -85,46 +110,54 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
         } => {
             let when_then = conditions
                 .iter()
-                .map(|cw| Ok((convert_expr(&cw.condition)?, convert_expr(&cw.result)?)))
+                .map(|cw| {
+                    Ok((
+                        convert_expr_depth(&cw.condition, depth)?,
+                        convert_expr_depth(&cw.result, depth)?,
+                    ))
+                })
                 .collect::<Result<Vec<_>>>()?;
             Ok(SqlExpr::Case {
                 operand: operand
                     .as_ref()
-                    .map(|e| convert_expr(e).map(Box::new))
+                    .map(|e| convert_expr_depth(e, depth).map(Box::new))
                     .transpose()?,
                 when_then,
                 else_expr: else_result
                     .as_ref()
-                    .map(|e| convert_expr(e).map(Box::new))
+                    .map(|e| convert_expr_depth(e, depth).map(Box::new))
                     .transpose()?,
             })
         }
         Expr::Cast {
             expr, data_type, ..
         } => Ok(SqlExpr::Cast {
-            expr: Box::new(convert_expr(expr)?),
+            expr: Box::new(convert_expr_depth(expr, depth)?),
             to_type: format!("{data_type}"),
         }),
         Expr::Array(ast::Array { elem, .. }) => {
-            let elems = elem.iter().map(convert_expr).collect::<Result<_>>()?;
+            let elems = elem
+                .iter()
+                .map(|e| convert_expr_depth(e, depth))
+                .collect::<Result<_>>()?;
             Ok(SqlExpr::ArrayLiteral(elems))
         }
         Expr::Wildcard(_) => Ok(SqlExpr::Wildcard),
         // TRIM([BOTH|LEADING|TRAILING] [what FROM] expr)
         Expr::Trim { expr, .. } => Ok(SqlExpr::Function {
             name: "trim".into(),
-            args: vec![convert_expr(expr)?],
+            args: vec![convert_expr_depth(expr, depth)?],
             distinct: false,
         }),
         // CEIL(expr) / FLOOR(expr)
         Expr::Ceil { expr, .. } => Ok(SqlExpr::Function {
             name: "ceil".into(),
-            args: vec![convert_expr(expr)?],
+            args: vec![convert_expr_depth(expr, depth)?],
             distinct: false,
         }),
         Expr::Floor { expr, .. } => Ok(SqlExpr::Function {
             name: "floor".into(),
-            args: vec![convert_expr(expr)?],
+            args: vec![convert_expr_depth(expr, depth)?],
             distinct: false,
         }),
         // SUBSTRING(expr FROM start FOR len)
@@ -134,12 +167,12 @@ pub fn convert_expr(expr: &Expr) -> Result<SqlExpr> {
             substring_for,
             ..
         } => {
-            let mut args = vec![convert_expr(expr)?];
+            let mut args = vec![convert_expr_depth(expr, depth)?];
             if let Some(from) = substring_from {
-                args.push(convert_expr(from)?);
+                args.push(convert_expr_depth(from, depth)?);
             }
             if let Some(len) = substring_for {
-                args.push(convert_expr(len)?);
+                args.push(convert_expr_depth(len, depth)?);
             }
             Ok(SqlExpr::Function {
                 name: "substring".into(),
@@ -241,7 +274,7 @@ pub fn convert_value(val: &Value) -> Result<SqlValue> {
     }
 }
 
-fn convert_function(func: &ast::Function) -> Result<SqlExpr> {
+fn convert_function_depth(func: &ast::Function, depth: &mut usize) -> Result<SqlExpr> {
     let name = func
         .name
         .0
@@ -264,14 +297,16 @@ fn convert_function(func: &ast::Function) -> Result<SqlExpr> {
             .args
             .iter()
             .filter_map(|a| match a {
-                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(convert_expr(e)),
+                ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
+                    Some(convert_expr_depth(e, depth))
+                }
                 ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Wildcard) => {
                     Some(Ok(SqlExpr::Wildcard))
                 }
                 ast::FunctionArg::Named {
                     arg: ast::FunctionArgExpr::Expr(e),
                     ..
-                } => Some(convert_expr(e)),
+                } => Some(convert_expr_depth(e, depth)),
                 _ => None,
             })
             .collect::<Result<Vec<_>>>()?,
