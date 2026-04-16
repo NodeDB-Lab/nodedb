@@ -67,5 +67,30 @@ fn parse_parametric_or_literal(expr: &str, upper: &str) -> Option<nodedb_types::
             trimmed[1..trimmed.len() - 1].to_string(),
         ));
     }
-    None
+
+    // Fallback: try the plan-time const-folder for arbitrary expressions
+    // (e.g. `upper('x')`, `1 + 2`, `concat('a', 'b')`).
+    try_const_fold_default(expr)
+}
+
+/// Attempt to parse the DEFAULT expression as SQL, then const-fold it.
+fn try_const_fold_default(expr: &str) -> Option<nodedb_types::Value> {
+    let sql_expr = nodedb_sql::parse_expr_string(expr).ok()?;
+    let folded = nodedb_sql::planner::const_fold::fold_constant_default(&sql_expr)?;
+    Some(sql_value_to_ndb(folded))
+}
+
+fn sql_value_to_ndb(v: nodedb_sql::types::SqlValue) -> nodedb_types::Value {
+    use nodedb_sql::types::SqlValue;
+    match v {
+        SqlValue::Null => nodedb_types::Value::Null,
+        SqlValue::Bool(b) => nodedb_types::Value::Bool(b),
+        SqlValue::Int(i) => nodedb_types::Value::Integer(i),
+        SqlValue::Float(f) => nodedb_types::Value::Float(f),
+        SqlValue::String(s) => nodedb_types::Value::String(s),
+        SqlValue::Bytes(b) => nodedb_types::Value::Bytes(b),
+        SqlValue::Array(a) => {
+            nodedb_types::Value::Array(a.into_iter().map(sql_value_to_ndb).collect())
+        }
+    }
 }
