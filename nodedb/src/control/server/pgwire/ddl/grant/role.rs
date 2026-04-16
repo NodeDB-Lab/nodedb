@@ -57,6 +57,13 @@ pub fn grant_role(
 ) -> PgWireResult<Vec<Response>> {
     require_admin(identity, "grant roles")?;
 
+    if parts.len() < 5 {
+        return Err(sqlstate_error(
+            "42601",
+            "syntax: GRANT ROLE <role> TO <user>",
+        ));
+    }
+
     let role = parse_role(parts[2]);
 
     if matches!(role, Role::Superuser) && !identity.is_superuser {
@@ -93,6 +100,13 @@ pub fn revoke_role(
     parts: &[&str],
 ) -> PgWireResult<Vec<Response>> {
     require_admin(identity, "revoke roles")?;
+
+    if parts.len() < 5 {
+        return Err(sqlstate_error(
+            "42601",
+            "syntax: REVOKE ROLE <role> FROM <user>",
+        ));
+    }
 
     let role = parse_role(parts[2]);
 

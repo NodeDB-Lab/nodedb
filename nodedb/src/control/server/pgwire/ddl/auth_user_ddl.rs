@@ -32,7 +32,7 @@ pub fn handle_auth_user(
         ));
     }
 
-    let upper0 = parts[0].to_uppercase();
+    let upper0 = parts.first().map(|s| s.to_uppercase()).unwrap_or_default();
     match upper0.as_str() {
         "DEACTIVATE" => deactivate_auth_user(state, identity, parts),
         "ALTER" => alter_auth_user_status(state, identity, parts),
