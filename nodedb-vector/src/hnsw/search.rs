@@ -31,14 +31,14 @@ impl HnswIndex {
         // Phase 1: Greedy descent from top layer to layer 1.
         let mut current_ep = ep;
         for layer in (1..=self.max_layer).rev() {
-            let results = search_layer(self, query, current_ep, 1, layer, None);
+            let results = search_layer(self, query, current_ep, 1, layer, None, 0);
             if let Some(nearest) = results.first() {
                 current_ep = nearest.id;
             }
         }
 
         // Phase 2: Beam search at layer 0.
-        let results = search_layer(self, query, current_ep, ef, 0, None);
+        let results = search_layer(self, query, current_ep, ef, 0, None, 0);
 
         results
             .into_iter()
@@ -51,16 +51,28 @@ impl HnswIndex {
     }
 
     /// Filtered K-NN search with Roaring bitmap pre-filtering.
-    ///
-    /// Only nodes whose ID is present in `filter` are included in results.
-    /// All nodes are still used for graph navigation — this prevents accuracy
-    /// degradation for selective filters.
     pub fn search_filtered(
         &self,
         query: &[f32],
         k: usize,
         ef: usize,
         filter: &RoaringBitmap,
+    ) -> Vec<SearchResult> {
+        self.search_filtered_offset(query, k, ef, filter, 0)
+    }
+
+    /// Filtered K-NN search where the bitmap is keyed in a shifted ID space.
+    ///
+    /// `id_offset` is added to local node IDs before testing `filter.contains`.
+    /// Used by multi-segment collections where the bitmap holds GLOBAL ids
+    /// and each segment's HNSW nodes are numbered starting at `base_id`.
+    pub fn search_filtered_offset(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        filter: &RoaringBitmap,
+        id_offset: u32,
     ) -> Vec<SearchResult> {
         assert_eq!(query.len(), self.dim, "query dimension mismatch");
         if self.is_empty() {
@@ -74,13 +86,13 @@ impl HnswIndex {
 
         let mut current_ep = ep;
         for layer in (1..=self.max_layer).rev() {
-            let results = search_layer(self, query, current_ep, 1, layer, None);
+            let results = search_layer(self, query, current_ep, 1, layer, None, 0);
             if let Some(nearest) = results.first() {
                 current_ep = nearest.id;
             }
         }
 
-        let results = search_layer(self, query, current_ep, ef, 0, Some(filter));
+        let results = search_layer(self, query, current_ep, ef, 0, Some(filter), id_offset);
 
         results
             .into_iter()
@@ -100,8 +112,21 @@ impl HnswIndex {
         ef: usize,
         bitmap_bytes: &[u8],
     ) -> Vec<SearchResult> {
+        self.search_with_bitmap_bytes_offset(query, k, ef, bitmap_bytes, 0)
+    }
+
+    /// Deserialize a Roaring bitmap and search with an ID offset applied
+    /// before testing membership. See `search_filtered_offset` for rationale.
+    pub fn search_with_bitmap_bytes_offset(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        bitmap_bytes: &[u8],
+        id_offset: u32,
+    ) -> Vec<SearchResult> {
         match RoaringBitmap::deserialize_from(bitmap_bytes) {
-            Ok(bitmap) => self.search_filtered(query, k, ef, &bitmap),
+            Ok(bitmap) => self.search_filtered_offset(query, k, ef, &bitmap, id_offset),
             Err(_) => self.search(query, k, ef),
         }
     }
@@ -119,6 +144,7 @@ pub(crate) fn search_layer(
     ef: usize,
     layer: usize,
     filter: Option<&RoaringBitmap>,
+    id_offset: u32,
 ) -> Vec<Candidate> {
     let mut visited: HashSet<u32> = HashSet::new();
     visited.insert(entry_point);
@@ -139,7 +165,7 @@ pub(crate) fn search_layer(
             return false;
         }
         match filter {
-            Some(f) => f.contains(id),
+            Some(f) => f.contains(id + id_offset),
             None => true,
         }
     };

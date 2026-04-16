@@ -7,6 +7,7 @@ use crate::collection::tier::StorageTier;
 use crate::distance::DistanceMetric;
 use crate::flat::FlatIndex;
 use crate::hnsw::{HnswIndex, HnswParams};
+use crate::quantize::pq::PqCodec;
 
 use super::lifecycle::VectorCollection;
 
@@ -33,12 +34,18 @@ pub(crate) struct CollectionSnapshot {
 pub(crate) struct SealedSnapshot {
     pub base_id: u32,
     pub hnsw_bytes: Vec<u8>,
+    #[serde(default)]
+    pub pq_bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    pub pq_codes: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(crate) struct BuildingSnapshot {
     pub base_id: u32,
     pub vectors: Vec<Vec<f32>>,
+    #[serde(default)]
+    pub deleted: Vec<bool>,
 }
 
 impl VectorCollection {
@@ -53,17 +60,27 @@ impl VectorCollection {
             next_id: self.next_id,
             growing_base_id: self.growing_base_id,
             growing_vectors: (0..self.growing.len() as u32)
-                .filter_map(|i| self.growing.get_vector(i).map(|v| v.to_vec()))
+                .filter_map(|i| self.growing.get_vector_raw(i).map(|v| v.to_vec()))
                 .collect(),
             growing_deleted: (0..self.growing.len() as u32)
-                .map(|i| self.growing.get_vector(i).is_none())
+                .map(|i| self.growing.is_deleted(i))
                 .collect(),
             sealed_segments: self
                 .sealed
                 .iter()
-                .map(|s| SealedSnapshot {
-                    base_id: s.base_id,
-                    hnsw_bytes: s.index.checkpoint_to_bytes(),
+                .map(|s| {
+                    let (pq_bytes, pq_codes) = match &s.pq {
+                        Some((codec, codes)) => {
+                            (zerompk::to_msgpack_vec(codec).ok(), Some(codes.clone()))
+                        }
+                        None => (None, None),
+                    };
+                    SealedSnapshot {
+                        base_id: s.base_id,
+                        hnsw_bytes: s.index.checkpoint_to_bytes(),
+                        pq_bytes,
+                        pq_codes,
+                    }
                 })
                 .collect(),
             building_segments: self
@@ -72,7 +89,10 @@ impl VectorCollection {
                 .map(|b| BuildingSnapshot {
                     base_id: b.base_id,
                     vectors: (0..b.flat.len() as u32)
-                        .filter_map(|i| b.flat.get_vector(i).map(|v| v.to_vec()))
+                        .filter_map(|i| b.flat.get_vector_raw(i).map(|v| v.to_vec()))
+                        .collect(),
+                    deleted: (0..b.flat.len() as u32)
+                        .map(|i| b.flat.is_deleted(i))
                         .collect(),
                 })
                 .collect(),
@@ -118,18 +138,35 @@ impl VectorCollection {
         };
 
         let mut growing = FlatIndex::new(snap.dim, metric);
-        for v in &snap.growing_vectors {
-            growing.insert(v.clone());
+        for (i, v) in snap.growing_vectors.iter().enumerate() {
+            let deleted = snap.growing_deleted.get(i).copied().unwrap_or(false);
+            if deleted {
+                growing.insert_tombstoned(v.clone());
+            } else {
+                growing.insert(v.clone());
+            }
         }
 
         let mut sealed = Vec::with_capacity(snap.sealed_segments.len());
         for ss in &snap.sealed_segments {
             if let Some(index) = HnswIndex::from_checkpoint(&ss.hnsw_bytes) {
-                let sq8 = VectorCollection::build_sq8_for_index(&index);
+                let pq = match (&ss.pq_bytes, &ss.pq_codes) {
+                    (Some(bytes), Some(codes)) => zerompk::from_msgpack::<PqCodec>(bytes)
+                        .ok()
+                        .map(|codec| (codec, codes.clone())),
+                    _ => None,
+                };
+                // Only train SQ8 when PQ isn't present — a segment never carries both.
+                let sq8 = if pq.is_some() {
+                    None
+                } else {
+                    VectorCollection::build_sq8_for_index(&index)
+                };
                 sealed.push(SealedSegment {
                     index,
                     base_id: ss.base_id,
                     sq8,
+                    pq,
                     tier: StorageTier::L0Ram,
                     mmap_vectors: None,
                 });
@@ -143,11 +180,18 @@ impl VectorCollection {
                     .insert(v.clone())
                     .expect("dimension guaranteed by checkpoint");
             }
+            // Replay building-segment tombstones onto the HNSW index.
+            for (i, &dead) in bs.deleted.iter().enumerate() {
+                if dead {
+                    index.delete(i as u32);
+                }
+            }
             let sq8 = VectorCollection::build_sq8_for_index(&index);
             sealed.push(SealedSegment {
                 index,
                 base_id: bs.base_id,
                 sq8,
+                pq: None,
                 tier: StorageTier::L0Ram,
                 mmap_vectors: None,
             });
@@ -155,6 +199,10 @@ impl VectorCollection {
 
         let next_segment_id = (sealed.len() + 1) as u32;
 
+        let index_config = crate::index_config::IndexConfig {
+            hnsw: params.clone(),
+            ..crate::index_config::IndexConfig::default()
+        };
         Some(Self {
             growing,
             growing_base_id: snap.growing_base_id,
@@ -171,6 +219,7 @@ impl VectorCollection {
             doc_id_map: snap.doc_id_map.into_iter().collect(),
             multi_doc_map: snap.multi_doc_map.into_iter().collect(),
             seal_threshold: DEFAULT_SEAL_THRESHOLD,
+            index_config,
         })
     }
 }

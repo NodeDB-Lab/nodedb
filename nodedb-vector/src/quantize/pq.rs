@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 /// PQ codec with trained codebooks.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct PqCodec {
     /// Original vector dimensionality.
     pub dim: usize,
@@ -161,7 +161,8 @@ fn l2_sub(a: &[f32], b: &[f32]) -> f32 {
 
 /// Simple k-means clustering for PQ codebook training.
 ///
-/// Uses k-means++ initialization for stable convergence.
+/// Uses proper k-means++ initialization (weighted d² sampling) with a
+/// deterministic seed so training is reproducible across runs.
 fn kmeans(data: &[&[f32]], dim: usize, k: usize, max_iter: usize) -> Vec<Vec<f32>> {
     let n = data.len();
     if n == 0 || k == 0 {
@@ -169,35 +170,48 @@ fn kmeans(data: &[&[f32]], dim: usize, k: usize, max_iter: usize) -> Vec<Vec<f32
     }
     let k = k.min(n); // Can't have more centroids than data points.
 
-    // K-means++ initialization.
+    // K-means++ initialization with deterministic xorshift.
+    let mut rng = crate::hnsw::Xorshift64::new(0xC0FF_EEDE_ADBE_EF42);
+
     let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(k);
-    // First centroid: pick the first data point (deterministic).
     centroids.push(data[0].to_vec());
 
     let mut min_dists = vec![f32::MAX; n];
-    for c in 1..k {
-        // Update min distances to nearest centroid.
+    // Update against the first centroid.
+    for (i, point) in data.iter().enumerate() {
+        let d = l2_sub(point, &centroids[0]);
+        if d < min_dists[i] {
+            min_dists[i] = d;
+        }
+    }
+
+    for _ in 1..k {
+        let total: f64 = min_dists.iter().map(|&d| d as f64).sum();
+        let next_idx = if total < f64::EPSILON {
+            // All points coincide with existing centroids.
+            0
+        } else {
+            let target = rng.next_f64() * total;
+            let mut acc = 0.0f64;
+            let mut chosen = n - 1;
+            for (i, &d) in min_dists.iter().enumerate() {
+                acc += d as f64;
+                if acc >= target {
+                    chosen = i;
+                    break;
+                }
+            }
+            chosen
+        };
+        centroids.push(data[next_idx].to_vec());
+        // Incrementally update min_dists against the new centroid.
+        let last = centroids.last().expect("just pushed");
         for (i, point) in data.iter().enumerate() {
-            let d = l2_sub(point, &centroids[c - 1]);
+            let d = l2_sub(point, last);
             if d < min_dists[i] {
                 min_dists[i] = d;
             }
         }
-        // Pick next centroid proportional to d².
-        let total: f64 = min_dists.iter().map(|&d| d as f64).sum();
-        if total < f64::EPSILON {
-            // All points coincide — duplicate the first centroid.
-            centroids.push(data[0].to_vec());
-            continue;
-        }
-        // Deterministic selection: pick the point with max min_dist.
-        let best_idx = min_dists
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        centroids.push(data[best_idx].to_vec());
     }
 
     // K-means iterations.

@@ -13,6 +13,13 @@ pub use scalar::*;
 /// feature is enabled; otherwise uses scalar implementations.
 #[inline]
 pub fn distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "distance: length mismatch (a.len()={}, b.len()={})",
+        a.len(),
+        b.len()
+    );
     #[cfg(feature = "simd")]
     {
         let rt = simd::runtime();

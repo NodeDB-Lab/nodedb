@@ -2,7 +2,7 @@
 
 use crate::flat::FlatIndex;
 use crate::hnsw::{HnswIndex, HnswParams};
-use crate::quantize::sq8::Sq8Codec;
+use crate::index_config::{IndexConfig, IndexType};
 
 use super::segment::{BuildRequest, BuildingSegment, DEFAULT_SEAL_THRESHOLD, SealedSegment};
 
@@ -40,6 +40,8 @@ pub struct VectorCollection {
     pub multi_doc_map: std::collections::HashMap<String, Vec<u32>>,
     /// Number of vectors in the growing segment before sealing.
     pub(crate) seal_threshold: usize,
+    /// Full index configuration (index type, PQ params, IVF params).
+    pub(crate) index_config: IndexConfig,
 }
 
 impl VectorCollection {
@@ -50,6 +52,25 @@ impl VectorCollection {
 
     /// Create an empty collection with an explicit seal threshold.
     pub fn with_seal_threshold(dim: usize, params: HnswParams, seal_threshold: usize) -> Self {
+        let index_config = IndexConfig {
+            hnsw: params.clone(),
+            ..IndexConfig::default()
+        };
+        Self::with_seal_threshold_and_config(dim, index_config, seal_threshold)
+    }
+
+    /// Create an empty collection with a full index configuration.
+    pub fn with_index_config(dim: usize, config: IndexConfig) -> Self {
+        Self::with_seal_threshold_and_config(dim, config, DEFAULT_SEAL_THRESHOLD)
+    }
+
+    /// Create an empty collection with a full index config and custom seal threshold.
+    pub fn with_seal_threshold_and_config(
+        dim: usize,
+        config: IndexConfig,
+        seal_threshold: usize,
+    ) -> Self {
+        let params = config.hnsw.clone();
         Self {
             growing: FlatIndex::new(dim, params.metric),
             growing_base_id: 0,
@@ -66,6 +87,7 @@ impl VectorCollection {
             doc_id_map: std::collections::HashMap::new(),
             multi_doc_map: std::collections::HashMap::new(),
             seal_threshold,
+            index_config: config,
         }
     }
 
@@ -213,51 +235,26 @@ impl VectorCollection {
             .position(|b| b.segment_id == segment_id)
         {
             let building = self.building.remove(pos);
-            let sq8 = Self::build_sq8_for_index(&index);
+            let use_pq = self.index_config.index_type == IndexType::HnswPq;
+            let (sq8, pq) = if use_pq {
+                (
+                    None,
+                    Self::build_pq_for_index(&index, self.index_config.pq_m),
+                )
+            } else {
+                (Self::build_sq8_for_index(&index), None)
+            };
             let (tier, mmap_vectors) = self.resolve_tier_for_build(segment_id, &index);
 
             self.sealed.push(SealedSegment {
                 index,
                 base_id: building.base_id,
                 sq8,
+                pq,
                 tier,
                 mmap_vectors,
             });
         }
-    }
-
-    /// Build SQ8 quantized data for an HNSW index.
-    pub fn build_sq8_for_index(index: &HnswIndex) -> Option<(Sq8Codec, Vec<u8>)> {
-        if index.live_count() < 1000 {
-            return None;
-        }
-        let dim = index.dim();
-        let n = index.len();
-
-        let mut refs: Vec<&[f32]> = Vec::with_capacity(n);
-        for i in 0..n {
-            if !index.is_deleted(i as u32)
-                && let Some(v) = index.get_vector(i as u32)
-            {
-                refs.push(v);
-            }
-        }
-        if refs.is_empty() {
-            return None;
-        }
-
-        let codec = Sq8Codec::calibrate(&refs, dim);
-
-        let mut data = Vec::with_capacity(dim * n);
-        for i in 0..n {
-            if let Some(v) = index.get_vector(i as u32) {
-                data.extend(codec.quantize(v));
-            } else {
-                data.extend(vec![0u8; dim]);
-            }
-        }
-
-        Some((codec, data))
     }
 
     /// Access sealed segments (read-only).
@@ -276,10 +273,64 @@ impl VectorCollection {
     }
 
     /// Compact sealed segments by removing tombstoned nodes.
+    ///
+    /// Rewrites `doc_id_map` and `multi_doc_map` for every sealed segment
+    /// so that global ids continue to resolve to the correct document
+    /// strings after local-id renumbering.
     pub fn compact(&mut self) -> usize {
         let mut total_removed = 0;
         for seg in &mut self.sealed {
-            total_removed += seg.index.compact();
+            let base_id = seg.base_id;
+            let (removed, id_map) = seg.index.compact_with_map();
+            total_removed += removed;
+            if removed == 0 {
+                continue;
+            }
+
+            // Rebuild doc_id_map for entries in [base_id, base_id + id_map.len()).
+            let segment_end = base_id as u64 + id_map.len() as u64;
+            let doc_keys: Vec<u32> = self
+                .doc_id_map
+                .keys()
+                .copied()
+                .filter(|&k| (k as u64) >= base_id as u64 && (k as u64) < segment_end)
+                .collect();
+            // Two-phase: remove all old entries first, then insert new ones so
+            // we don't clobber a freshly-remapped entry with a later tombstone
+            // removal.
+            let mut new_entries: Vec<(u32, String)> = Vec::with_capacity(doc_keys.len());
+            for old_global in &doc_keys {
+                let doc = self.doc_id_map.remove(old_global);
+                let old_local = (old_global - base_id) as usize;
+                let new_local = id_map[old_local];
+                if new_local != u32::MAX
+                    && let Some(doc) = doc
+                {
+                    new_entries.push((base_id + new_local, doc));
+                }
+            }
+            for (k, v) in new_entries {
+                self.doc_id_map.insert(k, v);
+            }
+
+            // Rewrite multi_doc_map entries for this segment.
+            for ids in self.multi_doc_map.values_mut() {
+                ids.retain_mut(|vid| {
+                    let v = *vid;
+                    if (v as u64) >= base_id as u64 && (v as u64) < segment_end {
+                        let old_local = (v - base_id) as usize;
+                        let new_local = id_map[old_local];
+                        if new_local == u32::MAX {
+                            false
+                        } else {
+                            *vid = base_id + new_local;
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                });
+            }
         }
         total_removed
     }
@@ -382,10 +433,18 @@ impl VectorCollection {
             0.0
         };
 
-        let quantization = if self.sealed.iter().any(|s| s.sq8.is_some()) {
+        let quantization = if self.sealed.iter().any(|s| s.pq.is_some()) {
+            nodedb_types::VectorIndexQuantization::Pq
+        } else if self.sealed.iter().any(|s| s.sq8.is_some()) {
             nodedb_types::VectorIndexQuantization::Sq8
         } else {
             nodedb_types::VectorIndexQuantization::None
+        };
+
+        let index_type = match self.index_config.index_type {
+            IndexType::HnswPq => nodedb_types::VectorIndexType::HnswPq,
+            IndexType::IvfPq => nodedb_types::VectorIndexType::IvfPq,
+            IndexType::Hnsw => nodedb_types::VectorIndexType::Hnsw,
         };
 
         let hnsw_mem: usize = self
@@ -422,7 +481,7 @@ impl VectorCollection {
             memory_bytes,
             disk_bytes,
             build_in_progress: !self.building.is_empty(),
-            index_type: nodedb_types::VectorIndexType::Hnsw,
+            index_type,
             hnsw_m: self.params.m,
             hnsw_m0: self.params.m0,
             hnsw_ef_construction: self.params.ef_construction,

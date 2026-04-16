@@ -4,6 +4,7 @@ use crate::collection::tier::StorageTier;
 use crate::flat::FlatIndex;
 use crate::hnsw::{HnswIndex, HnswParams};
 use crate::mmap_segment::MmapVectorSegment;
+use crate::quantize::pq::PqCodec;
 use crate::quantize::sq8::Sq8Codec;
 
 /// Default threshold for sealing the growing segment.
@@ -44,6 +45,8 @@ pub struct SealedSegment {
     pub base_id: u32,
     /// Optional SQ8 quantized vectors for accelerated traversal.
     pub sq8: Option<(Sq8Codec, Vec<u8>)>,
+    /// Optional PQ-compressed codes (for HnswPq-configured indexes).
+    pub pq: Option<(PqCodec, Vec<u8>)>,
     /// Storage tier: L0Ram = FP32 in HNSW nodes, L1Nvme = FP32 in mmap file.
     pub tier: StorageTier,
     /// mmap-backed vector segment for L1 NVMe tier.

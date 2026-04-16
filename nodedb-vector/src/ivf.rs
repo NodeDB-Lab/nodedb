@@ -220,21 +220,40 @@ fn kmeans_centroids(data: &[&[f32]], dim: usize, k: usize, max_iter: usize) -> V
     let mut centroids: Vec<Vec<f32>> = vec![data[0].to_vec()];
     let mut min_dists = vec![f32::MAX; n];
 
+    // Initialize min_dists against the first centroid.
+    for (i, point) in data.iter().enumerate() {
+        let d = distance(point, &centroids[0], DistanceMetric::L2);
+        if d < min_dists[i] {
+            min_dists[i] = d;
+        }
+    }
+
+    let mut rng = crate::hnsw::Xorshift64::new(0xC0FF_EEDE_ADBE_EF42);
     for _ in 1..k {
-        let Some(last) = centroids.last() else { break };
+        let total: f64 = min_dists.iter().map(|&d| d as f64).sum();
+        let next_idx = if total < f64::EPSILON {
+            0
+        } else {
+            let target = rng.next_f64() * total;
+            let mut acc = 0.0f64;
+            let mut chosen = n - 1;
+            for (i, &d) in min_dists.iter().enumerate() {
+                acc += d as f64;
+                if acc >= target {
+                    chosen = i;
+                    break;
+                }
+            }
+            chosen
+        };
+        centroids.push(data[next_idx].to_vec());
+        let last = centroids.last().expect("just pushed");
         for (i, point) in data.iter().enumerate() {
             let d = distance(point, last, DistanceMetric::L2);
             if d < min_dists[i] {
                 min_dists[i] = d;
             }
         }
-        let best = min_dists
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        centroids.push(data[best].to_vec());
     }
 
     let mut assignments = vec![0usize; n];

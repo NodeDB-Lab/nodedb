@@ -1,9 +1,111 @@
 //! VectorCollection search: multi-segment merging with SQ8 reranking.
 
-use crate::distance::distance;
+use crate::distance::{DistanceMetric, distance};
 use crate::hnsw::SearchResult;
 
 use super::lifecycle::VectorCollection;
+use super::segment::SealedSegment;
+
+/// Score a single candidate via the SQ8 codec, using the metric-appropriate
+/// asymmetric distance.
+#[inline]
+fn sq8_score(
+    codec: &crate::quantize::sq8::Sq8Codec,
+    query: &[f32],
+    encoded: &[u8],
+    metric: DistanceMetric,
+) -> f32 {
+    match metric {
+        DistanceMetric::Cosine => codec.asymmetric_cosine(query, encoded),
+        DistanceMetric::InnerProduct => codec.asymmetric_ip(query, encoded),
+        // L2 (and all other metrics that don't have a specialized asymmetric
+        // form yet) fall back to squared L2 — correct for ordering when the
+        // metric is L2 and a reasonable proxy otherwise since we rerank with
+        // exact FP32 below.
+        _ => codec.asymmetric_l2(query, encoded),
+    }
+}
+
+/// Candidate-generation + rerank for a sealed segment that has a quantized
+/// codec attached. Generates a widened candidate pool via HNSW, re-scores
+/// candidates using the quantized codec (this is where SQ8/PQ actually pay
+/// off — the FP32 vectors need not be resident), and reranks the top
+/// `top_k` via exact FP32 distance from mmap or index storage.
+fn quantized_search(
+    seg: &SealedSegment,
+    query: &[f32],
+    top_k: usize,
+    ef: usize,
+    metric: DistanceMetric,
+) -> Vec<SearchResult> {
+    let rerank_k = top_k.saturating_mul(3).max(20);
+    let hnsw_candidates = seg.index.search(query, rerank_k, ef);
+
+    // Phase 1: rank candidates by quantized distance.
+    let mut scored: Vec<(u32, f32)> = if let Some((codec, codes)) = &seg.pq {
+        let table = codec.build_distance_table(query);
+        let m = codec.m;
+        hnsw_candidates
+            .into_iter()
+            .filter_map(|r| {
+                let start = (r.id as usize).checked_mul(m)?;
+                let end = start.checked_add(m)?;
+                let slice = codes.get(start..end)?;
+                Some((r.id, codec.asymmetric_distance(&table, slice)))
+            })
+            .collect()
+    } else if let Some((codec, data)) = &seg.sq8 {
+        let dim = codec.dim();
+        hnsw_candidates
+            .into_iter()
+            .filter_map(|r| {
+                let start = (r.id as usize).checked_mul(dim)?;
+                let end = start.checked_add(dim)?;
+                let slice = data.get(start..end)?;
+                Some((r.id, sq8_score(codec, query, slice, metric)))
+            })
+            .collect()
+    } else {
+        hnsw_candidates
+            .into_iter()
+            .map(|r| (r.id, r.distance))
+            .collect()
+    };
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Keep only the most promising candidates for FP32 rerank.
+    let keep = rerank_k.min(scored.len());
+    scored.truncate(keep);
+
+    // Prefetch FP32 vectors for reranking.
+    if let Some(mmap) = &seg.mmap_vectors {
+        let ids: Vec<u32> = scored.iter().map(|&(id, _)| id).collect();
+        mmap.prefetch_batch(&ids);
+    }
+
+    // Phase 2: rerank with exact FP32.
+    let mut reranked: Vec<SearchResult> = scored
+        .into_iter()
+        .filter_map(|(id, _)| {
+            let v = if let Some(mmap) = &seg.mmap_vectors {
+                mmap.get_vector(id)?
+            } else {
+                seg.index.get_vector(id)?
+            };
+            Some(SearchResult {
+                id,
+                distance: distance(query, v, metric),
+            })
+        })
+        .collect();
+    reranked.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    reranked.truncate(top_k);
+    reranked
+}
 
 impl VectorCollection {
     /// Search across all segments, merging results by distance.
@@ -19,44 +121,8 @@ impl VectorCollection {
 
         // Search sealed segments.
         for seg in &self.sealed {
-            let results = if let Some(_sq8) = &seg.sq8 {
-                // Quantized two-phase search: use HNSW graph for O(log N) candidate
-                // generation, then rerank with exact FP32 distance.
-                let rerank_k = top_k.saturating_mul(3).max(20);
-                let hnsw_candidates = seg.index.search(query, rerank_k, ef);
-                let candidates: Vec<(u32, f32)> = hnsw_candidates
-                    .into_iter()
-                    .map(|r| (r.id, r.distance))
-                    .collect();
-
-                // Prefetch FP32 vectors for reranking candidates.
-                if let Some(mmap) = &seg.mmap_vectors {
-                    let ids: Vec<u32> = candidates.iter().map(|&(id, _)| id).collect();
-                    mmap.prefetch_batch(&ids);
-                }
-
-                // Phase 2: Rerank with exact FP32 distance.
-                let mut reranked: Vec<SearchResult> = candidates
-                    .iter()
-                    .filter_map(|&(id, _)| {
-                        let v = if let Some(mmap) = &seg.mmap_vectors {
-                            mmap.get_vector(id)?
-                        } else {
-                            seg.index.get_vector(id)?
-                        };
-                        Some(SearchResult {
-                            id,
-                            distance: distance(query, v, self.params.metric),
-                        })
-                    })
-                    .collect();
-                reranked.sort_by(|a, b| {
-                    a.distance
-                        .partial_cmp(&b.distance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                reranked.truncate(top_k);
-                reranked
+            let results = if seg.pq.is_some() || seg.sq8.is_some() {
+                quantized_search(seg, query, top_k, ef, self.params.metric)
             } else {
                 seg.index.search(query, top_k, ef)
             };
@@ -94,14 +160,18 @@ impl VectorCollection {
     ) -> Vec<SearchResult> {
         let mut all: Vec<SearchResult> = Vec::new();
 
-        let growing_results = self.growing.search_filtered(query, top_k, bitmap);
+        let growing_results =
+            self.growing
+                .search_filtered_offset(query, top_k, bitmap, self.growing_base_id);
         for mut r in growing_results {
             r.id += self.growing_base_id;
             all.push(r);
         }
 
         for seg in &self.sealed {
-            let results = seg.index.search_with_bitmap_bytes(query, top_k, ef, bitmap);
+            let results =
+                seg.index
+                    .search_with_bitmap_bytes_offset(query, top_k, ef, bitmap, seg.base_id);
             for mut r in results {
                 r.id += seg.base_id;
                 all.push(r);
@@ -109,7 +179,9 @@ impl VectorCollection {
         }
 
         for seg in &self.building {
-            let results = seg.flat.search_filtered(query, top_k, bitmap);
+            let results = seg
+                .flat
+                .search_filtered_offset(query, top_k, bitmap, seg.base_id);
             for mut r in results {
                 r.id += seg.base_id;
                 all.push(r);

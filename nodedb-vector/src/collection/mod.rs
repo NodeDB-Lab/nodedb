@@ -1,6 +1,7 @@
 pub mod budget;
 pub mod checkpoint;
 pub mod lifecycle;
+pub mod quantize;
 pub mod search;
 pub mod segment;
 pub mod tier;
