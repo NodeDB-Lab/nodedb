@@ -319,9 +319,9 @@ impl FailureDetector {
     }
 
     /// Refute a self-suspect rumour by bumping local incarnation and
-    /// rebroadcasting `Alive`. E-γ exposes the handle so tests can
-    /// assert the behaviour; the dissemination queue in E-δ will call
-    /// this automatically from the piggyback ingestor.
+    /// rebroadcasting `Alive`. Exposed for tests that assert the
+    /// refutation machinery directly; the piggyback ingestor calls
+    /// the same underlying path automatically in production.
     #[cfg(test)]
     pub async fn bump_local_incarnation(&self, past: Incarnation) -> Incarnation {
         let mut guard = self.local_incarnation.lock().await;

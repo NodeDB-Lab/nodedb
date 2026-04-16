@@ -6,19 +6,16 @@
 //! incarnation refutation, dedicated acks) used by modern systems such as
 //! Hashicorp memberlist and Cassandra's gossiper.
 //!
-//! ## Layer map (Phase E)
+//! ## Layer map
 //!
-//! | Sub-batch | Contents                                                   |
-//! |-----------|------------------------------------------------------------|
-//! | **E-α**   | Core types — `config`, `error`, `incarnation`, `member`, `membership` (this file's children) |
-//! | E-β       | Wire messages (`Ping`/`PingReq`/`Ack`/`Nack`) + zerompk codec |
-//! | E-γ       | Failure detector loop over an injected transport trait     |
-//! | E-δ       | Piggyback dissemination queue + convergence tests          |
-//! | E-ε       | Real UDP transport, bootstrap seeding, cluster integration |
-//!
-//! E-α is deliberately side-effect-free: no tasks, no I/O, no wire formats.
-//! It exposes the pure data model — member states, incarnation numbers, and
-//! the state-merge rule — that every later sub-batch builds on.
+//! - `config`, `error`, `incarnation`, `member`, `membership` — pure
+//!   data model: states, incarnation numbers, and the merge rule.
+//! - `wire` — `Ping` / `PingReq` / `Ack` / `Nack` datagrams + codec.
+//! - `detector` — failure detector loop over a pluggable transport
+//!   trait, scheduler, suspicion timer, probe round machinery.
+//! - `dissemination` — piggyback queue with `lambda * log(n)` fanout.
+//! - `bootstrap` — one-stop `spawn` entry point.
+//! - `subscriber` — hook trait fired on every membership transition.
 
 pub mod bootstrap;
 pub mod config;

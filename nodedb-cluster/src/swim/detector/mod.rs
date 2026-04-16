@@ -4,8 +4,8 @@
 //! probe scheduler, the suspicion timer, and the main `tokio::select!`
 //! loop. All actual networking is pushed behind the [`Transport`] trait
 //! so unit tests can run fully in-process against [`InMemoryTransport`]
-//! and the real UDP transport in E-ε can slot in without touching the
-//! detector logic.
+//! while production uses [`UdpTransport`] — both slot into the same
+//! detector without touching its logic.
 
 pub mod probe_round;
 pub mod runner;

@@ -1,9 +1,8 @@
 //! SWIM probe message structs.
 //!
-//! These are the four datagram types the failure detector exchanges over
-//! the network once E-ε wires in a transport. They are pure data types
-//! with `serde` derives — no I/O, no validation beyond what the type
-//! system enforces.
+//! These are the four datagram types the failure detector exchanges
+//! over the network. They are pure data types with `serde` derives —
+//! no I/O, no validation beyond what the type system enforces.
 //!
 //! ## Message flow (reference)
 //!
@@ -21,9 +20,7 @@
 //! ```
 //!
 //! Every message carries a bounded `piggyback: Vec<MemberUpdate>` slot
-//! used for gossip-style dissemination of membership deltas (E-δ). The
-//! wire format reserves the slot now so later sub-batches don't need a
-//! compatibility break.
+//! used for gossip-style dissemination of membership deltas.
 
 use nodedb_types::NodeId;
 use serde::{Deserialize, Serialize};

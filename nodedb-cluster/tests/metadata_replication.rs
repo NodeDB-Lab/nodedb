@@ -1,8 +1,8 @@
 //! Integration test: replicated metadata group commits + cache apply.
 //!
-//! After batch 1e the `nodedb-cluster` crate no longer understands
-//! per-DDL-object descriptor shapes — `CatalogDdl { payload }` is
-//! opaque here. This test verifies the cluster-side plumbing
+//! The `nodedb-cluster` crate does not understand per-DDL-object
+//! descriptor shapes — `CatalogDdl { payload }` is opaque here.
+//! This test verifies the cluster-side plumbing
 //! (raft commit + metadata applier dispatch + cache watermark)
 //! using synthetic opaque payloads. End-to-end cross-node DDL
 //! visibility (applier decoding + redb writeback + pgwire visibility)

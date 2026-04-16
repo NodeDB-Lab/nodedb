@@ -31,7 +31,7 @@ pub enum SwimMessage {
 
 impl SwimMessage {
     /// Mutable borrow of the piggyback slot, independent of variant.
-    /// Used by the dissemination queue (E-δ) to stamp outgoing deltas
+    /// Used by the dissemination queue to stamp outgoing deltas
     /// without caring which message type it is stamping onto.
     pub fn piggyback_mut(&mut self) -> &mut Vec<MemberUpdate> {
         match self {
@@ -53,7 +53,7 @@ impl SwimMessage {
     }
 
     /// Drop piggyback entries beyond `max`. Used before encoding to keep
-    /// a datagram below the UDP MTU — the dissemination queue (E-δ) will
+    /// a datagram below the UDP MTU — the dissemination queue will
     /// decide which updates are highest-priority; this helper just
     /// enforces the upper bound.
     pub fn truncate_piggyback(&mut self, max: usize) {

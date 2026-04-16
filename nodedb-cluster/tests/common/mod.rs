@@ -292,9 +292,9 @@ impl TestNode {
     }
 
     /// Number of committed `CatalogDdl` entries observed by this
-    /// node's cache applier. After batch 1e the cluster crate
-    /// treats catalog DDL payloads as opaque — this counter is
-    /// what tests assert on for replication correctness.
+    /// node's cache applier. The cluster crate treats catalog DDL
+    /// payloads as opaque — this counter is what tests assert on
+    /// for replication correctness.
     pub fn catalog_entries_applied(&self) -> u64 {
         self.metadata_cache
             .read()

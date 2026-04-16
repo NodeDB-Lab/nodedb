@@ -1,4 +1,4 @@
-//! E.2 — Liveness drives routing invalidation.
+//! Liveness drives routing invalidation.
 //!
 //! Three UDP-backed SWIM nodes form a full mesh. A shared
 //! `RoutingTable` declares node B as the leader of group 0. A

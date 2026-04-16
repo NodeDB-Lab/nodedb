@@ -55,7 +55,7 @@ impl Member {
 }
 
 /// Serializable subset of a `Member` — everything except the monotonic
-/// instant. E-β will use this as the wire payload for membership deltas.
+/// instant. Used as the wire payload for membership deltas.
 #[derive(
     Debug,
     Clone,

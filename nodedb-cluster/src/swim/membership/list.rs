@@ -117,7 +117,7 @@ impl MembershipList {
     }
 
     /// Apply a rumour to the table. Returns the merge outcome so the caller
-    /// can drive the dissemination queue (E-δ). On `SelfRefute`, the local
+    /// can drive the dissemination queue. On `SelfRefute`, the local
     /// record is updated in place to carry the bumped incarnation before
     /// returning, so the caller only needs to gossip the new record.
     pub fn apply(&self, update: &MemberUpdate) -> MergeOutcome {
