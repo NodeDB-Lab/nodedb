@@ -4,4 +4,4 @@ pub mod schema;
 
 pub use column_type::{ColumnDef, ColumnModifier, ColumnType, ColumnTypeParseError};
 pub use profile::{ColumnarProfile, DocumentMode};
-pub use schema::{ColumnarSchema, SchemaError, SchemaOps, StrictSchema};
+pub use schema::{ColumnarSchema, DroppedColumn, SchemaError, SchemaOps, StrictSchema};

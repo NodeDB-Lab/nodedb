@@ -187,6 +187,7 @@ impl std::str::FromStr for CollectionType {
                 StrictSchema {
                     columns: vec![],
                     version: 1,
+                    dropped_columns: Vec::new(),
                 },
             ))),
             "columnar" => Ok(Self::columnar()),
@@ -196,6 +197,7 @@ impl std::str::FromStr for CollectionType {
                 schema: StrictSchema {
                     columns: vec![],
                     version: 1,
+                    dropped_columns: Vec::new(),
                 },
                 ttl: None,
                 capacity_hint: 0,

@@ -199,6 +199,7 @@ impl ColumnarMemtable {
             modifiers: Vec::new(),
             generated_expr: None,
             generated_deps: Vec::new(),
+            added_at_version: 1,
         });
     }
 }

@@ -255,6 +255,16 @@ pub struct ColumnDef {
     /// Column names this generated column depends on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_deps: Vec<String>,
+    /// Schema version at which this column was added. Original columns have
+    /// version 1 (the default). Columns added via `ALTER ADD COLUMN` record
+    /// the schema version after the bump so the reader can build a physical
+    /// sub-schema for tuples written under older versions.
+    #[serde(default = "default_added_at_version")]
+    pub added_at_version: u16,
+}
+
+fn default_added_at_version() -> u16 {
+    1
 }
 
 impl ColumnDef {
@@ -268,6 +278,7 @@ impl ColumnDef {
             modifiers: Vec::new(),
             generated_expr: None,
             generated_deps: Vec::new(),
+            added_at_version: 1,
         }
     }
 
@@ -281,6 +292,7 @@ impl ColumnDef {
             modifiers: Vec::new(),
             generated_expr: None,
             generated_deps: Vec::new(),
+            added_at_version: 1,
         }
     }
 

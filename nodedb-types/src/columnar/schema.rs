@@ -44,6 +44,31 @@ pub trait SchemaOps {
 pub struct StrictSchema {
     pub columns: Vec<ColumnDef>,
     pub version: u16,
+    /// Columns that were removed via `ALTER DROP COLUMN`. Retained so the
+    /// reader can reconstruct the physical layout of tuples written before
+    /// the drop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_columns: Vec<DroppedColumn>,
+}
+
+/// Tombstone for a column removed by `ALTER DROP COLUMN`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct DroppedColumn {
+    /// The full column definition at time of drop.
+    pub def: ColumnDef,
+    /// The column's position in the column list before it was removed.
+    pub position: usize,
+    /// The schema version at which the column was dropped.
+    pub dropped_at_version: u16,
 }
 
 /// Schema for a columnar collection (compressed segment files).
@@ -112,6 +137,7 @@ impl StrictSchema {
         Ok(Self {
             columns,
             version: 1,
+            dropped_columns: Vec::new(),
         })
     }
 
@@ -134,6 +160,75 @@ impl StrictSchema {
     /// Null bitmap size in bytes.
     pub fn null_bitmap_size(&self) -> usize {
         self.columns.len().div_ceil(8)
+    }
+
+    /// Build a sub-schema matching the physical layout of tuples written at
+    /// the given version. Columns added after `version` are excluded;
+    /// columns dropped after `version` are re-inserted at their original
+    /// positions.
+    pub fn schema_for_version(&self, version: u16) -> StrictSchema {
+        // Start with live columns that existed at this version.
+        let mut cols: Vec<ColumnDef> = self
+            .columns
+            .iter()
+            .filter(|c| c.added_at_version <= version)
+            .cloned()
+            .collect();
+
+        // Re-insert dropped columns that were still alive at this version,
+        // sorted by position (ascending) so inserts don't shift later indices.
+        let mut to_reinsert: Vec<&DroppedColumn> = self
+            .dropped_columns
+            .iter()
+            .filter(|dc| dc.def.added_at_version <= version && dc.dropped_at_version > version)
+            .collect();
+        to_reinsert.sort_by_key(|dc| dc.position);
+        for dc in to_reinsert {
+            let pos = dc.position.min(cols.len());
+            cols.insert(pos, dc.def.clone());
+        }
+
+        StrictSchema {
+            version,
+            columns: cols,
+            dropped_columns: Vec::new(),
+        }
+    }
+
+    /// Parse a SQL default literal (e.g. `'n/a'`, `0`, `true`) into a `Value`.
+    ///
+    /// Covers the common cases produced by `ALTER ADD COLUMN ... DEFAULT ...`.
+    /// Returns `Value::Null` for expressions that cannot be trivially evaluated
+    /// at read time (functions, sub-queries, etc.).
+    pub fn parse_default_literal(expr: &str) -> crate::value::Value {
+        use crate::value::Value;
+
+        let trimmed = expr.trim();
+
+        // String literals: 'foo'
+        if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+            return Value::String(trimmed[1..trimmed.len() - 1].replace("''", "'"));
+        }
+
+        // Boolean
+        match trimmed.to_uppercase().as_str() {
+            "TRUE" => return Value::Bool(true),
+            "FALSE" => return Value::Bool(false),
+            "NULL" => return Value::Null,
+            _ => {}
+        }
+
+        // Integer
+        if let Ok(i) = trimmed.parse::<i64>() {
+            return Value::Integer(i);
+        }
+
+        // Float
+        if let Ok(f) = trimmed.parse::<f64>() {
+            return Value::Float(f);
+        }
+
+        Value::Null
     }
 }
 
@@ -211,6 +306,7 @@ mod tests {
             modifiers: Vec::new(),
             generated_expr: None,
             generated_deps: Vec::new(),
+            added_at_version: 1,
         }];
         assert!(matches!(
             StrictSchema::new(cols),
