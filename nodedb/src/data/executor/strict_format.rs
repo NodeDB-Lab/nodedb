@@ -85,12 +85,37 @@ pub(super) fn binary_tuple_to_value(tuple_bytes: &[u8], schema: &StrictSchema) -
         return None;
     }
 
-    let values = decoder.extract_all(tuple_bytes).ok()?;
-
+    // Version-aware decoding: if the tuple was written with an older schema
+    // (fewer columns due to ADD COLUMN), build a sub-schema decoder matching
+    // the physical layout and fill defaults for new columns.
     let mut map = std::collections::HashMap::with_capacity(schema.columns.len());
-    for (i, col) in schema.columns.iter().enumerate() {
-        map.insert(col.name.clone(), values[i].clone());
+    if version < schema.version {
+        let old_schema = schema.schema_for_version(version);
+        let old_decoder = nodedb_strict::TupleDecoder::new(&old_schema);
+        let old_values = old_decoder.extract_all(tuple_bytes).ok()?;
+
+        // Map old columns by name.
+        for (i, col) in old_schema.columns.iter().enumerate() {
+            map.insert(col.name.clone(), old_values[i].clone());
+        }
+        // Fill defaults for columns added after this tuple's version.
+        for col in &schema.columns {
+            if col.added_at_version > version {
+                let default_val = col
+                    .default
+                    .as_deref()
+                    .map(StrictSchema::parse_default_literal)
+                    .unwrap_or(Value::Null);
+                map.insert(col.name.clone(), default_val);
+            }
+        }
+    } else {
+        let values = decoder.extract_all(tuple_bytes).ok()?;
+        for (i, col) in schema.columns.iter().enumerate() {
+            map.insert(col.name.clone(), values[i].clone());
+        }
     }
+
     Some(Value::Object(map))
 }
 
@@ -108,14 +133,20 @@ pub(super) fn binary_tuple_to_json(
     tuple_bytes: &[u8],
     schema: &StrictSchema,
 ) -> Option<serde_json::Value> {
-    let decoder = nodedb_strict::TupleDecoder::new(schema);
-    let values = decoder.extract_all(tuple_bytes).ok()?;
-
-    let mut obj = serde_json::Map::with_capacity(schema.columns.len());
-    for (i, col) in schema.columns.iter().enumerate() {
-        obj.insert(col.name.clone(), value_to_json(&values[i]));
+    // Delegate to binary_tuple_to_value (which handles version-aware decoding)
+    // then convert Value → JSON.
+    let val = binary_tuple_to_value(tuple_bytes, schema)?;
+    match val {
+        Value::Object(map) => {
+            let mut obj = serde_json::Map::with_capacity(map.len());
+            for col in &schema.columns {
+                let v = map.get(&col.name).unwrap_or(&Value::Null);
+                obj.insert(col.name.clone(), value_to_json(v));
+            }
+            Some(serde_json::Value::Object(obj))
+        }
+        _ => None,
     }
-    Some(serde_json::Value::Object(obj))
 }
 
 /// Coerce a `nodedb_types::Value` to match a column's declared type.
@@ -372,6 +403,7 @@ mod tests {
                 ColumnDef::nullable("age", ColumnType::Int64),
             ],
             version: 1,
+            dropped_columns: Vec::new(),
         }
     }
 

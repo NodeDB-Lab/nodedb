@@ -96,6 +96,7 @@ fn document_scan_preserves_kv_rows_when_collection_has_strict_config() {
                         ColumnDef::nullable("lang", ColumnType::String),
                     ],
                     version: 1,
+                    dropped_columns: Vec::new(),
                 },
             },
             enforcement: Box::new(EnforcementOptions::default()),

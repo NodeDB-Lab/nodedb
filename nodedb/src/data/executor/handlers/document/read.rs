@@ -626,6 +626,7 @@ mod tests {
                 ColumnDef::nullable("age", ColumnType::Int64),
             ],
             version: 1,
+            dropped_columns: Vec::new(),
         };
         let mut map = std::collections::HashMap::new();
         map.insert("id".into(), Value::String("u1".into()));

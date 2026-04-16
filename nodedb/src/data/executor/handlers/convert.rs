@@ -105,6 +105,7 @@ impl CoreLoop {
         let schema = StrictSchema {
             columns,
             version: 1,
+            dropped_columns: Vec::new(),
         };
 
         // Scan all existing documents.
