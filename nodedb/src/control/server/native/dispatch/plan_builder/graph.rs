@@ -5,8 +5,25 @@ use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::GraphOp;
+use crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH;
 
 use super::parse_direction;
+
+/// Clamp a depth parameter coming in over the native protocol,
+/// rejecting out-of-range values rather than forwarding them to the
+/// engine. Mirrors the pgwire ingress so no entry point can saturate
+/// traversal with an unbounded fan-out.
+fn clamped_depth(value: Option<u64>, default: usize, field: &str) -> crate::Result<usize> {
+    let v = value.map(|v| v as usize).unwrap_or(default);
+    if v > MAX_GRAPH_TRAVERSAL_DEPTH {
+        return Err(crate::Error::BadRequest {
+            detail: format!(
+                "{field} {v} exceeds maximum allowed value {MAX_GRAPH_TRAVERSAL_DEPTH}"
+            ),
+        });
+    }
+    Ok(v)
+}
 
 pub(crate) fn build_rag_fusion(
     fields: &TextFields,
@@ -24,7 +41,7 @@ pub(crate) fn build_rag_fusion(
         vector_top_k: fields.vector_top_k.unwrap_or(20) as usize,
         edge_label: fields.edge_label.clone(),
         direction: parse_direction(fields.direction.as_deref()),
-        expansion_depth: fields.expansion_depth.unwrap_or(2) as usize,
+        expansion_depth: clamped_depth(fields.expansion_depth, 2, "expansion_depth")?,
         final_top_k: fields.final_top_k.unwrap_or(10) as usize,
         rrf_k: (
             fields.vector_k.unwrap_or(60.0),
@@ -43,7 +60,7 @@ pub(crate) fn build_hop(fields: &TextFields) -> crate::Result<PhysicalPlan> {
         })?;
     Ok(PhysicalPlan::Graph(GraphOp::Hop {
         start_nodes: vec![start.clone()],
-        depth: fields.depth.unwrap_or(2) as usize,
+        depth: clamped_depth(fields.depth, 2, "depth")?,
         edge_label: fields.edge_label.clone(),
         direction: parse_direction(fields.direction.as_deref()),
         options: Default::default(),
@@ -82,7 +99,7 @@ pub(crate) fn build_path(fields: &TextFields) -> crate::Result<PhysicalPlan> {
     Ok(PhysicalPlan::Graph(GraphOp::Path {
         src: from.clone(),
         dst: to.clone(),
-        max_depth: fields.depth.unwrap_or(10) as usize,
+        max_depth: clamped_depth(fields.depth, 10, "depth")?,
         edge_label: fields.edge_label.clone(),
         options: Default::default(),
         rls_filters: Vec::new(),
@@ -98,7 +115,7 @@ pub(crate) fn build_subgraph(fields: &TextFields) -> crate::Result<PhysicalPlan>
         })?;
     Ok(PhysicalPlan::Graph(GraphOp::Subgraph {
         start_nodes: vec![start.clone()],
-        depth: fields.depth.unwrap_or(2) as usize,
+        depth: clamped_depth(fields.depth, 2, "depth")?,
         edge_label: fields.edge_label.clone(),
         options: Default::default(),
         rls_filters: Vec::new(),

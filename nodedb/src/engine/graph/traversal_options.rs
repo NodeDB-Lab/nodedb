@@ -3,6 +3,15 @@
 //! Adaptive fan-out uses a two-tier limit with optional graceful
 //! degradation instead of a hard kill.
 
+/// Largest accepted value for any graph-DSL depth parameter
+/// (`DEPTH`, `MAX_DEPTH`, `EXPANSION_DEPTH`).
+///
+/// Enforced at every ingress (pgwire, native protocol) and at the
+/// engine boundary as defence-in-depth so a single statement cannot
+/// saturate `cross_core_bfs`, `csr.shortest_path`, or the subgraph
+/// materializer with an unbounded fan-out per hop.
+pub const MAX_GRAPH_TRAVERSAL_DEPTH: usize = 64;
+
 use serde::{Deserialize, Serialize};
 
 /// Per-query graph traversal configuration.

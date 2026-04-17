@@ -107,6 +107,7 @@ impl CoreLoop {
             depth,
             "graph hop"
         );
+        let depth = depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
         let scoped: Vec<String> = start_nodes.iter().map(|n| scoped_node(tid, n)).collect();
         let refs: Vec<&str> = scoped.iter().map(String::as_str).collect();
         let result = self.csr.traverse_bfs(
@@ -183,6 +184,8 @@ impl CoreLoop {
         edge_label: &Option<String>,
         max_depth: usize,
     ) -> Response {
+        let max_depth =
+            max_depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
         let scoped_src = scoped_node(tid, src);
         let scoped_dst = scoped_node(tid, dst);
         debug!(core = self.core_id, %scoped_src, %scoped_dst, ?edge_label, max_depth, "graph path");
@@ -230,6 +233,7 @@ impl CoreLoop {
             depth,
             "graph subgraph"
         );
+        let depth = depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
         let scoped: Vec<String> = start_nodes.iter().map(|n| scoped_node(tid, n)).collect();
         let refs: Vec<&str> = scoped.iter().map(String::as_str).collect();
         let edges = self.csr.subgraph(

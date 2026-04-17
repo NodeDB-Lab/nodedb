@@ -57,9 +57,15 @@ pub async fn search_fusion(
     }
 
     let upper = sql.to_uppercase();
-    let vector_top_k = extract_param(&upper, "VECTOR_TOP_K").unwrap_or(20);
-    let expansion_depth = extract_param(&upper, "DEPTH").unwrap_or(2);
-    let final_top_k = extract_param(&upper, "TOP").unwrap_or(10);
+    // Clamp FUSION numeric params before they reach the engine. An
+    // unbounded VECTOR_TOP_K is a single-statement DoS against the
+    // HNSW scan; DEPTH / TOP blow up the graph expansion fan-out.
+    const FUSION_VECTOR_TOP_K_CAP: usize = 10_000;
+    const FUSION_DEPTH_CAP: usize = 64;
+    const FUSION_TOP_CAP: usize = 10_000;
+    let vector_top_k = clamped_param(&upper, "VECTOR_TOP_K", 20, FUSION_VECTOR_TOP_K_CAP)?;
+    let expansion_depth = clamped_param(&upper, "DEPTH", 2, FUSION_DEPTH_CAP)?;
+    let final_top_k = clamped_param(&upper, "TOP", 10, FUSION_TOP_CAP)?;
 
     let edge_label = extract_string_param(sql, "LABEL");
 
@@ -97,4 +103,17 @@ pub async fn search_fusion(
         schema,
         stream::iter(vec![Ok(row)]),
     ))])
+}
+
+fn clamped_param(upper: &str, name: &str, default: usize, cap: usize) -> PgWireResult<usize> {
+    let Some(v) = extract_param(upper, name) else {
+        return Ok(default);
+    };
+    if v > cap {
+        return Err(sqlstate_error(
+            "22023",
+            &format!("{name} {v} exceeds maximum allowed value {cap}"),
+        ));
+    }
+    Ok(v)
 }

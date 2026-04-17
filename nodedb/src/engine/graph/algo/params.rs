@@ -169,8 +169,16 @@ impl AlgoParams {
     }
 
     /// Max iterations with sensible default per algorithm.
+    ///
+    /// Defence-in-depth: the pgwire handler clamps `ITERATIONS` to
+    /// `MAX_ITERATIONS_CAP` before dispatch, but any alternate entry
+    /// point (native protocol, internal dispatch) also lands here, so
+    /// we enforce the ceiling at the engine boundary too.
     pub fn iterations(&self, default: usize) -> usize {
-        self.max_iterations.unwrap_or(default).max(1)
+        const ITERATIONS_HARD_CAP: usize = 1_000;
+        self.max_iterations
+            .unwrap_or(default)
+            .clamp(1, ITERATIONS_HARD_CAP)
     }
 
     /// Convergence tolerance, validated to positive.

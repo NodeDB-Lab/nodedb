@@ -197,7 +197,7 @@ pub async fn tree_sum(
         .get(3)
         .map(|s| s.trim().trim_matches('\'').trim_matches('"').to_lowercase());
 
-    let max_depth = extract_number_after(&upper, "MAX_DEPTH").unwrap_or(100);
+    let max_depth = extract_number_after(&upper, "MAX_DEPTH")?.unwrap_or(100);
 
     // BFS traversal to get all descendant node IDs.
     let dir = crate::engine::graph::edge_store::Direction::Out;
@@ -317,7 +317,7 @@ pub async fn tree_children(
         .trim_matches('"')
         .to_string();
 
-    let max_depth = extract_number_after(&upper, "MAX_DEPTH").unwrap_or(100);
+    let max_depth = extract_number_after(&upper, "MAX_DEPTH")?.unwrap_or(100);
 
     let dir = crate::engine::graph::edge_store::Direction::Out;
     let bfs_result = dispatch_utils::cross_core_bfs(
@@ -415,11 +415,37 @@ fn extract_function_args<'a>(
     Ok(inner.split(',').collect())
 }
 
-/// Extract a number after a keyword (e.g. `MAX_DEPTH 5`).
-fn extract_number_after(upper: &str, keyword: &str) -> Option<usize> {
-    let pos = upper.find(keyword)?;
+/// Largest accepted value for tree MAX_DEPTH. Prevents a single
+/// statement from saturating `cross_core_bfs` with an unbounded
+/// fan-out per hop.
+const TREE_MAX_DEPTH_CAP: usize = 1024;
+
+/// Extract a number after a keyword and clamp to `TREE_MAX_DEPTH_CAP`.
+///
+/// Returns `Ok(None)` when the keyword is absent; the caller supplies
+/// its own default. Rejects out-of-range values with SQLSTATE 22023
+/// instead of forwarding them to the BFS loop.
+fn extract_number_after(upper: &str, keyword: &str) -> pgwire::error::PgWireResult<Option<usize>> {
+    let Some(pos) = upper.find(keyword) else {
+        return Ok(None);
+    };
     let after = upper[pos + keyword.len()..].trim_start();
-    after.split_whitespace().next()?.parse().ok()
+    let Some(tok) = after.split_whitespace().next() else {
+        return Ok(None);
+    };
+    let v: usize = tok.parse().map_err(|_| {
+        super::super::types::sqlstate_error(
+            "22023",
+            &format!("{keyword} must be a non-negative integer"),
+        )
+    })?;
+    if v > TREE_MAX_DEPTH_CAP {
+        return Err(super::super::types::sqlstate_error(
+            "22023",
+            &format!("{keyword} {v} exceeds maximum allowed value {TREE_MAX_DEPTH_CAP}"),
+        ));
+    }
+    Ok(Some(v))
 }
 
 /// Convert a JSON value to Decimal for summation.
