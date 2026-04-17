@@ -96,3 +96,8 @@ fn match_payload_to_response(
         stream::iter(pgwire_rows),
     ))])
 }
+
+// Tenant-prefix stripping lives in the Data Plane, in
+// `engine::graph::pattern::executor::rows_to_msgpack`, so every
+// `GraphOp::Match` consumer (pgwire, native, HTTP) receives
+// already-unscoped node ids on the wire.

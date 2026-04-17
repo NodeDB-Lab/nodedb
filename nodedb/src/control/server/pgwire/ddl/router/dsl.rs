@@ -89,39 +89,23 @@ pub(super) async fn dispatch(
         return Some(super::super::crdt_ops::crdt_apply(state, identity, sql).await);
     }
 
-    // DSL: Graph operations (async — dispatches to Data Plane).
-    if upper.starts_with("GRAPH INSERT EDGE ") {
-        return Some(super::super::graph_ops::insert_edge(state, identity, parts, sql).await);
-    }
-    if upper.starts_with("GRAPH DELETE EDGE ") {
-        return Some(super::super::graph_ops::delete_edge(state, identity, parts, sql).await);
-    }
-    if upper.starts_with("GRAPH LABEL ") {
-        return Some(
-            super::super::graph_ops::set_node_labels(state, identity, parts, sql, false).await,
-        );
-    }
-    if upper.starts_with("GRAPH UNLABEL ") {
-        return Some(
-            super::super::graph_ops::set_node_labels(state, identity, parts, sql, true).await,
-        );
-    }
-    if upper.starts_with("GRAPH TRAVERSE ") {
-        return Some(super::super::graph_ops::traverse(state, identity, parts, sql).await);
-    }
-    if upper.starts_with("GRAPH NEIGHBORS ") {
-        return Some(super::super::graph_ops::neighbors(state, identity, parts, sql).await);
-    }
-    if upper.starts_with("GRAPH PATH ") {
-        return Some(super::super::graph_ops::shortest_path(state, identity, parts, sql).await);
-    }
-    if upper.starts_with("GRAPH ALGO ") {
-        return Some(super::super::graph_ops::algo(state, identity, parts, sql).await);
-    }
-
-    // Cypher-style MATCH pattern queries.
-    if upper.starts_with("MATCH ") || upper.starts_with("OPTIONAL MATCH ") {
-        return Some(super::super::match_ops::match_query(state, identity, sql).await);
+    // Graph DSL (`GRAPH ...`) and `MATCH` flow through the typed
+    // AST. Parsing is done by `nodedb_sql::ddl_ast::graph_parse`,
+    // which is quote- and brace-aware — handlers never see raw SQL.
+    if (upper.starts_with("GRAPH ")
+        || upper.starts_with("MATCH ")
+        || upper.starts_with("OPTIONAL MATCH "))
+        && let Some(stmt) = nodedb_sql::ddl_ast::parse(sql)
+    {
+        if matches!(
+            stmt,
+            nodedb_sql::ddl_ast::NodedbStatement::MatchQuery { .. }
+        ) {
+            return Some(super::super::match_ops::match_query(state, identity, sql).await);
+        }
+        if let Some(resp) = super::super::graph_ops::dispatch_typed(state, identity, stmt).await {
+            return Some(resp);
+        }
     }
 
     // COPY FROM file.
