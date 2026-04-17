@@ -81,6 +81,7 @@ pub(super) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         | PhysicalPlan::Spatial(SpatialOp::Scan { collection, .. })
         | PhysicalPlan::Document(DocumentOp::Register { collection, .. })
         | PhysicalPlan::Document(DocumentOp::IndexLookup { collection, .. })
+        | PhysicalPlan::Document(DocumentOp::IndexedFetch { collection, .. })
         | PhysicalPlan::Document(DocumentOp::DropIndex { collection, .. }) => {
             Some(collection.as_str())
         }
@@ -115,6 +116,7 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         | PhysicalPlan::Graph(GraphOp::Subgraph { .. })
         | PhysicalPlan::Graph(GraphOp::RagFusion { .. })
         | PhysicalPlan::Document(DocumentOp::Scan { .. })
+        | PhysicalPlan::Document(DocumentOp::IndexedFetch { .. })
         | PhysicalPlan::Columnar(ColumnarOp::Scan { .. })
         | PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. })
         | PhysicalPlan::Spatial(SpatialOp::Scan { .. })

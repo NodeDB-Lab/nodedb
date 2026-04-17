@@ -72,6 +72,24 @@ pub(super) fn convert_one(
             key_value,
         } => super::scan::convert_point_get(collection, engine, key_value, tenant_id),
 
+        SqlPlan::DocumentIndexLookup {
+            collection,
+            alias: _,
+            engine: _,
+            field,
+            value,
+            filters,
+            projection,
+            sort_keys: _,
+            limit,
+            offset,
+            distinct: _,
+            window_functions: _,
+            case_insensitive: _,
+        } => super::scan::convert_document_index_lookup(
+            collection, field, value, filters, projection, *limit, *offset, tenant_id,
+        ),
+
         SqlPlan::Insert {
             collection,
             engine,

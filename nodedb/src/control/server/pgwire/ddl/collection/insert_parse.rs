@@ -332,7 +332,7 @@ pub(super) async fn plan_and_dispatch(
             &task.plan,
         )
         .map_err(|e| sqlstate_error_raw("XX000", &e.to_string()))?;
-        crate::control::server::dispatch_utils::dispatch_to_data_plane(
+        let response = crate::control::server::dispatch_utils::dispatch_to_data_plane(
             state,
             tenant_id,
             task.vshard_id,
@@ -341,6 +341,25 @@ pub(super) async fn plan_and_dispatch(
         )
         .await
         .map_err(|e| sqlstate_error_raw("XX000", &e.to_string()))?;
+
+        // Data Plane returns `Ok(Response { status: Error, .. })` for
+        // constraint violations (UNIQUE, CHECK-at-write, etc.). Surface
+        // them as pgwire errors — without this mapping the Data Plane's
+        // rejection would be silently swallowed and the write appears
+        // to succeed at the SQL layer.
+        if response.status == crate::bridge::envelope::Status::Error {
+            let detail = match &response.error_code {
+                Some(crate::bridge::envelope::ErrorCode::Internal { detail, .. }) => detail.clone(),
+                Some(other) => format!("{other:?}"),
+                None => String::from_utf8_lossy(&response.payload).into_owned(),
+            };
+            let sqlstate = if detail.to_lowercase().contains("unique") {
+                "23505"
+            } else {
+                "XX000"
+            };
+            return Err(sqlstate_error_raw(sqlstate, &detail));
+        }
     }
     Ok(())
 }

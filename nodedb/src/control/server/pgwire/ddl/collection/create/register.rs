@@ -41,12 +41,10 @@ pub async fn dispatch_register_if_needed(
     };
     let (fields, _serial_fields) =
         super::super::super::schema_validation::parse_fields_clause(parts);
-    let index_paths: Vec<String> = fields
-        .iter()
-        .map(|(name, _ty)| format!("$.{name}"))
-        .collect();
+    let mut indexes = derive_auto_indexes(fields.iter().map(|(n, _)| n.as_str()));
+    extend_with_catalog_indexes(&mut indexes, &coll);
     let _ = sql; // Reserved for future CRDT detection from SQL.
-    dispatch_register_from_stored_inner(state, tenant_id, &coll, index_paths).await;
+    dispatch_register_from_stored_inner(state, tenant_id, &coll, indexes).await;
 }
 
 /// Applier-side entry point: dispatch `DocumentOp::Register` using
@@ -58,19 +56,66 @@ pub async fn dispatch_register_if_needed(
 /// arrives.
 pub async fn dispatch_register_from_stored(state: &SharedState, coll: &StoredCollection) {
     let tenant_id = crate::types::TenantId::new(coll.tenant_id);
-    let index_paths: Vec<String> = coll
-        .fields
-        .iter()
-        .map(|(name, _ty)| format!("$.{name}"))
-        .collect();
-    dispatch_register_from_stored_inner(state, tenant_id, coll, index_paths).await;
+    let mut indexes = derive_auto_indexes(coll.fields.iter().map(|(n, _)| n.as_str()));
+    extend_with_catalog_indexes(&mut indexes, coll);
+    dispatch_register_from_stored_inner(state, tenant_id, coll, indexes).await;
+}
+
+/// Per-field auto-derived indexes (schemaless default: each declared field
+/// becomes a non-unique `$.field` index). Always `Ready` — these exist
+/// from the moment the collection is created.
+fn derive_auto_indexes<'a>(
+    field_names: impl IntoIterator<Item = &'a str>,
+) -> Vec<crate::bridge::physical_plan::RegisteredIndex> {
+    field_names
+        .into_iter()
+        .map(|n| crate::bridge::physical_plan::RegisteredIndex {
+            name: n.to_string(),
+            path: format!("$.{n}"),
+            unique: false,
+            case_insensitive: false,
+            state: crate::bridge::physical_plan::RegisteredIndexState::Ready,
+        })
+        .collect()
+}
+
+/// Append explicit `CREATE INDEX` entries from the catalog. When an
+/// explicit catalog index shares a path with an auto-derived one, the
+/// catalog entry supersedes the auto-derived one: UNIQUE/COLLATE
+/// modifiers have to take effect.
+fn extend_with_catalog_indexes(
+    out: &mut Vec<crate::bridge::physical_plan::RegisteredIndex>,
+    coll: &StoredCollection,
+) {
+    for idx in &coll.indexes {
+        let state = match idx.state {
+            crate::control::security::catalog::IndexBuildState::Building => {
+                crate::bridge::physical_plan::RegisteredIndexState::Building
+            }
+            crate::control::security::catalog::IndexBuildState::Ready => {
+                crate::bridge::physical_plan::RegisteredIndexState::Ready
+            }
+        };
+        let spec = crate::bridge::physical_plan::RegisteredIndex {
+            name: idx.name.clone(),
+            path: idx.field.clone(),
+            unique: idx.unique,
+            case_insensitive: idx.case_insensitive,
+            state,
+        };
+        if let Some(existing) = out.iter_mut().find(|e| e.path == spec.path) {
+            *existing = spec;
+        } else {
+            out.push(spec);
+        }
+    }
 }
 
 async fn dispatch_register_from_stored_inner(
     state: &SharedState,
     tenant_id: crate::types::TenantId,
     coll: &StoredCollection,
-    index_paths: Vec<String>,
+    indexes: Vec<crate::bridge::physical_plan::RegisteredIndex>,
 ) {
     let name = coll.name.clone();
     let Some(catalog) = state.credentials.catalog() else {
@@ -139,7 +184,7 @@ async fn dispatch_register_from_stored_inner(
     let plan = crate::bridge::envelope::PhysicalPlan::Document(
         crate::bridge::physical_plan::DocumentOp::Register {
             collection: name.clone(),
-            index_paths,
+            indexes,
             crdt_enabled,
             storage_mode,
             enforcement: Box::new(enforcement),

@@ -21,7 +21,7 @@ pub use columnar::ColumnarOp;
 pub use crdt::CrdtOp;
 pub use document::{
     BalancedDef, DocumentOp, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding,
-    PeriodLockConfig, StorageMode, UpdateValue,
+    PeriodLockConfig, RegisteredIndex, RegisteredIndexState, StorageMode, UpdateValue,
 };
 pub use graph::{BatchEdge, GraphOp};
 pub use kv::KvOp;

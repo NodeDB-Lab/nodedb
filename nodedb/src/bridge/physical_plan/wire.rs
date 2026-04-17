@@ -93,7 +93,13 @@ mod tests {
     fn roundtrip_document_register() {
         roundtrip(PhysicalPlan::Document(DocumentOp::Register {
             collection: "users".into(),
-            index_paths: vec!["email".into()],
+            indexes: vec![crate::bridge::physical_plan::RegisteredIndex {
+                name: "email".into(),
+                path: "$.email".into(),
+                unique: false,
+                case_insensitive: false,
+                state: crate::bridge::physical_plan::RegisteredIndexState::Ready,
+            }],
             crdt_enabled: false,
             storage_mode: crate::bridge::physical_plan::StorageMode::Schemaless,
             enforcement: Box::new(EnforcementOptions {

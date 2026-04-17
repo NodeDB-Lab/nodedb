@@ -313,11 +313,26 @@ pub(crate) fn build_insert_select(
 }
 
 pub(crate) fn build_register(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
-    let index_paths = fields.index_paths.clone().unwrap_or_default();
+    // Native protocol exposes only a legacy `index_paths` text list — promote
+    // each entry to a `Ready`, non-unique `RegisteredIndex` named after the
+    // path. UNIQUE / COLLATE / build-state come from SQL DDL only.
+    let indexes = fields
+        .index_paths
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| crate::bridge::physical_plan::RegisteredIndex {
+            name: path.clone(),
+            path,
+            unique: false,
+            case_insensitive: false,
+            state: crate::bridge::physical_plan::RegisteredIndexState::Ready,
+        })
+        .collect();
 
     Ok(PhysicalPlan::Document(DocumentOp::Register {
         collection: collection.to_string(),
-        index_paths,
+        indexes,
         crdt_enabled: false,
         storage_mode: crate::bridge::physical_plan::StorageMode::Schemaless,
         enforcement: Box::new(crate::bridge::physical_plan::EnforcementOptions::default()),

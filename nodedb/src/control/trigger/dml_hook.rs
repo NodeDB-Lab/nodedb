@@ -141,7 +141,9 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
         | DocumentOp::RangeScan { .. }
         | DocumentOp::Register { .. }
         | DocumentOp::IndexLookup { .. }
+        | DocumentOp::IndexedFetch { .. }
         | DocumentOp::DropIndex { .. }
+        | DocumentOp::BackfillIndex { .. }
         | DocumentOp::EstimateCount { .. } => None,
     }
 }

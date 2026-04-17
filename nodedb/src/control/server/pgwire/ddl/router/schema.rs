@@ -67,12 +67,10 @@ pub(super) async fn dispatch(
     }
 
     if upper.starts_with("CREATE INDEX ") || upper.starts_with("CREATE UNIQUE INDEX ") {
-        return Some(super::super::collection::create_index(
-            state, identity, parts, sql,
-        ));
+        return Some(super::super::collection::create_index(state, identity, parts, sql).await);
     }
     if upper.starts_with("DROP INDEX ") {
-        return Some(super::super::collection::drop_index(state, identity, parts));
+        return Some(super::super::collection::drop_index(state, identity, parts).await);
     }
     if upper.starts_with("SHOW INDEXES") || upper.starts_with("SHOW INDEX") {
         return Some(super::super::collection::show_indexes(

@@ -136,6 +136,42 @@ pub(super) fn convert_scan(p: ScanParams<'_>) -> crate::Result<Vec<PhysicalTask>
     }])
 }
 
+/// Map `SqlPlan::DocumentIndexLookup` to a `DocumentOp::IndexedFetch` task.
+///
+/// The handler resolves doc IDs through the sparse index, fetches each
+/// document, applies any remaining filters + projection, and emits rows
+/// in the same wire format as a document scan.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn convert_document_index_lookup(
+    collection: &str,
+    field: &str,
+    value: &SqlValue,
+    filters: &[Filter],
+    projection: &[nodedb_sql::types::Projection],
+    limit: Option<usize>,
+    offset: usize,
+    tenant_id: TenantId,
+) -> crate::Result<Vec<PhysicalTask>> {
+    let filter_bytes = serialize_filters(filters)?;
+    let proj_names = extract_projection_names(projection, &[]);
+    let vshard = VShardId::from_collection(collection);
+    let physical = PhysicalPlan::Document(DocumentOp::IndexedFetch {
+        collection: collection.into(),
+        path: field.into(),
+        value: sql_value_to_string(value),
+        filters: filter_bytes,
+        projection: proj_names,
+        limit: limit.unwrap_or(10_000),
+        offset,
+    });
+    Ok(vec![PhysicalTask {
+        tenant_id,
+        vshard_id: vshard,
+        plan: physical,
+        post_set_op: PostSetOp::None,
+    }])
+}
+
 pub(super) fn convert_point_get(
     collection: &str,
     engine: &EngineType,

@@ -215,6 +215,49 @@ pub struct BalancedDef {
     pub amount_column: String,
 }
 
+/// Build state for a secondary index propagated from catalog to the Data
+/// Plane. Mirrors [`crate::control::security::catalog::IndexBuildState`]
+/// but lives in the bridge so the Data Plane doesn't depend on catalog types.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub enum RegisteredIndexState {
+    Building,
+    Ready,
+}
+
+/// One secondary index spec propagated from the catalog into the Data
+/// Plane via [`DocumentOp::Register`]. The write path consults these to:
+///
+/// - extract values on put (path / is_array)
+/// - apply UNIQUE pre-commit checks (unique)
+/// - normalize case (case_insensitive)
+/// - skip `Building` indexes from planner lookups while still dual-writing
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct RegisteredIndex {
+    pub name: String,
+    pub path: String,
+    pub unique: bool,
+    pub case_insensitive: bool,
+    pub state: RegisteredIndexState,
+}
+
 /// Document engine physical operations (schemaless + strict + DML).
 #[derive(
     Debug,
@@ -293,10 +336,13 @@ pub enum DocumentOp {
         limit: usize,
     },
 
-    /// Register collection with secondary index paths and storage mode (DDL).
+    /// Register collection with secondary indexes and storage mode (DDL).
     Register {
         collection: String,
-        index_paths: Vec<String>,
+        /// Full secondary-index specs (name, path, unique, case_insensitive,
+        /// state). Replaces the old `Vec<String>` path-only payload so the
+        /// write handler can enforce UNIQUE and skip Building indexes.
+        indexes: Vec<RegisteredIndex>,
         crdt_enabled: bool,
         /// Storage encoding mode. Determines how documents are serialized.
         storage_mode: StorageMode,
@@ -311,8 +357,52 @@ pub enum DocumentOp {
         value: String,
     },
 
+    /// Fetch full document rows via a secondary index.
+    ///
+    /// Emitted from `SqlPlan::DocumentIndexLookup` for SELECT queries where
+    /// the WHERE clause has an equality predicate on an indexed field. The
+    /// handler resolves doc IDs via `sparse.index_lookup`, fetches each
+    /// document, applies any remaining filters + projection, and emits
+    /// scan-compatible row output via `response_codec`.
+    ///
+    /// Sort / distinct / window functions are handled by the planner
+    /// falling back to a full scan — the planner only emits this variant
+    /// when none of those are present.
+    IndexedFetch {
+        collection: String,
+        /// Indexed field path (e.g. `$.email`).
+        path: String,
+        /// Equality lookup value. COLLATE NOCASE rewrites normalize to
+        /// lowercase before emission, so the handler does not need to.
+        value: String,
+        /// Remaining post-filters (serialized `Vec<ScanFilter>`).
+        filters: Vec<u8>,
+        /// Column names to include in each row (empty = all fields).
+        projection: Vec<String>,
+        limit: usize,
+        offset: usize,
+    },
+
     /// Drop all secondary index entries for a field.
     DropIndex { collection: String, field: String },
+
+    /// Backfill a secondary index from existing collection documents.
+    ///
+    /// Emitted by CREATE INDEX on a collection that already has rows.
+    /// The handler scans every document, extracts the indexed value, and
+    /// writes sparse-index entries — atomically detecting UNIQUE
+    /// violations along the way. Running this inside a single write
+    /// transaction is intentional: it mirrors Postgres's blocking CREATE
+    /// INDEX lock semantics and guarantees the index is consistent when
+    /// the Ready flip commits.
+    BackfillIndex {
+        collection: String,
+        /// JSON-path-like field (e.g. `$.email`).
+        path: String,
+        is_array: bool,
+        unique: bool,
+        case_insensitive: bool,
+    },
 
     /// Truncate: delete ALL documents in a collection.
     /// If `restart_identity` is true, sequences attached to this collection's

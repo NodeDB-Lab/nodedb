@@ -144,6 +144,7 @@ pub fn create_collection(
         materialized_sums: Vec::new(),
         lvc_enabled: false,
         permission_tree_def: None,
+        indexes: Vec::new(),
     };
 
     // Persist through the replicated metadata Raft group (group 0).
