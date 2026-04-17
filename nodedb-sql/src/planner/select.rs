@@ -227,6 +227,7 @@ fn plan_select(
         offset: 0,
         distinct: select.distinct.is_some(),
         window_functions,
+        indexes: table.info.indexes.clone(),
     })?;
 
     // 10. Wrap with subquery joins (semi/anti/cross) if any.
@@ -956,6 +957,7 @@ impl SqlCatalog for CteCatalog<'_> {
                 columns: Vec::new(),
                 primary_key: Some("id".into()),
                 has_auto_tier: false,
+                indexes: Vec::new(),
             }));
         }
         self.inner.get_collection(name)
@@ -983,6 +985,7 @@ mod tests {
                     columns: Vec::new(),
                     primary_key: Some("id".into()),
                     has_auto_tier: false,
+                    indexes: Vec::new(),
                 }),
                 "users" => Some(CollectionInfo {
                     name: "users".into(),
@@ -990,6 +993,7 @@ mod tests {
                     columns: Vec::new(),
                     primary_key: Some("id".into()),
                     has_auto_tier: false,
+                    indexes: Vec::new(),
                 }),
                 "orders" => Some(CollectionInfo {
                     name: "orders".into(),
@@ -997,6 +1001,7 @@ mod tests {
                     columns: Vec::new(),
                     primary_key: Some("id".into()),
                     has_auto_tier: false,
+                    indexes: Vec::new(),
                 }),
                 "docs" => Some(CollectionInfo {
                     name: "docs".into(),
@@ -1004,6 +1009,7 @@ mod tests {
                     columns: Vec::new(),
                     primary_key: Some("id".into()),
                     has_auto_tier: false,
+                    indexes: Vec::new(),
                 }),
                 "tags" => Some(CollectionInfo {
                     name: "tags".into(),
@@ -1011,6 +1017,7 @@ mod tests {
                     columns: Vec::new(),
                     primary_key: Some("id".into()),
                     has_auto_tier: false,
+                    indexes: Vec::new(),
                 }),
                 "user_prefs" => Some(CollectionInfo {
                     name: "user_prefs".into(),
@@ -1018,6 +1025,7 @@ mod tests {
                     columns: Vec::new(),
                     primary_key: Some("key".into()),
                     has_auto_tier: false,
+                    indexes: Vec::new(),
                 }),
                 _ => None,
             };

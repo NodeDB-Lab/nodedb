@@ -27,6 +27,11 @@ impl EngineRules for StrictRules {
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {
+        if let Some(plan) =
+            crate::engine_rules::try_document_index_lookup(&p, EngineType::DocumentStrict)
+        {
+            return Ok(plan);
+        }
         Ok(SqlPlan::Scan {
             collection: p.collection,
             alias: p.alias,

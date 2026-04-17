@@ -34,6 +34,35 @@ pub enum SqlPlan {
         key_column: String,
         key_value: SqlValue,
     },
+    /// Document fetch via a secondary index: equality predicate on an
+    /// indexed field. The executor performs an index lookup to resolve
+    /// matching document IDs, reads each document, and applies any
+    /// remaining filters, projection, sort, and limit.
+    ///
+    /// Emitted by `document_schemaless::plan_scan` /
+    /// `document_strict::plan_scan` when the WHERE clause contains a
+    /// single equality predicate on a `Ready` indexed field. Any
+    /// additional predicates fall through as post-filters.
+    DocumentIndexLookup {
+        collection: String,
+        alias: Option<String>,
+        engine: EngineType,
+        /// Indexed field path used for the lookup.
+        field: String,
+        /// Equality value from the WHERE clause.
+        value: SqlValue,
+        /// Remaining filters after extracting the equality used for lookup.
+        filters: Vec<Filter>,
+        projection: Vec<Projection>,
+        sort_keys: Vec<SortKey>,
+        limit: Option<usize>,
+        offset: usize,
+        distinct: bool,
+        window_functions: Vec<WindowSpec>,
+        /// Whether the chosen index is COLLATE NOCASE — the executor
+        /// lowercases the lookup value before probing.
+        case_insensitive: bool,
+    },
     RangeScan {
         collection: String,
         field: String,
@@ -483,6 +512,32 @@ pub struct CollectionInfo {
     pub columns: Vec<ColumnInfo>,
     pub primary_key: Option<String>,
     pub has_auto_tier: bool,
+    /// Secondary indexes available for planner rewrites. Populated by the
+    /// catalog adapter from `StoredCollection.indexes`. `Building` entries
+    /// are included so the planner can see them but MUST be skipped when
+    /// choosing an index lookup — only `Ready` indexes back query rewrites.
+    pub indexes: Vec<IndexSpec>,
+}
+
+/// Secondary index metadata surfaced to the SQL planner.
+#[derive(Debug, Clone)]
+pub struct IndexSpec {
+    pub name: String,
+    /// Canonical field path (`$.email`, `$.user.name`, or plain column name
+    /// for strict documents — the catalog layer stores them uniformly).
+    pub field: String,
+    pub unique: bool,
+    pub case_insensitive: bool,
+    /// Build state. Only `Ready` indexes drive query rewrites.
+    pub state: IndexState,
+}
+
+/// Planner-facing index state. Mirrors the catalog variant but lives here
+/// so the SQL crate doesn't depend on `nodedb` internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    Building,
+    Ready,
 }
 
 /// Metadata about a single column.

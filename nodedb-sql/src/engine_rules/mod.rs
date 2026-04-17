@@ -27,6 +27,10 @@ pub struct ScanParams {
     pub offset: usize,
     pub distinct: bool,
     pub window_functions: Vec<WindowSpec>,
+    /// Secondary indexes available on the scan's collection. Document
+    /// engines consult this to rewrite equality-on-indexed-field into
+    /// [`SqlPlan::DocumentIndexLookup`]. Other engines ignore it today.
+    pub indexes: Vec<IndexSpec>,
 }
 
 /// Parameters for planning a POINT GET operation.
@@ -106,6 +110,116 @@ pub trait EngineRules {
     fn plan_delete(&self, params: DeleteParams) -> Result<Vec<SqlPlan>>;
     /// Plan a GROUP BY / aggregate query.
     fn plan_aggregate(&self, params: AggregateParams) -> Result<SqlPlan>;
+}
+
+/// Attempt to rewrite `ScanParams` into a [`SqlPlan::DocumentIndexLookup`]
+/// when exactly one of the filters is an equality predicate on a `Ready`
+/// indexed field. Returns `None` to fall through to a generic `Scan`.
+///
+/// Shared by the schemaless and strict document engines so the
+/// index-rewrite rule has one source of truth. Normalizes strict column
+/// names to `$.column` before matching against index fields because the
+/// catalog stores every document index in JSON-path canonical form.
+pub(crate) fn try_document_index_lookup(
+    params: &ScanParams,
+    engine: EngineType,
+) -> Option<SqlPlan> {
+    // Sort / distinct / window functions are not yet supported on the
+    // indexed-fetch path — fall back to a full scan so existing behavior
+    // stays correct. Extending the handler later is additive and doesn't
+    // invalidate the rewrite.
+    if !params.sort_keys.is_empty() || params.distinct || !params.window_functions.is_empty() {
+        return None;
+    }
+
+    // Iterate filters to find the first equality candidate that lines up
+    // with a Ready index. Keep the remaining filters as post-filters.
+    // Two predicate shapes appear in practice: the resolver-emitted
+    // `FilterExpr::Comparison` (compact) and the generic
+    // `FilterExpr::Expr(SqlExpr::BinaryOp { Column, Eq, Literal })`
+    // wrapper the default path produces. Both unambiguously express
+    // equality on a column — handle both.
+    for (i, f) in params.filters.iter().enumerate() {
+        let Some((field, value)) = extract_equality(&f.expr) else {
+            continue;
+        };
+        let canonical = canonical_index_field(&field);
+        let Some(idx) = params
+            .indexes
+            .iter()
+            .find(|i| i.state == IndexState::Ready && i.field == canonical)
+        else {
+            continue;
+        };
+
+        let mut remaining = params.filters.clone();
+        remaining.remove(i);
+
+        let lookup_value = if idx.case_insensitive {
+            lowercase_string_value(&value)
+        } else {
+            value
+        };
+
+        return Some(SqlPlan::DocumentIndexLookup {
+            collection: params.collection.clone(),
+            alias: params.alias.clone(),
+            engine,
+            field: idx.field.clone(),
+            value: lookup_value,
+            filters: remaining,
+            projection: params.projection.clone(),
+            sort_keys: params.sort_keys.clone(),
+            limit: params.limit,
+            offset: params.offset,
+            distinct: params.distinct,
+            window_functions: params.window_functions.clone(),
+            case_insensitive: idx.case_insensitive,
+        });
+    }
+    None
+}
+
+/// Pull `(column_name, equality_value)` out of a filter expression if it
+/// is a column-equals-literal predicate in either of the planner's two
+/// encodings.
+fn extract_equality(expr: &FilterExpr) -> Option<(String, SqlValue)> {
+    match expr {
+        FilterExpr::Comparison {
+            field,
+            op: CompareOp::Eq,
+            value,
+        } => Some((field.clone(), value.clone())),
+        FilterExpr::Expr(SqlExpr::BinaryOp { left, op, right }) => {
+            let (col, lit) = match (left.as_ref(), op, right.as_ref()) {
+                (SqlExpr::Column { name, .. }, BinaryOp::Eq, SqlExpr::Literal(v)) => {
+                    (name.clone(), v.clone())
+                }
+                (SqlExpr::Literal(v), BinaryOp::Eq, SqlExpr::Column { name, .. }) => {
+                    (name.clone(), v.clone())
+                }
+                _ => return None,
+            };
+            Some((col, lit))
+        }
+        _ => None,
+    }
+}
+
+fn canonical_index_field(field: &str) -> String {
+    if field.starts_with("$.") || field.starts_with('$') {
+        field.to_string()
+    } else {
+        format!("$.{field}")
+    }
+}
+
+fn lowercase_string_value(v: &SqlValue) -> SqlValue {
+    if let SqlValue::String(s) = v {
+        SqlValue::String(s.to_lowercase())
+    } else {
+        v.clone()
+    }
 }
 
 /// Resolve the engine rules for a given engine type.
