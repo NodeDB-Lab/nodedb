@@ -246,6 +246,67 @@ async fn graph_insert_edge_properties_with_brace_in_string_value() {
     );
 }
 
+// ── Edge-label validation at DSL ingress ──────────────────────────────
+//
+// `CsrIndex::ensure_label` silently truncates `id_to_label.len() as u16`
+// past 65 536 distinct labels, aliasing id 1 with a later unrelated label.
+// The DSL handler (`graph_ops/edge.rs`) passes the raw user string
+// through with no validation. Any correct fix MUST reject empty labels,
+// control characters, and labels over a length cap at ingress — so the
+// interner never sees degenerate input that could hit the wrap path.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_insert_edge_rejects_empty_label() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION lblchk").await.unwrap();
+
+    // Spec: an empty label is never a valid edge type. Current code
+    // accepts it and interns it as the 0-length string.
+    let res = server
+        .exec("GRAPH INSERT EDGE FROM 'a' TO 'b' TYPE ''")
+        .await;
+    assert!(
+        res.is_err(),
+        "empty TYPE must be rejected at DSL ingress; got Ok"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_insert_edge_rejects_control_chars_in_label() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION lblchk2").await.unwrap();
+
+    // Spec: labels with ASCII control characters (0x00..=0x1F) are
+    // rejected at ingress. Inject a literal control byte into the TYPE
+    // value to bypass any E-string unescaping differences.
+    let sql = format!(
+        "GRAPH INSERT EDGE FROM 'a' TO 'b' TYPE 'bad{}label'",
+        '\u{0001}'
+    );
+    let res = server.exec(&sql).await;
+    assert!(
+        res.is_err(),
+        "labels with control characters must be rejected at DSL ingress; got Ok"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_insert_edge_rejects_overlong_label() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION lblchk3").await.unwrap();
+
+    // Spec: label length is capped at a reasonable limit (the fix picks
+    // the exact cap; 256 bytes is a common choice). A 4 KiB label MUST
+    // be rejected regardless of where the cap lands.
+    let overlong = "x".repeat(4096);
+    let sql = format!("GRAPH INSERT EDGE FROM 'a' TO 'b' TYPE '{overlong}'");
+    let res = server.exec(&sql).await;
+    assert!(
+        res.is_err(),
+        "4 KiB label must be rejected at DSL ingress; got Ok"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graph_traverse_node_id_containing_keyword_substring() {
     let server = TestServer::start().await;
