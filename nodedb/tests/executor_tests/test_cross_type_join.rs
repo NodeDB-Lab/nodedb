@@ -86,7 +86,7 @@ fn document_scan_preserves_kv_rows_when_collection_has_strict_config() {
         &mut ctx.rx,
         PhysicalPlan::Document(DocumentOp::Register {
             collection: "prefs".into(),
-            index_paths: Vec::new(),
+            indexes: Vec::new(),
             crdt_enabled: false,
             storage_mode: StorageMode::Strict {
                 schema: StrictSchema {

@@ -29,6 +29,7 @@ impl SqlCatalog for TimeseriesCatalog {
                 columns: Vec::new(),
                 primary_key: None,
                 has_auto_tier: false,
+                indexes: Vec::new(),
             }),
             _ => None,
         };

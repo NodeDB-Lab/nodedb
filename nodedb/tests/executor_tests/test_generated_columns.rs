@@ -30,7 +30,7 @@ fn register_with_generated(
         rx,
         PhysicalPlan::Document(DocumentOp::Register {
             collection: collection.into(),
-            index_paths: Vec::new(),
+            indexes: Vec::new(),
             crdt_enabled: false,
             storage_mode: Default::default(),
             enforcement: Box::new(enforcement),
