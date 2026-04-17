@@ -478,6 +478,8 @@ mod tests {
             num_groups: 4,
             replication_factor: 3,
             force_bootstrap: false,
+            tls: None,
+            insecure_transport: false,
         }
     }
 

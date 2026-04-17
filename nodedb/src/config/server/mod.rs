@@ -6,7 +6,7 @@ mod observability;
 mod tls;
 
 pub use checkpoint::CheckpointSettings;
-pub use cluster::ClusterSettings;
+pub use cluster::{ClusterSettings, TlsPaths};
 pub use cold_storage::ColdStorageSettings;
 pub use env::{apply_env_overrides, parse_memory_size, parse_seed_nodes};
 pub use observability::{

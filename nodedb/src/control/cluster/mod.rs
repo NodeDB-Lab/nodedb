@@ -19,6 +19,7 @@ pub mod metadata_applier;
 pub mod recovery_check;
 pub mod spsc_applier;
 pub mod start_raft;
+pub mod tls;
 pub mod warm_peers;
 
 pub use applied_index_watcher::AppliedIndexWatcher;
@@ -28,4 +29,5 @@ pub use metadata_applier::MetadataCommitApplier;
 pub use recovery_check::{VerifyReport, verify_and_repair};
 pub use spsc_applier::SpscCommitApplier;
 pub use start_raft::start_raft;
+pub use tls::resolve_credentials;
 pub use warm_peers::{PeerWarmReport, warm_known_peers};

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,54 @@ pub struct ClusterSettings {
     /// [`Self::validate`]). Default: `false`.
     #[serde(default)]
     pub force_bootstrap: bool,
+
+    /// Paths to TLS credentials for the cluster QUIC transport.
+    /// When `None` the bootstrapping node auto-generates a cluster CA and
+    /// its own cert on first boot (persisted under `data_dir/tls/`) and
+    /// loads them on subsequent restarts. Joining nodes receive the CA
+    /// out-of-band (see L.4). If `insecure_transport = true` is also set,
+    /// this field is ignored.
+    #[serde(default)]
+    pub tls: Option<TlsPaths>,
+
+    /// **SECURITY ESCAPE HATCH.** When `true` the Raft QUIC transport
+    /// accepts any client certificate (including none) and the client
+    /// skips server certificate verification. Any network peer reaching
+    /// the QUIC port can forge Raft RPCs.
+    ///
+    /// Only enable on fully isolated private networks where every peer
+    /// on the wire is already inside the trust boundary. Production
+    /// deployments must leave this `false` and provide `tls` credentials
+    /// (or let the bootstrapping node auto-generate them).
+    ///
+    /// Default: `false`.
+    #[serde(default)]
+    pub insecure_transport: bool,
+}
+
+/// Paths to on-disk PEM-encoded TLS credentials.
+///
+/// All paths are read once at node startup. See `nodedb-cluster::TlsCredentials`
+/// for the runtime representation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsPaths {
+    /// Node certificate (PEM).
+    pub cert: PathBuf,
+    /// Node private key (PEM). Must be `0600` or the node refuses to start.
+    pub key: PathBuf,
+    /// Cluster CA certificate (PEM).
+    pub ca: PathBuf,
+    /// Optional CRL (PEM).
+    #[serde(default)]
+    pub crl: Option<PathBuf>,
+    /// Cluster-wide 32-byte HMAC key for the authenticated Raft frame
+    /// envelope. Raw bytes, no PEM framing. Must be `0600`.
+    ///
+    /// When `None`, the resolver falls back to `data_dir/tls/cluster_secret.bin`
+    /// (auto-generated on first bootstrap, delivered via the join RPC
+    /// otherwise).
+    #[serde(default)]
+    pub cluster_secret: Option<PathBuf>,
 }
 
 fn default_num_groups() -> u64 {

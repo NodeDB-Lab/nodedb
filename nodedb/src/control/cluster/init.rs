@@ -20,12 +20,16 @@ pub async fn init_cluster(
     data_dir: &std::path::Path,
     transport_tuning: &ClusterTransportTuning,
 ) -> crate::Result<ClusterHandle> {
-    // 1. Create QUIC transport, configured from ClusterTransportTuning.
+    // 1a. Resolve TLS credentials (mandatory mTLS unless explicitly opted out).
+    let credentials = crate::control::cluster::tls::resolve_credentials(config, data_dir)?;
+
+    // 1b. Create QUIC transport, configured from ClusterTransportTuning.
     let transport = Arc::new(
         nodedb_cluster::NexarTransport::with_tuning(
             config.node_id,
             config.listen,
             transport_tuning,
+            credentials,
         )
         .map_err(|e| crate::Error::Config {
             detail: format!("cluster transport: {e}"),

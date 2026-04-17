@@ -171,6 +171,11 @@ mod tests {
     }
 
     fn test_transport() -> NexarTransport {
-        NexarTransport::new(999, "127.0.0.1:0".parse().unwrap()).expect("test transport bind")
+        NexarTransport::new(
+            999,
+            "127.0.0.1:0".parse().unwrap(),
+            nodedb_cluster::TransportCredentials::Insecure,
+        )
+        .expect("test transport bind")
     }
 }
