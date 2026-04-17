@@ -14,6 +14,19 @@ use crate::types::{Lsn, ReadConsistency, RequestId, TenantId, VShardId};
 
 static BROADCAST_COUNTER: AtomicU64 = AtomicU64::new(2_000_000);
 
+/// Total number of `broadcast_to_all_cores` / `broadcast_count_to_all_cores`
+/// invocations since process start. Exposed so callers (including test
+/// harnesses) can assert O(hops) call-count budgets on batched BFS
+/// paths. Separate from `BROADCAST_COUNTER`, which allocates request
+/// IDs — that grows by `num_cores` per call, so it's a poor call-count
+/// proxy.
+static BROADCAST_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Read the total broadcast call count for observability / tests.
+pub fn broadcast_call_count() -> u64 {
+    BROADCAST_CALLS.load(Ordering::Relaxed)
+}
+
 /// Broadcast a physical plan to ALL Data Plane cores and merge responses.
 ///
 /// Used for scans (DocumentScan, Aggregate, etc.) where data is distributed
@@ -25,6 +38,7 @@ pub async fn broadcast_to_all_cores(
     plan: PhysicalPlan,
     trace_id: u64,
 ) -> crate::Result<Response> {
+    BROADCAST_CALLS.fetch_add(1, Ordering::Relaxed);
     let num_cores = match shared.dispatcher.lock() {
         Ok(d) => d.num_cores(),
         Err(p) => p.into_inner().num_cores(),
@@ -146,6 +160,7 @@ pub async fn broadcast_count_to_all_cores(
     trace_id: u64,
     count_key: &str,
 ) -> crate::Result<Response> {
+    BROADCAST_CALLS.fetch_add(1, Ordering::Relaxed);
     let num_cores = match shared.dispatcher.lock() {
         Ok(d) => d.num_cores(),
         Err(p) => p.into_inner().num_cores(),
@@ -244,6 +259,7 @@ pub async fn broadcast_raw(
     plan: PhysicalPlan,
     trace_id: u64,
 ) -> crate::Result<Vec<u8>> {
+    BROADCAST_CALLS.fetch_add(1, Ordering::Relaxed);
     let num_cores = match shared.dispatcher.lock() {
         Ok(d) => d.num_cores(),
         Err(p) => p.into_inner().num_cores(),
