@@ -54,7 +54,10 @@ pub fn commit_offset(
         state
             .offset_store
             .commit_offset(tenant_id, &stream_name, &group_name, partition_id, lsn)
-            .map_err(|e| sqlstate_error("XX000", &format!("offset commit: {e}")))?;
+            .map_err(|e| match e {
+                crate::Error::OffsetRegression { .. } => sqlstate_error("22023", &e.to_string()),
+                _ => sqlstate_error("XX000", &format!("offset commit: {e}")),
+            })?;
 
         return Ok(vec![Response::Execution(Tag::new("COMMIT OFFSET"))]);
     }
@@ -82,18 +85,23 @@ pub fn commit_offset(
             ));
         }
 
-        // Get the stream's latest LSN per partition from the buffer.
+        // Use the buffer's per-partition tail tracker — NOT a full
+        // read_from_lsn(0, MAX) scan. The scan is O(N) and silently
+        // misses partitions whose events have been evicted by retention.
         if let Some(buffer) = state.cdc_router.get_buffer(tenant_id, &stream_name) {
-            let events = buffer.read_from_lsn(0, usize::MAX);
-            let mut latest_per_partition: std::collections::HashMap<u16, u64> =
-                std::collections::HashMap::new();
-            for e in &events {
-                let entry = latest_per_partition.entry(e.partition).or_insert(0);
-                if e.lsn > *entry {
-                    *entry = e.lsn;
+            for (partition_id, lsn) in buffer.partition_tails() {
+                // Skip partitions whose committed offset already meets
+                // or exceeds the current tail — commit_offset rejects
+                // regressions and we want idempotent auto-commit.
+                let current = state.offset_store.get_offset(
+                    tenant_id,
+                    &stream_name,
+                    &group_name,
+                    partition_id,
+                );
+                if lsn <= current {
+                    continue;
                 }
-            }
-            for (partition_id, lsn) in latest_per_partition {
                 state
                     .offset_store
                     .commit_offset(tenant_id, &stream_name, &group_name, partition_id, lsn)

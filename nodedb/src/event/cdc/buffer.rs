@@ -10,7 +10,7 @@
 //! `serde_json::Value` payload and field diffs) per subscriber or poll is
 //! the hot-path cost the Arc layer exists to eliminate.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +24,11 @@ pub struct StreamBuffer {
     name: String,
     /// Buffered events (oldest at front, newest at back).
     events: RwLock<VecDeque<Arc<CdcEvent>>>,
+    /// Per-partition high-water-mark LSN observed since buffer creation.
+    /// Survives retention eviction — the source of truth for
+    /// `COMMIT OFFSETS` auto-commit, which would otherwise miss
+    /// partitions whose events have aged out of the ring.
+    partition_tails: RwLock<HashMap<u16, u64>>,
     /// Retention config.
     retention: RetentionConfig,
     /// Total events ever pushed (monotonic counter).
@@ -39,6 +44,7 @@ impl StreamBuffer {
             events: RwLock::new(VecDeque::with_capacity(
                 (retention.max_events as usize).min(65_536),
             )),
+            partition_tails: RwLock::new(HashMap::new()),
             retention,
             total_pushed: std::sync::atomic::AtomicU64::new(0),
             total_evicted: std::sync::atomic::AtomicU64::new(0),
@@ -76,9 +82,34 @@ impl StreamBuffer {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
+        // Update per-partition tail tracker *before* appending: this runs
+        // regardless of whether the ring has space, so partitions whose
+        // events get evicted still keep an advancing tail.
+        {
+            let mut tails = self
+                .partition_tails
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            let entry = tails.entry(event.partition).or_insert(0);
+            if event.lsn > *entry {
+                *entry = event.lsn;
+            }
+        }
+
         events.push_back(event);
         self.total_pushed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Latest observed LSN per partition, across the entire lifetime of
+    /// the buffer — NOT bounded by retention. This is the correct source
+    /// of truth for `COMMIT OFFSETS` auto-commit; scanning the retention
+    /// ring loses partitions whose events have been evicted.
+    pub fn partition_tails(&self) -> HashMap<u16, u64> {
+        self.partition_tails
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Read events from a given LSN forward (for consumer polling).
@@ -291,6 +322,50 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].lsn, 10);
         assert_eq!(events[2].lsn, 30);
+    }
+
+    fn make_event_on_partition(seq: u64, partition: u16, lsn: u64) -> CdcEvent {
+        let mut e = make_event(seq, lsn);
+        e.partition = partition;
+        e
+    }
+
+    /// The `COMMIT OFFSETS` pgwire handler derives per-partition tail LSNs
+    /// by scanning `read_from_lsn(0, usize::MAX)`. After buffer eviction
+    /// removes a partition's events, that scan misses the partition
+    /// entirely — no offset is committed for it, even though downstream
+    /// consumers have already processed those events. The buffer (or a
+    /// sibling tail tracker) must retain the latest LSN observed per
+    /// partition across eviction so auto-commit can advance every
+    /// partition, not just those whose events are still in the ring.
+    #[test]
+    fn partition_tails_survive_eviction() {
+        let buf = StreamBuffer::new(
+            "test".into(),
+            RetentionConfig {
+                max_events: 2,
+                max_age_secs: 3600,
+            },
+        );
+
+        // Partition 0: two early events. These will be evicted.
+        buf.push(make_event_on_partition(1, 0, 10));
+        buf.push(make_event_on_partition(2, 0, 20));
+        // Partition 1: two later events. Eviction kicks in on push 3,
+        // pop_front drops partition 0's entries first.
+        buf.push(make_event_on_partition(3, 1, 30));
+        buf.push(make_event_on_partition(4, 1, 40));
+        assert!(
+            buf.total_evicted() >= 1,
+            "expected eviction to have removed partition 0 events"
+        );
+
+        // `partition_tails()` is the source of truth for `COMMIT OFFSETS`.
+        // It must retain each partition's high-water-mark LSN even when
+        // the underlying event has been evicted from the retention ring.
+        let tails = buf.partition_tails();
+        assert_eq!(tails.get(&0).copied(), Some(20));
+        assert_eq!(tails.get(&1).copied(), Some(40));
     }
 
     #[test]

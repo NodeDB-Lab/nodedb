@@ -25,6 +25,18 @@ pub enum Error {
         resource: String,
     },
 
+    #[error(
+        "offset regression on stream '{stream}' group '{group}' partition {partition_id}: \
+         attempted LSN {attempted_lsn} < current committed LSN {current_lsn}"
+    )]
+    OffsetRegression {
+        stream: String,
+        group: String,
+        partition_id: u16,
+        current_lsn: u64,
+        attempted_lsn: u64,
+    },
+
     #[error("request {request_id} exceeded deadline")]
     DeadlineExceeded { request_id: RequestId },
 
@@ -247,6 +259,7 @@ impl From<Error> for NodeDbError {
                 collection, detail, ..
             } => NodeDbError::constraint_violation(collection, detail),
             Error::RejectedAuthz { resource, .. } => NodeDbError::authorization_denied(resource),
+            err @ Error::OffsetRegression { .. } => NodeDbError::bad_request(err.to_string()),
             Error::DeadlineExceeded { .. } => NodeDbError::deadline_exceeded(),
             Error::ConflictRetry {
                 collection,

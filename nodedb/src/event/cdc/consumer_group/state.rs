@@ -103,6 +103,22 @@ impl OffsetStore {
     }
 
     /// Commit an offset for a specific partition.
+    ///
+    /// Rejects regressions: `lsn` must be >= the currently committed LSN
+    /// for this `(tenant, stream, group, partition)`. A regressing commit
+    /// would cause the next poll to redeliver already-acknowledged events
+    /// and break exactly-once semantics. Re-committing the same LSN is
+    /// accepted (idempotent retry).
+    ///
+    /// # Durability of the monotonicity check
+    ///
+    /// The check reads the in-memory `cache`, but the cache is authoritative
+    /// because every successful `commit_offset` writes the new LSN to redb
+    /// *before* updating the cache entry, and `OffsetStore::open` rebuilds
+    /// the cache from redb on startup. So after a process restart the check
+    /// still sees the last durably committed LSN and a regressing retry is
+    /// still rejected — the guarantee holds across crashes, not only within
+    /// a single process lifetime.
     pub fn commit_offset(
         &self,
         tenant_id: u32,
@@ -111,6 +127,24 @@ impl OffsetStore {
         partition_id: u16,
         lsn: u64,
     ) -> crate::Result<()> {
+        {
+            let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
+            if let Some(current) = cache
+                .get(&(tenant_id, stream.to_string(), group.to_string()))
+                .and_then(|m| m.get(&partition_id))
+                .copied()
+                && lsn < current
+            {
+                return Err(crate::Error::OffsetRegression {
+                    stream: stream.to_string(),
+                    group: group.to_string(),
+                    partition_id,
+                    current_lsn: current,
+                    attempted_lsn: lsn,
+                });
+            }
+        }
+
         let key = offset_key(tenant_id, stream, group, partition_id);
         let value = lsn.to_le_bytes();
 
@@ -306,5 +340,43 @@ mod tests {
 
         assert_eq!(store.get_offset(1, "s", "group_a", 0), 100);
         assert_eq!(store.get_offset(1, "s", "group_b", 0), 500);
+    }
+
+    /// A subsequent commit with an LSN strictly less than the currently
+    /// committed LSN must be rejected — otherwise the next poll will
+    /// redeliver already-acknowledged events and break exactly-once
+    /// semantics downstream.
+    #[test]
+    fn commit_offset_rejects_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OffsetStore::open(dir.path()).unwrap();
+
+        store.commit_offset(1, "s", "g", 0, 1_000_000).unwrap();
+
+        let result = store.commit_offset(1, "s", "g", 0, 1);
+        assert!(
+            result.is_err(),
+            "offset regression (1 after 1_000_000) must be rejected; got {result:?}"
+        );
+        // Committed value must not have been overwritten.
+        assert_eq!(
+            store.get_offset(1, "s", "g", 0),
+            1_000_000,
+            "rejected commit must not clobber the stored offset"
+        );
+    }
+
+    /// Committing the same LSN that is already stored must succeed
+    /// (idempotent retry) — only strict regressions are rejected.
+    #[test]
+    fn commit_offset_same_lsn_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OffsetStore::open(dir.path()).unwrap();
+
+        store.commit_offset(1, "s", "g", 0, 500).unwrap();
+        store
+            .commit_offset(1, "s", "g", 0, 500)
+            .expect("re-committing the same LSN must be accepted");
+        assert_eq!(store.get_offset(1, "s", "g", 0), 500);
     }
 }
