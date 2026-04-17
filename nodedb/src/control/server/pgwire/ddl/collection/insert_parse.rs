@@ -239,9 +239,23 @@ pub(super) async fn dispatch_plan(
     None
 }
 
+/// Quote a user-supplied map key for safe inclusion as a SQL column
+/// identifier. Object-literal keys come from untrusted client payloads;
+/// concatenating them raw into generated SQL allows a crafted key to
+/// close the column list and inject arbitrary statements. Double-quoted
+/// identifiers are the SQL standard form; embedded double quotes are
+/// escaped by doubling.
+fn quote_column_identifier(key: &str) -> String {
+    format!("\"{}\"", key.replace('"', "\"\""))
+}
+
 /// Build a SQL INSERT statement from field map.
 ///
-/// Produces `INSERT INTO coll (col1, col2) VALUES ('val1', 'val2')`.
+/// Produces `INSERT INTO coll ("col1", "col2") VALUES ('val1', 'val2')`.
+/// Column identifiers are double-quoted so that map keys containing
+/// punctuation, whitespace, or SQL syntax are treated as a single
+/// identifier by the downstream parser instead of fragmenting the
+/// statement.
 pub(super) fn fields_to_insert_sql(
     collection: &str,
     fields: &std::collections::HashMap<String, nodedb_types::Value>,
@@ -253,7 +267,7 @@ pub(super) fn fields_to_insert_sql(
     entries.sort_by_key(|(k, _)| k.as_str());
 
     for (key, value) in entries {
-        cols.push(key.as_str());
+        cols.push(quote_column_identifier(key));
         vals.push(value_to_sql_literal(value));
     }
 
@@ -265,7 +279,8 @@ pub(super) fn fields_to_insert_sql(
     )
 }
 
-/// Build a SQL UPSERT statement from field map.
+/// Build a SQL UPSERT statement from field map. See
+/// `fields_to_insert_sql` for the identifier quoting rationale.
 pub(super) fn fields_to_upsert_sql(
     collection: &str,
     fields: &std::collections::HashMap<String, nodedb_types::Value>,
@@ -277,7 +292,7 @@ pub(super) fn fields_to_upsert_sql(
     entries.sort_by_key(|(k, _)| k.as_str());
 
     for (key, value) in entries {
-        cols.push(key.as_str());
+        cols.push(quote_column_identifier(key));
         vals.push(value_to_sql_literal(value));
     }
 
@@ -404,5 +419,117 @@ pub(super) async fn fire_before_triggers(
             "XX000",
             &format!("BEFORE trigger error: {e}"),
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Object-literal rewrite contract tests.
+    //!
+    //! Map keys originate from untrusted client input. The SQL builders
+    //! MUST either reject / quote unsafe identifiers and MUST canonicalize
+    //! non-finite floats before concatenation. These tests drive the
+    //! helpers directly to pin the contract; integration tests would
+    //! mask the bug behind accidental downstream parser rejection.
+    use super::*;
+    use std::collections::HashMap;
+
+    fn one_field(key: &str, value: nodedb_types::Value) -> HashMap<String, nodedb_types::Value> {
+        let mut m = HashMap::new();
+        m.insert("id".into(), nodedb_types::Value::String("r1".into()));
+        m.insert(key.into(), value);
+        m
+    }
+
+    #[test]
+    fn upsert_sql_quotes_injection_key_as_single_identifier() {
+        // Spec: a key containing SQL syntax characters must appear only
+        // inside a double-quoted identifier, never as bare tokens. The
+        // test payload contains `);` which, if unquoted, would close
+        // the column list and start a new statement.
+        let fields = one_field(
+            "a); DROP COLLECTION other; --",
+            nodedb_types::Value::Integer(1),
+        );
+        let sql = fields_to_upsert_sql("t", &fields);
+        let quoted = "\"a); DROP COLLECTION other; --\"";
+        assert!(
+            sql.contains(quoted),
+            "expected injection key to be safely double-quoted; got {sql}"
+        );
+        // Regression guard on the specific exploit: no bare `DROP` token
+        // appears outside the quoted identifier window.
+        let parts: Vec<&str> = sql.split(quoted).collect();
+        for p in &parts {
+            assert!(
+                !p.contains("DROP"),
+                "unquoted DROP token leaked outside identifier: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn insert_sql_quotes_injection_key_as_single_identifier() {
+        let fields = one_field(
+            "b); DROP COLLECTION other; --",
+            nodedb_types::Value::Integer(2),
+        );
+        let sql = fields_to_insert_sql("t", &fields);
+        let quoted = "\"b); DROP COLLECTION other; --\"";
+        assert!(
+            sql.contains(quoted),
+            "expected injection key to be safely double-quoted; got {sql}"
+        );
+        let parts: Vec<&str> = sql.split(quoted).collect();
+        for p in &parts {
+            assert!(
+                !p.contains("DROP"),
+                "unquoted DROP token leaked outside identifier: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn upsert_sql_escapes_embedded_double_quote_in_key() {
+        // Spec: a key containing `"` must be escaped by doubling, so the
+        // quoted-identifier form stays closed correctly. Otherwise the
+        // key could still terminate the identifier and inject syntax.
+        let fields = one_field(
+            "a\"); DROP COLLECTION other; --",
+            nodedb_types::Value::Integer(1),
+        );
+        let sql = fields_to_upsert_sql("t", &fields);
+        let escaped = "\"a\"\"); DROP COLLECTION other; --\"";
+        assert!(
+            sql.contains(escaped),
+            "embedded `\"` must be doubled; got {sql}"
+        );
+    }
+
+    #[test]
+    fn upsert_sql_rejects_or_canonicalizes_nan_float() {
+        // Spec: `Value::Float(NaN)` must not reach the generated SQL as
+        // the bare token `NaN`. `format!("{f}")` currently emits `NaN`
+        // verbatim, which the planner parses as an identifier reference.
+        let mut fields = HashMap::new();
+        fields.insert("id".into(), nodedb_types::Value::String("r1".into()));
+        fields.insert("score".into(), nodedb_types::Value::Float(f64::NAN));
+        let sql = fields_to_upsert_sql("t", &fields);
+        assert!(
+            !sql.contains("NaN"),
+            "non-finite float leaked as bare `NaN` token: {sql}"
+        );
+    }
+
+    #[test]
+    fn upsert_sql_rejects_or_canonicalizes_infinity_float() {
+        let mut fields = HashMap::new();
+        fields.insert("id".into(), nodedb_types::Value::String("r1".into()));
+        fields.insert("score".into(), nodedb_types::Value::Float(f64::INFINITY));
+        let sql = fields_to_upsert_sql("t", &fields);
+        assert!(
+            !sql.contains("inf"),
+            "non-finite float leaked as bare `inf` token: {sql}"
+        );
     }
 }
