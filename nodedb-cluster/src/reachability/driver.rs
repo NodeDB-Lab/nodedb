@@ -13,13 +13,14 @@
 //! run loop breaks at the next tick or immediately if it is waiting.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, trace};
 
 use crate::circuit_breaker::CircuitBreaker;
+use crate::loop_metrics::LoopMetrics;
 
 use super::prober::ReachabilityProber;
 
@@ -44,6 +45,7 @@ pub struct ReachabilityDriver {
     breaker: Arc<CircuitBreaker>,
     prober: Arc<dyn ReachabilityProber>,
     cfg: ReachabilityDriverConfig,
+    loop_metrics: Arc<LoopMetrics>,
 }
 
 impl ReachabilityDriver {
@@ -56,7 +58,13 @@ impl ReachabilityDriver {
             breaker,
             prober,
             cfg,
+            loop_metrics: LoopMetrics::new("reachability_loop"),
         }
+    }
+
+    /// Shared handle to this loop's standardized metrics.
+    pub fn loop_metrics(&self) -> Arc<LoopMetrics> {
+        Arc::clone(&self.loop_metrics)
     }
 
     /// Run the driver until `shutdown` flips to `true`.
@@ -67,6 +75,7 @@ impl ReachabilityDriver {
         // would stampede every open breaker at once.
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         tick.tick().await;
+        self.loop_metrics.set_up(true);
         loop {
             tokio::select! {
                 biased;
@@ -80,22 +89,30 @@ impl ReachabilityDriver {
                 }
             }
         }
+        self.loop_metrics.set_up(false);
         debug!("reachability driver shutting down");
     }
 
     /// Single sweep — exposed for tests that drive the loop manually.
     pub async fn sweep_once(&self) {
+        let started = Instant::now();
         let open = self.breaker.open_peers();
         if open.is_empty() {
+            self.loop_metrics.observe(started.elapsed());
             return;
         }
         trace!(count = open.len(), "reachability sweep: probing open peers");
         for peer in open {
             let prober = Arc::clone(&self.prober);
+            let err_metrics = Arc::clone(&self.loop_metrics);
             tokio::spawn(async move {
-                let _ = prober.probe(peer).await;
+                if let Err(e) = prober.probe(peer).await {
+                    tracing::debug!(peer, error = %e, "reachability probe failed");
+                    err_metrics.record_error("probe");
+                }
             });
         }
+        self.loop_metrics.observe(started.elapsed());
     }
 }
 

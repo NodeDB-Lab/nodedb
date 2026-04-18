@@ -174,6 +174,26 @@ pub struct SharedState {
     /// once in `control::cluster::start_raft`.
     pub cluster_observer: OnceLock<Arc<nodedb_cluster::ClusterObserver>>,
 
+    /// Registry of standardized per-loop metrics (iterations, last
+    /// duration, errors by kind, up flag). Populated at startup by
+    /// `control::cluster::start_raft` (for the raft, health,
+    /// reachability, and rebalancer loops) and by the lease-renewal
+    /// spawn site (for `descriptor_lease_loop`). The `/metrics` route
+    /// iterates the registry and emits every loop's Prometheus
+    /// exposition.
+    pub loop_metrics_registry: Arc<nodedb_cluster::LoopMetricsRegistry>,
+
+    /// Handle to the cluster health monitor. Set exactly once in
+    /// `control::cluster::start_raft`. Used by the Prometheus route
+    /// to render the `health_loop_suspect_peers{peer_id}` gauge.
+    pub health_monitor: OnceLock<Arc<nodedb_cluster::HealthMonitor>>,
+
+    /// Dispatcher for OTLP trace-span emission. Always set — disabled
+    /// instances are no-ops so gateway and executor call sites don't
+    /// need conditionals. Configured at startup from
+    /// `observability.otlp.export`.
+    pub trace_exporter: Arc<crate::control::trace_export::TraceExporter>,
+
     /// Migration tracker for observability (None in single-node mode).
     pub migration_tracker: Option<Arc<nodedb_cluster::MigrationTracker>>,
 

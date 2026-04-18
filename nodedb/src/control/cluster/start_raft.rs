@@ -101,6 +101,12 @@ pub fn start_raft(
     // client-facing listener.
     let ready_rx = raft_loop.subscribe_ready();
 
+    // Register the raft-tick loop's standardized metrics so the
+    // `/metrics` route can expose them alongside every other driver.
+    shared
+        .loop_metrics_registry
+        .register(raft_loop.loop_metrics());
+
     // Start the Raft tick loop.
     let rl_run = raft_loop.clone();
     let sr_raft = shutdown_rx.clone();
@@ -154,6 +160,12 @@ pub fn start_raft(
         handle.catalog.clone(),
         health_config,
     ));
+    shared
+        .loop_metrics_registry
+        .register(health_monitor.loop_metrics());
+    if shared.health_monitor.set(health_monitor.clone()).is_err() {
+        tracing::warn!("health_monitor already set — start_raft appears to have run twice");
+    }
     let sr_health = shutdown_rx;
     tokio::spawn(async move {
         health_monitor.run(sr_health).await;

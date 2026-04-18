@@ -77,6 +77,10 @@ pub struct PlanCache {
     inner: Mutex<PlanCacheInner>,
     /// Total number of cache hits since this cache was created.
     hit_count: AtomicU64,
+    /// Total number of cache misses (`get` calls that returned `None`)
+    /// since this cache was created. Paired with `hit_count` to render
+    /// the `gateway_plan_cache_hit_ratio` gauge.
+    miss_count: AtomicU64,
 }
 
 struct PlanCacheInner {
@@ -100,6 +104,7 @@ impl PlanCache {
                 version_set_index: HashMap::new(),
             }),
             hit_count: AtomicU64::new(0),
+            miss_count: AtomicU64::new(0),
         }
     }
 
@@ -118,6 +123,8 @@ impl PlanCache {
             .map(|e| std::sync::Arc::clone(&e.plan));
         if result.is_some() {
             self.hit_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.miss_count.fetch_add(1, Ordering::Relaxed);
         }
         result
     }
@@ -125,6 +132,24 @@ impl PlanCache {
     /// Total number of cache hits since this cache was created.
     pub fn cache_hit_count(&self) -> u64 {
         self.hit_count.load(Ordering::Relaxed)
+    }
+
+    /// Total number of cache misses since this cache was created.
+    pub fn cache_miss_count(&self) -> u64 {
+        self.miss_count.load(Ordering::Relaxed)
+    }
+
+    /// Cache hit ratio in `[0.0, 1.0]`. Returns `0.0` when the cache
+    /// has never been consulted so scrapes never see a NaN sample.
+    pub fn hit_ratio(&self) -> f64 {
+        let h = self.hit_count.load(Ordering::Relaxed);
+        let m = self.miss_count.load(Ordering::Relaxed);
+        let total = h + m;
+        if total == 0 {
+            0.0
+        } else {
+            h as f64 / total as f64
+        }
     }
 
     /// Insert a plan. On capacity overflow, the oldest entry is evicted.

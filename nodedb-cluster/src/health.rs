@@ -9,11 +9,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
 use crate::catalog::ClusterCatalog;
+use crate::loop_metrics::LoopMetrics;
 use crate::rpc_codec::{
     JoinNodeInfo, PingRequest, PongResponse, RaftRpc, TopologyAck, TopologyUpdate,
 };
@@ -58,6 +59,7 @@ pub struct HealthMonitor {
     config: HealthConfig,
     /// Per-peer consecutive ping failure count.
     ping_failures: Mutex<HashMap<u64, u32>>,
+    loop_metrics: Arc<LoopMetrics>,
 }
 
 impl HealthMonitor {
@@ -75,7 +77,23 @@ impl HealthMonitor {
             catalog,
             config,
             ping_failures: Mutex::new(HashMap::new()),
+            loop_metrics: LoopMetrics::new("health_loop"),
         }
+    }
+
+    /// Shared handle to this loop's standardized metrics.
+    pub fn loop_metrics(&self) -> Arc<LoopMetrics> {
+        Arc::clone(&self.loop_metrics)
+    }
+
+    /// Snapshot of currently-suspect peers (non-zero consecutive
+    /// ping-failure count). Used to render the labeled
+    /// `health_loop_suspect_peers{peer_id}` gauge.
+    pub fn suspect_peers(&self) -> HashMap<u64, u32> {
+        self.ping_failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Run the health monitor until shutdown.
@@ -84,11 +102,14 @@ impl HealthMonitor {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         info!(node_id = self.node_id, "health monitor started");
+        self.loop_metrics.set_up(true);
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    let started = Instant::now();
                     self.ping_all_peers().await;
+                    self.loop_metrics.observe(started.elapsed());
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
@@ -98,6 +119,7 @@ impl HealthMonitor {
                 }
             }
         }
+        self.loop_metrics.set_up(false);
     }
 
     /// Ping all known peers and update failure tracking.
@@ -198,6 +220,7 @@ impl HealthMonitor {
 
     /// Record a ping failure. Returns true if topology changed (node marked Draining).
     fn record_ping_failure(&self, peer_id: u64) -> bool {
+        self.loop_metrics.record_error("ping");
         let count = {
             let mut failures = self.ping_failures.lock().unwrap_or_else(|p| p.into_inner());
             let count = failures.entry(peer_id).or_insert(0);

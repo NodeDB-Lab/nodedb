@@ -6,7 +6,7 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::debug;
 
@@ -16,6 +16,7 @@ use crate::catalog::ClusterCatalog;
 use crate::conf_change::ConfChange;
 use crate::error::Result;
 use crate::forward::{NoopPlanExecutor, PlanExecutor};
+use crate::loop_metrics::LoopMetrics;
 use crate::metadata_group::applier::{MetadataApplier, NoopMetadataApplier};
 use crate::multi_raft::MultiRaft;
 use crate::topology::ClusterTopology;
@@ -90,6 +91,10 @@ pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     /// spawned just after `begin_shutdown`), and awaiting
     /// `receiver.changed()` is cancellable inside `tokio::select!`.
     pub(super) shutdown_watch: tokio::sync::watch::Sender<bool>,
+    /// Standardized loop observations. Updated inside `run()` after
+    /// every `do_tick`. Register via
+    /// [`Self::loop_metrics`] with the cluster registry.
+    pub(super) loop_metrics: Arc<LoopMetrics>,
     /// Boot-time readiness signal. Flipped to `true` by
     /// [`super::tick::do_tick`] after the first tick completes phase
     /// 4 (apply committed entries) — i.e. once Raft has driven at
@@ -128,6 +133,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             catalog: None,
             shutdown_watch,
             ready_watch,
+            loop_metrics: LoopMetrics::new("raft_tick_loop"),
         }
     }
 }
@@ -148,7 +154,20 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             catalog: self.catalog,
             shutdown_watch: self.shutdown_watch,
             ready_watch: self.ready_watch,
+            loop_metrics: self.loop_metrics,
         }
+    }
+
+    /// Shared handle to this loop's standardized metrics.
+    pub fn loop_metrics(&self) -> Arc<LoopMetrics> {
+        Arc::clone(&self.loop_metrics)
+    }
+
+    /// Count of Raft groups currently mounted on this node — used to
+    /// render the `raft_tick_loop_pending_groups` gauge.
+    pub fn pending_groups(&self) -> usize {
+        let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+        mr.group_count()
     }
 
     /// Signal cooperative shutdown to every detached task spawned
@@ -224,11 +243,14 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     pub async fn run(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut interval = tokio::time::interval(self.tick_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        self.loop_metrics.set_up(true);
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    let started = Instant::now();
                     self.do_tick();
+                    self.loop_metrics.observe(started.elapsed());
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
@@ -239,6 +261,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                 }
             }
         }
+        self.loop_metrics.set_up(false);
     }
 
     /// Propose a command to the Raft group owning the given vShard.

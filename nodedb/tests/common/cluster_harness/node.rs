@@ -227,7 +227,11 @@ impl TestClusterNode {
             Arc::clone(&shared),
             &tuning,
             cluster_shutdown_rx,
-        );
+        )
+        .map(|(join, metrics)| {
+            shared.loop_metrics_registry.register(metrics);
+            join
+        });
 
         // Construct the gateway and install it (plus its DDL invalidator) on
         // SharedState, mirroring what main.rs does before listeners bind.

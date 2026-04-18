@@ -26,11 +26,12 @@
 //! acquisition.
 
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nodedb_cluster::DescriptorId;
 #[cfg(test)]
 use nodedb_cluster::DescriptorLease;
+use nodedb_cluster::LoopMetrics;
 use nodedb_types::config::tuning::ClusterTransportTuning;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -82,17 +83,23 @@ pub struct LeaseRenewalLoop {
     shared: Weak<SharedState>,
     config: LeaseRenewalConfig,
     shutdown_rx: watch::Receiver<bool>,
+    loop_metrics: Arc<LoopMetrics>,
 }
 
 impl LeaseRenewalLoop {
     /// Spawn the renewal loop on the current tokio runtime. Returns
     /// `None` (and does not spawn anything) on single-node clusters
     /// where `metadata_raft` is not wired — see the module docstring.
+    ///
+    /// The returned handle is `(JoinHandle, LoopMetrics)`; the caller
+    /// registers the metrics with the cluster's loop-metrics registry
+    /// so scrapes include the standardized
+    /// `descriptor_lease_loop_*` samples.
     pub fn spawn(
         shared: Arc<SharedState>,
         tuning: &ClusterTransportTuning,
         shutdown_rx: watch::Receiver<bool>,
-    ) -> Option<JoinHandle<()>> {
+    ) -> Option<(JoinHandle<()>, Arc<LoopMetrics>)> {
         if shared.metadata_raft.get().is_none() {
             debug!("descriptor lease renewal: skipping spawn (no metadata raft handle)");
             return None;
@@ -104,12 +111,19 @@ impl LeaseRenewalLoop {
             threshold_pct = config.threshold_pct,
             "descriptor lease renewal loop spawning"
         );
+        let loop_metrics = LoopMetrics::new("descriptor_lease_loop");
+        let metrics_for_task = Arc::clone(&loop_metrics);
         let loop_handle = LeaseRenewalLoop {
             shared: Arc::downgrade(&shared),
             config,
             shutdown_rx,
+            loop_metrics: Arc::clone(&loop_metrics),
         };
-        Some(tokio::spawn(async move { loop_handle.run().await }))
+        let join = tokio::spawn(async move {
+            loop_handle.run().await;
+            metrics_for_task.set_up(false);
+        });
+        Some((join, loop_metrics))
     }
 
     async fn run(mut self) {
@@ -119,6 +133,7 @@ impl LeaseRenewalLoop {
         // acquires won't be near expiry.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
+        self.loop_metrics.set_up(true);
         loop {
             tokio::select! {
                 biased;
@@ -129,7 +144,9 @@ impl LeaseRenewalLoop {
                     }
                 }
                 _ = interval.tick() => {
+                    let started = Instant::now();
                     self.tick();
+                    self.loop_metrics.observe(started.elapsed());
                 }
             }
         }
@@ -179,6 +196,7 @@ impl LeaseRenewalLoop {
                             error = %e,
                             "descriptor lease renewal: re-acquire failed"
                         );
+                        self.loop_metrics.record_error("renew");
                     }
                 }
                 None => {
@@ -188,6 +206,7 @@ impl LeaseRenewalLoop {
                             error = %e,
                             "descriptor lease renewal: release after drop failed"
                         );
+                        self.loop_metrics.record_error("release");
                     }
                 }
             }

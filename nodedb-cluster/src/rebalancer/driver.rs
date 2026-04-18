@@ -24,7 +24,7 @@
 //! restartable: crash mid-tick, respawn, resume.
 
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{Notify, watch};
@@ -32,6 +32,7 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
+use crate::loop_metrics::LoopMetrics;
 use crate::rebalance::PlannedMove;
 use crate::routing::RoutingTable;
 use crate::topology::ClusterTopology;
@@ -102,6 +103,11 @@ pub struct RebalancerLoop {
     gate: Arc<dyn ElectionGate>,
     routing: Arc<RwLock<RoutingTable>>,
     topology: Arc<RwLock<ClusterTopology>>,
+    /// Standardized loop observations (iterations, last-iteration
+    /// duration, errors by kind, up flag). Register this handle with
+    /// the cluster's [`LoopMetricsRegistry`](crate::LoopMetricsRegistry)
+    /// so scrapes include its samples.
+    loop_metrics: Arc<LoopMetrics>,
     /// Membership-change notification. When any caller (a SWIM
     /// subscriber, a manual admin trigger, etc.) calls
     /// [`notify`](Notify::notify_one) on this handle, the run loop
@@ -126,6 +132,7 @@ impl RebalancerLoop {
             gate,
             routing,
             topology,
+            loop_metrics: LoopMetrics::new("rebalancer_loop"),
             kick: Arc::new(Notify::new()),
         }
     }
@@ -137,6 +144,12 @@ impl RebalancerLoop {
         Arc::clone(&self.kick)
     }
 
+    /// Shared handle to this loop's standardized metrics. Lifecycle
+    /// owners register this with the cluster registry on spawn.
+    pub fn loop_metrics(&self) -> Arc<LoopMetrics> {
+        Arc::clone(&self.loop_metrics)
+    }
+
     /// Run the driver until `shutdown` flips to `true`.
     pub async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
         let mut tick = interval(self.cfg.interval);
@@ -145,6 +158,7 @@ impl RebalancerLoop {
         // a full interval after start. Prevents start-up stampedes
         // when many nodes restart together.
         tick.tick().await;
+        self.loop_metrics.set_up(true);
         loop {
             tokio::select! {
                 biased;
@@ -162,20 +176,25 @@ impl RebalancerLoop {
                 }
             }
         }
+        self.loop_metrics.set_up(false);
         debug!("rebalancer loop shutting down");
     }
 
     /// Run a single sweep. Exposed for tests that drive the loop
     /// manually rather than through `run`.
     pub async fn sweep_once(&self) {
+        let started = Instant::now();
         if self.gate.any_group_electing().await {
             debug!("rebalancer: raft election in progress, skipping tick");
+            self.loop_metrics.observe(started.elapsed());
             return;
         }
         let metrics = match self.metrics.snapshot().await {
             Ok(m) => m,
             Err(e) => {
                 warn!(error = %e, "rebalancer: failed to collect metrics");
+                self.loop_metrics.record_error("metrics_snapshot");
+                self.loop_metrics.observe(started.elapsed());
                 return;
             }
         };
@@ -189,6 +208,8 @@ impl RebalancerLoop {
                 threshold = format!("{:.0}%", self.cfg.backpressure_cpu_threshold * 100.0),
                 "rebalancer: back-pressure — cluster under load, skipping sweep"
             );
+            self.loop_metrics.record_error("backpressure");
+            self.loop_metrics.observe(started.elapsed());
             return;
         }
         let plan = {
@@ -198,20 +219,26 @@ impl RebalancerLoop {
         };
         if plan.is_empty() {
             debug!("rebalancer: no moves needed this tick");
+            self.loop_metrics.observe(started.elapsed());
             return;
         }
         info!(
             move_count = plan.len(),
             "rebalancer: dispatching planned moves"
         );
+        let dispatcher = Arc::clone(&self.dispatcher);
+        let err_metrics = Arc::clone(&self.loop_metrics);
         for mv in plan {
-            let dispatcher = Arc::clone(&self.dispatcher);
+            let dispatcher = Arc::clone(&dispatcher);
+            let err_metrics = Arc::clone(&err_metrics);
             tokio::spawn(async move {
                 if let Err(e) = dispatcher.dispatch(mv).await {
                     warn!(error = %e, "rebalancer: dispatch failed");
+                    err_metrics.record_error("dispatch");
                 }
             });
         }
+        self.loop_metrics.observe(started.elapsed());
     }
 }
 

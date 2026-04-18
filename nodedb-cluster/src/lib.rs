@@ -20,6 +20,7 @@ pub mod ghost_sweeper;
 pub mod health;
 pub mod lifecycle;
 pub mod lifecycle_state;
+pub mod loop_metrics;
 pub mod metadata_group;
 pub mod migration;
 pub mod migration_executor;
@@ -60,6 +61,7 @@ pub use forward::{NoopPlanExecutor, PlanExecutor};
 pub use ghost::{GhostStub, GhostTable};
 pub use health::{HealthConfig, HealthMonitor};
 pub use lifecycle_state::{ClusterLifecycleState, ClusterLifecycleTracker};
+pub use loop_metrics::{LoopMetrics, LoopMetricsRegistry};
 pub use migration::{MigrationPhase, MigrationState};
 pub use migration_executor::{
     MigrationExecutor, MigrationRequest, MigrationResult, MigrationSnapshot, MigrationTracker,
