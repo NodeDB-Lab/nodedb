@@ -13,9 +13,11 @@
 //!   [`crate::control::metadata_proposer`].
 
 pub mod applied_index_watcher;
+pub mod bootstrap_listener;
 pub mod handle;
 pub mod init;
 pub mod metadata_applier;
+pub mod pem_io;
 pub mod recovery_check;
 pub mod spsc_applier;
 pub mod start_raft;
