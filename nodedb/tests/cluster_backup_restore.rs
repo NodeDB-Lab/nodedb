@@ -182,3 +182,310 @@ async fn three_node_dry_run_validates_envelope() {
 
     cluster.shutdown().await;
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Snapshot-watermark coordination across the fan-out.
+//
+// The backup orchestrator must gather a cluster-wide "as-of" LSN
+// before snapshotting each node. Without it, a write that interleaves
+// with the fan-out can land on one node's snapshot but not another,
+// materialising a state that never existed at any wall-clock instant
+// (cross-shard UNIQUE / FK invariants observably break). The spec is:
+//
+//   1. The envelope's `snapshot_watermark` is non-zero whenever any
+//      writes have committed (0 means "not captured" — a placeholder).
+//   2. Two backups bracketing a write advance the watermark strictly
+//      monotonically — it reflects a real coordinated commit instant,
+//      not a hardcoded constant.
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backup_envelope_carries_nonzero_snapshot_watermark() {
+    let cluster = TestCluster::spawn_three().await.expect("cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE COLLECTION cl_docs TYPE DOCUMENT STRICT \
+             (id TEXT PRIMARY KEY, content TEXT)",
+        )
+        .await
+        .expect("CREATE COLLECTION");
+
+    for i in 0..3 {
+        cluster.nodes[0]
+            .client
+            .simple_query(&format!(
+                "INSERT INTO cl_docs (id, content) VALUES ('wm{i}','v{i}')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert wm{i}: {}", db_detail(&e)));
+    }
+
+    let bytes = drain_backup(0, &cluster, TENANT).await;
+    let env = parse_envelope(&bytes, DEFAULT_MAX_TOTAL_BYTES).expect("parse envelope");
+
+    assert_ne!(
+        env.meta.snapshot_watermark, 0,
+        "backup envelope must carry a coordinated snapshot watermark (nonzero LSN), \
+         got 0 — the orchestrator is skipping the coordination round and the \
+         envelope represents a smear of per-node instants rather than one logical \
+         instant, breaking cross-shard invariants on restore"
+    );
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backup_watermark_advances_after_writes() {
+    let cluster = TestCluster::spawn_three().await.expect("cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE COLLECTION cl_docs TYPE DOCUMENT STRICT \
+             (id TEXT PRIMARY KEY, content TEXT)",
+        )
+        .await
+        .expect("CREATE COLLECTION");
+
+    cluster.nodes[0]
+        .client
+        .simple_query("INSERT INTO cl_docs (id, content) VALUES ('a','pre')")
+        .await
+        .unwrap_or_else(|e| panic!("insert a: {}", db_detail(&e)));
+
+    let bytes_before = drain_backup(0, &cluster, TENANT).await;
+    let env_before = parse_envelope(&bytes_before, DEFAULT_MAX_TOTAL_BYTES).expect("parse before");
+
+    for i in 0..4 {
+        cluster.nodes[0]
+            .client
+            .simple_query(&format!(
+                "INSERT INTO cl_docs (id, content) VALUES ('b{i}','post')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert b{i}: {}", db_detail(&e)));
+    }
+
+    let bytes_after = drain_backup(0, &cluster, TENANT).await;
+    let env_after = parse_envelope(&bytes_after, DEFAULT_MAX_TOTAL_BYTES).expect("parse after");
+
+    assert!(
+        env_after.meta.snapshot_watermark > env_before.meta.snapshot_watermark,
+        "watermark must advance across writes: before={}, after={} — a constant \
+         watermark means the orchestrator is not capturing a real LSN, so restore \
+         has no logical instant to recover to",
+        env_before.meta.snapshot_watermark,
+        env_after.meta.snapshot_watermark
+    );
+
+    cluster.shutdown().await;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Cross-cluster topology drift.
+//
+// The restore orchestrator re-buckets keys under the DESTINATION
+// cluster's current `vshard_for_collection` mapping — not the source
+// mapping recorded in the envelope. A regression that re-introduces
+// source-topology routing would silently misplace keys on a cluster
+// with a different vshard partitioning. Spawn two independent
+// clusters and exercise the cross-cluster path.
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_from_different_topology_preserves_all_keys() {
+    let cluster_a = TestCluster::spawn_three().await.expect("cluster A");
+    let cluster_b = TestCluster::spawn_three().await.expect("cluster B");
+
+    // Identical schema on both so the restore target has a place to
+    // write the incoming rows.
+    for cluster in [&cluster_a, &cluster_b] {
+        cluster
+            .exec_ddl_on_any_leader(
+                "CREATE COLLECTION cl_docs TYPE DOCUMENT STRICT \
+                 (id TEXT PRIMARY KEY, content TEXT)",
+            )
+            .await
+            .expect("CREATE COLLECTION");
+    }
+
+    for i in 0..8 {
+        cluster_a.nodes[0]
+            .client
+            .simple_query(&format!(
+                "INSERT INTO cl_docs (id, content) VALUES ('x{i}','v{i}')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert x{i}: {}", db_detail(&e)));
+    }
+
+    let bytes = drain_backup(0, &cluster_a, TENANT).await;
+
+    // Push cluster A's envelope into cluster B. The envelope records
+    // A's source_vshard_count; B's orchestrator must re-bucket under
+    // its own live routing table.
+    push_restore(0, &cluster_b, TENANT, bytes)
+        .await
+        .expect("RESTORE into cluster B");
+
+    let post = unique_contents(&cluster_b.nodes[1].client).await;
+    for i in 0..8u32 {
+        let needle = format!("\"v{i}\"");
+        assert!(
+            post.iter().any(|s| s.contains(&needle)),
+            "cross-cluster restore lost v{i} (cluster B sees: {post:?}) — \
+             a regression to source-topology routing would drop keys that \
+             no longer belong to the same vshard on the destination cluster"
+        );
+    }
+
+    cluster_a.shutdown().await;
+    cluster_b.shutdown().await;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Mid-flight node failure during restore fan-out.
+//
+// The restore orchestrator iterates per-node sub-snapshots via
+// `sync_dispatch` (local) or `RaftRpc::ExecuteRequest` (remote) and
+// surfaces the first per-node error. Two contracts must hold:
+//
+//   1. Loud failure — the client receives a structured error that
+//      names the failing node, never silent partial success.
+//   2. Idempotent retry — the engine-level PointPut writes are
+//      idempotent, so a subsequent retry after the failed node is
+//      restored converges to the expected state.
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_surfaces_failing_node_id_on_midflight_failure() {
+    let mut cluster = TestCluster::spawn_three().await.expect("cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE COLLECTION cl_docs TYPE DOCUMENT STRICT \
+             (id TEXT PRIMARY KEY, content TEXT)",
+        )
+        .await
+        .expect("CREATE COLLECTION");
+
+    for i in 0..4 {
+        cluster.nodes[0]
+            .client
+            .simple_query(&format!(
+                "INSERT INTO cl_docs (id, content) VALUES ('f{i}','v{i}')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert f{i}: {}", db_detail(&e)));
+    }
+
+    let bytes = drain_backup(0, &cluster, TENANT).await;
+
+    // Fault-inject: take down node 2, then pin node 0's routing table
+    // so it still believes node 2 is the leader for every raft group.
+    // Without the stale-route pin, quorum-replicated failover hides the
+    // fault entirely — restore transparently re-routes to a surviving
+    // replica and succeeds. Pinning forces the restore fan-out to
+    // attempt dispatch against the dead peer so the structured
+    // error-naming contract is actually exercised.
+    let downed_node_id = cluster.nodes[2].node_id;
+    let downed = cluster.nodes.remove(2);
+    downed.shutdown().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    for group_id in 0..8u64 {
+        cluster.nodes[0].force_stale_route_for_test(group_id, downed_node_id);
+    }
+
+    let err = push_restore(0, &cluster, TENANT, bytes)
+        .await
+        .expect_err("restore must fail loudly when fan-out targets a dead node");
+
+    assert!(
+        err.contains(&format!("node {downed_node_id}"))
+            || err.contains(&downed_node_id.to_string()),
+        "restore error must name the failing node id {downed_node_id} so the \
+         operator can act; got: {err}"
+    );
+
+    cluster.shutdown().await;
+}
+
+// NOTE: a proper same-cluster retry test (fault a node, it recovers,
+// retry succeeds on the same cluster) requires harness support for
+// in-place node restart — shutting down a node and bringing it back
+// with the same node id, same data dir, and a fresh transport that
+// the raft group accepts as a rejoin rather than a new member. The
+// current `TestClusterNode::spawn` always creates a fresh data dir
+// and a fresh transport keypair, so a "replacement" node fails the
+// rejoin handshake. Filed as a separate harness initiative.
+//
+// Idempotent replay on a healthy cluster is already covered by
+// `three_node_roundtrip_preserves_data`, which restores into a
+// cluster that already holds the same rows and expects convergence.
+
+// ────────────────────────────────────────────────────────────────────
+// Staleness gate on restore.
+//
+// Once the backup orchestrator captures a real watermark (#69), a
+// restore into a cluster whose current applied state is *newer* than
+// the envelope's watermark would roll back committed writes. The
+// operator should be told. Spec: by default, restoring a
+// stale-watermark envelope is rejected with a structured error. An
+// explicit opt-in (`FORCE` keyword) is the separate design decision —
+// not pinned here until the DDL surface lands.
+//
+// This test will remain red until #69's coordination round produces
+// nonzero watermarks AND the restore path compares them.
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_refuses_stale_watermark() {
+    let cluster = TestCluster::spawn_three().await.expect("cluster");
+    cluster
+        .exec_ddl_on_any_leader(
+            "CREATE COLLECTION cl_docs TYPE DOCUMENT STRICT \
+             (id TEXT PRIMARY KEY, content TEXT)",
+        )
+        .await
+        .expect("CREATE COLLECTION");
+
+    // Write, back up — envelope's watermark pins this logical instant.
+    for i in 0..3 {
+        cluster.nodes[0]
+            .client
+            .simple_query(&format!(
+                "INSERT INTO cl_docs (id, content) VALUES ('s{i}','early')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert s{i}: {}", db_detail(&e)));
+    }
+    let stale_bytes = drain_backup(0, &cluster, TENANT).await;
+
+    // Advance the cluster past the envelope's watermark.
+    for i in 0..3 {
+        cluster.nodes[0]
+            .client
+            .simple_query(&format!(
+                "INSERT INTO cl_docs (id, content) VALUES ('s{i}_late','late{i}')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert s{i}_late: {}", db_detail(&e)));
+    }
+
+    // Restoring the older envelope over newer state must be rejected.
+    let err = push_restore(0, &cluster, TENANT, stale_bytes)
+        .await
+        .expect_err(
+            "restore of stale-watermark envelope into newer cluster state must be \
+             rejected by default — silently overwriting newer committed writes is \
+             a correctness bug",
+        );
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("stale") || lower.contains("watermark") || lower.contains("older"),
+        "rejection error must name the staleness cause so operators know to \
+         pass FORCE if they really mean it; got: {err}"
+    );
+
+    cluster.shutdown().await;
+}
