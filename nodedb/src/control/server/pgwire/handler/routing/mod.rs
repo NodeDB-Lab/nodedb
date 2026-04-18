@@ -24,6 +24,50 @@ use super::super::types::{error_to_sqlstate, response_status_to_sqlstate};
 use super::core::NodeDbPgHandler;
 use super::plan::{describe_plan, extract_collection, payload_to_response};
 
+/// When `plan` is a KV point-get, turn the engine's stored bytes into
+/// a row-shaped msgpack map. Storage is shape-neutral by design: the
+/// two legal shapes are structurally disjoint via their msgpack type
+/// byte, so the wrap rule is a tagged union, not a fallback.
+///
+/// - **Msgpack map** (first byte in `0x80..=0x8f` / `0xde` / `0xdf`) —
+///   typed KV entry (`CREATE ... (key ..., col1 ..., col2 ...)`). Inject
+///   the primary key under `key` and pass through.
+/// - **Anything else** — single-`value` form (from `INSERT ... VALUES
+///   (key, value)` or RESP `SET`). Wrap as `{key: <key>, value: <bytes>}`.
+///
+/// For every non-KV-point-get plan, return the payload unchanged.
+fn maybe_wrap_kv_point_get(
+    plan: &crate::bridge::envelope::PhysicalPlan,
+    payload: &[u8],
+) -> Vec<u8> {
+    use crate::bridge::envelope::PhysicalPlan;
+    use crate::bridge::physical_plan::KvOp;
+    use nodedb_query::msgpack_scan;
+    if payload.is_empty() {
+        return payload.to_vec();
+    }
+    let PhysicalPlan::Kv(KvOp::Get { key, .. }) = plan else {
+        return payload.to_vec();
+    };
+    let key_str = String::from_utf8_lossy(key);
+    if msgpack_scan::map_header(payload, 0).is_some() {
+        msgpack_scan::inject_str_field(payload, "key", &key_str)
+    } else {
+        let mut buf = Vec::with_capacity(payload.len() + key_str.len() + 16);
+        msgpack_scan::write_map_header(&mut buf, 2);
+        msgpack_scan::write_str(&mut buf, "key");
+        msgpack_scan::write_str(&mut buf, &key_str);
+        msgpack_scan::write_str(&mut buf, "value");
+        // `write_str` takes `&str` — for arbitrary bytes coming from
+        // raw-value storage (possibly non-UTF-8 for RESP SET writes),
+        // take the lossy UTF-8 view. SQL SELECT on RESP-written binary
+        // values is already degraded by the pgwire text protocol; this
+        // keeps the representation well-formed msgpack.
+        msgpack_scan::write_str(&mut buf, &String::from_utf8_lossy(payload));
+        buf
+    }
+}
+
 /// Look up the current descriptor version for `id` against the
 /// local `SystemCatalog`. Used by the plan cache's freshness
 /// check — a cached plan is only returned when every recorded
@@ -291,6 +335,9 @@ impl NodeDbPgHandler {
             let plan_kind = describe_plan(&task.plan);
             let collection_for_si = extract_collection(&task.plan).map(String::from);
             let resp_post_set_op = task.post_set_op;
+            // Clone the plan up front so response-shaping (which runs after
+            // `dispatch_task` consumes `task`) still has it available.
+            let plan_for_response = task.plan.clone();
 
             // --- Trigger interception for DML writes ---
             let dml_info = crate::control::trigger::dml_hook::classify_dml_write(&task.plan);
@@ -433,7 +480,14 @@ impl NodeDbPgHandler {
                     dedup_set_op = resp_post_set_op;
                 }
             } else {
-                responses.push(payload_to_response(&resp.payload, plan_kind));
+                // KV point-get responses arrive as the stored value map
+                // (`{col: val, ...}`) — the primary-key column isn't in the
+                // stored value, so inject it before the pgwire layer turns
+                // the map into a SQL row. Matches the convention used by
+                // `execute_kv_scan`, which already injects `key` at the
+                // engine level.
+                let payload = maybe_wrap_kv_point_get(&plan_for_response, &resp.payload);
+                responses.push(payload_to_response(&payload, plan_kind));
             }
         }
 

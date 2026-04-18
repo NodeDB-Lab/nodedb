@@ -178,7 +178,11 @@ pub(super) fn convert_kv_insert(
         let key = sql_value_to_bytes(key_val);
         // Value is the payload columns as msgpack map.
         let value = if value_cols.len() == 1 && value_cols[0].0 == "value" {
-            // Simple (key, value) form — value is raw bytes.
+            // Simple (key, value) form — value is raw bytes. The pgwire
+            // read path detects this shape via the msgpack type byte and
+            // wraps it as `{value: <bytes>}` at projection time; keeping
+            // storage raw preserves the RESP opaque-bytes contract and
+            // avoids a wrap tax on every RESP SET/GET.
             sql_value_to_bytes(&value_cols[0].1)
         } else {
             // Typed columns form — write standard msgpack map directly.

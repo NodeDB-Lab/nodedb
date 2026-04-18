@@ -49,8 +49,21 @@ impl CoreLoop {
         let mut result_entries: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
         for (k, v) in &entries {
             let key_str = String::from_utf8_lossy(k);
-            // Inject "key" field into msgpack map without decode/re-encode.
-            let entry_mp = nodedb_query::msgpack_scan::inject_str_field(v, "key", &key_str);
+            // Two storage shapes coexist by design (see dml.rs::convert_kv_insert):
+            // - msgpack map (typed columns) — inject `key` in place.
+            // - raw bytes (single-`value` form / RESP SET) — wrap as
+            //   `{value: <bytes>}` first so the downstream injection
+            //   produces the same `{key, value}` shape every scan path
+            //   expects.
+            let entry_mp = if nodedb_query::msgpack_scan::map_header(v, 0).is_some() {
+                nodedb_query::msgpack_scan::inject_str_field(v, "key", &key_str)
+            } else {
+                let mut wrapped = Vec::with_capacity(v.len() + 8);
+                nodedb_query::msgpack_scan::write_map_header(&mut wrapped, 1);
+                nodedb_query::msgpack_scan::write_str(&mut wrapped, "value");
+                nodedb_query::msgpack_scan::write_str(&mut wrapped, &String::from_utf8_lossy(v));
+                nodedb_query::msgpack_scan::inject_str_field(&wrapped, "key", &key_str)
+            };
 
             // Apply filter predicates post-scan (already works on raw msgpack).
             if !filter_predicates.is_empty()
