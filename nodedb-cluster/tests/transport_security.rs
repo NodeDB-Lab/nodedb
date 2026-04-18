@@ -20,8 +20,17 @@
 //! Tests build transports on ephemeral loopback ports and do not depend
 //! on any cluster infrastructure beyond the transport layer itself.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+/// Serializes tests that construct `TransportCredentials::Insecure`, so the
+/// process-global `insecure_transport_count()` observed by
+/// `observability_insecure_counter_monotonic` is not racing with other
+/// concurrent tokio tests that also bump the counter.
+fn insecure_counter_guard() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 use nodedb_cluster::transport::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use nodedb_cluster::{
@@ -184,6 +193,7 @@ async fn l1_different_ca_mtls_rejects_handshake() {
 /// self-signed cert not signed by the client's CA).
 #[tokio::test]
 async fn l1_insecure_server_rejected_by_mtls_client() {
+    let _guard = insecure_counter_guard().lock().unwrap();
     let (_ca, client_creds) = generate_node_credentials("nodedb").unwrap();
     let server = Arc::new(
         NexarTransport::new(
@@ -342,6 +352,7 @@ async fn l3_swim_rejects_mismatched_mac_key() {
 /// L.5 / observability: every `Insecure` construction bumps the counter.
 #[tokio::test]
 async fn observability_insecure_counter_monotonic() {
+    let _guard = insecure_counter_guard().lock().unwrap();
     let before = insecure_transport_count();
     let _ = NexarTransport::new(
         99,
