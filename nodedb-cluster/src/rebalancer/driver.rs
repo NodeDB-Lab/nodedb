@@ -318,6 +318,8 @@ mod tests {
             bytes_stored: bytes_mib * 1_048_576,
             writes_per_sec: w,
             reads_per_sec: r,
+            qps_recent: 0.0,
+            p95_latency_us: 0,
             cpu_utilization: 0.0,
         }
     }
@@ -425,6 +427,8 @@ mod tests {
                 bytes_stored: 5000 * 1_048_576,
                 writes_per_sec: 200.0,
                 reads_per_sec: 200.0,
+                qps_recent: 0.0,
+                p95_latency_us: 0,
                 cpu_utilization: 0.95, // above 80% threshold
             },
             lm(2, 5, 5, 5.0, 5.0),

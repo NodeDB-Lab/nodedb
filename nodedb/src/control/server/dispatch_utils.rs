@@ -128,6 +128,14 @@ pub async fn dispatch_to_data_plane_with_source(
     );
     let change_meta = extract_write_metadata(&plan, tenant_id);
 
+    // Per-vShard QPS + latency timer. `dispatch_started` marks the
+    // wall-clock moment the request enters the Control Plane dispatch
+    // site; observation happens on every exit path (success, budget
+    // over-run, timeout) so the histogram captures the true end-to-end
+    // shape of the work routed to this vshard.
+    let dispatch_started = Instant::now();
+    let vshard_u16 = vshard_id.as_u16();
+
     let request_id = RequestId::new(DISPATCH_COUNTER.fetch_add(1, Ordering::Relaxed));
     let request = Request {
         request_id,
@@ -158,17 +166,25 @@ pub async fn dispatch_to_data_plane_with_source(
     // exceeds `tuning.network.max_query_result_bytes` is cancelled with
     // a typed `ExecutionLimitExceeded` error.
     let max_result_bytes = shared.tuning.network.max_query_result_bytes as usize;
+    let observe = |shared: &SharedState| {
+        let latency_us = dispatch_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        shared.per_vshard_metrics.observe(vshard_u16, latency_us);
+    };
     let response = tokio::time::timeout(
         Duration::from_secs(shared.tuning.network.default_deadline_secs),
         collect_bounded_response(&mut rx, max_result_bytes),
     )
     .await
-    .map_err(|_| crate::Error::DeadlineExceeded { request_id })?;
+    .map_err(|_| {
+        observe(shared);
+        crate::Error::DeadlineExceeded { request_id }
+    })?;
 
     let response = match response {
         Ok(r) => r,
         Err(DispatchCollectError::OverBudget { bytes }) => {
             shared.tracker.cancel(&request_id);
+            observe(shared);
             return Err(crate::Error::ExecutionLimitExceeded {
                 detail: format!(
                     "query result exceeded max_query_result_bytes \
@@ -177,6 +193,7 @@ pub async fn dispatch_to_data_plane_with_source(
             });
         }
         Err(DispatchCollectError::ChannelClosed) => {
+            observe(shared);
             return Err(crate::Error::Dispatch {
                 detail: "response channel closed".into(),
             });
@@ -228,6 +245,7 @@ pub async fn dispatch_to_data_plane_with_source(
         }
     }
 
+    observe(shared);
     Ok(response)
 }
 

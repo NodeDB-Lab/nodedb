@@ -28,20 +28,37 @@ pub struct LoadMetrics {
     pub writes_per_sec: f64,
     /// Reads per second (rolling average, caller-defined window).
     pub reads_per_sec: f64,
+    /// Aggregate QPS across every vshard this node currently leads.
+    /// Sourced from the per-vshard histograms that `SHOW RANGES`
+    /// exposes — hot vshards pull their owning node's score up.
+    pub qps_recent: f64,
+    /// Hottest per-vshard p95 latency observed on this node, in
+    /// microseconds. Used to bias the rebalancer away from nodes
+    /// whose tail latency is degrading even when raw QPS looks fine.
+    pub p95_latency_us: u64,
     /// Per-core CPU utilization (0.0–1.0). Used by the
     /// back-pressure gate to pause the rebalancer when the cluster
     /// is already stressed.
     pub cpu_utilization: f64,
 }
 
-/// Relative weights for the four load dimensions. Scaled linearly;
-/// the absolute values don't matter, only their ratios.
+/// Relative weights for the load dimensions. Scaled linearly; the
+/// absolute values don't matter, only their ratios.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadWeights {
     pub vshards: f64,
     pub bytes: f64,
     pub writes: f64,
     pub reads: f64,
+    /// Weight on aggregate per-vshard QPS. Defaults to the same as
+    /// `reads` so a cluster with only point-reads doesn't suddenly
+    /// double-count them; operators dial this up when they see
+    /// hotspotting that plain `reads_per_sec` failed to catch.
+    pub qps: f64,
+    /// Weight on p95 latency, expressed per millisecond. The
+    /// default (`0.001`) keeps latency an order of magnitude below
+    /// throughput signals so ordinary traffic doesn't trip moves.
+    pub latency_per_ms: f64,
 }
 
 impl Default for LoadWeights {
@@ -51,6 +68,8 @@ impl Default for LoadWeights {
             bytes: 1.0,
             writes: 1.0,
             reads: 1.0,
+            qps: 1.0,
+            latency_per_ms: 0.001,
         }
     }
 }
@@ -65,10 +84,13 @@ impl Default for LoadWeights {
 /// would swamp the qps signal entirely.
 pub fn normalized_score(m: &LoadMetrics, weights: &LoadWeights) -> f64 {
     const BYTES_UNIT: f64 = 1_048_576.0; // 1 MiB
+    let p95_ms = m.p95_latency_us as f64 / 1_000.0;
     weights.vshards * m.vshards_led as f64
         + weights.bytes * (m.bytes_stored as f64 / BYTES_UNIT)
         + weights.writes * m.writes_per_sec
         + weights.reads * m.reads_per_sec
+        + weights.qps * m.qps_recent
+        + weights.latency_per_ms * p95_ms
 }
 
 /// Injection seam for collecting load metrics from every node in the
@@ -93,6 +115,8 @@ mod tests {
             bytes_stored: bytes_mib * 1_048_576,
             writes_per_sec: w,
             reads_per_sec: r,
+            qps_recent: 0.0,
+            p95_latency_us: 0,
             cpu_utilization: 0.0,
         }
     }

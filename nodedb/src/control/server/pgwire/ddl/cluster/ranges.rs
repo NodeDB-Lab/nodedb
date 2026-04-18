@@ -9,11 +9,14 @@ use pgwire::error::PgWireResult;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
-use super::super::super::types::{int8_field, sqlstate_error, text_field};
+use super::super::super::types::{float8_field, int8_field, sqlstate_error, text_field};
 
-/// SHOW RANGES — list vshards with leaseholder and replica info.
+/// SHOW RANGES — list vshards with leaseholder, replicas, and the live
+/// per-vshard load signals (QPS, p99 latency) the rebalancer uses for
+/// move decisions.
 ///
-/// Columns: vshard_id, group_id, leaseholder, replicas.
+/// Columns: vshard_id, group_id, leaseholder, replicas, qps,
+/// p99_latency_ms, requests_total.
 /// Superuser only.
 pub fn show_ranges(
     state: &SharedState,
@@ -41,6 +44,9 @@ pub fn show_ranges(
         int8_field("group_id"),
         int8_field("leaseholder"),
         text_field("replicas"),
+        float8_field("qps"),
+        float8_field("p99_latency_ms"),
+        int8_field("requests_total"),
     ]);
 
     let mut rows = Vec::new();
@@ -61,10 +67,17 @@ pub fn show_ranges(
             }
             None => (0i64, String::new()),
         };
+        let (qps, p99_ms, req_total) = match state.per_vshard_metrics.snapshot(vshard_id) {
+            Some(s) => (s.qps, s.p99_us as f64 / 1_000.0, s.requests_total as i64),
+            None => (0.0_f64, 0.0_f64, 0_i64),
+        };
         encoder.encode_field(&(vshard_id as i64))?;
         encoder.encode_field(&(group_id as i64))?;
         encoder.encode_field(&leader)?;
         encoder.encode_field(&replicas_str)?;
+        encoder.encode_field(&qps)?;
+        encoder.encode_field(&p99_ms)?;
+        encoder.encode_field(&req_total)?;
         rows.push(Ok(encoder.take_row()));
     }
 

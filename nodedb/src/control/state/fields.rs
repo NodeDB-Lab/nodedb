@@ -183,6 +183,13 @@ pub struct SharedState {
     /// exposition.
     pub loop_metrics_registry: Arc<nodedb_cluster::LoopMetricsRegistry>,
 
+    /// Per-vShard QPS + latency histograms. Populated by the Control
+    /// Plane dispatch site on every request; consumed by `SHOW RANGES`,
+    /// the Prometheus route, and the rebalancer's load-metrics
+    /// provider (which aggregates the per-vshard rates into per-node
+    /// `LoadMetrics` for scoring).
+    pub per_vshard_metrics: Arc<crate::control::metrics::PerVShardMetricsRegistry>,
+
     /// Handle to the cluster health monitor. Set exactly once in
     /// `control::cluster::start_raft`. Used by the Prometheus route
     /// to render the `health_loop_suspect_peers{peer_id}` gauge.
@@ -193,6 +200,15 @@ pub struct SharedState {
     /// need conditionals. Configured at startup from
     /// `observability.otlp.export`.
     pub trace_exporter: Arc<crate::control::trace_export::TraceExporter>,
+
+    /// Master kill-switch for the `/cluster/debug/*` HTTP endpoints
+    /// (J.5). Populated at startup from
+    /// `observability.debug_endpoints_enabled`; defaults to `false`
+    /// so a production deployment that forgets to set the flag never
+    /// accidentally exposes raft / transport / catalog internals.
+    /// The handlers still require a superuser identity — this gate
+    /// is the second line of defence.
+    pub debug_endpoints_enabled: bool,
 
     /// Migration tracker for observability (None in single-node mode).
     pub migration_tracker: Option<Arc<nodedb_cluster::MigrationTracker>>,
@@ -364,6 +380,13 @@ pub struct SharedState {
 
     /// Performance tuning configuration.
     pub tuning: TuningConfig,
+
+    /// The node's on-disk data directory (from `config.data_dir`).
+    /// Needed by host-side appliers that write to filesystem — the
+    /// L.4 CA-trust applier writes `tls/ca.d/<fp>.crt`, the audit
+    /// segment opens under `audit/`, etc. Populated by `main.rs`
+    /// before raft starts.
+    pub data_dir: std::path::PathBuf,
 
     /// Schema version counter — bumped on CREATE/DROP/ALTER DDL.
     pub schema_version: crate::control::server::pgwire::handler::prepared::SchemaVersion,

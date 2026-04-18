@@ -77,6 +77,8 @@ fn lm(id: u64, v: u32, bytes_mib: u64, w: f64, r: f64) -> LoadMetrics {
         bytes_stored: bytes_mib * 1_048_576,
         writes_per_sec: w,
         reads_per_sec: r,
+        qps_recent: 0.0,
+        p95_latency_us: 0,
         cpu_utilization: 0.0,
     }
 }
