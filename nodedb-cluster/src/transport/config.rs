@@ -1,11 +1,30 @@
 //! QUIC and TLS configuration for Raft RPCs.
 
 use std::sync::Arc;
+use std::sync::Once;
 use std::time::Duration;
 
 use nodedb_types::config::tuning::ClusterTransportTuning;
 
 use crate::error::{ClusterError, Result};
+
+/// Install rustls' `ring` CryptoProvider exactly once per process.
+///
+/// rustls 0.23 refuses to build any `ServerConfig` / `ClientConfig` until a
+/// process-level provider is registered. In production the bootstrap
+/// listener installs it early, but any caller that generates certs or
+/// builds a TLS config before the bootstrap runs (e.g. integration tests
+/// that exercise just the transport layer) hits a panic. Doing the
+/// install here means every code path that ends up touching rustls
+/// through this module is covered. `install_default` returns `Err` on
+/// the second attempt, which we intentionally ignore via the `Once`
+/// guard — it has already succeeded.
+pub(crate) fn ensure_rustls_crypto_provider() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 /// ALPN protocol identifier for NodeDB Raft RPCs.
 pub const ALPN_NODEDB_RAFT: &[u8] = b"nodedb-raft/1";
@@ -53,6 +72,7 @@ pub fn raft_transport_config(tuning: &ClusterTransportTuning) -> quinn::Transpor
 pub(crate) fn make_raft_server_config(
     tuning: &ClusterTransportTuning,
 ) -> Result<quinn::ServerConfig> {
+    ensure_rustls_crypto_provider();
     let (cert, key) = nexar::transport::tls::generate_self_signed_cert().map_err(|e| {
         ClusterError::Transport {
             detail: format!("generate cert: {e}"),
@@ -93,6 +113,7 @@ pub(crate) fn make_raft_server_config(
 pub(crate) fn make_raft_client_config(
     tuning: &ClusterTransportTuning,
 ) -> Result<quinn::ClientConfig> {
+    ensure_rustls_crypto_provider();
     let provider = rustls::crypto::ring::default_provider();
     let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
@@ -149,6 +170,7 @@ pub fn make_raft_server_config_mtls(
     creds: &TlsCredentials,
     tuning: &ClusterTransportTuning,
 ) -> Result<quinn::ServerConfig> {
+    ensure_rustls_crypto_provider();
     let mut root_store = rustls::RootCertStore::empty();
     root_store
         .add(creds.ca_cert.clone())
@@ -211,6 +233,7 @@ pub fn make_raft_client_config_mtls(
     creds: &TlsCredentials,
     tuning: &ClusterTransportTuning,
 ) -> Result<quinn::ClientConfig> {
+    ensure_rustls_crypto_provider();
     let mut root_store = rustls::RootCertStore::empty();
     root_store
         .add(creds.ca_cert.clone())
@@ -270,6 +293,7 @@ pub fn generate_node_credentials(
 pub fn generate_node_credentials_multi_san(
     sans: &[&str],
 ) -> Result<(nexar::transport::tls::ClusterCa, TlsCredentials)> {
+    ensure_rustls_crypto_provider();
     let ca = nexar::transport::tls::ClusterCa::generate().map_err(|e| ClusterError::Transport {
         detail: format!("generate cluster CA: {e}"),
     })?;
