@@ -3,15 +3,11 @@
 //! Serialized as MessagePack inside `VShardEnvelope.payload` for
 //! transport-agnostic cross-node delivery via QUIC.
 
-use serde::{Deserialize, Serialize};
-
 /// Request to execute a write on a remote shard.
 ///
 /// Packaged by the source Event Plane, sent via `VShardEnvelope(CrossShardEvent)`,
 /// received and executed by the target Event Plane's `CrossShardReceiver`.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct CrossShardWriteRequest {
     /// SQL statement to execute on the target shard.
     pub sql: String,
@@ -33,9 +29,7 @@ pub struct CrossShardWriteRequest {
 }
 
 /// Response from the target shard after processing a cross-shard write.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct CrossShardWriteResponse {
     /// Whether the write was successfully executed.
     pub success: bool,
@@ -82,9 +76,7 @@ impl CrossShardWriteResponse {
 /// When a node publishes a NOTIFY (via `ChangeStream.publish()`), it also
 /// broadcasts this message to all peer nodes via `VShardEnvelope(NotifyBroadcast)`.
 /// Each peer delivers the event to its local `ChangeStream` for LISTEN subscribers.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct NotifyBroadcastMsg {
     /// The originating node ID (for dedup — don't re-broadcast our own events).
     pub source_node: u64,

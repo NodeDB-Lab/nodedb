@@ -1,13 +1,9 @@
 //! Sequence type definitions for catalog storage.
 
-use serde::{Deserialize, Serialize};
-
 /// Persisted sequence definition in the system catalog.
 ///
 /// Stored in redb under `_system.sequences` with key `"{tenant_id}:{name}"`.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct StoredSequence {
     pub tenant_id: u32,
     pub name: String,
@@ -32,19 +28,19 @@ pub struct StoredSequence {
     pub created_at: u64,
     /// Format template tokens (e.g. `[Literal("INV-"), Year2, Literal("-"), Seq{5}]`).
     /// When `Some`, `nextval()` returns a formatted string instead of raw i64.
-    #[serde(default)]
+    #[msgpack(default)]
     pub format_template: Option<Vec<crate::control::sequence::FormatToken>>,
     /// Reset scope — when the counter auto-resets to START.
-    #[serde(default)]
+    #[msgpack(default)]
     pub reset_scope: crate::control::sequence::ResetScope,
     /// GAP_FREE mode: serialize nextval through a mutex, recycle on rollback.
-    #[serde(default)]
+    #[msgpack(default)]
     pub gap_free: bool,
     /// Monotonic descriptor version, stamped by the metadata applier.
-    #[serde(default)]
+    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC stamped by the metadata applier at commit time.
-    #[serde(default)]
+    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
 }
 
@@ -102,9 +98,8 @@ impl StoredSequence {
 ///
 /// Persisted to catalog periodically and on shutdown. Not synced via CRDT —
 /// each node maintains its own counter within an allocated range.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct SequenceState {
     pub tenant_id: u32,
     pub name: String,
@@ -116,7 +111,7 @@ pub struct SequenceState {
     pub epoch: u64,
     /// Current period key for reset scope (e.g. "2026-04", "2026-Q2").
     /// Empty string means no period tracking (ResetScope::Never).
-    #[serde(default)]
+    #[msgpack(default)]
     pub period_key: String,
 }
 

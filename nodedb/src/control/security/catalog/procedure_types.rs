@@ -1,17 +1,7 @@
 //! Type definitions for stored procedure catalog storage.
 
 /// Parameter direction for stored procedures.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[repr(u8)]
 #[msgpack(c_enum)]
 pub enum ParamDirection {
@@ -31,18 +21,12 @@ impl ParamDirection {
 }
 
 /// A stored procedure parameter.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct ProcedureParam {
     pub name: String,
     pub data_type: String,
-    #[serde(default = "default_direction")]
+    #[msgpack(default = "default_direction")]
     pub direction: ParamDirection,
 }
 
@@ -56,15 +40,7 @@ fn default_direction() -> ParamDirection {
 /// collections. Used by the Event Plane cron scheduler for per-collection
 /// affinity routing of `CALL procedure(...)` in scheduled jobs.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
+    Debug, Clone, PartialEq, Eq, Default, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
 pub enum ProcedureRoutability {
     /// Procedure targets a single collection — can be routed to that
@@ -77,14 +53,8 @@ pub enum ProcedureRoutability {
 }
 
 /// Serializable stored procedure definition for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct StoredProcedure {
     pub tenant_id: u32,
     pub name: String,
@@ -92,23 +62,23 @@ pub struct StoredProcedure {
     /// Procedural SQL body (BEGIN ... END).
     pub body_sql: String,
     /// Maximum loop iterations (default 1_000_000).
-    #[serde(default = "default_max_iterations")]
+    #[msgpack(default = "default_max_iterations")]
     pub max_iterations: u64,
     /// Execution timeout in seconds (default 60).
-    #[serde(default = "default_timeout_secs")]
+    #[msgpack(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Routability classification: which collections the procedure targets.
     /// Used by cron scheduler for affinity routing.
-    #[serde(default)]
+    #[msgpack(default)]
     pub routability: ProcedureRoutability,
     pub owner: String,
     pub created_at: u64,
     /// Monotonic descriptor version, stamped by the metadata applier.
     /// See `StoredCollection::descriptor_version`.
-    #[serde(default)]
+    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC stamped by the metadata applier at commit time.
-    #[serde(default)]
+    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
 }
 

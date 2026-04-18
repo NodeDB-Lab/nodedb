@@ -24,14 +24,7 @@ pub(super) const RLS_POLICIES: TableDefinition<&str, &[u8]> =
 
 /// Catalog-shape RLS policy. JSON strings are sonic_rs-encoded
 /// versions of the runtime types so zerompk can derive the encoder.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct StoredRlsPolicy {
     pub tenant_id: u32,
     pub collection: String,

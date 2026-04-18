@@ -3,9 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Complete definition of a threshold alert rule.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct AlertDef {
     /// Owning tenant.
     pub tenant_id: u32,
@@ -40,9 +38,7 @@ pub struct AlertDef {
 }
 
 /// The aggregate condition: function(column) op threshold.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct AlertCondition {
     /// Aggregate function name (e.g., "avg", "max", "min", "sum", "count").
     pub agg_func: String,
@@ -55,17 +51,7 @@ pub struct AlertCondition {
 }
 
 /// Comparison operators for alert conditions.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[repr(u8)]
 #[msgpack(c_enum)]
 pub enum CompareOp {
@@ -117,9 +103,7 @@ impl CompareOp {
 }
 
 /// Where to send notifications on alert fire/clear.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum NotifyTarget {
     /// Publish alert event to a CDC topic.
     Topic { name: String },

@@ -3,15 +3,11 @@
 //! Types for the Event Plane's role as intermediary between Origin writes
 //! and Lite device delta delivery.
 
-use serde::{Deserialize, Serialize};
-
 /// An outbound CRDT delta ready for delivery to connected Lite instances.
 ///
 /// Packaged by the Event Plane's packager from a `WriteEvent`. Contains
 /// the full row data serialized as the CRDT delta payload (MessagePack).
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct OutboundDelta {
     /// Collection the delta applies to.
     pub collection: String,
@@ -33,17 +29,7 @@ pub struct OutboundDelta {
 }
 
 /// Operation type for outbound deltas.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[repr(u8)]
 #[msgpack(c_enum)]
 pub enum DeltaOp {

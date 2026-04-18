@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use std::path::Path;
 
 use redb::{Database, ReadableTable, TableDefinition};
-use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 /// redb table: entry_id (u64) → MessagePack-serialized DlqEntry.
@@ -18,9 +17,7 @@ const CROSS_SHARD_DLQ: TableDefinition<u64, &[u8]> = TableDefinition::new("cross
 const DEFAULT_MAX_ENTRIES: usize = 100_000;
 
 /// A cross-shard write that exhausted all retries.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct CrossShardDlqEntry {
     /// Monotonic entry identifier.
     pub entry_id: u64,

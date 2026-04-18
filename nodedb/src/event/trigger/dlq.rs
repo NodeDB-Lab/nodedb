@@ -12,7 +12,6 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableTable, TableDefinition};
-use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 /// redb table: monotonic entry_id → MessagePack-serialized TriggerDlqEntry.
@@ -22,9 +21,7 @@ const TRIGGER_DLQ: TableDefinition<u64, &[u8]> = TableDefinition::new("trigger_d
 const DEFAULT_MAX_ENTRIES: usize = 100_000;
 
 /// A failed trigger event in the DLQ.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct TriggerDlqEntry {
     /// Unique entry ID (monotonic within this node).
     pub entry_id: u64,

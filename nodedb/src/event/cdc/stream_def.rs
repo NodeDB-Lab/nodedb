@@ -1,11 +1,7 @@
 //! Change stream definition: persistent configuration for a CDC stream.
 
-use serde::{Deserialize, Serialize};
-
 /// Which operations to include in the stream.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct OpFilter {
     pub insert: bool,
     pub update: bool,
@@ -53,16 +49,7 @@ impl Default for OpFilter {
 
 /// Output format for change stream events.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
+    Debug, Clone, Copy, PartialEq, Eq, Default, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
 #[repr(u8)]
 #[msgpack(c_enum)]
@@ -90,9 +77,7 @@ impl StreamFormat {
 }
 
 /// Retention configuration for a change stream.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct RetentionConfig {
     /// Maximum events retained. Default 1M.
     pub max_events: u64,
@@ -114,16 +99,7 @@ impl Default for RetentionConfig {
 /// In a well-ordered system, events arrive in LSN order within a partition.
 /// Late events can occur during WAL replay or catchup.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
+    Debug, Clone, Copy, PartialEq, Eq, Default, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
 #[repr(u8)]
 #[msgpack(c_enum)]
@@ -163,9 +139,7 @@ impl LateDataPolicy {
 
 /// Log compaction configuration. When enabled, the buffer deduplicates
 /// by key field, keeping only the latest event per key value.
-#[derive(
-    Debug, Clone, Default, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, Default, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct CompactionConfig {
     /// Whether compaction is enabled.
     pub enabled: bool,
@@ -186,9 +160,8 @@ impl CompactionConfig {
 }
 
 /// Persistent definition of a change stream. Stored in the system catalog.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct ChangeStreamDef {
     /// Tenant that owns this stream.
     pub tenant_id: u32,
@@ -203,16 +176,16 @@ pub struct ChangeStreamDef {
     /// Retention configuration.
     pub retention: RetentionConfig,
     /// Log compaction configuration (optional).
-    #[serde(default)]
+    #[msgpack(default)]
     pub compaction: CompactionConfig,
     /// Webhook delivery configuration (optional).
-    #[serde(default)]
+    #[msgpack(default)]
     pub webhook: crate::event::webhook::WebhookConfig,
     /// Policy for events that arrive below the partition watermark.
-    #[serde(default)]
+    #[msgpack(default)]
     pub late_data: LateDataPolicy,
     /// Kafka bridge delivery configuration (optional).
-    #[serde(default)]
+    #[msgpack(default)]
     pub kafka: crate::event::kafka::KafkaDeliveryConfig,
     /// Owner (creator).
     pub owner: String,

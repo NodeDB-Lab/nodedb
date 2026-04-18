@@ -6,8 +6,6 @@
 //! it (the apply / post_apply / tests modules use exhaustive
 //! matches).
 
-use serde::{Deserialize, Serialize};
-
 use crate::control::security::catalog::{
     StoredCollection, StoredMaterializedView, StoredRlsPolicy,
     auth_types::{
@@ -21,9 +19,7 @@ use crate::control::security::catalog::{
 use crate::event::cdc::stream_def::ChangeStreamDef;
 use crate::event::scheduler::types::ScheduleDef;
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum CatalogEntry {
     // ── Collection ─────────────────────────────────────────────────
     /// Upsert a collection record. Used by CREATE COLLECTION and by

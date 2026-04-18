@@ -160,14 +160,7 @@ pub fn owner_key(object_type: &str, tenant_id: u32, object_name: &str) -> String
 // ── Checkpoint ────────────────────────────────────────────────────────
 
 /// A named checkpoint: captures a version vector at a point in time.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct CheckpointRecord {
     pub tenant_id: u32,
     pub collection: String,
@@ -201,16 +194,7 @@ impl CheckpointRecord {
 /// indexes in the `Ready` state — `Building` indexes are invisible to reads
 /// but receive dual-writes on new inserts so they converge.
 #[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
+    zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, Copy, PartialEq, Eq, Default,
 )]
 pub enum IndexBuildState {
     Building,
@@ -224,14 +208,8 @@ pub enum IndexBuildState {
 /// mutates the vector and issues a `PutCollection`, so replication, restart
 /// recovery, descriptor-lease invalidation, and DROP cascade all ride the
 /// existing collection-commit pipeline.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
+#[msgpack(map)]
 pub struct StoredIndex {
     /// Index identifier, unique per tenant.
     pub name: String,
@@ -239,32 +217,26 @@ pub struct StoredIndex {
     /// column indexes are plain column names — the DDL layer normalizes.
     pub field: String,
     /// UNIQUE enforced at write-path pre-commit.
-    #[serde(default)]
+    #[msgpack(default)]
     pub unique: bool,
     /// COLLATE NOCASE / COLLATE CI — values normalized to lowercase before
     /// index put and lookup.
-    #[serde(default)]
+    #[msgpack(default)]
     pub case_insensitive: bool,
     /// Partial index predicate (raw SQL text, parsed at write-time).
-    #[serde(default)]
+    #[msgpack(default)]
     pub predicate: Option<String>,
     /// Build state — see [`IndexBuildState`].
-    #[serde(default)]
+    #[msgpack(default)]
     pub state: IndexBuildState,
     /// Owner — inherited from the owning collection at create time.
-    #[serde(default)]
+    #[msgpack(default)]
     pub owner: String,
 }
 
 /// Serializable collection metadata for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
+#[msgpack(map)]
 pub struct StoredCollection {
     pub tenant_id: u32,
     pub name: String,
@@ -275,76 +247,76 @@ pub struct StoredCollection {
     /// of `0` is the sentinel for "legacy entry written before
     /// `DISTRIBUTED_CATALOG_VERSION >= 3`, version unknown" and
     /// forces resolvers to re-fetch.
-    #[serde(default)]
+    #[msgpack(default)]
     pub descriptor_version: u64,
     /// Hybrid Logical Clock timestamp assigned by the metadata
     /// applier at commit time. Strictly monotonic per descriptor.
-    #[serde(default)]
+    #[msgpack(default)]
     pub modification_hlc: Hlc,
     /// Optional field type declarations. Empty = schemaless.
-    #[serde(default)]
+    #[msgpack(default)]
     pub fields: Vec<(String, String)>,
     /// Extended field definitions with DEFAULT, VALUE (computed), ASSERT, TYPE.
-    #[serde(default)]
+    #[msgpack(default)]
     pub field_defs: Vec<FieldDefinition>,
     /// Event/trigger definitions (DEFINE EVENT).
-    #[serde(default)]
+    #[msgpack(default)]
     pub event_defs: Vec<EventDefinition>,
     /// Collection type: determines storage engine and query routing.
-    #[serde(default)]
+    #[msgpack(default)]
     pub collection_type: nodedb_types::CollectionType,
     /// Timeseries-specific configuration (JSON-serialized).
-    #[serde(default)]
+    #[msgpack(default)]
     pub timeseries_config: Option<String>,
     pub is_active: bool,
     /// Append-only: UPDATE/DELETE rejected.
-    #[serde(default)]
+    #[msgpack(default)]
     pub append_only: bool,
     /// Hash chain: each INSERT computes SHA-256 chain hash. Requires append_only.
-    #[serde(default)]
+    #[msgpack(default)]
     pub hash_chain: bool,
     /// Balanced constraint: debit/credit sums must match per group_key at commit.
-    #[serde(default)]
+    #[msgpack(default)]
     pub balanced: Option<BalancedConstraintDef>,
     /// Last hash in the chain.
-    #[serde(default)]
+    #[msgpack(default)]
     pub last_chain_hash: Option<String>,
     /// Period lock: binds a period column to a fiscal_periods status table.
-    #[serde(default)]
+    #[msgpack(default)]
     pub period_lock: Option<PeriodLockDef>,
     /// Data retention period. DELETE rejected if row age < period.
-    #[serde(default)]
+    #[msgpack(default)]
     pub retention_period: Option<String>,
     /// Active legal holds. DELETE rejected while any hold is active.
-    #[serde(default)]
+    #[msgpack(default)]
     pub legal_holds: Vec<LegalHold>,
     /// State transition constraints.
-    #[serde(default)]
+    #[msgpack(default)]
     pub state_constraints: Vec<StateTransitionDef>,
     /// Transition check predicates: OLD/NEW expression evaluated on UPDATE.
-    #[serde(default)]
+    #[msgpack(default)]
     pub transition_checks: Vec<TransitionCheckDef>,
     /// Type guard field constraints for schemaless collections.
-    #[serde(default)]
+    #[msgpack(default)]
     pub type_guards: Vec<nodedb_types::TypeGuardFieldDef>,
     /// General CHECK constraints (Control Plane enforcement, may contain subqueries).
-    #[serde(default)]
+    #[msgpack(default)]
     pub check_constraints: Vec<CheckConstraintDef>,
     /// Materialized sum definitions.
-    #[serde(default)]
+    #[msgpack(default)]
     pub materialized_sums: Vec<MaterializedSumDef>,
     /// Enable last-value cache for timeseries.
-    #[serde(default)]
+    #[msgpack(default)]
     pub lvc_enabled: bool,
     /// Permission tree definition (JSON-serialized).
-    #[serde(default)]
+    #[msgpack(default)]
     pub permission_tree_def: Option<String>,
     /// Secondary indexes declared on this collection.
     ///
     /// Mutated by CREATE/DROP INDEX DDL; the existing `PutCollection`
     /// commit pipeline handles replication + fan-out + descriptor-lease
     /// invalidation.
-    #[serde(default)]
+    #[msgpack(default)]
     pub indexes: Vec<StoredIndex>,
 }
 
@@ -402,28 +374,22 @@ impl StoredCollection {
 // ── Materialized view metadata ────────────────────────────────────────
 
 /// A materialized view: strict → columnar CDC bridge.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
+#[msgpack(map)]
 pub struct StoredMaterializedView {
     pub tenant_id: u32,
     pub name: String,
     pub source: String,
     pub query_sql: String,
-    #[serde(default = "default_refresh_mode")]
+    #[msgpack(default = "default_refresh_mode")]
     pub refresh_mode: String,
     pub owner: String,
     pub created_at: u64,
     /// Monotonic descriptor version. See [`StoredCollection::descriptor_version`].
-    #[serde(default)]
+    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC assigned by the metadata applier. See [`StoredCollection::modification_hlc`].
-    #[serde(default)]
+    #[msgpack(default)]
     pub modification_hlc: Hlc,
 }
 

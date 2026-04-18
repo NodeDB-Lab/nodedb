@@ -6,16 +6,7 @@
 use super::types::{DEPENDENCIES, SystemCatalog, catalog_err};
 
 /// A single dependency edge: the source object references the target.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    PartialEq,
-    Eq,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack, PartialEq, Eq)]
 pub struct Dependency {
     /// Type of referenced object: "function", "collection".
     pub target_type: String,
@@ -24,14 +15,7 @@ pub struct Dependency {
 }
 
 /// All dependencies for a source object.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct DependencyList {
     pub deps: Vec<Dependency>,
 }

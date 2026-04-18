@@ -1,11 +1,7 @@
 //! Consumer group type definitions.
 
-use serde::{Deserialize, Serialize};
-
 /// Persistent definition of a consumer group. Stored in the system catalog.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct ConsumerGroupDef {
     /// Tenant that owns this group.
     pub tenant_id: u32,
@@ -20,17 +16,7 @@ pub struct ConsumerGroupDef {
 }
 
 /// A single partition offset: (partition_id, committed_lsn).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct PartitionOffset {
     /// Partition ID (vShard ID).
     pub partition_id: u16,

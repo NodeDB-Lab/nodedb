@@ -8,8 +8,6 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use serde::{Deserialize, Serialize};
-
 use super::types::{AggDef, AggFunction};
 
 /// A row of aggregate results: (aggregate_name, value).
@@ -19,9 +17,8 @@ pub type AggRow = Vec<(String, f64)>;
 pub type MvResultRow = (String, AggRow, bool);
 
 /// Partial aggregate state for one group key.
-#[derive(
-    Debug, Clone, Default, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, Default, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct GroupState {
     pub count: u64,
     pub sum: f64,
@@ -29,11 +26,11 @@ pub struct GroupState {
     pub max: Option<f64>,
     /// Whether this bucket is finalized (all partitions have advanced past it).
     /// Once finalized, no more events will arrive for this group key.
-    #[serde(default)]
+    #[msgpack(default)]
     pub finalized: bool,
     /// Latest event_time (wall-clock ms) seen for this group key.
     /// Used to map LSN watermarks to wall-clock time for time-bucket finalization.
-    #[serde(default)]
+    #[msgpack(default)]
     pub latest_event_time: u64,
 }
 

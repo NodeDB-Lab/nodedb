@@ -1,16 +1,12 @@
 //! Column statistics for query optimizer (ANALYZE).
 
-use serde::{Deserialize, Serialize};
-
 use super::types::{COLUMN_STATS, SystemCatalog, catalog_err};
 
 /// Per-column statistics collected by ANALYZE.
 ///
 /// Stored in redb under `_system.column_stats` with key `"{tenant_id}:{collection}:{column}"`.
 /// Used by DataFusion's cost-based optimizer for cardinality estimation.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct StoredColumnStats {
     pub tenant_id: u32,
     pub collection: String,

@@ -3,35 +3,23 @@
 use super::types::{SCOPE_GRANTS, SCOPES, SystemCatalog, catalog_err};
 
 /// Serializable scope definition for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct StoredScope {
     /// Scope name (e.g., "profile:read", "orders:write").
     pub name: String,
     /// What this scope grants: `[("read", "user_profiles"), ("read", "user_settings")]`.
     pub grants: Vec<(String, String)>,
     /// Included sub-scopes (composition): `["profile:read", "settings:read"]`.
-    #[serde(default)]
+    #[msgpack(default)]
     pub includes: Vec<String>,
     pub created_by: String,
     pub created_at: u64,
 }
 
 /// Serializable scope grant for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct StoredScopeGrant {
     pub scope_name: String,
     /// Grantee type: "user", "role", "org", "team".
@@ -41,13 +29,13 @@ pub struct StoredScopeGrant {
     pub granted_by: String,
     pub granted_at: u64,
     /// Unix timestamp when this grant expires. 0 = no expiry.
-    #[serde(default)]
+    #[msgpack(default)]
     pub expires_at: u64,
     /// Grace period in seconds before hard cutoff after expiry.
-    #[serde(default)]
+    #[msgpack(default)]
     pub grace_period_secs: u64,
     /// Action on expiry: "revoke_all", "grant:<scope_name>", or empty (just expire).
-    #[serde(default)]
+    #[msgpack(default)]
     pub on_expire_action: String,
 }
 

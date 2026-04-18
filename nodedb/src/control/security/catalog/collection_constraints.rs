@@ -19,32 +19,41 @@ use crate::bridge::expr_eval::SqlExpr;
 
 /// Extended field definition supporting DEFAULT, VALUE, ASSERT, and TYPE constraints.
 #[derive(Debug, Clone, Serialize, Deserialize, ToMessagePack, FromMessagePack)]
+#[msgpack(map)]
 pub struct FieldDefinition {
     pub name: String,
     /// Type constraint: "int", "float", "string", etc. Empty = any.
     #[serde(default)]
+    #[msgpack(default)]
     pub field_type: String,
     /// Default expression (evaluated when field is missing on insert).
     #[serde(default)]
+    #[msgpack(default)]
     pub default_expr: String,
     /// Computed value expression (evaluated on every read, not stored).
     #[serde(default)]
+    #[msgpack(default)]
     pub value_expr: String,
     /// Assertion expression (must evaluate to true for writes to succeed).
     #[serde(default)]
+    #[msgpack(default)]
     pub assert_expr: String,
     /// Whether the field is read-only (cannot be set by user).
     #[serde(default)]
+    #[msgpack(default)]
     pub readonly: bool,
     /// Sequence name for auto-generated values on INSERT.
     #[serde(default)]
+    #[msgpack(default)]
     pub sequence_name: Option<String>,
     /// If true, this field is a stored generated column (materialized on write).
     /// `value_expr` contains the serialized SqlExpr for write-time evaluation.
     #[serde(default)]
+    #[msgpack(default)]
     pub is_generated: bool,
     /// Column names this generated column depends on (for UPDATE recomputation).
     #[serde(default)]
+    #[msgpack(default)]
     pub generated_deps: Vec<String>,
 }
 

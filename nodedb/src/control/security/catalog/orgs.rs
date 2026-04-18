@@ -3,35 +3,22 @@
 use super::types::{ORG_MEMBERS, ORGS, SystemCatalog, catalog_err};
 
 /// Serializable organization record for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct StoredOrg {
     pub org_id: String,
     pub name: String,
     pub tenant_id: u32,
     /// Organization status: active, suspended, banned.
-    #[serde(default = "default_active")]
+    #[msgpack(default = "default_active")]
     pub status: String,
     pub created_at: u64,
-    #[serde(default)]
+    #[msgpack(default)]
     pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Serializable org membership record for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct StoredOrgMember {
     pub auth_user_id: String,
     pub org_id: String,

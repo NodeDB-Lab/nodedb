@@ -1,14 +1,11 @@
 //! Webhook delivery configuration types.
 
-use serde::{Deserialize, Serialize};
-
 /// Webhook delivery configuration for a change stream.
 ///
 /// When set on a stream, the Event Plane spawns a background task that
 /// POSTs each event to the configured URL with retry and DLQ.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct WebhookConfig {
     /// Target URL to POST events to.
     pub url: String,
@@ -17,7 +14,7 @@ pub struct WebhookConfig {
     /// Per-request timeout in seconds. Default: 5.
     pub timeout_secs: u64,
     /// Optional custom headers (key → value).
-    #[serde(default)]
+    #[msgpack(default)]
     pub headers: Vec<(String, String)>,
 }
 
@@ -61,15 +58,15 @@ mod tests {
     }
 
     #[test]
-    fn serde_roundtrip() {
+    fn msgpack_roundtrip() {
         let cfg = WebhookConfig {
             url: "https://example.com".into(),
             max_retries: 5,
             timeout_secs: 10,
             headers: vec![("Authorization".into(), "Bearer tok".into())],
         };
-        let bytes = serde_json::to_vec(&cfg).unwrap();
-        let decoded: WebhookConfig = serde_json::from_slice(&bytes).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&cfg).unwrap();
+        let decoded: WebhookConfig = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(decoded.url, cfg.url);
         assert_eq!(decoded.max_retries, 5);
         assert_eq!(decoded.headers.len(), 1);
@@ -77,8 +74,20 @@ mod tests {
 
     #[test]
     fn deserialize_missing_headers_defaults_to_empty() {
-        let json = r#"{"url":"http://x","max_retries":1,"timeout_secs":2}"#;
-        let cfg: WebhookConfig = serde_json::from_str(json).unwrap();
+        #[derive(zerompk::ToMessagePack)]
+        #[msgpack(map)]
+        struct PartialConfig {
+            url: String,
+            max_retries: u32,
+            timeout_secs: u64,
+        }
+        let partial = PartialConfig {
+            url: "http://x".into(),
+            max_retries: 1,
+            timeout_secs: 2,
+        };
+        let bytes = zerompk::to_msgpack_vec(&partial).unwrap();
+        let cfg: WebhookConfig = zerompk::from_msgpack(&bytes).unwrap();
         assert!(cfg.headers.is_empty());
     }
 }

@@ -1,14 +1,8 @@
 //! Authentication and authorization type definitions for redb catalog storage.
 
 /// Serializable user record for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
+#[msgpack(map)]
 pub struct StoredUser {
     pub user_id: u64,
     pub username: String,
@@ -20,31 +14,25 @@ pub struct StoredUser {
     pub is_superuser: bool,
     pub is_active: bool,
     /// True if this is a service account (no password, API key auth only).
-    #[serde(default)]
+    #[msgpack(default)]
     pub is_service_account: bool,
     /// Unix timestamp (seconds) when the user was created.
-    #[serde(default)]
+    #[msgpack(default)]
     pub created_at: u64,
     /// Unix timestamp (seconds) when the user was last modified.
-    #[serde(default)]
+    #[msgpack(default)]
     pub updated_at: u64,
     /// Unix timestamp (seconds) when the password expires. 0 = no expiry.
-    #[serde(default)]
+    #[msgpack(default)]
     pub password_expires_at: u64,
     /// MD5 hash for pgwire MD5 auth: `md5(password + username)` as hex.
-    #[serde(default)]
+    #[msgpack(default)]
     pub md5_hash: String,
 }
 
 /// Serializable API key record for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
+#[msgpack(map)]
 pub struct StoredApiKey {
     /// Unique key identifier (used as prefix in the token).
     pub key_id: String,
@@ -62,19 +50,12 @@ pub struct StoredApiKey {
     pub created_at: u64,
     /// Permission scope restriction. Empty = inherit all user permissions.
     /// Format: ["read:collection_name", "write:collection_name", ...]
-    #[serde(default)]
+    #[msgpack(default)]
     pub scope: Vec<String>,
 }
 
 /// Serializable tenant record for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct StoredTenant {
     pub tenant_id: u32,
     pub name: String,
@@ -83,14 +64,8 @@ pub struct StoredTenant {
 }
 
 /// Serializable audit entry for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
+#[msgpack(map)]
 pub struct StoredAuditEntry {
     pub seq: u64,
     pub timestamp_us: u64,
@@ -99,19 +74,12 @@ pub struct StoredAuditEntry {
     pub source: String,
     pub detail: String,
     /// SHA-256 hash of the previous entry (hex). Empty for first entry.
-    #[serde(default)]
+    #[msgpack(default)]
     pub prev_hash: String,
 }
 
 /// Serializable custom role for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct StoredRole {
     pub name: String,
     pub tenant_id: u32,
@@ -121,14 +89,7 @@ pub struct StoredRole {
 }
 
 /// Serializable permission grant for redb storage.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct StoredPermission {
     /// What the grant applies to: "cluster", "tenant:1", "collection:1:users"
     pub target: String,
@@ -141,14 +102,7 @@ pub struct StoredPermission {
 }
 
 /// Serializable ownership record.
-#[derive(
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-    Debug,
-    Clone,
-)]
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct StoredOwner {
     /// "collection", "index"
     pub object_type: String,
@@ -159,14 +113,7 @@ pub struct StoredOwner {
 }
 
 /// Serializable blacklist entry for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct StoredBlacklistEntry {
     /// Blacklist entry key: `"user:{user_id}"` or `"ip:{addr_or_cidr}"`.
     pub key: String,
@@ -183,21 +130,15 @@ pub struct StoredBlacklistEntry {
 }
 
 /// Serializable JIT-provisioned auth user record for redb storage.
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct StoredAuthUser {
     /// Unique identifier (from JWT `sub` or `user_id` claim).
     pub id: String,
     /// Username (display name).
     pub username: String,
     /// Email address (from JWT `email` claim).
-    #[serde(default)]
+    #[msgpack(default)]
     pub email: String,
     /// Tenant this user belongs to.
     pub tenant_id: u32,
@@ -210,13 +151,13 @@ pub struct StoredAuthUser {
     /// Whether this user is active (can authenticate).
     pub is_active: bool,
     /// Account status: active, suspended, banned, restricted, read_only.
-    #[serde(default = "default_status")]
+    #[msgpack(default = "default_status")]
     pub status: String,
     /// Whether this user was externally provisioned (no local password).
-    #[serde(default = "default_true")]
+    #[msgpack(default = "default_true")]
     pub is_external: bool,
     /// Last synced JWT claims (for claim sync on each request).
-    #[serde(default)]
+    #[msgpack(default)]
     pub synced_claims: std::collections::HashMap<String, String>,
 }
 

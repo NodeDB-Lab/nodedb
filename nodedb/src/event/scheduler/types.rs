@@ -1,19 +1,8 @@
 //! Schedule definition types.
 
-use serde::{Deserialize, Serialize};
-
 /// What to do when a scheduled execution was missed (server was down).
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
+    Debug, Clone, Copy, PartialEq, Eq, Default, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
 #[repr(u8)]
 #[msgpack(c_enum)]
@@ -48,16 +37,7 @@ impl MissedPolicy {
 
 /// Where the schedule runs.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
+    Debug, Clone, Copy, PartialEq, Eq, Default, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
 #[repr(u8)]
 #[msgpack(c_enum)]
@@ -80,9 +60,8 @@ impl ScheduleScope {
 }
 
 /// Persistent definition of a scheduled job. Stored in the system catalog.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
 pub struct ScheduleDef {
     /// Tenant that owns this schedule.
     pub tenant_id: u32,
@@ -103,7 +82,7 @@ pub struct ScheduleDef {
     /// Target collection inferred from the SQL body (e.g., "orders" from
     /// `DELETE FROM orders ...`). Used for shard affinity in cluster mode.
     /// `None` for cross-collection or opaque jobs → runs on `_system` coordinator.
-    #[serde(default)]
+    #[msgpack(default)]
     pub target_collection: Option<String>,
     /// Owner (creator). Job runs with this user's privileges.
     pub owner: String,
@@ -112,9 +91,7 @@ pub struct ScheduleDef {
 }
 
 /// A completed job execution record.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct JobRun {
     /// Schedule name.
     pub schedule_name: String,

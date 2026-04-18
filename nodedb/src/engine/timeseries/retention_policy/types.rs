@@ -3,14 +3,10 @@
 //! A retention policy defines tiered data lifecycle for a timeseries collection:
 //! raw data → downsampled aggregates → archive → drop.
 
-use serde::{Deserialize, Serialize};
-
 use crate::engine::timeseries::continuous_agg::AggregateExpr;
 
 /// Complete definition of a tiered retention policy.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct RetentionPolicyDef {
     /// Owning tenant.
     pub tenant_id: u32,
@@ -34,9 +30,7 @@ pub struct RetentionPolicyDef {
 }
 
 /// A single tier in a retention policy.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct TierDef {
     /// Tier index (0 = RAW, 1+ = downsampled).
     pub tier_index: u32,
@@ -54,9 +48,7 @@ pub struct TierDef {
 }
 
 /// Where to archive data after it expires from a tier.
-#[derive(
-    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
-)]
+#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum ArchiveTarget {
     /// Archive to S3-compatible object storage.
     S3 { url: String },
