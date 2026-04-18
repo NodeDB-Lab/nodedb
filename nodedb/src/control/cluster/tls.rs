@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use nodedb_cluster::transport::pki_types::{
     CertificateDer, CertificateRevocationListDer, PrivateKeyDer,
 };
-use nodedb_cluster::{TlsCredentials, TransportCredentials, generate_node_credentials};
+use nodedb_cluster::{TlsCredentials, TransportCredentials};
 use tracing::{info, warn};
 
 use crate::config::server::{ClusterSettings, TlsPaths};
@@ -40,6 +40,14 @@ pub const TLS_SUBDIR: &str = "tls";
 const NODE_CERT_FILE: &str = "node.crt";
 const NODE_KEY_FILE: &str = "node.key";
 const CA_CERT_FILE: &str = "ca.crt";
+/// PKCS#8 DER of the cluster CA's private key. Persisted with 0600
+/// perms alongside `ca.crt` so `nodedb regen-certs` can reissue a
+/// per-node cert under the existing CA without a full rotation.
+/// Bootstrap writes this file; operators who wish to discard the CA
+/// key after bootstrap (for a one-shot, un-reissuable cluster) can
+/// `rm` it — `regen-certs` then errors with a clear message and the
+/// operator must `rotate-ca` instead.
+const CA_KEY_FILE: &str = "ca.key";
 /// Subdirectory of `tls/` holding **additional** trusted CA anchors
 /// active during an L.4 rotation overlap window. One `<fp>.crt` file
 /// per extra CA; the primary `ca.crt` (issuer of this node's own
@@ -99,6 +107,27 @@ pub fn resolve_credentials(
             node_id = settings.node_id,
             dir = %tls_dir.display(),
             "bootstrapped new cluster CA + node credentials"
+        );
+        return Ok(TransportCredentials::Mtls(creds));
+    }
+
+    // L.4: token-authenticated cred delivery. When the operator
+    // exports `NODEDB_JOIN_TOKEN=<hex>` and `NODEDB_JOIN_SEED=<addr>`,
+    // reach out to the seed's bootstrap listener, fetch the cred
+    // bundle, write it to `tls/`, and fall through to the normal
+    // `load_from_data_dir` path on the next pass. The env-driven
+    // spelling keeps joiners' config files identical to bootstrappers'
+    // — only the startup environment differs.
+    if let (Ok(token), Ok(seed_str)) = (
+        std::env::var("NODEDB_JOIN_TOKEN"),
+        std::env::var("NODEDB_JOIN_SEED"),
+    ) && let Ok(seed) = seed_str.parse::<std::net::SocketAddr>()
+    {
+        let creds = fetch_creds_via_bootstrap(settings, &tls_dir, &token, seed)?;
+        info!(
+            node_id = settings.node_id,
+            seed = %seed,
+            "fetched TLS bundle from bootstrap listener"
         );
         return Ok(TransportCredentials::Mtls(creds));
     }
@@ -221,6 +250,58 @@ pub fn remove_trusted_ca(tls_dir: &Path, fp: &[u8; 32]) -> crate::Result<()> {
     }
 }
 
+/// L.4 joiner-side helper: connect to `seed`'s bootstrap listener with
+/// `token`, receive `(ca_cert, node_cert, node_key, cluster_secret)`,
+/// write the files to `tls_dir/`, and return the loaded credentials.
+/// Blocks the calling thread on a short-lived tokio runtime so the
+/// helper composes with the synchronous resolve path.
+fn fetch_creds_via_bootstrap(
+    settings: &ClusterSettings,
+    tls_dir: &Path,
+    token_hex: &str,
+    seed: std::net::SocketAddr,
+) -> crate::Result<TlsCredentials> {
+    fs::create_dir_all(tls_dir).map_err(|e| crate::Error::Config {
+        detail: format!("create tls dir {}: {e}", tls_dir.display()),
+    })?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| crate::Error::Config {
+            detail: format!("build bootstrap runtime: {e}"),
+        })?;
+    let resp = rt
+        .block_on(nodedb_cluster::bootstrap_listener::fetch_creds(
+            seed,
+            token_hex,
+            settings.node_id,
+            std::time::Duration::from_secs(30),
+        ))
+        .map_err(|e| crate::Error::Config {
+            detail: format!("bootstrap fetch_creds: {e}"),
+        })?;
+
+    // Persist to disk so a restart takes the normal data-dir path
+    // without needing the token a second time.
+    write_pem_cert(&tls_dir.join(CA_CERT_FILE), &resp.ca_cert_der)?;
+    write_pem_cert(&tls_dir.join(NODE_CERT_FILE), &resp.node_cert_der)?;
+    write_pem_private_key(&tls_dir.join(NODE_KEY_FILE), &resp.node_key_der)?;
+    if resp.cluster_secret.len() != CLUSTER_SECRET_LEN {
+        return Err(crate::Error::Config {
+            detail: format!(
+                "bootstrap response cluster_secret has {} bytes, expected {CLUSTER_SECRET_LEN}",
+                resp.cluster_secret.len()
+            ),
+        });
+    }
+    let mut secret = [0u8; CLUSTER_SECRET_LEN];
+    secret.copy_from_slice(&resp.cluster_secret);
+    write_cluster_secret(&tls_dir.join(CLUSTER_SECRET_FILE), &secret)?;
+
+    load_from_data_dir(tls_dir)
+}
+
 fn bootstrap_credentials(
     settings: &ClusterSettings,
     tls_dir: &Path,
@@ -229,19 +310,24 @@ fn bootstrap_credentials(
         detail: format!("create tls dir {}: {e}", tls_dir.display()),
     })?;
 
-    // SAN must match the SNI hostname used by the Raft QUIC client
-    // (`transport::config::SNI_HOSTNAME`, fixed at "nodedb") or rustls
-    // rejects the handshake. Per-node identity binding via SAN is a
-    // follow-up (L.4) that will add issuer support for multiple SANs —
-    // for L.1 every node uses the shared cluster SAN and identity lives
-    // in the envelope's from_node_id (L.2).
-    let _desired_node_san = format!("node-{}", settings.node_id);
-    let (ca, creds) = generate_node_credentials(nodedb_cluster::transport::config::SNI_HOSTNAME)
-        .map_err(|e| crate::Error::Config {
-            detail: format!("bootstrap cluster CA: {e}"),
-        })?;
+    // Multi-SAN cert: one cert satisfies both the fixed cluster SNI
+    // (`"nodedb"`, required by the QUIC client config) AND the
+    // per-node identity (`node-<id>`), so future CRL-based revocation
+    // can target a specific node without tearing down the fleet.
+    let node_san = format!("node-{}", settings.node_id);
+    let (ca, creds) = nodedb_cluster::generate_node_credentials_multi_san(&[
+        &node_san,
+        nodedb_cluster::transport::config::SNI_HOSTNAME,
+    ])
+    .map_err(|e| crate::Error::Config {
+        detail: format!("bootstrap cluster CA: {e}"),
+    })?;
 
     write_pem_cert(&tls_dir.join(CA_CERT_FILE), ca.cert_der().as_ref())?;
+    // Persist the CA key so `nodedb regen-certs` can reissue node
+    // certs under the same CA. 0600 perms enforced by
+    // `write_pem_private_key`.
+    write_pem_private_key(&tls_dir.join(CA_KEY_FILE), &ca.key_pair_pkcs8_der())?;
     write_pem_cert(&tls_dir.join(NODE_CERT_FILE), creds.cert.as_ref())?;
     write_pem_private_key(&tls_dir.join(NODE_KEY_FILE), creds.key.secret_der())?;
     write_cluster_secret(&tls_dir.join(CLUSTER_SECRET_FILE), &creds.cluster_secret)?;
@@ -273,11 +359,13 @@ fn read_cluster_secret(path: &Path) -> crate::Result<[u8; CLUSTER_SECRET_LEN]> {
     Ok(out)
 }
 
-fn write_cluster_secret(path: &PathBuf, secret: &[u8; CLUSTER_SECRET_LEN]) -> crate::Result<()> {
+fn write_cluster_secret(path: &Path, secret: &[u8; CLUSTER_SECRET_LEN]) -> crate::Result<()> {
     fs::write(path, secret).map_err(|e| crate::Error::Config {
         detail: format!("write cluster secret {}: {e}", path.display()),
     })?;
-    set_private_key_perms(path)
+    super::pem_io::set_private_key_perms(path).map_err(|e| crate::Error::Config {
+        detail: format!("chmod 0600 {}: {e}", path.display()),
+    })
 }
 
 fn read_single_cert(path: &Path) -> crate::Result<CertificateDer<'static>> {
@@ -318,53 +406,16 @@ fn read_crls(path: &Path) -> crate::Result<Vec<CertificateRevocationListDer<'sta
     })
 }
 
-fn write_pem_cert(path: &PathBuf, der: &[u8]) -> crate::Result<()> {
-    let pem = pem_encode("CERTIFICATE", der);
-    fs::write(path, pem).map_err(|e| crate::Error::Config {
+fn write_pem_cert(path: &Path, der: &[u8]) -> crate::Result<()> {
+    super::pem_io::write_pem_cert(path, der).map_err(|e| crate::Error::Config {
         detail: format!("write {}: {e}", path.display()),
     })
 }
 
-fn write_pem_private_key(path: &PathBuf, der: &[u8]) -> crate::Result<()> {
-    let pem = pem_encode("PRIVATE KEY", der);
-    fs::write(path, pem).map_err(|e| crate::Error::Config {
+fn write_pem_private_key(path: &Path, der: &[u8]) -> crate::Result<()> {
+    super::pem_io::write_pem_private_key(path, der).map_err(|e| crate::Error::Config {
         detail: format!("write {}: {e}", path.display()),
-    })?;
-    set_private_key_perms(path)
-}
-
-fn pem_encode(label: &str, der: &[u8]) -> String {
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut out = String::with_capacity(b64.len() + 64);
-    out.push_str("-----BEGIN ");
-    out.push_str(label);
-    out.push_str("-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        out.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
-        out.push('\n');
-    }
-    out.push_str("-----END ");
-    out.push_str(label);
-    out.push_str("-----\n");
-    out
-}
-
-/// Tighten private-key file mode to 0600. No-op on non-Unix.
-fn set_private_key_perms(path: &PathBuf) -> crate::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, perms).map_err(|e| crate::Error::Config {
-            detail: format!("chmod 0600 {}: {e}", path.display()),
-        })?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
+    })
 }
 
 /// Refuse to start if a secret file is world- or group-readable.
