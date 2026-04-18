@@ -153,12 +153,16 @@ impl TestClusterNode {
         let data_side = data_sides.into_iter().next().expect("data side");
         let event_producer = event_producers.into_iter().next().expect("event producer");
         let core_dir = data_dir_path.clone();
+        let core_metrics = shared.system_metrics.clone();
         let (core_stop_tx, core_stop_rx) = std::sync::mpsc::channel::<()>();
         let core_handle = tokio::task::spawn_blocking(move || {
             let mut core =
                 CoreLoop::open(0, data_side.request_rx, data_side.response_tx, &core_dir)
                     .expect("core open");
             core.set_event_producer(event_producer);
+            if let Some(m) = core_metrics {
+                core.set_metrics(m);
+            }
             // Continue ticking only while the channel is Empty.
             // `Ok(())` means we got an explicit stop signal;
             // `Disconnected` means the sender was dropped (e.g. the

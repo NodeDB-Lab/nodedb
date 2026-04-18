@@ -221,6 +221,67 @@ async fn ddl_create_drop_trigger_replicates() {
     cluster.shutdown().await;
 }
 
+// ── Index backfill fan-out ───────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn create_index_backfill_runs_on_every_node() {
+    let cluster = TestCluster::spawn_three().await.expect("cluster");
+    cluster
+        .exec_ddl_on_any_leader("CREATE COLLECTION idx_fanout_coll")
+        .await
+        .expect("create coll");
+    wait_for(
+        "collection visible on all nodes",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.cached_collection_count() >= 1)
+        },
+    )
+    .await;
+
+    cluster
+        .exec_ddl_on_any_leader("INSERT INTO idx_fanout_coll (id, email) VALUES ('u1', 'a@b.com')")
+        .await
+        .expect("insert row");
+
+    cluster
+        .exec_ddl_on_any_leader("CREATE INDEX idx_fanout_email ON idx_fanout_coll(email)")
+        .await
+        .expect("create index");
+
+    // Every node's Data Plane must have executed BackfillIndex at
+    // least once — a distributed CREATE INDEX that runs the backfill
+    // only on the coordinator silently under-populates the index on
+    // rows hosted by other vShards. The counter distinguishes local
+    // handler invocation from Raft-replicated catalog state. Poll
+    // briefly to let any async applier post-effects settle before
+    // asserting final counts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline
+        && !cluster
+            .nodes
+            .iter()
+            .all(|n| n.document_index_backfill_count() >= 1)
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let counts: Vec<u64> = cluster
+        .nodes
+        .iter()
+        .map(|n| n.document_index_backfill_count())
+        .collect();
+    assert!(
+        counts.iter().all(|&c| c >= 1),
+        "backfill must run on every node; got {:?}",
+        counts
+    );
+    cluster.shutdown().await;
+}
+
 // ── Schedule ─────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]

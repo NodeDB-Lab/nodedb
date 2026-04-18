@@ -37,6 +37,23 @@ impl TestClusterNode {
             .unwrap_or(0)
     }
 
+    /// Count of `DocumentOp::BackfillIndex` handler invocations on
+    /// this node's Data Plane since startup. A CREATE INDEX against a
+    /// cluster must fan out backfill to every node — this counter
+    /// exposes whether the local core actually executed the primitive
+    /// (a positive value) versus merely replicating Raft state from
+    /// the coordinator (counter stays 0).
+    pub fn document_index_backfill_count(&self) -> u64 {
+        self.shared
+            .system_metrics
+            .as_ref()
+            .map(|m| {
+                m.document_index_backfills
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .unwrap_or(0)
+    }
+
     /// Number of active collections visible on this node (read through
     /// the local `SystemCatalog` redb — populated by the
     /// `MetadataCommitApplier` on every node via
