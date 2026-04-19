@@ -27,6 +27,17 @@ fn convert_expr_inner(expr: &SqlExpr, qualify: bool) -> crate::bridge::expr_eval
     use crate::bridge::expr_eval::SqlExpr as BExpr;
     match expr {
         SqlExpr::Column { table, name } => {
+            // `EXCLUDED.col` references the row proposed for insertion in
+            // `INSERT ... ON CONFLICT DO UPDATE`. Emit the dedicated
+            // variant so the upsert handler can resolve against the
+            // incoming row via `eval_with_excluded`. The table qualifier
+            // comes in already-normalized (lowercased) from the parser.
+            if table
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("excluded"))
+            {
+                return BExpr::ExcludedColumn(name.clone());
+            }
             if qualify {
                 BExpr::Column(nodedb_sql::planner::qualified_name(table.as_deref(), name))
             } else {

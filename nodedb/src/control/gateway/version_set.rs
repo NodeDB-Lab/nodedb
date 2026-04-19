@@ -138,6 +138,7 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
             match op {
                 PointGet { collection, .. }
                 | PointPut { collection, .. }
+                | PointInsert { collection, .. }
                 | PointDelete { collection, .. }
                 | PointUpdate { collection, .. }
                 | Scan { collection, .. }

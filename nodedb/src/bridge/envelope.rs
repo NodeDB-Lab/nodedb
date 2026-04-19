@@ -186,7 +186,11 @@ pub enum ErrorCode {
     /// Request exceeded its deadline.
     DeadlineExceeded,
     /// Constraint violation at commit time.
-    RejectedConstraint { constraint: String },
+    ///
+    /// `constraint` names the kind (`unique`, `not_null`, ...). `detail`
+    /// carries the human-readable explanation (e.g. which primary-key
+    /// value conflicted) so pgwire drivers can surface it to the user.
+    RejectedConstraint { constraint: String, detail: String },
     /// Pre-validation fast-reject.
     RejectedPrevalidation { reason: String },
     /// Document/collection not found.
@@ -235,9 +239,9 @@ impl From<crate::Error> for ErrorCode {
     fn from(e: crate::Error) -> Self {
         match e {
             crate::Error::DeadlineExceeded { .. } => Self::DeadlineExceeded,
-            crate::Error::RejectedConstraint { constraint, .. } => {
-                Self::RejectedConstraint { constraint }
-            }
+            crate::Error::RejectedConstraint {
+                constraint, detail, ..
+            } => Self::RejectedConstraint { constraint, detail },
             crate::Error::RejectedPrevalidation { reason, .. } => {
                 Self::RejectedPrevalidation { reason }
             }

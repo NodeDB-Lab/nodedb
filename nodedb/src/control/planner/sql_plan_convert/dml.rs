@@ -19,6 +19,7 @@ pub(super) fn convert_insert(
     engine: &EngineType,
     rows: &[Vec<(String, SqlValue)>],
     column_defaults: &[(String, String)],
+    if_absent: bool,
     tenant_id: TenantId,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
@@ -76,10 +77,11 @@ pub(super) fn convert_insert(
                 tasks.push(PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
-                    plan: PhysicalPlan::Document(DocumentOp::PointPut {
+                    plan: PhysicalPlan::Document(DocumentOp::PointInsert {
                         collection: collection.into(),
                         document_id: doc_id,
                         value: value_bytes,
+                        if_absent,
                     }),
                     post_set_op: PostSetOp::None,
                 });

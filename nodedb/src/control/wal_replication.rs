@@ -49,6 +49,13 @@ pub enum ReplicatedWrite {
         document_id: String,
         value: Vec<u8>,
     },
+    PointInsert {
+        collection: String,
+        document_id: String,
+        value: Vec<u8>,
+        #[serde(default)]
+        if_absent: bool,
+    },
     PointDelete {
         collection: String,
         document_id: String,
@@ -212,6 +219,17 @@ pub fn to_replicated_entry(
             collection: collection.clone(),
             document_id: document_id.clone(),
             value: value.clone(),
+        },
+        PhysicalPlan::Document(DocumentOp::PointInsert {
+            collection,
+            document_id,
+            value,
+            if_absent,
+        }) => ReplicatedWrite::PointInsert {
+            collection: collection.clone(),
+            document_id: document_id.clone(),
+            value: value.clone(),
+            if_absent: *if_absent,
         },
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
@@ -446,6 +464,17 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             collection: collection.clone(),
             document_id: document_id.clone(),
             value: value.clone(),
+        }),
+        ReplicatedWrite::PointInsert {
+            collection,
+            document_id,
+            value,
+            if_absent,
+        } => PhysicalPlan::Document(DocumentOp::PointInsert {
+            collection: collection.clone(),
+            document_id: document_id.clone(),
+            value: value.clone(),
+            if_absent: *if_absent,
         }),
         ReplicatedWrite::PointDelete {
             collection,

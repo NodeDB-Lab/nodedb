@@ -289,10 +289,30 @@ pub enum DocumentOp {
     },
 
     /// Point write: insert/update a document.
+    ///
+    /// This variant is unconditional-overwrite (upsert semantics). Use
+    /// [`DocumentOp::PointInsert`] for SQL `INSERT` where duplicate PKs must
+    /// raise `unique_violation`.
     PointPut {
         collection: String,
         document_id: String,
         value: Vec<u8>,
+    },
+
+    /// Point insert: write one document, fail on duplicate primary key.
+    ///
+    /// When `if_absent` is true the handler silently skips conflicts
+    /// (`INSERT ... ON CONFLICT DO NOTHING`). When false, a duplicate
+    /// primary key raises a unique-violation error.
+    ///
+    /// Separate from [`DocumentOp::PointPut`] because the write path must
+    /// probe the existence of `document_id` inside the same write txn as
+    /// the insert — conflating the two routed `INSERT` to silent upsert.
+    PointInsert {
+        collection: String,
+        document_id: String,
+        value: Vec<u8>,
+        if_absent: bool,
     },
 
     /// Point delete: remove a document.

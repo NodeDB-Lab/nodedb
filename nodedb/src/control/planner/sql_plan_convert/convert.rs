@@ -95,7 +95,15 @@ pub(super) fn convert_one(
             engine,
             rows,
             column_defaults,
-        } => super::dml::convert_insert(collection, engine, rows, column_defaults, tenant_id),
+            if_absent,
+        } => super::dml::convert_insert(
+            collection,
+            engine,
+            rows,
+            column_defaults,
+            *if_absent,
+            tenant_id,
+        ),
 
         SqlPlan::Upsert {
             collection,
