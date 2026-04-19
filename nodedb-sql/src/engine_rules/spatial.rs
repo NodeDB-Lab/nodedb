@@ -13,6 +13,7 @@ impl EngineRules for SpatialRules {
             engine: EngineType::Spatial,
             rows: p.rows,
             column_defaults: p.column_defaults,
+            if_absent: p.if_absent,
         }])
     }
 

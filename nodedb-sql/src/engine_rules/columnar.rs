@@ -13,6 +13,7 @@ impl EngineRules for ColumnarRules {
             engine: EngineType::Columnar,
             rows: p.rows,
             column_defaults: p.column_defaults,
+            if_absent: p.if_absent,
         }])
     }
 

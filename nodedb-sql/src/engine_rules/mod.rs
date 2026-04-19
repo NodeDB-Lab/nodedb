@@ -14,6 +14,9 @@ pub struct InsertParams {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<(String, SqlValue)>>,
     pub column_defaults: Vec<(String, String)>,
+    /// `ON CONFLICT DO NOTHING` semantics: duplicate-PK rows are skipped
+    /// silently. `false` for plain `INSERT` (raises `unique_violation`).
+    pub if_absent: bool,
 }
 
 /// Parameters for planning a SCAN operation.

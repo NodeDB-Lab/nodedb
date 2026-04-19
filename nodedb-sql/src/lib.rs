@@ -22,6 +22,7 @@ pub mod parser;
 pub mod planner;
 pub mod resolver;
 pub mod types;
+pub mod types_expr;
 
 pub use catalog::{SqlCatalog, SqlCatalogError};
 pub use error::{Result, SqlError};

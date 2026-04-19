@@ -2,6 +2,7 @@ pub mod aggregate;
 pub mod const_fold;
 pub mod cte;
 pub mod dml;
+pub mod dml_helpers;
 pub mod join;
 pub mod select;
 
