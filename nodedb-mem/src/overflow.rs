@@ -10,9 +10,40 @@
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::EngineId;
 use crate::error::{MemError, Result};
+
+/// Module-scoped counters for observing madvise behaviour.
+pub mod test_hooks {
+    use super::{AtomicU64, Ordering};
+    pub(super) static MADV_RANDOM_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    pub fn madv_random_count() -> u64 {
+        MADV_RANDOM_COUNT.load(Ordering::Relaxed)
+    }
+}
+
+/// Advise MADV_RANDOM on a freshly-mapped (or freshly-remapped) overflow
+/// region. Returns the hint on success, `None` on failure or zero-length.
+fn advise_random(base: *mut u8, len: usize, path: &Path) -> Option<libc::c_int> {
+    if len == 0 {
+        return None;
+    }
+    let rc = unsafe { libc::madvise(base as *mut libc::c_void, len, libc::MADV_RANDOM) };
+    if rc == 0 {
+        test_hooks::MADV_RANDOM_COUNT.fetch_add(1, Ordering::Relaxed);
+        Some(libc::MADV_RANDOM)
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+            "madvise(MADV_RANDOM) failed on overflow region; continuing with kernel default",
+        );
+        None
+    }
+}
 
 /// Metadata for one spilled allocation in the overflow region.
 #[derive(Debug, Clone)]
@@ -52,6 +83,8 @@ pub struct OverflowRegion {
     free_list: Vec<usize>,
     /// Maximum capacity (prevents unbounded growth).
     max_capacity: usize,
+    /// Last madvise hint applied to `base` (for observability).
+    madvise_state: Option<libc::c_int>,
 }
 
 impl OverflowRegion {
@@ -132,6 +165,11 @@ impl OverflowRegion {
             ));
         }
 
+        // Overflow spill is written in per-slot bursts and read from
+        // potentially any core. Access is scattered, so MADV_NORMAL readahead
+        // wastes page cache on adjacent slots unlikely to be read together.
+        let madvise_state = advise_random(base as *mut u8, capacity, path);
+
         Ok(Self {
             path: path.to_path_buf(),
             _fd: Arc::new(fd),
@@ -141,7 +179,13 @@ impl OverflowRegion {
             slots: Vec::new(),
             free_list: Vec::new(),
             max_capacity: Self::DEFAULT_MAX_CAPACITY,
+            madvise_state,
         })
+    }
+
+    /// The madvise hint currently in effect on the mapped region.
+    pub fn madvise_state(&self) -> Option<libc::c_int> {
+        self.madvise_state
     }
 
     /// Write data to the overflow region and return the slot index.
@@ -334,6 +378,10 @@ impl OverflowRegion {
         self.base = new_base as *mut u8;
         self.capacity = new_capacity;
 
+        // mremap produces a fresh mapping that inherits no advice — re-advise
+        // so growth doesn't silently regress to MADV_NORMAL.
+        self.madvise_state = advise_random(self.base, self.capacity, &self.path);
+
         Ok(())
     }
 }
@@ -377,6 +425,37 @@ mod tests {
         assert_eq!(region.used_bytes(), data.len());
         assert_eq!(slot_idx, 0);
         assert_eq!(region.slot_count(), 1);
+    }
+
+    #[test]
+    fn regrowth_re_advises_random_after_mremap() {
+        // Regression coverage for issue #77: mremap-grown spill regions
+        // inherited no advice, silently regressing to MADV_NORMAL. Private
+        // to this file because it drives the internal bump allocator until
+        // `grow()` fires — no public API exposes the growth path directly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("regrow.mmap");
+
+        let mut region = OverflowRegion::open_with_capacity(&path, 4096).unwrap();
+        let before = test_hooks::madv_random_count();
+        // open() already advised once.
+        assert_eq!(region.madvise_state(), Some(libc::MADV_RANDOM));
+
+        // Write 4096+ bytes to force grow().
+        let blob = vec![0xABu8; 4096];
+        region.write(&blob, EngineId::Vector).unwrap();
+        region.write(&blob, EngineId::Vector).unwrap();
+
+        assert!(
+            region.capacity() > 4096,
+            "test must have triggered at least one regrowth"
+        );
+        let after = test_hooks::madv_random_count();
+        assert!(
+            after > before,
+            "mremap-grown region must re-advise MADV_RANDOM (before={before}, after={after})"
+        );
+        assert_eq!(region.madvise_state(), Some(libc::MADV_RANDOM));
     }
 
     #[test]
