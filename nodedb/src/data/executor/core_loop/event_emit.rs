@@ -15,7 +15,7 @@ impl CoreLoop {
         collection: &str,
         stored_bytes: &[u8],
     ) -> Option<Vec<u8>> {
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let config = self.doc_configs.get(&config_key)?;
         if let crate::bridge::physical_plan::StorageMode::Strict { ref schema } =
             config.storage_mode

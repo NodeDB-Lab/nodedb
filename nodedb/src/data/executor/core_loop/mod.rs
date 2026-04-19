@@ -58,7 +58,9 @@ pub struct CoreLoop {
     pub(in crate::data::executor) crdt_engines: HashMap<TenantId, TenantCrdtEngine>,
 
     /// Per-collection vector collections, lazily initialized on first insert.
-    pub(in crate::data::executor) vector_collections: HashMap<String, VectorCollection>,
+    /// Key: `(TenantId, collection_key)` where `collection_key` is `collection`
+    /// or `"{collection}:{field_name}"` for named fields.
+    pub(in crate::data::executor) vector_collections: HashMap<(TenantId, String), VectorCollection>,
 
     /// Background HNSW builder: send requests.
     pub(in crate::data::executor) build_tx: Option<crate::engine::vector::builder::BuildSender>,
@@ -68,8 +70,9 @@ pub struct CoreLoop {
 
     /// Per-collection HNSW parameters set via DDL. If a collection has no
     /// entry here, `HnswParams::default()` is used on first insert.
+    /// Key: `(TenantId, collection_key)` — same shape as `vector_collections`.
     pub(in crate::data::executor) vector_params:
-        HashMap<String, crate::engine::vector::hnsw::HnswParams>,
+        HashMap<(TenantId, String), crate::engine::vector::hnsw::HnswParams>,
 
     /// redb-backed graph edge storage for this core.
     pub(in crate::data::executor) edge_store: EdgeStore,
@@ -83,14 +86,15 @@ pub struct CoreLoop {
     /// Full-text inverted index (BM25), shares redb with sparse engine.
     pub(in crate::data::executor) inverted: InvertedIndex,
 
-    /// Per-collection spatial R-tree indexes, keyed by "{tid}:{collection}:{field}".
+    /// Per-collection spatial R-tree indexes, keyed by (TenantId, collection, field).
     /// Lazily initialized when a spatial query or geometry insert first targets a field.
     pub(in crate::data::executor) spatial_indexes:
-        std::collections::HashMap<String, crate::engine::spatial::RTree>,
+        std::collections::HashMap<(TenantId, String, String), crate::engine::spatial::RTree>,
 
-    /// Reverse map from R-tree entry ID → document ID, keyed by (index_key, entry_id).
-    /// Needed because RTreeEntry only stores a u64 hash, not the original doc_id.
-    pub(in crate::data::executor) spatial_doc_map: std::collections::HashMap<(String, u64), String>,
+    /// Reverse map from R-tree entry ID → document ID,
+    /// keyed by (TenantId, collection, field, entry_id).
+    pub(in crate::data::executor) spatial_doc_map:
+        std::collections::HashMap<(TenantId, String, String, u64), String>,
 
     /// Base data directory for this core (used for sort spill temp files).
     pub(in crate::data::executor) data_dir: std::path::PathBuf,
@@ -123,29 +127,33 @@ pub struct CoreLoop {
     /// Updated incrementally on PointPut. Read by DataFusion optimizer.
     pub(in crate::data::executor) stats_store: crate::engine::sparse::stats::StatsStore,
 
-    /// Incremental aggregate cache: maps `(collection, group_key, agg_op)` →
+    /// Incremental aggregate cache: maps `(tenant, rest)` →
     /// partial aggregate state. Updated on writes (PointPut increments counts/sums),
     /// cleared on schema change. Turns O(N) full-scan aggregates into O(1) cache
     /// lookups for repeated dashboard/analytics queries.
     ///
-    /// Key: `"{collection}\0{group_by_fields}\0{agg_ops}"`.
+    /// Key: `(TenantId, "{collection}\0{group_by_fields}\0{agg_ops}")`.
     /// Value: cached result rows as JSON.
-    pub(in crate::data::executor) aggregate_cache: HashMap<String, Vec<u8>>,
+    pub(in crate::data::executor) aggregate_cache: HashMap<(TenantId, String), Vec<u8>>,
 
     /// Last time periodic maintenance (compaction, edge sweep) was run.
     pub(in crate::data::executor) last_maintenance: Option<std::time::Instant>,
 
     /// Per-collection full index config (includes index_type, PQ params, IVF params).
     /// Stored alongside vector_params for collections that use non-default index types.
+    /// Key: `(TenantId, collection_key)` — same shape as `vector_collections`.
     pub(in crate::data::executor) index_configs:
-        HashMap<String, crate::engine::vector::index_config::IndexConfig>,
+        HashMap<(TenantId, String), crate::engine::vector::index_config::IndexConfig>,
 
     /// IVF-PQ indexes for collections configured with `index_type = "ivf_pq"`.
+    /// Key: `(TenantId, collection_key)` — same shape as `vector_collections`.
     pub(in crate::data::executor) ivf_indexes:
-        HashMap<String, crate::engine::vector::ivf::IvfPqIndex>,
+        HashMap<(TenantId, String), crate::engine::vector::ivf::IvfPqIndex>,
 
-    /// Per-collection sparse vector inverted indexes, keyed by "{tid}:{collection}:{field}".
-    pub(in crate::data::executor) sparse_vector_indexes: HashMap<String, SparseInvertedIndex>,
+    /// Per-collection sparse vector inverted indexes, keyed by (TenantId, collection, field).
+    /// The field is `"_sparse"` when no named field is specified.
+    pub(in crate::data::executor) sparse_vector_indexes:
+        HashMap<(TenantId, String, String), SparseInvertedIndex>,
 
     /// Compaction interval (how often `maybe_run_maintenance` triggers).
     pub(in crate::data::executor) compaction_interval: std::time::Duration,
@@ -158,26 +166,29 @@ pub struct CoreLoop {
     pub(in crate::data::executor) doc_cache: DocCache,
 
     /// Per-collection columnar timeseries memtables (!Send, per-core owned).
+    /// Key: (TenantId, collection).
     pub(in crate::data::executor) columnar_memtables:
-        HashMap<String, crate::engine::timeseries::columnar_memtable::ColumnarMemtable>,
+        HashMap<(TenantId, String), crate::engine::timeseries::columnar_memtable::ColumnarMemtable>,
 
     /// Per-collection columnar mutation engines for plain/spatial profiles.
     /// Uses `nodedb-columnar`'s `MutationEngine` with full INSERT/UPDATE/DELETE.
-    /// Keyed by "{tid}:{collection}".
+    /// Key: (TenantId, collection).
     pub(in crate::data::executor) columnar_engines:
-        HashMap<String, nodedb_columnar::MutationEngine>,
+        HashMap<(TenantId, String), nodedb_columnar::MutationEngine>,
 
-    /// Flushed columnar segment bytes, keyed by "{tid}:{collection}".
+    /// Flushed columnar segment bytes, keyed by (TenantId, collection).
     /// Each entry is a list of encoded segment buffers produced by `SegmentWriter`.
     /// Kept in memory so `scan_columnar` can read rows that were drained from the
     /// active memtable during a flush (otherwise those rows would be lost until a
     /// real on-disk segment reader is wired up).
-    pub(in crate::data::executor) columnar_flushed_segments: HashMap<String, Vec<Vec<u8>>>,
+    pub(in crate::data::executor) columnar_flushed_segments:
+        HashMap<(TenantId, String), Vec<Vec<u8>>>,
 
     /// Per-collection max WAL LSN that has been ingested into the memtable.
     /// Used by the WAL catch-up deduplication: if a catch-up record's LSN
     /// is <= this value, the Data Plane skips it (already ingested).
-    pub(in crate::data::executor) ts_max_ingested_lsn: HashMap<String, u64>,
+    /// Key: (TenantId, collection).
+    pub(in crate::data::executor) ts_max_ingested_lsn: HashMap<(TenantId, String), u64>,
 
     /// Last time any timeseries ingest was processed on this core.
     /// Used by idle flush: if no ingest for 5 seconds, `maybe_run_maintenance`
@@ -185,12 +196,16 @@ pub struct CoreLoop {
     pub(in crate::data::executor) last_ts_ingest: Option<std::time::Instant>,
 
     /// Per-collection last-value caches for O(1) recent value lookup.
+    /// Key: (TenantId, collection).
     pub(in crate::data::executor) ts_last_value_caches:
-        HashMap<String, crate::engine::timeseries::last_value_cache::LastValueCache>,
+        HashMap<(TenantId, String), crate::engine::timeseries::last_value_cache::LastValueCache>,
 
     /// Per-collection timeseries partition registries for this core.
-    pub(in crate::data::executor) ts_registries:
-        HashMap<String, crate::engine::timeseries::partition_registry::PartitionRegistry>,
+    /// Key: (TenantId, collection).
+    pub(in crate::data::executor) ts_registries: HashMap<
+        (TenantId, String),
+        crate::engine::timeseries::partition_registry::PartitionRegistry,
+    >,
 
     /// Continuous aggregate manager for this core. Fires on memtable flush.
     pub(in crate::data::executor) continuous_agg_mgr:
@@ -206,14 +221,14 @@ pub struct CoreLoop {
         crate::storage::compaction::CompactionConfig,
 
     /// Per-collection document index configurations.
-    /// Maps "{tenant_id}:{collection}" → CollectionConfig.
+    /// Maps (TenantId, collection) → CollectionConfig.
     /// Populated via RegisterDocumentCollection plans.
     pub(in crate::data::executor) doc_configs:
-        HashMap<String, crate::engine::document::store::CollectionConfig>,
+        HashMap<(TenantId, String), crate::engine::document::store::CollectionConfig>,
 
     /// Per-collection last chain hash for HASH_CHAIN collections.
-    /// Maps collection_name → last SHA-256 hash.
-    pub(in crate::data::executor) chain_hashes: HashMap<String, String>,
+    /// Maps (TenantId, collection) → last SHA-256 hash.
+    pub(in crate::data::executor) chain_hashes: HashMap<(TenantId, String), String>,
 
     /// Query execution tuning parameters (sort run size, stream chunk size, etc.).
     /// Set at core spawn time from config; never changed at runtime.
@@ -357,18 +372,20 @@ impl CoreLoop {
 
     /// Test accessor: row count in a columnar memtable.
     #[cfg(test)]
-    pub fn columnar_memtable_row_count(&self, collection: &str) -> u64 {
+    pub fn columnar_memtable_row_count(&self, tid: u32, collection: &str) -> u64 {
+        let key = (TenantId::new(tid), collection.to_string());
         self.columnar_memtables
-            .get(collection)
+            .get(&key)
             .map(|mt| mt.row_count())
             .unwrap_or(0)
     }
 
     /// Test accessor: total row count across all partitions in a timeseries registry.
     #[cfg(test)]
-    pub fn ts_registry_row_count(&self, collection: &str) -> u64 {
+    pub fn ts_registry_row_count(&self, tid: u32, collection: &str) -> u64 {
+        let key = (TenantId::new(tid), collection.to_string());
         self.ts_registries
-            .get(collection)
+            .get(&key)
             .map(|reg| {
                 let range = nodedb_types::timeseries::TimeRange::new(0, i64::MAX);
                 reg.query_partitions(&range)

@@ -68,16 +68,36 @@ impl CoreLoop {
         }
     }
 
+    /// Build the map key for the four vector in-memory maps
+    /// (`vector_collections`, `vector_params`, `index_configs`, `ivf_indexes`).
+    ///
+    /// Returns `(TenantId, collection_key)` where `collection_key` is:
+    /// - `collection` when `field_name` is empty, or
+    /// - `"{collection}:{field_name}"` when a named field is specified.
+    ///
+    /// This replaces the old `format!("{tid}:{collection}")` string key with a
+    /// structured tuple so tenant scoping is structural rather than lexical.
     pub(in crate::data::executor) fn vector_index_key(
         tenant_id: u32,
         collection: &str,
         field_name: &str,
-    ) -> String {
-        if field_name.is_empty() {
-            format!("{tenant_id}:{collection}")
+    ) -> (TenantId, String) {
+        let coll_key = if field_name.is_empty() {
+            collection.to_string()
         } else {
-            format!("{tenant_id}:{collection}:{field_name}")
-        }
+            format!("{collection}:{field_name}")
+        };
+        (TenantId::new(tenant_id), coll_key)
+    }
+
+    /// Checkpoint filename for a vector collection key.
+    ///
+    /// Produces the same `"{tid}:{coll}"` string that was used before the
+    /// tuple-key migration so existing on-disk checkpoint files remain valid.
+    pub(in crate::data::executor) fn vector_checkpoint_filename(
+        key: &(TenantId, String),
+    ) -> String {
+        format!("{}:{}", key.0.as_u32(), key.1)
     }
 
     pub(in crate::data::executor) fn get_crdt_engine(
