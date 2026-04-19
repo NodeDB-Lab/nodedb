@@ -53,14 +53,15 @@ impl CoreLoop {
             );
         }
 
+        let engine_key = (task.request.tenant_id, collection.to_string());
         // Ensure MutationEngine exists (auto-create on first write).
-        if !self.columnar_engines.contains_key(collection) {
+        if !self.columnar_engines.contains_key(&engine_key) {
             let schema = infer_schema_from_value(&ndb_rows[0]);
             let engine = MutationEngine::new(collection.to_string(), schema);
-            self.columnar_engines.insert(collection.to_string(), engine);
+            self.columnar_engines.insert(engine_key.clone(), engine);
         }
 
-        let Some(engine) = self.columnar_engines.get_mut(collection) else {
+        let Some(engine) = self.columnar_engines.get_mut(&engine_key) else {
             return self.response_error(
                 task,
                 ErrorCode::Internal {
@@ -108,7 +109,7 @@ impl CoreLoop {
                 {
                     Ok(bytes) => {
                         self.columnar_flushed_segments
-                            .entry(collection.to_string())
+                            .entry(engine_key.clone())
                             .or_default()
                             .push(bytes);
                         tracing::debug!(
@@ -174,12 +175,14 @@ impl CoreLoop {
                             _ => continue,
                         };
                         let bbox = nodedb_types::bbox::geometry_bbox(&geom);
-                        let index_key = format!("{tid}:{collection}:{}", col_def.name);
+                        let index_key = (tid, collection.to_string(), col_def.name.clone());
                         let entry_id = crate::util::fnv1a_hash(doc_id.as_bytes());
                         let rtree = self.spatial_indexes.entry(index_key.clone()).or_default();
                         rtree.insert(crate::engine::spatial::RTreeEntry { id: entry_id, bbox });
-                        self.spatial_doc_map
-                            .insert((index_key, entry_id), doc_id.clone());
+                        self.spatial_doc_map.insert(
+                            (tid, collection.to_string(), col_def.name.clone(), entry_id),
+                            doc_id.clone(),
+                        );
                     }
                 }
             }
@@ -228,16 +231,18 @@ impl CoreLoop {
     /// Creates the engine on first call. Used by the spatial insert path.
     pub(in crate::data::executor) fn ingest_doc_to_columnar(
         &mut self,
+        tid: u32,
         collection: &str,
         obj: &serde_json::Map<String, serde_json::Value>,
     ) {
-        if !self.columnar_engines.contains_key(collection) {
+        let engine_key = (crate::types::TenantId::new(tid), collection.to_string());
+        if !self.columnar_engines.contains_key(&engine_key) {
             let schema = infer_schema_from_json(&serde_json::Value::Object(obj.clone()));
             let engine = MutationEngine::new(collection.to_string(), schema);
-            self.columnar_engines.insert(collection.to_string(), engine);
+            self.columnar_engines.insert(engine_key.clone(), engine);
         }
 
-        let Some(engine) = self.columnar_engines.get_mut(collection) else {
+        let Some(engine) = self.columnar_engines.get_mut(&engine_key) else {
             return;
         };
         let schema = engine.schema().clone();

@@ -96,7 +96,7 @@ impl CoreLoop {
             if removed > 0 {
                 info!(
                     core = self.core_id,
-                    collection = %key,
+                    collection = &key.1,
                     removed,
                     ratio = format!("{ratio:.2}"),
                     "vector compaction: tombstones removed"
@@ -169,15 +169,15 @@ impl CoreLoop {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis() as i64)
                             .unwrap_or(0);
-                        let collections: Vec<String> = self
+                        let collections: Vec<(crate::types::TenantId, String)> = self
                             .columnar_memtables
                             .iter()
                             .filter(|(_, mt)| !mt.is_empty())
-                            .map(|(name, _)| name.clone())
+                            .map(|(k, _)| k.clone())
                             .collect();
                         let mut flushed = 0usize;
-                        for collection in &collections {
-                            self.flush_ts_collection(collection, now_ms);
+                        for (tid, collection) in &collections {
+                            self.flush_ts_collection(*tid, collection, now_ms);
                             flushed += 1;
                         }
                         if flushed > 0 {
@@ -261,7 +261,7 @@ impl CoreLoop {
         let max_per_pass = self.segment_compaction_config.max_segments_per_pass;
         let mut total_merged = 0;
 
-        for (collection, registry) in &mut self.ts_registries {
+        for ((_, collection), registry) in &mut self.ts_registries {
             // Find mergeable partition groups, limited by config.
             let mut groups = registry.find_mergeable(now_ms);
             if !force {

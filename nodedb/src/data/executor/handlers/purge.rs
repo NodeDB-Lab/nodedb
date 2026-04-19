@@ -25,7 +25,7 @@ impl CoreLoop {
         tenant_id: u32,
     ) -> Response {
         info!(core = self.core_id, tenant_id, "starting tenant purge");
-        let prefix = format!("{tenant_id}:");
+        let _prefix = format!("{tenant_id}:");
 
         // 1. Sparse engine: documents + secondary indexes (persistent, redb).
         let (docs, idxs) = match self.sparse.delete_all_for_tenant(tenant_id) {
@@ -72,43 +72,27 @@ impl CoreLoop {
             }
         };
 
-        // 4. Vector engine: remove all collections keyed by "{tid}:*".
+        // 4. Vector engine: remove all collections for this tenant. O(1) structural
+        // deletion per entry — no key-prefix scan needed with tuple keys.
         let vec_removed = {
-            let keys: Vec<String> = self
-                .vector_collections
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
-            let count = keys.len();
-            for key in keys {
-                self.vector_collections.remove(&key);
-            }
-            count
+            let tid_key = TenantId::new(tenant_id);
+            let before = self.vector_collections.len();
+            self.vector_collections.retain(|(t, _), _| *t != tid_key);
+            self.vector_params.retain(|(t, _), _| *t != tid_key);
+            self.index_configs.retain(|(t, _), _| *t != tid_key);
+            self.ivf_indexes.retain(|(t, _), _| *t != tid_key);
+            before - self.vector_collections.len()
         };
 
         // 5. Timeseries: memtables + partition registries.
         let ts_removed = {
-            let mt_keys: Vec<String> = self
-                .columnar_memtables
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
-            let count = mt_keys.len();
-            for key in mt_keys {
-                self.columnar_memtables.remove(&key);
-            }
-            let reg_keys: Vec<String> = self
-                .ts_registries
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
-            for key in reg_keys {
-                self.ts_registries.remove(&key);
-            }
-            count
+            let tid_key = TenantId::new(tenant_id);
+            let before = self.columnar_memtables.len();
+            self.columnar_memtables.retain(|(t, _), _| *t != tid_key);
+            self.ts_registries.retain(|(t, _), _| *t != tid_key);
+            self.ts_max_ingested_lsn.retain(|(t, _), _| *t != tid_key);
+            self.ts_last_value_caches.retain(|(t, _), _| *t != tid_key);
+            before - self.columnar_memtables.len()
         };
 
         // 6. KV engine: remove all tenant hash tables.
@@ -122,28 +106,32 @@ impl CoreLoop {
         );
 
         // 8. Spatial indexes: remove tenant-scoped entries.
+        let tid_key = TenantId::new(tenant_id);
         let spatial_removed = {
-            let keys: Vec<String> = self
-                .spatial_indexes
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
-            let count = keys.len();
-            for key in keys {
-                self.spatial_indexes.remove(&key);
-            }
-            self.spatial_doc_map
-                .retain(|(coll, _), _| !coll.starts_with(&prefix));
-            count
+            let before = self.spatial_indexes.len();
+            self.spatial_indexes.retain(|(t, _, _), _| *t != tid_key);
+            self.spatial_doc_map.retain(|(t, _, _, _), _| *t != tid_key);
+            before - self.spatial_indexes.len()
         };
 
         // 9. Caches: evict all tenant data.
         self.doc_cache.evict_tenant(tenant_id);
-        self.aggregate_cache.retain(|k, _| !k.starts_with(&prefix));
+        self.aggregate_cache.retain(|(t, _), _| *t != tid_key);
 
         // 10. Doc configs: remove collection configs for this tenant.
-        self.doc_configs.retain(|k, _| !k.starts_with(&prefix));
+        self.doc_configs.retain(|(t, _), _| *t != tid_key);
+
+        // Chain hashes: remove for this tenant.
+        self.chain_hashes.retain(|(t, _), _| *t != tid_key);
+
+        // Sparse vector indexes: remove for this tenant.
+        self.sparse_vector_indexes
+            .retain(|(t, _, _), _| *t != tid_key);
+
+        // Columnar engines + flushed segments: remove for this tenant.
+        self.columnar_engines.retain(|(t, _), _| *t != tid_key);
+        self.columnar_flushed_segments
+            .retain(|(t, _), _| *t != tid_key);
 
         info!(
             core = self.core_id,

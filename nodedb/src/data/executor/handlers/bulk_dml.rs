@@ -40,7 +40,7 @@ impl CoreLoop {
             })?;
 
         // Check if this is a strict (Binary Tuple) collection.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let crate::bridge::physical_plan::StorageMode::Strict { ref schema } = c.storage_mode
             {
@@ -94,7 +94,7 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, returning, "bulk update");
 
         // Reject direct updates to generated columns.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         if let Some(config) = self.doc_configs.get(&config_key)
             && let Err(e) = super::generated::check_generated_readonly(
                 updates,

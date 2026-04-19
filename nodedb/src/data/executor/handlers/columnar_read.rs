@@ -22,8 +22,9 @@ impl CoreLoop {
         _rls_filters: &[u8],
     ) -> Response {
         let limit = if limit == 0 { 1000 } else { limit };
+        let engine_key = (task.request.tenant_id, collection.to_string());
 
-        let engine = match self.columnar_engines.get(collection) {
+        let engine = match self.columnar_engines.get(&engine_key) {
             Some(e) => e,
             None => {
                 // Empty result for missing collection.

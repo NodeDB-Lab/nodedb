@@ -65,9 +65,10 @@ impl CoreLoop {
         }
 
         // Clear aggregate cache for this collection.
-        let cache_prefix = format!("{tid}:{collection}\0");
+        let tid_key = crate::types::TenantId::new(tid);
+        let coll_prefix = format!("{collection}\0");
         self.aggregate_cache
-            .retain(|k, _| !k.starts_with(&cache_prefix));
+            .retain(|(t, rest), _| !(*t == tid_key && rest.starts_with(&coll_prefix)));
 
         debug!(core = self.core_id, %collection, truncated, "truncate complete");
         let result = serde_json::json!({ "truncated": truncated });

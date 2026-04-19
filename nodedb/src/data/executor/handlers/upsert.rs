@@ -36,7 +36,7 @@ impl CoreLoop {
         );
 
         // Detect strict storage mode for this collection.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let strict_schema = self.doc_configs.get(&config_key).and_then(|config| {
             if let crate::bridge::physical_plan::StorageMode::Strict { ref schema } =
                 config.storage_mode
