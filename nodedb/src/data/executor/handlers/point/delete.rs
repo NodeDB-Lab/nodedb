@@ -52,18 +52,20 @@ impl CoreLoop {
 
                 // Cascade 4: Remove from spatial R-tree indexes + reverse map.
                 let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
-                let prefix = format!("{tid}:{collection}:");
-                let spatial_keys: Vec<String> = self
+                let tid_id = crate::types::TenantId::new(tid);
+                let spatial_fields: Vec<String> = self
                     .spatial_indexes
                     .keys()
-                    .filter(|k| k.starts_with(&prefix))
-                    .cloned()
+                    .filter(|(t, c, _)| *t == tid_id && c == collection)
+                    .map(|(_, _, f)| f.clone())
                     .collect();
-                for key in spatial_keys {
-                    if let Some(rtree) = self.spatial_indexes.get_mut(&key) {
+                for field in spatial_fields {
+                    let skey = (tid_id, collection.to_string(), field.clone());
+                    if let Some(rtree) = self.spatial_indexes.get_mut(&skey) {
                         rtree.delete(entry_id);
                     }
-                    self.spatial_doc_map.remove(&(key, entry_id));
+                    self.spatial_doc_map
+                        .remove(&(tid_id, collection.to_string(), field, entry_id));
                 }
 
                 // Record deletion for edge referential integrity.

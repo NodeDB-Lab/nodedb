@@ -193,7 +193,7 @@ impl CoreLoop {
         };
 
         // Check if this collection uses strict (Binary Tuple) encoding.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let crate::bridge::physical_plan::StorageMode::Strict { ref schema } = c.storage_mode
             {

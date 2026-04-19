@@ -33,7 +33,7 @@ impl CoreLoop {
             Ok(()) => {
                 // Auto-index text fields for full-text search (same as PointPut).
                 // Also extract secondary indexes for any registered collection config.
-                let config_key = format!("{tid}:{collection}");
+                let config_key = (crate::types::TenantId::new(tid), collection.to_string());
                 let index_paths: Vec<crate::engine::document::store::IndexPath> = self
                     .doc_configs
                     .get(&config_key)
@@ -121,7 +121,7 @@ impl CoreLoop {
             .map(crate::engine::document::store::IndexPath::from_registered)
             .collect();
 
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         self.doc_configs.insert(config_key, config);
 
         self.response_ok(task)

@@ -157,14 +157,19 @@ impl CoreLoop {
 }
 
 /// Build a cache key for facet counts.
-fn facet_cache_key(tid: u32, collection: &str, fields: &[String], filter_bytes: &[u8]) -> String {
+fn facet_cache_key(
+    tid: u32,
+    collection: &str,
+    fields: &[String],
+    filter_bytes: &[u8],
+) -> (crate::types::TenantId, String) {
     use std::fmt::Write;
-    let mut key = format!("{tid}:{collection}\0facet:");
-    let _ = write!(key, "{}", fields.join(","));
+    let mut rest = format!("{collection}\0facet:");
+    let _ = write!(rest, "{}", fields.join(","));
     if !filter_bytes.is_empty() {
         // Hash the filter bytes to avoid bloating the cache key.
         let hash = crc32c::crc32c(filter_bytes);
-        let _ = write!(key, "\0filter:{hash:08x}");
+        let _ = write!(rest, "\0filter:{hash:08x}");
     }
-    key
+    (crate::types::TenantId::new(tid), rest)
 }

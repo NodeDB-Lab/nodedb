@@ -22,7 +22,7 @@ impl CoreLoop {
         value: &[u8],
     ) -> crate::Result<()> {
         // Evaluate generated columns before encoding.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let value = if let Some(config) = self.doc_configs.get(&config_key)
             && !config.enforcement.generated_columns.is_empty()
         {
@@ -93,9 +93,10 @@ impl CoreLoop {
                 warn!(core = self.core_id, %collection, error = %e, "column stats update failed");
             }
 
-            let cache_prefix = format!("{tid}:{collection}\0");
+            let tid_key = crate::types::TenantId::new(tid);
+            let coll_prefix = format!("{collection}\0");
             self.aggregate_cache
-                .retain(|k, _| !k.starts_with(&cache_prefix));
+                .retain(|(t, rest), _| !(*t == tid_key && rest.starts_with(&coll_prefix)));
         }
 
         self.doc_cache.put(tid, collection, document_id, &stored);
@@ -113,7 +114,7 @@ impl CoreLoop {
         // transaction (redb MVCC) — the read view won't see our outer
         // write txn but that's precisely the semantics we want for the
         // "does another row already hold this value" question.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         if let Some(config) = self.doc_configs.get(&config_key)
             && let Some(doc) = super::super::super::doc_format::decode_document(value)
         {
@@ -137,20 +138,23 @@ impl CoreLoop {
                 {
                     has_geometry = true;
                     let bbox = nodedb_types::bbox::geometry_bbox(&geom);
-                    let index_key = format!("{tid}:{collection}:{field_name}");
+                    let tid_id = crate::types::TenantId::new(tid);
+                    let spatial_key = (tid_id, collection.to_string(), field_name.clone());
                     let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
-                    let rtree = self.spatial_indexes.entry(index_key.clone()).or_default();
+                    let rtree = self.spatial_indexes.entry(spatial_key.clone()).or_default();
                     rtree.insert(crate::engine::spatial::RTreeEntry { id: entry_id, bbox });
                     // Maintain reverse map: entry_id → document_id.
-                    self.spatial_doc_map
-                        .insert((index_key, entry_id), document_id.to_string());
+                    self.spatial_doc_map.insert(
+                        (tid_id, collection.to_string(), field_name.clone(), entry_id),
+                        document_id.to_string(),
+                    );
                 }
             }
 
             // If document has geometry, also write to columnar memtable.
             // This ensures bare scans + aggregates work via columnar path.
             if has_geometry {
-                self.ingest_doc_to_columnar(collection, obj);
+                self.ingest_doc_to_columnar(tid, collection, obj);
             }
         }
 
@@ -223,20 +227,26 @@ impl CoreLoop {
         // Schemaless vector indexing: if no strict schema but vector_params exist
         // for this collection, extract matching fields and index them.
         if vector_fields.is_empty() {
-            let prefix = format!("{tid}:{collection}:");
-            let bare_key = format!("{tid}:{collection}");
-            let mut schemaless_keys: Vec<(String, String)> = self
+            // Named-field keys have the shape `(TenantId, "{collection}:{field}")`.
+            // The bare (no-field) key is `(TenantId, "{collection}")`.
+            let tid_key = crate::types::TenantId::new(tid);
+            let field_prefix = format!("{collection}:");
+            let bare_key = (tid_key, collection.to_string());
+
+            // Collect all vector_params entries for this tenant+collection.
+            // Each entry maps to a (params_map_key, field_name) pair.
+            let mut schemaless_keys: Vec<((crate::types::TenantId, String), String)> = self
                 .vector_params
                 .keys()
-                .filter(|k| k.starts_with(&prefix))
+                .filter(|(t, coll_key)| *t == bare_key.0 && coll_key.starts_with(&field_prefix))
                 .map(|k| {
-                    let field = k[prefix.len()..].to_string();
+                    let field = k.1[field_prefix.len()..].to_string();
                     (k.clone(), field)
                 })
                 .collect();
             // Also check for bare key (no field name) — default to "embedding".
             if schemaless_keys.is_empty() && self.vector_params.contains_key(&bare_key) {
-                schemaless_keys.push((bare_key, "embedding".to_string()));
+                schemaless_keys.push((bare_key.clone(), "embedding".to_string()));
             }
 
             if !schemaless_keys.is_empty()

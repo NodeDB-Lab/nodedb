@@ -61,6 +61,9 @@ impl CoreLoop {
             }
 
             // Restore vector collections.
+            // Snapshot keys are `"{tid}:{coll_key}"` strings. Strip the
+            // `"{tid}:"` prefix to get the collection key for the tuple map.
+            let tid_prefix = format!("{tenant_id}:");
             for (key, bytes) in &snap.vectors {
                 let vectors: Vec<(u32, Vec<f32>, Option<String>)> =
                     match zerompk::from_msgpack(bytes) {
@@ -71,7 +74,8 @@ impl CoreLoop {
                         }
                     };
                 let count = vectors.len() as u64;
-                self.restore_vector_collection(tenant_id, key, vectors);
+                let coll_key = key.strip_prefix(&tid_prefix).unwrap_or(key.as_str());
+                self.restore_vector_collection(tenant_id, coll_key, vectors);
                 vectors_written += count;
             }
 
@@ -168,25 +172,23 @@ impl CoreLoop {
 
     fn restore_vector_collection(
         &mut self,
-        _tenant_id: u32,
-        index_key: &str,
+        tenant_id: u32,
+        coll_key: &str,
         vectors: Vec<(u32, Vec<f32>, Option<String>)>,
     ) {
         if vectors.is_empty() {
             return;
         }
         let dim = vectors[0].1.len();
+        let map_key = (crate::types::TenantId::new(tenant_id), coll_key.to_string());
         let params = self
             .vector_params
-            .get(index_key)
+            .get(&map_key)
             .cloned()
             .unwrap_or_default();
-        let coll = self
-            .vector_collections
-            .entry(index_key.to_string())
-            .or_insert_with(|| {
-                crate::engine::vector::collection::VectorCollection::new(dim, params)
-            });
+        let coll = self.vector_collections.entry(map_key).or_insert_with(|| {
+            crate::engine::vector::collection::VectorCollection::new(dim, params)
+        });
         for (_, data, doc_id) in vectors {
             match doc_id {
                 Some(did) => {

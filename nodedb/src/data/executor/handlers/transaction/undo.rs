@@ -20,9 +20,15 @@ pub(in crate::data::executor) enum UndoEntry {
         old_value: Vec<u8>,
     },
     /// Undo a VectorInsert by soft-deleting the inserted vector.
-    InsertVector { index_key: String, vector_id: u32 },
+    InsertVector {
+        index_key: (crate::types::TenantId, String),
+        vector_id: u32,
+    },
     /// Undo a VectorDelete by un-deleting (clearing tombstone).
-    DeleteVector { index_key: String, vector_id: u32 },
+    DeleteVector {
+        index_key: (crate::types::TenantId, String),
+        vector_id: u32,
+    },
     /// Undo an EdgePut by deleting the edge (or restoring old properties).
     PutEdge {
         src_id: String,
@@ -181,7 +187,7 @@ impl CoreLoop {
 
         // For each collection, check if it has a BALANCED constraint.
         for (collection, stored_docs) in &inserts_by_collection {
-            let config_key = format!("{tid}:{collection}");
+            let config_key = (crate::types::TenantId::new(tid), collection.to_string());
             let Some(config) = self.doc_configs.get(&config_key) else {
                 continue;
             };

@@ -31,7 +31,7 @@ impl CoreLoop {
             "point update"
         );
 
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let is_strict = self.doc_configs.get(&config_key).is_some_and(|c| {
             matches!(
                 c.storage_mode,

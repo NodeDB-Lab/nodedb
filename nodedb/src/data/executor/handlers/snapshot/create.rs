@@ -20,9 +20,9 @@ impl CoreLoop {
             core = self.core_id,
             tenant_id, "creating full tenant snapshot"
         );
-        let prefix = format!("{tenant_id}:");
-
         let mut snapshot = TenantDataSnapshot::default();
+        // Used by out-of-scope maps (timeseries) that still use string-prefix keys.
+        let _prefix = format!("{tenant_id}:");
 
         // 1. Sparse engine: documents + indexes.
         match self.sparse.scan_all_for_tenant(tenant_id) {
@@ -58,14 +58,18 @@ impl CoreLoop {
         }
 
         // 3. Vector collections: export raw vectors + doc_id_map.
+        // The snapshot format stores keys as `"{tid}:{coll_key}"` strings for
+        // disk/wire compatibility — convert the tuple key at the boundary.
+        let tid_obj = crate::types::TenantId::new(tenant_id);
         for (key, collection) in &self.vector_collections {
-            if !key.starts_with(&prefix) {
+            if key.0 != tid_obj {
                 continue;
             }
             let vectors = collection.export_snapshot();
+            let key_str = format!("{tenant_id}:{}", key.1);
             match zerompk::to_msgpack_vec(&vectors) {
-                Ok(bytes) => snapshot.vectors.push((key.clone(), bytes)),
-                Err(e) => warn!(key, error = %e, "snapshot: vector serialization failed"),
+                Ok(bytes) => snapshot.vectors.push((key_str, bytes)),
+                Err(e) => warn!(key = &key.1, error = %e, "snapshot: vector serialization failed"),
             }
         }
 
@@ -102,13 +106,19 @@ impl CoreLoop {
         }
 
         // 6. Timeseries memtables: serialize column data.
-        for (key, mt) in &self.columnar_memtables {
-            if !key.starts_with(&prefix) {
+        // Snapshot format preserves "{tenant_id}:{collection}" string keys.
+        let tid_id = crate::types::TenantId::new(tenant_id);
+        for ((t, coll), mt) in &self.columnar_memtables {
+            if *t != tid_id {
                 continue;
             }
+            let key_str = format!("{tenant_id}:{coll}");
             match zerompk::to_msgpack_vec(&mt.export_snapshot()) {
-                Ok(bytes) => snapshot.timeseries.push((key.clone(), bytes)),
-                Err(e) => warn!(key, error = %e, "snapshot: timeseries serialization failed"),
+                Ok(bytes) => snapshot.timeseries.push((key_str, bytes)),
+                Err(e) => {
+                    let key = &key_str;
+                    warn!(key, error = %e, "snapshot: timeseries serialization failed");
+                }
             }
         }
 

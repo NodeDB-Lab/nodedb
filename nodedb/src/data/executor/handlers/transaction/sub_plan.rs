@@ -66,15 +66,15 @@ impl CoreLoop {
                 doc_id,
             }) => {
                 let index_key = Self::vector_index_key(tid, collection, field_name);
+                let params = self
+                    .vector_params
+                    .get(&index_key)
+                    .cloned()
+                    .unwrap_or_default();
                 let index = self
                     .vector_collections
                     .entry(index_key.clone())
                     .or_insert_with(|| {
-                        let params = self
-                            .vector_params
-                            .get(collection.as_str())
-                            .cloned()
-                            .unwrap_or_default();
                         crate::engine::vector::collection::VectorCollection::new(*dim, params)
                     });
 
@@ -225,7 +225,7 @@ impl CoreLoop {
         let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
 
         // Enforcement: append-only + period lock + state transitions + transition checks.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         if let Some(config) = self.doc_configs.get(&config_key) {
             super::super::super::enforcement::append_only::check_point_put(
                 collection,
@@ -289,13 +289,14 @@ impl CoreLoop {
 
         // Hash chain: on INSERT, compute chain hash and inject _chain_hash field.
         let stored = if old_value.is_none() {
-            let config_key_hc = format!("{tid}:{collection}");
+            let config_key_hc = (crate::types::TenantId::new(tid), collection.to_string());
             let hash_chain_enabled = self
                 .doc_configs
                 .get(&config_key_hc)
                 .is_some_and(|c| c.enforcement.hash_chain);
             match super::super::super::enforcement::hash_chain::apply_chain_on_insert(
                 &mut self.chain_hashes,
+                tid,
                 collection,
                 document_id,
                 value,
@@ -330,7 +331,7 @@ impl CoreLoop {
 
                 // Materialized sum trigger: on INSERT (not UPDATE).
                 if old_value.is_none() {
-                    let config_key = format!("{tid}:{collection}");
+                    let config_key = (crate::types::TenantId::new(tid), collection.to_string());
                     if let Some(config) = self.doc_configs.get(&config_key)
                         && !config.enforcement.materialized_sum_sources.is_empty()
                         && let Some(src_doc) =
@@ -371,7 +372,7 @@ impl CoreLoop {
         undo_log: &mut Vec<UndoEntry>,
     ) -> Result<Response, ErrorCode> {
         // Enforcement: append-only + period lock + retention/hold.
-        let config_key = format!("{tid}:{collection}");
+        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
         let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
         if let Some(config) = self.doc_configs.get(&config_key) {
             super::super::super::enforcement::append_only::check_point_delete(
