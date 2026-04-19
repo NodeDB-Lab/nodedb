@@ -6,7 +6,7 @@
 //! multiple nodes, and the local dispatch only populates the
 //! coordinator's vShards. Non-coordinator nodes host rows the
 //! coordinator never sees, so the Ready commit would pass with an
-//! incomplete index — the silent-miss class tracked in issue #71.
+//! incomplete index — a silent-miss class.
 //!
 //! This module drives the fan-out: after the coordinator's local
 //! backfill succeeds, it sends the same `DocumentOp::BackfillIndex`

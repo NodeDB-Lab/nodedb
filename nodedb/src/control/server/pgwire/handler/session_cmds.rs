@@ -93,7 +93,7 @@ impl NodeDbPgHandler {
         // now so rate-limit / audit / fingerprint checks fire on each SET
         // rather than being deferred to the next query. A probing client
         // that hammers SET LOCAL with bogus handles and never runs a query
-        // must still be throttled and observed (issue #68).
+        // must still be throttled and observed.
         if key == "nodedb.auth_session" {
             use crate::control::security::session_handle::{ClientFingerprint, ResolveOutcome};
             let caller_fp = ClientFingerprint::from_peer(identity.tenant_id, addr);

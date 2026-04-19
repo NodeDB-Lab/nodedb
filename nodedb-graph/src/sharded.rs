@@ -6,8 +6,7 @@
 //! every API boundary (results, traversal output, algorithm emit) to strip
 //! the prefix on the way back out. The heuristic strippers were fragile
 //! (mangled any id that happened to match the shape) and the strip was
-//! opt-in (forgetting it leaked internal keys to clients — the origin of
-//! issue #75).
+//! opt-in (forgetting it leaked internal keys to clients).
 //!
 //! `ShardedCsrIndex` replaces that scheme with structural partitioning:
 //! one independent `CsrIndex` per tenant, keyed in a `HashMap<TenantId, _>`.
@@ -216,8 +215,8 @@ mod tests {
         let part = sharded.partition(tid(42)).unwrap();
         let alice_id = part.node_id("alice").expect("alice must be present");
         // The stored name is exactly what the caller inserted — never
-        // `"42:alice"`. This is the invariant that made issue #75
-        // structurally impossible.
+        // `"42:alice"`. Structural partitioning keeps shard ids out of
+        // user-visible keys.
         assert_eq!(part.node_name(alice_id), "alice");
     }
 

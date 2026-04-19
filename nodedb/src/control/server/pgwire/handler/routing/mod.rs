@@ -138,9 +138,9 @@ impl NodeDbPgHandler {
     ) -> PgWireResult<Vec<Response>> {
         // Resolve opaque session handle if SET LOCAL nodedb.auth_session is set.
         // Bind the resolve to the caller's (tenant_id, peer IP) fingerprint so
-        // a handle leaked cross-origin does not grant access (issue #67). The
+        // a handle leaked cross-origin does not grant access. The
         // store also enforces per-connection rate limits + emits audit events
-        // on miss spikes (issue #68); a `RateLimited` outcome here becomes a
+        // on miss spikes; a `RateLimited` outcome here becomes a
         // fatal pgwire error that closes the connection.
         let caller_fp = crate::control::security::session_handle::ClientFingerprint::from_peer(
             identity.tenant_id,

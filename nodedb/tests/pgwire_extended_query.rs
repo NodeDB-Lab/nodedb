@@ -397,9 +397,9 @@ async fn extended_query_untyped_numeric_where_equals() {
     assert_eq!(id, "b", "numeric comparison must have selected n=2 row");
 }
 
-/// SEARCH DSL — a second DSL dispatcher beyond UPSERT. The fix in
-/// #85 part 2 must apply uniformly; if params are threaded through
-/// only one DSL dispatcher, this second prefix still breaks.
+/// SEARCH DSL — a second DSL dispatcher beyond UPSERT. Parameter
+/// binding must apply uniformly; if params are threaded through only
+/// one DSL dispatcher, this second prefix still breaks.
 #[tokio::test]
 async fn extended_query_dsl_search_vector_substitutes_params() {
     let server = TestServer::start().await;

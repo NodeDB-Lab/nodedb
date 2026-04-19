@@ -261,7 +261,7 @@ pub async fn create_index(
     // Phase 2b: fan the same backfill op to every other cluster node.
     // `execute_backfill_index` is vShard-local per core, so without
     // this step non-coordinator nodes never populate the index for
-    // the rows they host — the #71 silent-miss bug. Single-node and
+    // the rows they host — the silent-miss bug. Single-node and
     // peerless clusters short-circuit inside the helper.
     super::index_fanout::backfill_on_peers(
         state,

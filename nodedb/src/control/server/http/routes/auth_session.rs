@@ -31,7 +31,7 @@ use super::super::auth::{ApiError, AppState, resolve_auth};
 ///
 /// The caller's `(tenant_id, peer IP)` is captured as a `ClientFingerprint`
 /// and bound to the handle; subsequent resolves from a different origin are
-/// rejected per the configured `FingerprintMode` (issue #67).
+/// rejected per the configured `FingerprintMode`.
 pub async fn create_session(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,

@@ -34,8 +34,8 @@ pub enum FingerprintMode {
 }
 
 impl Default for FingerprintMode {
-    /// Subnet is the documented default in issue #67 — strict enough to
-    /// kill cross-origin theft, lax enough to tolerate mobile egress.
+    /// Subnet is the documented default — strict enough to kill
+    /// cross-origin theft, lax enough to tolerate mobile egress.
     fn default() -> Self {
         Self::Subnet
     }

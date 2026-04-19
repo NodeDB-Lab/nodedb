@@ -4,7 +4,7 @@
 //! Today, `SET LOCAL nodedb.auth_session = '<handle>'` on a pgwire connection
 //! silently tries to resolve the handle with no per-connection throttle and
 //! no observable signal on miss — a misconfigured client or a stolen-handle
-//! probe can hammer the resolver indefinitely. Acceptance for #68 specifies:
+//! probe can hammer the resolver indefinitely. Acceptance specifies:
 //!
 //! > simulate 100 failed `SET LOCAL nodedb.auth_session` calls → connection
 //! > closed with pgwire error; audit event recorded.
@@ -43,6 +43,6 @@ async fn set_local_auth_session_flood_closes_connection() {
          `SET LOCAL nodedb.auth_session` calls on one connection without \
          throttling or error — the resolver is unthrottled and unobservable. \
          Expected: connection closed with a pgwire error well before 100 \
-         attempts (issue #68 suggests 20/min default)"
+         attempts (20/min default)"
     );
 }

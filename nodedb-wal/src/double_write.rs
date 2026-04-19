@@ -75,7 +75,7 @@ const DWB_MAGIC: u32 = 0x4457_4246; // "DWBF"
 
 /// Global counter: total bytes written to any DWB across the process.
 /// Surfaces the duplicate-write cost of running the DWB alongside an
-/// O_DIRECT WAL (issue #76 proposal §4).
+/// O_DIRECT WAL.
 static DWB_BYTES_WRITTEN_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Total bytes written to DWB files since process start.

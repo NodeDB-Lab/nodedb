@@ -7,7 +7,7 @@
 //! The handle resolves to a full `AuthContext` without re-validating the JWT
 //! on every query. Handles expire after a configurable TTL.
 //!
-//! ## Hygiene layers (#67, #68)
+//! ## Hygiene layers
 //!
 //! - **Client fingerprint binding** — each handle captures the creating
 //!   client's `(tenant_id, ip)` at `create()`. On `resolve()`, the caller's

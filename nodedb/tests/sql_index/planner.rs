@@ -143,7 +143,7 @@ async fn distinct_on_indexed_equality_uses_index() {
     );
 }
 
-// ───────────────────────── Issue #72: plan-shape for IndexedFetch ─────────────────────────
+// ───────────────────────── Plan-shape for IndexedFetch ─────────────────────────
 //
 // The tests below assert the STRUCTURE of the emitted `IndexedFetch`
 // node, not just its presence. EXPLAIN renders the physical plan via
@@ -227,9 +227,9 @@ async fn indexed_fetch_plan_carries_residual_filters() {
     // outer Filter, leaving `filters: []` on the IndexedFetch. The
     // handler-level post-filter plumbing is then irrelevant (empty
     // residual) and the Control Plane does the filtering instead.
-    // That reproduces the issue #72 anti-pattern (filtering at the
-    // SQL layer rather than in the Data Plane handler that already
-    // has the row) and wastes a full-payload wire roundtrip.
+    // That reproduces the anti-pattern (filtering at the SQL layer
+    // rather than in the Data Plane handler that already has the row)
+    // and wastes a full-payload wire roundtrip.
     let plan = explain_raw(
         &server,
         "SELECT id FROM idx_resid \
@@ -257,6 +257,6 @@ async fn indexed_fetch_plan_carries_residual_filters() {
         !filters_body.is_empty(),
         "IndexedFetch must carry residual `created_at > 50` in `filters`, \
          not delegate to an outer Filter node — the Control-Plane post-filter \
-         compensation is the anti-pattern issue #72 is about. Got plan: {plan}"
+         compensation is the anti-pattern we're guarding against. Got plan: {plan}"
     );
 }

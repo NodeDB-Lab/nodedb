@@ -426,7 +426,7 @@ async fn restore_surfaces_failing_node_id_on_midflight_failure() {
 // ────────────────────────────────────────────────────────────────────
 // Staleness gate on restore.
 //
-// Once the backup orchestrator captures a real watermark (#69), a
+// Once the backup orchestrator captures a real watermark, a
 // restore into a cluster whose current applied state is *newer* than
 // the envelope's watermark would roll back committed writes. The
 // operator should be told. Spec: by default, restoring a
@@ -434,7 +434,7 @@ async fn restore_surfaces_failing_node_id_on_midflight_failure() {
 // explicit opt-in (`FORCE` keyword) is the separate design decision —
 // not pinned here until the DDL surface lands.
 //
-// This test will remain red until #69's coordination round produces
+// This test will remain red until the coordination round produces
 // nonzero watermarks AND the restore path compares them.
 // ────────────────────────────────────────────────────────────────────
 

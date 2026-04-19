@@ -388,7 +388,7 @@ fn group_by_not_capped_at_10k() {
 }
 
 // ---------------------------------------------------------------------------
-// #11 — LSN-based deduplication for WAL catch-up
+// LSN-based deduplication for WAL catch-up
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -457,7 +457,7 @@ fn dedup_only_skips_flushed_partitions() {
 }
 
 // ---------------------------------------------------------------------------
-// #11 — Catch-up must not skip gaps in LSN coverage
+// Catch-up must not skip gaps in LSN coverage
 // ---------------------------------------------------------------------------
 
 /// Simulates the real-world failure: ILP ingests batches 1,2,3,4,5 to WAL,
@@ -588,7 +588,7 @@ fn multi_batch_ingest_survives_memtable_flush() {
 }
 
 // ---------------------------------------------------------------------------
-// #11 — Idle memtable flush via maybe_run_maintenance
+// Idle memtable flush via maybe_run_maintenance
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -655,7 +655,7 @@ fn idle_flush_triggers_after_inactivity() {
 }
 
 // ---------------------------------------------------------------------------
-// #12 — Large GROUP BY produces valid single-payload response at Data Plane
+// Large GROUP BY produces valid single-payload response at Data Plane
 // ---------------------------------------------------------------------------
 
 #[test]

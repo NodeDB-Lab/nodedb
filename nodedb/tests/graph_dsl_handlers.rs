@@ -180,9 +180,8 @@ async fn graph_traverse_rejects_absurd_depth() {
         .await
         .unwrap();
 
-    // Spec from issue #52 checklist item 3: out-of-range numeric params
-    // must be rejected with SQLSTATE 22023 before dispatch, not
-    // forwarded to `cross_core_bfs` unchanged.
+    // Out-of-range numeric params must be rejected with SQLSTATE 22023
+    // before dispatch, not forwarded to `cross_core_bfs` unchanged.
     server
         .expect_error(
             "GRAPH TRAVERSE FROM 'a' DEPTH 4294967295 LABEL 'l' DIRECTION both",

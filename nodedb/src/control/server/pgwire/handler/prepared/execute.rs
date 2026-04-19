@@ -315,7 +315,7 @@ fn convert_portal_params(
 ///
 /// Natively decoded: `BOOL`, `INT2`/`INT4`/`INT8`, `FLOAT4`/`FLOAT8`/
 /// `NUMERIC`, `TEXT`/`VARCHAR` (implicit via fall-through), and
-/// `UNKNOWN` (the untyped-driver path — see issue #85).
+/// `UNKNOWN` (the untyped-driver path).
 ///
 /// # Fallback policy (catch-all arm)
 ///

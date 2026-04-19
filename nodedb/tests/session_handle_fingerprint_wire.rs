@@ -1,5 +1,5 @@
 //! Wire-level verification that `SessionHandleStore::resolve()` binds to the
-//! caller's `(tenant_id, peer IP)` fingerprint — issue #67.
+//! caller's `(tenant_id, peer IP)` fingerprint.
 //!
 //! Strategy: loopback provides every `127.0.0.0/8` address as a routable
 //! source on Linux. A client TCP socket that `bind()`s to `127.1.0.2` before

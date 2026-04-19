@@ -12,7 +12,7 @@ use crate::control::security::audit::AuditEvent;
 use crate::control::security::auth_context::AuthContext;
 use crate::types::TenantId;
 
-/// Default rate-limit budget per connection (issue #68 suggests 20/min).
+/// Default rate-limit budget per connection (20/min).
 const DEFAULT_RATE_LIMIT_MAX: u32 = 20;
 const DEFAULT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// Default spike threshold — tuned to fire once a connection has clearly

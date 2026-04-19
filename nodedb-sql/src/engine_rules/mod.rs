@@ -299,8 +299,7 @@ fn rebuild_and(mut conjuncts: Vec<SqlExpr>) -> Option<SqlExpr> {
 /// Initial version uses conjunct-level structural equality: every
 /// conjunct of the index predicate must appear (by `PartialEq`) as a
 /// conjunct of the query. This is conservative and deliberately so —
-/// a false positive here would silently omit rows from query results,
-/// which is the exact bug #73 reports.
+/// a false positive here would silently omit rows from query results.
 fn partial_index_entailed(predicate: Option<&str>, query_conjuncts: &[SqlExpr]) -> bool {
     let Some(text) = predicate else {
         return true;

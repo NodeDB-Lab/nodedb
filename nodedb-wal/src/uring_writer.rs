@@ -188,8 +188,8 @@ impl UringWriter {
     /// advance by `data.len()` — the padded length, not the unpadded
     /// buffer content length. Advancing by the unpadded length leaves the
     /// next submission's offset unaligned, and the kernel rejects the
-    /// write with `-EINVAL`. This is the root cause of issue #76 §1 and
-    /// mirrors the precedent set by `WalWriter::flush_buffer` in #42.
+    /// write with `-EINVAL`. Mirrors the precedent set by
+    /// `WalWriter::flush_buffer`.
     fn submit_and_wait_write(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());

@@ -214,8 +214,8 @@ impl SharedState {
     }
 
     /// Point the session-handle store's audit hook at this state's
-    /// `AuditLog`, so `SessionHandleFingerprintMismatch` (issue #67) and
-    /// `SessionHandleResolveMissSpike` (issue #68) are hash-chained with
+    /// `AuditLog`, so `SessionHandleFingerprintMismatch` and
+    /// `SessionHandleResolveMissSpike` are hash-chained with
     /// the rest of the auth-plane event stream. Captures the audit Arc
     /// directly — a `Weak<Self>` would block the cluster wire-up phase's
     /// `Arc::get_mut` on `SharedState`.

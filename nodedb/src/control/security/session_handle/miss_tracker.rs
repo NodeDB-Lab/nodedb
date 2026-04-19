@@ -5,7 +5,7 @@
 //!
 //! - `TenantMissCounters` — monotonic counter keyed by `TenantId`. Scraped
 //!   by `/metrics` for Grafana; feeds the `session_handle.resolve_miss_total`
-//!   tagged counter surfaced in issue #68.
+//!   tagged counter.
 //! - `PerConnectionSpikeDetector` — sliding-window detector keyed by
 //!   connection. When more than `threshold` misses land inside `window` on
 //!   a single connection, the detector fires once (`Fired`) and then stays

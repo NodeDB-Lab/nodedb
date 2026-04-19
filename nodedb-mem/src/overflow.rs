@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn regrowth_re_advises_random_after_mremap() {
-        // Regression coverage for issue #77: mremap-grown spill regions
+        // Regression coverage: mremap-grown spill regions
         // inherited no advice, silently regressing to MADV_NORMAL. Private
         // to this file because it drives the internal bump allocator until
         // `grow()` fires — no public API exposes the growth path directly.

@@ -273,27 +273,26 @@ pub struct AuthConfig {
     pub metering: Option<crate::control::security::metering::config::MeteringConfig>,
 
     /// Opaque session handle configuration: fingerprint binding, resolve
-    /// rate-limit, miss-spike detection. Issues #67 and #68.
+    /// rate-limit, miss-spike detection.
     #[serde(default)]
     pub session: SessionHandleConfig,
 }
 
 /// Configuration for `SessionHandleStore`: fingerprint binding, per-connection
-/// resolve rate limit, miss-spike detection. Maps directly to the acceptance
-/// criteria from issues #67 and #68.
+/// resolve rate limit, miss-spike detection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionHandleConfig {
     /// Session handle TTL in seconds. Default: 3600 (1 hour).
     #[serde(default = "default_session_ttl_secs")]
     pub ttl_secs: u64,
 
-    /// Fingerprint-binding strictness. Default: `subnet` (#67).
+    /// Fingerprint-binding strictness. Default: `subnet`.
     #[serde(default)]
     pub fingerprint_mode: SessionFingerprintMode,
 
     /// Per-connection resolve attempts allowed within
     /// `rate_limit_window_secs`. Exceed → fatal pgwire error + connection
-    /// close. Default: 20 (#68).
+    /// close. Default: 20.
     #[serde(default = "default_session_rate_limit_max")]
     pub resolve_attempts_per_window: u32,
 

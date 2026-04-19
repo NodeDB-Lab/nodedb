@@ -8,7 +8,7 @@
 //! **Never** roll a new identifier generator elsewhere — every
 //! security-sensitive ID in this crate MUST call `generate_tagged_random_hex`.
 //! Timestamp + counter schemes are forbidden here: they leak server state
-//! and enable enumeration (see issue #59).
+//! and enable enumeration.
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use std::fmt::Write;

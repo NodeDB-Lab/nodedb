@@ -66,7 +66,7 @@ fn pg_err(e: &tokio_postgres::Error) -> String {
     }
 }
 
-// ── #29: tenant-scoped planning via shared query_ctx ───────────────────
+// ── tenant-scoped planning via shared query_ctx ────────────────────────
 
 #[tokio::test]
 async fn tenant_user_can_select_own_collection() {
@@ -208,7 +208,7 @@ async fn tenant_user_cannot_see_other_tenants_collection_as_empty() {
     }
 }
 
-// ── #30: Trust-mode identity resolution ────────────────────────────────
+// ── Trust-mode identity resolution ─────────────────────────────────────
 
 #[tokio::test]
 async fn trust_mode_rejects_unknown_username() {
