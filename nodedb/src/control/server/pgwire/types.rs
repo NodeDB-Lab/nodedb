@@ -60,10 +60,14 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
 pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, String) {
     match code {
         ErrorCode::DeadlineExceeded => ("ERROR", "57014", "query cancelled due to deadline".into()),
-        ErrorCode::RejectedConstraint { constraint } => (
+        ErrorCode::RejectedConstraint { constraint, detail } => (
             "ERROR",
             "23505",
-            format!("constraint violation: {constraint}"),
+            if detail.is_empty() {
+                format!("constraint violation: {constraint}")
+            } else {
+                format!("constraint violation: {constraint}: {detail}")
+            },
         ),
         ErrorCode::RejectedPrevalidation { reason } => (
             "ERROR",

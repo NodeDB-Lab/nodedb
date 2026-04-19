@@ -61,6 +61,12 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
             collection,
             document_id,
             value,
+        }
+        | DocumentOp::PointInsert {
+            collection,
+            document_id,
+            value,
+            ..
         } => {
             let new_fields = deserialize_value_to_fields(value);
             Some(DmlWriteInfo {
@@ -189,6 +195,7 @@ pub fn patch_task_with_mutated_fields(
 
     match &mut task.plan {
         PhysicalPlan::Document(DocumentOp::PointPut { value, .. })
+        | PhysicalPlan::Document(DocumentOp::PointInsert { value, .. })
         | PhysicalPlan::Document(DocumentOp::Upsert { value, .. }) => {
             *value = new_bytes;
         }
