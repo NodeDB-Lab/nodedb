@@ -161,8 +161,7 @@ pub async fn restore_tenant(
         })?;
         let plan = PhysicalPlan::Meta(MetaOp::RestoreTenantSnapshot {
             tenant_id,
-            documents: payload,
-            indexes: Vec::new(),
+            snapshot: payload,
         });
         if is_self(state, node_id) {
             sync_dispatch::dispatch_async(

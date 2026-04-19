@@ -35,7 +35,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> Result<AlgoResultBatch, crate
         })?;
 
     let source_id = csr
-        .node_id(source)
+        .node_id_raw(source)
         .ok_or_else(|| crate::Error::BadRequest {
             detail: format!("source node '{source}' not found in graph"),
         })?;
@@ -44,12 +44,12 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> Result<AlgoResultBatch, crate
     // to fail fast with a clear error rather than silently producing wrong results.
     if csr.has_weights() {
         for node in 0..n {
-            for (_lid, _dst, w) in csr.iter_out_edges_weighted(node as u32) {
+            for (_lid, _dst, w) in csr.iter_out_edges_weighted_raw(node as u32) {
                 if w < 0.0 {
                     return Err(crate::Error::BadRequest {
                         detail: format!(
                             "SSSP (Dijkstra) requires non-negative edge weights, found {w} on edge from '{}'",
-                            csr.node_name(node as u32)
+                            csr.node_name_raw(node as u32)
                         ),
                     });
                 }
@@ -72,7 +72,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> Result<AlgoResultBatch, crate
         }
 
         // Relax outbound edges.
-        for (_lid, v, weight) in csr.iter_out_edges_weighted(u) {
+        for (_lid, v, weight) in csr.iter_out_edges_weighted_raw(u) {
             let new_dist = d + weight;
             if new_dist < dist[v as usize] {
                 dist[v as usize] = new_dist;
@@ -84,7 +84,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> Result<AlgoResultBatch, crate
     // Build result batch.
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Sssp);
     for (node, &d) in dist.iter().enumerate() {
-        batch.push_node_f64(csr.node_name(node as u32).to_string(), d);
+        batch.push_node_f64(csr.node_name_raw(node as u32).to_string(), d);
     }
     Ok(batch)
 }

@@ -44,7 +44,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Closeness);
     for (node, centrality) in scored {
-        batch.push_node_f64(csr.node_name(node as u32).to_string(), centrality);
+        batch.push_node_f64(csr.node_name_raw(node as u32).to_string(), centrality);
     }
     batch
 }

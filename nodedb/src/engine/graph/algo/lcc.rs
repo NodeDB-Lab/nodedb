@@ -47,7 +47,7 @@ pub fn run(csr: &CsrIndex, high_degree_threshold: usize, sample_pairs: usize) ->
     for node in 0..n {
         let node_id = node as u32;
         let coeff = compute_lcc(csr, node_id, high_degree_threshold, sample_pairs);
-        batch.push_node_f64(csr.node_name(node as u32).to_string(), coeff);
+        batch.push_node_f64(csr.node_name_raw(node as u32).to_string(), coeff);
     }
 
     batch
@@ -62,12 +62,12 @@ fn compute_lcc(
 ) -> f64 {
     // Collect undirected neighbor set (deduped).
     let mut neighbor_set: HashSet<u32> = HashSet::new();
-    for (_lid, dst) in csr.iter_out_edges(node) {
+    for (_lid, dst) in csr.iter_out_edges_raw(node) {
         if dst != node {
             neighbor_set.insert(dst);
         }
     }
-    for (_lid, src) in csr.iter_in_edges(node) {
+    for (_lid, src) in csr.iter_in_edges_raw(node) {
         if src != node {
             neighbor_set.insert(src);
         }
@@ -104,16 +104,16 @@ fn count_triangles_exact(csr: &CsrIndex, neighbors: &[u32]) -> usize {
     for &u in neighbors {
         // Collect u's undirected neighbors and check intersection with neighbor_set.
         // Only check pairs where u < w to avoid double counting.
-        for (_lid, w) in csr.iter_out_edges(u) {
+        for (_lid, w) in csr.iter_out_edges_raw(u) {
             if w > u && neighbor_set.contains(&w) {
                 triangles += 1;
             }
         }
-        for (_lid, w) in csr.iter_in_edges(u) {
+        for (_lid, w) in csr.iter_in_edges_raw(u) {
             if w > u && neighbor_set.contains(&w) {
                 // Avoid counting an edge both as out and in.
                 // Only count if the reverse (out) wasn't already counted.
-                let already_counted = csr.iter_out_edges(u).any(|(_l, t)| t == w);
+                let already_counted = csr.iter_out_edges_raw(u).any(|(_l, t)| t == w);
                 if !already_counted {
                     triangles += 1;
                 }
@@ -168,13 +168,13 @@ fn count_triangles_sampled(
 /// Check if an undirected edge exists between u and w.
 fn has_undirected_edge(csr: &CsrIndex, u: u32, w: u32, _neighbor_set: &HashSet<u32>) -> bool {
     // Check outbound from u to w.
-    for (_lid, dst) in csr.iter_out_edges(u) {
+    for (_lid, dst) in csr.iter_out_edges_raw(u) {
         if dst == w {
             return true;
         }
     }
     // Check inbound to u from w (i.e., outbound from w to u).
-    for (_lid, src) in csr.iter_in_edges(u) {
+    for (_lid, src) in csr.iter_in_edges_raw(u) {
         if src == w {
             return true;
         }

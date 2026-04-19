@@ -54,7 +54,7 @@ pub(super) fn expand_variable_length(
     if max_hops == 0 {
         if min_hops == 0 {
             let src_name = if want_path {
-                csr.node_name(source).to_string()
+                csr.node_name_raw(source).to_string()
             } else {
                 String::new()
             };
@@ -67,7 +67,7 @@ pub(super) fn expand_variable_length(
     }
 
     let src_name = if want_path {
-        csr.node_name(source).to_string()
+        csr.node_name_raw(source).to_string()
     } else {
         String::new()
     };
@@ -99,7 +99,7 @@ pub(super) fn expand_variable_length(
                 }
 
                 let new_path = if want_path {
-                    let dst_name = csr.node_name(dst).to_string();
+                    let dst_name = csr.node_name_raw(dst).to_string();
                     format!("{path}->{dst_name}")
                 } else {
                     String::new()
@@ -139,26 +139,26 @@ pub(super) fn collect_neighbors(
     let mut neighbors = Vec::new();
     match direction {
         Direction::Out => {
-            for (lid, dst) in csr.iter_out_edges(node) {
+            for (lid, dst) in csr.iter_out_edges_raw(node) {
                 if label_filter.is_none() || csr_label_matches(csr, lid, label_filter) {
                     neighbors.push((lid, dst));
                 }
             }
         }
         Direction::In => {
-            for (lid, src) in csr.iter_in_edges(node) {
+            for (lid, src) in csr.iter_in_edges_raw(node) {
                 if label_filter.is_none() || csr_label_matches(csr, lid, label_filter) {
                     neighbors.push((lid, src));
                 }
             }
         }
         Direction::Both => {
-            for (lid, dst) in csr.iter_out_edges(node) {
+            for (lid, dst) in csr.iter_out_edges_raw(node) {
                 if label_filter.is_none() || csr_label_matches(csr, lid, label_filter) {
                     neighbors.push((lid, dst));
                 }
             }
-            for (lid, src) in csr.iter_in_edges(node) {
+            for (lid, src) in csr.iter_in_edges_raw(node) {
                 if label_filter.is_none() || csr_label_matches(csr, lid, label_filter) {
                     neighbors.push((lid, src));
                 }
@@ -209,7 +209,7 @@ mod tests {
 
         let expansion = expand_variable_length(
             &csr,
-            csr.node_id("a").unwrap(),
+            csr.node_id_raw("a").unwrap(),
             Some("l"),
             Direction::Out,
             1,
@@ -253,7 +253,7 @@ mod tests {
 
         let expansion = expand_variable_length(
             &csr,
-            csr.node_id("a").unwrap(),
+            csr.node_id_raw("a").unwrap(),
             Some("l"),
             Direction::Out,
             0,
@@ -264,7 +264,7 @@ mod tests {
 
         let dsts: std::collections::HashSet<u32> = results.iter().map(|(d, _)| *d).collect();
         assert!(
-            dsts.contains(&csr.node_id("a").unwrap()),
+            dsts.contains(&csr.node_id_raw("a").unwrap()),
             "*0..k must include the source node at depth 0; got dsts {dsts:?}"
         );
     }
@@ -284,7 +284,7 @@ mod tests {
 
         let expansion = expand_variable_length(
             &csr,
-            csr.node_id("a").unwrap(),
+            csr.node_id_raw("a").unwrap(),
             Some("l"),
             Direction::Out,
             2,
@@ -294,7 +294,7 @@ mod tests {
         let results = expansion.results;
 
         let dsts: std::collections::HashSet<u32> = results.iter().map(|(d, _)| *d).collect();
-        let c = csr.node_id("c").unwrap();
+        let c = csr.node_id_raw("c").unwrap();
         let expected: std::collections::HashSet<u32> = [c].into_iter().collect();
         assert_eq!(
             dsts, expected,
@@ -323,7 +323,7 @@ mod tests {
 
         let expansion = expand_variable_length(
             &csr,
-            csr.node_id("root").unwrap(),
+            csr.node_id_raw("root").unwrap(),
             Some("l"),
             Direction::Out,
             1,

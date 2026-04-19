@@ -107,7 +107,7 @@ impl CoreLoop {
         }
 
         // 2. CSR compaction: merge write buffers into dense arrays.
-        self.csr.compact();
+        self.csr.compact_all();
         stats.csr_compacted = true;
 
         // 3. Dangling edge sweep.

@@ -42,17 +42,23 @@ impl CoreLoop {
         };
 
         // 2. Graph engine: edges in redb.
-        let edges = match self.edge_store.purge_tenant(tenant_id) {
+        let edges = match self
+            .edge_store
+            .purge_tenant(crate::types::TenantId::new(tenant_id))
+        {
             Ok(n) => n,
             Err(e) => {
                 warn!(tenant_id, error = %e, "edge store purge failed");
                 0
             }
         };
-        // CSR in-memory index: remove all scoped nodes for this tenant.
-        self.csr.remove_nodes_with_prefix(&prefix);
-        // Deleted-nodes set: remove scoped entries.
-        self.deleted_nodes.retain(|n| !n.starts_with(&prefix));
+        // CSR in-memory index: drop the tenant's partition outright. O(1)
+        // structural deletion — no key-prefix scan needed.
+        self.csr
+            .drop_partition(crate::types::TenantId::new(tenant_id));
+        // Deleted-nodes tracker: drop the whole tenant bucket.
+        self.deleted_nodes
+            .remove(&crate::types::TenantId::new(tenant_id));
 
         // 3. Inverted index (fulltext): postings + doc_lengths (persistent, redb).
         let inv = match self.inverted.purge_tenant(tenant_id) {

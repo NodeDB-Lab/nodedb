@@ -60,15 +60,9 @@ pub enum MetaOp {
     /// Returns serialized `(documents, indexes)` as JSON payload.
     CreateTenantSnapshot { tenant_id: u32 },
 
-    /// Restore a tenant's data to the sparse engine.
-    /// Writes documents and indexes from the serialized payload.
-    RestoreTenantSnapshot {
-        tenant_id: u32,
-        /// JSON-serialized `Vec<(String, Vec<u8>)>` of (key, value) pairs.
-        documents: Vec<u8>,
-        /// JSON-serialized `Vec<(String, Vec<u8>)>` of index entries.
-        indexes: Vec<u8>,
-    },
+    /// Restore a tenant's data across all engines from a snapshot.
+    /// `snapshot` is a MessagePack-serialized `TenantDataSnapshot`.
+    RestoreTenantSnapshot { tenant_id: u32, snapshot: Vec<u8> },
 
     /// Pre-computed response payload. The Data Plane echoes it back without
     /// touching any engine. Used for constant queries (SELECT 1 AS value).

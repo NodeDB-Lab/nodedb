@@ -75,7 +75,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Betweenness);
     for (node, centrality) in scored {
-        batch.push_node_f64(csr.node_name(node as u32).to_string(), centrality);
+        batch.push_node_f64(csr.node_name_raw(node as u32).to_string(), centrality);
     }
     batch
 }

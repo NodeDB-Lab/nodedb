@@ -285,9 +285,8 @@ impl CoreLoop {
 
             PhysicalPlan::Meta(MetaOp::RestoreTenantSnapshot {
                 tenant_id,
-                documents,
-                indexes,
-            }) => self.execute_restore_tenant_snapshot(task, *tenant_id, documents, indexes),
+                snapshot,
+            }) => self.execute_restore_tenant_snapshot(task, *tenant_id, snapshot),
 
             PhysicalPlan::Meta(MetaOp::ConvertCollection {
                 collection,

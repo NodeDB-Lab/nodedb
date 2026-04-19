@@ -30,12 +30,12 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
         .map(|i| {
             let node = i as u32;
             let mut set = HashSet::new();
-            for (_, dst) in csr.iter_out_edges(node) {
+            for (_, dst) in csr.iter_out_edges_raw(node) {
                 if dst != node {
                     set.insert(dst);
                 }
             }
-            for (_, src) in csr.iter_in_edges(node) {
+            for (_, src) in csr.iter_in_edges_raw(node) {
                 if src != node {
                     set.insert(src);
                 }
@@ -95,7 +95,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::KCore);
     for (node, k) in scored {
-        batch.push_node_i64(csr.node_name(node as u32).to_string(), k as i64);
+        batch.push_node_i64(csr.node_name_raw(node as u32).to_string(), k as i64);
     }
     batch
 }

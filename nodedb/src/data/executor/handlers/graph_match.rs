@@ -11,9 +11,10 @@ impl CoreLoop {
     pub(in crate::data::executor) fn execute_graph_match(
         &self,
         task: &ExecutionTask,
+        tid: u32,
         query_bytes: &[u8],
     ) -> Response {
-        debug!(core = self.core_id, "graph match execution");
+        debug!(core = self.core_id, tid, "graph match execution");
 
         // Deserialize the MatchQuery from MessagePack.
         let query: MatchQuery = match zerompk::from_msgpack(query_bytes) {
@@ -29,8 +30,20 @@ impl CoreLoop {
             }
         };
 
-        // Execute the pattern match on CSR + EdgeStore.
-        match crate::engine::graph::pattern::executor::execute(&query, &self.csr, &self.edge_store)
+        // Execute the pattern match on the caller's CSR partition +
+        // EdgeStore. An absent partition means "this tenant has no
+        // graph state" — return the empty row set rather than error.
+        let partition = match self.csr_partition(tid) {
+            Some(p) => p,
+            None => {
+                let payload = match crate::engine::graph::pattern::executor::rows_to_msgpack(&[]) {
+                    Ok(p) => p,
+                    Err(e) => return self.response_error(task, ErrorCode::from(e)),
+                };
+                return self.response_with_payload(task, payload);
+            }
+        };
+        match crate::engine::graph::pattern::executor::execute(&query, partition, &self.edge_store)
         {
             Ok(outcome) => {
                 match crate::engine::graph::pattern::executor::rows_to_msgpack(&outcome.rows) {

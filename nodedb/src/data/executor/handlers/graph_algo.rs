@@ -1,16 +1,20 @@
 //! Graph algorithm dispatch handler.
 //!
 //! Routes `PhysicalPlan::GraphAlgo` to the appropriate algorithm
-//! implementation in `engine::graph::algo::*`. Each algorithm runs
-//! on the in-memory CSR index and returns JSON-serialized results.
+//! implementation in `engine::graph::algo::*`. Each algorithm runs on
+//! the caller's CSR partition and emits results with user-visible node
+//! ids. There is no tenant prefix to strip on the way out — the
+//! partition stores node names in their raw form, so algorithm output
+//! is client-facing by construction.
 
+use nodedb_graph::CsrIndex;
 use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::scoping::scoped_node;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::algo::params::{AlgoParams, GraphAlgorithm};
+use crate::engine::graph::algo::result::AlgoResultBatch;
 
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_graph_algo(
@@ -22,12 +26,12 @@ impl CoreLoop {
     ) -> Response {
         debug!(
             core = self.core_id,
+            tid,
             algorithm = algorithm.name(),
             collection = %params.collection,
             "graph algorithm dispatch"
         );
 
-        // Validate source_node for SSSP.
         if *algorithm == GraphAlgorithm::Sssp && params.source_node.is_none() {
             return self.response_error(
                 task,
@@ -37,51 +41,52 @@ impl CoreLoop {
             );
         }
 
-        // Scope source_node with tenant_id so it matches CSR node keys.
-        // Only clone params when source_node needs to be rewritten.
-        let scoped_params;
-        let params = if params.source_node.is_some() {
-            let mut p = params.clone();
-            p.source_node = p.source_node.map(|n| scoped_node(tid, &n));
-            scoped_params = p;
-            &scoped_params
-        } else {
-            params
+        let partition = match self.csr_partition(tid) {
+            Some(p) => p,
+            None => {
+                // Tenant has no graph state — every algorithm returns
+                // the empty batch for its schema. No error, no special
+                // case at the algorithm level.
+                return match AlgoResultBatch::new(*algorithm).to_msgpack() {
+                    Ok(payload) => self.response_with_payload(task, payload),
+                    Err(e) => self.response_error(task, ErrorCode::from(e)),
+                };
+            }
         };
 
-        use crate::engine::graph::algo;
-
-        let result: Result<Vec<u8>, crate::Error> = match algorithm {
-            // ── Graphalytics (5 core algorithms) ──
-            GraphAlgorithm::PageRank => algo::pagerank::run(&self.csr, params).to_msgpack(),
-            GraphAlgorithm::Wcc => algo::wcc::run(&self.csr).to_msgpack(),
-            GraphAlgorithm::LabelPropagation => {
-                algo::label_propagation::run(&self.csr, params).to_msgpack()
-            }
-            GraphAlgorithm::Lcc => algo::lcc::run(
-                &self.csr,
-                self.graph_tuning.lcc_high_degree_threshold,
-                self.graph_tuning.lcc_sample_pairs,
+        run_algorithm(partition, algorithm, params, &self.graph_tuning)
+            .and_then(|batch| batch.to_msgpack())
+            .map_or_else(
+                |e| self.response_error(task, ErrorCode::from(e)),
+                |payload| self.response_with_payload(task, payload),
             )
-            .to_msgpack(),
-            GraphAlgorithm::Sssp => {
-                algo::sssp::run(&self.csr, params).and_then(|batch| batch.to_msgpack())
-            }
-            // ── Centrality suite ──
-            GraphAlgorithm::Betweenness => algo::betweenness::run(&self.csr, params).to_msgpack(),
-            GraphAlgorithm::Closeness => algo::closeness::run(&self.csr).to_msgpack(),
-            GraphAlgorithm::Harmonic => algo::harmonic::run(&self.csr).to_msgpack(),
-            GraphAlgorithm::Degree => algo::degree::run(&self.csr, params).to_msgpack(),
-            // ── Extended algorithms ──
-            GraphAlgorithm::Louvain => algo::louvain::run(&self.csr, params).to_msgpack(),
-            GraphAlgorithm::Triangles => algo::triangles::run(&self.csr, params).to_msgpack(),
-            GraphAlgorithm::Diameter => algo::diameter::run(&self.csr, params).to_msgpack(),
-            GraphAlgorithm::KCore => algo::kcore::run(&self.csr).to_msgpack(),
-        };
+    }
+}
 
-        match result {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
-        }
+fn run_algorithm(
+    csr: &CsrIndex,
+    algorithm: &GraphAlgorithm,
+    params: &AlgoParams,
+    tuning: &nodedb_types::config::tuning::GraphTuning,
+) -> Result<AlgoResultBatch, crate::Error> {
+    use crate::engine::graph::algo;
+    match algorithm {
+        GraphAlgorithm::PageRank => Ok(algo::pagerank::run(csr, params)),
+        GraphAlgorithm::Wcc => Ok(algo::wcc::run(csr)),
+        GraphAlgorithm::LabelPropagation => Ok(algo::label_propagation::run(csr, params)),
+        GraphAlgorithm::Lcc => Ok(algo::lcc::run(
+            csr,
+            tuning.lcc_high_degree_threshold,
+            tuning.lcc_sample_pairs,
+        )),
+        GraphAlgorithm::Sssp => algo::sssp::run(csr, params),
+        GraphAlgorithm::Betweenness => Ok(algo::betweenness::run(csr, params)),
+        GraphAlgorithm::Closeness => Ok(algo::closeness::run(csr)),
+        GraphAlgorithm::Harmonic => Ok(algo::harmonic::run(csr)),
+        GraphAlgorithm::Degree => Ok(algo::degree::run(csr, params)),
+        GraphAlgorithm::Louvain => Ok(algo::louvain::run(csr, params)),
+        GraphAlgorithm::Triangles => Ok(algo::triangles::run(csr, params)),
+        GraphAlgorithm::Diameter => Ok(algo::diameter::run(csr, params)),
+        GraphAlgorithm::KCore => Ok(algo::kcore::run(csr)),
     }
 }

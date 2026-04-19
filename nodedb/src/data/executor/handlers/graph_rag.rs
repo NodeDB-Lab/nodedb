@@ -69,6 +69,7 @@ impl CoreLoop {
 
         let start_ids: Vec<&str> = vector_scores.keys().map(String::as_str).collect();
         let (expanded_nodes, hop_distances, bfs_truncated) = self.bfs_with_distances(
+            tenant_id,
             &start_ids,
             edge_label.as_deref(),
             direction,
@@ -169,6 +170,7 @@ impl CoreLoop {
     /// BFS traversal that also tracks hop distances from start nodes.
     fn bfs_with_distances(
         &self,
+        tid: u32,
         start_nodes: &[&str],
         label_filter: Option<&str>,
         direction: Direction,
@@ -203,7 +205,10 @@ impl CoreLoop {
                 break;
             }
 
-            let neighbors = self.csr.neighbors(&node, label_filter, direction);
+            let neighbors = match self.csr_partition(tid) {
+                Some(part) => part.neighbors(&node, label_filter, direction),
+                None => Vec::new(),
+            };
             for (_, neighbor) in &neighbors {
                 if visited.len() >= effective_limit {
                     truncated = true;

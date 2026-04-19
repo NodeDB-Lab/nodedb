@@ -163,23 +163,35 @@ impl CoreLoop {
     }
 
     /// Sweep dangling edges: detect edges whose source or destination
-    /// node has been deleted (present in `deleted_nodes`).
+    /// node has been deleted (tracked per-tenant in `deleted_nodes`).
     ///
     /// Called periodically from the idle loop. Removes dangling edges
-    /// from both the CSR and persistent edge store. Returns the number
-    /// of edges removed.
+    /// from the tenant's CSR partition and from the tenant-scoped
+    /// edge store. Returns the total number of edges removed.
     pub fn sweep_dangling_edges(&mut self) -> usize {
         if self.deleted_nodes.is_empty() {
             return 0;
         }
         let mut removed = 0;
-        let deleted: Vec<String> = self.deleted_nodes.iter().cloned().collect();
-        for node in &deleted {
-            let edges = self.csr.remove_node_edges(node);
+        // Copy (tenant, node) pairs so we can mutate `self.csr` and
+        // `self.edge_store` without borrowing the map during
+        // iteration.
+        let work: Vec<(crate::types::TenantId, String)> = self
+            .deleted_nodes
+            .iter()
+            .flat_map(|(tid, set)| set.iter().map(move |n| (*tid, n.clone())))
+            .collect();
+        let swept_nodes = work.len();
+        for (tid, node) in &work {
+            let edges = match self.csr.partition_mut(*tid) {
+                Some(partition) => partition.remove_node_edges(node),
+                None => 0,
+            };
             if edges > 0 {
-                if let Err(e) = self.edge_store.delete_edges_for_node(node) {
+                if let Err(e) = self.edge_store.delete_edges_for_node(*tid, node) {
                     tracing::warn!(
                         core = self.core_id,
+                        tid = tid.as_u32(),
                         node = %node,
                         error = %e,
                         "sweep: failed to delete edges from store"
@@ -192,7 +204,7 @@ impl CoreLoop {
             tracing::info!(
                 core = self.core_id,
                 removed,
-                deleted_nodes = deleted.len(),
+                deleted_nodes = swept_nodes,
                 "dangling edge sweep complete"
             );
         }

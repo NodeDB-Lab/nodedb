@@ -247,7 +247,7 @@ mod tests {
             min_partition_size: 10,
         };
 
-        let degrees: Vec<usize> = parallel_map(&snap, &config, |node, s| s.out_degree(node));
+        let degrees: Vec<usize> = parallel_map(&snap, &config, |node, s| s.out_degree_raw(node));
 
         assert_eq!(degrees.len(), 100);
         // Each node has out-degree 1 in a 100-node ring.
@@ -270,7 +270,7 @@ mod tests {
             |range, s| {
                 let mut count = 0;
                 for node in range.start..range.end {
-                    count += s.out_degree(node);
+                    count += s.out_degree_raw(node);
                 }
                 count
             },
@@ -288,7 +288,7 @@ mod tests {
             min_partition_size: 1,
         };
 
-        let degrees: Vec<usize> = parallel_map(&snap, &config, |node, s| s.out_degree(node));
+        let degrees: Vec<usize> = parallel_map(&snap, &config, |node, s| s.out_degree_raw(node));
 
         assert_eq!(degrees.len(), 100);
     }

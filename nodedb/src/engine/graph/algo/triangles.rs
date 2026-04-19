@@ -36,12 +36,12 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
         .map(|i| {
             let node = i as u32;
             let mut neighbor_set = std::collections::HashSet::new();
-            for (_, dst) in csr.iter_out_edges(node) {
+            for (_, dst) in csr.iter_out_edges_raw(node) {
                 if dst != node {
                     neighbor_set.insert(dst);
                 }
             }
-            for (_, src) in csr.iter_in_edges(node) {
+            for (_, src) in csr.iter_in_edges_raw(node) {
                 if src != node {
                     neighbor_set.insert(src);
                 }
@@ -102,7 +102,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
         batch.push_node_i64("__global__".to_string(), global_count as i64);
     } else {
         for (node, &count) in per_node.iter().enumerate().take(n) {
-            batch.push_node_i64(csr.node_name(node as u32).to_string(), count as i64);
+            batch.push_node_i64(csr.node_name_raw(node as u32).to_string(), count as i64);
         }
     }
 

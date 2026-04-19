@@ -24,18 +24,15 @@ impl CoreLoop {
             .map(|(k, v)| KvPair { key: k, value: v })
             .collect();
 
-        let edges: Vec<KvPair> = self
+        let edges: Vec<TenantKvPair> = self
             .edge_store
             .export_edges()?
             .into_iter()
-            .map(|(k, v)| KvPair { key: k, value: v })
-            .collect();
-
-        let reverse_edges: Vec<KvPair> = self
-            .edge_store
-            .export_reverse_edges()?
-            .into_iter()
-            .map(|(k, v)| KvPair { key: k, value: v })
+            .map(|(tid, k, v)| TenantKvPair {
+                tenant_id: tid.as_u32(),
+                key: k,
+                value: v,
+            })
             .collect();
 
         let hnsw_indexes: Vec<HnswSnapshot> = self
@@ -75,7 +72,6 @@ impl CoreLoop {
             sparse_documents,
             sparse_indexes,
             edges,
-            reverse_edges,
             hnsw_indexes,
             crdt_snapshots,
         })

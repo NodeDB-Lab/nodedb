@@ -25,17 +25,17 @@ pub(in crate::data::executor) enum UndoEntry {
     DeleteVector { index_key: String, vector_id: u32 },
     /// Undo an EdgePut by deleting the edge (or restoring old properties).
     PutEdge {
-        scoped_src: String,
+        src_id: String,
         label: String,
-        scoped_dst: String,
+        dst_id: String,
         /// `None` if edge didn't exist before (inserted); `Some(bytes)` if overwritten.
         old_properties: Option<Vec<u8>>,
     },
     /// Undo an EdgeDelete by re-inserting the edge with its old properties.
     DeleteEdge {
-        scoped_src: String,
+        src_id: String,
         label: String,
-        scoped_dst: String,
+        dst_id: String,
         old_properties: Vec<u8>,
     },
 }
@@ -88,34 +88,37 @@ impl CoreLoop {
                     }
                 }
                 UndoEntry::PutEdge {
-                    scoped_src,
+                    src_id,
                     label,
-                    scoped_dst,
+                    dst_id,
                     old_properties,
                 } => {
+                    let tenant = nodedb_types::TenantId::new(tid);
                     if let Some(old_props) = old_properties {
                         // Edge was overwritten — restore old properties.
-                        let _ =
-                            self.edge_store
-                                .put_edge(&scoped_src, &label, &scoped_dst, &old_props);
+                        let _ = self
+                            .edge_store
+                            .put_edge(tenant, &src_id, &label, &dst_id, &old_props);
                     } else {
                         // Edge was newly inserted — delete it and remove from CSR.
                         let _ = self
                             .edge_store
-                            .delete_edge(&scoped_src, &label, &scoped_dst);
-                        self.csr.remove_edge(&scoped_src, &label, &scoped_dst);
+                            .delete_edge(tenant, &src_id, &label, &dst_id);
+                        self.csr_partition_mut(tid)
+                            .remove_edge(&src_id, &label, &dst_id);
                     }
                 }
                 UndoEntry::DeleteEdge {
-                    scoped_src,
+                    src_id,
                     label,
-                    scoped_dst,
+                    dst_id,
                     old_properties,
                 } => {
+                    let tenant = nodedb_types::TenantId::new(tid);
                     // Re-insert the deleted edge with its original properties.
                     let _ =
                         self.edge_store
-                            .put_edge(&scoped_src, &label, &scoped_dst, &old_properties);
+                            .put_edge(tenant, &src_id, &label, &dst_id, &old_properties);
                     let weight =
                         crate::engine::graph::csr::extract_weight_from_properties(&old_properties);
                     // Rollback path: LabelOverflow here can't be surfaced
@@ -123,11 +126,11 @@ impl CoreLoop {
                     // be silently ignored either. Log at warn — the CSR
                     // state is then known to be incomplete, and the outer
                     // transaction error is what the client actually sees.
+                    let partition = self.csr_partition_mut(tid);
                     let csr_res = if weight != 1.0 {
-                        self.csr
-                            .add_edge_weighted(&scoped_src, &label, &scoped_dst, weight)
+                        partition.add_edge_weighted(&src_id, &label, &dst_id, weight)
                     } else {
-                        self.csr.add_edge(&scoped_src, &label, &scoped_dst)
+                        partition.add_edge(&src_id, &label, &dst_id)
                     };
                     if let Err(e) = csr_res {
                         tracing::warn!(

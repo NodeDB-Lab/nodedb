@@ -117,7 +117,11 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Louvain);
     for node in 0..n {
         let comm_id = comm_map[&community[node]];
-        batch.push_louvain(csr.node_name(node as u32).to_string(), comm_id, modularity);
+        batch.push_louvain(
+            csr.node_name_raw(node as u32).to_string(),
+            comm_id,
+            modularity,
+        );
     }
     batch
 }
@@ -138,7 +142,7 @@ fn build_undirected_adjacency(csr: &CsrIndex, n: usize) -> UndirectedAdjacency {
         std::collections::HashSet::new();
 
     for u in 0..n {
-        for (_lid, v, w) in csr.iter_out_edges_weighted(u as u32) {
+        for (_lid, v, w) in csr.iter_out_edges_weighted_raw(u as u32) {
             let vi = v as usize;
             if vi == u {
                 continue; // Skip self-loops.
@@ -152,7 +156,7 @@ fn build_undirected_adjacency(csr: &CsrIndex, n: usize) -> UndirectedAdjacency {
             }
         }
 
-        for (_lid, v) in csr.iter_in_edges(u as u32) {
+        for (_lid, v) in csr.iter_in_edges_raw(u as u32) {
             let vi = v as usize;
             if vi == u {
                 continue;

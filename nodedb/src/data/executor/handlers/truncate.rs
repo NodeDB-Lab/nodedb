@@ -48,9 +48,11 @@ impl CoreLoop {
                 {
                     warn!(core = self.core_id, %collection, %doc_id, error = %e, "truncate: index cascade failed");
                 }
-                let edges = self.csr.remove_node_edges(doc_id);
+                let edges = self.csr_partition_mut(tid).remove_node_edges(doc_id);
                 if edges > 0
-                    && let Err(e) = self.edge_store.delete_edges_for_node(doc_id)
+                    && let Err(e) = self
+                        .edge_store
+                        .delete_edges_for_node(nodedb_types::TenantId::new(tid), doc_id)
                 {
                     warn!(core = self.core_id, %doc_id, error = %e, "truncate: edge cascade failed");
                 }

@@ -61,6 +61,23 @@ pub struct KvPair {
     pub value: Vec<u8>,
 }
 
+/// Tenant-tagged key-value pair from a structurally-partitioned redb
+/// table (e.g. the graph edge store). The tenant id is carried
+/// explicitly — no lexical encoding.
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct TenantKvPair {
+    pub tenant_id: u32,
+    pub key: String,
+    pub value: Vec<u8>,
+}
+
 /// Complete snapshot of a Data Plane core's state.
 ///
 /// Designed for serialization via MessagePack and transfer over the network
@@ -82,10 +99,10 @@ pub struct CoreSnapshot {
     /// All secondary indexes from SparseEngine.
     pub sparse_indexes: Vec<KvPair>,
 
-    /// All edges from EdgeStore.
-    pub edges: Vec<KvPair>,
-    /// All reverse edges from EdgeStore.
-    pub reverse_edges: Vec<KvPair>,
+    /// All edges from EdgeStore, tenant-tagged. The reverse-edge
+    /// index is rebuilt on restore from the forward records — not
+    /// shipped separately.
+    pub edges: Vec<TenantKvPair>,
 
     /// All HNSW vector indexes.
     pub hnsw_indexes: Vec<HnswSnapshot>,
@@ -101,7 +118,6 @@ impl CoreSnapshot {
             sparse_documents: Vec::new(),
             sparse_indexes: Vec::new(),
             edges: Vec::new(),
-            reverse_edges: Vec::new(),
             hnsw_indexes: Vec::new(),
             crdt_snapshots: Vec::new(),
         }
@@ -135,13 +151,8 @@ impl CoreSnapshot {
         let edges = self
             .edges
             .iter()
-            .map(|kv| kv.key.len() + kv.value.len())
-            .sum::<usize>()
-            + self
-                .reverse_edges
-                .iter()
-                .map(|kv| kv.key.len() + kv.value.len())
-                .sum::<usize>();
+            .map(|kv| kv.key.len() + kv.value.len() + 4)
+            .sum::<usize>();
         let vectors: usize = self
             .hnsw_indexes
             .iter()
@@ -188,13 +199,10 @@ mod tests {
                 key: "users:name:alice:u1".into(),
                 value: vec![],
             }],
-            edges: vec![KvPair {
+            edges: vec![TenantKvPair {
+                tenant_id: 1,
                 key: "u1\0knows\0u2".into(),
                 value: b"{}".to_vec(),
-            }],
-            reverse_edges: vec![KvPair {
-                key: "u2\0knows\0u1".into(),
-                value: vec![],
             }],
             hnsw_indexes: vec![HnswSnapshot {
                 tenant_id: 1,

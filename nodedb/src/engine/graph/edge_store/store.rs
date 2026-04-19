@@ -1,20 +1,20 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use nodedb_types::TenantId;
 use redb::{Database, ReadableTable, TableDefinition};
 
-/// Edge table: composite key `"src_id\x00edge_label\x00dst_id"` → edge properties (MessagePack).
+/// Edge table: composite key `(tid, "src\x00label\x00dst")` → properties.
 ///
-/// Separator \x00 ensures lexicographic ordering groups all edges from the same
-/// source together, then by label, then by destination — enabling efficient
-/// prefix scans for outbound traversals.
-pub(super) const EDGES: TableDefinition<&str, &[u8]> = TableDefinition::new("edges");
+/// The tenant id is a first-class key component (not a lexical prefix).
+/// The string portion holds **unscoped** user-visible node names joined
+/// by `\x00`, which groups all edges from the same source together for
+/// prefix scans.
+pub(super) const EDGES: TableDefinition<(u32, &str), &[u8]> = TableDefinition::new("edges");
 
-/// Reverse edge index: `"dst_id\x00edge_label\x00src_id"` → empty.
-///
-/// Enables efficient inbound traversals (`GRAPH_NEIGHBORS(node, label, IN)`).
-/// Maintained synchronously with the forward edge table.
-pub(super) const REVERSE_EDGES: TableDefinition<&str, &[u8]> =
+/// Reverse edge index: `(tid, "dst\x00label\x00src")` → empty. Mirrors
+/// the forward table structurally for inbound traversals.
+pub(super) const REVERSE_EDGES: TableDefinition<(u32, &str), &[u8]> =
     TableDefinition::new("reverse_edges");
 
 pub(super) fn redb_err<E: std::fmt::Display>(ctx: &str, e: E) -> crate::Error {
@@ -24,12 +24,13 @@ pub(super) fn redb_err<E: std::fmt::Display>(ctx: &str, e: E) -> crate::Error {
     }
 }
 
-/// Composite edge key using \x00 separator.
+/// Composite edge key using `\x00` separator — the string portion of
+/// the `(tid, key)` tuple stored in redb.
 pub(super) fn edge_key(src: &str, label: &str, dst: &str) -> String {
     format!("{src}\x00{label}\x00{dst}")
 }
 
-/// Parse a composite edge key back into (src, label, dst).
+/// Parse a composite edge key back into `(src, label, dst)`.
 pub(super) fn parse_edge_key(key: &str) -> Option<(&str, &str, &str)> {
     let mut parts = key.splitn(3, '\x00');
     let src = parts.next()?;
@@ -40,6 +41,10 @@ pub(super) fn parse_edge_key(key: &str) -> Option<(&str, &str, &str)> {
 
 // Re-export shared Direction from nodedb-types.
 pub use nodedb_types::graph::Direction;
+
+/// Decoded edge record yielded by [`EdgeStore::scan_all_edges_decoded`]:
+/// `(tenant, src, label, dst, properties)`.
+pub type EdgeRecord = (TenantId, String, String, String, Vec<u8>);
 
 /// A single edge with its properties.
 #[derive(Debug, Clone)]
@@ -52,11 +57,9 @@ pub struct Edge {
 
 /// redb-backed edge storage for the Knowledge Graph engine.
 ///
-/// Stores directed labeled edges as composite keys in redb B-Trees.
-/// Forward edges keyed by `(src, label, dst)` for outbound traversal.
-/// Reverse index keyed by `(dst, label, src)` for inbound traversal.
-///
-/// Each Data Plane core owns its own `EdgeStore` instance — no cross-core sharing.
+/// Keys are `(TenantId, composite_key)` tuples — tenant routing is
+/// structural, not lexical. Each Data Plane core owns its own
+/// `EdgeStore` instance; no cross-core sharing.
 pub struct EdgeStore {
     pub(super) db: Arc<Database>,
 }
@@ -70,7 +73,6 @@ impl EdgeStore {
 
         let db = Database::create(path).map_err(|e| redb_err("open", e))?;
 
-        // Ensure tables exist.
         let write_txn = db.begin_write().map_err(|e| redb_err("begin_write", e))?;
         {
             let _ = write_txn
@@ -85,19 +87,19 @@ impl EdgeStore {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Insert or update an edge with properties.
-    ///
-    /// Maintains both forward and reverse indexes atomically in a single transaction.
-    /// Properties are MessagePack-encoded bytes (empty `&[]` for edges without properties).
+    /// Insert or update an edge under the caller's tenant. Maintains
+    /// forward + reverse indexes atomically.
     pub fn put_edge(
         &self,
+        tid: TenantId,
         src: &str,
         label: &str,
         dst: &str,
         properties: &[u8],
     ) -> crate::Result<()> {
-        let fwd_key = edge_key(src, label, dst);
-        let rev_key = edge_key(dst, label, src);
+        let fwd = edge_key(src, label, dst);
+        let rev = edge_key(dst, label, src);
+        let t = tid.as_u32();
 
         let write_txn = self
             .db
@@ -108,23 +110,32 @@ impl EdgeStore {
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
             edges
-                .insert(fwd_key.as_str(), properties)
+                .insert((t, fwd.as_str()), properties)
                 .map_err(|e| redb_err("insert edge", e))?;
 
-            let mut rev = write_txn
+            let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            rev.insert(rev_key.as_str(), &[] as &[u8])
+            rev_t
+                .insert((t, rev.as_str()), &[] as &[u8])
                 .map_err(|e| redb_err("insert reverse", e))?;
         }
         write_txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(())
     }
 
-    /// Delete an edge. Removes both forward and reverse entries atomically.
-    pub fn delete_edge(&self, src: &str, label: &str, dst: &str) -> crate::Result<bool> {
-        let fwd_key = edge_key(src, label, dst);
-        let rev_key = edge_key(dst, label, src);
+    /// Delete an edge under the caller's tenant. Removes forward +
+    /// reverse entries atomically.
+    pub fn delete_edge(
+        &self,
+        tid: TenantId,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> crate::Result<bool> {
+        let fwd = edge_key(src, label, dst);
+        let rev = edge_key(dst, label, src);
+        let t = tid.as_u32();
 
         let write_txn = self
             .db
@@ -135,14 +146,15 @@ impl EdgeStore {
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
             let existed = edges
-                .remove(fwd_key.as_str())
+                .remove((t, fwd.as_str()))
                 .map_err(|e| redb_err("remove edge", e))?
                 .is_some();
 
-            let mut rev = write_txn
+            let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            rev.remove(rev_key.as_str())
+            rev_t
+                .remove((t, rev.as_str()))
                 .map_err(|e| redb_err("remove reverse", e))?;
 
             existed
@@ -151,11 +163,13 @@ impl EdgeStore {
         Ok(existed)
     }
 
-    /// Delete ALL edges where the given node is source or destination.
-    ///
-    /// Used during document deletion cascade. Scans both forward and
-    /// reverse edge tables for entries containing the node.
-    pub fn delete_edges_for_node(&self, node: &str) -> crate::Result<()> {
+    /// Delete ALL edges where `node` is source or destination within
+    /// the caller's tenant (used during document deletion cascade).
+    pub fn delete_edges_for_node(&self, tid: TenantId, node: &str) -> crate::Result<()> {
+        let t = tid.as_u32();
+        let out_prefix = format!("{node}\x00");
+        let out_end = format!("{node}\x01");
+
         let write_txn = self
             .db
             .begin_write()
@@ -164,46 +178,39 @@ impl EdgeStore {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            let mut rev = write_txn
+            let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
 
-            // Remove outgoing edges: keys starting with "node\x00".
-            let out_prefix = format!("{node}\x00");
-            let out_end = format!("{node}\x01");
             let out_keys: Vec<String> = edges
-                .range(out_prefix.as_str()..out_end.as_str())
+                .range((t, out_prefix.as_str())..(t, out_end.as_str()))
                 .map_err(|e| redb_err("out range", e))?
-                .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+                .filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string()))
                 .collect();
             for key in &out_keys {
                 edges
-                    .remove(key.as_str())
+                    .remove((t, key.as_str()))
                     .map_err(|e| redb_err("remove out edge", e))?;
-                // Build reverse key: "dst\x00label\x00src"
                 let parts: Vec<&str> = key.splitn(3, '\x00').collect();
                 if parts.len() == 3 {
                     let rev_key = format!("{}\x00{}\x00{}", parts[2], parts[1], parts[0]);
-                    let _ = rev.remove(rev_key.as_str());
+                    let _ = rev_t.remove((t, rev_key.as_str()));
                 }
             }
 
-            // Remove incoming edges: keys starting with "node\x00" in reverse table.
-            let in_prefix = format!("{node}\x00");
-            let in_end = format!("{node}\x01");
-            let in_keys: Vec<String> = rev
-                .range(in_prefix.as_str()..in_end.as_str())
+            let in_keys: Vec<String> = rev_t
+                .range((t, out_prefix.as_str())..(t, out_end.as_str()))
                 .map_err(|e| redb_err("in range", e))?
-                .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+                .filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string()))
                 .collect();
             for key in &in_keys {
-                rev.remove(key.as_str())
+                rev_t
+                    .remove((t, key.as_str()))
                     .map_err(|e| redb_err("remove in edge", e))?;
-                // Build forward key: "src\x00label\x00dst"
                 let parts: Vec<&str> = key.splitn(3, '\x00').collect();
                 if parts.len() == 3 {
                     let fwd_key = format!("{}\x00{}\x00{}", parts[2], parts[1], parts[0]);
-                    let _ = edges.remove(fwd_key.as_str());
+                    let _ = edges.remove((t, fwd_key.as_str()));
                 }
             }
         }
@@ -213,14 +220,10 @@ impl EdgeStore {
         Ok(())
     }
 
-    /// Purge all edges belonging to a tenant.
-    ///
-    /// Scans both EDGES and REVERSE_EDGES tables for keys starting with
-    /// `"{tenant_id}:"` (scoped node IDs) and removes them.
-    pub fn purge_tenant(&self, tenant_id: u32) -> crate::Result<usize> {
-        let prefix = format!("{tenant_id}:");
-        let end = format!("{tenant_id}:\u{ffff}");
-
+    /// Purge all edges belonging to a tenant. O(tenant-size) range
+    /// delete — no cross-tenant scan.
+    pub fn purge_tenant(&self, tid: TenantId) -> crate::Result<usize> {
+        let t = tid.as_u32();
         let write_txn = self
             .db
             .begin_write()
@@ -232,28 +235,28 @@ impl EdgeStore {
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
             let keys: Vec<String> = edges
-                .range(prefix.as_str()..end.as_str())
+                .range((t, "")..(t + 1, ""))
                 .map_err(|e| redb_err("edge range", e))?
-                .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+                .filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string()))
                 .collect();
             removed += keys.len();
             for key in &keys {
-                let _ = edges.remove(key.as_str());
+                let _ = edges.remove((t, key.as_str()));
             }
         }
 
         {
-            let mut rev = write_txn
+            let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            let keys: Vec<String> = rev
-                .range(prefix.as_str()..end.as_str())
+            let keys: Vec<String> = rev_t
+                .range((t, "")..(t + 1, ""))
                 .map_err(|e| redb_err("rev range", e))?
-                .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
+                .filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string()))
                 .collect();
             removed += keys.len();
             for key in &keys {
-                let _ = rev.remove(key.as_str());
+                let _ = rev_t.remove((t, key.as_str()));
             }
         }
 
@@ -263,14 +266,12 @@ impl EdgeStore {
         Ok(removed)
     }
 
-    /// Scan all forward edges belonging to a tenant.
-    ///
-    /// Returns `(composite_key, properties)` pairs from the EDGES table
-    /// where the key starts with `"{tenant_id}:"`.
-    pub fn scan_edges_for_tenant(&self, tenant_id: u32) -> crate::Result<Vec<(String, Vec<u8>)>> {
-        let prefix = format!("{tenant_id}:");
-        let end = format!("{tenant_id}:\u{ffff}");
-
+    /// Scan all forward edges belonging to a tenant, returning
+    /// `(composite_key, properties)` pairs. The composite key is the
+    /// unscoped `"src\x00label\x00dst"` form — callers already know
+    /// the tenant from context.
+    pub fn scan_edges_for_tenant(&self, tid: TenantId) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        let t = tid.as_u32();
         let read_txn = self
             .db
             .begin_read()
@@ -281,36 +282,20 @@ impl EdgeStore {
 
         let mut results = Vec::new();
         let range = table
-            .range(prefix.as_str()..end.as_str())
+            .range((t, "")..(t + 1, ""))
             .map_err(|e| redb_err("edge range", e))?;
         for entry in range {
             let entry = entry.map_err(|e| redb_err("edge entry", e))?;
-            results.push((entry.0.value().to_string(), entry.1.value().to_vec()));
+            results.push((entry.0.value().1.to_string(), entry.1.value().to_vec()));
         }
         Ok(results)
     }
 
-    /// Insert a raw edge by its full composite key (for snapshot restore).
-    pub fn put_edge_raw(&self, key: &str, properties: &[u8]) -> crate::Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| redb_err("begin_write", e))?;
-        {
-            let mut table = write_txn
-                .open_table(EDGES)
-                .map_err(|e| redb_err("open edges", e))?;
-            table
-                .insert(key, properties)
-                .map_err(|e| redb_err("insert edge", e))?;
-        }
-        write_txn.commit().map_err(|e| redb_err("commit edge", e))?;
-        Ok(())
-    }
-
-    /// Get a single edge's properties. Returns None if the edge doesn't exist.
-    pub fn get_edge(&self, src: &str, label: &str, dst: &str) -> crate::Result<Option<Vec<u8>>> {
-        let key = edge_key(src, label, dst);
+    /// Scan every forward edge across all tenants, yielding
+    /// `(TenantId, src, label, dst, properties)`. Used exclusively by
+    /// the CSR rebuild path — no lexical parsing required, tenant is
+    /// read directly from the tuple key.
+    pub fn scan_all_edges_decoded(&self) -> crate::Result<Vec<EdgeRecord>> {
         let read_txn = self
             .db
             .begin_read()
@@ -319,21 +304,103 @@ impl EdgeStore {
             .open_table(EDGES)
             .map_err(|e| redb_err("open edges", e))?;
 
-        match table.get(key.as_str()).map_err(|e| redb_err("get", e))? {
+        let mut out = Vec::new();
+        let range = table.iter().map_err(|e| redb_err("iter", e))?;
+        for entry in range {
+            let (k, v) = entry.map_err(|e| redb_err("iter", e))?;
+            let (t, composite) = k.value();
+            if let Some((src, label, dst)) = parse_edge_key(composite) {
+                out.push((
+                    TenantId::new(t),
+                    src.to_string(),
+                    label.to_string(),
+                    dst.to_string(),
+                    v.value().to_vec(),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Insert a raw edge record (for snapshot restore). Takes the
+    /// tenant + unscoped composite key + properties.
+    pub fn put_edge_raw(
+        &self,
+        tid: TenantId,
+        composite_key: &str,
+        properties: &[u8],
+    ) -> crate::Result<()> {
+        let t = tid.as_u32();
+        let rev_key = match parse_edge_key(composite_key) {
+            Some((src, label, dst)) => edge_key(dst, label, src),
+            None => {
+                return Err(crate::Error::BadRequest {
+                    detail: format!("put_edge_raw: malformed composite key {composite_key:?}"),
+                });
+            }
+        };
+
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("begin_write", e))?;
+        {
+            let mut edges = write_txn
+                .open_table(EDGES)
+                .map_err(|e| redb_err("open edges", e))?;
+            edges
+                .insert((t, composite_key), properties)
+                .map_err(|e| redb_err("insert edge", e))?;
+            let mut rev_t = write_txn
+                .open_table(REVERSE_EDGES)
+                .map_err(|e| redb_err("open reverse", e))?;
+            rev_t
+                .insert((t, rev_key.as_str()), &[] as &[u8])
+                .map_err(|e| redb_err("insert reverse", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit edge", e))?;
+        Ok(())
+    }
+
+    /// Get a single edge's properties under the caller's tenant.
+    pub fn get_edge(
+        &self,
+        tid: TenantId,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        let key = edge_key(src, label, dst);
+        let t = tid.as_u32();
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| redb_err("begin_read", e))?;
+        let table = read_txn
+            .open_table(EDGES)
+            .map_err(|e| redb_err("open edges", e))?;
+
+        match table
+            .get((t, key.as_str()))
+            .map_err(|e| redb_err("get", e))?
+        {
             Some(val) => Ok(Some(val.value().to_vec())),
             None => Ok(None),
         }
     }
 
-    /// Scan forward edges with a key prefix, parsing composite keys.
+    /// Scan forward edges under a tenant with a composite-key prefix.
+    /// Used internally by `neighbors_out` and friends.
     pub(super) fn scan_edges_with_prefix<F>(
         &self,
+        tid: TenantId,
         prefix: &str,
         mut make_edge: F,
     ) -> crate::Result<Vec<Edge>>
     where
         F: FnMut(&str, &str, &str) -> Edge,
     {
+        let t = tid.as_u32();
         let read_txn = self
             .db
             .begin_read()
@@ -343,15 +410,17 @@ impl EdgeStore {
             .map_err(|e| redb_err("open edges", e))?;
 
         let mut edges = Vec::new();
-        let range = table.range(prefix..).map_err(|e| redb_err("range", e))?;
+        let range = table
+            .range((t, prefix)..)
+            .map_err(|e| redb_err("range", e))?;
 
         for entry in range {
             let (key, val) = entry.map_err(|e| redb_err("iter", e))?;
-            let key_str = key.value();
-            if !key_str.starts_with(prefix) {
+            let (kt, composite) = key.value();
+            if kt != t || !composite.starts_with(prefix) {
                 break;
             }
-            if let Some((src, label, dst)) = parse_edge_key(key_str) {
+            if let Some((src, label, dst)) = parse_edge_key(composite) {
                 let mut edge = make_edge(src, label, dst);
                 edge.properties = val.value().to_vec();
                 edges.push(edge);
@@ -360,47 +429,13 @@ impl EdgeStore {
 
         Ok(edges)
     }
-
-    /// Insert by raw pre-formed key into the forward edge table (snapshot restore).
-    pub fn put_raw(&self, key: &str, value: &[u8]) -> crate::Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| redb_err("raw write txn", e))?;
-        {
-            let mut table = write_txn
-                .open_table(EDGES)
-                .map_err(|e| redb_err("open edges", e))?;
-            table
-                .insert(key, value)
-                .map_err(|e| redb_err("raw insert", e))?;
-        }
-        write_txn.commit().map_err(|e| redb_err("commit", e))?;
-        Ok(())
-    }
-
-    /// Insert by raw pre-formed key into the reverse edge table (snapshot restore).
-    pub fn put_raw_reverse(&self, key: &str, value: &[u8]) -> crate::Result<()> {
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| redb_err("raw write txn", e))?;
-        {
-            let mut table = write_txn
-                .open_table(REVERSE_EDGES)
-                .map_err(|e| redb_err("open reverse_edges", e))?;
-            table
-                .insert(key, value)
-                .map_err(|e| redb_err("raw insert reverse", e))?;
-        }
-        write_txn.commit().map_err(|e| redb_err("commit", e))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const T: TenantId = TenantId::new(1);
 
     fn make_store() -> (EdgeStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -412,36 +447,43 @@ mod tests {
     fn put_and_get_edge() {
         let (store, _dir) = make_store();
         let props = b"msgpack-props";
-        store.put_edge("alice", "KNOWS", "bob", props).unwrap();
+        store.put_edge(T, "alice", "KNOWS", "bob", props).unwrap();
 
-        let result = store.get_edge("alice", "KNOWS", "bob").unwrap();
+        let result = store.get_edge(T, "alice", "KNOWS", "bob").unwrap();
         assert_eq!(result, Some(props.to_vec()));
     }
 
     #[test]
     fn get_nonexistent_edge() {
         let (store, _dir) = make_store();
-        let result = store.get_edge("alice", "KNOWS", "bob").unwrap();
+        let result = store.get_edge(T, "alice", "KNOWS", "bob").unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn delete_edge() {
         let (store, _dir) = make_store();
-        store.put_edge("alice", "KNOWS", "bob", b"").unwrap();
-        assert!(store.delete_edge("alice", "KNOWS", "bob").unwrap());
-        assert!(!store.delete_edge("alice", "KNOWS", "bob").unwrap());
-        assert!(store.get_edge("alice", "KNOWS", "bob").unwrap().is_none());
+        store.put_edge(T, "alice", "KNOWS", "bob", b"").unwrap();
+        assert!(store.delete_edge(T, "alice", "KNOWS", "bob").unwrap());
+        assert!(!store.delete_edge(T, "alice", "KNOWS", "bob").unwrap());
+        assert!(
+            store
+                .get_edge(T, "alice", "KNOWS", "bob")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn neighbors_out_all_labels() {
         let (store, _dir) = make_store();
-        store.put_edge("alice", "KNOWS", "bob", b"").unwrap();
-        store.put_edge("alice", "KNOWS", "carol", b"").unwrap();
-        store.put_edge("alice", "WORKS_WITH", "dave", b"").unwrap();
+        store.put_edge(T, "alice", "KNOWS", "bob", b"").unwrap();
+        store.put_edge(T, "alice", "KNOWS", "carol", b"").unwrap();
+        store
+            .put_edge(T, "alice", "WORKS_WITH", "dave", b"")
+            .unwrap();
 
-        let edges = store.neighbors_out("alice", None).unwrap();
+        let edges = store.neighbors_out(T, "alice", None).unwrap();
         assert_eq!(edges.len(), 3);
 
         let dst_ids: Vec<&str> = edges.iter().map(|e| e.dst_id.as_str()).collect();
@@ -453,10 +495,12 @@ mod tests {
     #[test]
     fn neighbors_out_filtered_by_label() {
         let (store, _dir) = make_store();
-        store.put_edge("alice", "KNOWS", "bob", b"").unwrap();
-        store.put_edge("alice", "WORKS_WITH", "carol", b"").unwrap();
+        store.put_edge(T, "alice", "KNOWS", "bob", b"").unwrap();
+        store
+            .put_edge(T, "alice", "WORKS_WITH", "carol", b"")
+            .unwrap();
 
-        let edges = store.neighbors_out("alice", Some("KNOWS")).unwrap();
+        let edges = store.neighbors_out(T, "alice", Some("KNOWS")).unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].dst_id, "bob");
     }
@@ -464,10 +508,10 @@ mod tests {
     #[test]
     fn neighbors_in() {
         let (store, _dir) = make_store();
-        store.put_edge("alice", "KNOWS", "bob", b"").unwrap();
-        store.put_edge("carol", "KNOWS", "bob", b"").unwrap();
+        store.put_edge(T, "alice", "KNOWS", "bob", b"").unwrap();
+        store.put_edge(T, "carol", "KNOWS", "bob", b"").unwrap();
 
-        let edges = store.neighbors_in("bob", Some("KNOWS")).unwrap();
+        let edges = store.neighbors_in(T, "bob", Some("KNOWS")).unwrap();
         assert_eq!(edges.len(), 2);
         let src_ids: Vec<&str> = edges.iter().map(|e| e.src_id.as_str()).collect();
         assert!(src_ids.contains(&"alice"));
@@ -477,11 +521,11 @@ mod tests {
     #[test]
     fn neighbors_both() {
         let (store, _dir) = make_store();
-        store.put_edge("alice", "KNOWS", "bob", b"").unwrap();
-        store.put_edge("carol", "KNOWS", "alice", b"").unwrap();
+        store.put_edge(T, "alice", "KNOWS", "bob", b"").unwrap();
+        store.put_edge(T, "carol", "KNOWS", "alice", b"").unwrap();
 
         let edges = store
-            .neighbors("alice", Some("KNOWS"), Direction::Both)
+            .neighbors(T, "alice", Some("KNOWS"), Direction::Both)
             .unwrap();
         assert_eq!(edges.len(), 2);
     }
@@ -496,9 +540,9 @@ mod tests {
         let mut buf = Vec::new();
         rmpv::encode::write_value(&mut buf, &props).unwrap();
 
-        store.put_edge("a", "CITES", "b", &buf).unwrap();
+        store.put_edge(T, "a", "CITES", "b", &buf).unwrap();
 
-        let loaded = store.get_edge("a", "CITES", "b").unwrap().unwrap();
+        let loaded = store.get_edge(T, "a", "CITES", "b").unwrap().unwrap();
         let decoded: rmpv::Value = rmpv::decode::read_value(&mut loaded.as_slice()).unwrap();
         assert_eq!(decoded, props);
     }
@@ -506,115 +550,70 @@ mod tests {
     #[test]
     fn put_overwrites_properties() {
         let (store, _dir) = make_store();
-        store.put_edge("a", "L", "b", b"v1").unwrap();
-        store.put_edge("a", "L", "b", b"v2").unwrap();
+        store.put_edge(T, "a", "L", "b", b"v1").unwrap();
+        store.put_edge(T, "a", "L", "b", b"v2").unwrap();
 
-        let result = store.get_edge("a", "L", "b").unwrap().unwrap();
+        let result = store.get_edge(T, "a", "L", "b").unwrap().unwrap();
         assert_eq!(result, b"v2");
     }
 
     #[test]
     fn out_degree_and_in_degree() {
         let (store, _dir) = make_store();
-        store.put_edge("a", "X", "b", b"").unwrap();
-        store.put_edge("a", "X", "c", b"").unwrap();
-        store.put_edge("d", "X", "b", b"").unwrap();
+        store.put_edge(T, "a", "X", "b", b"").unwrap();
+        store.put_edge(T, "a", "X", "c", b"").unwrap();
+        store.put_edge(T, "d", "X", "b", b"").unwrap();
 
-        assert_eq!(store.out_degree("a", None).unwrap(), 2);
-        assert_eq!(store.in_degree("b", None).unwrap(), 2);
-        assert_eq!(store.in_degree("c", None).unwrap(), 1);
-    }
-
-    #[test]
-    fn traverse_bfs_simple() {
-        let (store, _dir) = make_store();
-        // a -> b -> c -> d
-        store.put_edge("a", "NEXT", "b", b"").unwrap();
-        store.put_edge("b", "NEXT", "c", b"").unwrap();
-        store.put_edge("c", "NEXT", "d", b"").unwrap();
-
-        // 1 hop from a: {a, b}
-        let mut result = store
-            .traverse_bfs(&["a"], Some("NEXT"), Direction::Out, 1, 10, 100_000)
-            .unwrap();
-        result.sort();
-        assert_eq!(result, vec!["a", "b"]);
-
-        // 2 hops from a: {a, b, c}
-        let mut result = store
-            .traverse_bfs(&["a"], Some("NEXT"), Direction::Out, 2, 10, 100_000)
-            .unwrap();
-        result.sort();
-        assert_eq!(result, vec!["a", "b", "c"]);
-
-        // 3 hops: all nodes
-        let mut result = store
-            .traverse_bfs(&["a"], Some("NEXT"), Direction::Out, 3, 10, 100_000)
-            .unwrap();
-        result.sort();
-        assert_eq!(result, vec!["a", "b", "c", "d"]);
-    }
-
-    #[test]
-    fn traverse_bfs_with_cycle() {
-        let (store, _dir) = make_store();
-        store.put_edge("a", "L", "b", b"").unwrap();
-        store.put_edge("b", "L", "c", b"").unwrap();
-        store.put_edge("c", "L", "a", b"").unwrap(); // cycle
-
-        let mut result = store
-            .traverse_bfs(&["a"], Some("L"), Direction::Out, 5, 10, 100_000)
-            .unwrap();
-        result.sort();
-        assert_eq!(result, vec!["a", "b", "c"]); // no infinite loop
-    }
-
-    #[test]
-    fn traverse_bfs_bidirectional() {
-        let (store, _dir) = make_store();
-        store.put_edge("a", "L", "b", b"").unwrap();
-        store.put_edge("c", "L", "a", b"").unwrap();
-
-        // Both directions from a: reaches b (outbound) and c (inbound)
-        let mut result = store
-            .traverse_bfs(&["a"], Some("L"), Direction::Both, 1, 10, 100_000)
-            .unwrap();
-        result.sort();
-        assert_eq!(result, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn traverse_bfs_multiple_start_nodes() {
-        let (store, _dir) = make_store();
-        store.put_edge("a", "L", "b", b"").unwrap();
-        store.put_edge("c", "L", "d", b"").unwrap();
-
-        let mut result = store
-            .traverse_bfs(&["a", "c"], Some("L"), Direction::Out, 1, 10, 100_000)
-            .unwrap();
-        result.sort();
-        assert_eq!(result, vec!["a", "b", "c", "d"]);
-    }
-
-    #[test]
-    fn isolated_node_traversal() {
-        let (store, _dir) = make_store();
-        let result = store
-            .traverse_bfs(&["lonely"], None, Direction::Out, 5, 10, 100_000)
-            .unwrap();
-        assert_eq!(result, vec!["lonely"]);
+        assert_eq!(store.out_degree(T, "a", None).unwrap(), 2);
+        assert_eq!(store.in_degree(T, "b", None).unwrap(), 2);
+        assert_eq!(store.in_degree(T, "c", None).unwrap(), 1);
     }
 
     #[test]
     fn inbound_neighbors_carry_properties() {
         let (store, _dir) = make_store();
         store
-            .put_edge("alice", "CITED", "paper1", b"props-data")
+            .put_edge(T, "alice", "CITED", "paper1", b"props-data")
             .unwrap();
 
-        let edges = store.neighbors_in("paper1", Some("CITED")).unwrap();
+        let edges = store.neighbors_in(T, "paper1", Some("CITED")).unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].src_id, "alice");
         assert_eq!(edges[0].properties, b"props-data");
+    }
+
+    #[test]
+    fn tenants_are_isolated() {
+        let (store, _dir) = make_store();
+        let t1 = TenantId::new(1);
+        let t2 = TenantId::new(2);
+        store.put_edge(t1, "alice", "KNOWS", "bob", b"t1").unwrap();
+        store.put_edge(t2, "alice", "KNOWS", "bob", b"t2").unwrap();
+
+        assert_eq!(
+            store.get_edge(t1, "alice", "KNOWS", "bob").unwrap(),
+            Some(b"t1".to_vec())
+        );
+        assert_eq!(
+            store.get_edge(t2, "alice", "KNOWS", "bob").unwrap(),
+            Some(b"t2".to_vec())
+        );
+
+        let t1_edges = store.scan_edges_for_tenant(t1).unwrap();
+        assert_eq!(t1_edges.len(), 1);
+        let t2_edges = store.scan_edges_for_tenant(t2).unwrap();
+        assert_eq!(t2_edges.len(), 1);
+
+        store.purge_tenant(t1).unwrap();
+        assert!(
+            store
+                .get_edge(t1, "alice", "KNOWS", "bob")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.get_edge(t2, "alice", "KNOWS", "bob").unwrap(),
+            Some(b"t2".to_vec())
+        );
     }
 }

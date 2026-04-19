@@ -75,7 +75,7 @@ fn compute_exact(csr: &CsrIndex, n: usize) -> (i64, i64) {
 fn compute_approximate(csr: &CsrIndex, n: usize) -> (i64, i64) {
     // Find first non-isolated node.
     let start = (0..n)
-        .find(|&i| csr.out_degree(i as u32) > 0 || csr.in_degree(i as u32) > 0)
+        .find(|&i| csr.out_degree_raw(i as u32) > 0 || csr.in_degree_raw(i as u32) > 0)
         .unwrap_or(0);
 
     // First sweep: find farthest node from start.

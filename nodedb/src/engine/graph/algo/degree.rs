@@ -28,9 +28,9 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
         .map(|i| {
             let node_id = i as u32;
             let deg = match dir.as_str() {
-                "IN" => csr.in_degree(node_id),
-                "OUT" => csr.out_degree(node_id),
-                _ => csr.out_degree(node_id) + csr.in_degree(node_id),
+                "IN" => csr.in_degree_raw(node_id),
+                "OUT" => csr.out_degree_raw(node_id),
+                _ => csr.out_degree_raw(node_id) + csr.in_degree_raw(node_id),
             };
             (i, deg as f64 / normalizer)
         })
@@ -40,7 +40,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Degree);
     for (node, centrality) in scored {
-        batch.push_node_f64(csr.node_name(node as u32).to_string(), centrality);
+        batch.push_node_f64(csr.node_name_raw(node as u32).to_string(), centrality);
     }
     batch
 }

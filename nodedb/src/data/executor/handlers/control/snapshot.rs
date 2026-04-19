@@ -221,7 +221,7 @@ impl CoreLoop {
         let spatial_checkpointed = self.checkpoint_spatial_indexes();
 
         // 4. Compact CSR write buffers into dense arrays for clean state.
-        self.csr.compact();
+        self.csr.compact_all();
 
         // 5. Record completed flushes in the checkpoint coordinator
         //    and advance the checkpoint LSN for WAL truncation safety.

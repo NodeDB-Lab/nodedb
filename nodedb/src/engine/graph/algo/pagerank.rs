@@ -42,7 +42,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
     let mut next_rank = vec![0.0f64; n];
 
     // Precompute out-degrees and dangling mask for SIMD dangling sum.
-    let out_degrees: Vec<usize> = (0..n).map(|i| csr.out_degree(i as u32)).collect();
+    let out_degrees: Vec<usize> = (0..n).map(|i| csr.out_degree_raw(i as u32)).collect();
     let is_dangling: Vec<bool> = out_degrees.iter().map(|&d| d == 0).collect();
 
     let teleport = (1.0 - damping) / n as f64;
@@ -65,7 +65,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
                 continue;
             }
             let contrib = damping * rank[u] / deg as f64;
-            for (_lid, dst) in csr.iter_out_edges(u as u32) {
+            for (_lid, dst) in csr.iter_out_edges_raw(u as u32) {
                 next_rank[dst as usize] += contrib;
             }
         }
@@ -91,7 +91,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::PageRank);
     for (node_id, r) in indexed {
-        batch.push_node_f64(csr.node_name(node_id as u32).to_string(), r);
+        batch.push_node_f64(csr.node_name_raw(node_id as u32).to_string(), r);
     }
     batch
 }

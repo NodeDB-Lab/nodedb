@@ -6,7 +6,6 @@ use nodedb_bridge::buffer::{Consumer, Producer};
 
 use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use crate::engine::crdt::tenant_state::TenantCrdtEngine;
-use crate::engine::graph::csr::CsrIndex;
 use crate::engine::graph::edge_store::EdgeStore;
 use crate::engine::sparse::btree::SparseEngine;
 use crate::engine::sparse::doc_cache::DocCache;
@@ -14,6 +13,8 @@ use crate::engine::sparse::inverted::InvertedIndex;
 use crate::engine::vector::collection::VectorCollection;
 use crate::engine::vector::sparse::SparseInvertedIndex;
 use crate::types::{Lsn, TenantId};
+use nodedb_graph::CsrIndex;
+use nodedb_graph::ShardedCsrIndex;
 
 use super::task::ExecutionTask;
 
@@ -73,8 +74,11 @@ pub struct CoreLoop {
     /// redb-backed graph edge storage for this core.
     pub(in crate::data::executor) edge_store: EdgeStore,
 
-    /// In-memory CSR adjacency index, rebuilt from edge_store on startup.
-    pub(in crate::data::executor) csr: CsrIndex,
+    /// Per-tenant in-memory CSR adjacency index, rebuilt from
+    /// edge_store on startup. Each tenant's graph state lives in its
+    /// own `CsrIndex` partition — no shared key space, no lexical
+    /// `<tid>:` prefix anywhere in memory.
+    pub(in crate::data::executor) csr: ShardedCsrIndex,
 
     /// Full-text inverted index (BM25), shares redb with sparse engine.
     pub(in crate::data::executor) inverted: InvertedIndex,
@@ -94,10 +98,18 @@ pub struct CoreLoop {
     /// vShards that are paused for write operations (during Phase 3 migration cutover).
     pub(in crate::data::executor) paused_vshards: std::collections::HashSet<crate::types::VShardId>,
 
-    /// Nodes that have been explicitly deleted via PointDelete cascade.
-    /// Used for edge referential integrity — EdgePut to a deleted node is rejected
-    /// with `RejectedDanglingEdge`. Cleared periodically or on compaction.
-    pub(in crate::data::executor) deleted_nodes: std::collections::HashSet<String>,
+    /// Nodes that have been explicitly deleted via PointDelete cascade,
+    /// keyed per-tenant. Used for edge referential integrity —
+    /// `EdgePut` to a deleted node is rejected with
+    /// `RejectedDanglingEdge`. Cleared periodically or on compaction.
+    ///
+    /// Stored as `HashMap<TenantId, HashSet<UnscopedNodeName>>`: one
+    /// set per tenant, entries are raw user-visible names. This is the
+    /// last piece of state in `CoreLoop` that used to live as a flat
+    /// scoped-string tracker; it's now structurally tenant-partitioned
+    /// like every other graph concern.
+    pub(in crate::data::executor) deleted_nodes:
+        HashMap<TenantId, std::collections::HashSet<String>>,
 
     /// Idempotency key deduplication: maps processed idempotency keys to
     /// whether they succeeded (true) or failed (false). Uses `VecDeque`
@@ -249,7 +261,7 @@ impl CoreLoop {
 
         let graph_path = data_dir.join(format!("graph/core-{core_id}.redb"));
         let edge_store = EdgeStore::open(&graph_path)?;
-        let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&edge_store)?;
+        let csr = crate::engine::graph::csr::rebuild::rebuild_sharded_from_store(&edge_store)?;
 
         // Inverted index shares the sparse engine's redb database.
         let inverted = InvertedIndex::open(sparse.db().clone())?;
@@ -274,7 +286,7 @@ impl CoreLoop {
             inverted,
             data_dir: data_dir.to_path_buf(),
             paused_vshards: std::collections::HashSet::new(),
-            deleted_nodes: std::collections::HashSet::new(),
+            deleted_nodes: HashMap::new(),
             idempotency_cache: HashMap::new(),
             idempotency_order: std::collections::VecDeque::new(),
             stats_store,
@@ -365,5 +377,43 @@ impl CoreLoop {
                     .sum()
             })
             .unwrap_or(0)
+    }
+
+    /// Shared-access view of a tenant's CSR partition.
+    ///
+    /// Returns `None` if the tenant has no graph state on this core —
+    /// read paths treat that as "empty" rather than an error.
+    #[inline]
+    pub(in crate::data::executor) fn csr_partition(&self, tid: u32) -> Option<&CsrIndex> {
+        self.csr.partition(TenantId::new(tid))
+    }
+
+    /// Mutable view of a tenant's CSR partition, creating an empty one
+    /// on first use. Canonical write-path entry point — resolves the
+    /// tenant once, then all subsequent operations address unprefixed
+    /// node names inside that partition.
+    #[inline]
+    pub(in crate::data::executor) fn csr_partition_mut(&mut self, tid: u32) -> &mut CsrIndex {
+        self.csr.get_or_create(TenantId::new(tid))
+    }
+
+    /// Mark `node_id` as deleted within the caller's tenant. Used by
+    /// PointDelete cascade so subsequent `EdgePut` to the same node is
+    /// rejected as dangling.
+    #[inline]
+    pub(in crate::data::executor) fn mark_node_deleted(&mut self, tid: u32, node_id: &str) {
+        self.deleted_nodes
+            .entry(TenantId::new(tid))
+            .or_default()
+            .insert(node_id.to_string());
+    }
+
+    /// Test whether `node_id` has been marked deleted within the
+    /// caller's tenant.
+    #[inline]
+    pub(in crate::data::executor) fn is_node_deleted(&self, tid: u32, node_id: &str) -> bool {
+        self.deleted_nodes
+            .get(&TenantId::new(tid))
+            .is_some_and(|s| s.contains(node_id))
     }
 }

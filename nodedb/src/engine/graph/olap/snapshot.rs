@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use crate::engine::graph::csr::CsrIndex;
+use nodedb_graph::LocalNodeId;
 
 /// Immutable graph snapshot for analytical workloads.
 ///
@@ -43,6 +44,9 @@ pub struct CsrSnapshot {
     in_weights: Option<Vec<f64>>,
 
     has_weights: bool,
+    /// Partition tag inherited from the source `CsrIndex` — used to construct
+    /// and validate `LocalNodeId` values on the tagged API.
+    partition_tag: u32,
 }
 
 impl CsrSnapshot {
@@ -77,6 +81,7 @@ impl CsrSnapshot {
             in_labels: csr.in_labels_slice().to_vec(),
             in_weights: csr.in_weights_slice().map(|w| w.to_vec()),
             has_weights: csr.has_weights(),
+            partition_tag: csr.partition_tag(),
         }
     }
 
@@ -90,12 +95,8 @@ impl CsrSnapshot {
         self.out_targets.len()
     }
 
-    pub fn node_name(&self, dense_id: u32) -> &str {
-        &self.id_to_node[dense_id as usize]
-    }
-
-    pub fn node_id(&self, name: &str) -> Option<u32> {
-        self.node_to_id.get(name).copied()
+    pub fn has_weights(&self) -> bool {
+        self.has_weights
     }
 
     pub fn label_name(&self, label_id: u32) -> &str {
@@ -106,12 +107,81 @@ impl CsrSnapshot {
         self.label_to_id.get(name).copied()
     }
 
-    pub fn has_weights(&self) -> bool {
-        self.has_weights
+    /// Partition tag inherited from the source `CsrIndex`.
+    pub fn partition_tag(&self) -> u32 {
+        self.partition_tag
+    }
+
+    /// Wrap a raw dense node index into a tagged `LocalNodeId` for this snapshot.
+    pub fn local(&self, raw: u32) -> LocalNodeId {
+        LocalNodeId::new(raw, self.partition_tag)
+    }
+
+    // ── Tagged API (takes / returns LocalNodeId) ──
+
+    pub fn node_name(&self, id: LocalNodeId) -> &str {
+        &self.id_to_node[id.raw(self.partition_tag) as usize]
+    }
+
+    pub fn node_id(&self, name: &str) -> Option<LocalNodeId> {
+        self.node_to_id
+            .get(name)
+            .copied()
+            .map(|raw| LocalNodeId::new(raw, self.partition_tag))
     }
 
     /// Out-degree of a node in the snapshot.
-    pub fn out_degree(&self, node: u32) -> usize {
+    pub fn out_degree(&self, node: LocalNodeId) -> usize {
+        self.out_degree_raw(node.raw(self.partition_tag))
+    }
+
+    /// In-degree of a node in the snapshot.
+    pub fn in_degree(&self, node: LocalNodeId) -> usize {
+        self.in_degree_raw(node.raw(self.partition_tag))
+    }
+
+    /// Iterate outbound edges for a node: `(label_id, dst_id)`.
+    pub fn iter_out_edges(
+        &self,
+        node: LocalNodeId,
+    ) -> impl Iterator<Item = (u32, LocalNodeId)> + '_ {
+        let tag = self.partition_tag;
+        self.iter_out_edges_raw(node.raw(tag))
+            .map(move |(lid, dst)| (lid, LocalNodeId::new(dst, tag)))
+    }
+
+    /// Iterate inbound edges for a node: `(label_id, src_id)`.
+    pub fn iter_in_edges(
+        &self,
+        node: LocalNodeId,
+    ) -> impl Iterator<Item = (u32, LocalNodeId)> + '_ {
+        let tag = self.partition_tag;
+        self.iter_in_edges_raw(node.raw(tag))
+            .map(move |(lid, src)| (lid, LocalNodeId::new(src, tag)))
+    }
+
+    /// Iterate outbound edges with weights: `(label_id, dst_id, weight)`.
+    pub fn iter_out_edges_weighted(
+        &self,
+        node: LocalNodeId,
+    ) -> impl Iterator<Item = (u32, LocalNodeId, f64)> + '_ {
+        let tag = self.partition_tag;
+        self.iter_out_edges_weighted_raw(node.raw(tag))
+            .map(move |(lid, dst, w)| (lid, LocalNodeId::new(dst, tag), w))
+    }
+
+    // ── Raw u32 API (in-partition algorithm use — no tag validation) ──
+
+    pub fn node_name_raw(&self, dense_id: u32) -> &str {
+        &self.id_to_node[dense_id as usize]
+    }
+
+    pub fn node_id_raw(&self, name: &str) -> Option<u32> {
+        self.node_to_id.get(name).copied()
+    }
+
+    /// Out-degree of a node (raw dense index).
+    pub fn out_degree_raw(&self, node: u32) -> usize {
         let idx = node as usize;
         if idx + 1 >= self.out_offsets.len() {
             return 0;
@@ -119,8 +189,8 @@ impl CsrSnapshot {
         (self.out_offsets[idx + 1] - self.out_offsets[idx]) as usize
     }
 
-    /// In-degree of a node in the snapshot.
-    pub fn in_degree(&self, node: u32) -> usize {
+    /// In-degree of a node (raw dense index).
+    pub fn in_degree_raw(&self, node: u32) -> usize {
         let idx = node as usize;
         if idx + 1 >= self.in_offsets.len() {
             return 0;
@@ -128,8 +198,8 @@ impl CsrSnapshot {
         (self.in_offsets[idx + 1] - self.in_offsets[idx]) as usize
     }
 
-    /// Iterate outbound edges for a node: `(label_id, dst_id)`.
-    pub fn iter_out_edges(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+    /// Iterate outbound edges for a node (raw dense index): `(label_id, dst_id)`.
+    pub fn iter_out_edges_raw(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
         let idx = node as usize;
         let (start, end) = if idx + 1 < self.out_offsets.len() {
             (
@@ -142,8 +212,8 @@ impl CsrSnapshot {
         (start..end).map(move |i| (self.out_labels[i], self.out_targets[i]))
     }
 
-    /// Iterate inbound edges for a node: `(label_id, src_id)`.
-    pub fn iter_in_edges(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+    /// Iterate inbound edges for a node (raw dense index): `(label_id, src_id)`.
+    pub fn iter_in_edges_raw(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
         let idx = node as usize;
         let (start, end) = if idx + 1 < self.in_offsets.len() {
             (
@@ -156,8 +226,11 @@ impl CsrSnapshot {
         (start..end).map(move |i| (self.in_labels[i], self.in_targets[i]))
     }
 
-    /// Iterate outbound edges with weights: `(label_id, dst_id, weight)`.
-    pub fn iter_out_edges_weighted(&self, node: u32) -> impl Iterator<Item = (u32, u32, f64)> + '_ {
+    /// Iterate outbound edges with weights (raw dense index): `(label_id, dst_id, weight)`.
+    pub fn iter_out_edges_weighted_raw(
+        &self,
+        node: u32,
+    ) -> impl Iterator<Item = (u32, u32, f64)> + '_ {
         let idx = node as usize;
         let (start, end) = if idx + 1 < self.out_offsets.len() {
             (
@@ -229,9 +302,9 @@ mod tests {
         let mut csr = make_csr();
         let snap = CsrSnapshot::from_csr(&mut csr);
 
-        assert_eq!(snap.node_id("a"), Some(0));
-        assert_eq!(snap.node_name(0), "a");
-        assert_eq!(snap.node_id("nonexistent"), None);
+        assert_eq!(snap.node_id_raw("a"), Some(0));
+        assert_eq!(snap.node_name_raw(0), "a");
+        assert_eq!(snap.node_id_raw("nonexistent"), None);
     }
 
     #[test]
@@ -239,8 +312,8 @@ mod tests {
         let mut csr = make_csr();
         let snap = CsrSnapshot::from_csr(&mut csr);
 
-        let a_id = snap.node_id("a").unwrap();
-        let out_edges: Vec<(u32, u32)> = snap.iter_out_edges(a_id).collect();
+        let a_id = snap.node_id_raw("a").unwrap();
+        let out_edges: Vec<(u32, u32)> = snap.iter_out_edges_raw(a_id).collect();
         assert_eq!(out_edges.len(), 2); // KNOWS->b, LIKES->c
     }
 
@@ -249,13 +322,13 @@ mod tests {
         let mut csr = make_csr();
         let snap = CsrSnapshot::from_csr(&mut csr);
 
-        let a_id = snap.node_id("a").unwrap();
-        assert_eq!(snap.out_degree(a_id), 2);
-        assert_eq!(snap.in_degree(a_id), 0);
+        let a_id = snap.node_id_raw("a").unwrap();
+        assert_eq!(snap.out_degree_raw(a_id), 2);
+        assert_eq!(snap.in_degree_raw(a_id), 0);
 
-        let b_id = snap.node_id("b").unwrap();
-        assert_eq!(snap.out_degree(b_id), 1);
-        assert_eq!(snap.in_degree(b_id), 1);
+        let b_id = snap.node_id_raw("b").unwrap();
+        assert_eq!(snap.out_degree_raw(b_id), 1);
+        assert_eq!(snap.in_degree_raw(b_id), 1);
     }
 
     #[test]
@@ -266,7 +339,7 @@ mod tests {
         let snap = CsrSnapshot::from_csr(&mut csr);
 
         assert!(snap.has_weights());
-        let edges: Vec<(u32, u32, f64)> = snap.iter_out_edges_weighted(0).collect();
+        let edges: Vec<(u32, u32, f64)> = snap.iter_out_edges_weighted_raw(0).collect();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].2, 2.5);
     }

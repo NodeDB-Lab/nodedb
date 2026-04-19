@@ -27,7 +27,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
     // as an outbound edge from u, this covers all edges without needing
     // inbound iteration.
     for u in 0..n {
-        for (_lid, v) in csr.iter_out_edges(u as u32) {
+        for (_lid, v) in csr.iter_out_edges_raw(u as u32) {
             uf.union(u, v as usize);
         }
     }
@@ -35,7 +35,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
     // Also scan inbound edges to handle directed-only edges that might
     // not appear in both CSR halves for WCC's undirected semantics.
     for v in 0..n {
-        for (_lid, u) in csr.iter_in_edges(v as u32) {
+        for (_lid, u) in csr.iter_in_edges_raw(v as u32) {
             uf.union(u as usize, v);
         }
     }
@@ -44,7 +44,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Wcc);
     for node in 0..n {
         let component = uf.find(node);
-        batch.push_node_i64(csr.node_name(node as u32).to_string(), component as i64);
+        batch.push_node_i64(csr.node_name_raw(node as u32).to_string(), component as i64);
     }
     batch
 }

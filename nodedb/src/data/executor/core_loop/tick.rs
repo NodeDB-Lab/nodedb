@@ -68,7 +68,13 @@ impl CoreLoop {
             self.idempotency_order.push_back(key);
         }
 
-        if self.deleted_nodes.len() > 100_000 {
+        // Bound the dangling-edge tracker across all tenants. Count
+        // all entries; when the aggregate exceeds the cap, drop the
+        // whole map — callers are tolerant of false negatives (an
+        // `EdgePut` to a recently-deleted node races the tracker, so
+        // the semantics are advisory regardless).
+        let total: usize = self.deleted_nodes.values().map(|s| s.len()).sum();
+        if total > 100_000 {
             self.deleted_nodes.clear();
         }
 

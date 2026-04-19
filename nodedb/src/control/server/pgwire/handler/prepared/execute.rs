@@ -224,11 +224,11 @@ fn push_flat_rows(
             }
         }
         serde_json::Value::Object(mut map) => {
-            if is_scan_wrapper(&map) {
-                if let Some(serde_json::Value::Object(inner)) = map.remove("data") {
-                    out.push(inner);
-                    return;
-                }
+            if is_scan_wrapper(&map)
+                && let Some(serde_json::Value::Object(inner)) = map.remove("data")
+            {
+                out.push(inner);
+                return;
             }
             out.push(map);
         }

@@ -123,13 +123,10 @@ impl CoreLoop {
                 dst_id,
                 properties,
             }) => {
-                let scoped_src = crate::data::executor::scoping::scoped_node(tid, src_id);
-                let scoped_dst = crate::data::executor::scoping::scoped_node(tid, dst_id);
-
                 // Capture old properties for rollback before writing.
                 let old_properties = self
                     .edge_store
-                    .get_edge(&scoped_src, label, &scoped_dst)
+                    .get_edge(nodedb_types::TenantId::new(tid), src_id, label, dst_id)
                     .ok()
                     .flatten();
 
@@ -142,9 +139,9 @@ impl CoreLoop {
                 }
 
                 undo_log.push(UndoEntry::PutEdge {
-                    scoped_src,
+                    src_id: src_id.clone(),
                     label: label.clone(),
-                    scoped_dst,
+                    dst_id: dst_id.clone(),
                     old_properties,
                 });
                 Ok(resp)
@@ -155,13 +152,10 @@ impl CoreLoop {
                 label,
                 dst_id,
             }) => {
-                let scoped_src = crate::data::executor::scoping::scoped_node(tid, src_id);
-                let scoped_dst = crate::data::executor::scoping::scoped_node(tid, dst_id);
-
                 // Capture old properties for rollback before deleting.
                 let old_properties = self
                     .edge_store
-                    .get_edge(&scoped_src, label, &scoped_dst)
+                    .get_edge(nodedb_types::TenantId::new(tid), src_id, label, dst_id)
                     .ok()
                     .flatten();
 
@@ -175,9 +169,9 @@ impl CoreLoop {
                 // Only track undo if the edge actually existed.
                 if let Some(props) = old_properties {
                     undo_log.push(UndoEntry::DeleteEdge {
-                        scoped_src,
+                        src_id: src_id.clone(),
                         label: label.clone(),
-                        scoped_dst,
+                        dst_id: dst_id.clone(),
                         old_properties: props,
                     });
                 }
@@ -412,9 +406,11 @@ impl CoreLoop {
                 let _ = self
                     .sparse
                     .delete_indexes_for_document(tid, collection, document_id);
-                let edges_removed = self.csr.remove_node_edges(document_id);
+                let edges_removed = self.csr_partition_mut(tid).remove_node_edges(document_id);
                 if edges_removed > 0 {
-                    let _ = self.edge_store.delete_edges_for_node(document_id);
+                    let _ = self
+                        .edge_store
+                        .delete_edges_for_node(nodedb_types::TenantId::new(tid), document_id);
                 }
 
                 if let Some(old) = old_value {

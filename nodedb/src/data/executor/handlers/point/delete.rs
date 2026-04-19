@@ -35,10 +35,13 @@ impl CoreLoop {
                 }
 
                 // Cascade 3: Remove graph edges where this document is src or dst.
-                let edges_removed = self.csr.remove_node_edges(document_id);
+                let edges_removed = self.csr_partition_mut(tid).remove_node_edges(document_id);
                 if edges_removed > 0 {
                     // Also remove from persistent edge store.
-                    if let Err(e) = self.edge_store.delete_edges_for_node(document_id) {
+                    if let Err(e) = self
+                        .edge_store
+                        .delete_edges_for_node(nodedb_types::TenantId::new(tid), document_id)
+                    {
                         warn!(core = self.core_id, %document_id, error = %e, "edge cascade failed");
                     }
                     tracing::trace!(core = self.core_id, %document_id, edges_removed, "EDGE_CASCADE_DELETE");
@@ -61,7 +64,7 @@ impl CoreLoop {
                 }
 
                 // Record deletion for edge referential integrity.
-                self.deleted_nodes.insert(document_id.to_string());
+                self.mark_node_deleted(tid, document_id);
 
                 // Invalidate document cache.
                 self.doc_cache.invalidate(tid, collection, document_id);

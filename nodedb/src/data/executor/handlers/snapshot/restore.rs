@@ -9,34 +9,31 @@ use crate::data::executor::task::ExecutionTask;
 impl CoreLoop {
     /// Restore a tenant's data across ALL engines from a snapshot.
     ///
-    /// Receives MessagePack-serialized documents and indexes (legacy format)
-    /// and writes them to the sparse engine. Extended fields (edges, vectors,
-    /// KV, CRDT, timeseries) are restored from the full `TenantDataSnapshot`
-    /// when present.
+    /// `documents_bytes` carries a MessagePack-serialized
+    /// `TenantDataSnapshot` — the full per-tenant snapshot with
+    /// documents, indexes, edges, vectors, KV, CRDT, and timeseries.
     pub(in crate::data::executor) fn execute_restore_tenant_snapshot(
         &mut self,
         task: &ExecutionTask,
         tenant_id: u32,
-        documents_bytes: &[u8],
-        indexes_bytes: &[u8],
+        snapshot_bytes: &[u8],
     ) -> Response {
         info!(core = self.core_id, tenant_id, "restoring tenant snapshot");
 
-        // Try to deserialize as full TenantDataSnapshot first (new format).
-        // Fall back to legacy (documents + indexes only) if that fails.
-        let full_snapshot: Option<crate::types::TenantDataSnapshot> =
-            zerompk::from_msgpack(documents_bytes).ok();
-
-        let (docs_written, indexes_written) = if let Some(ref snap) = full_snapshot {
-            self.restore_sparse(tenant_id, &snap.documents, &snap.indexes)
-        } else {
-            // Legacy format: separate documents and indexes bytes.
-            let documents: Vec<(String, Vec<u8>)> =
-                zerompk::from_msgpack(documents_bytes).unwrap_or_default();
-            let indexes: Vec<(String, Vec<u8>)> =
-                zerompk::from_msgpack(indexes_bytes).unwrap_or_default();
-            self.restore_sparse(tenant_id, &documents, &indexes)
+        let snap: crate::types::TenantDataSnapshot = match zerompk::from_msgpack(snapshot_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("malformed tenant snapshot: {e}"),
+                    },
+                );
+            }
         };
+
+        let (docs_written, indexes_written) =
+            self.restore_sparse(tenant_id, &snap.documents, &snap.indexes);
 
         let mut edges_written = 0u64;
         let mut vectors_written = 0u64;
@@ -44,10 +41,12 @@ impl CoreLoop {
         let mut crdt_written = 0u64;
         let mut ts_written = 0u64;
 
-        if let Some(ref snap) = full_snapshot {
-            // Restore graph edges.
+        {
+            // Restore graph edges. Keys are the unscoped
+            // `"src\0label\0dst"` form; tenant is supplied from context.
+            let tid = crate::types::TenantId::new(tenant_id);
             for (key, props) in &snap.edges {
-                if let Err(e) = self.edge_store.put_edge_raw(key, props) {
+                if let Err(e) = self.edge_store.put_edge_raw(tid, key, props) {
                     warn!(key, error = %e, "failed to restore edge");
                     continue;
                 }
@@ -56,7 +55,7 @@ impl CoreLoop {
             // Rebuild CSR from restored edges.
             if edges_written > 0
                 && let Ok(rebuilt) =
-                    crate::engine::graph::csr::rebuild::rebuild_from_store(&self.edge_store)
+                    crate::engine::graph::csr::rebuild::rebuild_sharded_from_store(&self.edge_store)
             {
                 self.csr = rebuilt;
             }

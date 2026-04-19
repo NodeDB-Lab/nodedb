@@ -52,10 +52,10 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
             // Count neighbor labels (both directions for undirected community detection).
             let mut label_counts: HashMap<u32, u32> = HashMap::new();
 
-            for (_lid, neighbor) in csr.iter_out_edges(node_id) {
+            for (_lid, neighbor) in csr.iter_out_edges_raw(node_id) {
                 *label_counts.entry(labels[neighbor as usize]).or_insert(0) += 1;
             }
-            for (_lid, neighbor) in csr.iter_in_edges(node_id) {
+            for (_lid, neighbor) in csr.iter_in_edges_raw(node_id) {
                 *label_counts.entry(labels[neighbor as usize]).or_insert(0) += 1;
             }
 
@@ -95,7 +95,7 @@ pub fn run(csr: &CsrIndex, params: &AlgoParams) -> AlgoResultBatch {
     // Build result.
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::LabelPropagation);
     for (node, &label) in labels.iter().enumerate() {
-        batch.push_node_i64(csr.node_name(node as u32).to_string(), label as i64);
+        batch.push_node_i64(csr.node_name_raw(node as u32).to_string(), label as i64);
     }
     batch
 }

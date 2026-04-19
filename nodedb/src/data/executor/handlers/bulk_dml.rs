@@ -336,13 +336,15 @@ impl CoreLoop {
                     warn!(core = self.core_id, %collection, %doc_id, error = %e, "bulk delete: secondary index cascade failed");
                 }
                 // Cascade: graph edges.
-                let edges_removed = self.csr.remove_node_edges(doc_id);
+                let edges_removed = self.csr_partition_mut(tid).remove_node_edges(doc_id);
                 if edges_removed > 0
-                    && let Err(e) = self.edge_store.delete_edges_for_node(doc_id)
+                    && let Err(e) = self
+                        .edge_store
+                        .delete_edges_for_node(nodedb_types::TenantId::new(tid), doc_id)
                 {
                     warn!(core = self.core_id, %doc_id, error = %e, "bulk delete: edge cascade failed");
                 }
-                self.deleted_nodes.insert(doc_id.to_string());
+                self.mark_node_deleted(tid, doc_id);
                 self.doc_cache.invalidate(tid, collection, doc_id);
                 affected += 1;
             }

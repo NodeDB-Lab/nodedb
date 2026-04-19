@@ -146,7 +146,7 @@ fn restore_core_state(
         std::fs::create_dir_all(parent).map_err(crate::Error::Io)?;
     }
     let edge_store = crate::engine::graph::edge_store::store::EdgeStore::open(&graph_path)?;
-    restore_edge_data(&edge_store, &snap.edges, &snap.reverse_edges)?;
+    restore_edge_data(&edge_store, &snap.edges)?;
 
     // Restore vector indexes by writing checkpoint files.
     // The normal startup path (load_vector_checkpoints) will load these.
@@ -187,25 +187,22 @@ fn restore_sparse_data(
     Ok(())
 }
 
-/// Restore edge store data from snapshot.
+/// Restore edge store data from snapshot. Reverse index is rebuilt
+/// automatically from the forward records via `put_edge_raw`.
 fn restore_edge_data(
     edge_store: &crate::engine::graph::edge_store::store::EdgeStore,
-    edges: &[KvPair],
-    reverse_edges: &[KvPair],
+    edges: &[crate::data::snapshot::TenantKvPair],
 ) -> crate::Result<()> {
     for kv in edges {
-        edge_store.put_raw(&kv.key, &kv.value)?;
-    }
-    for kv in reverse_edges {
-        edge_store.put_raw_reverse(&kv.key, &kv.value)?;
+        edge_store.put_edge_raw(
+            nodedb_types::TenantId::new(kv.tenant_id),
+            &kv.key,
+            &kv.value,
+        )?;
     }
 
     if !edges.is_empty() {
-        info!(
-            edges = edges.len(),
-            reverse = reverse_edges.len(),
-            "edge store data restored"
-        );
+        info!(edges = edges.len(), "edge store data restored");
     }
 
     Ok(())
@@ -351,7 +348,6 @@ mod tests {
             ],
             sparse_indexes: vec![],
             edges: vec![],
-            reverse_edges: vec![],
             hnsw_indexes: vec![],
             crdt_snapshots: vec![],
         };

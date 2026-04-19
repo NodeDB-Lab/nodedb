@@ -33,7 +33,7 @@ pub fn run(csr: &CsrIndex) -> AlgoResultBatch {
 
     let mut batch = AlgoResultBatch::new(GraphAlgorithm::Harmonic);
     for (node, centrality) in scored {
-        batch.push_node_f64(csr.node_name(node as u32).to_string(), centrality);
+        batch.push_node_f64(csr.node_name_raw(node as u32).to_string(), centrality);
     }
     batch
 }
@@ -48,7 +48,7 @@ fn bfs_inverse_distances(csr: &CsrIndex, source: u32, n: usize) -> f64 {
 
     while let Some(v) = queue.pop_front() {
         let d = dist[v as usize];
-        for (_, neighbor) in csr.iter_out_edges(v) {
+        for (_, neighbor) in csr.iter_out_edges_raw(v) {
             let ni = neighbor as usize;
             if dist[ni] == u32::MAX {
                 dist[ni] = d + 1;
@@ -56,7 +56,7 @@ fn bfs_inverse_distances(csr: &CsrIndex, source: u32, n: usize) -> f64 {
                 queue.push_back(neighbor);
             }
         }
-        for (_, neighbor) in csr.iter_in_edges(v) {
+        for (_, neighbor) in csr.iter_in_edges_raw(v) {
             let ni = neighbor as usize;
             if dist[ni] == u32::MAX {
                 dist[ni] = d + 1;

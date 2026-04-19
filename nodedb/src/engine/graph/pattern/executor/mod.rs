@@ -100,23 +100,19 @@ fn execute_query(
 /// from multiple cores. BindingRow is `HashMap<String, String>` — all
 /// values are strings, so we write raw msgpack directly.
 pub fn rows_to_msgpack(rows: &[BindingRow]) -> Result<Vec<u8>, crate::Error> {
-    use crate::data::executor::scoping::strip_tenant_prefix;
     use nodedb_query::msgpack_scan::{write_array_header, write_map_header, write_str};
 
+    // MATCH bindings now carry user-visible node ids directly. The
+    // CSR partition that produced them is tenant-scoped by
+    // construction, so there is no `<tid>:` prefix to strip — what
+    // the user inserted is what the user sees back.
     let mut buf = Vec::with_capacity(rows.len() * 64);
     write_array_header(&mut buf, rows.len());
     for row in rows {
         write_map_header(&mut buf, row.len());
         for (k, v) in row {
             write_str(&mut buf, k);
-            // MATCH bindings carry tenant-scoped node ids (`{tid}:name`)
-            // because CSR/EdgeStore lookups run on scoped keys. The
-            // prefix must be stripped before the payload crosses the
-            // Data-Plane boundary so no consumer (pgwire, native,
-            // HTTP) can leak internal tenant numbering. Literal
-            // property values without a `{digits}:` prefix pass
-            // through untouched.
-            write_str(&mut buf, strip_tenant_prefix(v));
+            write_str(&mut buf, v);
         }
     }
     Ok(buf)
@@ -224,8 +220,8 @@ fn execute_triple(
                 bind_node(&mut row, &triple.src, csr, src_id);
                 bind_node(&mut row, &triple.dst, csr, dst_id);
                 if let Some(ref edge_name) = triple.edge.name {
-                    let src_name = csr.node_name(src_id);
-                    let dst_name = csr.node_name(dst_id);
+                    let src_name = csr.node_name_raw(src_id);
+                    let dst_name = csr.node_name_raw(dst_id);
                     let label_name = csr.label_name(lid);
                     row.insert(
                         edge_name.clone(),
@@ -244,7 +240,7 @@ fn resolve_binding(binding: &NodeBinding, csr: &CsrIndex, row: &BindingRow) -> V
     if let Some(ref name) = binding.name
         && let Some(value) = row.get(name)
     {
-        if let Some(id) = csr.node_id(value) {
+        if let Some(id) = csr.node_id_raw(value) {
             // Check label constraint if specified.
             if let Some(ref label) = binding.label
                 && !csr.node_has_label(id, label)
@@ -279,7 +275,7 @@ fn binding_compatible(
     if let Some(ref name) = binding.name
         && let Some(existing) = row.get(name)
     {
-        return existing == csr.node_name(node_id);
+        return existing == csr.node_name_raw(node_id);
     }
     true
 }
@@ -287,7 +283,7 @@ fn binding_compatible(
 fn bind_node(row: &mut BindingRow, binding: &NodeBinding, csr: &CsrIndex, node_id: u32) {
     if let Some(ref name) = binding.name {
         row.entry(name.clone())
-            .or_insert_with(|| csr.node_name(node_id).to_string());
+            .or_insert_with(|| csr.node_name_raw(node_id).to_string());
     }
 }
 
@@ -351,11 +347,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = EdgeStore::open(&dir.path().join("graph.redb")).unwrap();
 
-        store.put_edge("alice", "KNOWS", "bob", b"").unwrap();
-        store.put_edge("bob", "KNOWS", "carol", b"").unwrap();
-        store.put_edge("carol", "KNOWS", "dave", b"").unwrap();
-        store.put_edge("alice", "LIKES", "carol", b"").unwrap();
-        store.put_edge("bob", "BLOCKED", "dave", b"").unwrap();
+        use nodedb_types::TenantId;
+        const T: TenantId = TenantId::new(1);
+        store.put_edge(T, "alice", "KNOWS", "bob", b"").unwrap();
+        store.put_edge(T, "bob", "KNOWS", "carol", b"").unwrap();
+        store.put_edge(T, "carol", "KNOWS", "dave", b"").unwrap();
+        store.put_edge(T, "alice", "LIKES", "carol", b"").unwrap();
+        store.put_edge(T, "bob", "BLOCKED", "dave", b"").unwrap();
 
         let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&store).unwrap();
         (csr, store, dir)

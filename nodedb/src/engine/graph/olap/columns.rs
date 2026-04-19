@@ -258,24 +258,32 @@ impl StringColumn {
 pub fn extract_edge_properties(
     edge_store: &crate::engine::graph::edge_store::EdgeStore,
     csr: &crate::engine::graph::csr::CsrIndex,
+    tid: nodedb_types::TenantId,
     property_names: &[&str],
 ) -> Result<PropertyColumns, crate::Error> {
     let n = csr.node_count();
     let mut columns = PropertyColumns::new(n);
 
-    let all_edges = edge_store.scan_all_edges()?;
+    // Scan only the caller's tenant partition. Returned keys are in
+    // unscoped `"src\0label\0dst"` form — tenant routing is structural.
+    let tenant_edges = edge_store.scan_edges_for_tenant(tid)?;
 
-    for edge in &all_edges {
-        if edge.properties.is_empty() {
+    for (composite_key, properties) in &tenant_edges {
+        if properties.is_empty() {
             continue;
         }
 
-        let Some(src_id) = csr.node_id(&edge.src_id) else {
+        let src_name = match composite_key.split_once('\x00') {
+            Some((s, _)) => s,
+            None => continue,
+        };
+        let Some(src_id) = csr.node_id_raw(src_name) else {
             continue;
         };
+        let edge_properties = properties;
 
         // Parse MessagePack properties.
-        let Ok(val) = rmpv::decode::read_value(&mut &edge.properties[..]) else {
+        let Ok(val) = rmpv::decode::read_value(&mut edge_properties.as_slice()) else {
             continue;
         };
 
@@ -400,13 +408,27 @@ mod tests {
         ]);
         let mut buf = Vec::new();
         rmpv::encode::write_value(&mut buf, &props).unwrap();
-        store.put_edge("alice", "KNOWS", "bob", &buf).unwrap();
+        store
+            .put_edge(
+                nodedb_types::TenantId::new(1),
+                "alice",
+                "KNOWS",
+                "bob",
+                &buf,
+            )
+            .unwrap();
 
         let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&store).unwrap();
 
-        let columns = extract_edge_properties(&store, &csr, &["weight", "label"]).unwrap();
+        let columns = extract_edge_properties(
+            &store,
+            &csr,
+            nodedb_types::TenantId::new(1),
+            &["weight", "label"],
+        )
+        .unwrap();
 
-        let alice_id = csr.node_id("alice").unwrap();
+        let alice_id = csr.node_id_raw("alice").unwrap();
         assert_eq!(columns.f64_columns["weight"].get(alice_id), Some(0.75));
         assert_eq!(
             columns.string_columns["label"].get(alice_id),
@@ -421,10 +443,14 @@ mod tests {
             crate::engine::graph::edge_store::EdgeStore::open(&dir.path().join("graph.redb"))
                 .unwrap();
 
-        store.put_edge("a", "L", "b", b"").unwrap();
+        store
+            .put_edge(nodedb_types::TenantId::new(1), "a", "L", "b", b"")
+            .unwrap();
 
         let csr = crate::engine::graph::csr::rebuild::rebuild_from_store(&store).unwrap();
-        let columns = extract_edge_properties(&store, &csr, &["weight"]).unwrap();
+        let columns =
+            extract_edge_properties(&store, &csr, nodedb_types::TenantId::new(1), &["weight"])
+                .unwrap();
 
         // No properties extracted.
         assert!(columns.f64_columns.is_empty());

@@ -103,20 +103,20 @@ impl CoreLoop {
                 self.execute_graph_algo(task, tid, algorithm, params)
             }
 
-            GraphOp::Match { query } => self.execute_graph_match(task, query),
+            GraphOp::Match { query } => self.execute_graph_match(task, tid, query),
 
             GraphOp::SetNodeLabels { node_id, labels } => {
-                let scoped = super::super::scoping::scoped_node(tid, node_id);
+                let partition = self.csr_partition_mut(tid);
                 for label in labels {
-                    self.csr.add_node_label(&scoped, label);
+                    partition.add_node_label(node_id, label);
                 }
                 self.response_ok(task)
             }
 
             GraphOp::RemoveNodeLabels { node_id, labels } => {
-                let scoped = super::super::scoping::scoped_node(tid, node_id);
+                let partition = self.csr_partition_mut(tid);
                 for label in labels {
-                    self.csr.remove_node_label(&scoped, label);
+                    partition.remove_node_label(node_id, label);
                 }
                 self.response_ok(task)
             }
