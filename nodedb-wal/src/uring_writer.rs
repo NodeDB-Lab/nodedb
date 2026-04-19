@@ -179,6 +179,17 @@ impl UringWriter {
     }
 
     /// Submit a write SQE and wait for the CQE.
+    ///
+    /// ## O_DIRECT alignment invariant
+    ///
+    /// When `use_direct_io` is true, the submission slice (`data`) is
+    /// zero-padded up to the alignment boundary via `as_aligned_slice`.
+    /// The kernel writes exactly `data.len()` bytes, so `file_offset` MUST
+    /// advance by `data.len()` — the padded length, not the unpadded
+    /// buffer content length. Advancing by the unpadded length leaves the
+    /// next submission's offset unaligned, and the kernel rejects the
+    /// write with `-EINVAL`. This is the root cause of issue #76 §1 and
+    /// mirrors the precedent set by `WalWriter::flush_buffer` in #42.
     fn submit_and_wait_write(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -189,6 +200,7 @@ impl UringWriter {
         } else {
             self.buffer.as_slice()
         };
+        let write_len = data.len() as u64;
 
         let fd = types::Fd(self.file.as_raw_fd());
         let write_op = opcode::Write::new(fd, data.as_ptr(), data.len() as u32)
@@ -221,7 +233,8 @@ impl UringWriter {
             )));
         }
 
-        self.file_offset += self.buffer.len() as u64;
+        // See the O_DIRECT alignment invariant on this function's doc comment.
+        self.file_offset += write_len;
         self.buffer.clear();
         Ok(())
     }
