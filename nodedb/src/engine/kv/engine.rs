@@ -113,6 +113,23 @@ impl KvEngine {
         self.hash_to_tenant.remove(&tkey);
         self.hash_to_collection.remove(&tkey);
         self.sorted_indexes.purge_collection(tenant_id, collection);
+
+        // Eagerly drop pending TTL-wheel entries for this collection.
+        // Stale entries would otherwise no-op at fire time (the table
+        // they reference is gone), but they still consume reap budget
+        // per tick — for a large collection with many TTLs, that's
+        // wasted work until every scheduled time has passed.
+        let prefix = format!("{tenant_id}:{collection}\0").into_bytes();
+        let wheel_removed = self.expiry.purge_prefix(&prefix);
+        if wheel_removed > 0 {
+            tracing::debug!(
+                tenant_id,
+                collection,
+                wheel_removed,
+                "kv: dropped expiry-wheel entries for purged collection"
+            );
+        }
+
         removed
     }
 

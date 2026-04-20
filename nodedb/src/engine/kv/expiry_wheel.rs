@@ -168,6 +168,38 @@ impl ExpiryWheel {
         )
     }
 
+    /// Drop every wheel entry whose composite key starts with
+    /// `prefix`. Returns the number of entries removed.
+    ///
+    /// Called during collection hard-delete so the wheel does not
+    /// carry stale entries for purged collections — without this,
+    /// a large purged collection's TTL backlog would burn reap
+    /// budget for no-op ticks until every entry's scheduled time
+    /// had passed. Safe during a live wheel: entries are removed
+    /// in-place; cursors are not advanced.
+    pub fn purge_prefix(&mut self, prefix: &[u8]) -> usize {
+        if prefix.is_empty() {
+            return 0;
+        }
+        let matches = |e: &ExpiryEntry| e.key.starts_with(prefix);
+        let mut removed = 0;
+        let mut drop_from = |slot: &mut Vec<ExpiryEntry>| {
+            let before = slot.len();
+            slot.retain(|e| !matches(e));
+            removed += before - slot.len();
+        };
+        for slot in &mut self.fine {
+            drop_from(slot);
+        }
+        for slot in &mut self.coarse {
+            drop_from(slot);
+        }
+        drop_from(&mut self.spillover);
+        drop_from(&mut self.deferred);
+        self.total_entries = self.total_entries.saturating_sub(removed);
+        removed
+    }
+
     /// Advance the wheel and return up to `reap_budget` expired keys.
     ///
     /// Call this from the TPC core's event loop at `tick_ms` intervals.
@@ -312,6 +344,38 @@ mod tests {
         assert_eq!(batch.expired.len(), 1);
         assert_eq!(batch.expired[0].0, b"k1");
         assert_eq!(w.len(), 0);
+    }
+
+    #[test]
+    fn purge_prefix_drops_scoped_entries_across_slots() {
+        let mut w = ExpiryWheel::new(0, 1000, 1024);
+        let prefix = b"1:users\0";
+        // Mix fine-slot, coarse-slot, spillover, and a sibling
+        // collection/tenant that must NOT be dropped.
+        w.insert([prefix, b"a".as_slice()].concat(), 2_000); // fine
+        w.insert([prefix, b"b".as_slice()].concat(), 300_000); // coarse
+        w.insert([prefix, b"c".as_slice()].concat(), 10_000_000); // spillover
+        w.insert(b"1:orders\0x".to_vec(), 2_000); // different collection
+        w.insert(b"2:users\0y".to_vec(), 2_000); // different tenant
+        assert_eq!(w.len(), 5);
+
+        let removed = w.purge_prefix(prefix);
+        assert_eq!(removed, 3);
+        assert_eq!(w.len(), 2);
+
+        // Sibling entries still fire.
+        let batch = w.tick(2_000);
+        let remaining_keys: Vec<_> = batch.expired.iter().map(|(k, _)| k.clone()).collect();
+        assert!(remaining_keys.iter().any(|k| k.starts_with(b"1:orders\0")));
+        assert!(remaining_keys.iter().any(|k| k.starts_with(b"2:users\0")));
+    }
+
+    #[test]
+    fn purge_prefix_empty_prefix_is_noop() {
+        let mut w = ExpiryWheel::new(0, 1000, 1024);
+        w.insert(b"1:x\0k".to_vec(), 2_000);
+        assert_eq!(w.purge_prefix(&[]), 0);
+        assert_eq!(w.len(), 1);
     }
 
     #[test]
