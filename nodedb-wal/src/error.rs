@@ -58,6 +58,12 @@ pub enum WalError {
     /// that want the DWB disabled must not call `open` at all.
     #[error("DoubleWriteBuffer::open called with DwbMode::Off")]
     DwbOffNotOpenable,
+
+    /// Record payload failed structural validation (truncation, bad length
+    /// prefix, invalid UTF-8, etc.). Distinct from [`WalError::ChecksumMismatch`]
+    /// — the bytes passed CRC but the payload's own framing is wrong.
+    #[error("corrupt WAL record at LSN {lsn}: {detail}")]
+    CorruptRecord { lsn: u64, detail: String },
 }
 
 pub type Result<T> = std::result::Result<T, WalError>;

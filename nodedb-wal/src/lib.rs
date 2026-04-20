@@ -31,8 +31,10 @@ pub mod mmap_reader;
 pub mod reader;
 pub mod record;
 pub mod recovery;
+pub mod replay;
 pub mod segment;
 pub mod segmented;
+pub mod tombstone;
 #[cfg(feature = "io-uring")]
 pub mod uring_writer;
 pub mod writer;
@@ -43,5 +45,7 @@ pub use group_commit::GroupCommitter;
 pub use lazy_reader::LazyWalReader;
 pub use record::{RecordHeader, RecordType, WalRecord};
 pub use recovery::{RecoveryInfo, recover};
+pub use replay::{TombstoneSet, extract_tombstones};
 pub use segmented::{SegmentedWal, SegmentedWalConfig};
+pub use tombstone::{CollectionTombstonePayload, MAX_COLLECTION_NAME_LEN};
 pub use writer::WalWriter;

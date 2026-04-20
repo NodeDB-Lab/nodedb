@@ -161,6 +161,14 @@ pub enum RecordType {
 
     /// Checkpoint marker — indicates a consistent snapshot point.
     Checkpoint = 100 | 0x8000,
+
+    /// Collection hard-delete tombstone — any prior record for
+    /// `(tenant_id, collection)` with `lsn < purge_lsn` must be skipped on
+    /// replay. Payload: [`CollectionTombstonePayload`] (MessagePack).
+    ///
+    /// Required: replaying a node that does not understand this record
+    /// would resurrect purged rows.
+    CollectionTombstoned = 101 | 0x8000,
 }
 
 impl RecordType {
@@ -183,6 +191,7 @@ impl RecordType {
             30 => Some(Self::TimeseriesBatch),
             31 => Some(Self::LogBatch),
             x if x == 100 | 0x8000 => Some(Self::Checkpoint),
+            x if x == 101 | 0x8000 => Some(Self::CollectionTombstoned),
             _ => None,
         }
     }
