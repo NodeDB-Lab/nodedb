@@ -181,6 +181,11 @@ async fn handle_sync_session(
     let mut crdt_delivery_rx: Option<
         tokio::sync::mpsc::Receiver<crate::event::crdt_sync::types::OutboundDelta>,
     > = None;
+    // Control-frame channel (CollectionPurged etc.) — separate from
+    // the delta queue so a saturated delta path can't drop a purge.
+    let mut crdt_control_rx: Option<
+        tokio::sync::mpsc::Receiver<nodedb_types::sync::wire::SyncFrame>,
+    > = None;
     let mut crdt_registered = false;
 
     // Presence: register a bounded outbound channel for this session.
@@ -336,13 +341,15 @@ async fn handle_sync_session(
             let tenant_id = session.tenant_id.map(|t| t.as_u32()).unwrap_or(0);
             let peer_id = session.device_metadata.peer_id;
             let config = crate::event::crdt_sync::types::DeliveryConfig::default();
-            crdt_delivery_rx = Some(shared.crdt_sync_delivery.register(
+            let (drx, crx) = shared.crdt_sync_delivery.register(
                 session_id.clone(),
                 peer_id,
                 tenant_id,
                 Vec::new(), // All collections — shape filtering done at delivery level.
                 &config,
-            ));
+            );
+            crdt_delivery_rx = Some(drx);
+            crdt_control_rx = Some(crx);
             crdt_registered = true;
         }
 
@@ -368,6 +375,24 @@ async fn handle_sync_session(
                 use tokio_tungstenite::tungstenite::Message;
                 if ws
                     .send(Message::Binary((*bytes).clone().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+
+        // Drain outbound control frames (CollectionPurged,
+        // stream-termination, etc.) and push to Lite device. Runs
+        // before the delta drain so purge notifications are never
+        // starved by a delta backlog.
+        if let Some(ref mut rx) = crdt_control_rx {
+            while let Ok(frame) = rx.try_recv() {
+                use futures::SinkExt;
+                use tokio_tungstenite::tungstenite::Message;
+                if ws
+                    .send(Message::Binary(frame.to_bytes().into()))
                     .await
                     .is_err()
                 {
