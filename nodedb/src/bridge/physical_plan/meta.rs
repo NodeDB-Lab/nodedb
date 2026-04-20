@@ -109,6 +109,17 @@ pub enum MetaOp {
     /// are a no-op. Runs on every node.
     UnregisterMaterializedView { tenant_id: u32, name: String },
 
+    /// Estimate the on-core data size (in bytes) for a single
+    /// `(tenant_id, collection)` pair. Sums per-engine in-memory
+    /// state: KV hash-table bytes, columnar flushed-segment byte
+    /// count, vector-index byte count, and sparse-redb document
+    /// range. Response payload is a u64 LE byte count.
+    ///
+    /// Used by `_system.dropped_collections.size_bytes_estimate` to
+    /// surface "how much storage will a hard-delete reclaim?"
+    /// without waiting for a purge cycle.
+    QueryCollectionSize { tenant_id: u32, name: String },
+
     /// Enforce retention on a timeseries collection: drop segments older than
     /// the cutoff. Called by the retention policy enforcement loop.
     EnforceTimeseriesRetention { collection: String, max_age_ms: i64 },

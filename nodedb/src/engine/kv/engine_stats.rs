@@ -120,6 +120,17 @@ impl KvEngine {
         self.tables.get(&tkey).map(|t| t.len()).unwrap_or(0)
     }
 
+    /// Approximate memory usage for a specific collection. Sums the
+    /// hash table's own `mem_usage()` estimate; returns 0 if no table
+    /// exists for `(tenant_id, collection)`.
+    pub fn collection_mem_usage(&self, tenant_id: u32, collection: &str) -> u64 {
+        let tkey = table_key(tenant_id, collection);
+        self.tables
+            .get(&tkey)
+            .map(|t| t.mem_usage() as u64)
+            .unwrap_or(0)
+    }
+
     /// Comprehensive observability snapshot for this KV engine.
     pub fn stats(&self) -> KvStats {
         let mut total_entries = 0usize;

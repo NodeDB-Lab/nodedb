@@ -233,6 +233,35 @@ impl SparseEngine {
         })
     }
 
+    /// Approximate byte count for all documents in a single
+    /// `(tenant_id, collection)` pair. Sums the raw value sizes via a
+    /// redb range scan — O(N) in row count for a single read
+    /// transaction. Best-effort: redb key overhead + secondary-index
+    /// bytes are not counted. Used by the
+    /// `_system.dropped_collections.size_bytes_estimate` column.
+    pub fn approx_bytes_for_collection(&self, tenant_id: u32, collection: &str) -> u64 {
+        let prefix = format!("{tenant_id}:{collection}:");
+        let end = format!("{tenant_id}:{collection}:\u{ffff}");
+        let read_txn = match self.db.begin_read() {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let table = match read_txn.open_table(DOCUMENTS) {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let mut total: u64 = 0;
+        let range = match table.range::<&str>(prefix.as_str()..end.as_str()) {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+        for entry in range {
+            let Ok((_k, v)) = entry else { continue };
+            total = total.saturating_add(v.value().len() as u64);
+        }
+        total
+    }
+
     /// Delete a document (tenant-scoped).
     pub fn delete(
         &self,

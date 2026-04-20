@@ -21,6 +21,7 @@ pub mod join;
 pub mod kv;
 pub mod point;
 pub mod purge;
+pub mod query_collection_size;
 pub mod reclaim;
 pub mod recursive;
 pub mod rls_eval;

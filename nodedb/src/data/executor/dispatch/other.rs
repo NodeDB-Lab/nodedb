@@ -308,6 +308,10 @@ impl CoreLoop {
                 self.execute_unregister_materialized_view(task, *tenant_id, name)
             }
 
+            PhysicalPlan::Meta(MetaOp::QueryCollectionSize { tenant_id, name }) => {
+                self.execute_query_collection_size(task, *tenant_id, name)
+            }
+
             PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                 collection,
                 max_age_ms,
