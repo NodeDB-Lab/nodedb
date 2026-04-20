@@ -88,11 +88,12 @@ pub fn pg_catalog_schema(table: &str) -> Option<Vec<pgwire::api::results::FieldI
             bool_field("rolcanlogin"),
         ],
         "_system.dropped_collections" => vec![
-            int8_field("tenant"),
+            int8_field("tenant_id"),
             text_field("name"),
             text_field("owner"),
-            int8_field("deactivated_at"),
-            int8_field("retention_expires_at"),
+            text_field("engine_type"),
+            int8_field("deactivated_at_ns"),
+            int8_field("retention_expires_at_ns"),
         ],
         _ => return None,
     };

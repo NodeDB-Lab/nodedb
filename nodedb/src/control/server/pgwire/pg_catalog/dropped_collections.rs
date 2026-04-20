@@ -6,12 +6,19 @@
 //! still possible.
 //!
 //! Columns:
-//! - `tenant` — numeric tenant id (as `int8`).
+//! - `tenant_id` — numeric tenant id (as `int8`).
 //! - `name` — collection name.
 //! - `owner` — preserved owner username.
-//! - `deactivated_at` — HLC wall-clock nanoseconds when
+//! - `engine_type` — storage engine slug (`"document"`, `"strict"`,
+//!   `"columnar"`, `"timeseries"`, `"columnar:spatial"`, `"kv"`),
+//!   resolved from `StoredCollection.collection_type.as_str()`.
+//! - `deactivated_at_ns` — HLC wall-clock nanoseconds when
 //!   `is_active` flipped to false (from `StoredCollection.modification_hlc`).
-//! - `retention_expires_at` — same unit, wall-clock ns.
+//! - `retention_expires_at_ns` — same unit, wall-clock ns.
+//!
+//! Column names match the field names on `nodedb_types::DroppedCollection`
+//! so the `NodeDb::list_dropped_collections` client trait decoder can
+//! round-trip rows without an alias mapping.
 //!
 //! Visibility: tenant_admin and superuser see every tenant's entries;
 //! regular users see only their own tenant. Enforced in-handler to
@@ -33,11 +40,12 @@ pub fn dropped_collections(
     identity: &AuthenticatedIdentity,
 ) -> PgWireResult<Vec<Response>> {
     let schema = Arc::new(vec![
-        int8_field("tenant"),
+        int8_field("tenant_id"),
         text_field("name"),
         text_field("owner"),
-        int8_field("deactivated_at"),
-        int8_field("retention_expires_at"),
+        text_field("engine_type"),
+        int8_field("deactivated_at_ns"),
+        int8_field("retention_expires_at_ns"),
     ]);
 
     let Some(catalog) = state.credentials.catalog() else {
@@ -70,9 +78,11 @@ pub fn dropped_collections(
         }
         let deactivated_ns = coll.modification_hlc.wall_ns;
         let expires_ns = deactivated_ns.saturating_add(retention_ns);
+        let engine_type = coll.collection_type.as_str();
         encoder.encode_field(&(coll.tenant_id as i64))?;
         encoder.encode_field(&coll.name.as_str())?;
         encoder.encode_field(&coll.owner.as_str())?;
+        encoder.encode_field(&engine_type)?;
         encoder.encode_field(&(deactivated_ns as i64))?;
         encoder.encode_field(&(expires_ns as i64))?;
         rows.push(Ok(encoder.take_row()));
