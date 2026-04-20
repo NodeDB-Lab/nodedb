@@ -60,8 +60,16 @@ impl CrdtSyncDelivery {
         tenant_id: u32,
         subscribed_collections: Vec<String>,
         config: &DeliveryConfig,
-    ) -> mpsc::Receiver<OutboundDelta> {
+    ) -> (
+        mpsc::Receiver<OutboundDelta>,
+        mpsc::Receiver<nodedb_types::sync::wire::SyncFrame>,
+    ) {
         let (tx, rx) = mpsc::channel(config.max_queue_per_session);
+        // Control-frame channel: small bounded queue. Purge
+        // notifications are rare + fire-and-forget, so 32 slots is
+        // plenty. If the listener can't drain fast enough the session
+        // is already wedged for other reasons.
+        let (control_tx, control_rx) = mpsc::channel(32);
 
         let handle = LiteSessionHandle {
             session_id: session_id.clone(),
@@ -69,6 +77,7 @@ impl CrdtSyncDelivery {
             tenant_id,
             subscribed_collections,
             sender: tx,
+            control_sender: control_tx,
         };
 
         let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
@@ -83,7 +92,59 @@ impl CrdtSyncDelivery {
             "registered Lite session for CRDT sync delivery"
         );
 
-        rx
+        (rx, control_rx)
+    }
+
+    /// Broadcast a `CollectionPurged` control frame to every session
+    /// currently subscribed to `(tenant_id, collection)`. Runs when
+    /// `purge_async` finishes the per-node reclaim, so every online
+    /// Lite client learns about the hard-delete within one network
+    /// round-trip and can drop local state. Offline clients pick it
+    /// up on reconnect via the `last_seen_lsn` replay path.
+    pub fn broadcast_collection_purged(&self, tenant_id: u32, collection: &str, purge_lsn: u64) {
+        let msg = nodedb_types::sync::wire::CollectionPurgedMsg {
+            tenant_id,
+            name: collection.to_string(),
+            purge_lsn,
+        };
+        let Some(frame) = nodedb_types::sync::wire::SyncFrame::new_msgpack(
+            nodedb_types::sync::wire::SyncMessageType::CollectionPurged,
+            &msg,
+        ) else {
+            warn!(
+                tenant_id,
+                collection, purge_lsn, "failed to encode CollectionPurgedMsg — skipping broadcast"
+            );
+            return;
+        };
+
+        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
+        let mut sent = 0usize;
+        let mut dropped = 0usize;
+        for session in sessions.values() {
+            if session.tenant_id != tenant_id {
+                continue;
+            }
+            // Collection filter: if the session declared a subscription
+            // list, the collection must be in it. Empty list = "all
+            // collections for this tenant" = always notify.
+            if !session.subscribed_collections.is_empty()
+                && !session
+                    .subscribed_collections
+                    .iter()
+                    .any(|c| c == collection)
+            {
+                continue;
+            }
+            match session.control_sender.try_send(frame.clone()) {
+                Ok(()) => sent += 1,
+                Err(_) => dropped += 1,
+            }
+        }
+        info!(
+            tenant_id,
+            collection, purge_lsn, sent, dropped, "broadcast CollectionPurged to sync sessions"
+        );
     }
 
     /// Unregister a disconnected Lite session.
@@ -230,7 +291,7 @@ mod tests {
         let delivery = CrdtSyncDelivery::new();
         let config = DeliveryConfig::default();
 
-        let _rx = delivery.register("s1".into(), 42, 1, vec!["orders".into()], &config);
+        let (_rx, _crx) = delivery.register("s1".into(), 42, 1, vec!["orders".into()], &config);
         assert_eq!(delivery.session_count(), 1);
         assert!(delivery.has_subscribers(1, "orders"));
         assert!(!delivery.has_subscribers(1, "users"));
@@ -246,7 +307,7 @@ mod tests {
         let config = DeliveryConfig::default();
 
         // Empty subscribed_collections = all collections.
-        let _rx = delivery.register("s1".into(), 42, 1, vec![], &config);
+        let (_rx, _crx) = delivery.register("s1".into(), 42, 1, vec![], &config);
         assert!(delivery.has_subscribers(1, "orders"));
         assert!(delivery.has_subscribers(1, "users"));
         assert!(delivery.has_subscribers(1, "anything"));
@@ -257,7 +318,7 @@ mod tests {
         let delivery = CrdtSyncDelivery::new();
         let config = DeliveryConfig::default();
 
-        let mut rx = delivery.register("s1".into(), 42, 1, vec!["orders".into()], &config);
+        let (mut rx, _crx) = delivery.register("s1".into(), 42, 1, vec!["orders".into()], &config);
 
         delivery.enqueue(1, make_delta("orders", 100));
         delivery.enqueue(1, make_delta("users", 200)); // Should NOT deliver.
@@ -278,7 +339,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _rx = delivery.register("s1".into(), 42, 1, vec![], &config);
+        let (_rx, _crx) = delivery.register("s1".into(), 42, 1, vec![], &config);
 
         // Fill the channel (capacity 2).
         delivery.enqueue(1, make_delta("a", 1));
@@ -299,7 +360,7 @@ mod tests {
         let delivery = CrdtSyncDelivery::new();
         let config = DeliveryConfig::default();
 
-        let rx = delivery.register("s1".into(), 42, 1, vec![], &config);
+        let (rx, _crx) = delivery.register("s1".into(), 42, 1, vec![], &config);
         assert_eq!(delivery.session_count(), 1);
 
         // Drop receiver → channel closed.
@@ -313,8 +374,8 @@ mod tests {
         let delivery = CrdtSyncDelivery::new();
         let config = DeliveryConfig::default();
 
-        let mut rx1 = delivery.register("s1".into(), 1, 1, vec![], &config);
-        let mut rx2 = delivery.register("s2".into(), 2, 1, vec![], &config);
+        let (mut rx1, _c1) = delivery.register("s1".into(), 1, 1, vec![], &config);
+        let (mut rx2, _c2) = delivery.register("s2".into(), 2, 1, vec![], &config);
 
         delivery.enqueue(1, make_delta("orders", 100));
 

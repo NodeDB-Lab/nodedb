@@ -54,6 +54,11 @@ pub struct LiteSessionHandle {
     pub subscribed_collections: Vec<String>,
     /// Channel for pushing deltas to the session writer task.
     pub sender: tokio::sync::mpsc::Sender<OutboundDelta>,
+    /// Channel for pushing control frames (`CollectionPurged`,
+    /// stream-termination, etc.) that aren't per-row deltas. Kept on
+    /// a separate channel so a saturated delta queue never drops a
+    /// purge notification.
+    pub control_sender: tokio::sync::mpsc::Sender<nodedb_types::sync::wire::SyncFrame>,
 }
 
 /// Configuration for CRDT sync delivery.

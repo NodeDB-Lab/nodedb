@@ -138,11 +138,30 @@ pub fn drop_collection(
         ));
     }
 
-    // Verify the collection exists (read from the legacy redb — the
-    // replicated cache observes the same entries via the applier).
+    // Existence + idempotency check. The matrix:
+    //
+    // | catalog state       | DROP (soft)                 | DROP PURGE             |
+    // |---------------------|-----------------------------|------------------------|
+    // | active              | proceed                     | proceed (upgrade)      |
+    // | soft-deleted        | idempotent OK — already     | proceed (upgrade to    |
+    // |                     |   soft-deleted              |   hard-delete)         |
+    // | absent (purged/NA)  | 42P01 "does not exist"      | idempotent OK —        |
+    // |                     |                             |   already purged       |
+    //
+    // The two idempotency branches short-circuit with a success tag
+    // and skip the audit pair + propose — re-running a drop that's
+    // already a no-op should not spawn extra raft rounds or audit
+    // noise.
     if let Some(catalog) = state.credentials.catalog() {
         match catalog.get_collection(tenant_id.as_u32(), name) {
             Ok(Some(coll)) if coll.is_active => {}
+            Ok(Some(_)) if flags.purge => {}
+            Ok(Some(_)) => {
+                return Ok(vec![Response::Execution(Tag::new("DROP COLLECTION"))]);
+            }
+            Ok(None) if flags.purge => {
+                return Ok(vec![Response::Execution(Tag::new("DROP COLLECTION"))]);
+            }
             _ => {
                 return Err(sqlstate_error(
                     "42P01",
