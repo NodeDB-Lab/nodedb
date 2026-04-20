@@ -33,6 +33,21 @@ pub enum SqlError {
     /// from `SqlCatalogError::RetryableSchemaChanged`.
     #[error("retryable schema change on {descriptor}")]
     RetryableSchemaChanged { descriptor: String },
+
+    /// Collection is soft-deleted (within retention window).
+    /// Propagated from `SqlCatalogError::CollectionDeactivated`;
+    /// the pgwire layer renders this as sqlstate 42P01 with an
+    /// `UNDROP COLLECTION <name>` hint in the message.
+    #[error(
+        "collection '{name}' was dropped; \
+         restore with `{undrop_hint}` before retention elapses \
+         at {retention_expires_at_ns} ns"
+    )]
+    CollectionDeactivated {
+        name: String,
+        retention_expires_at_ns: u64,
+        undrop_hint: String,
+    },
 }
 
 impl From<crate::catalog::SqlCatalogError> for SqlError {
@@ -40,6 +55,17 @@ impl From<crate::catalog::SqlCatalogError> for SqlError {
         match e {
             crate::catalog::SqlCatalogError::RetryableSchemaChanged { descriptor } => {
                 Self::RetryableSchemaChanged { descriptor }
+            }
+            crate::catalog::SqlCatalogError::CollectionDeactivated {
+                name,
+                retention_expires_at_ns,
+            } => {
+                let undrop_hint = format!("UNDROP COLLECTION {name}");
+                Self::CollectionDeactivated {
+                    name,
+                    retention_expires_at_ns,
+                    undrop_hint,
+                }
             }
         }
     }

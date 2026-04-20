@@ -195,6 +195,15 @@ impl QueryContext {
             nodedb_sql::SqlError::RetryableSchemaChanged { descriptor } => {
                 crate::Error::RetryableSchemaChanged { descriptor }
             }
+            nodedb_sql::SqlError::CollectionDeactivated {
+                name,
+                retention_expires_at_ns,
+                ..
+            } => crate::Error::CollectionDeactivated {
+                tenant_id,
+                collection: name,
+                retention_expires_at_ns,
+            },
             other => crate::Error::PlanError {
                 detail: format!("{other}"),
             },

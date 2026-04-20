@@ -25,6 +25,18 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             "42P01",
             format!("collection \"{collection}\" does not exist"),
         ),
+        crate::Error::CollectionDeactivated { collection, .. } => (
+            "ERROR",
+            // 42P01 (undefined_table) is the canonical pg code; the
+            // distinct message carries the UNDROP hint so client UX
+            // can surface a restore button without a custom sqlstate.
+            "42P01",
+            format!(
+                "collection \"{collection}\" was dropped and is within its retention \
+                 window; restore it with `UNDROP COLLECTION {collection}` before \
+                 it is hard-deleted"
+            ),
+        ),
         crate::Error::DocumentNotFound {
             collection,
             document_id,

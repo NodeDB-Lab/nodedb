@@ -166,7 +166,19 @@ impl SqlCatalog for OriginCatalog {
             return Ok(None);
         };
         if !stored.is_active {
-            return Ok(None);
+            // Soft-deleted: surface a distinct error so the pgwire
+            // handler renders the UNDROP hint instead of "unknown
+            // table". Retention window uses the default config —
+            // per-tenant override resolution is tracked as its own
+            // checklist item.
+            let retention = crate::config::server::RetentionSettings::default()
+                .retention_window()
+                .as_nanos() as u64;
+            let retention_expires_at_ns = stored.modification_hlc.wall_ns.saturating_add(retention);
+            return Err(SqlCatalogError::CollectionDeactivated {
+                name: name.to_string(),
+                retention_expires_at_ns,
+            });
         }
 
         // Record the observed descriptor version so the caller

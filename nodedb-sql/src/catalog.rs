@@ -32,6 +32,21 @@ pub enum SqlCatalogError {
         /// `"collection orders"`. Used in log / trace output.
         descriptor: String,
     },
+
+    /// Collection is soft-deleted (`DROP COLLECTION` run, retention
+    /// window still active). Distinct from `Ok(None)` = absent so the
+    /// planner can surface an actionable error with an `UNDROP`
+    /// hint rather than a generic "unknown table".
+    #[error(
+        "collection '{name}' was dropped and is within its retention window; \
+         restore with UNDROP COLLECTION before {retention_expires_at_ns} ns"
+    )]
+    CollectionDeactivated {
+        name: String,
+        /// Wall-clock nanoseconds when retention elapses and the
+        /// collection is hard-deleted by the GC sweeper.
+        retention_expires_at_ns: u64,
+    },
 }
 
 /// Trait for looking up collection metadata during planning.

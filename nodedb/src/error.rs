@@ -110,6 +110,16 @@ pub enum Error {
         document_id: String,
     },
 
+    #[error(
+        "collection '{collection}' is soft-deleted for tenant {tenant_id}; \
+         UNDROP before {retention_expires_at_ns} ns"
+    )]
+    CollectionDeactivated {
+        tenant_id: TenantId,
+        collection: String,
+        retention_expires_at_ns: u64,
+    },
+
     // --- Routing errors ---
     #[error("vshard {vshard_id} has no serving leader")]
     NoLeader { vshard_id: VShardId },
@@ -313,6 +323,11 @@ impl From<Error> for NodeDbError {
                 collection,
                 document_id,
             } => NodeDbError::document_not_found(collection, document_id),
+            Error::CollectionDeactivated {
+                collection,
+                retention_expires_at_ns,
+                ..
+            } => NodeDbError::collection_deactivated(collection, retention_expires_at_ns),
 
             // Routing / Cluster
             Error::NoLeader { vshard_id } => {
