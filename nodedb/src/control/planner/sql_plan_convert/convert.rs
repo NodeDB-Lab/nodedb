@@ -68,9 +68,9 @@ pub(super) fn convert_one(
             collection,
             alias: _,
             engine,
-            key_column: _,
+            key_column,
             key_value,
-        } => super::scan::convert_point_get(collection, engine, key_value, tenant_id),
+        } => super::scan::convert_point_get(collection, engine, key_column, key_value, tenant_id),
 
         SqlPlan::DocumentIndexLookup {
             collection,

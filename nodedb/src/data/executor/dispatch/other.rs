@@ -461,20 +461,33 @@ impl CoreLoop {
                 limit,
                 filters,
                 rls_filters,
+                sort_keys,
             }) => self.execute_columnar_scan(
                 task,
-                collection,
-                projection,
-                *limit,
-                filters,
-                rls_filters,
+                super::super::handlers::columnar_read::ColumnarScanParams {
+                    collection,
+                    projection,
+                    limit: *limit,
+                    filters,
+                    rls_filters,
+                    sort_keys,
+                },
             ),
 
             PhysicalPlan::Columnar(ColumnarOp::Insert {
                 collection,
                 payload,
                 format,
-            }) => self.execute_columnar_insert(task, collection, payload, format),
+                intent,
+                on_conflict_updates,
+            }) => self.execute_columnar_insert(
+                task,
+                collection,
+                payload,
+                format,
+                *intent,
+                on_conflict_updates,
+            ),
 
             PhysicalPlan::Columnar(ColumnarOp::Update {
                 collection,

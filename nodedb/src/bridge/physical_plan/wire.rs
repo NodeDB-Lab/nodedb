@@ -146,6 +146,7 @@ mod tests {
             limit: 1000,
             filters: vec![],
             rls_filters: vec![],
+            sort_keys: vec![],
         }));
     }
 

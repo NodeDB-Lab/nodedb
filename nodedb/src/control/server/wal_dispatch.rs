@@ -158,6 +158,8 @@ pub fn wal_append_if_write_with_creds(
             collection: _,
             payload,
             format: _,
+            intent: _,
+            on_conflict_updates: _,
         }) => {
             wal.append_timeseries_batch(tenant_id, vshard_id, payload)?;
         }

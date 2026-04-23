@@ -3,6 +3,7 @@
 use nodedb_sql::types::{EngineType, Filter, KvInsertIntent, SqlExpr, SqlValue};
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::physical_plan::ColumnarInsertIntent;
 use crate::bridge::physical_plan::*;
 use crate::types::{TenantId, VShardId};
 
@@ -92,6 +93,11 @@ pub(super) fn convert_insert(
     // Emit batched ColumnarOp::Insert for columnar/spatial collections.
     if !columnar_rows.is_empty() {
         let payload = rows_to_msgpack_array(&columnar_rows, column_defaults)?;
+        let intent = if if_absent {
+            ColumnarInsertIntent::InsertIfAbsent
+        } else {
+            ColumnarInsertIntent::Insert
+        };
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,
@@ -99,6 +105,8 @@ pub(super) fn convert_insert(
                 collection: collection.into(),
                 payload,
                 format: "msgpack".into(),
+                intent,
+                on_conflict_updates: Vec::new(),
             }),
             post_set_op: PostSetOp::None,
         });
@@ -111,7 +119,7 @@ pub(super) fn convert_upsert(
     collection: &str,
     engine: &EngineType,
     rows: &[Vec<(String, SqlValue)>],
-    _column_defaults: &[(String, String)],
+    column_defaults: &[(String, String)],
     on_conflict_updates: &[(String, SqlExpr)],
     tenant_id: TenantId,
 ) -> crate::Result<Vec<PhysicalTask>> {
@@ -126,6 +134,8 @@ pub(super) fn convert_upsert(
     } else {
         assignments_to_update_values(on_conflict_updates)?
     };
+
+    let mut columnar_rows: Vec<&Vec<(String, SqlValue)>> = Vec::new();
 
     for row in rows {
         let doc_id = row
@@ -149,12 +159,10 @@ pub(super) fn convert_upsert(
                     post_set_op: PostSetOp::None,
                 });
             }
-            // Columnar, Timeseries, Spatial, KeyValue should never reach here —
-            // nodedb-sql rejects upsert on these engine types at plan time.
-            EngineType::Columnar
-            | EngineType::Timeseries
-            | EngineType::Spatial
-            | EngineType::KeyValue => {
+            EngineType::Columnar | EngineType::Spatial => {
+                columnar_rows.push(row);
+            }
+            EngineType::Timeseries | EngineType::KeyValue => {
                 return Err(crate::Error::PlanError {
                     detail: format!(
                         "UPSERT into '{collection}': engine type {engine:?} does not support upsert"
@@ -162,6 +170,22 @@ pub(super) fn convert_upsert(
                 });
             }
         }
+    }
+
+    if !columnar_rows.is_empty() {
+        let payload = rows_to_msgpack_array(&columnar_rows, column_defaults)?;
+        tasks.push(PhysicalTask {
+            tenant_id,
+            vshard_id: vshard,
+            plan: PhysicalPlan::Columnar(ColumnarOp::Insert {
+                collection: collection.into(),
+                payload,
+                format: "msgpack".into(),
+                intent: ColumnarInsertIntent::Put,
+                on_conflict_updates: on_conflict_values,
+            }),
+            post_set_op: PostSetOp::None,
+        });
     }
 
     Ok(tasks)

@@ -402,6 +402,7 @@ mod tests {
             limit: 10,
             filters: Vec::new(),
             rls_filters: Vec::new(),
+            sort_keys: Vec::new(),
         });
         assert!(plan.is_broadcast_scan());
     }

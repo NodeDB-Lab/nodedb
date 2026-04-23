@@ -9,18 +9,27 @@ use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::physical_plan::ColumnarInsertIntent;
+use crate::bridge::physical_plan::document::UpdateValue;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::upsert::apply_on_conflict_updates;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    /// Execute a columnar insert: write rows from JSON payload to MutationEngine.
+    /// Execute a columnar insert: write rows from MessagePack payload to
+    /// `MutationEngine`, applying intent-specific semantics on duplicate
+    /// PK (upsert-overwrite for `Insert` and `Put`, silent skip for
+    /// `InsertIfAbsent`, merge-via-`apply_on_conflict_updates` for `Put`
+    /// with non-empty `on_conflict_updates`).
     pub(in crate::data::executor) fn execute_columnar_insert(
         &mut self,
         task: &ExecutionTask,
         collection: &str,
         payload: &[u8],
         _format: &str,
+        intent: ColumnarInsertIntent,
+        on_conflict_updates: &[(String, UpdateValue)],
     ) -> Response {
         // Parse payload: msgpack-encoded nodedb_types::Value (array or object).
         let ndb_rows: Vec<nodedb_types::Value> = match nodedb_types::value_from_msgpack(payload) {
@@ -61,16 +70,17 @@ impl CoreLoop {
             self.columnar_engines.insert(engine_key.clone(), engine);
         }
 
-        let Some(engine) = self.columnar_engines.get_mut(&engine_key) else {
-            return self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: "columnar engine missing after create".into(),
-                },
-            );
+        let schema = match self.columnar_engines.get(&engine_key) {
+            Some(e) => e.schema().clone(),
+            None => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "columnar engine missing after create".into(),
+                    },
+                );
+            }
         };
-
-        let schema = engine.schema().clone();
         let mut accepted = 0u64;
 
         for row in &ndb_rows {
@@ -86,7 +96,96 @@ impl CoreLoop {
                 .map(|col| ndb_field_to_value(obj.get(&col.name), &col.column_type))
                 .collect();
 
-            match engine.insert(&values) {
+            // Resolve the actual row to write (merged for ON CONFLICT DO
+            // UPDATE, plain otherwise). This runs before the mutable
+            // engine borrow needed by the insert call.
+            let final_values: Vec<Value> = match intent {
+                ColumnarInsertIntent::Put if !on_conflict_updates.is_empty() => {
+                    let pk_bytes = {
+                        let engine = match self.columnar_engines.get(&engine_key) {
+                            Some(e) => e,
+                            None => {
+                                return self.response_error(
+                                    task,
+                                    ErrorCode::Internal {
+                                        detail: "columnar engine vanished during insert".into(),
+                                    },
+                                );
+                            }
+                        };
+                        match engine.encode_pk_from_row(&values) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                return self.response_error(
+                                    task,
+                                    ErrorCode::Internal {
+                                        detail: format!("columnar insert: pk encode failed: {e}"),
+                                    },
+                                );
+                            }
+                        }
+                    };
+
+                    let prior_row = self
+                        .columnar_engines
+                        .get(&engine_key)
+                        .and_then(|e| e.lookup_memtable_row_by_pk(&pk_bytes))
+                        .or_else(|| self.read_flushed_row_by_pk(&engine_key, &pk_bytes));
+
+                    match prior_row {
+                        None => values,
+                        Some(prior) => {
+                            let existing_val = row_values_to_object(&schema, &prior);
+                            let excluded_val = row_values_to_object(&schema, &values);
+                            let merged = apply_on_conflict_updates(
+                                existing_val,
+                                &excluded_val,
+                                on_conflict_updates,
+                            );
+                            let merged_obj = match merged {
+                                nodedb_types::Value::Object(m) => m,
+                                _ => {
+                                    return self.response_error(
+                                        task,
+                                        ErrorCode::Internal {
+                                            detail: "merged ON CONFLICT value was not an object"
+                                                .into(),
+                                        },
+                                    );
+                                }
+                            };
+                            schema
+                                .columns
+                                .iter()
+                                .map(|col| {
+                                    ndb_field_to_value(merged_obj.get(&col.name), &col.column_type)
+                                })
+                                .collect()
+                        }
+                    }
+                }
+                _ => values,
+            };
+
+            let engine = match self.columnar_engines.get_mut(&engine_key) {
+                Some(e) => e,
+                None => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: "columnar engine vanished during insert".into(),
+                        },
+                    );
+                }
+            };
+            let result = match intent {
+                ColumnarInsertIntent::InsertIfAbsent => engine.insert_if_absent(&final_values),
+                ColumnarInsertIntent::Insert | ColumnarInsertIntent::Put => {
+                    engine.insert(&final_values)
+                }
+            };
+
+            match result {
                 Ok(_) => accepted += 1,
                 Err(e) => {
                     return self.response_error(
@@ -98,6 +197,18 @@ impl CoreLoop {
                 }
             }
         }
+
+        let engine = match self.columnar_engines.get_mut(&engine_key) {
+            Some(e) => e,
+            None => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "columnar engine missing after insert loop".into(),
+                    },
+                );
+            }
+        };
 
         // Flush memtable to a segment if the threshold has been reached.
         if engine.should_flush() {
@@ -258,6 +369,60 @@ impl CoreLoop {
             .collect();
 
         let _ = engine.insert(&values);
+    }
+}
+
+/// Build a `nodedb_types::Value::Object` from a schema-ordered row. Used
+/// by the ON CONFLICT DO UPDATE path to present `existing` and `EXCLUDED`
+/// rows to `apply_on_conflict_updates` in the same shape the document
+/// upsert path uses.
+pub(super) fn row_values_to_object(schema: &ColumnarSchema, row: &[Value]) -> nodedb_types::Value {
+    let mut map = std::collections::HashMap::with_capacity(schema.columns.len());
+    for (col, val) in schema.columns.iter().zip(row.iter()) {
+        map.insert(col.name.clone(), val.clone());
+    }
+    nodedb_types::Value::Object(map)
+}
+
+impl CoreLoop {
+    /// Read a single row from a flushed columnar segment by PK, if the PK
+    /// index points to one. Returns `None` when the PK lives in the
+    /// memtable, when the segment is not in memory, or when the row was
+    /// tombstoned. Used by the `ON CONFLICT DO UPDATE` path to locate a
+    /// prior row that has already been flushed out of the memtable.
+    pub(super) fn read_flushed_row_by_pk(
+        &self,
+        engine_key: &(crate::types::TenantId, String),
+        pk_bytes: &[u8],
+    ) -> Option<Vec<Value>> {
+        let engine = self.columnar_engines.get(engine_key)?;
+        let loc = engine.pk_index().get(pk_bytes).copied()?;
+        // Memtable case is already covered by the engine-side lookup.
+        if loc.segment_id == 0 {
+            return None;
+        }
+        // Tombstoned — prior row no longer logically present.
+        if engine
+            .delete_bitmap(loc.segment_id)
+            .is_some_and(|bm| bm.is_deleted(loc.row_index))
+        {
+            return None;
+        }
+        let segs = self.columnar_flushed_segments.get(engine_key)?;
+        // Segments are pushed in order starting at segment_id=1.
+        let seg_idx = (loc.segment_id as usize).checked_sub(1)?;
+        let seg_bytes = segs.get(seg_idx)?;
+        let reader = nodedb_columnar::SegmentReader::open(seg_bytes).ok()?;
+        let schema = engine.schema();
+        let mut row = Vec::with_capacity(schema.columns.len());
+        for col_idx in 0..schema.columns.len() {
+            let decoded = reader.read_column(col_idx).ok()?;
+            row.push(crate::data::executor::scan_normalize::decoded_col_to_value(
+                &decoded,
+                loc.row_index as usize,
+            ));
+        }
+        Some(row)
     }
 }
 

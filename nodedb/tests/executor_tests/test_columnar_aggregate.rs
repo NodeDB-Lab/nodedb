@@ -1,6 +1,6 @@
 use crate::helpers::{make_ctx, payload_value, send_ok};
 use nodedb::bridge::envelope::PhysicalPlan;
-use nodedb::bridge::physical_plan::{AggregateSpec, ColumnarOp, QueryOp};
+use nodedb::bridge::physical_plan::{AggregateSpec, ColumnarInsertIntent, ColumnarOp, QueryOp};
 use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
 
 #[test]
@@ -22,6 +22,8 @@ fn aggregate_count_reads_plain_columnar_engine_rows() {
             collection: "weather".into(),
             payload,
             format: "msgpack".into(),
+            intent: ColumnarInsertIntent::Insert,
+            on_conflict_updates: Vec::new(),
         }),
     );
 
@@ -81,6 +83,8 @@ fn columnar_having_uses_canonical_key_but_output_keeps_user_alias() {
             collection: "weather".into(),
             payload,
             format: "msgpack".into(),
+            intent: ColumnarInsertIntent::Insert,
+            on_conflict_updates: Vec::new(),
         }),
     );
 
@@ -154,6 +158,8 @@ fn columnar_insert_triggers_memtable_flush() {
             collection: "large_col".into(),
             payload,
             format: "msgpack".into(),
+            intent: ColumnarInsertIntent::Insert,
+            on_conflict_updates: Vec::new(),
         }),
     );
 
@@ -197,6 +203,8 @@ fn aggregate_group_by_does_not_require_full_materialization() {
             collection: "grouped".into(),
             payload,
             format: "msgpack".into(),
+            intent: ColumnarInsertIntent::Insert,
+            on_conflict_updates: Vec::new(),
         }),
     );
 

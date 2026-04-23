@@ -17,7 +17,7 @@ pub mod timeseries;
 pub mod vector;
 pub mod wire;
 
-pub use columnar::ColumnarOp;
+pub use columnar::{ColumnarInsertIntent, ColumnarOp};
 pub use crdt::CrdtOp;
 pub use document::{
     BalancedDef, DocumentOp, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding,

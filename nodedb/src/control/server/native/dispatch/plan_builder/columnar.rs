@@ -3,7 +3,7 @@
 use nodedb_types::protocol::TextFields;
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::ColumnarOp;
+use crate::bridge::physical_plan::{ColumnarInsertIntent, ColumnarOp};
 
 pub(crate) fn build_scan(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
     let limit = fields.limit.unwrap_or(10_000) as usize;
@@ -15,6 +15,7 @@ pub(crate) fn build_scan(fields: &TextFields, collection: &str) -> crate::Result
         limit,
         filters,
         rls_filters: Vec::new(),
+        sort_keys: Vec::new(),
     }))
 }
 
@@ -33,5 +34,7 @@ pub(crate) fn build_insert(fields: &TextFields, collection: &str) -> crate::Resu
         collection: collection.to_string(),
         payload,
         format,
+        intent: ColumnarInsertIntent::Insert,
+        on_conflict_updates: Vec::new(),
     }))
 }

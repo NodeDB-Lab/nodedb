@@ -72,29 +72,75 @@ impl MutationEngine {
         }
     }
 
-    /// Insert a row. Returns WAL record to persist.
+    /// Insert a row with upsert-on-duplicate semantics. Returns WAL
+    /// records to persist.
     ///
-    /// Validates schema, checks PK uniqueness, adds to memtable and PK index.
+    /// Validates schema. If the PK already exists, the prior row is
+    /// tombstoned via the segment's delete bitmap (a single positional
+    /// delete) before the new row is appended to the memtable. The PK
+    /// index is rebound to the new row location. This matches the
+    /// ClickHouse / Iceberg "sparse PK + positional delete" model and
+    /// keeps `SELECT WHERE pk = X` linearizable on one row without a
+    /// read-time merge pass.
+    ///
+    /// Callers that want strict INSERT (error on duplicate) should check
+    /// `pk_index().contains()` themselves before calling; callers that
+    /// want `ON CONFLICT DO NOTHING` semantics should use
+    /// [`Self::insert_if_absent`].
     pub fn insert(&mut self, values: &[Value]) -> Result<MutationResult, ColumnarError> {
-        // Extract PK bytes for uniqueness check.
         let pk_bytes = self.extract_pk_bytes(values)?;
+        let mut wal_records = Vec::with_capacity(2);
 
-        // Check for duplicate PK.
-        if self.pk_index.contains(&pk_bytes) {
-            return Err(ColumnarError::DuplicatePrimaryKey);
+        // If a prior row exists for this PK, tombstone it in place so
+        // subsequent scans skip the stale row. The PK index is rebound
+        // below to the freshly-appended row.
+        if let Some(prior) = self.pk_index.get(&pk_bytes).copied() {
+            let bitmap = self.delete_bitmaps.entry(prior.segment_id).or_default();
+            bitmap.mark_deleted(prior.row_index);
+            wal_records.push(ColumnarWalRecord::DeleteRows {
+                collection: self.collection.clone(),
+                segment_id: prior.segment_id,
+                row_indices: vec![prior.row_index],
+            });
         }
 
-        // Generate WAL record BEFORE applying the mutation.
+        let row_data = encode_row_for_wal(values)?;
+        wal_records.push(ColumnarWalRecord::InsertRow {
+            collection: self.collection.clone(),
+            row_data,
+        });
+
+        self.memtable.append_row(values)?;
+        let location = RowLocation {
+            segment_id: self.memtable_segment_id,
+            row_index: self.memtable_row_counter,
+        };
+        self.pk_index.upsert(pk_bytes, location);
+        self.memtable_row_counter += 1;
+
+        Ok(MutationResult { wal_records })
+    }
+
+    /// `INSERT ... ON CONFLICT DO NOTHING` semantics: append only if the
+    /// PK is absent; silently skip on duplicate.
+    ///
+    /// Returns `Ok(MutationResult { wal_records })` with an empty vector
+    /// when the row was skipped, so callers that batch WAL appends can
+    /// detect no-ops by checking `wal_records.is_empty()`.
+    pub fn insert_if_absent(&mut self, values: &[Value]) -> Result<MutationResult, ColumnarError> {
+        let pk_bytes = self.extract_pk_bytes(values)?;
+        if self.pk_index.contains(&pk_bytes) {
+            return Ok(MutationResult {
+                wal_records: Vec::new(),
+            });
+        }
+
         let row_data = encode_row_for_wal(values)?;
         let wal = ColumnarWalRecord::InsertRow {
             collection: self.collection.clone(),
             row_data,
         };
-
-        // Add to memtable.
         self.memtable.append_row(values)?;
-
-        // Add to PK index (pointing to memtable virtual segment).
         let location = RowLocation {
             segment_id: self.memtable_segment_id,
             row_index: self.memtable_row_counter,
@@ -105,6 +151,28 @@ impl MutationEngine {
         Ok(MutationResult {
             wal_records: vec![wal],
         })
+    }
+
+    /// Look up the current row for a PK in the memtable, if present.
+    ///
+    /// Returns `None` if the PK is not in the index, or if the PK points
+    /// to a flushed segment (callers needing cross-segment lookup must
+    /// go through a segment reader separately). This is the fast path
+    /// used by `ON CONFLICT DO UPDATE` to read the would-be-merged row
+    /// when the duplicate hits the memtable — the common case under
+    /// back-to-back inserts.
+    pub fn lookup_memtable_row_by_pk(&self, pk_bytes: &[u8]) -> Option<Vec<Value>> {
+        let loc = self.pk_index.get(pk_bytes).copied()?;
+        if loc.segment_id != self.memtable_segment_id {
+            return None;
+        }
+        self.memtable.get_row(loc.row_index as usize)
+    }
+
+    /// Encode a PK value as index bytes. Exposed for callers that need
+    /// to probe the PK index (e.g. `ON CONFLICT DO UPDATE` routing).
+    pub fn encode_pk_from_row(&self, values: &[Value]) -> Result<Vec<u8>, ColumnarError> {
+        self.extract_pk_bytes(values)
     }
 
     /// Delete a row by PK value. Returns WAL record to persist.

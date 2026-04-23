@@ -7,6 +7,35 @@
 //!
 //! All profiles share the same `ColumnarMemtable` → `SegmentWriter` infrastructure.
 
+/// Intent carried on `ColumnarOp::Insert` — see enum docs.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub enum ColumnarInsertIntent {
+    /// Plain `INSERT`. On columnar, duplicate PK is **not** an error —
+    /// the prior row is tombstoned via the segment's delete bitmap and
+    /// the new row is appended. Cross-engine SQL consistency is kept on
+    /// the read side (`SELECT WHERE pk = X` returns one row) rather than
+    /// the insert-error side, matching ClickHouse's append + dedup model.
+    Insert,
+    /// `INSERT ... ON CONFLICT DO NOTHING`: silent no-op on duplicate.
+    InsertIfAbsent,
+    /// `UPSERT` / `INSERT ... ON CONFLICT (pk) DO UPDATE`. Behaves like
+    /// `Insert` when `on_conflict_updates` is empty (overwrite); when
+    /// non-empty, the handler reads the existing row, applies the
+    /// assignments (with `EXCLUDED.col` bound to the incoming row), and
+    /// writes the merged result.
+    Put,
+}
+
 /// Base columnar physical operations.
 #[derive(
     Debug,
@@ -28,12 +57,22 @@ pub enum ColumnarOp {
         limit: usize,
         filters: Vec<u8>,
         rls_filters: Vec<u8>,
+        /// ORDER BY clause: `(field_name, ascending)` pairs, applied
+        /// against matching rows before the `limit` is enforced. Empty
+        /// for scans with no ORDER BY.
+        sort_keys: Vec<(String, bool)>,
     },
 
     /// Insert rows into a columnar memtable.
     ///
     /// Accepts JSON or MessagePack payload. The memtable is created on
     /// first insert with schema inferred from the payload.
+    ///
+    /// `intent` distinguishes plain `INSERT` (upsert-semantics on columnar:
+    /// duplicate PK tombstones the prior row and appends the new one) from
+    /// `ON CONFLICT DO NOTHING` (`InsertIfAbsent` — silent skip on dup) and
+    /// `UPSERT` / `ON CONFLICT (pk) DO UPDATE` (`Put` — optionally with
+    /// per-row merges in `on_conflict_updates`).
     Insert {
         collection: String,
         /// Row data. Format determined by `format` field.
@@ -41,6 +80,16 @@ pub enum ColumnarOp {
         /// "json" for JSON array of objects, "msgpack" for MessagePack,
         /// "ilp" for InfluxDB Line Protocol (delegated to timeseries path).
         format: String,
+        /// INSERT / INSERT IF ABSENT / UPSERT distinction. See
+        /// `ColumnarInsertIntent` for semantics per variant.
+        intent: ColumnarInsertIntent,
+        /// `ON CONFLICT (pk) DO UPDATE SET field = expr` assignments.
+        /// Carried only when `intent == Put`; empty for `Insert`,
+        /// `InsertIfAbsent`, and plain `UPSERT` (whole-row overwrite).
+        /// Each `UpdateValue` is either a literal msgpack bytes payload
+        /// or a `SqlExpr` the handler evaluates against the existing row
+        /// plus the would-be-inserted row (with `EXCLUDED.col` resolution).
+        on_conflict_updates: Vec<(String, super::document::UpdateValue)>,
     },
 
     /// Update rows matching filter predicates.

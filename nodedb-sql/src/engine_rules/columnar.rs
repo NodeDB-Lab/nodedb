@@ -1,7 +1,7 @@
 //! Engine rules for plain columnar collections.
 
 use crate::engine_rules::*;
-use crate::error::{Result, SqlError};
+use crate::error::Result;
 use crate::types::*;
 
 pub struct ColumnarRules;
@@ -17,10 +17,18 @@ impl EngineRules for ColumnarRules {
         }])
     }
 
-    fn plan_upsert(&self, _p: UpsertParams) -> Result<Vec<SqlPlan>> {
-        Err(SqlError::Unsupported {
-            detail: "UPSERT is not supported on columnar collections".into(),
-        })
+    /// `UPSERT` / `INSERT ... ON CONFLICT (pk) DO UPDATE` on columnar.
+    /// Duplicate PK tombstones the prior row via the segment's delete
+    /// bitmap; the new row (or its merged form, when `on_conflict_updates`
+    /// is non-empty) is appended. Sort-key semantics are unchanged.
+    fn plan_upsert(&self, p: UpsertParams) -> Result<Vec<SqlPlan>> {
+        Ok(vec![SqlPlan::Upsert {
+            collection: p.collection,
+            engine: EngineType::Columnar,
+            rows: p.rows,
+            column_defaults: p.column_defaults,
+            on_conflict_updates: p.on_conflict_updates,
+        }])
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {

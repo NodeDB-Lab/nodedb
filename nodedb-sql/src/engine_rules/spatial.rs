@@ -1,7 +1,7 @@
 //! Engine rules for spatial columnar collections.
 
 use crate::engine_rules::*;
-use crate::error::{Result, SqlError};
+use crate::error::Result;
 use crate::types::*;
 
 pub struct SpatialRules;
@@ -17,10 +17,17 @@ impl EngineRules for SpatialRules {
         }])
     }
 
-    fn plan_upsert(&self, _p: UpsertParams) -> Result<Vec<SqlPlan>> {
-        Err(SqlError::Unsupported {
-            detail: "UPSERT is not supported on spatial collections".into(),
-        })
+    /// Spatial extends columnar and inherits the same upsert semantics:
+    /// duplicate PK tombstones the prior row; the new row (or merged form
+    /// when `on_conflict_updates` is non-empty) is appended.
+    fn plan_upsert(&self, p: UpsertParams) -> Result<Vec<SqlPlan>> {
+        Ok(vec![SqlPlan::Upsert {
+            collection: p.collection,
+            engine: EngineType::Spatial,
+            rows: p.rows,
+            column_defaults: p.column_defaults,
+            on_conflict_updates: p.on_conflict_updates,
+        }])
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {
