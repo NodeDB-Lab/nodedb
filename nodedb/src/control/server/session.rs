@@ -357,6 +357,7 @@ impl Session {
                     expansion_depth,
                     final_top_k,
                     rrf_k: (vector_k, graph_k),
+                    vector_field: body["vector_field"].as_str().unwrap_or("").to_string(),
                     options: Default::default(),
                 })
             }

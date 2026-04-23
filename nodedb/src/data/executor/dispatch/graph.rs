@@ -86,6 +86,7 @@ impl CoreLoop {
                 expansion_depth,
                 final_top_k,
                 rrf_k,
+                vector_field,
                 options,
             } => self.execute_graph_rag_fusion(
                 task,
@@ -98,6 +99,7 @@ impl CoreLoop {
                 *expansion_depth,
                 *final_top_k,
                 *rrf_k,
+                vector_field.as_str(),
                 options.max_visited,
             ),
 

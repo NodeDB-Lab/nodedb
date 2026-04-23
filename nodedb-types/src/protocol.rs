@@ -457,6 +457,8 @@ pub struct TextFields {
     pub vector_k: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_k: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_field: Option<String>,
 
     // ── Graph ops ────────────────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -686,6 +688,7 @@ impl zerompk::ToMessagePack for TextFields {
         self.final_top_k.write(writer)?;
         self.vector_k.write(writer)?;
         self.graph_k.write(writer)?;
+        self.vector_field.write(writer)?;
         self.start_node.write(writer)?;
         self.end_node.write(writer)?;
         self.depth.write(writer)?;
@@ -790,6 +793,7 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
             final_top_k: Option::<u64>::read(reader)?,
             vector_k: Option::<f64>::read(reader)?,
             graph_k: Option::<f64>::read(reader)?,
+            vector_field: Option::<String>::read(reader)?,
             start_node: Option::<String>::read(reader)?,
             end_node: Option::<String>::read(reader)?,
             depth: Option::<u64>::read(reader)?,

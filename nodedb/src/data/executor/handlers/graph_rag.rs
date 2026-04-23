@@ -35,6 +35,7 @@ impl CoreLoop {
         expansion_depth: usize,
         final_top_k: usize,
         rrf_k: (f64, f64),
+        vector_field: &str,
         max_visited: usize,
     ) -> Response {
         debug!(
@@ -46,7 +47,7 @@ impl CoreLoop {
             "graph rag fusion"
         );
 
-        let index_key = CoreLoop::vector_index_key(tenant_id, collection, "");
+        let index_key = CoreLoop::vector_index_key(tenant_id, collection, vector_field);
         let Some(index) = self.vector_collections.get(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };

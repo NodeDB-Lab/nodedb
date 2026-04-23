@@ -9,6 +9,7 @@
 
 mod algo;
 mod edge;
+pub(super) mod rag_fusion;
 mod response;
 mod traverse;
 
@@ -95,6 +96,11 @@ pub async fn dispatch_typed(
             )
             .await,
         ),
+        NodedbStatement::GraphRagFusion { collection, params } => {
+            Some(rag_fusion::rag_fusion(state, identity, collection, params).await)
+        }
+        // Non-graph NodedbStatement variants (CreateCollection, DropCollection,
+        // etc.) return None so the caller can route them to the correct handler.
         _ => None,
     }
 }

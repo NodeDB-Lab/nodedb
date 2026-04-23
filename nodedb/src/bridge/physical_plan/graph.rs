@@ -128,6 +128,11 @@ pub enum GraphOp {
         final_top_k: usize,
         /// RRF k constants: (vector_k, graph_k).
         rrf_k: (f64, f64),
+        /// Vector index field name. Empty string selects the raw (field-less)
+        /// index created via `VectorOp::Insert`; a non-empty value selects
+        /// the field-backed index created when documents are inserted with an
+        /// embedded vector column (e.g. `INSERT INTO col (id, embedding) VALUES …`).
+        vector_field: String,
         options: GraphTraversalOptions,
     },
 

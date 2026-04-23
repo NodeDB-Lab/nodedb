@@ -47,6 +47,7 @@ pub(crate) fn build_rag_fusion(
             fields.vector_k.unwrap_or(60.0),
             fields.graph_k.unwrap_or(10.0),
         ),
+        vector_field: fields.vector_field.clone().unwrap_or_default(),
         options: Default::default(),
     }))
 }
