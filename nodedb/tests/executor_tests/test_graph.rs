@@ -230,6 +230,7 @@ fn graph_rag_fusion_pipeline() {
             expansion_depth: 2,
             final_top_k: 5,
             rrf_k: (60.0, 10.0),
+            vector_field: String::new(),
             options: Default::default(),
         }),
     );
