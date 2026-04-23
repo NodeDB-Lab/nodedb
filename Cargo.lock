@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3735,7 +3735,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-bridge"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "fluxbench",
  "libc",
@@ -3747,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-client"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "nodedb-types",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-cluster"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "crc32c",
@@ -3794,7 +3794,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-codec"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "lz4_flex 0.11.6",
  "pco",
@@ -3810,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-columnar"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "crc32c",
  "nodedb-codec",
@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-crdt"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "hmac 0.12.1",
  "loro",
@@ -3840,7 +3840,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-fts"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "icu_segmenter",
  "lindera",
@@ -3855,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-graph"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "nodedb-types",
  "rkyv 0.8.15",
@@ -3870,7 +3870,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-mem"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "fluxbench",
  "libc",
@@ -3885,7 +3885,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-query"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "nodedb-fts",
  "nodedb-spatial",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-raft"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "rand 0.9.4",
  "rkyv 0.8.15",
@@ -3917,7 +3917,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-spatial"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "h3o",
  "nodedb-types",
@@ -3932,7 +3932,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-sql"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "nodedb-query",
  "nodedb-types",
@@ -3942,7 +3942,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-strict"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "arrow",
  "nodedb-types",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-types"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "crc32c",
  "nanoid",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-vector"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "libc",
  "memmap2",
@@ -3993,7 +3993,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-wal"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes-gcm",
  "crc32c",
