@@ -123,10 +123,16 @@ impl<'a> DocumentEngine<'a> {
     }
 
     /// Delete a document and its secondary index entries.
+    ///
+    /// Returns whether a row was actually removed. The prior bytes returned
+    /// by `sparse.delete` are not needed at this boundary.
     pub fn delete(&self, collection: &str, doc_id: &str) -> crate::Result<bool> {
         self.sparse
             .delete_indexes_for_document(self.tenant_id, collection, doc_id)?;
-        self.sparse.delete(self.tenant_id, collection, doc_id)
+        Ok(self
+            .sparse
+            .delete(self.tenant_id, collection, doc_id)?
+            .is_some())
     }
 
     /// Drop all secondary index entries for a field across the entire collection.

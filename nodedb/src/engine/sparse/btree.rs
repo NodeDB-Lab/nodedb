@@ -96,34 +96,41 @@ impl SparseEngine {
     }
 
     /// Insert or update a document (tenant-scoped).
+    ///
+    /// Returns the prior bytes when this write replaced an existing document,
+    /// or `None` when it was a fresh insert. Callers thread the prior value
+    /// into Event Plane emission so the `WriteOp` tag (Insert vs Update)
+    /// reflects the actual mutation — there is no separate probe.
     pub fn put(
         &self,
         tenant_id: u32,
         collection: &str,
         document_id: &str,
         value: &[u8],
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(tenant_id, collection, document_id, |key| {
             let write_txn = self
                 .db
                 .begin_write()
                 .map_err(|e| redb_err("write txn", e))?;
-            {
+            let prior = {
                 let mut table = write_txn
                     .open_table(DOCUMENTS)
                     .map_err(|e| redb_err("open table", e))?;
                 table
                     .insert(key, value)
-                    .map_err(|e| redb_err("insert", e))?;
-            }
+                    .map_err(|e| redb_err("insert", e))?
+                    .map(|g| g.value().to_vec())
+            };
             write_txn.commit().map_err(|e| redb_err("commit", e))?;
 
             debug!(collection, document_id, len = value.len(), "document put");
-            Ok(())
+            Ok(prior)
         })
     }
 
     /// Insert or update a document within an externally-owned write transaction.
+    /// Same prior-bytes semantics as [`SparseEngine::put`].
     pub fn put_in_txn(
         &self,
         txn: &WriteTransaction,
@@ -131,15 +138,16 @@ impl SparseEngine {
         collection: &str,
         document_id: &str,
         value: &[u8],
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(tenant_id, collection, document_id, |key| {
             let mut table = txn
                 .open_table(DOCUMENTS)
                 .map_err(|e| redb_err("open table", e))?;
-            table
+            let prior = table
                 .insert(key, value)
-                .map_err(|e| redb_err("insert", e))?;
-            Ok(())
+                .map_err(|e| redb_err("insert", e))?
+                .map(|g| g.value().to_vec());
+            Ok(prior)
         })
     }
 
@@ -263,30 +271,40 @@ impl SparseEngine {
     }
 
     /// Delete a document (tenant-scoped).
+    ///
+    /// Returns the prior bytes when a row was actually removed, or `None`
+    /// when nothing matched. The Event Plane needs the prior bytes as the
+    /// `old_value` for CDC/trigger delete events; returning them here
+    /// avoids a second read pass in the handler.
     pub fn delete(
         &self,
         tenant_id: u32,
         collection: &str,
         document_id: &str,
-    ) -> crate::Result<bool> {
+    ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(tenant_id, collection, document_id, |key| {
             let write_txn = self
                 .db
                 .begin_write()
                 .map_err(|e| redb_err("write txn", e))?;
-            let removed = {
+            let prior = {
                 let mut table = write_txn
                     .open_table(DOCUMENTS)
                     .map_err(|e| redb_err("open table", e))?;
                 table
                     .remove(key)
                     .map_err(|e| redb_err("remove", e))?
-                    .is_some()
+                    .map(|g| g.value().to_vec())
             };
             write_txn.commit().map_err(|e| redb_err("commit", e))?;
 
-            debug!(collection, document_id, removed, "document delete");
-            Ok(removed)
+            debug!(
+                collection,
+                document_id,
+                removed = prior.is_some(),
+                "document delete"
+            );
+            Ok(prior)
         })
     }
 
@@ -341,9 +359,12 @@ mod tests {
     fn delete_removes() {
         let (engine, _dir) = open_temp();
         engine.put(1, "users", "u1", b"alice").unwrap();
-        assert!(engine.delete(1, "users", "u1").unwrap());
+        assert_eq!(
+            engine.delete(1, "users", "u1").unwrap(),
+            Some(b"alice".to_vec())
+        );
         assert_eq!(engine.get(1, "users", "u1").unwrap(), None);
-        assert!(!engine.delete(1, "users", "u1").unwrap());
+        assert_eq!(engine.delete(1, "users", "u1").unwrap(), None);
     }
 
     #[test]
