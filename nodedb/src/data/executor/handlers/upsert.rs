@@ -205,7 +205,7 @@ impl CoreLoop {
 /// the UPDATE handler's path — so arithmetic (`n = n + 1`), functions
 /// (`name = UPPER(name)`), `CASE`, and concatenation all work. Literal
 /// assignments bypass the evaluator and decode their msgpack directly.
-fn apply_on_conflict_updates(
+pub(in crate::data::executor) fn apply_on_conflict_updates(
     existing: nodedb_types::Value,
     excluded: &nodedb_types::Value,
     updates: &[(String, crate::bridge::physical_plan::UpdateValue)],

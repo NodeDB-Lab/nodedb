@@ -124,7 +124,16 @@ pub(super) fn convert_one(
             collection,
             entries,
             ttl_secs,
-        } => super::dml::convert_kv_insert(collection, entries, *ttl_secs, tenant_id),
+            intent,
+            on_conflict_updates,
+        } => super::dml::convert_kv_insert(
+            collection,
+            entries,
+            *ttl_secs,
+            *intent,
+            on_conflict_updates,
+            tenant_id,
+        ),
 
         SqlPlan::Update {
             collection,

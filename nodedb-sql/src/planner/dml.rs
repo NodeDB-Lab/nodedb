@@ -111,39 +111,12 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
 
     // KV engine: key and value are fundamentally separate — handle directly.
     if info.engine == EngineType::KeyValue {
-        let key_idx = columns.iter().position(|c| c == "key");
-        let ttl_idx = columns.iter().position(|c| c == "ttl");
-        let mut entries = Vec::with_capacity(rows_ast.len());
-        let mut ttl_secs: u64 = 0;
-        for row_exprs in rows_ast {
-            let key_val = match key_idx {
-                Some(idx) => expr_to_sql_value(&row_exprs[idx])?,
-                None => SqlValue::String(String::new()),
-            };
-            // Extract TTL if present (in seconds).
-            if let Some(idx) = ttl_idx {
-                match expr_to_sql_value(&row_exprs[idx]) {
-                    Ok(SqlValue::Int(n)) => ttl_secs = n.max(0) as u64,
-                    Ok(SqlValue::Float(f)) => ttl_secs = f.max(0.0) as u64,
-                    _ => {}
-                }
-            }
-            let value_cols: Vec<(String, SqlValue)> = columns
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| Some(*i) != key_idx && Some(*i) != ttl_idx)
-                .map(|(i, col)| {
-                    let val = expr_to_sql_value(&row_exprs[i])?;
-                    Ok((col.clone(), val))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            entries.push((key_val, value_cols));
-        }
-        return Ok(vec![SqlPlan::KvInsert {
-            collection: table_name,
-            entries,
-            ttl_secs,
-        }]);
+        let intent = if if_absent {
+            KvInsertIntent::InsertIfAbsent
+        } else {
+            KvInsertIntent::Insert
+        };
+        return build_kv_insert_plan(table_name, &columns, rows_ast, intent, Vec::new());
     }
 
     // All other engines: delegate to engine rules.
@@ -198,38 +171,13 @@ pub fn plan_upsert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
 
     // KV: upsert is just a PUT (natural overwrite).
     if info.engine == EngineType::KeyValue {
-        let key_idx = columns.iter().position(|c| c == "key");
-        let ttl_idx = columns.iter().position(|c| c == "ttl");
-        let mut entries = Vec::with_capacity(rows_ast.len());
-        let mut ttl_secs: u64 = 0;
-        for row_exprs in rows_ast {
-            let key_val = match key_idx {
-                Some(idx) => expr_to_sql_value(&row_exprs[idx])?,
-                None => SqlValue::String(String::new()),
-            };
-            if let Some(idx) = ttl_idx {
-                match expr_to_sql_value(&row_exprs[idx]) {
-                    Ok(SqlValue::Int(n)) => ttl_secs = n.max(0) as u64,
-                    Ok(SqlValue::Float(f)) => ttl_secs = f.max(0.0) as u64,
-                    _ => {}
-                }
-            }
-            let value_cols: Vec<(String, SqlValue)> = columns
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| Some(*i) != key_idx && Some(*i) != ttl_idx)
-                .map(|(i, col)| {
-                    let val = expr_to_sql_value(&row_exprs[i])?;
-                    Ok((col.clone(), val))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            entries.push((key_val, value_cols));
-        }
-        return Ok(vec![SqlPlan::KvInsert {
-            collection: table_name,
-            entries,
-            ttl_secs,
-        }]);
+        return build_kv_insert_plan(
+            table_name,
+            &columns,
+            rows_ast,
+            KvInsertIntent::Put,
+            Vec::new(),
+        );
     }
 
     let rows = convert_value_rows(&columns, rows_ast)?;
@@ -285,6 +233,20 @@ fn plan_upsert_with_on_conflict(
         }
     };
 
+    // KV: `INSERT ... ON CONFLICT (key) DO UPDATE SET ...` is an opt-in
+    // overwrite — same physical semantics as UPSERT, with the optional
+    // per-row assignments carried through for the Data Plane to apply
+    // against the existing row.
+    if info.engine == EngineType::KeyValue {
+        return build_kv_insert_plan(
+            table_name,
+            &columns,
+            rows_ast,
+            KvInsertIntent::Put,
+            on_conflict_updates,
+        );
+    }
+
     let rows = convert_value_rows(&columns, rows_ast)?;
     let column_defaults: Vec<(String, String)> = info
         .columns
@@ -299,6 +261,53 @@ fn plan_upsert_with_on_conflict(
         column_defaults,
         on_conflict_updates,
     })
+}
+
+/// Build a `SqlPlan::KvInsert` from a VALUES clause. Shared by plain INSERT,
+/// UPSERT, and `INSERT ... ON CONFLICT (key) DO UPDATE` — the three paths
+/// differ only in `intent` and `on_conflict_updates`, never in how entries
+/// are extracted from the row exprs.
+fn build_kv_insert_plan(
+    table_name: String,
+    columns: &[String],
+    rows_ast: &[Vec<ast::Expr>],
+    intent: KvInsertIntent,
+    on_conflict_updates: Vec<(String, SqlExpr)>,
+) -> Result<Vec<SqlPlan>> {
+    let key_idx = columns.iter().position(|c| c == "key");
+    let ttl_idx = columns.iter().position(|c| c == "ttl");
+    let mut entries = Vec::with_capacity(rows_ast.len());
+    let mut ttl_secs: u64 = 0;
+    for row_exprs in rows_ast {
+        let key_val = match key_idx {
+            Some(idx) => expr_to_sql_value(&row_exprs[idx])?,
+            None => SqlValue::String(String::new()),
+        };
+        if let Some(idx) = ttl_idx {
+            match expr_to_sql_value(&row_exprs[idx]) {
+                Ok(SqlValue::Int(n)) => ttl_secs = n.max(0) as u64,
+                Ok(SqlValue::Float(f)) => ttl_secs = f.max(0.0) as u64,
+                _ => {}
+            }
+        }
+        let value_cols: Vec<(String, SqlValue)> = columns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != key_idx && Some(*i) != ttl_idx)
+            .map(|(i, col)| {
+                let val = expr_to_sql_value(&row_exprs[i])?;
+                Ok((col.clone(), val))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        entries.push((key_val, value_cols));
+    }
+    Ok(vec![SqlPlan::KvInsert {
+        collection: table_name,
+        entries,
+        ttl_secs,
+        intent,
+        on_conflict_updates,
+    }])
 }
 
 /// Plan an UPDATE statement.

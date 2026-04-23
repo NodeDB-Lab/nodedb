@@ -23,7 +23,8 @@ pub enum KvOp {
         rls_filters: Vec<u8>,
     },
 
-    /// Insert or update. Writes a Binary Tuple value keyed by primary key.
+    /// Insert or update (RESP SET / SQL UPSERT semantics). Writes a Binary
+    /// Tuple value keyed by primary key, overwriting any existing row.
     ///
     /// If the collection has secondary indexes, they are maintained synchronously.
     /// If no secondary indexes, takes the zero-index fast path.
@@ -34,6 +35,40 @@ pub enum KvOp {
         value: Vec<u8>,
         /// Per-key TTL override in milliseconds. 0 = use collection default.
         ttl_ms: u64,
+    },
+
+    /// SQL `INSERT` semantics: write only if the key does not already exist.
+    /// Returns `unique_violation` (SQLSTATE 23505, via `NodeDbError`) on
+    /// duplicate key. Reserved for the `INSERT` SQL path — RESP `SET` and
+    /// `UPSERT` continue to use `Put`.
+    Insert {
+        collection: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_ms: u64,
+    },
+
+    /// SQL `INSERT ... ON CONFLICT DO NOTHING` semantics: write if the key
+    /// does not exist, silently no-op on duplicate. No error on conflict.
+    InsertIfAbsent {
+        collection: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_ms: u64,
+    },
+
+    /// SQL `INSERT ... ON CONFLICT (key) DO UPDATE SET ...` semantics:
+    /// write if absent; on duplicate, read-modify-write — apply the
+    /// `updates` (which may reference `EXCLUDED.col` on the incoming row)
+    /// to the existing value and write the merged result. `value` is the
+    /// would-be-inserted row, used both as the write target when absent
+    /// and as `EXCLUDED` when the handler evaluates expressions.
+    InsertOnConflictUpdate {
+        collection: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        ttl_ms: u64,
+        updates: Vec<(String, super::document::UpdateValue)>,
     },
 
     /// Delete by primary key(s). Returns count of keys actually deleted.

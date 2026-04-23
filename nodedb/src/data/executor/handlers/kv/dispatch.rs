@@ -25,6 +25,35 @@ impl CoreLoop {
                 value,
                 ttl_ms,
             } => self.execute_kv_put(task, tid, collection, key, value, *ttl_ms),
+            KvOp::Insert {
+                collection,
+                key,
+                value,
+                ttl_ms,
+            } => self.execute_kv_insert(task, tid, collection, key, value, *ttl_ms),
+            KvOp::InsertIfAbsent {
+                collection,
+                key,
+                value,
+                ttl_ms,
+            } => self.execute_kv_insert_if_absent(task, tid, collection, key, value, *ttl_ms),
+            KvOp::InsertOnConflictUpdate {
+                collection,
+                key,
+                value,
+                ttl_ms,
+                updates,
+            } => self.execute_kv_insert_on_conflict_update(
+                task,
+                super::crud::KvInsertOnConflictUpdateParams {
+                    tid,
+                    collection,
+                    key,
+                    value,
+                    ttl_ms: *ttl_ms,
+                    updates,
+                },
+            ),
             KvOp::Delete { collection, keys } => {
                 self.execute_kv_delete(task, tid, collection, keys)
             }

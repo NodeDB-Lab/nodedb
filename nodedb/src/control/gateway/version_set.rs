@@ -93,6 +93,9 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
             match op {
                 Get { collection, .. }
                 | Put { collection, .. }
+                | Insert { collection, .. }
+                | InsertIfAbsent { collection, .. }
+                | InsertOnConflictUpdate { collection, .. }
                 | Delete { collection, .. }
                 | Scan { collection, .. }
                 | Expire { collection, .. }

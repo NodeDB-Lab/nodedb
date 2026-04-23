@@ -1,6 +1,6 @@
 //! DML plan conversions (INSERT, UPDATE, DELETE).
 
-use nodedb_sql::types::{EngineType, Filter, SqlExpr, SqlValue};
+use nodedb_sql::types::{EngineType, Filter, KvInsertIntent, SqlExpr, SqlValue};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::*;
@@ -171,8 +171,21 @@ pub(super) fn convert_kv_insert(
     collection: &str,
     entries: &[(SqlValue, Vec<(String, SqlValue)>)],
     ttl_secs: u64,
+    intent: KvInsertIntent,
+    on_conflict_updates: &[(String, SqlExpr)],
     tenant_id: TenantId,
 ) -> crate::Result<Vec<PhysicalTask>> {
+    // `ON CONFLICT (key) DO UPDATE SET ... = expr`: thread per-row
+    // assignments through to the Data Plane as `UpdateValue`s. The
+    // handler performs read-modify-write on conflict and evaluates
+    // `EXCLUDED.col` / arithmetic / functions against the existing
+    // row + the would-be-inserted row — same semantics as the
+    // document-engine upsert path.
+    let update_values = if on_conflict_updates.is_empty() {
+        Vec::new()
+    } else {
+        assignments_to_update_values(on_conflict_updates)?
+    };
     let vshard = VShardId::from_collection(collection);
     let ttl_ms = ttl_secs * 1000;
     let mut tasks = Vec::with_capacity(entries.len());
@@ -196,15 +209,37 @@ pub(super) fn convert_kv_insert(
             }
             buf
         };
-        tasks.push(PhysicalTask {
-            tenant_id,
-            vshard_id: vshard,
-            plan: PhysicalPlan::Kv(KvOp::Put {
+        let op = match intent {
+            KvInsertIntent::Insert => KvOp::Insert {
                 collection: collection.into(),
                 key,
                 value,
                 ttl_ms,
-            }),
+            },
+            KvInsertIntent::InsertIfAbsent => KvOp::InsertIfAbsent {
+                collection: collection.into(),
+                key,
+                value,
+                ttl_ms,
+            },
+            KvInsertIntent::Put if !update_values.is_empty() => KvOp::InsertOnConflictUpdate {
+                collection: collection.into(),
+                key,
+                value,
+                ttl_ms,
+                updates: update_values.clone(),
+            },
+            KvInsertIntent::Put => KvOp::Put {
+                collection: collection.into(),
+                key,
+                value,
+                ttl_ms,
+            },
+        };
+        tasks.push(PhysicalTask {
+            tenant_id,
+            vshard_id: vshard,
+            plan: PhysicalPlan::Kv(op),
             post_set_op: PostSetOp::None,
         });
     }

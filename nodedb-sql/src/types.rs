@@ -91,6 +91,18 @@ pub enum SqlPlan {
         entries: Vec<(SqlValue, Vec<(String, SqlValue)>)>,
         /// TTL in seconds (0 = no expiry). Extracted from `ttl` column if present.
         ttl_secs: u64,
+        /// INSERT-vs-UPSERT distinction. `KvOp::Put` is a Redis-SET-style
+        /// upsert by design; to honor SQL `INSERT` semantics the planner must
+        /// tell the converter whether a duplicate key should raise (plain
+        /// `INSERT`, `Insert`), be silently skipped (`ON CONFLICT DO NOTHING`,
+        /// `InsertIfAbsent`), or overwrite (`UPSERT` / `ON CONFLICT DO
+        /// UPDATE`, `Put`).
+        intent: KvInsertIntent,
+        /// `ON CONFLICT (key) DO UPDATE SET field = expr` assignments, carried
+        /// through when `intent == Put` via the ON-CONFLICT-DO-UPDATE path.
+        /// Empty for plain UPSERT (whole-value overwrite) and for INSERT
+        /// variants.
+        on_conflict_updates: Vec<(String, SqlExpr)>,
     },
     /// UPSERT: insert or merge if document exists.
     Upsert {
@@ -247,6 +259,23 @@ pub enum SqlPlan {
         /// The outer query that references CTE names.
         outer: Box<SqlPlan>,
     },
+}
+
+/// INSERT-vs-UPSERT intent carried on `SqlPlan::KvInsert`.
+///
+/// The KV engine's `KvOp::Put` is a Redis-SET-style upsert: write wins
+/// unconditionally. SQL requires `INSERT` to raise `unique_violation`
+/// on duplicate keys, so the plan must carry the caller's intent through
+/// to the Data Plane where the hash-index existence probe happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvInsertIntent {
+    /// Plain `INSERT`: duplicate key raises `SQLSTATE 23505`.
+    Insert,
+    /// `INSERT ... ON CONFLICT DO NOTHING`: duplicate key is a no-op.
+    InsertIfAbsent,
+    /// `UPSERT` / `INSERT ... ON CONFLICT (key) DO UPDATE` / RESP `SET`:
+    /// duplicate key overwrites. Also the shape used by the RESP SET path.
+    Put,
 }
 
 /// Database engine type for a collection.

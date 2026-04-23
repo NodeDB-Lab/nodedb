@@ -326,6 +326,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         // KV engine: write operations.
         PhysicalPlan::Kv(
             KvOp::Put { .. }
+            | KvOp::Insert { .. }
+            | KvOp::InsertIfAbsent { .. }
+            | KvOp::InsertOnConflictUpdate { .. }
             | KvOp::Delete { .. }
             | KvOp::Expire { .. }
             | KvOp::Persist { .. }

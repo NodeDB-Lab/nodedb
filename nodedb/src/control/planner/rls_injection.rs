@@ -281,6 +281,9 @@ fn inject_permission_tree_for_plan(
         PhysicalPlan::Document(DocumentOp::Upsert { collection, .. })
         | PhysicalPlan::Document(DocumentOp::BatchInsert { collection, .. })
         | PhysicalPlan::Kv(KvOp::Put { collection, .. })
+        | PhysicalPlan::Kv(KvOp::Insert { collection, .. })
+        | PhysicalPlan::Kv(KvOp::InsertIfAbsent { collection, .. })
+        | PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate { collection, .. })
         | PhysicalPlan::Kv(KvOp::BatchPut { collection, .. }) => {
             (collection.as_str(), None, PermTreeLevel::Write)
         }
