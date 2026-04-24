@@ -63,7 +63,33 @@ impl CoreLoop {
     }
 }
 
-fn run_algorithm(
+/// Shared implementation used by both current-state and temporal
+/// `execute_graph_algo*` handlers. Runs the algorithm and encodes the
+/// response (success payload or structured error).
+pub(super) fn run_algo_response(
+    core: &CoreLoop,
+    task: &ExecutionTask,
+    csr: &CsrIndex,
+    algorithm: &GraphAlgorithm,
+    params: &AlgoParams,
+) -> Response {
+    if *algorithm == GraphAlgorithm::Sssp && params.source_node.is_none() {
+        return core.response_error(
+            task,
+            ErrorCode::Internal {
+                detail: "SSSP requires FROM '<source_node>'".into(),
+            },
+        );
+    }
+    run_algorithm(csr, algorithm, params, &core.graph_tuning)
+        .and_then(|batch| batch.to_msgpack())
+        .map_or_else(
+            |e| core.response_error(task, ErrorCode::from(e)),
+            |payload| core.response_with_payload(task, payload),
+        )
+}
+
+pub(super) fn run_algorithm(
     csr: &CsrIndex,
     algorithm: &GraphAlgorithm,
     params: &AlgoParams,

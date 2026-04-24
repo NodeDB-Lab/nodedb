@@ -124,6 +124,33 @@ impl CoreLoop {
                 }
                 self.response_ok(task)
             }
+
+            GraphOp::TemporalNeighbors {
+                collection,
+                node_id,
+                edge_label,
+                direction,
+                system_as_of_ms,
+                valid_at_ms,
+                rls_filters: _,
+            } => self.execute_graph_temporal_neighbors(
+                task,
+                super::super::handlers::graph_temporal::TemporalNeighborsParams {
+                    tid,
+                    collection,
+                    node_id,
+                    edge_label,
+                    direction: *direction,
+                    system_as_of_ms: *system_as_of_ms,
+                    valid_at_ms: *valid_at_ms,
+                },
+            ),
+
+            GraphOp::TemporalAlgorithm {
+                algorithm,
+                params,
+                system_as_of_ms,
+            } => self.execute_graph_temporal_algo(task, tid, algorithm, params, *system_as_of_ms),
         }
     }
 }

@@ -16,6 +16,7 @@ pub mod graph;
 pub mod graph_algo;
 pub mod graph_match;
 pub mod graph_rag;
+pub mod graph_temporal;
 pub mod insert_select;
 pub mod join;
 pub mod kv;

@@ -88,6 +88,8 @@ impl PhysicalPlan {
                 | PhysicalPlan::Graph(GraphOp::Subgraph { .. })
                 | PhysicalPlan::Graph(GraphOp::RagFusion { .. })
                 | PhysicalPlan::Graph(GraphOp::Match { .. })
+                | PhysicalPlan::Graph(GraphOp::TemporalNeighbors { .. })
+                | PhysicalPlan::Graph(GraphOp::TemporalAlgorithm { .. })
                 | PhysicalPlan::Vector(VectorOp::Search { .. })
                 | PhysicalPlan::Text(TextOp::Search { .. })
                 | PhysicalPlan::Text(TextOp::HybridSearch { .. })

@@ -159,4 +159,41 @@ pub enum GraphOp {
         node_id: String,
         labels: Vec<String>,
     },
+
+    /// Bitemporal 1-hop neighbors lookup.
+    ///
+    /// Resolves edges whose latest version with `system_from <= system_as_of_ms`
+    /// (converted to HLC ordinal) is not a sentinel, optionally also filtering
+    /// by `valid_from_ms <= valid_at_ms < valid_until_ms`. The handler calls
+    /// [`ceiling_resolve_edge`](crate::engine::graph::edge_store::EdgeStore::ceiling_resolve_edge)
+    /// per candidate base edge.
+    TemporalNeighbors {
+        /// Edge store is collection-scoped; current-state `Neighbors` reads
+        /// the tenant-wide CSR, but the versioned key layout is
+        /// `{collection}\x00...`, so the bitemporal path must name the
+        /// collection explicitly.
+        collection: String,
+        node_id: String,
+        edge_label: Option<String>,
+        direction: Direction,
+        /// System-time cutoff in ms. `None` falls back to current-state
+        /// semantics identical to `Neighbors`.
+        system_as_of_ms: Option<i64>,
+        /// Optional valid-time point. Skipped when `None`.
+        valid_at_ms: Option<i64>,
+        rls_filters: Vec<u8>,
+    },
+
+    /// Bitemporal graph algorithm execution.
+    ///
+    /// Identical to `Algo` but builds its CSR snapshot via
+    /// [`CsrSnapshot::from_edge_store_as_of`](crate::engine::graph::olap::snapshot::CsrSnapshot)
+    /// at the given system-time cutoff before running the algorithm.
+    TemporalAlgorithm {
+        algorithm: GraphAlgorithm,
+        params: AlgoParams,
+        /// System-time cutoff in ms. `None` means current state (equivalent
+        /// to plain `Algo`).
+        system_as_of_ms: Option<i64>,
+    },
 }
