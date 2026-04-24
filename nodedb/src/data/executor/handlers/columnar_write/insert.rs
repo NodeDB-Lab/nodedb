@@ -1,11 +1,8 @@
-//! Columnar base insert handler.
-//!
-//! Writes rows to `nodedb-columnar`'s `MutationEngine`. Accepts JSON payload
-//! (array of objects). Creates the engine on first insert with schema inferred
-//! from the first row.
+//! Columnar insert dispatcher: builds rows, applies ON CONFLICT semantics,
+//! drives the per-row insert, flushes the memtable, updates spatial index.
 
 use nodedb_columnar::MutationEngine;
-use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+use nodedb_types::columnar::ColumnType;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
@@ -15,6 +12,10 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::upsert::apply_on_conflict_updates;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
+
+use super::schema::{
+    infer_schema_from_value, ndb_field_to_value, prepend_bitemporal_columns, row_values_to_object,
+};
 
 impl CoreLoop {
     /// Execute a columnar insert: write rows from MessagePack payload to
@@ -363,207 +364,4 @@ impl CoreLoop {
             error_code: None,
         }
     }
-}
-
-impl CoreLoop {
-    /// Ingest a single JSON document into the columnar engine for a collection.
-    ///
-    /// Creates the engine on first call. Used by the spatial insert path.
-    pub(in crate::data::executor) fn ingest_doc_to_columnar(
-        &mut self,
-        tid: u32,
-        collection: &str,
-        obj: &serde_json::Map<String, serde_json::Value>,
-    ) {
-        let engine_key = (crate::types::TenantId::new(tid), collection.to_string());
-        let bitemporal = self.is_bitemporal(tid, collection);
-        let sys_now = if bitemporal {
-            self.bitemporal_now_ms()
-        } else {
-            0
-        };
-        if !self.columnar_engines.contains_key(&engine_key) {
-            let base_schema = infer_schema_from_json(&serde_json::Value::Object(obj.clone()));
-            let schema = if bitemporal {
-                prepend_bitemporal_columns(base_schema)
-            } else {
-                base_schema
-            };
-            let engine = MutationEngine::new(collection.to_string(), schema);
-            self.columnar_engines.insert(engine_key.clone(), engine);
-        }
-
-        let Some(engine) = self.columnar_engines.get_mut(&engine_key) else {
-            return;
-        };
-        let schema = engine.schema().clone();
-
-        let ndb_obj: std::collections::HashMap<String, Value> = obj
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::from(v.clone())))
-            .collect();
-        let values: Vec<Value> = schema
-            .columns
-            .iter()
-            .map(|col| match col.name.as_str() {
-                "_ts_system" if bitemporal => Value::Integer(sys_now),
-                "_ts_valid_from" if bitemporal => match ndb_obj.get("_ts_valid_from") {
-                    Some(Value::Integer(i)) => Value::Integer(*i),
-                    _ => Value::Integer(i64::MIN),
-                },
-                "_ts_valid_until" if bitemporal => match ndb_obj.get("_ts_valid_until") {
-                    Some(Value::Integer(i)) => Value::Integer(*i),
-                    _ => Value::Integer(i64::MAX),
-                },
-                _ => ndb_field_to_value(ndb_obj.get(&col.name), &col.column_type),
-            })
-            .collect();
-
-        let _ = engine.insert(&values);
-    }
-}
-
-/// Build a `nodedb_types::Value::Object` from a schema-ordered row. Used
-/// by the ON CONFLICT DO UPDATE path to present `existing` and `EXCLUDED`
-/// rows to `apply_on_conflict_updates` in the same shape the document
-/// upsert path uses.
-pub(super) fn row_values_to_object(schema: &ColumnarSchema, row: &[Value]) -> nodedb_types::Value {
-    let mut map = std::collections::HashMap::with_capacity(schema.columns.len());
-    for (col, val) in schema.columns.iter().zip(row.iter()) {
-        map.insert(col.name.clone(), val.clone());
-    }
-    nodedb_types::Value::Object(map)
-}
-
-impl CoreLoop {
-    /// Read a single row from a flushed columnar segment by PK, if the PK
-    /// index points to one. Returns `None` when the PK lives in the
-    /// memtable, when the segment is not in memory, or when the row was
-    /// tombstoned. Used by the `ON CONFLICT DO UPDATE` path to locate a
-    /// prior row that has already been flushed out of the memtable.
-    pub(super) fn read_flushed_row_by_pk(
-        &self,
-        engine_key: &(crate::types::TenantId, String),
-        pk_bytes: &[u8],
-    ) -> Option<Vec<Value>> {
-        let engine = self.columnar_engines.get(engine_key)?;
-        let loc = engine.pk_index().get(pk_bytes).copied()?;
-        // Memtable case is already covered by the engine-side lookup.
-        if loc.segment_id == 0 {
-            return None;
-        }
-        // Tombstoned — prior row no longer logically present.
-        if engine
-            .delete_bitmap(loc.segment_id)
-            .is_some_and(|bm| bm.is_deleted(loc.row_index))
-        {
-            return None;
-        }
-        let segs = self.columnar_flushed_segments.get(engine_key)?;
-        // Segments are pushed in order starting at segment_id=1.
-        let seg_idx = (loc.segment_id as usize).checked_sub(1)?;
-        let seg_bytes = segs.get(seg_idx)?;
-        let reader = nodedb_columnar::SegmentReader::open(seg_bytes).ok()?;
-        let schema = engine.schema();
-        let mut row = Vec::with_capacity(schema.columns.len());
-        for col_idx in 0..schema.columns.len() {
-            let decoded = reader.read_column(col_idx).ok()?;
-            row.push(crate::data::executor::scan_normalize::decoded_col_to_value(
-                &decoded,
-                loc.row_index as usize,
-            ));
-        }
-        Some(row)
-    }
-}
-
-/// Coerce a `nodedb_types::Value` field to match the column type.
-fn ndb_field_to_value(val: Option<&Value>, col_type: &ColumnType) -> Value {
-    let Some(val) = val else { return Value::Null };
-    match (col_type, val) {
-        (_, Value::Null) => Value::Null,
-        (ColumnType::Int64, Value::Integer(_)) => val.clone(),
-        (ColumnType::Int64, Value::Float(f)) => Value::Integer(*f as i64),
-        (ColumnType::Int64, Value::String(s)) => {
-            s.parse::<i64>().map(Value::Integer).unwrap_or(Value::Null)
-        }
-        (ColumnType::Float64, Value::Float(_)) => val.clone(),
-        (ColumnType::Float64, Value::Integer(n)) => Value::Float(*n as f64),
-        (ColumnType::Float64, Value::String(s)) => {
-            s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null)
-        }
-        (ColumnType::Bool, Value::Bool(_)) => val.clone(),
-        (ColumnType::String, Value::String(_)) => val.clone(),
-        (ColumnType::Timestamp, Value::Integer(n)) => {
-            Value::DateTime(nodedb_types::NdbDateTime::from_millis(*n))
-        }
-        (ColumnType::Timestamp, Value::Float(f)) => {
-            Value::DateTime(nodedb_types::NdbDateTime::from_millis(*f as i64))
-        }
-        (ColumnType::Timestamp, Value::String(s)) => nodedb_types::datetime::NdbDateTime::parse(s)
-            .map(Value::DateTime)
-            .unwrap_or_else(|| Value::String(s.clone())),
-        (ColumnType::Uuid, Value::String(_)) => val.clone(),
-        // Fallback: integers as floats, strings as strings.
-        (ColumnType::Float64, _) => Value::Null,
-        (ColumnType::Int64, _) => Value::Null,
-        _ => val.clone(),
-    }
-}
-
-/// Infer a columnar schema from a `nodedb_types::Value::Object` (first row).
-fn infer_schema_from_value(row: &Value) -> ColumnarSchema {
-    let obj = match row {
-        Value::Object(m) => m,
-        _ => {
-            return ColumnarSchema::new(vec![ColumnDef::required("value", ColumnType::Float64)])
-                .expect("single-column schema");
-        }
-    };
-
-    let mut columns = Vec::new();
-    for (key, val) in obj {
-        let lower = key.to_lowercase();
-        let col_type = if lower == "timestamp" || lower == "ts" || lower == "time" {
-            ColumnType::Timestamp
-        } else {
-            match val {
-                Value::Float(_) => ColumnType::Float64,
-                Value::Integer(_) => ColumnType::Int64,
-                Value::Bool(_) => ColumnType::Bool,
-                _ => ColumnType::String,
-            }
-        };
-        if lower == "id" {
-            columns.push(ColumnDef::required(key.clone(), col_type).with_primary_key());
-        } else {
-            columns.push(ColumnDef::nullable(key.clone(), col_type));
-        }
-    }
-
-    if columns.is_empty() {
-        columns.push(ColumnDef::required("value", ColumnType::Float64));
-    }
-
-    ColumnarSchema::new(columns).expect("inferred schema must be valid")
-}
-
-/// Prepend the three reserved bitemporal columns (`_ts_system`,
-/// `_ts_valid_from`, `_ts_valid_until`) at positions 0/1/2 of a columnar
-/// schema. All three are required Int64; `_ts_system` is engine-stamped
-/// on every write, the valid-time pair is client-provided (or defaults
-/// to the open interval).
-fn prepend_bitemporal_columns(base: ColumnarSchema) -> ColumnarSchema {
-    let mut cols = Vec::with_capacity(3 + base.columns.len());
-    cols.push(ColumnDef::required("_ts_system", ColumnType::Int64));
-    cols.push(ColumnDef::required("_ts_valid_from", ColumnType::Int64));
-    cols.push(ColumnDef::required("_ts_valid_until", ColumnType::Int64));
-    cols.extend(base.columns);
-    ColumnarSchema::new(cols).expect("bitemporal columnar schema must be valid")
-}
-
-/// Infer a columnar schema from a JSON object — used by the spatial insert path.
-pub(super) fn infer_schema_from_json(row: &serde_json::Value) -> ColumnarSchema {
-    let ndb: Value = row.clone().into();
-    infer_schema_from_value(&ndb)
 }

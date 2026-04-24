@@ -16,6 +16,7 @@ pub mod grouped_filter;
 pub mod grouped_scan;
 pub mod ilp;
 pub mod ilp_ingest;
+pub mod ilp_schema;
 pub mod last_value_cache;
 pub mod manager;
 pub mod memtable;

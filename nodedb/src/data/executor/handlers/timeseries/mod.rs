@@ -4,6 +4,7 @@ pub mod aggregate;
 pub mod encode;
 pub mod flush;
 pub mod ingest;
+pub mod ingest_formats;
 mod msgpack_decode;
 pub mod raw_scan;
 
