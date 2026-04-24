@@ -61,6 +61,18 @@ pub enum ColumnarOp {
         /// against matching rows before the `limit` is enforced. Empty
         /// for scans with no ORDER BY.
         sort_keys: Vec<(String, bool)>,
+        /// Bitemporal system-time cutoff: read rows whose `_ts_system`
+        /// is ≤ this value. `None` = current-state read. Only populated
+        /// for collections created `WITH BITEMPORAL`.
+        #[serde(default)]
+        #[msgpack(default)]
+        system_as_of_ms: Option<i64>,
+        /// Bitemporal valid-time predicate: keep rows whose
+        /// `[_ts_valid_from, _ts_valid_until)` interval contains this
+        /// point. `None` = no valid-time filter.
+        #[serde(default)]
+        #[msgpack(default)]
+        valid_at_ms: Option<i64>,
     },
 
     /// Insert rows into a columnar memtable.

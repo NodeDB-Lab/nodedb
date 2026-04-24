@@ -39,6 +39,19 @@ pub enum TimeseriesOp {
         computed_columns: Vec<u8>,
         /// RLS post-scan filters (applied after time-range pruning).
         rls_filters: Vec<u8>,
+        /// Bitemporal system-time cutoff. When `Some`, block-skip on
+        /// `_ts_system` min/max and a post-fetch filter exclude rows
+        /// written after the given epoch-ms. Only populated for
+        /// timeseries collections created `WITH BITEMPORAL`.
+        #[serde(default)]
+        #[msgpack(default)]
+        system_as_of_ms: Option<i64>,
+        /// Bitemporal valid-time point. When `Some`, only rows whose
+        /// `[_ts_valid_from, _ts_valid_until)` interval contains this
+        /// point are returned.
+        #[serde(default)]
+        #[msgpack(default)]
+        valid_at_ms: Option<i64>,
     },
 
     /// Write a batch of samples to the columnar memtable.

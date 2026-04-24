@@ -210,6 +210,7 @@ pub(super) fn convert_one(
             gap_fill,
             limit,
             tiered,
+            temporal,
         } => super::scan::convert_timeseries_scan(super::scan_params::TimeseriesScanParams {
             collection,
             time_range,
@@ -223,6 +224,7 @@ pub(super) fn convert_one(
             tiered,
             tenant_id,
             ctx,
+            temporal,
         }),
 
         SqlPlan::TimeseriesIngest { collection, rows } => {

@@ -403,6 +403,8 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             sort_keys: Vec::new(),
+            system_as_of_ms: None,
+            valid_at_ms: None,
         });
         assert!(plan.is_broadcast_scan());
     }

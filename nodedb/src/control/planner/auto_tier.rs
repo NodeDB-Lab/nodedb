@@ -225,6 +225,8 @@ fn build_scan_task(
             gap_fill: gap_fill.to_string(),
             computed_columns: Vec::new(),
             rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
         }),
         post_set_op: PostSetOp::None,
     }

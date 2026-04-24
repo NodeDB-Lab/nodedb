@@ -112,6 +112,8 @@ pub(super) fn convert_aggregate(
                 gap_fill: String::new(),
                 computed_columns: Vec::new(),
                 rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             }),
             post_set_op: PostSetOp::None,
         }]);

@@ -61,6 +61,7 @@ pub(super) struct TimeseriesScanParams<'a> {
     pub tiered: &'a bool,
     pub tenant_id: TenantId,
     pub ctx: &'a ConvertContext,
+    pub temporal: &'a nodedb_sql::TemporalScope,
 }
 
 /// Parameters for `convert_hybrid_search`.

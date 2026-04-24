@@ -103,6 +103,8 @@ pub(super) fn convert_scan(p: ScanParams<'_>) -> crate::Result<Vec<PhysicalTask>
                 gap_fill: String::new(),
                 computed_columns: computed_bytes,
                 rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             })
         }
         EngineType::Columnar => PhysicalPlan::Columnar(ColumnarOp::Scan {
@@ -112,6 +114,8 @@ pub(super) fn convert_scan(p: ScanParams<'_>) -> crate::Result<Vec<PhysicalTask>
             filters: filter_bytes,
             rls_filters: Vec::new(),
             sort_keys: sort.clone(),
+            system_as_of_ms: temporal.system_as_of_ms,
+            valid_at_ms: valid_at_from_scope(temporal),
         }),
         EngineType::Spatial => PhysicalPlan::Columnar(ColumnarOp::Scan {
             collection: collection.into(),
@@ -120,6 +124,8 @@ pub(super) fn convert_scan(p: ScanParams<'_>) -> crate::Result<Vec<PhysicalTask>
             filters: filter_bytes,
             rls_filters: Vec::new(),
             sort_keys: sort.clone(),
+            system_as_of_ms: None,
+            valid_at_ms: None,
         }),
         EngineType::KeyValue => PhysicalPlan::Kv(KvOp::Scan {
             collection: collection.into(),
@@ -237,6 +243,8 @@ pub(super) fn convert_point_get(
                 filters: filter_bytes,
                 rls_filters: Vec::new(),
                 sort_keys: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             })
         }
         // Timeseries should never reach here — nodedb-sql rejects point gets.
@@ -341,6 +349,7 @@ pub(super) fn convert_timeseries_scan(
         tiered,
         tenant_id,
         ctx,
+        temporal,
     } = p;
     let filter_bytes = serialize_filters(filters)?;
     let agg_pairs: Vec<(String, String)> = aggregates.iter().map(agg_expr_to_pair).collect();
@@ -379,6 +388,8 @@ pub(super) fn convert_timeseries_scan(
             gap_fill: gap_fill.to_string(),
             computed_columns: Vec::new(),
             rls_filters: Vec::new(),
+            system_as_of_ms: temporal.system_as_of_ms,
+            valid_at_ms: valid_at_from_scope(temporal),
         }),
         post_set_op: PostSetOp::None,
     }])

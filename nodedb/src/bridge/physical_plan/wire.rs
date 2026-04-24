@@ -150,6 +150,8 @@ mod tests {
             filters: vec![],
             rls_filters: vec![],
             sort_keys: vec![],
+            system_as_of_ms: None,
+            valid_at_ms: None,
         }));
     }
 
@@ -167,6 +169,8 @@ mod tests {
             gap_fill: "null".into(),
             computed_columns: vec![],
             rls_filters: vec![],
+                system_as_of_ms: None,
+                valid_at_ms: None,
         }));
     }
 
