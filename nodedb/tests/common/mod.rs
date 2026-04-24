@@ -31,5 +31,7 @@ pub fn make_cdc_event(seq: u64, partition: u16, collection: &str, op: &str) -> C
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     }
 }

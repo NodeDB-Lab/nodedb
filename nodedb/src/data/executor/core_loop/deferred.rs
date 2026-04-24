@@ -39,6 +39,9 @@ impl CoreLoop {
         for write in writes {
             self.event_sequence += 1;
 
+            let (system_time_ms, valid_time_ms) = crate::event::bitemporal_extract::extract_stamps(
+                write.new_value.as_deref().or(write.old_value.as_deref()),
+            );
             let event = WriteEvent {
                 sequence: self.event_sequence,
                 collection: Arc::from(write.collection.as_str()),
@@ -50,6 +53,8 @@ impl CoreLoop {
                 source: EventSource::Deferred,
                 new_value: write.new_value.map(|v| Arc::from(v.as_slice())),
                 old_value: write.old_value.map(|v| Arc::from(v.as_slice())),
+                system_time_ms,
+                valid_time_ms,
             };
 
             producer.emit(event);

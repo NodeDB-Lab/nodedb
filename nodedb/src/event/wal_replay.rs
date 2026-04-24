@@ -160,6 +160,8 @@ fn parse_put_record(
     {
         *sequence += 1;
         let key_str = String::from_utf8_lossy(&key);
+        let (system_time_ms, valid_time_ms) =
+            crate::event::bitemporal_extract::extract_stamps(Some(&value));
         return Some(WriteEvent {
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
@@ -171,6 +173,8 @@ fn parse_put_record(
             source: EventSource::User,
             new_value: Some(Arc::from(value.as_slice())),
             old_value: None,
+            system_time_ms,
+            valid_time_ms,
         });
     }
 
@@ -194,6 +198,8 @@ fn parse_put_record(
             source: EventSource::User,
             new_value: None,
             old_value: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         });
     }
 
@@ -205,6 +211,8 @@ fn parse_put_record(
         // Document put has exactly 3 elements; edge put has 4.
         // If the third element parsed as Vec<u8> is the actual doc value, this is a doc put.
         *sequence += 1;
+        let (system_time_ms, valid_time_ms) =
+            crate::event::bitemporal_extract::extract_stamps(Some(&value));
         return Some(WriteEvent {
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
@@ -216,6 +224,8 @@ fn parse_put_record(
             source: EventSource::User,
             new_value: Some(Arc::from(value.as_slice())),
             old_value: None,
+            system_time_ms,
+            valid_time_ms,
         });
     }
 
@@ -255,6 +265,8 @@ fn parse_delete_record(
             source: EventSource::User,
             new_value: None,
             old_value: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         });
     }
 
@@ -272,6 +284,8 @@ fn parse_delete_record(
             source: EventSource::User,
             new_value: None,
             old_value: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         });
     }
 

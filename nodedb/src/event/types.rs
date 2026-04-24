@@ -78,6 +78,15 @@ pub struct WriteEvent {
     /// The old row data before the write.
     /// Present for UPDATE and DELETE operations.
     pub old_value: Option<Arc<[u8]>>,
+
+    /// `_ts_system` extracted from the new (or old, on delete) row payload.
+    /// `None` for non-bitemporal collections, heartbeats, and bulk-summary
+    /// events whose payload is intentionally absent.
+    pub system_time_ms: Option<i64>,
+
+    /// `_ts_valid_from` extracted from the new (or old, on delete) row
+    /// payload. `None` under the same conditions as `system_time_ms`.
+    pub valid_time_ms: Option<i64>,
 }
 
 /// The type of write operation that generated this event.
@@ -206,6 +215,8 @@ mod tests {
             source: EventSource::User,
             new_value: Some(Arc::from(b"payload".as_slice())),
             old_value: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         };
         assert_eq!(event.sequence, 1);
         assert_eq!(event.op, WriteOp::Insert);

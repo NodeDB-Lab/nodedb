@@ -58,6 +58,8 @@ fn write_event(seq: u64) -> WriteEvent {
         source: EventSource::User,
         new_value: Some(Arc::from(serde_json::to_vec(&payload).unwrap().as_slice())),
         old_value: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     }
 }
 
@@ -111,6 +113,8 @@ fn buffer_read_from_lsn_shares_event_allocation_across_polls() {
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     };
     buf.push(ev);
 
@@ -152,6 +156,8 @@ fn buffer_partition_read_shares_event_allocation() {
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     };
     buf.push(ev);
 

@@ -80,6 +80,8 @@ pub fn publish_to_topic(
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     };
 
     buffer.push(event);

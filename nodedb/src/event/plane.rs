@@ -278,6 +278,8 @@ mod tests {
             source: EventSource::User,
             new_value: Some(Arc::from(b"payload".as_slice())),
             old_value: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         }
     }
 

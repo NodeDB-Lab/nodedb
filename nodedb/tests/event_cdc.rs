@@ -109,6 +109,8 @@ fn log_compaction_keeps_latest_per_key() {
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     });
     buf.push(CdcEvent {
         sequence: 2,
@@ -123,6 +125,8 @@ fn log_compaction_keeps_latest_per_key() {
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     });
 
     // Before compaction: both events present.

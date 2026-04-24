@@ -154,6 +154,8 @@ fn event_source_preserved_through_write_event() {
         source: EventSource::User,
         new_value: None,
         old_value: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     };
     // After leader failover, new leader's Event Plane replays from WAL.
     // The replayed events have source: User → triggers fire.

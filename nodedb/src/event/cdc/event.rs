@@ -43,6 +43,15 @@ pub struct CdcEvent {
     /// Each entry describes a single field-level change with its dot-path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_diffs: Option<Vec<super::super::field_diff::FieldDiff>>,
+    /// `_ts_system` from the row payload. `None` for non-bitemporal
+    /// collections; consumers using bitemporal CDC see strictly monotonic
+    /// values across events for a given (collection, partition).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_time_ms: Option<i64>,
+    /// `_ts_valid_from` from the row payload. `None` for non-bitemporal
+    /// collections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_time_ms: Option<i64>,
 }
 
 impl CdcEvent {
@@ -64,7 +73,9 @@ impl zerompk::ToMessagePack for CdcEvent {
         let field_count = 9
             + usize::from(self.new_value.is_some())
             + usize::from(self.old_value.is_some())
-            + usize::from(self.field_diffs.is_some());
+            + usize::from(self.field_diffs.is_some())
+            + usize::from(self.system_time_ms.is_some())
+            + usize::from(self.valid_time_ms.is_some());
         writer.write_map_len(field_count)?;
         writer.write_string("sequence")?;
         writer.write_u64(self.sequence)?;
@@ -96,6 +107,14 @@ impl zerompk::ToMessagePack for CdcEvent {
             writer.write_string("field_diffs")?;
             diffs.write(writer)?;
         }
+        if let Some(ts) = self.system_time_ms {
+            writer.write_string("system_time_ms")?;
+            writer.write_i64(ts)?;
+        }
+        if let Some(ts) = self.valid_time_ms {
+            writer.write_string("valid_time_ms")?;
+            writer.write_i64(ts)?;
+        }
         Ok(())
     }
 }
@@ -115,6 +134,8 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
         let mut new_value: Option<serde_json::Value> = None;
         let mut old_value: Option<serde_json::Value> = None;
         let mut field_diffs: Option<Vec<super::super::field_diff::FieldDiff>> = None;
+        let mut system_time_ms: Option<i64> = None;
+        let mut valid_time_ms: Option<i64> = None;
         for _ in 0..len {
             let key = reader.read_string()?.into_owned();
             match key.as_str() {
@@ -132,6 +153,8 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
                 "field_diffs" => {
                     field_diffs = Some(Vec::<super::super::field_diff::FieldDiff>::read(reader)?);
                 }
+                "system_time_ms" => system_time_ms = Some(reader.read_i64()?),
+                "valid_time_ms" => valid_time_ms = Some(reader.read_i64()?),
                 _ => {
                     JsonValue::read(reader)?;
                 }
@@ -150,6 +173,8 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
             new_value,
             old_value,
             field_diffs,
+            system_time_ms,
+            valid_time_ms,
         })
     }
 }
@@ -173,6 +198,8 @@ mod tests {
             old_value: None,
             schema_version: 0,
             field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         };
 
         let bytes = event.to_json_bytes();
@@ -197,11 +224,43 @@ mod tests {
             old_value: Some(serde_json::json!({"name": "Bob"})),
             schema_version: 0,
             field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         };
 
         let bytes = event.to_msgpack_bytes();
         let parsed: CdcEvent = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(parsed.op, "UPDATE");
         assert!(parsed.old_value.is_some());
+    }
+
+    #[test]
+    fn cdc_event_bitemporal_stamps_roundtrip() {
+        let event = CdcEvent {
+            sequence: 3,
+            partition: 0,
+            collection: "users".into(),
+            op: "INSERT".into(),
+            row_id: "u-1".into(),
+            event_time: 1700000002000,
+            lsn: 300,
+            tenant_id: 1,
+            new_value: Some(serde_json::json!({"name": "Carol"})),
+            old_value: None,
+            schema_version: 0,
+            field_diffs: None,
+            system_time_ms: Some(1_700_000_000_000),
+            valid_time_ms: Some(1_500_000_000_000),
+        };
+
+        let json = event.to_json_bytes();
+        let parsed_json: CdcEvent = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed_json.system_time_ms, Some(1_700_000_000_000));
+        assert_eq!(parsed_json.valid_time_ms, Some(1_500_000_000_000));
+
+        let mp = event.to_msgpack_bytes();
+        let parsed_mp: CdcEvent = zerompk::from_msgpack(&mp).unwrap();
+        assert_eq!(parsed_mp.system_time_ms, Some(1_700_000_000_000));
+        assert_eq!(parsed_mp.valid_time_ms, Some(1_500_000_000_000));
     }
 }

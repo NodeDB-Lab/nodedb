@@ -104,6 +104,9 @@ impl CoreLoop {
 
         self.event_sequence += 1;
 
+        let (system_time_ms, valid_time_ms) =
+            crate::event::bitemporal_extract::extract_stamps(new_value.or(old_value));
+
         let event = crate::event::WriteEvent {
             sequence: self.event_sequence,
             collection: Arc::from(collection),
@@ -115,6 +118,8 @@ impl CoreLoop {
             source: task.request.event_source,
             new_value: new_value.map(Arc::from),
             old_value: old_value.map(Arc::from),
+            system_time_ms,
+            valid_time_ms,
         };
 
         producer.emit(event);
@@ -149,6 +154,8 @@ impl CoreLoop {
             source: crate::event::EventSource::User,
             new_value: None,
             old_value: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         };
 
         producer.emit(event);

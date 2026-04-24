@@ -48,6 +48,8 @@ pub fn process_write_event_for_mvs(event: &WriteEvent, registry: &MvRegistry, st
         old_value: None,
         schema_version: 0,
         field_diffs: None,
+        system_time_ms: event.system_time_ms,
+        valid_time_ms: event.valid_time_ms,
     };
 
     for mv_state in &mv_states {
@@ -203,6 +205,8 @@ mod tests {
             old_value: None,
             schema_version: 0,
             field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         }
     }
 

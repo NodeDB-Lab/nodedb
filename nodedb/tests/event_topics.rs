@@ -58,6 +58,8 @@ fn topic_buffer_publish_and_consume() {
             old_value: None,
             schema_version: 0,
             field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         });
     }
 
@@ -95,6 +97,8 @@ fn topic_retention_eviction() {
             old_value: None,
             schema_version: 0,
             field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
         });
     }
 

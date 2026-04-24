@@ -31,6 +31,8 @@ fn make_event(source: EventSource, op: WriteOp, collection: &str) -> WriteEvent 
         source,
         new_value: Some(Arc::from(b"{\"id\":1}".as_slice())),
         old_value: None,
+        system_time_ms: None,
+        valid_time_ms: None,
     }
 }
 
