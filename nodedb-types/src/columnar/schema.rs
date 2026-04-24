@@ -49,6 +49,14 @@ pub struct StrictSchema {
     /// the drop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_columns: Vec<DroppedColumn>,
+    /// When true, the tuple reserves fixed-Int64 slots 0/1/2 for
+    /// `__system_from_ms`, `__valid_from_ms`, `__valid_until_ms`. These
+    /// columns are prepended by `StrictSchema::new_bitemporal` and appear
+    /// in `columns` like any other field; the flag preserves the intent
+    /// across catalog round-trips.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[msgpack(default)]
+    pub bitemporal: bool,
 }
 
 /// Tombstone for a column removed by `ALTER DROP COLUMN`.
@@ -87,6 +95,20 @@ pub struct ColumnarSchema {
     pub version: u16,
 }
 
+/// Reserved strict-tuple column names for bitemporal collections. Stored
+/// in fixed Int64 slots 0/1/2 so the decoder can extract them via a
+/// constant-offset jump.
+pub const BITEMPORAL_SYSTEM_FROM: &str = "__system_from_ms";
+pub const BITEMPORAL_VALID_FROM: &str = "__valid_from_ms";
+pub const BITEMPORAL_VALID_UNTIL: &str = "__valid_until_ms";
+
+/// All reserved bitemporal column names, in slot order (0, 1, 2).
+pub const BITEMPORAL_RESERVED_COLUMNS: [&str; 3] = [
+    BITEMPORAL_SYSTEM_FROM,
+    BITEMPORAL_VALID_FROM,
+    BITEMPORAL_VALID_UNTIL,
+];
+
 /// Schema validation errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SchemaError {
@@ -98,6 +120,8 @@ pub enum SchemaError {
     ZeroVectorDim(String),
     #[error("primary key column '{0}' must be NOT NULL")]
     NullablePrimaryKey(String),
+    #[error("column name '{0}' is reserved for bitemporal collections")]
+    ReservedColumnName(String),
 }
 
 fn validate_columns(columns: &[ColumnDef]) -> Result<(), SchemaError> {
@@ -133,11 +157,48 @@ impl SchemaOps for ColumnarSchema {
 
 impl StrictSchema {
     pub fn new(columns: Vec<ColumnDef>) -> Result<Self, SchemaError> {
+        for col in &columns {
+            if BITEMPORAL_RESERVED_COLUMNS.contains(&col.name.as_str()) {
+                return Err(SchemaError::ReservedColumnName(col.name.clone()));
+            }
+        }
         validate_columns(&columns)?;
         Ok(Self {
             columns,
             version: 1,
             dropped_columns: Vec::new(),
+            bitemporal: false,
+        })
+    }
+
+    /// Build a schema for a bitemporal strict collection. Prepends three
+    /// reserved Int64 columns (`__system_from_ms`, `__valid_from_ms`,
+    /// `__valid_until_ms`) at positions 0/1/2 so the tuple decoder can
+    /// extract them via fixed-offset jump. User columns are rejected if
+    /// any collides with a reserved name.
+    pub fn new_bitemporal(user_columns: Vec<ColumnDef>) -> Result<Self, SchemaError> {
+        for col in &user_columns {
+            if BITEMPORAL_RESERVED_COLUMNS.contains(&col.name.as_str()) {
+                return Err(SchemaError::ReservedColumnName(col.name.clone()));
+            }
+        }
+        let mut columns = Vec::with_capacity(3 + user_columns.len());
+        columns.push(ColumnDef::required(
+            BITEMPORAL_SYSTEM_FROM,
+            ColumnType::Int64,
+        ));
+        columns.push(ColumnDef::required(BITEMPORAL_VALID_FROM, ColumnType::Int64));
+        columns.push(ColumnDef::required(
+            BITEMPORAL_VALID_UNTIL,
+            ColumnType::Int64,
+        ));
+        columns.extend(user_columns);
+        validate_columns(&columns)?;
+        Ok(Self {
+            columns,
+            version: 1,
+            dropped_columns: Vec::new(),
+            bitemporal: true,
         })
     }
 
@@ -192,6 +253,7 @@ impl StrictSchema {
             version,
             columns: cols,
             dropped_columns: Vec::new(),
+            bitemporal: self.bitemporal,
         }
     }
 
