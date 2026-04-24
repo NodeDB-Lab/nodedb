@@ -159,3 +159,13 @@ Released and production-ready. All engines implemented and tested. Currently onb
 ## License
 
 NodeDB is licensed under the [Business Source License 1.1](LICENSE.md). You can use NodeDB for any commercial purpose — SaaS products, AI platforms, internal tools, self-hosted deployments, anything. The only restriction is offering NodeDB itself as a hosted database service (DBaaS) or commercial database tooling; that requires a [commercial license](LICENSE.md). Converts to Apache 2.0 on 2030-01-01.
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=nodedb-lab%2Fnodedb&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nodedb-lab/nodedb&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nodedb-lab/nodedb&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nodedb-lab/nodedb&type=date&legend=top-left" />
+ </picture>
+</a>
