@@ -15,6 +15,7 @@ use crate::engine::vector::sparse::SparseInvertedIndex;
 use crate::types::{Lsn, TenantId};
 use nodedb_graph::CsrIndex;
 use nodedb_graph::ShardedCsrIndex;
+use nodedb_types::OrdinalClock;
 
 use super::task::ExecutionTask;
 
@@ -76,6 +77,11 @@ pub struct CoreLoop {
 
     /// redb-backed graph edge storage for this core.
     pub(in crate::data::executor) edge_store: EdgeStore,
+
+    /// Strictly-monotonic ordinal clock for bitemporal `system_from` suffixes.
+    /// Shared across all Data Plane cores so edge keys are globally ordered
+    /// even under concurrent multi-core writes.
+    pub(in crate::data::executor) hlc: Arc<OrdinalClock>,
 
     /// Per-tenant in-memory CSR adjacency index, rebuilt from
     /// edge_store on startup. Each tenant's graph state lives in its
@@ -286,6 +292,7 @@ impl CoreLoop {
         request_rx: Consumer<BridgeRequest>,
         response_tx: Producer<BridgeResponse>,
         data_dir: &Path,
+        hlc: Arc<OrdinalClock>,
     ) -> crate::Result<Self> {
         let sparse_path = data_dir.join(format!("sparse/core-{core_id}.redb"));
         let sparse = SparseEngine::open(&sparse_path)?;
@@ -313,6 +320,7 @@ impl CoreLoop {
             build_rx: None,
             vector_params: HashMap::new(),
             edge_store,
+            hlc,
             csr,
             inverted,
             data_dir: data_dir.to_path_buf(),

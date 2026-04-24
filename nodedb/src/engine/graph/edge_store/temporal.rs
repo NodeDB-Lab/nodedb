@@ -1,11 +1,17 @@
 //! Bitemporal EdgeStore primitives.
 //!
-//! Key layout appends a 20-digit zero-padded `system_from_ms` suffix to the
-//! legacy composite key:
+//! Key layout appends a 20-digit zero-padded `system_from` ordinal suffix to
+//! the legacy composite key:
 //!
 //! ```text
-//! {collection}\x00{src}\x00{label}\x00{dst}\x00{system_from_ms:020}
+//! {collection}\x00{src}\x00{label}\x00{dst}\x00{system_from:020}
 //! ```
+//!
+//! `system_from` is an HLC-aligned `i64` ordinal (nanosecond-precision,
+//! strictly monotonic per write) produced by
+//! [`nodedb_types::OrdinalClock::next_ordinal`]. User-facing "AS OF SYSTEM
+//! TIME `<ms>`" queries translate via
+//! [`nodedb_types::ms_to_ordinal_upper`].
 //!
 //! Reverse-range scanning within the `edge_version_prefix` range yields the
 //! latest-written version first — the basis for the Ceiling algorithm.
@@ -16,10 +22,9 @@
 //! (`0xFF`, `0xFE`) never collide with a fixarray prefix (`0x90..=0x9f`).
 
 use nodedb_types::TenantId;
-use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use super::store::{EDGES, Edge, EdgeStore, REVERSE_EDGES, edge_key, redb_err};
+use super::store::{EDGES, Edge, EdgeStore, REVERSE_EDGES, redb_err};
 
 /// Soft-delete marker.
 pub const TOMBSTONE_SENTINEL: &[u8] = &[0xFF];
@@ -28,7 +33,7 @@ pub const TOMBSTONE_SENTINEL: &[u8] = &[0xFF];
 /// Distinct from tombstone so audits can tell "user-deleted" from "legally erased".
 pub const GDPR_ERASURE_SENTINEL: &[u8] = &[0xFE];
 
-/// Width of the zero-padded `system_from_ms` suffix.
+/// Width of the zero-padded `system_from` ordinal suffix.
 pub const SYSTEM_TIME_WIDTH: usize = 20;
 
 /// Bitemporal edge value payload. Wraps the caller's MessagePack property
@@ -93,22 +98,22 @@ pub fn is_sentinel(bytes: &[u8]) -> bool {
 
 /// Build a versioned edge key.
 ///
-/// Returns an error if `system_from_ms` is negative — key ordering semantics
+/// Returns an error if `system_from` is negative — key ordering semantics
 /// require a non-negative suffix.
 pub fn versioned_edge_key(
     collection: &str,
     src: &str,
     label: &str,
     dst: &str,
-    system_from_ms: i64,
+    system_from: i64,
 ) -> crate::Result<String> {
-    if system_from_ms < 0 {
+    if system_from < 0 {
         return Err(crate::Error::BadRequest {
-            detail: format!("versioned_edge_key: negative system_from_ms={system_from_ms}"),
+            detail: format!("versioned_edge_key: negative system_from={system_from}"),
         });
     }
     Ok(format!(
-        "{collection}\x00{src}\x00{label}\x00{dst}\x00{system_from_ms:0width$}",
+        "{collection}\x00{src}\x00{label}\x00{dst}\x00{system_from:0width$}",
         width = SYSTEM_TIME_WIDTH
     ))
 }
@@ -131,18 +136,18 @@ pub fn parse_versioned_edge_key(key: &str) -> Option<(&str, &str, &str, &str, i6
     if version.len() != SYSTEM_TIME_WIDTH {
         return None;
     }
-    let system_from_ms: i64 = version.parse().ok()?;
-    Some((collection, src, label, dst, system_from_ms))
+    let system_from: i64 = version.parse().ok()?;
+    Some((collection, src, label, dst, system_from))
 }
 
 impl EdgeStore {
-    /// Write a new version of an edge at `system_from_ms`. Maintains
+    /// Write a new version of an edge at `system_from`. Maintains
     /// the reverse index with the same suffix so inbound traversal can
     /// version-scan symmetrically.
     ///
     /// Does NOT close prior versions' `system_until_ms` — that's Ceiling's job
     /// at read time (the closed-open interval is inferred from the next-newer
-    /// version's `system_from_ms`).
+    /// version's `system_from`).
     pub fn put_edge_versioned(
         &self,
         tid: TenantId,
@@ -151,12 +156,12 @@ impl EdgeStore {
         label: &str,
         dst: &str,
         properties: &[u8],
-        system_from_ms: i64,
+        system_from: i64,
         valid_from_ms: i64,
         valid_until_ms: i64,
     ) -> crate::Result<()> {
-        let fwd = versioned_edge_key(collection, src, label, dst, system_from_ms)?;
-        let rev = versioned_edge_key(collection, dst, label, src, system_from_ms)?;
+        let fwd = versioned_edge_key(collection, src, label, dst, system_from)?;
+        let rev = versioned_edge_key(collection, dst, label, src, system_from)?;
         let payload =
             EdgeValuePayload::new(valid_from_ms, valid_until_ms, properties.to_vec()).encode()?;
         let t = tid.as_u32();
@@ -184,7 +189,7 @@ impl EdgeStore {
         Ok(())
     }
 
-    /// Append a tombstone version at `system_from_ms` — subsequent Ceiling
+    /// Append a tombstone version at `system_from` — subsequent Ceiling
     /// reads within that system-time window return `None`.
     pub fn soft_delete_edge(
         &self,
@@ -193,7 +198,7 @@ impl EdgeStore {
         src: &str,
         label: &str,
         dst: &str,
-        system_from_ms: i64,
+        system_from: i64,
     ) -> crate::Result<()> {
         self.write_sentinel(
             tid,
@@ -201,7 +206,7 @@ impl EdgeStore {
             src,
             label,
             dst,
-            system_from_ms,
+            system_from,
             TOMBSTONE_SENTINEL,
         )
     }
@@ -215,7 +220,7 @@ impl EdgeStore {
         src: &str,
         label: &str,
         dst: &str,
-        system_from_ms: i64,
+        system_from: i64,
     ) -> crate::Result<()> {
         self.write_sentinel(
             tid,
@@ -223,7 +228,7 @@ impl EdgeStore {
             src,
             label,
             dst,
-            system_from_ms,
+            system_from,
             GDPR_ERASURE_SENTINEL,
         )
     }
@@ -235,11 +240,11 @@ impl EdgeStore {
         src: &str,
         label: &str,
         dst: &str,
-        system_from_ms: i64,
+        system_from: i64,
         sentinel: &[u8],
     ) -> crate::Result<()> {
-        let fwd = versioned_edge_key(collection, src, label, dst, system_from_ms)?;
-        let rev = versioned_edge_key(collection, dst, label, src, system_from_ms)?;
+        let fwd = versioned_edge_key(collection, src, label, dst, system_from)?;
+        let rev = versioned_edge_key(collection, dst, label, src, system_from)?;
         let t = tid.as_u32();
 
         let write_txn = self
@@ -270,7 +275,7 @@ impl EdgeStore {
     }
 
     /// Resolve the Ceiling: the latest version of
-    /// `(collection, src, label, dst)` whose `system_from_ms ≤ system_as_of_ms`.
+    /// `(collection, src, label, dst)` whose `system_from ≤ system_as_of`.
     ///
     /// Returns `Ok(None)` if no version exists at or before the cutoff, or if
     /// the latest qualifying version is a tombstone/GDPR erasure.
@@ -285,16 +290,16 @@ impl EdgeStore {
         src: &str,
         label: &str,
         dst: &str,
-        system_as_of_ms: i64,
+        system_as_of: i64,
         valid_at_ms: Option<i64>,
     ) -> crate::Result<Option<Vec<u8>>> {
-        if system_as_of_ms < 0 {
+        if system_as_of < 0 {
             return Err(crate::Error::BadRequest {
-                detail: format!("ceiling_resolve_edge: negative system_as_of_ms={system_as_of_ms}"),
+                detail: format!("ceiling_resolve_edge: negative system_as_of={system_as_of}"),
             });
         }
         let prefix = edge_version_prefix(collection, src, label, dst);
-        let upper = versioned_edge_key(collection, src, label, dst, system_as_of_ms)?;
+        let upper = versioned_edge_key(collection, src, label, dst, system_as_of)?;
         let t = tid.as_u32();
 
         let read_txn = self
@@ -305,7 +310,7 @@ impl EdgeStore {
             .open_table(EDGES)
             .map_err(|e| redb_err("open edges", e))?;
 
-        // Inclusive upper — the exact key at system_as_of_ms is a valid ceiling.
+        // Inclusive upper — the exact key at system_as_of is a valid ceiling.
         let range = table
             .range((t, prefix.as_str())..=(t, upper.as_str()))
             .map_err(|e| redb_err("ceiling range", e))?;

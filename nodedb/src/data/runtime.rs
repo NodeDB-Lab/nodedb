@@ -174,6 +174,7 @@ pub fn spawn_core(
     event_producer: Option<crate::event::bus::EventProducer>,
     governor: Arc<nodedb_mem::MemoryGovernor>,
     quiesce: Option<Arc<crate::bridge::quiesce::CollectionQuiesce>>,
+    hlc: Arc<nodedb_types::OrdinalClock>,
 ) -> std::io::Result<(JoinHandle<()>, EventFdNotifier)> {
     let data_dir = data_dir.to_path_buf();
 
@@ -191,7 +192,7 @@ pub fn spawn_core(
             }
 
             // 2. Open engines.
-            let mut core = CoreLoop::open(core_id, request_rx, response_tx, &data_dir)
+            let mut core = CoreLoop::open(core_id, request_rx, response_tx, &data_dir, hlc)
                 .expect("failed to open CoreLoop engines");
 
             // 2b. Apply memory governor.

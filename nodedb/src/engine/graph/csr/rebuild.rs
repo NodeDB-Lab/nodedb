@@ -9,10 +9,20 @@ use nodedb_types::TenantId;
 
 use crate::engine::graph::edge_store::EdgeStore;
 
-/// Rebuild the sharded CSR index from an EdgeStore.
+/// Rebuild the sharded CSR index from an EdgeStore at `system_as_of` (None =
+/// current state).
 pub fn rebuild_sharded_from_store(store: &EdgeStore) -> crate::Result<ShardedCsrIndex> {
+    rebuild_sharded_from_store_as_of(store, None)
+}
+
+/// Rebuild the sharded CSR index from an EdgeStore using a specific
+/// bitemporal cutoff.
+pub fn rebuild_sharded_from_store_as_of(
+    store: &EdgeStore,
+    system_as_of: Option<i64>,
+) -> crate::Result<ShardedCsrIndex> {
     let mut sharded = ShardedCsrIndex::new();
-    let all_edges = store.scan_all_edges_decoded()?;
+    let all_edges = store.scan_all_edges_decoded(system_as_of)?;
 
     // First pass: materialize every (tenant, node) so isolated endpoints
     // get stable node ids before edge insertion.
@@ -49,7 +59,7 @@ pub fn rebuild_sharded_from_store(store: &EdgeStore) -> crate::Result<ShardedCsr
 pub fn rebuild_from_store(store: &EdgeStore) -> crate::Result<CsrIndex> {
     use std::collections::hash_map::Entry;
 
-    let mut sharded = rebuild_sharded_from_store(store)?;
+    let mut sharded = rebuild_sharded_from_store_as_of(store, None)?;
     let tid = sharded
         .iter()
         .map(|(tid, _)| *tid)

@@ -479,9 +479,12 @@ impl CoreLoop {
                     .delete_indexes_for_document(tid, collection, document_id);
                 let edges_removed = self.csr_partition_mut(tid).remove_node_edges(document_id);
                 if edges_removed > 0 {
-                    let _ = self
-                        .edge_store
-                        .delete_edges_for_node(nodedb_types::TenantId::new(tid), document_id);
+                    let cascade_ord = self.hlc.next_ordinal();
+                    let _ = self.edge_store.delete_edges_for_node(
+                        nodedb_types::TenantId::new(tid),
+                        document_id,
+                        cascade_ord,
+                    );
                 }
 
                 if let Some(old) = old_value {

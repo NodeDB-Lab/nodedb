@@ -188,7 +188,8 @@ impl CoreLoop {
                 None => 0,
             };
             if edges > 0 {
-                if let Err(e) = self.edge_store.delete_edges_for_node(*tid, node) {
+                let ord = self.hlc.next_ordinal();
+                if let Err(e) = self.edge_store.delete_edges_for_node(*tid, node, ord) {
                     tracing::warn!(
                         core = self.core_id,
                         tid = tid.as_u32(),

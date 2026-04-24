@@ -54,13 +54,18 @@ impl CoreLoop {
             );
         }
 
-        match self.edge_store.put_edge(
+        let ord = self.hlc.next_ordinal();
+        let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
+        match self.edge_store.put_edge_versioned(
             TenantId::new(tid),
             collection,
             src_id,
             label,
             dst_id,
             properties,
+            ord,
+            valid_from_ms,
+            i64::MAX,
         ) {
             Ok(()) => {
                 let weight = crate::engine::graph::csr::extract_weight_from_properties(properties);
@@ -117,13 +122,18 @@ impl CoreLoop {
                     },
                 );
             }
-            match self.edge_store.put_edge(
+            let ord = self.hlc.next_ordinal();
+            let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
+            match self.edge_store.put_edge_versioned(
                 TenantId::new(tid),
                 &edge.collection,
                 &edge.src_id,
                 &edge.label,
                 &edge.dst_id,
                 &[],
+                ord,
+                valid_from_ms,
+                i64::MAX,
             ) {
                 Ok(()) => {
                     let partition = self.csr_partition_mut(tid);
@@ -166,12 +176,14 @@ impl CoreLoop {
             "edge delete batch"
         );
         for edge in edges {
-            let _ = self.edge_store.delete_edge(
+            let ord = self.hlc.next_ordinal();
+            let _ = self.edge_store.soft_delete_edge(
                 TenantId::new(tid),
                 &edge.collection,
                 &edge.src_id,
                 &edge.label,
                 &edge.dst_id,
+                ord,
             );
             let partition = self.csr_partition_mut(tid);
             partition.remove_edge(&edge.src_id, &edge.label, &edge.dst_id);
@@ -193,10 +205,15 @@ impl CoreLoop {
         dst_id: &str,
     ) -> Response {
         debug!(core = self.core_id, tid, %collection, %src_id, %label, %dst_id, "edge delete");
-        match self
-            .edge_store
-            .delete_edge(TenantId::new(tid), collection, src_id, label, dst_id)
-        {
+        let ord = self.hlc.next_ordinal();
+        match self.edge_store.soft_delete_edge(
+            TenantId::new(tid),
+            collection,
+            src_id,
+            label,
+            dst_id,
+            ord,
+        ) {
             Ok(_) => {
                 let partition = self.csr_partition_mut(tid);
                 partition.remove_edge(src_id, label, dst_id);

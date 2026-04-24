@@ -278,6 +278,11 @@ async fn main() -> anyhow::Result<()> {
     // `try_start_scan` — splitting it would make drain a no-op.
     let quiesce = nodedb::bridge::quiesce::CollectionQuiesce::new();
 
+    // Shared ordinal clock for bitemporal `system_from` key suffixes.
+    // One instance per server — all Data Plane cores reference the same
+    // Arc so edge keys are globally strictly monotonic.
+    let hlc = Arc::new(nodedb_types::OrdinalClock::new());
+
     let mut core_handles = Vec::with_capacity(num_cores);
     let mut notifiers = Vec::with_capacity(num_cores);
     for (core_id, (data_side, event_producer)) in
@@ -296,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
             Some(event_producer),
             Arc::clone(&governor),
             Some(Arc::clone(&quiesce)),
+            Arc::clone(&hlc),
         )?;
         core_handles.push(handle);
         notifiers.push((core_id, notifier));

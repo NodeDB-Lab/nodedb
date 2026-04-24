@@ -106,24 +106,30 @@ impl CoreLoop {
                     old_properties,
                 } => {
                     let tenant = nodedb_types::TenantId::new(tid);
+                    let ord = self.hlc.next_ordinal();
                     if let Some(old_props) = old_properties {
-                        // Edge was overwritten — restore old properties.
-                        let _ = self.edge_store.put_edge(
+                        // Edge was overwritten — restore old properties as a new version.
+                        let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
+                        let _ = self.edge_store.put_edge_versioned(
                             tenant,
                             &collection,
                             &src_id,
                             &label,
                             &dst_id,
                             &old_props,
+                            ord,
+                            valid_from_ms,
+                            i64::MAX,
                         );
                     } else {
-                        // Edge was newly inserted — delete it and remove from CSR.
-                        let _ = self.edge_store.delete_edge(
+                        // Edge was newly inserted — tombstone it; CSR drops the edge.
+                        let _ = self.edge_store.soft_delete_edge(
                             tenant,
                             &collection,
                             &src_id,
                             &label,
                             &dst_id,
+                            ord,
                         );
                         self.csr_partition_mut(tid)
                             .remove_edge(&src_id, &label, &dst_id);
@@ -137,14 +143,20 @@ impl CoreLoop {
                     old_properties,
                 } => {
                     let tenant = nodedb_types::TenantId::new(tid);
-                    // Re-insert the deleted edge with its original properties.
-                    let _ = self.edge_store.put_edge(
+                    let ord = self.hlc.next_ordinal();
+                    let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
+                    // Re-insert the deleted edge as a new version with the
+                    // original properties.
+                    let _ = self.edge_store.put_edge_versioned(
                         tenant,
                         &collection,
                         &src_id,
                         &label,
                         &dst_id,
                         &old_properties,
+                        ord,
+                        valid_from_ms,
+                        i64::MAX,
                     );
                     let weight =
                         crate::engine::graph::csr::extract_weight_from_properties(&old_properties);
