@@ -76,6 +76,8 @@ fn ts_scan(
             aggregates,
             gap_fill: String::new(),
             rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             computed_columns: Vec::new(),
         }),
     );
@@ -112,6 +114,8 @@ fn ts_scan_filtered(
             aggregates,
             gap_fill: String::new(),
             rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             computed_columns: Vec::new(),
         }),
     );
@@ -688,6 +692,8 @@ fn large_group_by_returns_single_valid_json() {
             aggregates: vec![("count".into(), "*".into())],
             gap_fill: String::new(),
             rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             computed_columns: Vec::new(),
         }),
     );
