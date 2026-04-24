@@ -16,6 +16,10 @@ pub struct BspCoordinator {
     pub shard_ids: Vec<u16>,
     pub acks: HashMap<u16, SuperstepAck>,
     pub completed: bool,
+    /// Bitemporal system-time ordinal for this run. Stamped onto every
+    /// `SuperstepBarrier` so all shards materialize the same historical
+    /// topology. `None` means current state.
+    pub system_as_of: Option<i64>,
 }
 
 impl BspCoordinator {
@@ -25,6 +29,16 @@ impl BspCoordinator {
         tolerance: f64,
         shard_ids: Vec<u16>,
     ) -> Self {
+        Self::new_as_of(algorithm, max_iterations, tolerance, shard_ids, None)
+    }
+
+    pub fn new_as_of(
+        algorithm: String,
+        max_iterations: u32,
+        tolerance: f64,
+        shard_ids: Vec<u16>,
+        system_as_of: Option<i64>,
+    ) -> Self {
         Self {
             algorithm,
             iteration: 0,
@@ -33,6 +47,7 @@ impl BspCoordinator {
             shard_ids,
             acks: HashMap::new(),
             completed: false,
+            system_as_of,
         }
     }
 
@@ -81,6 +96,7 @@ impl BspCoordinator {
             iteration: self.iteration + 1,
             max_iterations: self.max_iterations,
             params: String::new(),
+            system_as_of: self.system_as_of,
         }
     }
 

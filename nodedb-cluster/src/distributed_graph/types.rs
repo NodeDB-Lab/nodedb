@@ -11,6 +11,12 @@ pub struct SuperstepBarrier {
     pub iteration: u32,
     pub max_iterations: u32,
     pub params: String,
+    /// Bitemporal system-time ordinal for the algorithm run. `None` means
+    /// "current state"; shards building their local `CsrSnapshot` from an
+    /// `EdgeStore` thread this through to `scan_all_edges_decoded` so every
+    /// shard sees the same historical topology.
+    #[serde(default)]
+    pub system_as_of: Option<i64>,
 }
 
 /// Boundary vertex contributions: shard → target shard (scatter phase).
@@ -56,10 +62,26 @@ mod tests {
             iteration: 3,
             max_iterations: 20,
             params: r#"{"damping":0.85}"#.into(),
+            system_as_of: None,
         };
         let bytes = zerompk::to_msgpack_vec(&barrier).unwrap();
         let decoded: SuperstepBarrier = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(decoded.iteration, 3);
+        assert!(decoded.system_as_of.is_none());
+    }
+
+    #[test]
+    fn superstep_barrier_carries_system_as_of() {
+        let barrier = SuperstepBarrier {
+            algorithm: "pagerank".into(),
+            iteration: 1,
+            max_iterations: 10,
+            params: String::new(),
+            system_as_of: Some(1_700_000_000_000_000_000),
+        };
+        let bytes = zerompk::to_msgpack_vec(&barrier).unwrap();
+        let decoded: SuperstepBarrier = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded.system_as_of, Some(1_700_000_000_000_000_000));
     }
 
     #[test]

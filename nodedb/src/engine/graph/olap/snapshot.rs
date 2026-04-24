@@ -16,7 +16,10 @@
 use std::collections::HashMap;
 
 use crate::engine::graph::csr::CsrIndex;
+use crate::engine::graph::edge_store::EdgeStore;
 use nodedb_graph::LocalNodeId;
+use nodedb_graph::csr::weights::extract_weight_from_properties;
+use nodedb_types::TenantId;
 
 /// Immutable graph snapshot for analytical workloads.
 ///
@@ -63,6 +66,56 @@ impl CsrSnapshot {
     /// arrays only — buffer edges are NOT included). Cheaper but potentially stale.
     pub fn from_csr_no_compact(csr: &CsrIndex) -> Self {
         Self::snapshot_dense(csr)
+    }
+
+    /// Build a bitemporal snapshot directly from an `EdgeStore` at a specific
+    /// system-time ordinal (or current state when `None`).
+    ///
+    /// Used by analytical reads that need "AS OF SYSTEM TIME `<t>`" semantics
+    /// — the resolver walks every edge's version chain, returning the Ceiling
+    /// value per base edge, then materializes a fresh in-memory `CsrIndex`
+    /// and snapshots it. Tombstoned / GDPR-erased bases are omitted.
+    ///
+    /// Bitemporal algorithmic correctness is delivered entirely by this
+    /// builder: the 13 algorithms consume `CsrSnapshot` opaquely and see no
+    /// temporal metadata — they simply run on whichever historical topology
+    /// the caller materialized.
+    pub fn from_edge_store_as_of(
+        edge_store: &EdgeStore,
+        tid: TenantId,
+        system_as_of: Option<i64>,
+    ) -> crate::Result<Self> {
+        let mut csr = CsrIndex::new();
+        let records = edge_store.scan_all_edges_decoded(system_as_of)?;
+
+        // First pass: intern every endpoint so isolated vertices still land
+        // in the snapshot (CSR rebuild parity).
+        for (rec_tid, _coll, src, _label, dst, _props) in &records {
+            if *rec_tid != tid {
+                continue;
+            }
+            csr.add_node(src);
+            csr.add_node(dst);
+        }
+
+        // Second pass: insert edges with weight extraction.
+        for (rec_tid, _coll, src, label, dst, props) in &records {
+            if *rec_tid != tid {
+                continue;
+            }
+            let weight = extract_weight_from_properties(props);
+            let res = if weight != 1.0 {
+                csr.add_edge_weighted(src, label, dst, weight)
+            } else {
+                csr.add_edge(src, label, dst)
+            };
+            res.map_err(|e| crate::Error::Internal {
+                detail: format!("CsrSnapshot::from_edge_store_as_of: {e}"),
+            })?;
+        }
+
+        csr.compact();
+        Ok(Self::snapshot_dense(&csr))
     }
 
     /// Snapshot the dense CSR arrays (shared by both constructors).
