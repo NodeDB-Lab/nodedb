@@ -1,103 +1,24 @@
 //! ILP → columnar memtable ingestion bridge.
 //!
 //! Accumulates parsed ILP lines into batches and flushes them to the
-//! columnar memtable. Handles schema inference on first write (auto-create).
+//! columnar memtable. Schema inference / evolution lives in the sibling
+//! `ilp_schema` module.
 
 use std::collections::HashMap;
 
-use super::columnar_memtable::{ColumnType, ColumnValue, ColumnarMemtable, ColumnarSchema};
+use super::columnar_memtable::{ColumnType, ColumnValue, ColumnarMemtable};
 use super::ilp::{FieldValue, IlpLine};
 use nodedb_types::timeseries::{IngestResult, SeriesId, SeriesKey};
 
-/// Infers a columnar schema from a batch of ILP lines.
-///
-/// Scans all lines to discover tag keys and field keys, then builds
-/// a schema: timestamp + tag columns (Symbol) + field columns (typed).
-pub fn infer_schema(lines: &[IlpLine<'_>]) -> ColumnarSchema {
-    // Collect all tag keys and field keys with their types.
-    let mut tag_keys: Vec<String> = Vec::new();
-    let mut field_keys: Vec<(String, ColumnType)> = Vec::new();
-    let mut seen_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+pub use super::ilp_schema::{ensure_bitemporal_columns, evolve_schema, infer_schema};
 
-    for line in lines {
-        for &(key, _) in &line.tags {
-            if seen_tags.insert(key.to_string()) {
-                tag_keys.push(key.to_string());
-            }
-        }
-        for &(key, ref val) in &line.fields {
-            if seen_fields.insert(key.to_string()) {
-                let col_type = match val {
-                    FieldValue::Float(_) => ColumnType::Float64,
-                    FieldValue::Int(_) | FieldValue::UInt(_) => ColumnType::Int64,
-                    FieldValue::Str(_) => ColumnType::Symbol,
-                    FieldValue::Bool(_) => ColumnType::Float64,
-                };
-                field_keys.push((key.to_string(), col_type));
-            }
-        }
-    }
-
-    // Build schema: timestamp, then tags (Symbol), then fields.
-    let mut columns = Vec::with_capacity(1 + tag_keys.len() + field_keys.len());
-    columns.push(("timestamp".to_string(), ColumnType::Timestamp));
-    for tag in &tag_keys {
-        columns.push((tag.clone(), ColumnType::Symbol));
-    }
-    for (field, ty) in &field_keys {
-        columns.push((field.clone(), *ty));
-    }
-
-    ColumnarSchema {
-        timestamp_idx: 0,
-        codecs: vec![nodedb_codec::ColumnCodec::Auto; columns.len()],
-        columns,
-    }
-}
-
-/// Detect new fields in an ILP batch and expand the memtable schema.
-///
-/// Scans all lines for tag keys and field keys not present in the current
-/// schema. New columns are added with NULL backfill for existing rows.
-/// Must be called BEFORE `ingest_batch` so the batch can map values to
-/// the expanded schema.
-pub fn evolve_schema(memtable: &mut ColumnarMemtable, lines: &[IlpLine<'_>]) {
-    // Collect existing column names before mutating (avoids borrow conflict).
-    let existing: std::collections::HashSet<String> = memtable
-        .schema()
-        .columns
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
-
-    // Collect all new columns to add (name, type).
-    let mut new_columns: Vec<(String, ColumnType)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for line in lines {
-        for &(key, _) in &line.tags {
-            if !existing.contains(key) && seen.insert(key.to_string()) {
-                new_columns.push((key.to_string(), ColumnType::Symbol));
-            }
-        }
-        for &(key, ref val) in &line.fields {
-            if !existing.contains(key) && seen.insert(key.to_string()) {
-                let col_type = match val {
-                    FieldValue::Float(_) => ColumnType::Float64,
-                    FieldValue::Int(_) | FieldValue::UInt(_) => ColumnType::Int64,
-                    FieldValue::Str(_) => ColumnType::Symbol,
-                    FieldValue::Bool(_) => ColumnType::Float64,
-                };
-                new_columns.push((key.to_string(), col_type));
-            }
-        }
-    }
-
-    // Now mutate — no outstanding borrows.
-    for (name, col_type) in new_columns {
-        memtable.add_column(name, col_type);
-    }
+/// Bitemporal stamps applied per-row on ingest. `system_ms` is always
+/// engine-assigned (client-supplied values are ignored); the valid-time
+/// pair is client-provided (via `_ts_valid_from` / `_ts_valid_until`
+/// fields in the line's field set) or defaults to the open interval.
+#[derive(Clone, Copy)]
+pub struct BitempStamps {
+    pub system_ms: i64,
 }
 
 /// Ingest a batch of parsed ILP lines into a columnar memtable.
@@ -112,16 +33,29 @@ pub fn ingest_batch(
     series_keys: &mut HashMap<SeriesId, SeriesKey>,
     default_timestamp_ms: i64,
 ) -> (usize, usize) {
-    ingest_batch_with_lvc(memtable, lines, series_keys, default_timestamp_ms, None)
+    ingest_batch_with_lvc(
+        memtable,
+        lines,
+        series_keys,
+        default_timestamp_ms,
+        None,
+        None,
+    )
 }
 
 /// Ingest a batch of ILP lines with optional last-value cache update.
+///
+/// When `bitemporal` is `Some`, rows are stamped with the provided
+/// `system_ms` for the `_ts_system` reserved column. `_ts_valid_from` /
+/// `_ts_valid_until` are pulled from the line's field set when present,
+/// defaulting to the open interval `[i64::MIN, i64::MAX)`.
 pub fn ingest_batch_with_lvc(
     memtable: &mut ColumnarMemtable,
     lines: &[IlpLine<'_>],
     series_keys: &mut HashMap<SeriesId, SeriesKey>,
     default_timestamp_ms: i64,
     mut lvc: Option<&mut super::last_value_cache::LastValueCache>,
+    bitemporal: Option<BitempStamps>,
 ) -> (usize, usize) {
     let schema = memtable.schema().clone();
     let mut accepted = 0;
@@ -168,7 +102,16 @@ pub fn ingest_batch_with_lvc(
                     values.push(ColumnValue::Float64(val));
                 }
                 ColumnType::Int64 => {
-                    let val = find_field_i64(&line.fields, col_name);
+                    let val = match (bitemporal, col_name.as_str()) {
+                        (Some(b), "_ts_system") => b.system_ms,
+                        (Some(_), "_ts_valid_from") => {
+                            find_field_i64_opt(&line.fields, col_name).unwrap_or(i64::MIN)
+                        }
+                        (Some(_), "_ts_valid_until") => {
+                            find_field_i64_opt(&line.fields, col_name).unwrap_or(i64::MAX)
+                        }
+                        _ => find_field_i64(&line.fields, col_name),
+                    };
                     values.push(ColumnValue::Int64(val));
                 }
             }
@@ -230,9 +173,13 @@ fn find_field_f64(fields: &[(&str, FieldValue<'_>)], name: &str) -> f64 {
 }
 
 fn find_field_i64(fields: &[(&str, FieldValue<'_>)], name: &str) -> i64 {
+    find_field_i64_opt(fields, name).unwrap_or(0)
+}
+
+fn find_field_i64_opt(fields: &[(&str, FieldValue<'_>)], name: &str) -> Option<i64> {
     for &(k, ref v) in fields {
         if k == name {
-            return match v {
+            return Some(match v {
                 FieldValue::Int(i) => *i,
                 FieldValue::UInt(u) => *u as i64,
                 FieldValue::Float(f) => *f as i64,
@@ -244,16 +191,16 @@ fn find_field_i64(fields: &[(&str, FieldValue<'_>)], name: &str) -> i64 {
                     }
                 }
                 FieldValue::Str(_) => 0,
-            };
+            });
         }
     }
-    0
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::timeseries::columnar_memtable::ColumnarMemtableConfig;
+    use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnarMemtableConfig};
     use crate::engine::timeseries::ilp::parse_batch;
 
     fn default_config() -> ColumnarMemtableConfig {
@@ -284,6 +231,78 @@ mod tests {
         assert_eq!(schema.columns[2].1, ColumnType::Symbol); // dc
         assert_eq!(schema.columns[3].1, ColumnType::Float64); // value
         assert_eq!(schema.columns[4].1, ColumnType::Int64); // count
+    }
+
+    #[test]
+    fn bitemporal_ingest_stamps_reserved_columns() {
+        // Late-arriving IoT backfill: an ILP line with a user-provided
+        // `_ts_valid_from` reflecting when the measurement was taken, but
+        // the server stamps `_ts_system` at ingest time. A subsequent
+        // `AS OF SYSTEM TIME` query before `system_now` must exclude the
+        // row; an `AS OF VALID TIME` query at the event time must find it.
+        let input = "temp,sensor=s1 reading=22.5,_ts_valid_from=1000i,_ts_valid_until=2000i \
+                     1500000000000000";
+        let lines: Vec<_> = parse_batch(input)
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut schema = infer_schema(&lines);
+        ensure_bitemporal_columns(&mut schema);
+        // All three reserved columns must be present; `_ts_valid_from`
+        // and `_ts_valid_until` may come from the line's field set (via
+        // `infer_schema`) instead of being appended by
+        // `ensure_bitemporal_columns`, so we check set-membership rather
+        // than fixed tail-order.
+        for name in ["_ts_system", "_ts_valid_from", "_ts_valid_until"] {
+            assert!(
+                schema.columns.iter().any(|(n, _)| n == name),
+                "missing reserved column {name}"
+            );
+        }
+
+        let mut mt = ColumnarMemtable::new(schema, default_config());
+        let mut keys = HashMap::new();
+        let stamps = Some(BitempStamps { system_ms: 5_000 });
+        let (accepted, rejected) =
+            ingest_batch_with_lvc(&mut mt, &lines, &mut keys, 0, None, stamps);
+        assert_eq!((accepted, rejected), (1, 0));
+
+        // Inspect the memtable row to verify the three reserved slots
+        // carry the expected stamps.
+        let schema = mt.schema().clone();
+        let sys_idx = schema
+            .columns
+            .iter()
+            .position(|(n, _)| n == "_ts_system")
+            .unwrap();
+        let vf_idx = schema
+            .columns
+            .iter()
+            .position(|(n, _)| n == "_ts_valid_from")
+            .unwrap();
+        let vu_idx = schema
+            .columns
+            .iter()
+            .position(|(n, _)| n == "_ts_valid_until")
+            .unwrap();
+        let rows: Vec<Vec<i64>> = (0..mt.row_count() as usize)
+            .map(|r| {
+                [sys_idx, vf_idx, vu_idx]
+                    .iter()
+                    .map(|&c| {
+                        let col = mt.column(c);
+                        if let ColumnData::Int64(vals) = col {
+                            vals[r]
+                        } else {
+                            panic!("expected Int64 column at idx {c}")
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], vec![5_000, 1_000, 2_000]);
     }
 
     #[test]
