@@ -6,16 +6,37 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
+pub(in crate::data::executor) struct PointGetParams<'a> {
+    pub tid: u32,
+    pub collection: &'a str,
+    pub document_id: &'a str,
+    pub rls_filters: &'a [u8],
+    pub system_as_of_ms: Option<i64>,
+    pub valid_at_ms: Option<i64>,
+}
+
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_point_get(
         &mut self,
         task: &ExecutionTask,
-        tid: u32,
-        collection: &str,
-        document_id: &str,
-        rls_filters: &[u8],
+        p: PointGetParams<'_>,
     ) -> Response {
-        debug!(core = self.core_id, %collection, %document_id, "point get");
+        let PointGetParams {
+            tid,
+            collection,
+            document_id,
+            rls_filters,
+            system_as_of_ms,
+            valid_at_ms,
+        } = p;
+        debug!(
+            core = self.core_id,
+            %collection,
+            %document_id,
+            ?system_as_of_ms,
+            ?valid_at_ms,
+            "point get"
+        );
 
         // Check if this is a strict collection — affects decode format.
         let config_key = (crate::types::TenantId::new(tid), collection.to_string());
@@ -28,28 +49,60 @@ impl CoreLoop {
             }
         });
 
-        // Fetch data from cache or redb.
-        let cached = self
-            .doc_cache
-            .get(tid, collection, document_id)
-            .map(|v| v.to_vec());
-        let data = if let Some(data) = cached {
-            data
-        } else {
-            match self.sparse.get(tid, collection, document_id) {
-                Ok(Some(data)) => {
-                    self.doc_cache.put(tid, collection, document_id, &data);
-                    data
-                }
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let is_temporal_read = system_as_of_ms.is_some() || valid_at_ms.is_some();
+
+        // Fetch data from cache or storage. Temporal reads bypass the
+        // doc cache (cache holds current state) and read the versioned
+        // table directly via Ceiling at the cutoff.
+        let data = if is_temporal_read {
+            match self.sparse.versioned_get_as_of(
+                tid,
+                collection,
+                document_id,
+                system_as_of_ms,
+                valid_at_ms,
+            ) {
+                Ok(Some(data)) => data,
                 Ok(None) => return self.response_with_payload(task, Vec::new()),
                 Err(e) => {
-                    tracing::warn!(core = self.core_id, error = %e, "sparse get failed");
                     return self.response_error(
                         task,
                         ErrorCode::Internal {
                             detail: e.to_string(),
                         },
                     );
+                }
+            }
+        } else {
+            let cached = self
+                .doc_cache
+                .get(tid, collection, document_id)
+                .map(|v| v.to_vec());
+            if let Some(data) = cached {
+                data
+            } else {
+                let res = if bitemporal {
+                    self.sparse
+                        .versioned_get_current(tid, collection, document_id)
+                } else {
+                    self.sparse.get(tid, collection, document_id)
+                };
+                match res {
+                    Ok(Some(data)) => {
+                        self.doc_cache.put(tid, collection, document_id, &data);
+                        data
+                    }
+                    Ok(None) => return self.response_with_payload(task, Vec::new()),
+                    Err(e) => {
+                        tracing::warn!(core = self.core_id, error = %e, "sparse get failed");
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: e.to_string(),
+                            },
+                        );
+                    }
                 }
             }
         };

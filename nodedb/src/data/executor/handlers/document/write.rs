@@ -95,6 +95,7 @@ impl CoreLoop {
         crdt_enabled: bool,
         storage_mode: &crate::bridge::physical_plan::StorageMode,
         enforcement: &crate::bridge::physical_plan::EnforcementOptions,
+        bitemporal: bool,
     ) -> Response {
         let mode_label = match storage_mode {
             crate::bridge::physical_plan::StorageMode::Schemaless => "schemaless",
@@ -116,6 +117,7 @@ impl CoreLoop {
         config.crdt_enabled = crdt_enabled;
         config.storage_mode = storage_mode.clone();
         config.enforcement = enforcement.clone();
+        config.bitemporal = bitemporal;
         config.index_paths = indexes
             .iter()
             .map(crate::engine::document::store::IndexPath::from_registered)

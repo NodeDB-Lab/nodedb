@@ -65,9 +65,32 @@ impl CoreLoop {
             value.to_vec()
         };
 
-        let prior = self
-            .sparse
-            .put_in_txn(txn, tid, collection, document_id, &stored)?;
+        // Bitemporal collections version every write: read the current
+        // (pre-write) version for the `prior` slot, then append a new
+        // version at `sys_from = now()`. Non-bitemporal collections use
+        // the legacy overwrite path, returning the old bytes redb replaced.
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let prior = if bitemporal {
+            let current = self
+                .sparse
+                .versioned_get_current(tid, collection, document_id)?;
+            self.sparse.versioned_put_in_txn(
+                txn,
+                crate::engine::sparse::btree_versioned::VersionedPut {
+                    tenant: tid,
+                    coll: collection,
+                    doc_id: document_id,
+                    sys_from_ms: self.bitemporal_now_ms(),
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
+                    body: &stored,
+                },
+            )?;
+            current
+        } else {
+            self.sparse
+                .put_in_txn(txn, tid, collection, document_id, &stored)?
+        };
 
         // Text indexing and stats use the original JSON input, not the stored
         // bytes — Binary Tuple requires a schema to decode, and the input JSON
@@ -126,7 +149,45 @@ impl CoreLoop {
         {
             let paths = config.index_paths.clone();
             check_unique_constraints(&self.sparse, tid, collection, &doc, document_id, &paths)?;
-            self.apply_secondary_indexes_in_txn(txn, tid, collection, &doc, document_id, &paths);
+            if bitemporal {
+                let sys_from = self.bitemporal_now_ms();
+                for path in &paths {
+                    if let Some(ref pred) = path.predicate
+                        && !pred.evaluate_json(&doc)
+                    {
+                        continue;
+                    }
+                    for v in crate::engine::document::store::extract_index_values(
+                        &doc,
+                        &path.path,
+                        path.is_array,
+                    ) {
+                        let value = if path.case_insensitive {
+                            v.to_lowercase()
+                        } else {
+                            v
+                        };
+                        self.sparse.versioned_index_put_in_txn(
+                            txn,
+                            tid,
+                            collection,
+                            &path.path,
+                            &value,
+                            document_id,
+                            sys_from,
+                        )?;
+                    }
+                }
+            } else {
+                self.apply_secondary_indexes_in_txn(
+                    txn,
+                    tid,
+                    collection,
+                    &doc,
+                    document_id,
+                    &paths,
+                );
+            }
         }
 
         // Spatial index: detect geometry fields and insert into R-tree.

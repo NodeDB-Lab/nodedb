@@ -560,6 +560,106 @@ impl CoreLoop {
             },
         )
     }
+
+    /// Bitemporal scan. Reads from the versioned document table at the
+    /// requested system-time cutoff, applies an optional valid-time
+    /// predicate per version, and emits rows in the same wire format as
+    /// [`Self::execute_document_scan`].
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::data::executor) fn execute_document_scan_as_of(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u32,
+        collection: &str,
+        limit: usize,
+        offset: usize,
+        filters: &[u8],
+        projection: &[String],
+        system_as_of_ms: Option<i64>,
+        valid_at_ms: Option<i64>,
+    ) -> Response {
+        debug!(
+            core = self.core_id,
+            %collection,
+            limit,
+            offset,
+            ?system_as_of_ms,
+            ?valid_at_ms,
+            "document scan (bitemporal)"
+        );
+
+        let _scan_guard = match self.acquire_scan_guard(task, tid, collection) {
+            Ok(g) => g,
+            Err(resp) => return resp,
+        };
+
+        let filter_predicates: Vec<ScanFilter> = if filters.is_empty() {
+            Vec::new()
+        } else {
+            match zerompk::from_msgpack(filters) {
+                Ok(f) => f,
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("malformed scan filters: {e}"),
+                        },
+                    );
+                }
+            }
+        };
+
+        let fetch_limit = (limit + offset).saturating_mul(2).max(1000);
+        let rows = match self.sparse.versioned_scan_as_of(
+            tid,
+            collection,
+            system_as_of_ms,
+            valid_at_ms,
+            fetch_limit,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                );
+            }
+        };
+
+        // Apply WHERE filters post-fetch. The bitemporal scan is always a
+        // full-collection read at the requested cutoff; there's no index
+        // pushdown on the versioned path, so filters run in the Data
+        // Plane after the versioned-get.
+        let filtered: Vec<(String, Vec<u8>)> = if filter_predicates.is_empty() {
+            rows
+        } else {
+            rows.into_iter()
+                .filter(|(_id, body)| filter_predicates.iter().all(|f| f.matches_binary(body)))
+                .collect()
+        };
+
+        let sliced: Vec<(String, Vec<u8>)> =
+            filtered.into_iter().skip(offset).take(limit).collect();
+
+        // Raw passthrough when no projection/computed-columns — versioned
+        // storage already yields msgpack bodies, so we reuse the existing
+        // raw emission helper.
+        if projection.is_empty() {
+            return self.send_document_rows_raw(task, &sliced, 1024);
+        }
+
+        // Projection path: decode → project → re-encode.
+        let transformed: Vec<_> = sliced
+            .into_iter()
+            .map(|(doc_id, body)| {
+                let projected = apply_projection_msgpack(&body, &[], projection);
+                (doc_id, projected)
+            })
+            .collect();
+        self.send_document_rows_raw(task, &transformed, 1024)
+    }
 }
 
 #[cfg(test)]

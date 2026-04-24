@@ -38,10 +38,15 @@ impl CoreLoop {
         // this check and our insert commit. Probe uses `document_id` as
         // the row key, which is how the primary key is encoded for strict
         // and schemaless collections alike (see `dml::convert_insert`).
-        match self
-            .sparse
-            .exists_in_txn(&txn, tid, collection, document_id)
-        {
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let exists_result = if bitemporal {
+            self.sparse
+                .versioned_exists_current_in_txn(&txn, tid, collection, document_id)
+        } else {
+            self.sparse
+                .exists_in_txn(&txn, tid, collection, document_id)
+        };
+        match exists_result {
             Ok(true) => {
                 // Drop the txn without committing — no-op on redb.
                 if if_absent {

@@ -492,4 +492,25 @@ impl CoreLoop {
             .get(&TenantId::new(tid))
             .is_some_and(|s| s.contains(node_id))
     }
+
+    /// Is this collection configured for bitemporal (versioned) storage?
+    /// Collections flagged `bitemporal: true` on registration route every
+    /// write to the versioned redb table and every read via the Ceiling
+    /// resolver, enabling `FOR SYSTEM_TIME AS OF` / `FOR VALID_TIME`
+    /// queries.
+    #[inline]
+    pub(in crate::data::executor) fn is_bitemporal(&self, tid: u32, collection: &str) -> bool {
+        let key = (TenantId::new(tid), collection.to_string());
+        self.doc_configs.get(&key).is_some_and(|c| c.bitemporal)
+    }
+
+    /// Wall-clock millisecond stamp for versioned writes. Used as
+    /// `system_from_ms` on every write to a bitemporal collection.
+    #[inline]
+    pub(in crate::data::executor) fn bitemporal_now_ms(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
 }

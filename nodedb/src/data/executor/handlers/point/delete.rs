@@ -16,7 +16,77 @@ impl CoreLoop {
         document_id: &str,
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, "point delete");
-        match self.sparse.delete(tid, collection, document_id) {
+
+        // On bitemporal collections: append a doc tombstone + versioned
+        // index tombstones for every current field value. `prior` is the
+        // pre-delete body so the Event Plane sees `old_value` correctly.
+        // Current-state-only indexes (text, graph, spatial, vector) are
+        // still cascaded below — they track "what exists now" regardless
+        // of bitemporal history.
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let delete_result: crate::Result<Option<Vec<u8>>> = if bitemporal {
+            let prior = self
+                .sparse
+                .versioned_get_current(tid, collection, document_id);
+            match prior {
+                Ok(Some(body)) => {
+                    let sys_from = self.bitemporal_now_ms();
+                    let res: crate::Result<()> = (|| {
+                        let txn = self.sparse.begin_write()?;
+                        self.sparse.versioned_tombstone_in_txn(
+                            &txn,
+                            tid,
+                            collection,
+                            document_id,
+                            sys_from,
+                        )?;
+                        // Index tombstones: reflect every current value so
+                        // `index_lookup_as_of` at or after `sys_from` skips
+                        // this doc_id.
+                        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+                        if let Some(config) = self.doc_configs.get(&config_key)
+                            && let Some(doc) =
+                                super::super::super::doc_format::decode_document(&body)
+                        {
+                            for path in config.index_paths.clone() {
+                                for v in crate::engine::document::store::extract_index_values(
+                                    &doc,
+                                    &path.path,
+                                    path.is_array,
+                                ) {
+                                    let value = if path.case_insensitive {
+                                        v.to_lowercase()
+                                    } else {
+                                        v
+                                    };
+                                    self.sparse.versioned_index_tombstone_in_txn(
+                                        &txn,
+                                        tid,
+                                        collection,
+                                        &path.path,
+                                        &value,
+                                        document_id,
+                                        sys_from,
+                                    )?;
+                                }
+                            }
+                        }
+                        txn.commit().map_err(|e| crate::Error::Storage {
+                            engine: "sparse".into(),
+                            detail: format!("commit: {e}"),
+                        })?;
+                        Ok(())
+                    })();
+                    res.map(|()| Some(body))
+                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            }
+        } else {
+            self.sparse.delete(tid, collection, document_id)
+        };
+
+        match delete_result {
             Ok(prior) => {
                 // Cascade 1: Remove from full-text inverted index.
                 if let Err(e) = self.inverted.remove_document(

@@ -74,6 +74,8 @@ fn expired_task_returns_deadline_exceeded() {
                     collection: "x".into(),
                     document_id: "y".into(),
                     rls_filters: Vec::new(),
+                    system_as_of_ms: None,
+                    valid_at_ms: None,
                 }))
             },
         })
@@ -95,6 +97,8 @@ fn watermark_in_response() {
                 collection: "x".into(),
                 document_id: "y".into(),
                 rls_filters: Vec::new(),
+                system_as_of_ms: None,
+                valid_at_ms: None,
             })),
         })
         .unwrap();
@@ -115,6 +119,8 @@ fn cancel_removes_pending_task() {
                     collection: "x".into(),
                     document_id: "y".into(),
                     rls_filters: Vec::new(),
+                    system_as_of_ms: None,
+                    valid_at_ms: None,
                 }))
             },
         })

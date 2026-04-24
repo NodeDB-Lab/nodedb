@@ -14,7 +14,19 @@ impl CoreLoop {
                 collection,
                 document_id,
                 rls_filters,
-            } => self.execute_point_get(task, tid, collection, document_id, rls_filters),
+                system_as_of_ms,
+                valid_at_ms,
+            } => self.execute_point_get(
+                task,
+                super::super::handlers::point::get::PointGetParams {
+                    tid,
+                    collection,
+                    document_id,
+                    rls_filters,
+                    system_as_of_ms: *system_as_of_ms,
+                    valid_at_ms: *valid_at_ms,
+                },
+            ),
 
             DocumentOp::PointPut {
                 collection,
@@ -51,19 +63,37 @@ impl CoreLoop {
                 projection,
                 computed_columns,
                 window_functions,
-            } => self.execute_document_scan(
-                task,
-                tid,
-                collection,
-                *limit,
-                *offset,
-                sort_keys,
-                filters,
-                *distinct,
-                projection,
-                computed_columns,
-                window_functions,
-            ),
+                system_as_of_ms,
+                valid_at_ms,
+            } => {
+                if system_as_of_ms.is_some() || valid_at_ms.is_some() {
+                    self.execute_document_scan_as_of(
+                        task,
+                        tid,
+                        collection,
+                        *limit,
+                        *offset,
+                        filters,
+                        projection,
+                        *system_as_of_ms,
+                        *valid_at_ms,
+                    )
+                } else {
+                    self.execute_document_scan(
+                        task,
+                        tid,
+                        collection,
+                        *limit,
+                        *offset,
+                        sort_keys,
+                        filters,
+                        *distinct,
+                        projection,
+                        computed_columns,
+                        window_functions,
+                    )
+                }
+            }
 
             DocumentOp::BatchInsert {
                 collection,
@@ -138,6 +168,7 @@ impl CoreLoop {
                 crdt_enabled,
                 storage_mode,
                 enforcement,
+                bitemporal,
             } => self.execute_register_document_collection(
                 task,
                 tid,
@@ -146,6 +177,7 @@ impl CoreLoop {
                 *crdt_enabled,
                 storage_mode,
                 enforcement,
+                *bitemporal,
             ),
 
             DocumentOp::IndexLookup {

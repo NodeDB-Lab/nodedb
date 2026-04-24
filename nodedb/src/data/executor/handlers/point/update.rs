@@ -55,7 +55,14 @@ impl CoreLoop {
             .iter()
             .any(|(_, v)| matches!(v, UpdateValue::Expr(_)));
 
-        match self.sparse.get(tid, collection, document_id) {
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let get_result = if bitemporal {
+            self.sparse
+                .versioned_get_current(tid, collection, document_id)
+        } else {
+            self.sparse.get(tid, collection, document_id)
+        };
+        match get_result {
             Ok(Some(current_bytes)) => {
                 let has_generated = self.doc_configs.get(&config_key).is_some_and(|c| {
                     !c.enforcement.generated_columns.is_empty()
@@ -200,10 +207,23 @@ impl CoreLoop {
                     }
                 };
 
-                match self
-                    .sparse
-                    .put(tid, collection, document_id, &updated_bytes)
-                {
+                let write_result = if bitemporal {
+                    self.sparse
+                        .versioned_put(crate::engine::sparse::btree_versioned::VersionedPut {
+                            tenant: tid,
+                            coll: collection,
+                            doc_id: document_id,
+                            sys_from_ms: self.bitemporal_now_ms(),
+                            valid_from_ms: i64::MIN,
+                            valid_until_ms: i64::MAX,
+                            body: &updated_bytes,
+                        })
+                        .map(|()| None::<Vec<u8>>)
+                } else {
+                    self.sparse
+                        .put(tid, collection, document_id, &updated_bytes)
+                };
+                match write_result {
                     Ok(_prior) => {
                         self.doc_cache
                             .put(tid, collection, document_id, &updated_bytes);

@@ -47,8 +47,17 @@ impl CoreLoop {
             }
         });
 
-        // Check if document already exists.
-        let existing = self.sparse.get(tid, collection, document_id);
+        // Check if document already exists. Bitemporal collections consult
+        // the versioned table's current-state view (reverse-scan to newest
+        // non-tombstone); non-bitemporal collections use the legacy point
+        // lookup.
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let existing = if bitemporal {
+            self.sparse
+                .versioned_get_current(tid, collection, document_id)
+        } else {
+            self.sparse.get(tid, collection, document_id)
+        };
 
         match existing {
             Ok(Some(current_bytes)) => {
@@ -143,8 +152,24 @@ impl CoreLoop {
                 // Write directly to storage. `current_bytes` is the
                 // pre-merge stored row, already read above — thread it to
                 // the Event Plane as `old_value` so the emitted WriteOp
-                // resolves to Update.
-                match self.sparse.put(tid, collection, document_id, &stored_bytes) {
+                // resolves to Update. Bitemporal collections append a new
+                // version instead of overwriting.
+                let write_result = if bitemporal {
+                    self.sparse
+                        .versioned_put(crate::engine::sparse::btree_versioned::VersionedPut {
+                            tenant: tid,
+                            coll: collection,
+                            doc_id: document_id,
+                            sys_from_ms: self.bitemporal_now_ms(),
+                            valid_from_ms: i64::MIN,
+                            valid_until_ms: i64::MAX,
+                            body: &stored_bytes,
+                        })
+                        .map(|()| None::<Vec<u8>>)
+                } else {
+                    self.sparse.put(tid, collection, document_id, &stored_bytes)
+                };
+                match write_result {
                     Ok(_prior) => {
                         self.doc_cache
                             .put(tid, collection, document_id, &stored_bytes);
