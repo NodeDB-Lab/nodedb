@@ -102,6 +102,17 @@ pub fn merge_partitions(
     // Write merged partition.
     let writer = ColumnarSegmentWriter::new(base_dir);
 
+    // Preserve the merged partition's system-time max so retention's
+    // bitemporal path sees the true latest write time, not just event-time.
+    let max_system_ts = ref_schema
+        .ts_system_idx()
+        .and_then(|idx| merged_columns.get(idx))
+        .map(|col| match col {
+            ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.iter().copied().max().unwrap_or(0),
+            _ => 0,
+        })
+        .unwrap_or(0);
+
     // Build a drain-like result for the writer.
     let drain = crate::engine::timeseries::columnar_memtable::ColumnarDrainResult {
         columns: merged_columns,
@@ -110,6 +121,7 @@ pub fn merge_partitions(
         row_count: total_rows,
         min_ts: global_min_ts,
         max_ts: global_max_ts,
+        max_system_ts,
         series_row_counts: std::collections::HashMap::new(),
     };
 

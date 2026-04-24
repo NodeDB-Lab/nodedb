@@ -58,6 +58,7 @@ impl PartitionRegistry {
                         interval_ms: self.current_interval.as_millis().unwrap_or(0),
                         last_flushed_wal_lsn: 0,
                         column_stats: std::collections::HashMap::new(),
+                        max_system_ts: 0,
                     },
                     dir_name,
                 };

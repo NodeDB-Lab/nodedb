@@ -261,7 +261,23 @@ impl CoreLoop {
         let max_per_pass = self.segment_compaction_config.max_segments_per_pass;
         let mut total_merged = 0;
 
-        for ((_, collection), registry) in &mut self.ts_registries {
+        // Snapshot bitemporal flags per collection up front so the
+        // mutable-borrow loop below can query them without re-borrowing `self`.
+        let bitemporal_flags: std::collections::HashMap<(crate::types::TenantId, String), bool> =
+            self.ts_registries
+                .keys()
+                .map(|(tid, col)| {
+                    let flag = self.is_bitemporal(tid.as_u32(), col);
+                    ((*tid, col.clone()), flag)
+                })
+                .collect();
+
+        for ((tid, collection), registry) in &mut self.ts_registries {
+            let bitemporal = bitemporal_flags
+                .get(&(*tid, collection.clone()))
+                .copied()
+                .unwrap_or(false);
+
             // Find mergeable partition groups, limited by config.
             let mut groups = registry.find_mergeable(now_ms);
             if !force {
@@ -275,7 +291,7 @@ impl CoreLoop {
             }
 
             // Retention: find and purge expired partitions.
-            let expired = registry.find_expired(now_ms);
+            let expired = registry.find_expired(now_ms, bitemporal);
             for start_ts in &expired {
                 registry.mark_deleted(*start_ts);
             }

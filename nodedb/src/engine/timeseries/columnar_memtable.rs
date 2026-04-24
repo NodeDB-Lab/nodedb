@@ -64,6 +64,11 @@ impl ColumnarSchema {
             .copied()
             .unwrap_or(nodedb_codec::ColumnCodec::Auto)
     }
+
+    /// Index of the reserved `_ts_system` column, or `None` for non-bitemporal.
+    pub fn ts_system_idx(&self) -> Option<usize> {
+        self.columns.iter().position(|(n, _)| n == "_ts_system")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +460,21 @@ impl ColumnarMemtable {
             }
         }
 
+        // Scan `_ts_system` column (if present) for retention's system-time axis.
+        // For non-bitemporal partitions this is 0 and retention falls through
+        // to the existing `max_ts` (event-time) path.
+        let max_system_ts = self
+            .schema
+            .ts_system_idx()
+            .and_then(|idx| drained_columns.get(idx))
+            .map(|col| match col {
+                ColumnData::Timestamp(v) | ColumnData::Int64(v) => {
+                    v.iter().copied().max().unwrap_or(0)
+                }
+                _ => 0,
+            })
+            .unwrap_or(0);
+
         let result = ColumnarDrainResult {
             columns: drained_columns,
             schema: self.schema.clone(),
@@ -462,6 +482,7 @@ impl ColumnarMemtable {
             row_count: self.row_count,
             min_ts: self.min_ts,
             max_ts: self.max_ts,
+            max_system_ts,
             series_row_counts: std::mem::take(&mut self.series_row_counts),
         };
 
@@ -584,6 +605,10 @@ pub struct ColumnarDrainResult {
     pub row_count: u64,
     pub min_ts: i64,
     pub max_ts: i64,
+    /// Maximum `_ts_system` value across rows (bitemporal only; 0 otherwise).
+    /// Populated on drain by scanning the `_ts_system` column so retention
+    /// can evaluate system-time staleness without re-reading the segment.
+    pub max_system_ts: i64,
     pub series_row_counts: HashMap<SeriesId, u64>,
 }
 

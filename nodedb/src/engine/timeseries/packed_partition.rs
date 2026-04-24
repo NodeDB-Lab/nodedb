@@ -223,6 +223,7 @@ mod tests {
             interval_ms: 86_400_000,
             last_flushed_wal_lsn: 0,
             column_stats: HashMap::new(),
+            max_system_ts: 0,
         }
     }
 

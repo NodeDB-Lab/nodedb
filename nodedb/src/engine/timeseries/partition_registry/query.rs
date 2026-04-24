@@ -42,14 +42,27 @@ impl PartitionRegistry {
     }
 
     /// Find partitions eligible for retention drop.
-    pub fn find_expired(&self, now_ms: i64) -> Vec<i64> {
+    ///
+    /// When `bitemporal` is true, staleness is evaluated against each
+    /// partition's `max_system_ts` (falling back to `max_ts` when 0 —
+    /// partitions written before bitemporal tracking existed). This
+    /// lets a late-arriving backfill with old event-time but current
+    /// system-time survive the retention window.
+    pub fn find_expired(&self, now_ms: i64, bitemporal: bool) -> Vec<i64> {
         if self.config.retention_period_ms == 0 {
             return Vec::new();
         }
         let cutoff = now_ms - self.config.retention_period_ms as i64;
         self.partitions
             .iter()
-            .filter(|(_, e)| e.meta.max_ts < cutoff && e.meta.state != PartitionState::Deleted)
+            .filter(|(_, e)| {
+                let axis_ts = if bitemporal && e.meta.max_system_ts > 0 {
+                    e.meta.max_system_ts
+                } else {
+                    e.meta.max_ts
+                };
+                axis_ts < cutoff && e.meta.state != PartitionState::Deleted
+            })
             .map(|(&start, _)| start)
             .collect()
     }

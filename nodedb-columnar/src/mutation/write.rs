@@ -28,10 +28,19 @@ impl MutationEngine {
         let pk_bytes = self.extract_pk_bytes(values)?;
         let mut wal_records = Vec::with_capacity(2);
 
+        // Bitemporal collections preserve every version of a PK: each
+        // write appends a new row with a distinct `_ts_system` stamp and
+        // the prior row stays visible to `AS OF` queries. Skipping the
+        // upsert-tombstone here keeps compaction lossless without
+        // needing a separate "version-aware" delete bitmap. The PK
+        // index is still rebound below so current-state reads see the
+        // latest version.
+        let bitemporal = self.schema.is_bitemporal();
+
         // If a prior row exists for this PK, tombstone it in place so
         // subsequent scans skip the stale row. The PK index is rebound
         // below to the freshly-appended row.
-        if let Some(prior) = self.pk_index.get(&pk_bytes).copied() {
+        if !bitemporal && let Some(prior) = self.pk_index.get(&pk_bytes).copied() {
             let bitmap = self.delete_bitmaps.entry(prior.segment_id).or_default();
             bitmap.mark_deleted(prior.row_index);
             wal_records.push(ColumnarWalRecord::DeleteRows {

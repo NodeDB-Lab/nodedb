@@ -164,6 +164,7 @@ mod tests {
             interval_ms: 86_400_000,
             last_flushed_wal_lsn: 42,
             column_stats: HashMap::new(),
+            max_system_ts: 0,
         };
         assert!(meta.is_queryable());
         assert!(meta.overlaps(&TimeRange::new(1500, 2500)));
@@ -182,6 +183,7 @@ mod tests {
             interval_ms: 0,
             last_flushed_wal_lsn: 0,
             column_stats: HashMap::new(),
+            max_system_ts: 0,
         };
         assert!(!meta.is_queryable());
     }

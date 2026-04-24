@@ -327,13 +327,25 @@ impl CoreLoop {
                 let mut deleted = 0usize;
                 let ts_base = self.data_dir.join("ts").join(collection.as_str());
 
+                // Bitemporal collections key retention on system-time
+                // (`max_system_ts`) so backfill with old event-time but
+                // current write-time survives an event-time-based TTL.
+                // Non-bitemporal partitions have `max_system_ts == 0` and
+                // fall through to the existing `max_ts` path.
+                let bitemporal = self.is_bitemporal(task.request.tenant_id.as_u32(), collection);
+
                 let ts_key = (task.request.tenant_id, collection.to_string());
                 if let Some(registry) = self.ts_registries.get_mut(&ts_key) {
                     // Find partitions older than cutoff.
                     let expired: Vec<(i64, String)> = registry
                         .iter()
                         .filter(|(_, e)| {
-                            e.meta.max_ts < cutoff
+                            let axis_ts = if bitemporal && e.meta.max_system_ts > 0 {
+                                e.meta.max_system_ts
+                            } else {
+                                e.meta.max_ts
+                            };
+                            axis_ts < cutoff
                                 && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
                         })
                         .map(|(&start, e)| (start, e.dir_name.clone()))

@@ -66,6 +66,12 @@ pub struct PartitionMeta {
     /// Per-column statistics (codec, min/max/sum/count/cardinality).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_stats: HashMap<String, nodedb_codec::ColumnStatistics>,
+    /// Maximum `_ts_system` value across rows in this partition
+    /// (bitemporal only; 0 for non-bitemporal partitions). Retention on
+    /// bitemporal collections uses this instead of `max_ts` so that
+    /// late-arriving backfill survives an event-time-based TTL.
+    #[serde(default)]
+    pub max_system_ts: i64,
 }
 
 impl PartitionMeta {

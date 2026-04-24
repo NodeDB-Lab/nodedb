@@ -99,6 +99,9 @@ pub fn merge_o3_into_partition(
                 .max()
                 .unwrap_or(i64::MIN),
         ),
+        // O3 merge preserves the existing partition's system-time max;
+        // O3Row does not carry `_ts_system` (O3 is a value-only buffer).
+        max_system_ts: existing_meta.max_system_ts,
         series_row_counts: std::collections::HashMap::new(),
     };
 

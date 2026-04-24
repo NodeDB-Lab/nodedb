@@ -522,6 +522,7 @@ mod tests {
             interval_ms: 3 * 86_400_000,
             last_flushed_wal_lsn: 100,
             column_stats: std::collections::HashMap::new(),
+            max_system_ts: 0,
         };
         registry.commit_merge(
             merged_meta,

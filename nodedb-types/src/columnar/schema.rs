@@ -305,6 +305,21 @@ impl ColumnarSchema {
             version: 1,
         })
     }
+
+    /// Whether this schema has the reserved `_ts_system` bitemporal column.
+    ///
+    /// Detected by column name rather than a separate flag to keep the
+    /// on-disk manifest format unchanged; `_ts_system` is only inserted
+    /// by `prepend_bitemporal_columns` on the write path, so its
+    /// presence is a reliable bitemporal signal.
+    pub fn is_bitemporal(&self) -> bool {
+        self.columns.iter().any(|c| c.name == "_ts_system")
+    }
+
+    /// Position of the `_ts_system` column, or `None` for non-bitemporal.
+    pub fn ts_system_idx(&self) -> Option<usize> {
+        self.columns.iter().position(|c| c.name == "_ts_system")
+    }
 }
 
 #[cfg(test)]

@@ -98,6 +98,7 @@ impl ColumnarSegmentWriter {
             interval_ms,
             last_flushed_wal_lsn: flush_wal_lsn,
             column_stats,
+            max_system_ts: drain.max_system_ts,
         };
 
         let meta_json = sonic_rs::to_vec(&meta)
