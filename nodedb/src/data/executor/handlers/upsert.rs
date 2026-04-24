@@ -120,10 +120,25 @@ impl CoreLoop {
                     apply_on_conflict_updates(existing_val, &new_val, on_conflict_updates)
                 };
 
+                let sys_from_ms = if bitemporal {
+                    self.bitemporal_now_ms()
+                } else {
+                    0
+                };
                 // Encode merged value for storage.
                 let stored_bytes = if let Some(ref schema) = strict_schema {
-                    // Strict: encode directly to binary tuple.
-                    match super::super::strict_format::value_to_binary_tuple(&merged, schema) {
+                    let result = if bitemporal && schema.bitemporal {
+                        super::super::strict_format::value_to_binary_tuple_bitemporal(
+                            &merged,
+                            schema,
+                            sys_from_ms,
+                            i64::MIN,
+                            i64::MAX,
+                        )
+                    } else {
+                        super::super::strict_format::value_to_binary_tuple(&merged, schema)
+                    };
+                    match result {
                         Ok(bt) => bt,
                         Err(e) => {
                             return self.response_error(
@@ -160,7 +175,7 @@ impl CoreLoop {
                             tenant: tid,
                             coll: collection,
                             doc_id: document_id,
-                            sys_from_ms: self.bitemporal_now_ms(),
+                            sys_from_ms,
                             valid_from_ms: i64::MIN,
                             valid_until_ms: i64::MAX,
                             body: &stored_bytes,

@@ -56,6 +56,11 @@ impl CoreLoop {
             .any(|(_, v)| matches!(v, UpdateValue::Expr(_)));
 
         let bitemporal = self.is_bitemporal(tid, collection);
+        let sys_from_for_encode = if bitemporal {
+            self.bitemporal_now_ms()
+        } else {
+            0
+        };
         let get_result = if bitemporal {
             self.sparse
                 .versioned_get_current(tid, collection, document_id)
@@ -181,9 +186,20 @@ impl CoreLoop {
                                 config.storage_mode
                         {
                             let ndb_val: nodedb_types::Value = doc.clone().into();
-                            match super::super::super::strict_format::value_to_binary_tuple(
-                                &ndb_val, schema,
-                            ) {
+                            let result = if bitemporal && schema.bitemporal {
+                                super::super::super::strict_format::value_to_binary_tuple_bitemporal(
+                                    &ndb_val,
+                                    schema,
+                                    sys_from_for_encode,
+                                    i64::MIN,
+                                    i64::MAX,
+                                )
+                            } else {
+                                super::super::super::strict_format::value_to_binary_tuple(
+                                    &ndb_val, schema,
+                                )
+                            };
+                            match result {
                                 Ok(bytes) => bytes,
                                 Err(e) => {
                                     return self.response_error(
@@ -213,7 +229,7 @@ impl CoreLoop {
                             tenant: tid,
                             coll: collection,
                             doc_id: document_id,
-                            sys_from_ms: self.bitemporal_now_ms(),
+                            sys_from_ms: sys_from_for_encode,
                             valid_from_ms: i64::MIN,
                             valid_until_ms: i64::MAX,
                             body: &updated_bytes,

@@ -106,6 +106,7 @@ impl CoreLoop {
             columns,
             version: 1,
             dropped_columns: Vec::new(),
+            bitemporal: false,
         };
 
         // Scan all existing documents.

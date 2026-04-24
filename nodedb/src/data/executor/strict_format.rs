@@ -62,6 +62,79 @@ pub(super) fn value_to_binary_tuple(
         .map_err(|e| format!("Binary Tuple encode: {e}"))
 }
 
+/// Bitemporal variant: decode msgpack to `Value`, then encode as a Binary
+/// Tuple with reserved slots 0/1/2 populated from the supplied timestamps.
+pub(super) fn bytes_to_binary_tuple_bitemporal(
+    bytes: &[u8],
+    schema: &StrictSchema,
+    system_from_ms: i64,
+    valid_from_ms: i64,
+    valid_until_ms: i64,
+) -> Result<Vec<u8>, String> {
+    let value =
+        nodedb_types::value_from_msgpack(bytes).map_err(|e| format!("zerompk decode: {e}"))?;
+    value_to_binary_tuple_bitemporal(
+        &value,
+        schema,
+        system_from_ms,
+        valid_from_ms,
+        valid_until_ms,
+    )
+}
+
+/// Bitemporal variant: encode a user-supplied `Value::Object` together
+/// with the three reserved bitemporal timestamps.
+pub(super) fn value_to_binary_tuple_bitemporal(
+    value: &Value,
+    schema: &StrictSchema,
+    system_from_ms: i64,
+    valid_from_ms: i64,
+    valid_until_ms: i64,
+) -> Result<Vec<u8>, String> {
+    if !schema.bitemporal {
+        return Err("schema is not bitemporal".into());
+    }
+    let map = match value {
+        Value::Object(m) => m,
+        _ => return Err("strict value must be an Object".to_string()),
+    };
+
+    let user_columns = &schema.columns[3..];
+    let user_names: std::collections::HashSet<&str> =
+        user_columns.iter().map(|c| c.name.as_str()).collect();
+    if let Some(unknown) = map.keys().find(|k| {
+        !user_names.contains(k.as_str())
+            && !nodedb_types::columnar::BITEMPORAL_RESERVED_COLUMNS.contains(&k.as_str())
+    }) {
+        return Err(format!(
+            "unknown field '{unknown}' not present in strict schema"
+        ));
+    }
+
+    let mut user_values = Vec::with_capacity(user_columns.len());
+    for col in user_columns {
+        let field_val = map.get(&col.name);
+        let typed = match field_val {
+            None | Some(Value::Null) => {
+                if !col.nullable {
+                    return Err(format!(
+                        "column '{}' is NOT NULL but no value provided",
+                        col.name
+                    ));
+                }
+                Value::Null
+            }
+            Some(v) => coerce_value(v, &col.column_type, &col.name)?,
+        };
+        user_values.push(typed);
+    }
+
+    let encoder = nodedb_strict::TupleEncoder::new(schema);
+    encoder
+        .encode_bitemporal(system_from_ms, valid_from_ms, valid_until_ms, &user_values)
+        .map_err(|e| format!("Binary Tuple encode: {e}"))
+}
+
 /// Decode a Binary Tuple to `nodedb_types::Value::Object` using the schema.
 ///
 /// Returns `None` if the bytes are not a valid binary tuple (e.g., if they
@@ -411,6 +484,7 @@ mod tests {
             ],
             version: 1,
             dropped_columns: Vec::new(),
+            bitemporal: false,
         }
     }
 
@@ -451,6 +525,52 @@ mod tests {
         let result = value_to_binary_tuple(&Value::Object(map), &schema);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("NOT NULL"));
+    }
+
+    #[test]
+    fn bitemporal_value_roundtrip() {
+        let schema = StrictSchema::new_bitemporal(vec![
+            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::required("name", ColumnType::String),
+        ])
+        .unwrap();
+        let mut map = std::collections::HashMap::new();
+        map.insert("id".into(), Value::String("u1".into()));
+        map.insert("name".into(), Value::String("Alice".into()));
+
+        let tuple = value_to_binary_tuple_bitemporal(
+            &Value::Object(map),
+            &schema,
+            1_700_000_000_000,
+            0,
+            i64::MAX,
+        )
+        .unwrap();
+
+        let decoder = nodedb_strict::TupleDecoder::new(&schema);
+        let (sys, vf, vu) = decoder.extract_bitemporal_timestamps(&tuple).unwrap();
+        assert_eq!(sys, 1_700_000_000_000);
+        assert_eq!(vf, 0);
+        assert_eq!(vu, i64::MAX);
+        assert_eq!(
+            decoder.extract_by_name(&tuple, "id").unwrap(),
+            Value::String("u1".into())
+        );
+    }
+
+    #[test]
+    fn bitemporal_encode_rejects_non_bitemporal_schema() {
+        let schema = test_schema();
+        let map = std::collections::HashMap::new();
+        let result = value_to_binary_tuple_bitemporal(
+            &Value::Object(map),
+            &schema,
+            0,
+            0,
+            0,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not bitemporal"));
     }
 
     #[test]

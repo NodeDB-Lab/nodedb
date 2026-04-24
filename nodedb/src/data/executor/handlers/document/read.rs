@@ -733,6 +733,7 @@ mod tests {
             ],
             version: 1,
             dropped_columns: Vec::new(),
+            bitemporal: false,
         };
         let mut map = std::collections::HashMap::new();
         map.insert("id".into(), Value::String("u1".into()));

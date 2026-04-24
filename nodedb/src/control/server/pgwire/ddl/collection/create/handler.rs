@@ -78,10 +78,18 @@ pub fn create_collection(
     // DataFusion needs all column names+types to build the Arrow schema for planning.
     let mut columnar_schema_columns: Vec<(String, String)> = Vec::new();
 
+    // `BITEMPORAL` flag is consulted here so strict schemas can reserve
+    // tuple slots 0/1/2 for `__system_from_ms` / `__valid_from_ms` /
+    // `__valid_until_ms`. The flag is re-read below for non-strict
+    // collections which route through the versioned sparse table only.
+    let bitemporal_flag = upper.contains("BITEMPORAL");
+
     let collection_type = if upper.contains("TYPE") && upper.contains("KEY_VALUE") {
         super::super::super::kv::parse_kv_collection(sql, &upper)?
     } else if upper.contains("TYPE") && upper.contains("STRICT") {
-        let schema = parse_typed_schema(sql).map_err(|e| sqlstate_error("42601", &e))?;
+        let schema =
+            super::super::helpers::parse_typed_schema_with_flags(sql, bitemporal_flag)
+                .map_err(|e| sqlstate_error("42601", &e))?;
         nodedb_types::CollectionType::strict(schema)
     } else if upper.contains("TYPE") && upper.contains("COLUMNAR") {
         resolve_columnar(sql, &upper, &mut columnar_schema_columns)
@@ -115,7 +123,7 @@ pub fn create_collection(
     // version keyed by `system_from_ms` and reads use the versioned
     // table + Ceiling resolver. Enables `FOR SYSTEM_TIME AS OF` /
     // `FOR VALID_TIME` queries on this collection.
-    let bitemporal = upper.contains("BITEMPORAL");
+    let bitemporal = bitemporal_flag;
     if hash_chain && !append_only {
         return Err(sqlstate_error("42601", "HASH_CHAIN requires APPEND_ONLY"));
     }

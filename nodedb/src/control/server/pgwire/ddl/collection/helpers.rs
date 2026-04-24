@@ -39,6 +39,16 @@ pub(super) fn extract_with_value(sql: &str, key: &str) -> Option<String> {
 pub(in crate::control::server::pgwire::ddl) fn parse_typed_schema(
     sql: &str,
 ) -> Result<nodedb_types::columnar::StrictSchema, String> {
+    parse_typed_schema_with_flags(sql, false)
+}
+
+/// Variant of `parse_typed_schema` that additionally flags the schema
+/// as bitemporal, prepending the three reserved fixed-Int64 slots
+/// (`__system_from_ms`, `__valid_from_ms`, `__valid_until_ms`).
+pub(in crate::control::server::pgwire::ddl) fn parse_typed_schema_with_flags(
+    sql: &str,
+    bitemporal: bool,
+) -> Result<nodedb_types::columnar::StrictSchema, String> {
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
 
     // Find parenthesized column definitions.
@@ -100,7 +110,11 @@ pub(in crate::control::server::pgwire::ddl) fn parse_typed_schema(
         );
     }
 
-    StrictSchema::new(columns).map_err(|e| e.to_string())
+    if bitemporal {
+        StrictSchema::new_bitemporal(columns).map_err(|e| e.to_string())
+    } else {
+        StrictSchema::new(columns).map_err(|e| e.to_string())
+    }
 }
 
 /// Parse a single column definition: `name TYPE [NOT NULL] [PRIMARY KEY] [DEFAULT expr]`

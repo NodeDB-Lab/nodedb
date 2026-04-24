@@ -50,17 +50,31 @@ impl CoreLoop {
         };
         let value = &value;
 
+        let bitemporal = self.is_bitemporal(tid, collection);
+        let sys_from_ms = self.bitemporal_now_ms();
+        let valid_from_ms = i64::MIN;
+        let valid_until_ms = i64::MAX;
+
         // Check if this collection uses strict (Binary Tuple) encoding.
         let stored = if let Some(config) = self.doc_configs.get(&config_key)
             && let crate::bridge::physical_plan::StorageMode::Strict { ref schema } =
                 config.storage_mode
         {
-            super::super::super::strict_format::bytes_to_binary_tuple(value, schema).map_err(
-                |e| crate::Error::Serialization {
-                    format: "binary_tuple".into(),
-                    detail: e,
-                },
-            )?
+            if bitemporal && schema.bitemporal {
+                super::super::super::strict_format::bytes_to_binary_tuple_bitemporal(
+                    value,
+                    schema,
+                    sys_from_ms,
+                    valid_from_ms,
+                    valid_until_ms,
+                )
+            } else {
+                super::super::super::strict_format::bytes_to_binary_tuple(value, schema)
+            }
+            .map_err(|e| crate::Error::Serialization {
+                format: "binary_tuple".into(),
+                detail: e,
+            })?
         } else {
             value.to_vec()
         };
@@ -69,7 +83,6 @@ impl CoreLoop {
         // (pre-write) version for the `prior` slot, then append a new
         // version at `sys_from = now()`. Non-bitemporal collections use
         // the legacy overwrite path, returning the old bytes redb replaced.
-        let bitemporal = self.is_bitemporal(tid, collection);
         let prior = if bitemporal {
             let current = self
                 .sparse
@@ -80,9 +93,9 @@ impl CoreLoop {
                     tenant: tid,
                     coll: collection,
                     doc_id: document_id,
-                    sys_from_ms: self.bitemporal_now_ms(),
-                    valid_from_ms: i64::MIN,
-                    valid_until_ms: i64::MAX,
+                    sys_from_ms,
+                    valid_from_ms,
+                    valid_until_ms,
                     body: &stored,
                 },
             )?;
