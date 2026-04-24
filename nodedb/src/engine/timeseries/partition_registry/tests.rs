@@ -102,7 +102,7 @@ fn find_expired() {
 
     // 40 days later, retention=30d → days 1-9 expired (but only 1-5 exist).
     let now = 40 * day_ms;
-    let expired = reg.find_expired(now);
+    let expired = reg.find_expired(now, false);
     assert_eq!(expired.len(), 5);
 }
 
@@ -132,6 +132,7 @@ fn commit_merge_and_purge() {
         interval_ms: 3 * day_ms as u64,
         last_flushed_wal_lsn: 100,
         column_stats: std::collections::HashMap::new(),
+        max_system_ts: 0,
     };
     reg.commit_merge(merged_meta, "ts-merged".into(), &starts);
 

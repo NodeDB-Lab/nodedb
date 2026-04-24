@@ -472,6 +472,7 @@ fn legacy_partition_no_sparse_index() {
             interval_ms: 86_400_000,
             last_flushed_wal_lsn: 0,
             column_stats: std::collections::HashMap::new(),
+            max_system_ts: 0,
         })
         .unwrap(),
     )

@@ -131,7 +131,7 @@ fn timeseries_partition_registry_persist_is_durable() {
     // `PartitionRegistry::persist` writes the authoritative partition map via
     // the same tmp+rename pattern — recovery reads it on startup, so the
     // zero-file failure mode is identical to checkpoint writers.
-    assert_durable_checkpoint_writer("nodedb/src/engine/timeseries/partition_registry.rs");
+    assert_durable_checkpoint_writer("nodedb/src/engine/timeseries/partition_registry/persistence.rs");
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn regen_certs_writes_are_durable() {
 /// renamed-in directory. The swap helper must fsync both parent directories.
 #[test]
 fn timeseries_merge_directory_swap_is_durable() {
-    let src = read("nodedb/src/engine/timeseries/merge.rs");
+    let src = read("nodedb/src/engine/timeseries/merge/o3.rs");
     assert!(
         src.contains("atomic_swap_dirs_fsync") || src.contains("fsync_directory"),
         "timeseries merge directory swap must fsync the parent directory \
