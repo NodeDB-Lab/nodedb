@@ -17,9 +17,8 @@
 //! wall clock and forcibly incremented if wall time didn't advance.
 //!
 //! Cross-node convergence (folding a remote peer's ordinal forward) is
-//! a separate concern addressed in the closed-timestamp wiring
-//! (BITEMPORAL_CHECKLIST Tier 10); `update_from_remote` is exposed here
-//! so the wiring has a single canonical API to call.
+//! handled by the closed-timestamp wiring; `update_from_remote` is
+//! exposed here so that wiring has a single canonical API to call.
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};

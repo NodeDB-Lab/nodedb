@@ -20,6 +20,7 @@
 
 pub mod keys;
 pub mod payload;
+pub mod query;
 pub mod read;
 #[cfg(test)]
 mod tests;
