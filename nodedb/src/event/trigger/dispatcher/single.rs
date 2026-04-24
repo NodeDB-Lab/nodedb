@@ -1,27 +1,31 @@
-//! Trigger dispatcher: bridges Event Plane events to Control Plane trigger fire.
+//! Single-event trigger dispatch: one `WriteEvent` → matching AFTER triggers.
 //!
-//! For each incoming WriteEvent with `source: User`, the dispatcher:
-//! 1. Deserializes `new_value`/`old_value` from MessagePack to `HashMap<String, nodedb_types::Value>`
-//! 2. Calls the existing `fire_after_insert/update/delete()` in `control::trigger::fire`
+//! For each incoming `WriteEvent` with a triggerable source, this path:
+//! 1. Deserializes `new_value` / `old_value` from MessagePack to
+//!    `HashMap<String, nodedb_types::Value>`
+//! 2. Calls the `fire_after_insert/update/delete` entry point in
+//!    `control::trigger::fire`
 //! 3. On failure, enqueues into the retry queue (exponential backoff)
-//! 4. After max retries, sends to the trigger DLQ
+//! 4. After max retries, the consumer routes the entry into the trigger DLQ
 
 use std::sync::Arc;
 
 use tracing::{debug, trace, warn};
 
 use crate::control::security::catalog::trigger_types::TriggerExecutionMode;
-use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, Role};
+use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::control::trigger::fire;
+use crate::control::trigger::row_identity::inject_row_identity;
 use crate::event::types::{EventSource, WriteEvent, WriteOp, deserialize_event_payload};
 use crate::types::TenantId;
 
-use super::retry::{RetryEntry, TriggerRetryQueue};
+use super::super::retry::{RetryEntry, TriggerRetryQueue};
+use super::identity::trigger_identity;
 
-/// Dispatch a WriteEvent to matching AFTER triggers.
+/// Dispatch a `WriteEvent` to matching AFTER triggers.
 ///
-/// Skips events not from `EventSource::User` (cascade prevention).
+/// Skips events not from `EventSource::User` / `Deferred` (cascade prevention).
 /// Returns `Ok(())` even if trigger execution fails — failures are
 /// handled via retry queue + DLQ, not propagated to the caller.
 pub async fn dispatch_triggers(
@@ -29,11 +33,9 @@ pub async fn dispatch_triggers(
     state: &Arc<SharedState>,
     retry_queue: &mut TriggerRetryQueue,
 ) {
-    // Determine which trigger execution mode to fire based on event source.
     let mode_filter = match event.source {
         EventSource::User => Some(TriggerExecutionMode::Async),
         EventSource::Deferred => Some(TriggerExecutionMode::Deferred),
-        // Trigger/RaftFollower/CrdtSync sources don't fire triggers.
         _ => {
             trace!(
                 source = %event.source,
@@ -44,8 +46,8 @@ pub async fn dispatch_triggers(
         }
     };
 
-    // Deserialize row data from the event payload and convert to nodedb_types::Value
-    // at this Event Plane boundary — the only remaining serde_json::Map → HashMap conversion point.
+    // Deserialize at the Event Plane boundary — the only remaining
+    // serde_json::Map → HashMap conversion point.
     let new_fields: Option<std::collections::HashMap<String, nodedb_types::Value>> = event
         .new_value
         .as_ref()
@@ -71,7 +73,6 @@ pub async fn dispatch_triggers(
             fields
         });
 
-    // Build a system identity for trigger execution (SECURITY DEFINER model).
     let identity = trigger_identity(event.tenant_id);
 
     let op_str = event.op.to_string();
@@ -85,7 +86,7 @@ pub async fn dispatch_triggers(
             // events for each row in a batch, so triggers fire on those
             // individual events. Bulk events are safe to skip for ROW triggers.
             //
-            // However, STATEMENT-level triggers fire on bulk events since they
+            // STATEMENT-level triggers fire on bulk events since they
             // represent a complete DML statement.
             let dml_event = match event.op {
                 WriteOp::BulkInsert { .. } => crate::control::trigger::DmlEvent::Insert,
@@ -103,7 +104,6 @@ pub async fn dispatch_triggers(
             .await
         }
         _ => {
-            // Fire ROW-level triggers for individual events.
             let row_result = fire_for_operation(
                 &op_str,
                 state,
@@ -143,7 +143,6 @@ pub async fn dispatch_triggers(
                         error = %e,
                         "AFTER STATEMENT trigger failed, enqueuing for retry"
                     );
-                    // Statement trigger failures also go through retry.
                     retry_queue.enqueue(RetryEntry {
                         tenant_id: event.tenant_id.as_u32(),
                         collection: event.collection.to_string(),
@@ -178,7 +177,7 @@ pub async fn dispatch_triggers(
             collection: event.collection.to_string(),
             row_id: event.row_id.as_str().to_string(),
             operation: event.op.to_string(),
-            trigger_name: String::new(), // Registry matched multiple — generic entry
+            trigger_name: String::new(),
             new_fields,
             old_fields,
             attempts: 0,
@@ -194,7 +193,7 @@ pub async fn dispatch_triggers(
 /// Retry a single entry. On failure, re-enqueues into the retry queue.
 ///
 /// Called from the consumer loop where the DLQ mutex is NOT held,
-/// avoiding holding a MutexGuard across await points.
+/// avoiding holding a `MutexGuard` across await points.
 pub async fn retry_single(
     entry: &RetryEntry,
     state: &Arc<SharedState>,
@@ -216,7 +215,6 @@ pub async fn retry_single(
     }
 }
 
-/// Re-fire a single trigger entry during retry.
 async fn retry_fire(
     entry: &RetryEntry,
     state: &Arc<SharedState>,
@@ -236,12 +234,12 @@ async fn retry_fire(
     .await
 }
 
-/// Shared trigger fire logic: routes to the correct fire_after_* function.
+/// Shared trigger fire logic: routes to the correct `fire_after_*` function.
 ///
-/// Used by both initial dispatch (from WriteEvent) and retry (from RetryEntry).
-/// `mode_filter` controls which execution mode triggers are fired.
+/// Used by both initial dispatch (from `WriteEvent`) and retry (from
+/// `RetryEntry`). `mode_filter` controls which execution mode triggers fire.
 #[allow(clippy::too_many_arguments)]
-async fn fire_for_operation(
+pub(super) async fn fire_for_operation(
     operation: &str,
     state: &Arc<SharedState>,
     identity: &AuthenticatedIdentity,
@@ -306,137 +304,9 @@ async fn fire_for_operation(
     }
 }
 
-/// Dispatch a batch of trigger rows.
-///
-/// For `BatchSafe` triggers, fires each matching trigger once per row in the batch
-/// (but with the optimization of pre-filtering WHEN clauses across the whole batch).
-/// For `RowAtATime` triggers, fires per-row as usual.
-///
-/// This is called by the consumer loop after the batch collector yields a full batch.
-pub async fn dispatch_trigger_batch(
-    batch: &crate::control::trigger::batch::collector::TriggerBatch,
-    state: &Arc<SharedState>,
-    retry_queue: &mut TriggerRetryQueue,
-) {
-    use crate::control::security::catalog::trigger_types::{TriggerGranularity, TriggerTiming};
-    use crate::control::trigger::batch::when_filter;
-    use crate::control::trigger::fire_common;
-    use crate::control::trigger::registry::DmlEvent;
-
-    let tenant_id = TenantId::new(batch.tenant_id);
-    let identity = trigger_identity(tenant_id);
-    let mode_filter = Some(TriggerExecutionMode::Async);
-
-    let dml_event = match batch.operation.as_str() {
-        "INSERT" => DmlEvent::Insert,
-        "UPDATE" => DmlEvent::Update,
-        "DELETE" => DmlEvent::Delete,
-        _ => return,
-    };
-
-    let triggers =
-        state
-            .trigger_registry
-            .get_matching(batch.tenant_id, &batch.collection, dml_event);
-
-    let after_row_triggers: Vec<_> = triggers
-        .iter()
-        .filter(|t| t.timing == TriggerTiming::After)
-        .filter(|t| t.granularity == TriggerGranularity::Row)
-        .filter(|t| mode_filter.is_none() || Some(t.execution_mode) == mode_filter)
-        .collect();
-
-    if after_row_triggers.is_empty() {
-        return;
-    }
-
-    for trigger in &after_row_triggers {
-        // Pre-filter the batch by WHEN clause.
-        let mask = when_filter::filter_batch_by_when(
-            &batch.rows,
-            &batch.collection,
-            &batch.operation,
-            trigger.when_condition.as_deref(),
-        );
-
-        let passing = when_filter::count_passing(&mask);
-        if passing == 0 {
-            continue;
-        }
-
-        // For each passing row, fire the trigger body.
-        // BatchSafe triggers could in the future dispatch a single bulk DML
-        // with all passing rows. For now, they still fire per-row but with
-        // the WHEN clause pre-filtered (avoiding parse+eval overhead on
-        // non-matching rows).
-        for (row, &passes) in batch.rows.iter().zip(mask.iter()) {
-            if !passes {
-                continue;
-            }
-
-            let bindings =
-                when_filter::build_row_bindings(row, &batch.collection, &batch.operation);
-
-            let result = fire_common::fire_triggers(
-                state,
-                &identity,
-                tenant_id,
-                &batch.collection,
-                std::slice::from_ref(trigger),
-                &bindings,
-                0,
-            )
-            .await;
-
-            if let Err(e) = result {
-                warn!(
-                    trigger = %trigger.name,
-                    collection = %batch.collection,
-                    row_id = %row.row_id,
-                    error = %e,
-                    "batch trigger fire failed, enqueuing row for retry"
-                );
-                retry_queue.enqueue(RetryEntry {
-                    tenant_id: batch.tenant_id,
-                    collection: batch.collection.clone(),
-                    row_id: row.row_id.clone(),
-                    operation: batch.operation.clone(),
-                    trigger_name: trigger.name.clone(),
-                    new_fields: row.new_fields().cloned(),
-                    old_fields: row.old_fields().cloned(),
-                    attempts: 0,
-                    last_error: e.to_string(),
-                    next_retry_at: std::time::Instant::now(),
-                    source_lsn: 0,
-                    source_sequence: 0,
-                    cascade_depth: 0,
-                });
-            }
-        }
-    }
-}
-
-/// Build a system identity for trigger execution (SECURITY DEFINER model).
-///
-/// Trigger bodies execute with superuser privileges — they are database-defined
-/// code, not user-submitted queries. The trigger creator's identity is stored
-/// in `StoredTrigger.owner` but for now we use a system identity.
-fn trigger_identity(tenant_id: TenantId) -> AuthenticatedIdentity {
-    AuthenticatedIdentity {
-        user_id: 0,
-        username: "_system_trigger".into(),
-        tenant_id,
-        auth_method: AuthMethod::Trust,
-        roles: vec![Role::Superuser],
-        is_superuser: true,
-    }
-}
-
-use crate::control::trigger::row_identity::inject_row_identity;
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::event::types::deserialize_event_payload;
 
     #[test]
     fn deserialize_json_payload() {
@@ -459,12 +329,5 @@ mod tests {
     fn deserialize_non_object_returns_none() {
         let bytes = serde_json::to_vec(&serde_json::json!([1, 2, 3])).unwrap();
         assert!(deserialize_event_payload(&bytes).is_none());
-    }
-
-    #[test]
-    fn trigger_identity_is_superuser() {
-        let id = trigger_identity(TenantId::new(5));
-        assert!(id.is_superuser);
-        assert_eq!(id.tenant_id, TenantId::new(5));
     }
 }
