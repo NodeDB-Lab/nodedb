@@ -117,6 +117,17 @@ impl EventPlane {
                 shutdown.raw_receiver(),
             );
 
+        // Spawn the bitemporal audit-retention enforcement loop.
+        // Tick interval comes from server tuning config so operators
+        // control cadence declaratively; no code change needed to adjust.
+        let _bitemporal_retention_handle =
+            crate::engine::bitemporal::spawn_bitemporal_retention_loop(
+                Arc::clone(&shared_state),
+                Arc::clone(&shared_state.bitemporal_retention_registry),
+                shutdown.raw_receiver(),
+                shared_state.tuning.bitemporal_retention_tick(),
+            );
+
         // Spawn the alert evaluation loop.
         let _alert_handle = super::alert::executor::spawn_alert_eval_loop(
             Arc::clone(&shared_state),

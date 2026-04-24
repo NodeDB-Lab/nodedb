@@ -4,6 +4,7 @@
 pub mod crdt;
 pub mod document;
 pub mod graph;
+pub mod meta_retention;
 pub mod other;
 pub mod text;
 pub mod vector;

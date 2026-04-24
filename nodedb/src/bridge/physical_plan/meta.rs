@@ -124,6 +124,44 @@ pub enum MetaOp {
     /// the cutoff. Called by the retention policy enforcement loop.
     EnforceTimeseriesRetention { collection: String, max_age_ms: i64 },
 
+    /// Bitemporal audit-retention purge for the graph edge store.
+    ///
+    /// Deletes versioned edge rows (in `edge_store/temporal` layout) where
+    /// `system_from_ms < cutoff_system_ms` AND a newer version of the same
+    /// base key exists. Never deletes the single surviving (latest) version
+    /// of a base key, even if it is older than the cutoff — "audit retain"
+    /// reclaims only *superseded* history, not the current row.
+    /// Emits one `RecordType::TemporalPurge` WAL record per purged batch.
+    TemporalPurgeEdgeStore {
+        tenant_id: u32,
+        collection: String,
+        cutoff_system_ms: i64,
+    },
+
+    /// Bitemporal audit-retention purge for the DocumentStrict versioned
+    /// tables (`documents_versioned` + `indexes_versioned`). Same semantics
+    /// as `TemporalPurgeEdgeStore`: drop versions older than `cutoff_system_ms`
+    /// when a newer version of the same `(tenant, coll, doc_id)` exists;
+    /// never drop the single surviving version. Deletes index-version rows
+    /// keyed to the purged document versions in the same transaction.
+    TemporalPurgeDocumentStrict {
+        tenant_id: u32,
+        collection: String,
+        cutoff_system_ms: i64,
+    },
+
+    /// Bitemporal audit-retention purge for plain columnar collections.
+    /// Reuses the timeseries max-system-ts axis on partition meta: any
+    /// partition whose `max_system_ts < cutoff_system_ms` and whose max
+    /// column version has been superseded by a later partition is removed.
+    /// Non-bitemporal columnar collections are a no-op (collection is
+    /// expected to be flagged bitemporal by the caller).
+    TemporalPurgeColumnar {
+        tenant_id: u32,
+        collection: String,
+        cutoff_system_ms: i64,
+    },
+
     /// Apply retention to continuous aggregate buckets managed by
     /// the aggregate manager. Drops materialized buckets older than
     /// each aggregate's configured retention_period_ms.

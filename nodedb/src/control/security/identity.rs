@@ -354,7 +354,11 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
 
         // Retention enforcement is admin-level (invoked by background tasks).
         PhysicalPlan::Meta(
-            MetaOp::EnforceTimeseriesRetention { .. } | MetaOp::ApplyContinuousAggRetention,
+            MetaOp::EnforceTimeseriesRetention { .. }
+            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::TemporalPurgeEdgeStore { .. }
+            | MetaOp::TemporalPurgeDocumentStrict { .. }
+            | MetaOp::TemporalPurgeColumnar { .. },
         ) => Permission::Admin,
 
         // Watermark query is admin-level (invoked by enforcement loop).

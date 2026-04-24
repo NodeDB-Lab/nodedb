@@ -312,159 +312,54 @@ impl CoreLoop {
                 self.execute_query_collection_size(task, *tenant_id, name)
             }
 
+            // Retention / purge / continuous-agg / last-value bodies live in
+            // `dispatch/meta_retention/` to keep this file within the size
+            // budget; the arms below are one-line delegations so the Meta
+            // match stays exhaustive.
             PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                 collection,
                 max_age_ms,
-            }) => {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("system clock before UNIX_EPOCH: {e}; using epoch as now");
-                        std::time::Duration::ZERO
-                    })
-                    .as_millis() as i64;
-                let cutoff = now_ms - *max_age_ms;
-                let mut deleted = 0usize;
-                let ts_base = self.data_dir.join("ts").join(collection.as_str());
-
-                // Bitemporal collections key retention on system-time
-                // (`max_system_ts`) so backfill with old event-time but
-                // current write-time survives an event-time-based TTL.
-                // Non-bitemporal partitions have `max_system_ts == 0` and
-                // fall through to the existing `max_ts` path.
-                let bitemporal = self.is_bitemporal(task.request.tenant_id.as_u32(), collection);
-
-                let ts_key = (task.request.tenant_id, collection.to_string());
-                if let Some(registry) = self.ts_registries.get_mut(&ts_key) {
-                    // Find partitions older than cutoff.
-                    let expired: Vec<(i64, String)> = registry
-                        .iter()
-                        .filter(|(_, e)| {
-                            let axis_ts = if bitemporal && e.meta.max_system_ts > 0 {
-                                e.meta.max_system_ts
-                            } else {
-                                e.meta.max_ts
-                            };
-                            axis_ts < cutoff
-                                && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
-                        })
-                        .map(|(&start, e)| (start, e.dir_name.clone()))
-                        .collect();
-
-                    for (start_ts, dir_name) in expired {
-                        let partition_path = ts_base.join(&dir_name);
-                        if partition_path.exists()
-                            && let Err(e) = std::fs::remove_dir_all(&partition_path)
-                        {
-                            tracing::warn!(
-                                path = %partition_path.display(),
-                                error = %e,
-                                "failed to delete expired partition"
-                            );
-                            continue;
-                        }
-                        registry.mark_deleted(start_ts);
-                        deleted += 1;
-                    }
-
-                    if deleted > 0 {
-                        tracing::info!(
-                            collection,
-                            deleted,
-                            max_age_ms,
-                            "retention enforcement complete"
-                        );
-                    }
-                }
-
-                // Evict LVC entries older than the cutoff.
-                if let Some(lvc) = self.ts_last_value_caches.get_mut(&ts_key) {
-                    let evicted = lvc.evict_older_than(cutoff);
-                    if evicted > 0 {
-                        tracing::debug!(collection, evicted, "evicted stale LVC entries");
-                    }
-                }
-
-                let payload = (deleted as u64).to_le_bytes().to_vec();
-                self.response_with_payload(task, payload)
-            }
-
+            }) => self.meta_enforce_timeseries_retention(task, collection, *max_age_ms),
             PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention) => {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("system clock before UNIX_EPOCH: {e}; using epoch as now");
-                        std::time::Duration::ZERO
-                    })
-                    .as_millis() as i64;
-                let removed = self.continuous_agg_mgr.apply_retention(now_ms);
-                tracing::debug!(removed, "continuous aggregate retention applied");
-                self.response_ok(task)
+                self.meta_apply_continuous_agg_retention(task)
             }
-
             PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark { aggregate_name }) => {
-                let wm = self
-                    .continuous_agg_mgr
-                    .get_watermark(aggregate_name)
-                    .cloned()
-                    .unwrap_or_default();
-                match response_codec::encode_serde(&wm) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(
-                        task,
-                        crate::bridge::envelope::ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    ),
-                }
+                self.meta_query_aggregate_watermark(task, aggregate_name)
             }
-
             PhysicalPlan::Meta(MetaOp::QueryLastValues { collection }) => {
-                let lvc_key = (task.request.tenant_id, collection.to_string());
-
-                // LVC is populated on ingest via ingest_batch_with_lvc().
-                // After crash recovery, it rebuilds as new data flows in.
-                // If no new data has arrived since restart, the cache is empty.
-                let entries: Vec<(u64, i64, f64)> =
-                    if let Some(lvc) = self.ts_last_value_caches.get(&lvc_key) {
-                        lvc.all().map(|(id, e)| (id, e.ts, e.value)).collect()
-                    } else {
-                        Vec::new()
-                    };
-                match response_codec::encode(&entries) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(
-                        task,
-                        crate::bridge::envelope::ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    ),
-                }
+                self.meta_query_last_values(task, collection)
+            }
+            PhysicalPlan::Meta(MetaOp::QueryLastValue {
+                collection,
+                series_id,
+            }) => self.meta_query_last_value(task, collection, *series_id),
+            PhysicalPlan::Meta(MetaOp::TemporalPurgeEdgeStore {
+                tenant_id,
+                collection,
+                cutoff_system_ms,
+            }) => {
+                self.meta_temporal_purge_edge_store(task, *tenant_id, collection, *cutoff_system_ms)
+            }
+            PhysicalPlan::Meta(MetaOp::TemporalPurgeDocumentStrict {
+                tenant_id,
+                collection,
+                cutoff_system_ms,
+            }) => self.meta_temporal_purge_document_strict(
+                task,
+                *tenant_id,
+                collection,
+                *cutoff_system_ms,
+            ),
+            PhysicalPlan::Meta(MetaOp::TemporalPurgeColumnar {
+                tenant_id,
+                collection,
+                cutoff_system_ms,
+            }) => {
+                self.meta_temporal_purge_columnar(task, *tenant_id, collection, *cutoff_system_ms)
             }
 
             PhysicalPlan::Meta(MetaOp::RawResponse { payload }) => {
                 self.response_with_payload(task, payload.clone())
-            }
-
-            PhysicalPlan::Meta(MetaOp::QueryLastValue {
-                collection,
-                series_id,
-            }) => {
-                let lvc_key = (task.request.tenant_id, collection.to_string());
-                let entry: Option<(i64, f64)> = self
-                    .ts_last_value_caches
-                    .get(&lvc_key)
-                    .and_then(|lvc| lvc.get(*series_id))
-                    .map(|e| (e.ts, e.value));
-                match response_codec::encode(&entry) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(
-                        task,
-                        crate::bridge::envelope::ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    ),
-                }
             }
 
             PhysicalPlan::Columnar(ColumnarOp::Scan {

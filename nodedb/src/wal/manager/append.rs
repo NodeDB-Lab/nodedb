@@ -102,6 +102,32 @@ impl WalManager {
     /// `vshard_id` of `0` is conventional — tombstones are tenant-level
     /// metadata, not sharded user data. Replay filters on
     /// `(tenant_id, collection)` pair alone.
+    /// Append a `TemporalPurge` audit record. Emitted by the
+    /// Control Plane's bitemporal-retention scheduler after a successful
+    /// dispatch of `MetaOp::TemporalPurge*` to the Data Plane, providing
+    /// a durable audit trail distinct from regular `Delete` records.
+    ///
+    /// `vshard_id` is `0` — bitemporal audit-purge is collection-scoped
+    /// metadata, not sharded user data.
+    pub fn append_temporal_purge(
+        &self,
+        tid: TenantId,
+        engine: nodedb_wal::TemporalPurgeEngine,
+        collection: &str,
+        cutoff_system_ms: i64,
+        purged_count: u64,
+    ) -> crate::Result<Lsn> {
+        let payload = nodedb_wal::TemporalPurgePayload::new(
+            engine,
+            collection,
+            cutoff_system_ms,
+            purged_count,
+        )
+        .to_bytes()
+        .map_err(crate::Error::Wal)?;
+        self.append_record(RecordType::TemporalPurge, tid, VShardId::new(0), &payload)
+    }
+
     pub fn append_collection_tombstone(
         &self,
         tid: TenantId,

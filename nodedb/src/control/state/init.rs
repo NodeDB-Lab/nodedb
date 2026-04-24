@@ -142,6 +142,9 @@ impl SharedState {
             retention_policy_registry: Arc::new(
                 crate::engine::timeseries::retention_policy::RetentionPolicyRegistry::new(),
             ),
+            bitemporal_retention_registry: Arc::new(
+                crate::engine::bitemporal::BitemporalRetentionRegistry::new(),
+            ),
             alert_registry: Arc::new(crate::event::alert::AlertRegistry::new()),
             alert_hysteresis: Arc::new(crate::event::alert::hysteresis::HysteresisManager::new()),
             schedule_registry: Arc::new(crate::event::scheduler::ScheduleRegistry::new()),
@@ -361,6 +364,9 @@ impl SharedState {
                 catalog_path.parent().unwrap_or(std::path::Path::new(".")),
             )?),
             retention_policy_registry,
+            bitemporal_retention_registry: Arc::new(
+                crate::engine::bitemporal::BitemporalRetentionRegistry::new(),
+            ),
             alert_registry,
             alert_hysteresis,
             schedule_registry,

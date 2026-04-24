@@ -273,6 +273,12 @@ pub struct SharedState {
     pub retention_policy_registry:
         Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>,
 
+    /// Per-collection bitemporal audit-retention policy registry.
+    /// Populated by DDL (`CREATE COLLECTION ... WITH BITEMPORAL RETENTION`),
+    /// consumed by the background enforcement loop that dispatches
+    /// `MetaOp::TemporalPurge*`.
+    pub bitemporal_retention_registry: Arc<crate::engine::bitemporal::BitemporalRetentionRegistry>,
+
     /// In-memory alert rule registry for threshold alerting.
     pub alert_registry: Arc<crate::event::alert::AlertRegistry>,
 
