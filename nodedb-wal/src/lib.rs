@@ -34,6 +34,7 @@ pub mod recovery;
 pub mod replay;
 pub mod segment;
 pub mod segmented;
+pub mod temporal_purge;
 pub mod tombstone;
 #[cfg(feature = "io-uring")]
 pub mod uring_writer;
@@ -47,5 +48,6 @@ pub use record::{RecordHeader, RecordType, WalRecord};
 pub use recovery::{RecoveryInfo, recover};
 pub use replay::{TombstoneSet, extract_tombstones};
 pub use segmented::{SegmentedWal, SegmentedWalConfig};
+pub use temporal_purge::{TemporalPurgeEngine, TemporalPurgePayload};
 pub use tombstone::{CollectionTombstonePayload, MAX_COLLECTION_NAME_LEN};
 pub use writer::WalWriter;

@@ -54,6 +54,16 @@ pub enum RecordType {
     /// Not required: a replay that skips these records produces a slightly
     /// coarser interpolation table but does not corrupt state.
     LsnMsAnchor = 102,
+
+    /// Bitemporal version purge — drops one or more *superseded* row
+    /// versions (those with finite `_ts_valid_until`) once
+    /// `audit_retain_ms` has elapsed. Distinct from `Delete`, which
+    /// removes the current live row; replay must not conflate them
+    /// because a `TemporalPurge` must never delete live state.
+    ///
+    /// Required: a replay that skipped this record would leave purged
+    /// versions resurrected and diverge from the leader's state.
+    TemporalPurge = 103 | 0x8000,
 }
 
 impl RecordType {
@@ -78,6 +88,7 @@ impl RecordType {
             x if x == 100 | 0x8000 => Some(Self::Checkpoint),
             x if x == 101 | 0x8000 => Some(Self::CollectionTombstoned),
             102 => Some(Self::LsnMsAnchor),
+            x if x == 103 | 0x8000 => Some(Self::TemporalPurge),
             _ => None,
         }
     }
@@ -96,6 +107,7 @@ mod tests {
         assert!(!RecordType::is_required(RecordType::TimeseriesBatch as u16));
         assert!(!RecordType::is_required(RecordType::LogBatch as u16));
         assert!(!RecordType::is_required(RecordType::LsnMsAnchor as u16));
+        assert!(RecordType::is_required(RecordType::TemporalPurge as u16));
     }
 
     #[test]
@@ -114,6 +126,7 @@ mod tests {
             RecordType::Checkpoint,
             RecordType::CollectionTombstoned,
             RecordType::LsnMsAnchor,
+            RecordType::TemporalPurge,
         ] {
             assert_eq!(RecordType::from_raw(ty as u16), Some(ty));
         }
