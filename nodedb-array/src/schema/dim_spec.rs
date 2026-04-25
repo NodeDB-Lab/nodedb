@@ -7,8 +7,19 @@ use crate::types::Domain;
 /// Dimension type tag. Each variant has a one-to-one mapping with
 /// [`crate::types::coord::value::CoordValue`] — the encoder dispatches
 /// off this tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(rename_all = "snake_case")]
+#[msgpack(c_enum)]
 pub enum DimType {
     Int64,
     Float64,
@@ -20,7 +31,16 @@ pub enum DimType {
 }
 
 /// One dimension of an [`super::ArraySchema`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct DimSpec {
     pub name: String,
     pub dtype: DimType,

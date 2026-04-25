@@ -7,8 +7,20 @@ use serde::{Deserialize, Serialize};
 /// `Hilbert` is the default for ND locality — neighboring coordinates
 /// in any dim project to neighboring positions in the linear tile
 /// payload, which compresses well and preserves slice locality.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(rename_all = "snake_case")]
+#[msgpack(c_enum)]
 pub enum CellOrder {
     RowMajor,
     ColMajor,
@@ -19,8 +31,20 @@ pub enum CellOrder {
 
 /// Across-tile ordering. Hilbert keeps tile-id sort order coherent
 /// with spatial locality, so range scans hit a contiguous run of tiles.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(rename_all = "snake_case")]
+#[msgpack(c_enum)]
 pub enum TileOrder {
     RowMajor,
     ColMajor,

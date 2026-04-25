@@ -5,8 +5,19 @@ use serde::{Deserialize, Serialize};
 /// Attribute type tag. One-to-one with
 /// [`crate::types::cell_value::value::CellValue`] (excluding `Null`,
 /// which is per-cell, not per-attribute).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 #[serde(rename_all = "snake_case")]
+#[msgpack(c_enum)]
 pub enum AttrType {
     Int64,
     Float64,
@@ -15,7 +26,16 @@ pub enum AttrType {
 }
 
 /// One attribute column on an [`super::ArraySchema`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct AttrSpec {
     pub name: String,
     pub dtype: AttrType,

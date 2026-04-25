@@ -7,6 +7,7 @@
 
 pub mod coord;
 pub mod error;
+pub mod query;
 pub mod schema;
 pub mod segment;
 pub mod tile;
