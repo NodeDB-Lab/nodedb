@@ -12,13 +12,16 @@
 //! segmented WAL and feeds records in here.
 
 use crate::engine::array::store::ArrayStore;
-use crate::engine::array::wal::{ArrayDeletePayload, ArrayPutPayload};
+use crate::engine::array::wal::{ArrayDeletePayload, ArrayPutCell, ArrayPutPayload};
+use crate::engine::array::write::{stamp_delete_cells, stamp_put_cells};
 use nodedb_array::ArrayError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
     #[error(transparent)]
     Array(#[from] ArrayError),
+    #[error(transparent)]
+    Engine(#[from] crate::engine::array::engine::ArrayEngineError),
     #[error("recovery: unknown array {array}")]
     UnknownArray { array: String },
 }
@@ -73,12 +76,8 @@ impl<'a> Recovery<'a> {
                     self.stats.puts_skipped += 1;
                     return Ok(());
                 }
-                let schema = self.store.schema().clone();
-                for cell in payload.cells {
-                    self.store
-                        .memtable
-                        .put_cell(&schema, cell.coord, cell.attrs, lsn)?;
-                }
+                let cells: Vec<ArrayPutCell> = payload.cells;
+                stamp_put_cells(self.store, cells, lsn)?;
                 self.stats.puts_applied += 1;
             }
             RecoveryRecord::Delete { lsn, payload } => {
@@ -86,10 +85,7 @@ impl<'a> Recovery<'a> {
                     self.stats.deletes_skipped += 1;
                     return Ok(());
                 }
-                let schema = self.store.schema().clone();
-                for coord in payload.coords {
-                    self.store.memtable.delete_cell(&schema, coord, lsn)?;
-                }
+                stamp_delete_cells(self.store, payload.coords, lsn)?;
                 self.stats.deletes_applied += 1;
             }
             RecoveryRecord::Flush { lsn, .. } => {

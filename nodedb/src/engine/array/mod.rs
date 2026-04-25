@@ -6,12 +6,18 @@
 //! last `ArrayFlush` watermark; flushed segments are durable on disk and
 //! mmap'd by the segment store on open.
 
+pub mod compact;
 pub mod compaction;
 pub mod engine;
+pub mod flush;
 pub mod memtable;
+pub mod read;
 pub mod recovery;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 pub mod wal;
+pub mod write;
 
 pub use engine::{ArrayEngine, ArrayEngineConfig};
-pub use wal::{ArrayDeletePayload, ArrayFlushPayload, ArrayPutPayload, ArrayWalAppender};
+pub use wal::{ArrayDeletePayload, ArrayFlushPayload, ArrayPutPayload};

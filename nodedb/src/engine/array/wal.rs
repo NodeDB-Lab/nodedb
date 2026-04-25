@@ -12,9 +12,10 @@
 //!   captured in the segment and must not be reapplied.
 //!
 //! All three are zerompk-encoded — never JSON between planes (CLAUDE.md
-//! rule #11). The engine never builds [`nodedb_wal::WalRecord`] itself;
-//! it hands payloads to an [`ArrayWalAppender`] which Origin wires to
-//! the real group-commit pipeline.
+//! rule #11). LSNs are allocated by the Control Plane WAL writer; the
+//! Data Plane just stamps the supplied LSN, so there is no engine-side
+//! "appender" trait — these payload types are consumed by recovery and
+//! by the WAL record types directly.
 
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
@@ -80,17 +81,6 @@ pub struct ArrayFlushPayload {
     /// Tile ids that landed in the segment — lets compaction and
     /// debugging cross-check the manifest without re-decoding the file.
     pub tile_ids: Vec<TileId>,
-}
-
-/// Persistence trait the engine calls into. Origin implements this with
-/// the real group-commit WAL writer; tests use an in-memory variant.
-///
-/// Returns the assigned LSN so the engine can stamp memtable entries
-/// for ordering against subsequent flush watermarks.
-pub trait ArrayWalAppender {
-    fn append_put(&mut self, payload: &ArrayPutPayload) -> Result<u64, ArrayWalError>;
-    fn append_delete(&mut self, payload: &ArrayDeletePayload) -> Result<u64, ArrayWalError>;
-    fn append_flush(&mut self, payload: &ArrayFlushPayload) -> Result<u64, ArrayWalError>;
 }
 
 #[derive(Debug, thiserror::Error)]
