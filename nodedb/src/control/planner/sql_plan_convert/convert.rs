@@ -264,15 +264,18 @@ pub(super) fn convert_one(
             top_k,
             ef_search,
             filters,
-        } => super::scan::convert_vector_search(
+            array_prefilter,
+        } => super::scan::convert_vector_search(super::scan_params::VectorSearchParams {
             collection,
             field,
             query_vector,
             top_k,
             ef_search,
             filters,
+            array_prefilter: array_prefilter.as_ref(),
             tenant_id,
-        ),
+            ctx,
+        }),
 
         SqlPlan::TextSearch {
             collection,

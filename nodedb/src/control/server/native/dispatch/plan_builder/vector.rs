@@ -25,6 +25,7 @@ pub(crate) fn build_search(fields: &TextFields, collection: &str) -> crate::Resu
         filter_bitmap: None,
         field_name,
         rls_filters: Vec::new(),
+        inline_prefilter_plan: None,
     }))
 }
 

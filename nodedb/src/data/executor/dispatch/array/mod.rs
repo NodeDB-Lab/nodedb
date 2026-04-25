@@ -9,6 +9,7 @@ pub mod entry;
 pub mod mutate;
 pub mod open;
 pub mod read;
+pub mod surrogate_scan;
 
 #[cfg(test)]
 mod tests_dispatch;

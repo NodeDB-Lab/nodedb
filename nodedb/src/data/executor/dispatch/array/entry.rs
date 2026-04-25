@@ -52,6 +52,10 @@ impl CoreLoop {
                 *limit,
                 cell_filter.as_ref(),
             ),
+            ArrayOp::SurrogateBitmapScan {
+                array_id,
+                slice_msgpack,
+            } => self.dispatch_array_surrogate_bitmap_scan(task, array_id, slice_msgpack),
             ArrayOp::Project {
                 array_id,
                 attr_indices,

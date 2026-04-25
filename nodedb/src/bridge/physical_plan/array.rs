@@ -158,6 +158,20 @@ pub enum ArrayOp {
     /// indicates whether a merge happened.
     Compact { array_id: ArrayId },
 
+    /// Coord-range slice that emits one document-shaped row per matching
+    /// cell, where the row's `id` is the cell's bound `Surrogate` formatted
+    /// as 8-char zero-padded lowercase hex (substrate row-key format).
+    /// Used by the cross-engine fusion path: the vector engine runs this
+    /// as an `inline_prefilter_plan` and reads `id` via
+    /// `collect_surrogates` to build a `SurrogateBitmap`. Since the
+    /// surrogate identity initiative binds every cell to a global
+    /// `Surrogate` at write time, the cell's own surrogate is the
+    /// cross-engine join key — no extra attr resolution needed.
+    SurrogateBitmapScan {
+        array_id: ArrayId,
+        slice_msgpack: Vec<u8>,
+    },
+
     /// Drop the per-core array store. Broadcast on `DROP ARRAY` after
     /// the Control-Plane catalog has been mutated so each Data-Plane
     /// core releases its local store; otherwise a follow-up
@@ -177,6 +191,7 @@ impl ArrayOp {
             | ArrayOp::Put { array_id, .. }
             | ArrayOp::Delete { array_id, .. }
             | ArrayOp::Slice { array_id, .. }
+            | ArrayOp::SurrogateBitmapScan { array_id, .. }
             | ArrayOp::Project { array_id, .. }
             | ArrayOp::Aggregate { array_id, .. }
             | ArrayOp::Flush { array_id, .. }

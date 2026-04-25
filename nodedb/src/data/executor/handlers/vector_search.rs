@@ -94,6 +94,10 @@ pub(in crate::data::executor) struct VectorSearchParams<'a> {
     pub field_name: &'a str,
     /// RLS post-candidate filters. Applied after HNSW/IVF returns candidates.
     pub rls_filters: &'a [u8],
+    /// Cross-engine prefilter sub-plan: when `Some`, executed locally and
+    /// its output rows materialized into a `SurrogateBitmap` that is
+    /// intersected with `filter_bitmap` before HNSW search.
+    pub inline_prefilter_plan: Option<&'a crate::bridge::envelope::PhysicalPlan>,
 }
 
 /// Parameters for multi-vector search (all named fields, RRF fusion).
@@ -111,7 +115,7 @@ pub(in crate::data::executor) struct VectorMultiSearchParams<'a> {
 
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_vector_search(
-        &self,
+        &mut self,
         params: VectorSearchParams<'_>,
     ) -> Response {
         let VectorSearchParams {
@@ -124,7 +128,27 @@ impl CoreLoop {
             filter_bitmap,
             field_name,
             rls_filters,
+            inline_prefilter_plan,
         } = params;
+
+        // Materialize cross-engine prefilter sub-plan (e.g. NDARRAY_SLICE
+        // → surrogate bitmap) and intersect with any pre-existing
+        // `filter_bitmap`. The sub-plan emits document-shaped rows whose
+        // `id` is the cell's surrogate as 8-char zero-padded lowercase
+        // hex; `collect_surrogates` decodes that back into surrogate IDs.
+        let inline_bitmap = inline_prefilter_plan.map(|sub_plan| {
+            crate::data::executor::dispatch::bitmap::hashjoin_inline::run_bitmap_subplan(
+                self, task, sub_plan,
+            )
+        });
+        let effective_filter: Option<nodedb_types::SurrogateBitmap> =
+            match (filter_bitmap.cloned(), inline_bitmap) {
+                (Some(a), Some(b)) => Some(a.intersect(&b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) if !b.is_empty() => Some(b),
+                _ => None,
+            };
+        let filter_bitmap = effective_filter.as_ref();
         debug!(core = self.core_id, %collection, top_k, ef_search, "vector search");
 
         // Scan-quiesce gate.

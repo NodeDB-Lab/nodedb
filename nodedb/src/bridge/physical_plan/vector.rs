@@ -2,6 +2,8 @@
 
 use nodedb_types::{Surrogate, SurrogateBitmap};
 
+use crate::bridge::envelope::PhysicalPlan;
+
 /// Vector engine physical operations.
 #[derive(
     Debug,
@@ -28,6 +30,16 @@ pub enum VectorOp {
         /// Applied after HNSW returns candidates, before returning to client.
         /// Result count may be less than requested `top_k`.
         rls_filters: Vec<u8>,
+        /// Optional sub-plan whose output rows materialize a `SurrogateBitmap`
+        /// used as an additional prefilter (intersected with `filter_bitmap`).
+        ///
+        /// Set by the planner when fusing `Vector ORDER BY ... + JOIN
+        /// NDARRAY_SLICE(...) ON v.id = s.surrogate` into a single op:
+        /// the array slice runs first, its surrogate column becomes the
+        /// vector engine's pre-filter, then HNSW search runs against the
+        /// reduced candidate set. Mirrors `HashJoin`'s `inline_*_bitmap`
+        /// mechanism so the Data Plane composition is uniform.
+        inline_prefilter_plan: Option<Box<PhysicalPlan>>,
     },
 
     /// Insert a vector into the HNSW index (write path).

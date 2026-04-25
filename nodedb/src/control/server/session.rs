@@ -284,6 +284,7 @@ impl Session {
                     filter_bitmap: None,
                     field_name: String::new(),
                     rls_filters: Vec::new(),
+                    inline_prefilter_plan: None,
                 })
             }
             "range_scan" => {

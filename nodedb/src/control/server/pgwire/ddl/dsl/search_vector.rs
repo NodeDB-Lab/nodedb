@@ -91,6 +91,7 @@ pub async fn search_vector(
         filter_bitmap: None,
         field_name,
         rls_filters: Vec::new(),
+        inline_prefilter_plan: None,
     });
 
     let payload = crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async(

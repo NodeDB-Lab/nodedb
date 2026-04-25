@@ -514,30 +514,102 @@ pub(super) fn convert_timeseries_ingest(
 }
 
 pub(super) fn convert_vector_search(
-    collection: &str,
-    field: &str,
-    query_vector: &[f32],
-    top_k: &usize,
-    ef_search: &usize,
-    filters: &[Filter],
-    tenant_id: TenantId,
+    p: super::scan_params::VectorSearchParams<'_>,
 ) -> crate::Result<Vec<PhysicalTask>> {
-    let vshard = VShardId::from_collection(collection);
-    let filter_bytes = serialize_filters(filters)?;
+    let vshard = VShardId::from_collection(p.collection);
+    let filter_bytes = serialize_filters(p.filters)?;
+    let inline_prefilter_plan = match p.array_prefilter {
+        Some(pref) => Some(Box::new(build_array_prefilter_plan(
+            pref,
+            p.tenant_id,
+            p.ctx,
+        )?)),
+        None => None,
+    };
     Ok(vec![PhysicalTask {
-        tenant_id,
+        tenant_id: p.tenant_id,
         vshard_id: vshard,
         plan: PhysicalPlan::Vector(VectorOp::Search {
-            collection: collection.into(),
-            query_vector: query_vector.to_vec(),
-            top_k: *top_k,
-            ef_search: *ef_search,
+            collection: p.collection.into(),
+            query_vector: p.query_vector.to_vec(),
+            top_k: *p.top_k,
+            ef_search: *p.ef_search,
             filter_bitmap: None,
-            field_name: field.to_string(),
+            field_name: p.field.to_string(),
             rls_filters: filter_bytes,
+            inline_prefilter_plan,
         }),
         post_set_op: PostSetOp::None,
     }])
+}
+
+/// Lower an `NdArrayPrefilter` (array name + slice AST) into the
+/// `ArrayOp::SurrogateBitmapScan` sub-plan that the vector search handler
+/// runs as its `inline_prefilter_plan`.
+fn build_array_prefilter_plan(
+    prefilter: &nodedb_sql::types::NdArrayPrefilter,
+    tenant_id: TenantId,
+    ctx: &super::convert::ConvertContext,
+) -> crate::Result<PhysicalPlan> {
+    use nodedb_array::query::slice::{DimRange, Slice};
+    use nodedb_array::schema::ArraySchema;
+    use nodedb_array::types::ArrayId;
+
+    let array_catalog = ctx
+        .array_catalog
+        .as_ref()
+        .ok_or_else(|| crate::Error::PlanError {
+            detail: "array prefilter: no array catalog wired into convert context".into(),
+        })?;
+    let entry = {
+        let cat = array_catalog.read().map_err(|_| crate::Error::PlanError {
+            detail: "array catalog lock poisoned".into(),
+        })?;
+        cat.lookup_by_name(&prefilter.array_name)
+            .ok_or_else(|| crate::Error::PlanError {
+                detail: format!(
+                    "array prefilter: array '{}' not found",
+                    prefilter.array_name
+                ),
+            })?
+    };
+    let schema: ArraySchema =
+        zerompk::from_msgpack(&entry.schema_msgpack).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("array schema decode: {e}"),
+        })?;
+
+    let mut dim_ranges: Vec<Option<DimRange>> = vec![None; schema.dims.len()];
+    for r in &prefilter.slice.dim_ranges {
+        let idx = schema
+            .dims
+            .iter()
+            .position(|d| d.name == r.dim)
+            .ok_or_else(|| crate::Error::PlanError {
+                detail: format!(
+                    "array prefilter: array '{}' has no dim '{}'",
+                    prefilter.array_name, r.dim
+                ),
+            })?;
+        let dtype = schema.dims[idx].dtype;
+        let lo = super::array_fn_convert::helpers::coerce_bound(&r.lo, dtype, &r.dim)?;
+        let hi = super::array_fn_convert::helpers::coerce_bound(&r.hi, dtype, &r.dim)?;
+        dim_ranges[idx] = Some(DimRange::new(lo, hi));
+    }
+    let slice = Slice::new(dim_ranges);
+    let slice_msgpack =
+        zerompk::to_msgpack_vec(&slice).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("array slice encode: {e}"),
+        })?;
+
+    let aid = ArrayId::new(tenant_id, &prefilter.array_name);
+    Ok(PhysicalPlan::Array(
+        crate::bridge::physical_plan::ArrayOp::SurrogateBitmapScan {
+            array_id: aid,
+            slice_msgpack,
+        },
+    ))
 }
 
 pub(super) fn convert_text_search(

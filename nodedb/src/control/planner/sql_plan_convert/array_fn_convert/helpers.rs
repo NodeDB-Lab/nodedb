@@ -49,7 +49,7 @@ pub(super) fn resolve_attr_indices(
     Ok(out)
 }
 
-pub(super) fn coerce_bound(
+pub(crate) fn coerce_bound(
     lit: &ArrayCoordLiteral,
     dtype: EngineDimType,
     dim: &str,

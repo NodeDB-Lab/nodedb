@@ -64,6 +64,19 @@ pub(super) struct TimeseriesScanParams<'a> {
     pub temporal: &'a nodedb_sql::TemporalScope,
 }
 
+/// Parameters for `convert_vector_search`.
+pub(super) struct VectorSearchParams<'a> {
+    pub collection: &'a str,
+    pub field: &'a str,
+    pub query_vector: &'a [f32],
+    pub top_k: &'a usize,
+    pub ef_search: &'a usize,
+    pub filters: &'a [Filter],
+    pub array_prefilter: Option<&'a nodedb_sql::types::NdArrayPrefilter>,
+    pub tenant_id: TenantId,
+    pub ctx: &'a ConvertContext,
+}
+
 /// Parameters for `convert_hybrid_search`.
 pub(super) struct HybridSearchParams<'a> {
     pub collection: &'a str,

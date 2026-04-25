@@ -374,6 +374,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         // writes, OpenArray is DDL, flush/compact are admin.
         PhysicalPlan::Array(
             ArrayOp::Slice { .. }
+            | ArrayOp::SurrogateBitmapScan { .. }
             | ArrayOp::Project { .. }
             | ArrayOp::Aggregate { .. }
             | ArrayOp::Elementwise { .. },
