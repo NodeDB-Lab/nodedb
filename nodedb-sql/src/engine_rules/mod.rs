@@ -1,3 +1,4 @@
+pub mod array;
 pub mod columnar;
 pub mod document_schemaless;
 pub mod document_strict;
@@ -388,5 +389,6 @@ pub fn resolve_engine_rules(engine: EngineType) -> &'static dyn EngineRules {
         EngineType::Columnar => &columnar::ColumnarRules,
         EngineType::Timeseries => &timeseries::TimeseriesRules,
         EngineType::Spatial => &spatial::SpatialRules,
+        EngineType::Array => &array::ArrayRules,
     }
 }

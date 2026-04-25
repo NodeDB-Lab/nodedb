@@ -104,11 +104,22 @@ fn plan_select(
     functions: &FunctionRegistry,
     temporal: TemporalScope,
 ) -> Result<SqlPlan> {
+    // 0. Intercept array table-valued functions before catalog resolution
+    //    so a name like `NDARRAY_SLICE` is not looked up as a collection.
+    if let Some(plan) = super::array_fn::try_plan_array_table_fn(&select.from, catalog)? {
+        return Ok(plan);
+    }
+
     // 1. Resolve FROM tables.
     let scope = TableScope::resolve_from(catalog, &select.from)?;
 
     // 2. Handle constant queries (no FROM clause): SELECT 1, SELECT 'hello', etc.
     if select.from.is_empty() {
+        // Intercept maintenance functions (NDARRAY_FLUSH / NDARRAY_COMPACT)
+        // before falling through to constant evaluation.
+        if let Some(plan) = super::array_fn::try_plan_array_maint_fn(&select.projection, catalog)? {
+            return Ok(plan);
+        }
         let projection = convert_projection(&select.projection)?;
         let mut columns = Vec::new();
         let mut values = Vec::new();

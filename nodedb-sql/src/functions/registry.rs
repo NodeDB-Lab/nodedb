@@ -25,6 +25,20 @@ pub enum SearchTrigger {
     SpatialIntersects,
     SpatialWithin,
     TimeBucket,
+    /// Array engine table-valued read: `NDARRAY_SLICE(name, slice_obj, attrs?, limit?)`.
+    NdArraySlice,
+    /// Array engine table-valued read: `NDARRAY_PROJECT(name, attrs)`.
+    NdArrayProject,
+    /// Array engine table-valued aggregate:
+    /// `NDARRAY_AGG(name, attr, reducer, group_by_dim?)`.
+    NdArrayAgg,
+    /// Array engine table-valued elementwise:
+    /// `NDARRAY_ELEMENTWISE(left, right, op, attr)`.
+    NdArrayElementwise,
+    /// Array engine maintenance scalar (returns BOOL): `NDARRAY_FLUSH(name)`.
+    NdArrayFlush,
+    /// Array engine maintenance scalar (returns BOOL): `NDARRAY_COMPACT(name)`.
+    NdArrayCompact,
 }
 
 /// Metadata about a known function.
@@ -185,6 +199,13 @@ fn builtin_functions() -> Vec<FunctionMeta> {
         s("now", Scalar, 0, 0, None),
         s("current_timestamp", Scalar, 0, 0, None),
         s("make_array", Scalar, 0, 255, None),
+        // ── Array engine ──
+        s("ndarray_slice", Scalar, 2, 4, NdArraySlice),
+        s("ndarray_project", Scalar, 2, 2, NdArrayProject),
+        s("ndarray_agg", Scalar, 3, 4, NdArrayAgg),
+        s("ndarray_elementwise", Scalar, 4, 4, NdArrayElementwise),
+        s("ndarray_flush", Scalar, 1, 1, NdArrayFlush),
+        s("ndarray_compact", Scalar, 1, 1, NdArrayCompact),
     ]
 }
 

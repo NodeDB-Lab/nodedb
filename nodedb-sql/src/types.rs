@@ -269,6 +269,66 @@ pub enum SqlPlan {
         /// The outer query that references CTE names.
         outer: Box<SqlPlan>,
     },
+
+    // ── Array (ND sparse) ─────────────────────────────────────
+    /// `CREATE ARRAY <name> DIMS (...) ATTRS (...) TILE_EXTENTS (...)`.
+    /// AST is engine-agnostic — the Origin converter builds the typed
+    /// `nodedb_array::ArraySchema` and persists the catalog row.
+    CreateArray {
+        name: String,
+        dims: Vec<crate::types_array::ArrayDimAst>,
+        attrs: Vec<crate::types_array::ArrayAttrAst>,
+        tile_extents: Vec<i64>,
+        cell_order: crate::types_array::ArrayCellOrderAst,
+        tile_order: crate::types_array::ArrayTileOrderAst,
+    },
+    /// `DROP ARRAY [IF EXISTS] <name>` — pure Control-Plane catalog
+    /// mutation. Per-core array store cleanup happens lazily.
+    DropArray { name: String, if_exists: bool },
+    /// `INSERT INTO ARRAY <name> COORDS (...) VALUES (...) [, ...]`.
+    InsertArray {
+        name: String,
+        rows: Vec<crate::types_array::ArrayInsertRow>,
+    },
+    /// `DELETE FROM ARRAY <name> WHERE COORDS IN ((...), (...))`.
+    DeleteArray {
+        name: String,
+        coords: Vec<Vec<crate::types_array::ArrayCoordLiteral>>,
+    },
+    /// `SELECT * FROM NDARRAY_SLICE(name, {dim:[lo,hi],..}, [attrs], limit)`.
+    NdArraySlice {
+        name: String,
+        slice: crate::types_array::ArraySliceAst,
+        /// Attribute names. Empty = all attrs.
+        attr_projection: Vec<String>,
+        /// 0 = unlimited.
+        limit: u32,
+    },
+    /// `SELECT * FROM NDARRAY_PROJECT(name, [attrs])`.
+    NdArrayProject {
+        name: String,
+        /// Attribute names. Must be non-empty.
+        attr_projection: Vec<String>,
+    },
+    /// `SELECT * FROM NDARRAY_AGG(name, attr, reducer [, group_by_dim])`.
+    NdArrayAgg {
+        name: String,
+        attr: String,
+        reducer: crate::types_array::ArrayReducerAst,
+        /// `None` = scalar fold; `Some(name)` = group by that dim.
+        group_by_dim: Option<String>,
+    },
+    /// `SELECT * FROM NDARRAY_ELEMENTWISE(left, right, op, attr)`.
+    NdArrayElementwise {
+        left: String,
+        right: String,
+        op: crate::types_array::ArrayBinaryOpAst,
+        attr: String,
+    },
+    /// `SELECT NDARRAY_FLUSH(name)` — returns one row `{result: BOOL}`.
+    NdArrayFlush { name: String },
+    /// `SELECT NDARRAY_COMPACT(name)` — returns one row `{result: BOOL}`.
+    NdArrayCompact { name: String },
 }
 
 /// INSERT-vs-UPSERT intent carried on `SqlPlan::KvInsert`.
@@ -297,6 +357,11 @@ pub enum EngineType {
     Columnar,
     Timeseries,
     Spatial,
+    /// ND sparse array engine — `CREATE ARRAY ...`. Routes through
+    /// `ArrayRules` for SQL-level validation, but most table-shaped
+    /// operations are unsupported on this engine (DML happens via
+    /// dedicated `INSERT INTO ARRAY` / `DELETE FROM ARRAY` syntax).
+    Array,
 }
 
 /// SQL join type.
@@ -436,7 +501,7 @@ pub use crate::types_expr::{BinaryOp, SqlDataType, SqlExpr, SqlValue, UnaryOp};
 // `crate::catalog` to keep this file under the 500-line limit.
 // Re-exported here so downstream modules that `use crate::types::*`
 // keep resolving `SqlCatalog` without changing their imports.
-pub use crate::catalog::{SqlCatalog, SqlCatalogError};
+pub use crate::catalog::{ArrayCatalogView, SqlCatalog, SqlCatalogError};
 
 /// Metadata about a collection for query planning.
 #[derive(Debug, Clone)]

@@ -1,4 +1,7 @@
 pub mod aggregate;
+pub mod array_ddl;
+pub mod array_dml;
+pub mod array_fn;
 pub mod const_fold;
 pub mod cte;
 pub mod dml;

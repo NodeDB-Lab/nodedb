@@ -138,7 +138,8 @@ fn ndb_to_sql_value(v: Value) -> SqlValue {
         | Value::Geometry(_)
         | Value::Set(_)
         | Value::Range { .. }
-        | Value::Record { .. } => SqlValue::Null,
+        | Value::Record { .. }
+        | Value::NdArrayCell(_) => SqlValue::Null,
     }
 }
 

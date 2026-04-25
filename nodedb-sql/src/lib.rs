@@ -23,6 +23,7 @@ pub mod planner;
 pub mod resolver;
 pub mod temporal;
 pub mod types;
+pub mod types_array;
 pub mod types_expr;
 
 pub use temporal::{TemporalScope, ValidTime};
@@ -55,6 +56,7 @@ pub fn parse_expr_string(expr_text: &str) -> Result<SqlExpr> {
 }
 
 use functions::registry::FunctionRegistry;
+use parser::array_stmt::{ArrayStatement, try_parse_array_statement};
 use parser::preprocess;
 use parser::statement::{StatementKind, classify, parse_sql};
 
@@ -63,6 +65,11 @@ use parser::statement::{StatementKind, classify, parse_sql};
 /// Handles NodeDB-specific syntax (UPSERT, `{ }` object literals) via
 /// pre-processing before handing to sqlparser.
 pub fn plan_sql(sql: &str, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+    // Array DDL/DML uses non-standard syntax that sqlparser-rs cannot
+    // accept. Intercept it before the standard preprocess pipeline.
+    if let Some(stmt) = try_parse_array_statement(sql)? {
+        return plan_array_statement(stmt, catalog);
+    }
     let preprocessed = preprocess::preprocess(sql)?;
     let effective_sql = preprocessed.as_ref().map_or(sql, |p| p.sql.as_str());
     let is_upsert = preprocessed.as_ref().is_some_and(|p| p.is_upsert);
@@ -86,6 +93,13 @@ pub fn plan_sql_with_params(
     params: &[ParamValue],
     catalog: &dyn SqlCatalog,
 ) -> Result<Vec<SqlPlan>> {
+    // Array DDL/DML never carries `$N` placeholders, but be defensive:
+    // intercept the same way as the no-params path so the array surface
+    // is reachable even if a client uses extended-query mode.
+    if let Some(stmt) = try_parse_array_statement(sql)? {
+        let _ = params; // arrays don't accept bound params today
+        return plan_array_statement(stmt, catalog);
+    }
     let preprocessed = preprocess::preprocess(sql)?;
     let effective_sql = preprocessed.as_ref().map_or(sql, |p| p.sql.as_str());
     let is_upsert = preprocessed.as_ref().is_some_and(|p| p.is_upsert);
@@ -147,4 +161,14 @@ fn plan_statements(
     }
 
     Ok(plans)
+}
+
+/// Plan one parsed array statement.
+fn plan_array_statement(stmt: ArrayStatement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+    match stmt {
+        ArrayStatement::Create(c) => Ok(vec![planner::array_ddl::plan_create_array(&c)?]),
+        ArrayStatement::Drop(d) => Ok(vec![planner::array_ddl::plan_drop_array(&d)?]),
+        ArrayStatement::Insert(i) => planner::array_dml::plan_insert_array(&i, catalog),
+        ArrayStatement::Delete(d) => planner::array_dml::plan_delete_array(&d, catalog),
+    }
 }

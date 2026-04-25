@@ -10,6 +10,7 @@
 use thiserror::Error;
 
 use crate::types::CollectionInfo;
+use crate::types_array::{ArrayAttrAst, ArrayDimAst};
 
 /// Errors surfaced by `SqlCatalog` implementations.
 ///
@@ -70,4 +71,29 @@ pub enum SqlCatalogError {
 ///   the whole statement.
 pub trait SqlCatalog {
     fn get_collection(&self, name: &str) -> Result<Option<CollectionInfo>, SqlCatalogError>;
+
+    /// Look up an array by name. Returns `None` if no array with that
+    /// name is registered. The default implementation returns `None` so
+    /// that catalog adapters predating array support compile without
+    /// change — the array DML planner falls back to "array not found"
+    /// in that case.
+    fn lookup_array(&self, _name: &str) -> Option<ArrayCatalogView> {
+        None
+    }
+
+    /// Cheap existence check; the default delegates to `lookup_array`.
+    fn array_exists(&self, name: &str) -> bool {
+        self.lookup_array(name).is_some()
+    }
+}
+
+/// View of a registered array, surfaced to the SQL planner. Decoded by
+/// the runtime catalog adapter from its persisted msgpack schema blob;
+/// keeps `nodedb-sql` free of any dependency on `nodedb-array`.
+#[derive(Debug, Clone)]
+pub struct ArrayCatalogView {
+    pub name: String,
+    pub dims: Vec<ArrayDimAst>,
+    pub attrs: Vec<ArrayAttrAst>,
+    pub tile_extents: Vec<i64>,
 }
