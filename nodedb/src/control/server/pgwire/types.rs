@@ -172,6 +172,7 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             ),
         ),
         ErrorCode::Internal { detail } => ("ERROR", "XX000", detail.clone()),
+        ErrorCode::Unsupported { detail } => ("ERROR", "0A000", detail.clone()),
     }
 }
 

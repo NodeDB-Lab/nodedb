@@ -149,6 +149,13 @@ pub(super) fn convert_scan(p: ScanParams<'_>) -> crate::Result<Vec<PhysicalTask>
                 valid_at_ms: valid_at_from_scope(temporal),
             })
         }
+        EngineType::Array => {
+            return Err(crate::Error::PlanError {
+                detail: format!(
+                    "scan on '{collection}': array engine has no table-shaped scan; use ARRAY_SLICE (sub-pass 3)"
+                ),
+            });
+        }
     };
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -253,6 +260,12 @@ pub(super) fn convert_point_get(
                 detail: format!(
                     "point get on '{collection}': timeseries does not support point lookups"
                 ),
+            });
+        }
+        // Array reads do not have a key column.
+        EngineType::Array => {
+            return Err(crate::Error::PlanError {
+                detail: format!("point get on '{collection}': array engine has no primary key"),
             });
         }
     };

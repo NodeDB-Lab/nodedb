@@ -216,6 +216,9 @@ mod tests {
             TenantId::new(1),
             &ConvertContext {
                 retention_registry: None,
+                array_catalog: None,
+                credentials: None,
+                wal: None,
             },
         )
         .expect("convert insert-select");
@@ -258,6 +261,9 @@ mod tests {
             TenantId::new(1),
             &ConvertContext {
                 retention_registry: None,
+                array_catalog: None,
+                credentials: None,
+                wal: None,
             },
         )
         .expect("convert insert-select with star");

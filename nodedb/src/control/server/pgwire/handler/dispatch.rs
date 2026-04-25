@@ -48,6 +48,25 @@ impl NodeDbPgHandler {
             .await;
         }
 
+        // `DROP ARRAY` must reach every Data-Plane core so each can release
+        // its per-core store and remove the on-disk segment dir; otherwise
+        // a follow-up `CREATE ARRAY` of the same name carries stale state.
+        if matches!(
+            task.plan,
+            crate::bridge::envelope::PhysicalPlan::Array(
+                crate::bridge::physical_plan::ArrayOp::DropArray { .. }
+            )
+        ) {
+            return crate::control::server::dispatch_utils::broadcast_count_to_all_cores(
+                &self.state,
+                task.tenant_id,
+                task.plan,
+                0,
+                "dropped",
+            )
+            .await;
+        }
+
         // Broadcast scans to all cores — data is distributed across cores.
         if task.plan.is_broadcast_scan() {
             return crate::control::server::dispatch_utils::broadcast_to_all_cores(

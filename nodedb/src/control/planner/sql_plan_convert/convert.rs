@@ -7,14 +7,26 @@ use nodedb_sql::types::SqlPlan;
 
 use std::sync::Arc;
 
+use crate::control::array_catalog::ArrayCatalogHandle;
+use crate::control::security::credential::CredentialStore;
 use crate::engine::timeseries::retention_policy::RetentionPolicyRegistry;
 use crate::types::TenantId;
+use crate::wal::WalManager;
 
 use super::super::physical::PhysicalTask;
 
 /// Conversion context holding optional references needed during plan conversion.
 pub struct ConvertContext {
     pub retention_registry: Option<Arc<RetentionPolicyRegistry>>,
+    /// Array DDL/DML targets — when `None`, array statements fail with a
+    /// deterministic error so converters used by sub-planners (which do
+    /// not own array state) cannot accidentally mutate the catalog.
+    pub array_catalog: Option<ArrayCatalogHandle>,
+    /// Used by `SqlPlan::CreateArray` / `DropArray` to persist or
+    /// remove `_system.arrays` rows.
+    pub credentials: Option<Arc<CredentialStore>>,
+    /// LSN allocator for array Put/Delete dispatches.
+    pub wal: Option<Arc<WalManager>>,
 }
 
 /// Convert a list of SqlPlans to PhysicalTasks.
@@ -333,6 +345,84 @@ pub(super) fn convert_one(
 
         SqlPlan::Cte { definitions, outer } => {
             super::set_ops::convert_cte(definitions, outer, tenant_id, ctx)
+        }
+
+        SqlPlan::CreateArray {
+            name,
+            dims,
+            attrs,
+            tile_extents,
+            cell_order,
+            tile_order,
+        } => super::array_convert::convert_create_array(
+            name,
+            dims,
+            attrs,
+            tile_extents,
+            *cell_order,
+            *tile_order,
+            tenant_id,
+            ctx,
+        ),
+
+        SqlPlan::DropArray { name, if_exists } => {
+            super::array_convert::convert_drop_array(name, *if_exists, tenant_id, ctx)
+        }
+
+        SqlPlan::InsertArray { name, rows } => {
+            super::array_convert::convert_insert_array(name, rows, tenant_id, ctx)
+        }
+
+        SqlPlan::DeleteArray { name, coords } => {
+            super::array_convert::convert_delete_array(name, coords, tenant_id, ctx)
+        }
+
+        SqlPlan::NdArraySlice {
+            name,
+            slice,
+            attr_projection,
+            limit,
+        } => super::array_fn_convert::convert_slice(
+            name,
+            slice,
+            attr_projection,
+            *limit,
+            tenant_id,
+            ctx,
+        ),
+
+        SqlPlan::NdArrayProject {
+            name,
+            attr_projection,
+        } => super::array_fn_convert::convert_project(name, attr_projection, tenant_id, ctx),
+
+        SqlPlan::NdArrayAgg {
+            name,
+            attr,
+            reducer,
+            group_by_dim,
+        } => super::array_fn_convert::convert_agg(
+            name,
+            attr,
+            *reducer,
+            group_by_dim.as_deref(),
+            tenant_id,
+            ctx,
+        ),
+
+        SqlPlan::NdArrayElementwise {
+            left,
+            right,
+            op,
+            attr,
+        } => super::array_fn_convert::convert_elementwise(left, right, *op, attr, tenant_id, ctx),
+
+        SqlPlan::NdArrayFlush { name } => {
+            super::array_fn_convert::convert_flush(name, tenant_id, ctx)
+        }
+
+        SqlPlan::NdArrayCompact { name } => {
+            super::array_fn_convert::convert_compact(name, tenant_id, ctx)
         }
 
         SqlPlan::MultiVectorSearch { .. } | SqlPlan::RangeScan { .. } => {

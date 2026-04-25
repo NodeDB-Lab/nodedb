@@ -238,6 +238,10 @@ pub enum ErrorCode {
     CollectionDraining { collection: String },
     /// Internal error (io_uring failure, corruption, etc.)
     Internal { detail: String },
+    /// Operation is not supported on this engine, or not yet implemented for
+    /// this op-type. Distinguished from `Internal` so pgwire surfaces it as
+    /// `0A000` (feature_not_supported) rather than `XX000`.
+    Unsupported { detail: String },
 }
 
 impl From<crate::Error> for ErrorCode {

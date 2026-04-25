@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use nodedb_cluster::{DescriptorId, DescriptorKind};
 use nodedb_sql::{
     SqlCatalog, SqlCatalogError,
-    types::{CollectionInfo, ColumnInfo, EngineType, SqlDataType},
+    types::{ArrayCatalogView, CollectionInfo, ColumnInfo, EngineType, SqlDataType},
 };
 
 use crate::control::planner::descriptor_set::DescriptorVersionSet;
@@ -54,6 +54,10 @@ pub struct OriginCatalog {
     tenant_id: u32,
     retention_policy_registry:
         Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
+    /// Array catalog handle. When `None`, `lookup_array` returns
+    /// `None` for every name — used by sub-planners that don't own
+    /// array state.
+    array_catalog: Option<crate::control::array_catalog::ArrayCatalogHandle>,
     /// Optional reference to the host's drain tracker. When
     /// present, `get_collection` checks for an active drain
     /// on each descriptor it reads and returns
@@ -102,6 +106,7 @@ impl OriginCatalog {
             retention_policy_registry,
             drain_tracker: None,
             recorded_versions: Mutex::new(DescriptorVersionSet::new()),
+            array_catalog: None,
         }
     }
 
@@ -123,6 +128,7 @@ impl OriginCatalog {
             retention_policy_registry,
             drain_tracker: Some(Arc::clone(&shared.lease_drain)),
             recorded_versions: Mutex::new(DescriptorVersionSet::new()),
+            array_catalog: Some(shared.array_catalog.clone()),
         }
     }
 
@@ -265,6 +271,71 @@ impl SqlCatalog for OriginCatalog {
             indexes,
             bitemporal: stored.bitemporal,
         }))
+    }
+
+    fn lookup_array(&self, name: &str) -> Option<ArrayCatalogView> {
+        use nodedb_array::schema::{ArraySchema, AttrType as EAT, DimType as EDT};
+        use nodedb_array::types::domain::DomainBound;
+        use nodedb_sql::types_array::{
+            ArrayAttrAst, ArrayAttrType, ArrayDimAst, ArrayDimType, ArrayDomainBound,
+        };
+
+        let handle = self.array_catalog.as_ref()?;
+        let entry = {
+            let cat = handle.read().ok()?;
+            cat.lookup_by_name(name)?
+        };
+        let schema: ArraySchema = zerompk::from_msgpack(&entry.schema_msgpack).ok()?;
+
+        let dims = schema
+            .dims
+            .iter()
+            .map(|d| ArrayDimAst {
+                name: d.name.clone(),
+                dtype: match d.dtype {
+                    EDT::Int64 => ArrayDimType::Int64,
+                    EDT::Float64 => ArrayDimType::Float64,
+                    EDT::TimestampMs => ArrayDimType::TimestampMs,
+                    EDT::String => ArrayDimType::String,
+                },
+                lo: bound_engine_to_ast(&d.domain.lo),
+                hi: bound_engine_to_ast(&d.domain.hi),
+            })
+            .collect();
+
+        let attrs = schema
+            .attrs
+            .iter()
+            .map(|a| ArrayAttrAst {
+                name: a.name.clone(),
+                dtype: match a.dtype {
+                    EAT::Int64 => ArrayAttrType::Int64,
+                    EAT::Float64 => ArrayAttrType::Float64,
+                    EAT::String => ArrayAttrType::String,
+                    EAT::Bytes => ArrayAttrType::Bytes,
+                },
+                nullable: a.nullable,
+            })
+            .collect();
+
+        let tile_extents = schema.tile_extents.iter().map(|n| *n as i64).collect();
+
+        // Closure-local helper.
+        fn bound_engine_to_ast(b: &DomainBound) -> ArrayDomainBound {
+            match b {
+                DomainBound::Int64(v) => ArrayDomainBound::Int64(*v),
+                DomainBound::Float64(v) => ArrayDomainBound::Float64(*v),
+                DomainBound::TimestampMs(v) => ArrayDomainBound::TimestampMs(*v),
+                DomainBound::String(v) => ArrayDomainBound::String(v.clone()),
+            }
+        }
+
+        Some(ArrayCatalogView {
+            name: schema.name,
+            dims,
+            attrs,
+            tile_extents,
+        })
     }
 }
 

@@ -162,6 +162,26 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
 
         PhysicalPlan::Document(DocumentOp::Upsert { .. }) => DmlResult("UPSERT"),
 
+        // Array engine read & maintenance ops produce a JSON-array
+        // payload of rows; route to the multi-row decoder so each row
+        // streams as its own pgwire `result` field. Aggregate's payload
+        // is plain msgpack (decode_payload_to_json transcodes); Slice /
+        // Project payloads use the tagged Value codec which transcodes
+        // to a JSON array of arrays — clients receive JSON text per row.
+        PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Slice { .. })
+        | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Project { .. })
+        | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Aggregate { .. })
+        | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Elementwise { .. }) => {
+            PlanKind::MultiRow
+        }
+        // Flush / Compact return `{flushed: 1}` / `{compacted: N}` —
+        // route as SingleDocument so the row's `document` column
+        // carries the status JSON.
+        PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Flush { .. })
+        | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Compact { .. }) => {
+            PlanKind::SingleDocument
+        }
+
         _ => PlanKind::Execution,
     }
 }

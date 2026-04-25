@@ -47,6 +47,12 @@ pub struct QueryContext {
     /// Retention policy registry for auto-tier routing.
     retention_registry:
         Option<Arc<crate::engine::timeseries::retention_policy::RetentionPolicyRegistry>>,
+    /// Array catalog handle — required for `CREATE ARRAY` / `DROP ARRAY` /
+    /// `INSERT INTO ARRAY` / `DELETE FROM ARRAY` to resolve and persist
+    /// catalog entries. `None` for sub-planners that don't own array DDL.
+    array_catalog: Option<crate::control::array_catalog::ArrayCatalogHandle>,
+    /// WAL allocator — required by array DML for `wal_lsn` allocation.
+    wal: Option<Arc<crate::wal::WalManager>>,
 }
 
 /// Inputs needed to construct an `OriginCatalog` per plan call.
@@ -89,6 +95,8 @@ impl QueryContext {
         Self {
             catalog_inputs: None,
             retention_registry: None,
+            array_catalog: None,
+            wal: None,
         }
     }
 
@@ -122,6 +130,8 @@ impl QueryContext {
                 retention_policy_registry: retention.clone(),
             }),
             retention_registry: retention,
+            array_catalog: Some(state.array_catalog.clone()),
+            wal: Some(Arc::clone(&state.wal)),
         }
     }
 
@@ -148,6 +158,8 @@ impl QueryContext {
         Self {
             catalog_inputs,
             retention_registry: retention_policy_registry,
+            array_catalog: None,
+            wal: None,
         }
     }
 
@@ -211,6 +223,12 @@ impl QueryContext {
         let version_set = catalog.take_recorded_versions();
         let ctx = super::sql_plan_convert::ConvertContext {
             retention_registry: self.retention_registry.clone(),
+            array_catalog: self.array_catalog.clone(),
+            credentials: self
+                .catalog_inputs
+                .as_ref()
+                .map(|i| Arc::clone(&i.credentials)),
+            wal: self.wal.clone(),
         };
         let tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
         Ok((tasks, version_set))
@@ -306,6 +324,12 @@ impl QueryContext {
         })?;
         let ctx = super::sql_plan_convert::ConvertContext {
             retention_registry: self.retention_registry.clone(),
+            array_catalog: self.array_catalog.clone(),
+            credentials: self
+                .catalog_inputs
+                .as_ref()
+                .map(|i| Arc::clone(&i.credentials)),
+            wal: self.wal.clone(),
         };
         let mut tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
 

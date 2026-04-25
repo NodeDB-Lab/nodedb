@@ -4,6 +4,7 @@
 //! each defined in its own module. This keeps each engine's operations
 //! isolated.
 
+pub mod array;
 pub mod columnar;
 pub mod crdt;
 pub mod document;
@@ -17,6 +18,7 @@ pub mod timeseries;
 pub mod vector;
 pub mod wire;
 
+pub use array::{ArrayBinaryOp, ArrayOp, ArrayReducer};
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};
 pub use crdt::CrdtOp;
 pub use document::{
@@ -69,6 +71,11 @@ pub enum PhysicalPlan {
     Query(QueryOp),
     /// Meta / maintenance: WAL, cancel, snapshot, compact, checkpoint.
     Meta(MetaOp),
+    /// Array engine: Tier 4 query operators + put/delete/flush/compact.
+    /// Handlers are wired in Tier 6 (after SQL DDL populates the
+    /// array catalog); Tier 5 dispatch routes to a deterministic
+    /// `Unimplemented` response.
+    Array(ArrayOp),
 }
 
 impl PhysicalPlan {

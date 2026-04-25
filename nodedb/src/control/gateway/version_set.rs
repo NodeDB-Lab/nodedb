@@ -324,6 +324,13 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
         PhysicalPlan::Meta(_) => {
             // Meta ops target infrastructure, not user collections.
         }
+
+        // ── Array ────────────────────────────────────────────────────────
+        // Arrays use a separate catalog from collection-based engines;
+        // version-set tracking attaches per-array in Tier 6 once the
+        // SQL DDL surface registers them. For Tier 5 the wire types
+        // exist but there is no version-set contribution.
+        PhysicalPlan::Array(_) => {}
     }
 
     out

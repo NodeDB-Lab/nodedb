@@ -227,6 +227,23 @@ async fn dispatch_task(ctx: &DispatchCtx<'_>, task: PhysicalTask) -> crate::Resu
         .await;
     }
 
+    // `DROP ARRAY` fans out to every core so per-core stores are released.
+    if matches!(
+        task.plan,
+        crate::bridge::envelope::PhysicalPlan::Array(
+            crate::bridge::physical_plan::ArrayOp::DropArray { .. }
+        )
+    ) {
+        return dispatch_utils::broadcast_count_to_all_cores(
+            ctx.state,
+            task.tenant_id,
+            task.plan,
+            0,
+            "dropped",
+        )
+        .await;
+    }
+
     // Broadcast scans must fan-out to all cores regardless of gateway state.
     if task.plan.is_broadcast_scan() {
         return dispatch_utils::broadcast_to_all_cores(ctx.state, task.tenant_id, task.plan, 0)

@@ -87,6 +87,13 @@ pub(super) fn convert_insert(
                     post_set_op: PostSetOp::None,
                 });
             }
+            EngineType::Array => {
+                return Err(crate::Error::PlanError {
+                    detail: format!(
+                        "INSERT into '{collection}': array engine uses INSERT INTO ARRAY syntax"
+                    ),
+                });
+            }
         }
     }
 
@@ -162,7 +169,7 @@ pub(super) fn convert_upsert(
             EngineType::Columnar | EngineType::Spatial => {
                 columnar_rows.push(row);
             }
-            EngineType::Timeseries | EngineType::KeyValue => {
+            EngineType::Timeseries | EngineType::KeyValue | EngineType::Array => {
                 return Err(crate::Error::PlanError {
                     detail: format!(
                         "UPSERT into '{collection}': engine type {engine:?} does not support upsert"

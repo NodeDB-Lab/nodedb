@@ -153,7 +153,7 @@ pub fn role_grants_permission(role: &Role, permission: Permission) -> bool {
 pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Permission {
     use crate::bridge::envelope::PhysicalPlan;
     use crate::bridge::physical_plan::{
-        ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp, QueryOp, SpatialOp, TextOp,
+        ArrayOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp, QueryOp, SpatialOp, TextOp,
         TimeseriesOp, VectorOp,
     };
     match plan {
@@ -369,6 +369,20 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Meta(MetaOp::QueryLastValues { .. } | MetaOp::QueryLastValue { .. }) => {
             Permission::Read
         }
+
+        // Array engine: query operators are reads, put/delete are
+        // writes, OpenArray is DDL, flush/compact are admin.
+        PhysicalPlan::Array(
+            ArrayOp::Slice { .. }
+            | ArrayOp::Project { .. }
+            | ArrayOp::Aggregate { .. }
+            | ArrayOp::Elementwise { .. },
+        ) => Permission::Read,
+        PhysicalPlan::Array(ArrayOp::Put { .. } | ArrayOp::Delete { .. }) => Permission::Write,
+        PhysicalPlan::Array(ArrayOp::OpenArray { .. }) => Permission::Alter,
+        PhysicalPlan::Array(
+            ArrayOp::Flush { .. } | ArrayOp::Compact { .. } | ArrayOp::DropArray { .. },
+        ) => Permission::Admin,
     }
 }
 
