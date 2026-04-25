@@ -56,6 +56,22 @@ pub enum RecordType {
     /// Payload: MessagePack-encoded `Vec<(record_type: u16, payload: Vec<u8>)>`.
     Transaction = 50 | 0x8000,
 
+    /// Surrogate allocator: high-watermark flush record.
+    ///
+    /// Emitted periodically by `SurrogateRegistry::flush` (every N=1024
+    /// allocations or T=200ms, whichever first) to make the surrogate
+    /// allocator's hwm crash-recoverable. Replay advances the in-memory
+    /// allocator past `hi` so post-restart allocations never collide
+    /// with pre-restart ones.
+    ///
+    /// Payload: zerompk-encoded `SurrogateAllocPayload { hi: u32 }`
+    /// (4-byte little-endian u32 wrapped in msgpack).
+    ///
+    /// Required: a replay that skipped this record could re-issue
+    /// surrogates that already point at live engine state, corrupting
+    /// every per-engine index keyed on Surrogate.
+    SurrogateAlloc = 51 | 0x8000,
+
     /// Checkpoint marker — indicates a consistent snapshot point.
     Checkpoint = 100 | 0x8000,
 
@@ -98,6 +114,7 @@ impl RecordType {
             x if x == 12 | 0x8000 => Some(Self::VectorParams),
             x if x == 20 | 0x8000 => Some(Self::CrdtDelta),
             x if x == 50 | 0x8000 => Some(Self::Transaction),
+            x if x == 51 | 0x8000 => Some(Self::SurrogateAlloc),
             30 => Some(Self::TimeseriesBatch),
             31 => Some(Self::LogBatch),
             x if x == 40 | 0x8000 => Some(Self::ArrayPut),
@@ -144,6 +161,7 @@ mod tests {
             RecordType::ArrayDelete,
             RecordType::ArrayFlush,
             RecordType::Transaction,
+            RecordType::SurrogateAlloc,
             RecordType::Checkpoint,
             RecordType::CollectionTombstoned,
             RecordType::LsnMsAnchor,
