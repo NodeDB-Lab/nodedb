@@ -72,6 +72,21 @@ pub enum RecordType {
     /// every per-engine index keyed on Surrogate.
     SurrogateAlloc = 51 | 0x8000,
 
+    /// Surrogate ↔ PK binding record.
+    ///
+    /// Emitted by `SurrogateAssigner::assign` immediately after the
+    /// catalog two-table txn that writes `_system.surrogate_pk{,_rev}`,
+    /// so a crash between the catalog write and the next hwm checkpoint
+    /// still recovers the binding on replay (idempotent re-apply).
+    ///
+    /// Payload: zerompk-encoded `SurrogateBindPayload {
+    /// surrogate: u32, collection: String, pk_bytes: Vec<u8> }`.
+    ///
+    /// Required: skipping a bind on replay would leave the catalog
+    /// behind the registry hwm, so a subsequent insert with the same
+    /// user PK would allocate a fresh surrogate and break identity.
+    SurrogateBind = 52 | 0x8000,
+
     /// Checkpoint marker — indicates a consistent snapshot point.
     Checkpoint = 100 | 0x8000,
 
@@ -115,6 +130,7 @@ impl RecordType {
             x if x == 20 | 0x8000 => Some(Self::CrdtDelta),
             x if x == 50 | 0x8000 => Some(Self::Transaction),
             x if x == 51 | 0x8000 => Some(Self::SurrogateAlloc),
+            x if x == 52 | 0x8000 => Some(Self::SurrogateBind),
             30 => Some(Self::TimeseriesBatch),
             31 => Some(Self::LogBatch),
             x if x == 40 | 0x8000 => Some(Self::ArrayPut),
@@ -162,6 +178,7 @@ mod tests {
             RecordType::ArrayFlush,
             RecordType::Transaction,
             RecordType::SurrogateAlloc,
+            RecordType::SurrogateBind,
             RecordType::Checkpoint,
             RecordType::CollectionTombstoned,
             RecordType::LsnMsAnchor,
