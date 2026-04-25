@@ -135,6 +135,9 @@ fn record_to_event(record: &WalRecord, sequence: &mut u64) -> Option<WriteEvent>
         | RecordType::CrdtDelta
         | RecordType::TimeseriesBatch
         | RecordType::LogBatch
+        | RecordType::ArrayPut
+        | RecordType::ArrayDelete
+        | RecordType::ArrayFlush
         | RecordType::Transaction
         | RecordType::Checkpoint
         | RecordType::CollectionTombstoned

@@ -36,6 +36,21 @@ pub enum RecordType {
     /// Timeseries engine: log entry batch.
     LogBatch = 31,
 
+    /// Array engine: insert/update one or more cells in an array.
+    /// Payload: zerompk-encoded `ArrayPutPayload`.
+    ArrayPut = 40 | 0x8000,
+
+    /// Array engine: delete one or more cells in an array.
+    /// Payload: zerompk-encoded `ArrayDeletePayload`.
+    ArrayDelete = 41 | 0x8000,
+
+    /// Array engine: a memtable was flushed to a new on-disk segment.
+    /// Replay treats this as a watermark — memtable mutations whose LSN
+    /// is <= the flush record's LSN are already durable on the segment
+    /// and must not be re-applied to the live memtable.
+    /// Payload: zerompk-encoded `ArrayFlushPayload`.
+    ArrayFlush = 42 | 0x8000,
+
     /// Atomic transaction: wraps multiple sub-records into a single WAL
     /// group. On replay, either all sub-records apply or none.
     /// Payload: MessagePack-encoded `Vec<(record_type: u16, payload: Vec<u8>)>`.
@@ -85,6 +100,9 @@ impl RecordType {
             x if x == 50 | 0x8000 => Some(Self::Transaction),
             30 => Some(Self::TimeseriesBatch),
             31 => Some(Self::LogBatch),
+            x if x == 40 | 0x8000 => Some(Self::ArrayPut),
+            x if x == 41 | 0x8000 => Some(Self::ArrayDelete),
+            x if x == 42 | 0x8000 => Some(Self::ArrayFlush),
             x if x == 100 | 0x8000 => Some(Self::Checkpoint),
             x if x == 101 | 0x8000 => Some(Self::CollectionTombstoned),
             102 => Some(Self::LsnMsAnchor),
@@ -122,6 +140,9 @@ mod tests {
             RecordType::CrdtDelta,
             RecordType::TimeseriesBatch,
             RecordType::LogBatch,
+            RecordType::ArrayPut,
+            RecordType::ArrayDelete,
+            RecordType::ArrayFlush,
             RecordType::Transaction,
             RecordType::Checkpoint,
             RecordType::CollectionTombstoned,
