@@ -135,6 +135,21 @@ pub enum MetadataEntry {
         /// `None` when this entry only adds.
         remove_ca_fingerprint: Option<[u8; 32]>,
     },
+
+    // ── Surrogate identity ────────────────────────────────────────────
+    /// Advance the cluster-wide surrogate high-watermark to `hwm`.
+    ///
+    /// Proposed by the metadata-group leader whenever the local
+    /// `SurrogateRegistry` flush threshold trips (every 1024
+    /// allocations or 200 ms, whichever comes first). Applied on
+    /// every node by the host-side `MetadataCommitApplier` which
+    /// calls `SurrogateRegistry::restore_hwm(hwm)` — idempotent and
+    /// monotonic, so out-of-order replay or duplicate delivery are
+    /// both safe. Followers must never allocate surrogates locally;
+    /// they only advance their in-memory HWM via these log entries.
+    SurrogateAlloc {
+        hwm: u32,
+    },
 }
 
 /// Topology mutations proposed through the metadata group.

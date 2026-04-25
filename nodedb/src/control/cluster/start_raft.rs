@@ -95,6 +95,14 @@ pub fn start_raft(
         tracing::warn!("metadata_raft already set — start_raft appears to have run twice");
     }
 
+    // Allow the surrogate assigner's flush path to propose
+    // `SurrogateAlloc` entries to the Raft group so followers advance
+    // their in-memory HWM on every checkpoint. Mirrors the pattern
+    // used by `MetadataCommitApplier::install_shared`.
+    shared
+        .surrogate_assigner
+        .install_shared(Arc::downgrade(&shared));
+
     // Subscribe to the boot-time readiness watch BEFORE spawning the
     // tick loop so we cannot miss the first transition. The receiver
     // is returned to `main.rs`, which awaits it before binding any

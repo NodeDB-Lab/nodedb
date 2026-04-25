@@ -114,6 +114,11 @@ impl MetadataCache {
                 // `tls/ca.d/<fp>.crt` and rebuilds the rustls config.
                 // Cluster cache has nothing to track.
             }
+            MetadataEntry::SurrogateAlloc { .. } => {
+                // Surrogate HWM advance is host-side only: the production
+                // applier calls `SurrogateRegistry::restore_hwm`. The
+                // cluster cache has no surrogate state to track.
+            }
             MetadataEntry::Batch { entries } => {
                 for sub in entries {
                     self.apply(index, sub);

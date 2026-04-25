@@ -226,6 +226,43 @@ pub fn propose_catalog_entry_with_timeout(
     Ok(log_index)
 }
 
+/// Propose a surrogate high-watermark advance to the metadata Raft group
+/// and wait for it to be applied locally.
+///
+/// In single-node / no-cluster mode (no `metadata_raft` installed),
+/// returns `Ok(0)` immediately — the WAL-only path on `SharedState` is
+/// still sufficient. In cluster mode this is called by the leader-side
+/// flush path instead of (or in addition to) the local WAL record, so
+/// every follower's `SurrogateRegistry` advances to the same hwm via the
+/// Raft commit.
+///
+/// `hwm` is the highest surrogate that has been issued so far on this
+/// node. Followers apply the entry by calling
+/// `SurrogateRegistry::restore_hwm(hwm)` (idempotent, monotonic).
+pub fn propose_surrogate_hwm(shared: &SharedState, hwm: u32) -> Result<u64, Error> {
+    let Some(handle) = shared.metadata_raft.get() else {
+        return Ok(0);
+    };
+
+    let entry = MetadataEntry::SurrogateAlloc { hwm };
+    let raw = encode_entry(&entry).map_err(|e| Error::Config {
+        detail: format!("surrogate_alloc encode: {e}"),
+    })?;
+
+    let log_index = handle.propose(raw)?;
+
+    let watcher = shared.applied_index_watcher();
+    let timed_out =
+        tokio::task::block_in_place(|| !watcher.wait_for(log_index, DEFAULT_PROPOSE_TIMEOUT));
+    if timed_out {
+        return Err(Error::Config {
+            detail: format!("surrogate_alloc propose timed out waiting for log index {log_index}"),
+        });
+    }
+
+    Ok(log_index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

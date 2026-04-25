@@ -147,6 +147,43 @@ impl MetadataCommitApplier {
                 }
                 return;
             }
+            MetadataEntry::SurrogateAlloc { hwm } => {
+                // Advance the in-memory surrogate high-watermark on every
+                // node. `restore_hwm` is idempotent and monotonic: calling
+                // it with a value at or below the current HWM is a no-op,
+                // so duplicate or reordered delivery cannot push the
+                // counter backwards. Also persist the hwm to the catalog so
+                // the local node survives a restart without re-reading the
+                // full log.
+                if let Some(weak) = self.shared.get()
+                    && let Some(shared) = weak.upgrade()
+                {
+                    let reg = shared
+                        .surrogate_assigner
+                        .registry_handle()
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner());
+                    if let Err(e) = reg.restore_hwm(*hwm) {
+                        warn!(hwm, error = %e, "surrogate_alloc apply: restore_hwm failed");
+                    }
+                    drop(reg);
+                    // Best-effort catalog persist: a failure means the
+                    // next restart will re-derive the HWM from the log,
+                    // which is correct — just slightly slower. We must
+                    // not block the apply loop on catalog I/O.
+                    if let Some(catalog) = self.credentials.catalog()
+                        && let Err(e) = catalog.put_surrogate_hwm(*hwm)
+                    {
+                        warn!(
+                            hwm,
+                            error = %e,
+                            "surrogate_alloc apply: failed to persist hwm to catalog"
+                        );
+                    }
+                    debug!(hwm, raft_index, "surrogate hwm advanced via raft");
+                }
+                return;
+            }
             _ => {}
         }
 
