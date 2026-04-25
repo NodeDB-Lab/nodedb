@@ -4,7 +4,7 @@
 //! (`CREATE ARRAY`, `INSERT INTO ARRAY`, `DELETE FROM ARRAY`,
 //! `DROP ARRAY`). The standard SQL DML pathways are unsupported by
 //! design — the planner refuses them with a hint pointing to the
-//! correct surface (and to sub-pass 3 for table-valued reads).
+//! correct surface (use ARRAY_SLICE / ARRAY_AGG for table-valued reads).
 
 use crate::engine_rules::*;
 use crate::error::{Result, SqlError};
@@ -27,14 +27,14 @@ impl EngineRules for ArrayRules {
     fn plan_scan(&self, _p: ScanParams) -> Result<SqlPlan> {
         Err(unsupported(
             "SELECT",
-            "table-valued array reads (ARRAY_SLICE, ARRAY_AGG, ...) land in sub-pass 3",
+            "use ARRAY_SLICE or ARRAY_AGG for table-valued array reads",
         ))
     }
 
     fn plan_point_get(&self, _p: PointGetParams) -> Result<SqlPlan> {
         Err(unsupported(
             "point lookup",
-            "arrays have no primary key; use ARRAY_SLICE (sub-pass 3)",
+            "arrays have no primary key; use ARRAY_SLICE for coord-range reads",
         ))
     }
 
@@ -55,7 +55,7 @@ impl EngineRules for ArrayRules {
     fn plan_aggregate(&self, _p: AggregateParams) -> Result<SqlPlan> {
         Err(unsupported(
             "GROUP BY",
-            "table-valued array aggregates land in sub-pass 3",
+            "use ARRAY_AGG for table-valued array aggregates",
         ))
     }
 }
