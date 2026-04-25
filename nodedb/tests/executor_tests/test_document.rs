@@ -18,6 +18,8 @@ fn point_get_not_found() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -37,6 +39,8 @@ fn point_put_and_get() {
             collection: "docs".into(),
             document_id: "d1".into(),
             value: b"hello world".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -50,6 +54,8 @@ fn point_put_and_get() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -69,6 +75,8 @@ fn point_delete_removes() {
             collection: "docs".into(),
             document_id: "d1".into(),
             value: b"data".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -79,6 +87,8 @@ fn point_delete_removes() {
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "docs".into(),
             document_id: "d1".into(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -92,6 +102,8 @@ fn point_delete_removes() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -128,6 +140,8 @@ fn range_scan_returns_results() {
             collection: "users".into(),
             document_id: "u1".into(),
             value: b"{\"name\":\"alice\",\"age\":25}".to_vec(),
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"u1".to_vec(),
         }),
     );
     send_ok(
@@ -138,6 +152,8 @@ fn range_scan_returns_results() {
             collection: "users".into(),
             document_id: "u2".into(),
             value: b"{\"name\":\"bob\",\"age\":30}".to_vec(),
+            surrogate: nodedb_types::Surrogate::new(2),
+            pk_bytes: b"u2".to_vec(),
         }),
     );
 

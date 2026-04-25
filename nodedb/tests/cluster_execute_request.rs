@@ -37,6 +37,7 @@ fn make_kv_put_request(
         key: b"test-key".to_vec(),
         value: value_bytes,
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
 
     let plan_bytes = plan_wire::encode(&plan).expect("encode plan");
@@ -194,6 +195,7 @@ async fn execute_request_cross_node_dispatch() {
                 key: b"k1".to_vec(),
                 value: value_bytes,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             });
             plan_wire::encode(&plan).expect("encode plan")
         },

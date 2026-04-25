@@ -62,6 +62,8 @@ fn get_doc(
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     payload_value(&payload)
@@ -98,6 +100,8 @@ fn insert_materializes_generated_column() {
                 "tax_rate": 0.08
             }))
             .unwrap(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -136,6 +140,8 @@ fn insert_materializes_concat() {
                 "brand": "Nike"
             }))
             .unwrap(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -176,6 +182,8 @@ fn update_recomputes_generated_column() {
                 "tax_rate": 0.08
             }))
             .unwrap(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -194,6 +202,8 @@ fn update_recomputes_generated_column() {
                 ),
             )],
             returning: false,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -228,6 +238,8 @@ fn update_generated_column_directly_rejected() {
             collection: "products".into(),
             document_id: "p1".into(),
             value: serde_json::to_vec(&serde_json::json!({"price": 100.0})).unwrap(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -246,6 +258,8 @@ fn update_generated_column_directly_rejected() {
                 ),
             )],
             returning: false,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -291,6 +305,8 @@ fn chained_generated_columns() {
                 "tax_rate": 0.1
             }))
             .unwrap(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 

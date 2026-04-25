@@ -4,35 +4,41 @@
 
 use std::sync::{Arc, RwLock};
 
-use nodedb::control::security::catalog::SystemCatalog;
+use nodedb::control::security::credential::CredentialStore;
 use nodedb::control::surrogate::{
     FLUSH_OPS_THRESHOLD, NoopWalAppender, SurrogateAssigner, SurrogateRegistry,
     SurrogateRegistryHandle, SurrogateWalAppender,
 };
 use nodedb_types::Surrogate;
 
-fn open_catalog() -> (tempfile::TempDir, SystemCatalog) {
+fn open_credentials() -> (tempfile::TempDir, Arc<CredentialStore>) {
     let dir = tempfile::tempdir().unwrap();
-    let cat = SystemCatalog::open(&dir.path().join("system.redb")).unwrap();
-    (dir, cat)
+    let creds = Arc::new(CredentialStore::open(&dir.path().join("system.redb")).unwrap());
+    (dir, creds)
 }
 
 fn fresh_registry() -> SurrogateRegistryHandle {
     Arc::new(RwLock::new(SurrogateRegistry::new()))
 }
 
+fn make_assigner(
+    creds: Arc<CredentialStore>,
+    wal: Arc<dyn SurrogateWalAppender>,
+) -> SurrogateAssigner {
+    SurrogateAssigner::new(fresh_registry(), creds, wal)
+}
+
 #[test]
 fn assign_is_idempotent_for_same_pk() {
-    let (_dir, cat) = open_catalog();
-    let reg = fresh_registry();
-    let wal = NoopWalAppender;
-    let a = SurrogateAssigner::new(&reg, &cat, &wal);
+    let (_dir, creds) = open_credentials();
+    let wal: Arc<dyn SurrogateWalAppender> = Arc::new(NoopWalAppender);
+    let a = make_assigner(creds.clone(), wal);
     let s1 = a.assign("users", b"alice").unwrap();
     let s2 = a.assign("users", b"alice").unwrap();
     let s3 = a.assign("users", b"alice").unwrap();
     assert_eq!(s1, s2);
     assert_eq!(s2, s3);
-    // Catalog binding survives — verifiable directly.
+    let cat = creds.catalog().as_ref().unwrap();
     assert_eq!(
         cat.get_surrogate_for_pk("users", b"alice").unwrap(),
         Some(s1)
@@ -45,30 +51,28 @@ fn assign_is_idempotent_for_same_pk() {
 
 #[test]
 fn assign_distinct_pks_returns_distinct_surrogates() {
-    let (_dir, cat) = open_catalog();
-    let reg = fresh_registry();
-    let wal = NoopWalAppender;
-    let a = SurrogateAssigner::new(&reg, &cat, &wal);
+    let (_dir, creds) = open_credentials();
+    let wal: Arc<dyn SurrogateWalAppender> = Arc::new(NoopWalAppender);
+    let a = make_assigner(creds, wal);
     let s1 = a.assign("users", b"alice").unwrap();
     let s2 = a.assign("users", b"bob").unwrap();
     let s3 = a.assign("users", b"carol").unwrap();
     assert_ne!(s1, s2);
     assert_ne!(s2, s3);
     assert_ne!(s1, s3);
-    // Surrogates are monotonic for sequential assigns from a fresh registry.
     assert!(s1.as_u32() < s2.as_u32());
     assert!(s2.as_u32() < s3.as_u32());
 }
 
 #[test]
 fn drop_collection_wipes_surrogate_map() {
-    let (_dir, cat) = open_catalog();
-    let reg = fresh_registry();
-    let wal = NoopWalAppender;
-    let a = SurrogateAssigner::new(&reg, &cat, &wal);
+    let (_dir, creds) = open_credentials();
+    let wal: Arc<dyn SurrogateWalAppender> = Arc::new(NoopWalAppender);
+    let a = make_assigner(creds.clone(), wal);
     let _ = a.assign("users", b"alice").unwrap();
     let _ = a.assign("users", b"bob").unwrap();
     let s_other = a.assign("orders", b"o1").unwrap();
+    let cat = creds.catalog().as_ref().unwrap();
     assert_eq!(
         cat.scan_surrogates_for_collection("users").unwrap().len(),
         2
@@ -80,7 +84,6 @@ fn drop_collection_wipes_surrogate_map() {
             .unwrap()
             .is_empty()
     );
-    // Other collection's surrogates intact.
     assert_eq!(
         cat.get_surrogate_for_pk("orders", b"o1").unwrap(),
         Some(s_other)
@@ -124,10 +127,10 @@ impl SurrogateWalAppender for CountingAppender {
 
 #[test]
 fn flush_emits_wal_record_at_threshold() {
-    let (_dir, cat) = open_catalog();
-    let reg = fresh_registry();
-    let wal = CountingAppender::new();
-    let a = SurrogateAssigner::new(&reg, &cat, &wal);
+    let (_dir, creds) = open_credentials();
+    let wal_concrete = Arc::new(CountingAppender::new());
+    let wal_dyn: Arc<dyn SurrogateWalAppender> = wal_concrete.clone();
+    let a = make_assigner(creds.clone(), wal_dyn);
 
     let n = FLUSH_OPS_THRESHOLD as usize;
     for i in 0..n {
@@ -135,24 +138,21 @@ fn flush_emits_wal_record_at_threshold() {
         let _ = a.assign("users", pk.as_bytes()).unwrap();
     }
 
-    // The 1024th assign trips `should_flush`, which in turn calls the
-    // WAL appender exactly once and persists the new hwm to the
-    // catalog. Subsequent assigns inside the same window will not
-    // re-flush until the next threshold.
-    let alloc_calls = wal.allocs.load(std::sync::atomic::Ordering::Acquire);
+    let alloc_calls = wal_concrete
+        .allocs
+        .load(std::sync::atomic::Ordering::Acquire);
     assert!(
         alloc_calls >= 1,
         "expected at least one SurrogateAlloc WAL emission after {n} allocations, got {alloc_calls}"
     );
-    let bind_calls = wal.binds.load(std::sync::atomic::Ordering::Acquire);
+    let bind_calls = wal_concrete
+        .binds
+        .load(std::sync::atomic::Ordering::Acquire);
     assert_eq!(
         bind_calls as usize, n,
         "expected one SurrogateBind per fresh allocation"
     );
-    // The persisted hwm is whatever the most recent flush captured;
-    // it must be non-zero and ≤ n (the total allocations so far).
-    // Either threshold (1024 ops or 200 ms elapsed) can fire first
-    // depending on host wall-clock, so we don't assert exact equality.
+    let cat = creds.catalog().as_ref().unwrap();
     let persisted = cat.get_surrogate_hwm().unwrap();
     assert!(
         persisted > 0 && persisted <= n as u32,
@@ -166,14 +166,14 @@ fn assigns_persist_across_reopen() {
     let path = dir.path().join("system.redb");
     let s_persisted: Surrogate;
     {
-        let cat = SystemCatalog::open(&path).unwrap();
-        let reg = fresh_registry();
-        let wal = NoopWalAppender;
-        let a = SurrogateAssigner::new(&reg, &cat, &wal);
+        let creds = Arc::new(CredentialStore::open(&path).unwrap());
+        let wal: Arc<dyn SurrogateWalAppender> = Arc::new(NoopWalAppender);
+        let a = make_assigner(creds, wal);
         s_persisted = a.assign("users", b"alice").unwrap();
     }
-    // Reopen the catalog — the binding row must survive.
-    let cat = SystemCatalog::open(&path).unwrap();
+    // Reopen — the binding row must survive.
+    let creds = CredentialStore::open(&path).unwrap();
+    let cat = creds.catalog().as_ref().unwrap();
     assert_eq!(
         cat.get_surrogate_for_pk("users", b"alice").unwrap(),
         Some(s_persisted)

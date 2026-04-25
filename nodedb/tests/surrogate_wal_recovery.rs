@@ -8,16 +8,19 @@
 use std::sync::{Arc, RwLock};
 
 use nodedb::control::security::catalog::SystemCatalog;
+use nodedb::control::security::credential::CredentialStore;
 use nodedb::control::surrogate::{
-    SurrogateAssigner, SurrogateRegistry, SurrogateRegistryHandle, WalSurrogateAppender,
+    SurrogateAssigner, SurrogateRegistry, SurrogateRegistryHandle, SurrogateWalAppender,
+    WalSurrogateAppender,
 };
 use nodedb::wal::WalManager;
 use nodedb::wal::replay::replay_surrogate_records;
 use nodedb_types::Surrogate;
 
-fn open_wal_appender(path: &std::path::Path) -> (Arc<WalManager>, WalSurrogateAppender) {
+fn open_wal_appender(path: &std::path::Path) -> (Arc<WalManager>, Arc<dyn SurrogateWalAppender>) {
     let wal = Arc::new(WalManager::open_for_testing(path).unwrap());
-    let appender = WalSurrogateAppender::new(Arc::clone(&wal));
+    let appender: Arc<dyn SurrogateWalAppender> =
+        Arc::new(WalSurrogateAppender::new(Arc::clone(&wal)));
     (wal, appender)
 }
 
@@ -52,9 +55,9 @@ fn kill_restart_recovers_all_bindings_and_hwm() {
     // higher layers).
     {
         let (_wal, appender) = open_wal_appender(&wal_path);
-        let catalog = SystemCatalog::open(&catalog_path).unwrap();
+        let credentials = Arc::new(CredentialStore::open(&catalog_path).unwrap());
         let registry = fresh_registry();
-        let assigner = SurrogateAssigner::new(&registry, &catalog, &appender);
+        let assigner = SurrogateAssigner::new(registry, credentials, appender);
 
         for (coll, pk) in &inserts {
             let s = assigner.assign(coll, pk).unwrap();
@@ -139,9 +142,9 @@ fn kill_restart_after_hwm_flush_threshold_recovers_via_alloc_record() {
     let mut last_surrogate: Option<Surrogate> = None;
     {
         let (_wal, appender) = open_wal_appender(&wal_path);
-        let catalog = SystemCatalog::open(&catalog_path).unwrap();
+        let credentials = Arc::new(CredentialStore::open(&catalog_path).unwrap());
         let registry = fresh_registry();
-        let assigner = SurrogateAssigner::new(&registry, &catalog, &appender);
+        let assigner = SurrogateAssigner::new(registry, credentials, appender);
 
         for i in 0..total {
             let pk = format!("u{i:08}");

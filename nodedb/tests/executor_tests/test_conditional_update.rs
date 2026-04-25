@@ -23,6 +23,22 @@ fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
     }
 }
 
+/// Hash a string PK to a deterministic non-zero surrogate so each test
+/// row lands on its own substrate key. The data plane keys redb rows by
+/// `surrogate_to_doc_id(surrogate)`; with a wired catalog the assigner
+/// guarantees a stable injection, but executor-direct fixtures bypass
+/// the catalog and have to thread their own bindings.
+fn surrogate_for(id: &str) -> nodedb_types::Surrogate {
+    let mut h: u32 = 2_166_136_261;
+    for &b in id.as_bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16_777_619);
+    }
+    // Bias away from `Surrogate::ZERO`, which the document substrate
+    // reserves as a sentinel for unbound rows.
+    nodedb_types::Surrogate::new(h.max(1))
+}
+
 /// Insert a product document with stock field.
 fn insert_product(
     core: &mut nodedb::data::executor::core_loop::CoreLoop,
@@ -40,6 +56,8 @@ fn insert_product(
             collection: "products".into(),
             document_id: id.into(),
             value: value.into_bytes(),
+            surrogate: surrogate_for(id),
+            pk_bytes: id.as_bytes().to_vec(),
         }),
     );
 }
@@ -61,6 +79,8 @@ fn get_stock(
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: surrogate_for(id),
+            pk_bytes: id.as_bytes().to_vec(),
         }),
     );
     let v = payload_value(&payload);
@@ -278,6 +298,8 @@ fn point_update_returns_affected_count() {
             document_id: "pu1".into(),
             updates,
             returning: false,
+            surrogate: surrogate_for("pu1"),
+            pk_bytes: b"pu1".to_vec(),
         }),
     );
 
@@ -308,6 +330,8 @@ fn point_update_returning_returns_updated_document() {
             document_id: "pu2".into(),
             updates,
             returning: true,
+            surrogate: surrogate_for("pu2"),
+            pk_bytes: b"pu2".to_vec(),
         }),
     );
 

@@ -28,6 +28,8 @@ fn async_trigger_not_in_raft_log() {
         collection: "orders".into(),
         document_id: "doc-1".into(),
         value: b"{}".to_vec(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
 
     // to_replicated_entry converts the plan to a Raft log entry.
@@ -42,7 +44,9 @@ fn async_trigger_not_in_raft_log() {
     // The entry serializes to bytes that can be deserialized back.
     let bytes = entry.unwrap().to_bytes();
     let (tid, vsid, restored) =
-        nodedb::control::wal_replication::from_replicated_entry(&bytes).unwrap();
+        nodedb::control::wal_replication::from_replicated_entry(&bytes, None)
+            .unwrap()
+            .unwrap();
     assert_eq!(tid, TenantId::new(1));
     assert_eq!(vsid, VShardId::new(0));
 
@@ -171,6 +175,8 @@ fn replicated_entry_roundtrip_point_delete() {
     let plan = PhysicalPlan::Document(DocumentOp::PointDelete {
         collection: "orders".into(),
         document_id: "doc-99".into(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let entry = nodedb::control::wal_replication::to_replicated_entry(
         TenantId::new(1),
@@ -179,7 +185,9 @@ fn replicated_entry_roundtrip_point_delete() {
     )
     .unwrap();
     let bytes = entry.to_bytes();
-    let (_, _, restored) = nodedb::control::wal_replication::from_replicated_entry(&bytes).unwrap();
+    let (_, _, restored) = nodedb::control::wal_replication::from_replicated_entry(&bytes, None)
+        .unwrap()
+        .unwrap();
     assert!(matches!(
         restored,
         PhysicalPlan::Document(DocumentOp::PointDelete { .. })
@@ -195,6 +203,8 @@ fn read_ops_not_replicated() {
         rls_filters: vec![],
         system_as_of_ms: None,
         valid_at_ms: None,
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let entry = nodedb::control::wal_replication::to_replicated_entry(
         TenantId::new(1),
@@ -217,6 +227,8 @@ fn procedure_dml_is_normal_write() {
         collection: "archive".into(),
         document_id: "a-1".into(),
         value: b"{}".to_vec(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     // This is a normal write → replicates via Raft.
     assert!(

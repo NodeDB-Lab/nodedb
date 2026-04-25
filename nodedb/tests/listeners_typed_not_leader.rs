@@ -164,6 +164,7 @@ async fn pgwire_not_leader_retry_uses_shared_gateway() {
         key: b"pgwire-key".to_vec(),
         value: mp_string("val"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway
         .execute(&test_ctx(), put_plan)
@@ -218,6 +219,7 @@ async fn http_not_leader_gateway_error_mapping() {
         key: b"http-key".to_vec(),
         value: mp_string("v"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway
         .execute(&test_ctx(), put_plan)
@@ -278,6 +280,7 @@ async fn resp_not_leader_gateway_error_mapping() {
         key: b"resp-key".to_vec(),
         value: mp_string("v"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway
         .execute(&test_ctx(), put_plan)
@@ -398,6 +401,7 @@ async fn native_not_leader_gateway_error_mapping() {
         key: b"native-key".to_vec(),
         value: mp_string("v"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway
         .execute(&test_ctx(), put_plan)

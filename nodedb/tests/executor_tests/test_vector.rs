@@ -19,7 +19,7 @@ fn vector_insert_and_search() {
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ),
         })

@@ -39,6 +39,8 @@ fn fulltext_search_isolated() {
                 collection: "articles".into(),
                 document_id: id.to_string(),
                 value: val.as_bytes().to_vec(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }

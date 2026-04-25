@@ -34,6 +34,8 @@ fn cross_model_query_vector_graph_relational() {
                     "citations": i * 10,
                 }))
                 .unwrap(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -48,7 +50,7 @@ fn cross_model_query_vector_graph_relational() {
                     vector: vec![i as f32, (i as f32).sin(), (i as f32).cos()],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ),
         })
@@ -71,6 +73,8 @@ fn cross_model_query_vector_graph_relational() {
                 label: "CITES".into(),
                 dst_id: format!("p{}", i + 1),
                 properties: vec![],
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -202,6 +206,8 @@ fn rrf_fusion_mathematically_correct() {
                     "body": format!("document about database systems topic {i}"),
                 }))
                 .unwrap(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -216,7 +222,7 @@ fn rrf_fusion_mathematically_correct() {
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ),
         })
@@ -297,6 +303,8 @@ fn document_indexes_consistent_after_simulated_crash() {
                 "status": "published",
             }))
             .unwrap(),
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"a1".to_vec(),
         }),
     );
 
@@ -312,10 +320,15 @@ fn document_indexes_consistent_after_simulated_crash() {
                 "status": "draft",
             }))
             .unwrap(),
+            surrogate: nodedb_types::Surrogate::new(2),
+            pk_bytes: b"a2".to_vec(),
         }),
     );
 
-    // Text search should find both documents.
+    // Text search should find both documents. Without a wired catalog
+    // the inverted-index hits surface as substrate row keys (hex of
+    // the surrogate) rather than user-visible PKs, so the assertion
+    // checks for the substrate key derived from `Surrogate::new(1)`.
     let text_payload = send_ok(
         &mut core,
         &mut tx,
@@ -330,8 +343,8 @@ fn document_indexes_consistent_after_simulated_crash() {
     );
     let text_json = payload_json(&text_payload);
     assert!(
-        text_json.contains("a1"),
-        "text search should find a1: {text_json}"
+        text_json.contains("00000001"),
+        "text search should find a1's substrate key: {text_json}"
     );
 
     // Delete a1 — should cascade to inverted index.
@@ -342,6 +355,8 @@ fn document_indexes_consistent_after_simulated_crash() {
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "articles".into(),
             document_id: "a1".into(),
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"a1".to_vec(),
         }),
     );
 
@@ -360,8 +375,8 @@ fn document_indexes_consistent_after_simulated_crash() {
     );
     let text_after_json = payload_json(&text_after);
     assert!(
-        !text_after_json.contains("a1"),
-        "a1 should be removed from text index after delete: {text_after_json}"
+        !text_after_json.contains("00000001"),
+        "a1's substrate key should be removed from text index after delete: {text_after_json}"
     );
 
     // a2 should still be findable.
@@ -379,8 +394,8 @@ fn document_indexes_consistent_after_simulated_crash() {
     );
     let text_a2_json = payload_json(&text_a2);
     assert!(
-        text_a2_json.contains("a2"),
-        "a2 should still be in text index: {text_a2_json}"
+        text_a2_json.contains("00000002"),
+        "a2's substrate key should still be in text index: {text_a2_json}"
     );
 
     // Verify PointGet confirms a1 is gone, a2 exists.
@@ -394,6 +409,8 @@ fn document_indexes_consistent_after_simulated_crash() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"a1".to_vec(),
         }),
     );
     assert_eq!(get_a1.error_code, None);
@@ -408,6 +425,8 @@ fn document_indexes_consistent_after_simulated_crash() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::new(2),
+            pk_bytes: b"a2".to_vec(),
         }),
     );
     assert_eq!(get_a2.status, Status::Ok);

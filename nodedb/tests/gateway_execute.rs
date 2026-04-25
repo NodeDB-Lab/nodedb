@@ -68,6 +68,7 @@ async fn gateway_execute_kv_put_get_single_node() {
         key: b"smoke-key".to_vec(),
         value: mp_string("smoke-value"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     let put_result = gateway.execute(&ctx, put_plan).await;
     assert!(

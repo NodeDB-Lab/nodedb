@@ -172,6 +172,7 @@ async fn wal_redispatch_makes_data_queryable() {
                     payload,
                     format: "ilp".to_string(),
                     wal_lsn: Some(record.header.lsn),
+                    surrogates: Vec::new(),
                 }),
                 collection,
             )
@@ -259,6 +260,7 @@ async fn catchup_fills_gaps_from_spsc_drops() {
                     payload,
                     format: "ilp".to_string(),
                     wal_lsn: Some(record.header.lsn),
+                    surrogates: Vec::new(),
                 }),
                 collection,
             )
@@ -406,6 +408,7 @@ async fn production_scenario_catchup_drains_wal_after_ingest() {
                         payload: raw_payload,
                         format: "ilp".to_string(),
                         wal_lsn: None,
+                        surrogates: Vec::new(),
                     }),
                     collection,
                 )

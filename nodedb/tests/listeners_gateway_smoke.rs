@@ -68,6 +68,7 @@ async fn pgwire_gateway_smoke_cache_hit() {
         key: b"pgwire-smoke-key".to_vec(),
         value: mp_string("pgwire-smoke-val"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway.execute(&ctx, put_plan).await.expect("gateway Put");
 
@@ -127,6 +128,7 @@ async fn http_gateway_smoke_cache_hit() {
         key: b"http-smoke-key".to_vec(),
         value: mp_string("http-smoke-val"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway.execute(&ctx, put_plan).await.expect("gateway Put");
 
@@ -180,6 +182,7 @@ async fn resp_gateway_smoke_cache_hit() {
         key: b"resp-smoke-key".to_vec(),
         value: mp_string("resp-smoke-val"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway.execute(&ctx, put_plan).await.expect("gateway Put");
 
@@ -236,6 +239,7 @@ async fn ilp_gateway_smoke_cache_hit() {
         key: b"ilp-smoke-key".to_vec(),
         value: mp_string("ilp-smoke-val"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway.execute(&ctx, put_plan).await.expect("gateway Put");
 
@@ -289,6 +293,7 @@ async fn native_gateway_smoke_cache_hit() {
         key: b"native-smoke-key".to_vec(),
         value: mp_string("native-smoke-val"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway.execute(&ctx, put_plan).await.expect("gateway Put");
 

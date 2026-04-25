@@ -23,6 +23,7 @@ fn kv_put_get_delete() {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -79,6 +80,7 @@ fn kv_overwrite_returns_ok() {
             key: b"k".to_vec(),
             value: b"v1".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -92,6 +94,7 @@ fn kv_overwrite_returns_ok() {
             key: b"k".to_vec(),
             value: b"v2".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -162,6 +165,7 @@ fn kv_scan_returns_entries() {
                 key: format!("key{i}").into_bytes(),
                 value: format!("val{i}").into_bytes(),
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -199,6 +203,7 @@ fn kv_scan_with_match_pattern() {
                     key: format!("{prefix}{i}").into_bytes(),
                     value: b"data".to_vec(),
                     ttl_ms: 0,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             );
         }
@@ -241,6 +246,7 @@ fn kv_expire_and_persist() {
             key: b"k".to_vec(),
             value: b"v".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -310,6 +316,7 @@ fn kv_register_index_and_lookup() {
             key: b"s1".to_vec(),
             value: doc1,
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
     send_ok(
@@ -321,6 +328,7 @@ fn kv_register_index_and_lookup() {
             key: b"s2".to_vec(),
             value: doc2,
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -368,6 +376,7 @@ fn kv_drop_index() {
             key: b"k1".to_vec(),
             value: doc,
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -401,6 +410,7 @@ fn kv_tenant_isolation() {
             key: b"k".to_vec(),
             value: b"tenant1".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }))
     };
     tx.try_push(nodedb::bridge::dispatch::BridgeRequest { inner: req })
@@ -417,6 +427,7 @@ fn kv_tenant_isolation() {
             key: b"k".to_vec(),
             value: b"tenant2".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }))
     };
     tx.try_push(nodedb::bridge::dispatch::BridgeRequest { inner: req })

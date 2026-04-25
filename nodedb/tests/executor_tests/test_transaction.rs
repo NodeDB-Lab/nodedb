@@ -19,11 +19,15 @@ fn transaction_batch_commits_atomically() {
                     collection: "docs".into(),
                     document_id: "d1".into(),
                     value: b"{\"name\":\"alice\"}".to_vec(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                 }),
                 PhysicalPlan::Document(DocumentOp::PointPut {
                     collection: "docs".into(),
                     document_id: "d2".into(),
                     value: b"{\"name\":\"bob\"}".to_vec(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                 }),
             ],
         }),
@@ -41,6 +45,8 @@ fn transaction_batch_commits_atomically() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(r1.status, Status::Ok);
@@ -55,6 +61,8 @@ fn transaction_batch_commits_atomically() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(r2.status, Status::Ok);
@@ -72,6 +80,8 @@ fn transaction_batch_response_uses_outer_request_id() {
                     collection: "docs".into(),
                     document_id: "d1".into(),
                     value: b"{\"name\":\"alice\"}".to_vec(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                 })],
             }),
         ),
@@ -97,6 +107,8 @@ fn transaction_batch_rollback_on_failure() {
             collection: "docs".into(),
             document_id: "d1".into(),
             value: b"original".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -126,7 +138,7 @@ fn transaction_batch_rollback_on_failure() {
             vector: vec![1.0, 2.0, 3.0],
             dim: 3,
             field_name: String::new(),
-            doc_id: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -141,6 +153,8 @@ fn transaction_batch_rollback_on_failure() {
                     collection: "docs".into(),
                     document_id: "d1".into(),
                     value: b"{\"name\":\"modified\"}".to_vec(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                 }),
                 // Dimension mismatch: index is dim=3 but vector has 2 elements.
                 PhysicalPlan::Vector(VectorOp::Insert {
@@ -148,7 +162,7 @@ fn transaction_batch_rollback_on_failure() {
                     vector: vec![1.0, 2.0],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ],
         }),
@@ -166,6 +180,8 @@ fn transaction_batch_rollback_on_failure() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(r.status, Status::Ok);
@@ -185,6 +201,8 @@ fn transaction_edge_put_committed() {
             collection: "nodes".into(),
             document_id: "alice".into(),
             value: b"{\"name\":\"alice\"}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     send_ok(
@@ -195,6 +213,8 @@ fn transaction_edge_put_committed() {
             collection: "nodes".into(),
             document_id: "bob".into(),
             value: b"{\"name\":\"bob\"}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -209,6 +229,8 @@ fn transaction_edge_put_committed() {
                     collection: "nodes".into(),
                     document_id: "carol".into(),
                     value: b"{\"name\":\"carol\"}".to_vec(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                 }),
                 PhysicalPlan::Graph(GraphOp::EdgePut {
                     collection: "col".into(),
@@ -216,6 +238,8 @@ fn transaction_edge_put_committed() {
                     label: "KNOWS".into(),
                     dst_id: "bob".into(),
                     properties: Vec::new(),
+                    src_surrogate: nodedb_types::Surrogate::ZERO,
+                    dst_surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ],
         }),
@@ -251,6 +275,8 @@ fn transaction_edge_put_rolled_back_on_failure() {
             collection: "nodes".into(),
             document_id: "alice".into(),
             value: b"{\"name\":\"alice\"}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     send_ok(
@@ -261,6 +287,8 @@ fn transaction_edge_put_rolled_back_on_failure() {
             collection: "nodes".into(),
             document_id: "bob".into(),
             value: b"{\"name\":\"bob\"}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -289,7 +317,7 @@ fn transaction_edge_put_rolled_back_on_failure() {
             vector: vec![1.0, 2.0, 3.0],
             dim: 3,
             field_name: String::new(),
-            doc_id: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -306,6 +334,8 @@ fn transaction_edge_put_rolled_back_on_failure() {
                     label: "KNOWS".into(),
                     dst_id: "bob".into(),
                     properties: Vec::new(),
+                    src_surrogate: nodedb_types::Surrogate::ZERO,
+                    dst_surrogate: nodedb_types::Surrogate::ZERO,
                 }),
                 // Dimension mismatch: index is dim=3 but vector has 2 elements.
                 PhysicalPlan::Vector(VectorOp::Insert {
@@ -313,7 +343,7 @@ fn transaction_edge_put_rolled_back_on_failure() {
                     vector: vec![1.0, 2.0],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ],
         }),
@@ -357,6 +387,8 @@ fn transaction_mixed_doc_edge_vector_rollback() {
             collection: "nodes".into(),
             document_id: "n1".into(),
             value: b"original_n1".to_vec(),
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"n1".to_vec(),
         }),
     );
     send_ok(
@@ -367,6 +399,8 @@ fn transaction_mixed_doc_edge_vector_rollback() {
             collection: "nodes".into(),
             document_id: "n2".into(),
             value: b"original_n2".to_vec(),
+            surrogate: nodedb_types::Surrogate::new(2),
+            pk_bytes: b"n2".to_vec(),
         }),
     );
 
@@ -395,7 +429,7 @@ fn transaction_mixed_doc_edge_vector_rollback() {
             vector: vec![1.0, 2.0, 3.0],
             dim: 3,
             field_name: String::new(),
-            doc_id: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -410,6 +444,8 @@ fn transaction_mixed_doc_edge_vector_rollback() {
                     collection: "nodes".into(),
                     document_id: "n1".into(),
                     value: b"modified_n1".to_vec(),
+                    surrogate: nodedb_types::Surrogate::new(1),
+                    pk_bytes: b"n1".to_vec(),
                 }),
                 PhysicalPlan::Graph(GraphOp::EdgePut {
                     collection: "col".into(),
@@ -417,6 +453,8 @@ fn transaction_mixed_doc_edge_vector_rollback() {
                     label: "LINKED".into(),
                     dst_id: "n2".into(),
                     properties: Vec::new(),
+                    src_surrogate: nodedb_types::Surrogate::ZERO,
+                    dst_surrogate: nodedb_types::Surrogate::ZERO,
                 }),
                 // Fail: dim mismatch.
                 PhysicalPlan::Vector(VectorOp::Insert {
@@ -424,7 +462,7 @@ fn transaction_mixed_doc_edge_vector_rollback() {
                     vector: vec![1.0],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ],
         }),
@@ -442,6 +480,8 @@ fn transaction_mixed_doc_edge_vector_rollback() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"n1".to_vec(),
         }),
     );
     assert_eq!(r.status, Status::Ok);

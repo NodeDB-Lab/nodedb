@@ -28,6 +28,8 @@ fn purge_removes_all_tenant_data() {
                 collection: "users".into(),
                 document_id: format!("u{i}"),
                 value: format!("{{\"name\":\"user_{i}\"}}").into_bytes(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -44,6 +46,8 @@ fn purge_removes_all_tenant_data() {
             label: "KNOWS".into(),
             dst_id: "u1".into(),
             properties: vec![],
+            src_surrogate: nodedb_types::Surrogate::ZERO,
+            dst_surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -58,6 +62,7 @@ fn purge_removes_all_tenant_data() {
             key: b"sess_1".to_vec(),
             value: b"session_data".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -72,6 +77,7 @@ fn purge_removes_all_tenant_data() {
             payload: b"cpu,host=a value=1.0 1000000000\n".to_vec(),
             format: "ilp".into(),
             wal_lsn: None,
+            surrogates: Vec::new(),
         }),
     );
 
@@ -86,6 +92,8 @@ fn purge_removes_all_tenant_data() {
             collection: "users".into(),
             document_id: "u0".into(),
             value: b"{\"name\":\"tenant_b_user\"}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -131,6 +139,8 @@ fn purge_removes_all_tenant_data() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(resp.error_code, None, "Tenant A documents should be purged");
@@ -218,6 +228,8 @@ fn purge_removes_all_tenant_data() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(
@@ -246,6 +258,8 @@ fn purge_is_idempotent() {
             collection: "test".into(),
             document_id: "d1".into(),
             value: b"{\"x\":1}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 

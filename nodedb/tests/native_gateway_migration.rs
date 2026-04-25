@@ -66,6 +66,7 @@ async fn native_gateway_migration_single_node_select() {
         key: b"native-key".to_vec(),
         value: mp_string("native-value"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     gateway
         .execute(&ctx, put_plan)
@@ -124,6 +125,7 @@ async fn native_gateway_migration_cross_node_select() {
         key: b"cross-native-key".to_vec(),
         value: mp_string("cross-native-value"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     leader_gw
         .execute(&ctx, put_plan)

@@ -25,6 +25,8 @@ fn sparse_point_get_isolated() {
             collection: "users".into(),
             document_id: "u1".into(),
             value: b"{\"name\":\"alice\",\"secret\":\"tenant_a_data\"}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 
@@ -40,6 +42,8 @@ fn sparse_point_get_isolated() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -58,6 +62,8 @@ fn sparse_point_get_isolated() {
             rls_filters: Vec::new(),
             system_as_of_ms: None,
             valid_at_ms: None,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
     assert_eq!(
@@ -81,6 +87,8 @@ fn sparse_range_scan_isolated() {
                 collection: "items".into(),
                 document_id: format!("item_{i}"),
                 value: format!("{{\"val\":{i}}}").into_bytes(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }

@@ -25,6 +25,7 @@ fn kv_get_isolated() {
             key: b"session_abc".to_vec(),
             value: b"tenant_a_session_data".to_vec(),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 

@@ -41,6 +41,8 @@ fn insert_product(
             collection: "products".into(),
             document_id: id.into(),
             value: value_bytes,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
     );
 }

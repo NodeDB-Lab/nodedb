@@ -66,6 +66,7 @@ async fn http_gateway_migration_single_node_query() {
         key: b"row-1".to_vec(),
         value: mp_string("hello-http"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     let put_result = gateway.execute(&ctx, put_plan).await;
     assert!(
@@ -133,6 +134,7 @@ async fn http_gateway_migration_cross_node_query() {
         key: b"cross-key".to_vec(),
         value: mp_string("cross-value"),
         ttl_ms: 0,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     let put_result = gateway.execute(&ctx, put_plan).await;
     assert!(

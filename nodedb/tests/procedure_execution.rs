@@ -153,6 +153,8 @@ fn dummy_task(id: &str) -> nodedb::control::planner::physical::PhysicalTask {
             collection: "test".into(),
             document_id: id.into(),
             value: vec![],
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
         post_set_op: nodedb::control::planner::physical::PostSetOp::None,
     }

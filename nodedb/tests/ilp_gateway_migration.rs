@@ -71,6 +71,7 @@ async fn ilp_gateway_migration_single_node_ingest() {
         payload: batch,
         format: "ilp".to_string(),
         wal_lsn: None,
+        surrogates: Vec::new(),
     });
     let result = gw.execute(&ctx, plan).await;
     assert!(
@@ -114,6 +115,7 @@ async fn ilp_gateway_migration_cross_node_ingest() {
         payload: ilp_batch("ilp_gw_cross", 5),
         format: "ilp".to_string(),
         wal_lsn: None,
+        surrogates: Vec::new(),
     });
     let result1 = leader_gw.execute(&ctx, plan1).await;
     assert!(
@@ -133,6 +135,7 @@ async fn ilp_gateway_migration_cross_node_ingest() {
         payload: ilp_batch("ilp_gw_cross", 5),
         format: "ilp".to_string(),
         wal_lsn: None,
+        surrogates: Vec::new(),
     });
     // Retry once on RetryableSchemaChanged: the descriptor may not yet be in
     // the follower catalog when the gateway snapshot was taken.
@@ -144,6 +147,7 @@ async fn ilp_gateway_migration_cross_node_ingest() {
                 payload: ilp_batch("ilp_gw_cross", 5),
                 format: "ilp".to_string(),
                 wal_lsn: None,
+                surrogates: Vec::new(),
             });
             follower_gw.execute(&ctx, plan2b).await
         }

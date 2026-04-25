@@ -6,6 +6,15 @@ use nodedb::bridge::scan_filter::ScanFilter;
 
 use crate::helpers::*;
 
+fn surrogate_for(id: &str) -> nodedb_types::Surrogate {
+    let mut h: u32 = 2_166_136_261;
+    for &b in id.as_bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16_777_619);
+    }
+    nodedb_types::Surrogate::new(h.max(1))
+}
+
 fn insert_product(
     core: &mut nodedb::data::executor::core_loop::CoreLoop,
     tx: &mut nodedb_bridge::buffer::Producer<nodedb::bridge::dispatch::BridgeRequest>,
@@ -21,6 +30,8 @@ fn insert_product(
             collection: "products".into(),
             document_id: id.into(),
             value: serde_json::to_vec(&doc).unwrap(),
+            surrogate: surrogate_for(id),
+            pk_bytes: id.as_bytes().to_vec(),
         }),
     );
 }

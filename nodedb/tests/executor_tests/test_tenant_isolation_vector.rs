@@ -26,7 +26,7 @@ fn vector_search_isolated() {
                 vector: vec![i as f32, 0.0, 0.0],
                 dim: 3,
                 field_name: String::new(),
-                doc_id: None,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }

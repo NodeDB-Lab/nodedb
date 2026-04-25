@@ -22,6 +22,8 @@ fn edge_put_and_graph_neighbors() {
                 label: "KNOWS".into(),
                 dst_id: dst.to_string(),
                 properties: vec![],
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -57,6 +59,8 @@ fn graph_hop_traversal() {
                 label: "NEXT".into(),
                 dst_id: d.to_string(),
                 properties: vec![],
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -95,6 +99,8 @@ fn graph_path_and_subgraph() {
                 label: "L".into(),
                 dst_id: d.to_string(),
                 properties: vec![],
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -145,6 +151,8 @@ fn edge_delete_updates_csr() {
             label: "R".into(),
             dst_id: "y".into(),
             properties: vec![],
+            src_surrogate: nodedb_types::Surrogate::ZERO,
+            dst_surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -190,7 +198,7 @@ fn graph_rag_fusion_pipeline() {
                     vector: vec![i as f32, 0.0, 0.0],
                     dim: 3,
                     field_name: String::new(),
-                    doc_id: None,
+                    surrogate: nodedb_types::Surrogate::ZERO,
                 }),
             ),
         })
@@ -213,6 +221,8 @@ fn graph_rag_fusion_pipeline() {
                 label: "CITES".into(),
                 dst_id: d.to_string(),
                 properties: vec![],
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }

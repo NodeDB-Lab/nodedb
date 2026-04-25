@@ -24,6 +24,7 @@ fn aggregate_count_reads_plain_columnar_engine_rows() {
             format: "msgpack".into(),
             intent: ColumnarInsertIntent::Insert,
             on_conflict_updates: Vec::new(),
+            surrogates: Vec::new(),
         }),
     );
 
@@ -85,6 +86,7 @@ fn columnar_having_uses_canonical_key_but_output_keeps_user_alias() {
             format: "msgpack".into(),
             intent: ColumnarInsertIntent::Insert,
             on_conflict_updates: Vec::new(),
+            surrogates: Vec::new(),
         }),
     );
 
@@ -160,6 +162,7 @@ fn columnar_insert_triggers_memtable_flush() {
             format: "msgpack".into(),
             intent: ColumnarInsertIntent::Insert,
             on_conflict_updates: Vec::new(),
+            surrogates: Vec::new(),
         }),
     );
 
@@ -205,6 +208,7 @@ fn aggregate_group_by_does_not_require_full_materialization() {
             format: "msgpack".into(),
             intent: ColumnarInsertIntent::Insert,
             on_conflict_updates: Vec::new(),
+            surrogates: Vec::new(),
         }),
     );
 

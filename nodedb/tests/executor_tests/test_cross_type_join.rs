@@ -38,6 +38,7 @@ fn kv_put_scan_roundtrip() {
             key: b"d1".to_vec(),
             value: value1,
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -51,6 +52,7 @@ fn kv_put_scan_roundtrip() {
             key: b"d3".to_vec(),
             value: value2,
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -115,6 +117,7 @@ fn document_scan_preserves_kv_rows_when_collection_has_strict_config() {
             key: b"d1".to_vec(),
             value,
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         }),
     );
 
@@ -163,6 +166,8 @@ fn schemaless_put_scan_roundtrip() {
             collection: "docs".into(),
             document_id: "d1".into(),
             value: doc1,
+            surrogate: nodedb_types::Surrogate::new(1),
+            pk_bytes: b"d1".to_vec(),
         }),
     );
 
@@ -175,6 +180,8 @@ fn schemaless_put_scan_roundtrip() {
             collection: "docs".into(),
             document_id: "d3".into(),
             value: doc2,
+            surrogate: nodedb_types::Surrogate::new(2),
+            pk_bytes: b"d3".to_vec(),
         }),
     );
 
@@ -263,6 +270,8 @@ fn single_core_cross_type_hash_join() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -279,6 +288,7 @@ fn single_core_cross_type_hash_join() {
                 key: key.as_bytes().to_vec(),
                 value,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -352,6 +362,8 @@ fn single_core_left_join_with_nulls() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -367,6 +379,7 @@ fn single_core_left_join_with_nulls() {
                 key: key.as_bytes().to_vec(),
                 value,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -410,11 +423,14 @@ fn single_core_left_join_with_nulls() {
 fn single_core_self_join_respects_aliases_in_filter_and_projection() {
     let mut ctx = make_ctx();
 
-    for (id, name, dept) in [
+    for (idx, (id, name, dept)) in [
         ("1", "Alice", "eng"),
         ("2", "Bob", "eng"),
         ("3", "Cara", "pm"),
-    ] {
+    ]
+    .iter()
+    .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("name", name), ("dept", dept)]);
         send_ok(
             &mut ctx.core,
@@ -422,8 +438,10 @@ fn single_core_self_join_respects_aliases_in_filter_and_projection() {
             &mut ctx.rx,
             PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: "employees".into(),
-                document_id: id.into(),
+                document_id: (*id).into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
+                pk_bytes: id.as_bytes().to_vec(),
             }),
         );
     }
@@ -502,6 +520,8 @@ fn single_core_self_join_star_keeps_both_sides() {
                 collection: "employees".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -547,17 +567,29 @@ fn single_core_self_join_star_keeps_both_sides() {
 fn schemaless_self_join_matches_on_canonicalized_object_fields() {
     let mut ctx = make_ctx();
 
-    for (id, user_id, item) in [
+    for (idx, (id, user_id, item)) in [
         ("o1", "u1", "book"),
         ("o3", "u1", "pen"),
         ("o2", "u2", "pad"),
-    ] {
+    ]
+    .iter()
+    .enumerate()
+    {
         let mut obj = std::collections::HashMap::new();
+        // Inline `id` into the document body so projections of `a.id`
+        // surface the user-facing order id rather than the substrate
+        // row key (hex of surrogate). The substrate retrofit moved
+        // doc-id-as-key out of the `id` column slot, so tests that
+        // assert on the user PK have to write it as a payload field.
+        obj.insert("id".to_string(), nodedb_types::Value::String((*id).into()));
         obj.insert(
             "user_id".to_string(),
-            nodedb_types::Value::String(user_id.into()),
+            nodedb_types::Value::String((*user_id).into()),
         );
-        obj.insert("item".to_string(), nodedb_types::Value::String(item.into()));
+        obj.insert(
+            "item".to_string(),
+            nodedb_types::Value::String((*item).into()),
+        );
         let tagged = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).unwrap();
 
         send_ok(
@@ -566,8 +598,10 @@ fn schemaless_self_join_matches_on_canonicalized_object_fields() {
             &mut ctx.rx,
             PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: "orders".into(),
-                document_id: id.into(),
+                document_id: (*id).into(),
                 value: tagged,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
+                pk_bytes: id.as_bytes().to_vec(),
             }),
         );
     }
@@ -649,6 +683,8 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -737,6 +773,8 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
                 collection: "orders".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -818,6 +856,8 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -843,6 +883,8 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                 collection: "orders".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -951,6 +993,8 @@ fn multi_core_broadcast_inner_join() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -967,6 +1011,7 @@ fn multi_core_broadcast_inner_join() {
                 key: key.as_bytes().to_vec(),
                 value,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -1064,6 +1109,8 @@ fn multi_core_broadcast_left_join() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -1079,6 +1126,7 @@ fn multi_core_broadcast_left_join() {
                 key: key.as_bytes().to_vec(),
                 value,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -1156,6 +1204,8 @@ fn multi_core_broadcast_merge_simulation() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -1169,6 +1219,8 @@ fn multi_core_broadcast_merge_simulation() {
                 collection: "docs".into(),
                 document_id: "d4".into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -1185,6 +1237,7 @@ fn multi_core_broadcast_merge_simulation() {
                 key: b"d1".to_vec(),
                 value,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -1199,6 +1252,7 @@ fn multi_core_broadcast_merge_simulation() {
                 key: b"d3".to_vec(),
                 value,
                 ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::ZERO,
             }),
         );
     }
@@ -1314,6 +1368,8 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -1328,6 +1384,8 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 collection: "orders".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }
@@ -1342,6 +1400,8 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 collection: "payments".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }

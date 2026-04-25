@@ -28,6 +28,8 @@ fn procedure_dml_creates_replicated_entry() {
         collection: "archive".into(),
         document_id: "a-1".into(),
         value: b"{}".to_vec(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let entry = nodedb::control::wal_replication::to_replicated_entry(
         TenantId::new(1),
@@ -76,6 +78,8 @@ fn tx_ctx_commit_yields_independent_tasks() {
             collection: "orders".into(),
             document_id: "o-1".into(),
             value: b"{}".to_vec(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
         post_set_op: nodedb::control::planner::physical::PostSetOp::None,
     });
@@ -85,6 +89,8 @@ fn tx_ctx_commit_yields_independent_tasks() {
         plan: PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "temp".into(),
             document_id: "t-1".into(),
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
         post_set_op: nodedb::control::planner::physical::PostSetOp::None,
     });
@@ -122,6 +128,8 @@ fn procedure_can_target_multiple_vshards() {
             collection: "a".into(),
             document_id: "d1".into(),
             value: vec![],
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
         post_set_op: nodedb::control::planner::physical::PostSetOp::None,
     });
@@ -133,6 +141,8 @@ fn procedure_can_target_multiple_vshards() {
             collection: "b".into(),
             document_id: "d2".into(),
             value: vec![],
+            surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
         }),
         post_set_op: nodedb::control::planner::physical::PostSetOp::None,
     });

@@ -177,6 +177,7 @@ async fn pgwire_gateway_migration_plan_cache_hits() {
             key: b"cache-key".to_vec(),
             value: mp_string("cache-val"),
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         });
         gateway
             .execute(&ctx, put_plan)

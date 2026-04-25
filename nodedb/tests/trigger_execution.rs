@@ -127,6 +127,8 @@ fn classify_point_put_as_insert() {
         collection: "orders".into(),
         document_id: "doc-1".into(),
         value: b"{}".to_vec(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let info = classify_dml_write(&plan).unwrap();
     assert_eq!(info.collection, "orders");
@@ -142,6 +144,8 @@ fn classify_point_delete() {
     let plan = PhysicalPlan::Document(DocumentOp::PointDelete {
         collection: "orders".into(),
         document_id: "doc-1".into(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let info = classify_dml_write(&plan).unwrap();
     assert_eq!(info.collection, "orders");
@@ -159,6 +163,8 @@ fn classify_point_update() {
         document_id: "u-1".into(),
         updates: vec![],
         returning: false,
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let info = classify_dml_write(&plan).unwrap();
     assert_eq!(info.collection, "users");
@@ -211,7 +217,7 @@ fn classify_vector_op_returns_none() {
         vector: vec![1.0, 2.0, 3.0],
         dim: 3,
         field_name: String::new(),
-        doc_id: None,
+        surrogate: nodedb_types::Surrogate::ZERO,
     });
     // Vector ops don't participate in BEFORE/SYNC AFTER hook path.
     assert!(classify_dml_write(&plan).is_none());
@@ -645,6 +651,8 @@ fn classify_point_put_deserializes_json_value() {
         collection: "users".into(),
         document_id: "u-1".into(),
         value,
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let info = classify_dml_write(&plan).unwrap();
     let fields = info.new_fields.unwrap();
@@ -668,6 +676,8 @@ fn classify_point_put_deserializes_msgpack_value() {
         collection: "data".into(),
         document_id: "d-1".into(),
         value,
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     let info = classify_dml_write(&plan).unwrap();
     let fields = info.new_fields.unwrap();

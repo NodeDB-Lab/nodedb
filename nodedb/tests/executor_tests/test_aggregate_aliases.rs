@@ -27,6 +27,8 @@ fn aggregate_output_uses_user_alias_but_having_reads_canonical_key() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             }),
         );
     }

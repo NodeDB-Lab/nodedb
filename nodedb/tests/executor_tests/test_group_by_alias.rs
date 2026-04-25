@@ -57,6 +57,7 @@ fn sql_to_physical(sql: &str) -> PhysicalPlan {
         array_catalog: None,
         credentials: None,
         wal: None,
+        surrogate_assigner: None,
     };
     let tenant_id = nodedb::types::TenantId::new(1);
     let tasks = convert(&plans, tenant_id, &ctx).unwrap();
@@ -85,6 +86,7 @@ fn ingest_ilp(ctx: &mut TestCtx, collection: &str, payload: &str) {
             payload: payload.as_bytes().to_vec(),
             format: "ilp".to_string(),
             wal_lsn: None,
+            surrogates: Vec::new(),
         }),
     );
 }

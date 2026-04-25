@@ -39,6 +39,7 @@ fn change(
     ProposedChange {
         collection: USERS.into(),
         row_id: row_id.into(),
+        surrogate: nodedb_types::Surrogate::ZERO,
         fields: vec![
             ("name".into(), LoroValue::String("Alice".into())),
             ("email".into(), LoroValue::String(email.into())),
