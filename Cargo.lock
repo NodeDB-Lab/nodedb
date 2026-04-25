@@ -3872,6 +3872,7 @@ version = "0.0.6"
 dependencies = [
  "hmac 0.12.1",
  "loro",
+ "nodedb-types",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.18",
@@ -3885,6 +3886,7 @@ version = "0.0.6"
 dependencies = [
  "icu_segmenter",
  "lindera",
+ "nodedb-types",
  "rust-stemmers",
  "serde",
  "thiserror 2.0.18",
