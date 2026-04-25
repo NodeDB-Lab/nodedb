@@ -1,6 +1,7 @@
 pub mod config;
 
 pub mod approx;
+pub mod array_cell;
 pub mod backup_envelope;
 pub mod bbox;
 pub mod collection;
@@ -37,6 +38,7 @@ pub mod vector_index_stats;
 pub mod vector_model;
 
 pub use approx::{CountMinSketch, HyperLogLog, SpaceSaving, TDigest};
+pub use array_cell::ArrayCell;
 pub use bbox::{BoundingBox, geometry_bbox};
 pub use collection::CollectionType;
 pub use columnar::{

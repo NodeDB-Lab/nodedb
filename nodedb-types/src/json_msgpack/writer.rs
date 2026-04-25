@@ -69,6 +69,22 @@ fn write_native_value(buf: &mut Vec<u8>, value: &crate::Value) {
             }
         }
         crate::Value::Range { .. } | crate::Value::Record { .. } => buf.push(0xC0),
+        // NdArrayCell is encoded as a 2-key map `{coords:[...], attrs:[...]}`
+        // so the pgwire `msgpack_to_json_string` transcoder produces clean
+        // JSON for clients reading slice/project rows.
+        crate::Value::NdArrayCell(cell) => {
+            write_native_map_header(buf, 2);
+            write_native_str(buf, "coords");
+            write_native_array_header(buf, cell.coords.len());
+            for v in &cell.coords {
+                write_native_value(buf, v);
+            }
+            write_native_str(buf, "attrs");
+            write_native_array_header(buf, cell.attrs.len());
+            for v in &cell.attrs {
+                write_native_value(buf, v);
+            }
+        }
     }
 }
 
