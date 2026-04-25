@@ -35,6 +35,7 @@ nodedb-strict = { workspace = true }
 nodedb-spatial = { workspace = true }
 nodedb-graph = { workspace = true }
 nodedb-vector = { workspace = true, features = ["collection"] }
+nodedb-array = { workspace = true }
 nodedb-sql = { workspace = true }
 arrow = { workspace = true }
 

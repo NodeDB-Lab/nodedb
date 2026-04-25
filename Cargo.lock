@@ -3698,6 +3698,7 @@ dependencies = [
  "memchr",
  "memmap2",
  "nexar",
+ "nodedb-array",
  "nodedb-bridge",
  "nodedb-cluster",
  "nodedb-codec",

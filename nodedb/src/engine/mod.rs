@@ -1,3 +1,4 @@
+pub mod array;
 pub mod bitemporal;
 pub mod crdt;
 pub mod document;
