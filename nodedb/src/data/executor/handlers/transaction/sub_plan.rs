@@ -43,12 +43,14 @@ impl CoreLoop {
                 collection,
                 document_id,
                 value,
+                surrogate,
                 ..
             }) => self.tx_point_put(
                 &dummy_task,
                 tid,
                 collection,
                 document_id,
+                *surrogate,
                 value,
                 undo_log,
                 user_roles,
@@ -59,7 +61,7 @@ impl CoreLoop {
                 document_id,
                 value,
                 if_absent,
-                surrogate: _,
+                surrogate,
             }) => {
                 // Existence probe against the engine's current state. The
                 // transaction buffer is represented by `undo_log`: earlier
@@ -67,9 +69,10 @@ impl CoreLoop {
                 // `document_id` show up via `sparse.get` because we apply
                 // writes eagerly and undo on rollback. Same-tx duplicate
                 // keys therefore surface here too.
+                let row_key = crate::engine::document::store::surrogate_to_doc_id(*surrogate);
                 let exists = self
                     .sparse
-                    .get(tid, collection, document_id)
+                    .get(tid, collection, &row_key)
                     .ok()
                     .flatten()
                     .is_some();
@@ -90,6 +93,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     document_id,
+                    *surrogate,
                     value,
                     undo_log,
                     user_roles,
@@ -99,8 +103,16 @@ impl CoreLoop {
             PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection,
                 document_id,
+                surrogate,
                 ..
-            }) => self.tx_point_delete(&dummy_task, tid, collection, document_id, undo_log),
+            }) => self.tx_point_delete(
+                &dummy_task,
+                tid,
+                collection,
+                document_id,
+                *surrogate,
+                undo_log,
+            ),
 
             PhysicalPlan::Vector(VectorOp::Insert {
                 collection,
@@ -285,12 +297,15 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         document_id: &str,
+        surrogate: nodedb_types::Surrogate,
         value: &[u8],
         undo_log: &mut Vec<UndoEntry>,
         user_roles: &[String],
     ) -> Result<Response, ErrorCode> {
+        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let row_key = row_key.as_str();
         // Save old value for rollback.
-        let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
+        let old_value = self.sparse.get(tid, collection, row_key).ok().flatten();
 
         // Enforcement: append-only + period lock + state transitions + transition checks.
         let config_key = (crate::types::TenantId::new(tid), collection.to_string());
@@ -376,7 +391,7 @@ impl CoreLoop {
         } else {
             encode_for_storage(value)?
         };
-        match self.sparse.put(tid, collection, document_id, &stored) {
+        match self.sparse.put(tid, collection, row_key, &stored) {
             Ok(_prior) => {
                 // Auto-index text fields (includes nested block content).
                 if let Some(doc) = super::super::super::doc_format::decode_document(value) {
@@ -385,7 +400,7 @@ impl CoreLoop {
                         let _ = self.inverted.index_document(
                             crate::types::TenantId::new(tid),
                             collection,
-                            document_id,
+                            row_key,
                             &text_content,
                         );
                     }
@@ -393,7 +408,7 @@ impl CoreLoop {
 
                 undo_log.push(UndoEntry::PutDocument {
                     collection: collection.to_string(),
-                    document_id: document_id.to_string(),
+                    document_id: row_key.to_string(),
                     old_value: old_value.clone(),
                 });
 
@@ -431,17 +446,22 @@ impl CoreLoop {
     }
 
     /// Execute a PointDelete within a transaction.
+    #[allow(clippy::too_many_arguments)]
     fn tx_point_delete(
         &mut self,
         dummy_task: &ExecutionTask,
         tid: u32,
         collection: &str,
         document_id: &str,
+        surrogate: nodedb_types::Surrogate,
         undo_log: &mut Vec<UndoEntry>,
     ) -> Result<Response, ErrorCode> {
+        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let row_key = row_key.as_str();
+        let _ = document_id; // user-facing PK, retained in API for parity; storage uses row_key.
         // Enforcement: append-only + period lock + retention/hold.
         let config_key = (crate::types::TenantId::new(tid), collection.to_string());
-        let old_value = self.sparse.get(tid, collection, document_id).ok().flatten();
+        let old_value = self.sparse.get(tid, collection, row_key).ok().flatten();
         if let Some(config) = self.doc_configs.get(&config_key) {
             super::super::super::enforcement::append_only::check_point_delete(
                 collection,
@@ -469,23 +489,23 @@ impl CoreLoop {
                 created_at,
             )?;
         }
-        match self.sparse.delete(tid, collection, document_id) {
+        match self.sparse.delete(tid, collection, row_key) {
             Ok(_) => {
                 // Cascade: inverted index, secondary indexes, graph edges.
                 let _ = self.inverted.remove_document(
                     crate::types::TenantId::new(tid),
                     collection,
-                    document_id,
+                    row_key,
                 );
                 let _ = self
                     .sparse
-                    .delete_indexes_for_document(tid, collection, document_id);
-                let edges_removed = self.csr_partition_mut(tid).remove_node_edges(document_id);
+                    .delete_indexes_for_document(tid, collection, row_key);
+                let edges_removed = self.csr_partition_mut(tid).remove_node_edges(row_key);
                 if edges_removed > 0 {
                     let cascade_ord = self.hlc.next_ordinal();
                     let _ = self.edge_store.delete_edges_for_node(
                         nodedb_types::TenantId::new(tid),
-                        document_id,
+                        row_key,
                         cascade_ord,
                     );
                 }
@@ -493,7 +513,7 @@ impl CoreLoop {
                 if let Some(old) = old_value {
                     undo_log.push(UndoEntry::DeleteDocument {
                         collection: collection.to_string(),
-                        document_id: document_id.to_string(),
+                        document_id: row_key.to_string(),
                         old_value: old,
                     });
                 }
