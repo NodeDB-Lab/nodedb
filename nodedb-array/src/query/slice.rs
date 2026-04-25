@@ -104,7 +104,12 @@ pub fn slice_sparse(
             continue;
         }
         let attrs: Vec<CellValue> = tile.attr_cols.iter().map(|col| col[row].clone()).collect();
-        b.push(&coord, &attrs)?;
+        let surrogate = tile
+            .surrogates
+            .get(row)
+            .copied()
+            .unwrap_or(nodedb_types::Surrogate::ZERO);
+        b.push_with_surrogate(&coord, &attrs, surrogate)?;
     }
     Ok(b.build())
 }

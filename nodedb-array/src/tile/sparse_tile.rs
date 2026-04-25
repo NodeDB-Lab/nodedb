@@ -5,6 +5,7 @@
 //! dictionary-encoded inline: rare in genomic / single-cell workloads
 //! that have many repeats per tile.
 
+use nodedb_types::Surrogate;
 use serde::{Deserialize, Serialize};
 
 use super::mbr::{MbrBuilder, TileMBR};
@@ -75,6 +76,11 @@ pub struct SparseTile {
     pub dim_dicts: Vec<DimDict>,
     /// One column per schema attr, parallel to `schema.attrs`.
     pub attr_cols: Vec<Vec<CellValue>>,
+    /// Per-cell global surrogate (one entry per row, parallel to the
+    /// dim-dict index streams and `attr_cols`). Cross-engine bitmap
+    /// joins read this column directly without translating coords back
+    /// to user-visible primary keys.
+    pub surrogates: Vec<Surrogate>,
     pub mbr: TileMBR,
 }
 
@@ -84,6 +90,7 @@ impl SparseTile {
         Self {
             dim_dicts: (0..schema.arity()).map(|_| DimDict::new()).collect(),
             attr_cols: (0..schema.attrs.len()).map(|_| Vec::new()).collect(),
+            surrogates: Vec::new(),
             mbr: TileMBR::new(schema.arity(), schema.attrs.len()),
         }
     }
@@ -99,6 +106,7 @@ pub struct SparseTileBuilder<'a> {
     schema: &'a ArraySchema,
     dim_dicts: Vec<DimDict>,
     attr_cols: Vec<Vec<CellValue>>,
+    surrogates: Vec<Surrogate>,
     mbr: MbrBuilder,
 }
 
@@ -108,11 +116,26 @@ impl<'a> SparseTileBuilder<'a> {
             schema,
             dim_dicts: (0..schema.arity()).map(|_| DimDict::new()).collect(),
             attr_cols: (0..schema.attrs.len()).map(|_| Vec::new()).collect(),
+            surrogates: Vec::new(),
             mbr: MbrBuilder::new(schema.arity(), schema.attrs.len()),
         }
     }
 
+    /// Push a row whose surrogate is unknown to the caller (recovery,
+    /// pure-shape ops). The slot is filled with [`Surrogate::ZERO`];
+    /// callers that have a real surrogate should use
+    /// [`Self::push_with_surrogate`].
     pub fn push(&mut self, coord: &[CoordValue], attrs: &[CellValue]) -> ArrayResult<()> {
+        self.push_with_surrogate(coord, attrs, Surrogate::ZERO)
+    }
+
+    /// Push a row carrying a Control-Plane-allocated surrogate.
+    pub fn push_with_surrogate(
+        &mut self,
+        coord: &[CoordValue],
+        attrs: &[CellValue],
+        surrogate: Surrogate,
+    ) -> ArrayResult<()> {
         if coord.len() != self.schema.arity() {
             return Err(ArrayError::CoordArityMismatch {
                 array: self.schema.name.clone(),
@@ -137,6 +160,7 @@ impl<'a> SparseTileBuilder<'a> {
         for (i, a) in attrs.iter().enumerate() {
             self.attr_cols[i].push(a.clone());
         }
+        self.surrogates.push(surrogate);
         self.mbr.fold(coord, attrs);
         Ok(())
     }
@@ -145,6 +169,7 @@ impl<'a> SparseTileBuilder<'a> {
         SparseTile {
             dim_dicts: self.dim_dicts,
             attr_cols: self.attr_cols,
+            surrogates: self.surrogates,
             mbr: self.mbr.build(),
         }
     }

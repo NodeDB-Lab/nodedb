@@ -35,11 +35,16 @@ pub fn rechunk_sparse(
             .map(|d| d.values[d.indices[row] as usize].clone())
             .collect();
         let attrs: Vec<CellValue> = tile.attr_cols.iter().map(|col| col[row].clone()).collect();
+        let surrogate = tile
+            .surrogates
+            .get(row)
+            .copied()
+            .unwrap_or(nodedb_types::Surrogate::ZERO);
         let tid = tile_id_for_cell(target_schema, &coord, 0)?;
         let entry = buckets
             .entry(tid)
             .or_insert_with(|| SparseTileBuilder::new(target_schema));
-        entry.push(&coord, &attrs)?;
+        entry.push_with_surrogate(&coord, &attrs, surrogate)?;
     }
     Ok(buckets.into_iter().map(|(k, v)| (k, v.build())).collect())
 }
