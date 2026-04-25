@@ -481,6 +481,7 @@ fn surrogate_round_trip_all_engines() {
             filter_bitmap: None,
             field_name: String::new(),
             rls_filters: Vec::new(),
+            inline_prefilter_plan: None,
         }),
     );
     let all_vec_surs = extract_vector_surrogates(&all_vec);
@@ -501,6 +502,7 @@ fn surrogate_round_trip_all_engines() {
             filter_bitmap: Some(intersection.clone()),
             field_name: String::new(),
             rls_filters: Vec::new(),
+            inline_prefilter_plan: None,
         }),
     );
     let filtered_vec_surs = extract_vector_surrogates(&filtered_vec);

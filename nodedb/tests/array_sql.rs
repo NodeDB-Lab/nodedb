@@ -313,3 +313,62 @@ async fn drop_then_recreate_with_different_schema_starts_clean() {
         "fresh array must be empty; got stale rows: {rows:?}"
     );
 }
+
+/// End-to-end fusion: `ORDER BY vector_distance(...) + JOIN NDARRAY_SLICE(...)`
+/// must reach the data plane as a single fused `VectorOp::Search` whose
+/// `inline_prefilter_plan` is an `ArrayOp::SurrogateBitmapScan` over the
+/// requested slice. Asserts the wire executes end-to-end without error;
+/// the per-cell semantics (correctly filtered hits) are covered at the
+/// dispatch level in `data::executor::dispatch::array::tests_dispatch::
+/// vector_search_with_array_surrogate_prefilter`.
+#[tokio::test]
+async fn vector_search_with_ndarray_slice_prefilter_fuses_e2e() {
+    let srv = TestServer::start().await;
+
+    // Document collection backing vector embeddings.
+    srv.exec("CREATE COLLECTION genes TYPE document")
+        .await
+        .expect("CREATE COLLECTION genes");
+    srv.exec("CREATE VECTOR INDEX idx_genes_emb ON genes FIELD embedding METRIC cosine DIM 3")
+        .await
+        .expect("CREATE VECTOR INDEX");
+
+    // Genome array — chr × pos with one float attr.
+    srv.exec(
+        "CREATE ARRAY genome \
+         DIMS (chrom INT64 [1..23], pos INT64 [0..300000000]) \
+         ATTRS (qual FLOAT64) \
+         TILE_EXTENTS (1, 1000000) \
+         CELL_ORDER HILBERT",
+    )
+    .await
+    .expect("CREATE ARRAY genome");
+    srv.exec(
+        "INSERT INTO ARRAY genome \
+         COORDS (1, 1000) VALUES (10.0), \
+         COORDS (1, 2000) VALUES (20.0), \
+         COORDS (2, 1000) VALUES (30.0)",
+    )
+    .await
+    .expect("INSERT INTO ARRAY genome");
+    srv.exec("SELECT NDARRAY_FLUSH('genome')")
+        .await
+        .expect("NDARRAY_FLUSH");
+
+    // Fused query: ORDER BY vector_distance + JOIN NDARRAY_SLICE.
+    // Surrogate alignment between the empty vector index and the array's
+    // cells is not arranged here — the assertion is that the query
+    // wires through every layer without error (planner fusion → convert
+    // layer → ArrayOp::SurrogateBitmapScan + VectorOp::Search with
+    // inline_prefilter_plan → data plane sub-plan execution).
+    let _ = srv
+        .query_text(
+            "SELECT id FROM genes \
+             JOIN NDARRAY_SLICE('genome', '{chrom: [1, 1], pos: [0, 50000]}') AS s \
+               ON id = s.qual \
+             ORDER BY vector_distance(embedding, [1.0, 0.0, 0.0]) \
+             LIMIT 10",
+        )
+        .await
+        .expect("fused vector+array prefilter query");
+}

@@ -221,6 +221,7 @@ fn kv_and_vector_coexist() {
             filter_bitmap: None,
             field_name: String::new(),
             rls_filters: Vec::new(),
+            inline_prefilter_plan: None,
         }),
     );
 }

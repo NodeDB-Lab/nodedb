@@ -95,11 +95,15 @@ impl Harness {
     }
 
     fn send(&mut self, op: ArrayOp) -> crate::bridge::envelope::Response {
+        self.send_plan(PhysicalPlan::Array(op))
+    }
+
+    fn send_plan(&mut self, plan: PhysicalPlan) -> crate::bridge::envelope::Response {
         let id = self.next_id;
         self.next_id += 1;
         self.req_tx
             .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::Array(op), id),
+                inner: make_request(plan, id),
             })
             .unwrap();
         self.core.tick();
@@ -514,4 +518,73 @@ fn elementwise_schema_hash_mismatch_errors() {
         cell_filter: None,
     });
     assert_ne!(r.status, Status::Ok);
+}
+
+#[test]
+fn vector_search_with_array_surrogate_prefilter() {
+    use crate::bridge::physical_plan::VectorOp;
+
+    // 2D array tiling chr × pos, cells bound to surrogates 1..=10.
+    // Row "chr=0" carries surrogates 1..=5; row "chr=1" carries 6..=10.
+    let mut h = Harness::new();
+    let s = schema_2d_f64("genome");
+    let aid = ArrayId::new(TenantId::new(1), "genome");
+    h.open(&aid, &s, 0xC1);
+    let mut cells = Vec::new();
+    for i in 0u32..10 {
+        let chr = (i / 5) as i64;
+        let pos = (i % 5) as i64;
+        cells.push(cell_sur(chr, pos, i as f64, i + 1));
+    }
+    h.put(&aid, cells, 1);
+    h.flush(&aid);
+
+    // Insert 10 vectors with matching surrogates 1..=10.
+    for i in 0u32..10 {
+        let r = h.send_plan(PhysicalPlan::Vector(VectorOp::Insert {
+            collection: "embeddings".into(),
+            vector: vec![(i + 1) as f32, 0.0, 0.0],
+            dim: 3,
+            field_name: String::new(),
+            surrogate: Surrogate(i + 1),
+        }));
+        assert_eq!(r.status, Status::Ok, "vector insert {i} failed: {r:?}");
+    }
+
+    // Slice: chr=0 only (matches surrogates 1..=5).
+    let slice = ArraySlice::new(vec![
+        Some(DimRange::new(DomainBound::Int64(0), DomainBound::Int64(0))),
+        None,
+    ]);
+    let slice_msgpack = zerompk::to_msgpack_vec(&slice).unwrap();
+
+    // Vector search with inline prefilter sub-plan.
+    let r = h.send_plan(PhysicalPlan::Vector(VectorOp::Search {
+        collection: "embeddings".into(),
+        query_vector: vec![5.5f32, 0.0, 0.0],
+        top_k: 10,
+        ef_search: 0,
+        filter_bitmap: None,
+        field_name: String::new(),
+        rls_filters: Vec::new(),
+        inline_prefilter_plan: Some(Box::new(PhysicalPlan::Array(
+            ArrayOp::SurrogateBitmapScan {
+                array_id: aid.clone(),
+                slice_msgpack,
+            },
+        ))),
+    }));
+    assert_eq!(r.status, Status::Ok, "vector+prefilter failed: {r:?}");
+
+    // Result hits MUST all carry surrogate ids in 1..=5.
+    let json = nodedb_types::msgpack_to_json_string(r.payload.as_ref()).expect("hits msgpack→json");
+    let hits: Vec<serde_json::Value> = serde_json::from_str(&json).expect("hits json parse");
+    assert!(!hits.is_empty(), "expected at least one hit, got none");
+    for hit in &hits {
+        let id = hit["id"].as_u64().expect("hit.id present") as u32;
+        assert!(
+            (1..=5).contains(&id),
+            "hit surrogate {id} outside slice prefilter range 1..=5"
+        );
+    }
 }

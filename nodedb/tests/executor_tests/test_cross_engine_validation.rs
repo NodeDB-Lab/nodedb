@@ -92,6 +92,7 @@ fn cross_model_query_vector_graph_relational() {
             filter_bitmap: None,
             field_name: String::new(),
             rls_filters: Vec::new(),
+            inline_prefilter_plan: None,
         }),
     );
     let vector_json = payload_json(&vector_payload);

@@ -45,6 +45,7 @@ fn vector_search_isolated() {
             filter_bitmap: None,
             field_name: String::new(),
             rls_filters: Vec::new(),
+            inline_prefilter_plan: None,
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -64,6 +65,7 @@ fn vector_search_isolated() {
             filter_bitmap: None,
             field_name: String::new(),
             rls_filters: Vec::new(),
+            inline_prefilter_plan: None,
         }),
     );
     // Tenant B has no vector index for this collection — the engine returns
