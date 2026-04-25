@@ -24,6 +24,7 @@ fn insert_product(
     color: &str,
     size: &str,
     price: f64,
+    surrogate: nodedb_types::Surrogate,
 ) {
     let value = serde_json::json!({
         "brand": brand,
@@ -41,7 +42,7 @@ fn insert_product(
             collection: "products".into(),
             document_id: id.into(),
             value: value_bytes,
-            surrogate: nodedb_types::Surrogate::ZERO,
+            surrogate,
             pk_bytes: Vec::new(),
         }),
     );
@@ -57,12 +58,72 @@ fn seed_products(
     tx: &mut nodedb_bridge::buffer::Producer<nodedb::bridge::dispatch::BridgeRequest>,
     rx: &mut nodedb_bridge::buffer::Consumer<nodedb::bridge::dispatch::BridgeResponse>,
 ) {
-    insert_product(core, tx, rx, "p1", "Nike", "black", "10", 120.0);
-    insert_product(core, tx, rx, "p2", "Nike", "white", "10", 110.0);
-    insert_product(core, tx, rx, "p3", "Nike", "black", "11", 130.0);
-    insert_product(core, tx, rx, "p4", "Adidas", "black", "10", 100.0);
-    insert_product(core, tx, rx, "p5", "Adidas", "red", "9", 90.0);
-    insert_product(core, tx, rx, "p6", "Puma", "white", "11", 80.0);
+    insert_product(
+        core,
+        tx,
+        rx,
+        "p1",
+        "Nike",
+        "black",
+        "10",
+        120.0,
+        nodedb_types::Surrogate::new(1),
+    );
+    insert_product(
+        core,
+        tx,
+        rx,
+        "p2",
+        "Nike",
+        "white",
+        "10",
+        110.0,
+        nodedb_types::Surrogate::new(2),
+    );
+    insert_product(
+        core,
+        tx,
+        rx,
+        "p3",
+        "Nike",
+        "black",
+        "11",
+        130.0,
+        nodedb_types::Surrogate::new(3),
+    );
+    insert_product(
+        core,
+        tx,
+        rx,
+        "p4",
+        "Adidas",
+        "black",
+        "10",
+        100.0,
+        nodedb_types::Surrogate::new(4),
+    );
+    insert_product(
+        core,
+        tx,
+        rx,
+        "p5",
+        "Adidas",
+        "red",
+        "9",
+        90.0,
+        nodedb_types::Surrogate::new(5),
+    );
+    insert_product(
+        core,
+        tx,
+        rx,
+        "p6",
+        "Puma",
+        "white",
+        "11",
+        80.0,
+        nodedb_types::Surrogate::new(6),
+    );
 }
 
 fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
@@ -239,19 +300,59 @@ fn facet_single_field() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
     seed_products(&mut core, &mut tx, &mut rx);
     insert_product(
-        &mut core, &mut tx, &mut rx, "p2", "Nike", "white", "10", 110.0,
+        &mut core,
+        &mut tx,
+        &mut rx,
+        "p2",
+        "Nike",
+        "white",
+        "10",
+        110.0,
+        nodedb_types::Surrogate::new(2),
     );
     insert_product(
-        &mut core, &mut tx, &mut rx, "p3", "Nike", "black", "11", 130.0,
+        &mut core,
+        &mut tx,
+        &mut rx,
+        "p3",
+        "Nike",
+        "black",
+        "11",
+        130.0,
+        nodedb_types::Surrogate::new(3),
     );
     insert_product(
-        &mut core, &mut tx, &mut rx, "p4", "Adidas", "black", "10", 100.0,
+        &mut core,
+        &mut tx,
+        &mut rx,
+        "p4",
+        "Adidas",
+        "black",
+        "10",
+        100.0,
+        nodedb_types::Surrogate::new(4),
     );
     insert_product(
-        &mut core, &mut tx, &mut rx, "p5", "Adidas", "red", "9", 90.0,
+        &mut core,
+        &mut tx,
+        &mut rx,
+        "p5",
+        "Adidas",
+        "red",
+        "9",
+        90.0,
+        nodedb_types::Surrogate::new(5),
     );
     insert_product(
-        &mut core, &mut tx, &mut rx, "p6", "Puma", "white", "11", 80.0,
+        &mut core,
+        &mut tx,
+        &mut rx,
+        "p6",
+        "Puma",
+        "white",
+        "11",
+        80.0,
+        nodedb_types::Surrogate::new(6),
     );
 
     let payload = send_ok(

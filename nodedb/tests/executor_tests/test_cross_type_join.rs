@@ -261,7 +261,10 @@ fn single_core_cross_type_hash_join() {
     let mut ctx = make_ctx();
 
     // Insert schemaless docs.
-    for (id, name) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")] {
+    for (idx, (id, name)) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("name", name)]);
         send_ok(
             &mut ctx.core,
@@ -271,7 +274,7 @@ fn single_core_cross_type_hash_join() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -355,7 +358,10 @@ fn single_core_cross_type_hash_join() {
 fn single_core_left_join_with_nulls() {
     let mut ctx = make_ctx();
 
-    for (id, name) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")] {
+    for (idx, (id, name)) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("name", name)]);
         send_ok(
             &mut ctx.core,
@@ -365,7 +371,7 @@ fn single_core_left_join_with_nulls() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -675,11 +681,14 @@ fn schemaless_self_join_matches_on_canonicalized_object_fields() {
 fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
     let mut ctx = make_ctx();
 
-    for (id, name, score) in [
+    for (idx, (id, name, score)) in [
         ("u1", "Alice", 10.0),
         ("u2", "Bob", 7.0),
         ("u3", "Cara", 8.0),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
             "id": id,
             "name": name,
@@ -694,7 +703,7 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -766,13 +775,16 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
 fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
     let mut ctx = make_ctx();
 
-    for (id, amount) in [
+    for (idx, (id, amount)) in [
         ("o1", 30.0_f64),
         ("o2", 99.99_f64),
         ("o3", 30.0_f64),
         ("o4", 25.0_f64),
         ("o5", 50.0_f64),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
             "id": id,
             "amount": amount,
@@ -786,7 +798,7 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
                 collection: "orders".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -857,7 +869,10 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
 fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
     let mut ctx = make_ctx();
 
-    for (id, name) in [("u1", "Alice"), ("u2", "Bob Updated"), ("u3", "Carol")] {
+    for (idx, (id, name)) in [("u1", "Alice"), ("u2", "Bob Updated"), ("u3", "Carol")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
             "id": id,
             "name": name,
@@ -871,19 +886,22 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
     }
 
-    for (id, user_id, amount) in [
+    for (idx, (id, user_id, amount)) in [
         ("o1", "u1", 30.0_f64),
         ("o2", "u2", 99.99_f64),
         ("o3", "u3", 30.0_f64),
         ("o4", "u1", 25.0_f64),
         ("o5", "u2", 50.0_f64),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
             "id": id,
             "user_id": user_id,
@@ -898,7 +916,7 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                 collection: "orders".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -1002,7 +1020,10 @@ fn multi_core_broadcast_inner_join() {
     let mut core1 = make_ctx_with_id(1);
 
     // Insert docs on core 0.
-    for (id, name) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")] {
+    for (idx, (id, name)) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("name", name)]);
         send_ok(
             &mut core0.core,
@@ -1012,7 +1033,7 @@ fn multi_core_broadcast_inner_join() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -1119,7 +1140,10 @@ fn multi_core_broadcast_left_join() {
     let mut core0 = make_ctx_with_id(0);
     let mut core1 = make_ctx_with_id(1);
 
-    for (id, name) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")] {
+    for (idx, (id, name)) in [("d1", "Alice"), ("d3", "Carol"), ("d4", "Dave")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("name", name)]);
         send_ok(
             &mut core0.core,
@@ -1129,7 +1153,7 @@ fn multi_core_broadcast_left_join() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -1215,7 +1239,7 @@ fn multi_core_broadcast_merge_simulation() {
     let mut core1 = make_ctx_with_id(1);
 
     // Docs split across cores: d1,d3 on core0, d4 on core1.
-    for (id, name) in [("d1", "Alice"), ("d3", "Carol")] {
+    for (idx, (id, name)) in [("d1", "Alice"), ("d3", "Carol")].into_iter().enumerate() {
         let doc = build_msgpack_map(&[("id", id), ("name", name)]);
         send_ok(
             &mut core0.core,
@@ -1225,7 +1249,7 @@ fn multi_core_broadcast_merge_simulation() {
                 collection: "docs".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -1240,7 +1264,7 @@ fn multi_core_broadcast_merge_simulation() {
                 collection: "docs".into(),
                 document_id: "d4".into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new(1),
                 pk_bytes: Vec::new(),
             }),
         );
@@ -1380,7 +1404,7 @@ fn multi_core_broadcast_merge_simulation() {
 fn inline_hash_join_honors_qualified_left_keys() {
     let mut ctx = make_ctx();
 
-    for (id, name) in [("u1", "Alice"), ("u2", "Bob")] {
+    for (idx, (id, name)) in [("u1", "Alice"), ("u2", "Bob")].into_iter().enumerate() {
         let doc = build_msgpack_map(&[("id", id), ("name", name)]);
         send_ok(
             &mut ctx.core,
@@ -1390,13 +1414,16 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
     }
 
-    for (id, user_id, item) in [("o1", "u1", "Book"), ("o2", "u2", "Pen")] {
+    for (idx, (id, user_id, item)) in [("o1", "u1", "Book"), ("o2", "u2", "Pen")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("user_id", user_id), ("item", item)]);
         send_ok(
             &mut ctx.core,
@@ -1406,13 +1433,16 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 collection: "orders".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );
     }
 
-    for (id, order_id, amount) in [("p1", "o1", "10"), ("p2", "o2", "25")] {
+    for (idx, (id, order_id, amount)) in [("p1", "o1", "10"), ("p2", "o2", "25")]
+        .into_iter()
+        .enumerate()
+    {
         let doc = build_msgpack_map(&[("id", id), ("order_id", order_id), ("amount", amount)]);
         send_ok(
             &mut ctx.core,
@@ -1422,7 +1452,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 collection: "payments".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate: nodedb_types::Surrogate::new((idx as u32) + 1),
                 pk_bytes: Vec::new(),
             }),
         );

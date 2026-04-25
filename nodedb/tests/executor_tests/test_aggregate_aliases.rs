@@ -7,11 +7,15 @@ use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
 fn aggregate_output_uses_user_alias_but_having_reads_canonical_key() {
     let mut ctx = make_ctx();
 
-    for (id, department, score) in [
+    for (idx, (id, department, score)) in [
         ("u1", "tools", 10),
         ("u2", "tools", 20),
         ("u3", "sales", 30),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let surrogate = nodedb_types::Surrogate::new((idx as u32) + 1);
         let doc = nodedb_types::json_to_msgpack(&serde_json::json!({
             "id": id,
             "department": department,
@@ -27,7 +31,7 @@ fn aggregate_output_uses_user_alias_but_having_reads_canonical_key() {
                 collection: "users".into(),
                 document_id: id.into(),
                 value: doc,
-                surrogate: nodedb_types::Surrogate::ZERO,
+                surrogate,
                 pk_bytes: Vec::new(),
             }),
         );
