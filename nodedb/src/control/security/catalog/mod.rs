@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod arrays;
 pub mod audit;
 pub mod auth_types;
 pub mod auth_users;

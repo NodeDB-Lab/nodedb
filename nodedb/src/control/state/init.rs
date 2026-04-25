@@ -121,6 +121,7 @@ impl SharedState {
             shape_registry: crate::control::server::sync::shape::ShapeRegistry::new(),
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             trigger_registry: crate::control::trigger::TriggerRegistry::new(),
+            array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),
@@ -243,6 +244,7 @@ impl SharedState {
         auth_config: &crate::config::auth::AuthConfig,
         tuning: TuningConfig,
         quiesce: Arc<crate::bridge::quiesce::CollectionQuiesce>,
+        array_catalog: crate::control::array_catalog::ArrayCatalogHandle,
     ) -> crate::Result<Arc<Self>> {
         let mut credentials = CredentialStore::open(catalog_path)?;
         credentials.set_lockout_policy(
@@ -354,6 +356,7 @@ impl SharedState {
             roles,
             permissions,
             trigger_registry,
+            array_catalog,
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),

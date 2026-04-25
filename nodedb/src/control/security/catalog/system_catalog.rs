@@ -81,6 +81,9 @@ impl SystemCatalog {
                 .open_table(TRIGGERS)
                 .map_err(|e| catalog_err("init triggers table", e))?;
             let _ = write_txn
+                .open_table(ARRAYS)
+                .map_err(|e| catalog_err("init arrays table", e))?;
+            let _ = write_txn
                 .open_table(PROCEDURES)
                 .map_err(|e| catalog_err("init procedures table", e))?;
             let _ = write_txn

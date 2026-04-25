@@ -1,3 +1,4 @@
+pub mod array_catalog;
 pub mod arrow_convert;
 pub mod backup;
 pub mod cascade;

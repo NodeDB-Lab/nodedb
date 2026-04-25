@@ -81,6 +81,10 @@ pub(super) const FUNCTIONS: TableDefinition<&str, &[u8]> =
 /// Table: "{tenant_id}:{name}" -> MessagePack-serialized trigger definition.
 pub(super) const TRIGGERS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.triggers");
 
+/// Table: "{tenant_id}:{name}" -> MessagePack-serialized `ArrayCatalogEntry`.
+/// One row per ND array registered via DDL (sub-pass 2/3 surface).
+pub(super) const ARRAYS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.arrays");
+
 /// Table: "{tenant_id}:{stream_name}" -> MessagePack-serialized ChangeStreamDef.
 pub(super) const CHANGE_STREAMS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.change_streams");

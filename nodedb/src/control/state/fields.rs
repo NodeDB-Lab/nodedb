@@ -254,6 +254,12 @@ pub struct SharedState {
     /// In-memory trigger registry for fast lookup during DML.
     pub trigger_registry: crate::control::trigger::TriggerRegistry,
 
+    /// Shared ND-array catalog handle. Mirrors the persisted
+    /// `_system.arrays` rows and is shared (by `Arc` clone) with every
+    /// Data-Plane `CoreLoop` so dispatch handlers can resolve array
+    /// names and schema digests without crossing planes.
+    pub array_catalog: crate::control::array_catalog::ArrayCatalogHandle,
+
     /// Cached parsed procedural blocks for triggers and procedures.
     pub block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache,
 
