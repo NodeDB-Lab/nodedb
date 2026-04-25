@@ -8,6 +8,7 @@
 pub mod coord;
 pub mod error;
 pub mod schema;
+pub mod segment;
 pub mod tile;
 pub mod types;
 
@@ -18,6 +19,10 @@ pub use coord::{
 pub use error::{ArrayError, ArrayResult};
 pub use schema::{
     ArraySchema, ArraySchemaBuilder, AttrSpec, CellOrder, DimSpec, DimType, TileOrder,
+};
+pub use segment::{
+    FOOTER_MAGIC, FORMAT_VERSION, HEADER_MAGIC, HilbertPackedRTree, MbrQueryPredicate,
+    SegmentFooter, SegmentHeader, SegmentReader, SegmentWriter, TileEntry, TileKind, TilePayload,
 };
 pub use tile::{
     AttrStats, DENSE_PROMOTION_THRESHOLD, DenseTile, SparseTile, TileMBR, should_promote_to_dense,

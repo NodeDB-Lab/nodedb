@@ -57,6 +57,9 @@ pub enum ArrayError {
         attr: String,
         detail: String,
     },
+
+    #[error("segment corruption: {detail}")]
+    SegmentCorruption { detail: String },
 }
 
 impl ArrayError {
@@ -70,6 +73,7 @@ impl ArrayError {
             | ArrayError::CoordArityMismatch { array, .. }
             | ArrayError::CoordOutOfDomain { array, .. }
             | ArrayError::CellTypeMismatch { array, .. } => array,
+            ArrayError::SegmentCorruption { .. } => "",
         }
     }
 }

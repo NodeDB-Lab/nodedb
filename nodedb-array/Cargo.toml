@@ -19,6 +19,7 @@ serde = { workspace = true }
 zerompk = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+crc32c = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

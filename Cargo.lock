@@ -3764,6 +3764,7 @@ dependencies = [
 name = "nodedb-array"
 version = "0.0.6"
 dependencies = [
+ "crc32c",
  "nodedb-types",
  "serde",
  "serde_json",
