@@ -90,13 +90,14 @@ pub async fn validate_typeguard(
         if let Ok(serde_json::Value::Array(rows)) = sonic_rs::from_str::<serde_json::Value>(chunk) {
             for row in rows {
                 // Scan responses wrap documents as {"id": "...", "data": {...}}.
-                // Extract the inner document for validation.
+                // The outer "id" is the substrate row key (a surrogate hex
+                // string); the user-visible primary key lives inside the
+                // document body. Prefer the body's PK so violation reports
+                // reference the identifier the caller wrote.
                 let (doc_id, inner) = if let Some(data) = row.get("data") {
-                    let id = row
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+                    let body_id = data.get("id").and_then(|v| v.as_str());
+                    let outer_id = row.get("id").and_then(|v| v.as_str());
+                    let id = body_id.or(outer_id).unwrap_or("unknown").to_string();
                     (id, data.clone())
                 } else {
                     let id = row
