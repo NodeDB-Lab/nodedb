@@ -1,6 +1,6 @@
 //! Compaction policy — chooses which segments to merge.
 //!
-//! Tier 3 ships size-tiered for L0: when the L0 segment count crosses
+//! Uses size-tiered compaction for L0: when the L0 segment count crosses
 //! [`L0_TRIGGER`], all L0 segments are merged into a single L1 segment.
 //! Higher levels stay leveled (one segment per level by construction
 //! once L1 is non-empty), so subsequent L0→L1 merges that overlap

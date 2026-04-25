@@ -1,5 +1,5 @@
 //! End-to-end test for the `CREATE / DROP / INSERT INTO / DELETE FROM`
-//! ARRAY surface introduced in Tier 6 sub-pass 2.
+//! ARRAY SQL surface.
 //!
 //! Spins up a single-core NodeDB server via the shared pgwire harness,
 //! exercises every array DDL/DML statement over the wire, and verifies
@@ -84,7 +84,7 @@ async fn insert_unknown_array_errors() {
         .await;
 }
 
-// ── Tier 6 sub-pass 3: NDARRAY_* function surface ────────────────────
+// ── NDARRAY_* function surface ────────────────────────────────────────
 
 /// Helper: spin up a server with a 2-dim array preloaded with cells.
 async fn prepare_genome(srv: &TestServer) {
@@ -128,9 +128,8 @@ async fn ndarray_slice_returns_in_range_cells() {
         2,
         "expected two cells in chrom=1, pos<13000; got {rows:?}"
     );
-    // Each row is a JSON cell `{"coords": [...], "attrs": [...]}` —
-    // tier-6 fixup wave 2 made the pgwire transcoder emit this clean
-    // shape directly. Reject the prior `[18, "<base64>"]` leak.
+    // Each row is a JSON cell `{"coords": [...], "attrs": [...]}`.
+    // Reject any internal `[18, "<base64>"]` tagged-msgpack leak.
     for row in &rows {
         let cell: serde_json::Value =
             serde_json::from_str(row).unwrap_or_else(|e| panic!("row not JSON object: {row}: {e}"));
@@ -264,10 +263,9 @@ async fn ndarray_flush_and_compact_succeed() {
     assert_eq!(rows.len(), 3, "post-maintenance reads must still work");
 }
 
-/// Regression for tier-6 fixup wave 2 item 9: `DROP ARRAY` must broadcast
-/// to every Data-Plane core so a subsequent `CREATE ARRAY` of the same
-/// name (with a different schema) does not carry stale per-core memtable
-/// or segment state.
+/// `DROP ARRAY` must broadcast to every Data-Plane core so a subsequent
+/// `CREATE ARRAY` of the same name (with a different schema) does not
+/// carry stale per-core memtable or segment state.
 #[tokio::test]
 async fn drop_then_recreate_with_different_schema_starts_clean() {
     let srv = TestServer::start().await;

@@ -4,7 +4,7 @@
 //! schema hash. We union both sides into one sparse tile each (schema
 //! comes from the left store); the inner `elementwise` routine then
 //! handles outer-join semantics on coordinates exactly. Per-tile fast-
-//! path pairing is sub-pass 2 territory.
+//! path pairing is future work.
 
 use nodedb_array::query::elementwise::{BinaryOp, elementwise};
 use nodedb_array::schema::ArraySchema;

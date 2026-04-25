@@ -123,10 +123,8 @@ fn next_segment_id_for_compaction(_store: &ArrayStore, inputs: &[String]) -> Str
             max_seq = max_seq.max(n);
         }
     }
-    // Tag compaction outputs with a high bit so they sort after any
-    // future flush that the engine's allocator hands out (tier 3 keeps
-    // both spaces small; tier 5 will replace this with a coordinated
-    // allocator on the engine).
+    // Compaction outputs sort after any future flush by reusing the
+    // monotonic engine allocator's space (max input seq + 1).
     let combined = max_seq.saturating_add(1);
     format!("{combined:010}.ndas")
 }
@@ -198,13 +196,14 @@ impl MergedTile {
     }
 
     fn absorb_dense(&mut self, _schema: &ArraySchema, _tile: &DenseTile) -> ArrayResult<()> {
-        // Tier 3 only flushes sparse memtables. Dense tiles arrive only
-        // via promotion (Tier 4+), so a merger that encounters one
-        // today indicates a programming error rather than data — we
-        // surface it as a corruption error.
+        // Memtable flushes only emit sparse tiles. Dense tiles arrive
+        // via promotion at query time, so a merger that encounters one
+        // here indicates a programming error rather than data — surface
+        // as a corruption error.
         Err(nodedb_array::ArrayError::SegmentCorruption {
-            detail: "compaction merger received a dense tile but tier 3 does not produce them"
-                .into(),
+            detail:
+                "compaction merger received a dense tile; only sparse tiles are produced by flush"
+                    .into(),
         })
     }
 

@@ -1,8 +1,8 @@
-//! Integration-style dispatch tests for sub-pass 1c-b read handlers.
+//! Integration-style dispatch tests for array read handlers.
 //!
 //! Each test drives a fresh `CoreLoop` through a sequence of bridge
 //! requests (OpenArray → Put [→ Flush]* → read op) and inspects the
-//! response payload. The harness mirrors the 1c-a smoke test in
+//! response payload. The harness mirrors the smoke tests in
 //! `mutate.rs`; we keep them in a sibling file because `mutate.rs` is
 //! already close to the file-size limit.
 

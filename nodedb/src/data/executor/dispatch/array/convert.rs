@@ -5,8 +5,8 @@
 //! Every match is exhaustive on the source enum so adding a new variant
 //! fails to compile until handled here explicitly.
 //!
-//! Sub-pass 1c-b consumers (read/aggregate/elementwise) call every
-//! helper here, so no module-wide dead-code allowance is needed.
+//! Read, aggregate, and elementwise handlers call every helper here,
+//! so no module-wide dead-code allowance is needed.
 
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::schema::attr_spec::AttrType;
@@ -29,7 +29,7 @@ pub fn coord_value_to_value(c: &CoordValue) -> Value {
 
 /// Coerce a generic `Value` to a typed `CoordValue`, rejecting any
 /// combination that the target dimension type cannot represent.
-#[allow(dead_code)] // sub-pass 2 (SQL DML extractors) consumes this.
+#[allow(dead_code)] // consumed by SQL DML extractors
 pub fn value_to_coord_value(v: &Value, expected: DimType) -> Result<CoordValue, NodeDbError> {
     match (v, expected) {
         (Value::Integer(i), DimType::Int64) => Ok(CoordValue::Int64(*i)),
@@ -83,7 +83,7 @@ pub fn cell_value_to_value(c: &CellValue) -> Value {
 /// combination the target attribute type cannot represent. `Null` maps
 /// to `CellValue::Null` regardless of the declared attribute type;
 /// nullability is enforced elsewhere (schema validation).
-#[allow(dead_code)] // sub-pass 2 (SQL DML extractors) consumes this.
+#[allow(dead_code)] // consumed by SQL DML extractors
 pub fn value_to_cell_value(v: &Value, expected: AttrType) -> Result<CellValue, NodeDbError> {
     match (v, expected) {
         (Value::Null, _) => Ok(CellValue::Null),

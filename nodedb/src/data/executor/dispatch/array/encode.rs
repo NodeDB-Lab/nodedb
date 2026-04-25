@@ -4,8 +4,7 @@
 //! via `value_to_msgpack` — the native (untagged) writer. This is the
 //! shape the pgwire `msgpack_to_json_string` transcoder expects, and it
 //! keeps `Value::NdArrayCell` representable as a clean
-//! `{"coords": [...], "attrs": [...]}` map (the writer was extended in
-//! tier-6 fixup wave 2 to emit that map shape rather than nil).
+//! `{"coords": [...], "attrs": [...]}` map.
 //!
 //! Using the tagged zerompk codec instead leaks the internal
 //! `[18, <bin>]` shape to clients, which is unreadable.

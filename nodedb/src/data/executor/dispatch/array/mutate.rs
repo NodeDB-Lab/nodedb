@@ -288,11 +288,11 @@ mod tests {
         );
     }
 
-    /// Tier-6 fixup wave 2 item 9: `OpenArray` → `Put` → `DropArray` →
-    /// re-`OpenArray` with a *different* schema_hash → `Slice` returns
-    /// zero rows. Without `drop_array` releasing the per-core store, the
-    /// second `OpenArray` would either reject the schema_hash mismatch
-    /// or surface stale memtable cells.
+    /// `OpenArray` → `Put` → `DropArray` → re-`OpenArray` with a
+    /// *different* schema_hash → `Slice` returns zero rows. Without
+    /// `drop_array` releasing the per-core store, the second `OpenArray`
+    /// would either reject the schema_hash mismatch or surface stale
+    /// memtable cells.
     #[test]
     fn array_drop_clears_per_core_state() {
         use nodedb_array::types::cell_value::value::CellValue;

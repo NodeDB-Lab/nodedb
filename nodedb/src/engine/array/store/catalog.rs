@@ -170,7 +170,6 @@ impl ArrayStore {
 
     /// Run the MBR predicate against every segment + the memtable.
     /// Returns decoded tile payloads in segment-then-memtable order.
-    /// Tier 4 will replace this with a streaming iterator and merge.
     pub fn scan_tiles(
         &self,
         pred: &MbrQueryPredicate,

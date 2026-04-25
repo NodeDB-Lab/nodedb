@@ -8,7 +8,7 @@
 //! re-applied to the live memtable.
 //!
 //! The recovery layer is intentionally pure with respect to WAL I/O: it
-//! takes already-decoded payloads. The Origin glue (Tier 5) reads the
+//! takes already-decoded payloads. The engine open path reads the
 //! segmented WAL and feeds records in here.
 
 use crate::engine::array::store::ArrayStore;

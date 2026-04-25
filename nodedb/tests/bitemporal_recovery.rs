@@ -1,6 +1,6 @@
 //! Bitemporal recovery & idempotency.
 //!
-//! Two risk mitigations from Tier 10:
+//! Two correctness properties verified here:
 //!
 //! 1. **Crash mid-bitemporal-write** — redb is ACID, so committed
 //!    versions survive across a process restart. The bitemporal
