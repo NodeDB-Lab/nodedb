@@ -128,6 +128,22 @@ impl WalManager {
         self.append_record(RecordType::TemporalPurge, tid, VShardId::new(0), &payload)
     }
 
+    /// Append a `SurrogateAlloc` high-watermark record. Emitted by
+    /// `SurrogateRegistry::flush` (every 1024 allocations or 200 ms,
+    /// whichever first) so the global surrogate counter is
+    /// crash-recoverable independent of the redb `_system.surrogate_hwm`
+    /// row. `vshard_id` is `0` — the surrogate hwm is a node-global
+    /// allocator counter, not sharded user data.
+    pub fn append_surrogate_alloc(&self, hi: u32) -> crate::Result<Lsn> {
+        let payload = nodedb_wal::record::SurrogateAllocPayload::new(hi).to_bytes();
+        self.append_record(
+            RecordType::SurrogateAlloc,
+            TenantId::new(0),
+            VShardId::new(0),
+            &payload,
+        )
+    }
+
     pub fn append_collection_tombstone(
         &self,
         tid: TenantId,

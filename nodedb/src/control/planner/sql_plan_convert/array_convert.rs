@@ -166,12 +166,21 @@ pub(super) fn convert_drop_array(
             detail: format!("DROP ARRAY {name}: not found"),
         });
     }
-    if let Some(catalog) = credentials.catalog().as_ref()
-        && let Err(e) = crate::control::array_catalog::persist::remove(catalog, name)
-    {
-        return Err(crate::Error::PlanError {
-            detail: format!("array catalog remove: {e}"),
-        });
+    if let Some(catalog) = credentials.catalog().as_ref() {
+        if let Err(e) = crate::control::array_catalog::persist::remove(catalog, name) {
+            return Err(crate::Error::PlanError {
+                detail: format!("array catalog remove: {e}"),
+            });
+        }
+        // Wipe the surrogate ↔ PK map for this array. Surrogates are
+        // collection/array-scoped; leaving them behind on drop would
+        // just be allocator-bloat (and would break any later
+        // CREATE-with-same-name observability assertion).
+        if let Err(e) = catalog.delete_all_surrogates_for_collection(name) {
+            return Err(crate::Error::PlanError {
+                detail: format!("array surrogate-map cleanup: {e}"),
+            });
+        }
     }
     // Broadcast `ArrayOp::DropArray` to every core so each core releases
     // its per-core store and removes the on-disk segment dir. The

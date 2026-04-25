@@ -52,6 +52,19 @@ pub fn purge(tenant_id: u32, name: &str, catalog: &SystemCatalog) {
         ),
     }
     super::owner::delete_parent_owner(object_type::COLLECTION, tenant_id, name, catalog);
+    // Wipe the surrogate ↔ PK map for this collection. Surrogates are
+    // collection-scoped; once the primary row is gone they can never
+    // be observed again, so leaving the catalog rows behind would
+    // just be allocator-bloat. Mirrors the array-drop cleanup in
+    // `array_convert::convert_drop_array`.
+    if let Err(e) = catalog.delete_all_surrogates_for_collection(name) {
+        warn!(
+            collection = %name,
+            tenant = tenant_id,
+            error = %e,
+            "catalog_entry: purge_collection surrogate-map cleanup failed"
+        );
+    }
 }
 
 pub fn deactivate(tenant_id: u32, name: &str, catalog: &SystemCatalog) {

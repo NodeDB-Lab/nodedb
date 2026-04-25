@@ -27,6 +27,8 @@ pub mod security;
 pub mod sequence_types;
 pub mod sequences;
 pub mod streaming_mvs;
+pub mod surrogate_hwm;
+pub mod surrogate_pk;
 pub mod system_catalog;
 pub mod topics;
 pub mod trigger_types;

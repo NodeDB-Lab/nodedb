@@ -82,8 +82,24 @@ pub(super) const FUNCTIONS: TableDefinition<&str, &[u8]> =
 pub(super) const TRIGGERS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.triggers");
 
 /// Table: "{tenant_id}:{name}" -> MessagePack-serialized `ArrayCatalogEntry`.
-/// One row per ND array registered via DDL (sub-pass 2/3 surface).
+/// One row per ND array registered via DDL.
 pub(super) const ARRAYS: TableDefinition<&str, &[u8]> = TableDefinition::new("_system.arrays");
+
+/// Table: `(collection, encoded_pk_bytes)` -> `Surrogate` (u32 LE).
+///
+/// Forward direction of the PK ↔ Surrogate map. Every successful
+/// `assign_surrogate(collection, pk)` writes one row here and one in the
+/// reverse table within the same redb txn, so the two never drift.
+pub(super) const SURROGATE_PK: TableDefinition<(&str, &[u8]), u32> =
+    TableDefinition::new("_system.surrogate_pk");
+
+/// Table: `(collection, surrogate)` -> encoded pk bytes.
+///
+/// Reverse direction of `_system.surrogate_pk`. Used by per-engine
+/// emit paths to translate surrogates back into user-visible PKs at
+/// the API boundary (S3+).
+pub(super) const SURROGATE_PK_REV: TableDefinition<(&str, u32), &[u8]> =
+    TableDefinition::new("_system.surrogate_pk_rev");
 
 /// Table: "{tenant_id}:{stream_name}" -> MessagePack-serialized ChangeStreamDef.
 pub(super) const CHANGE_STREAMS: TableDefinition<&str, &[u8]> =

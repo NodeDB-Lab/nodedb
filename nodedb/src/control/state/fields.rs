@@ -260,6 +260,13 @@ pub struct SharedState {
     /// names and schema digests without crossing planes.
     pub array_catalog: crate::control::array_catalog::ArrayCatalogHandle,
 
+    /// Global surrogate registry — the source of monotonic
+    /// `Surrogate(u32)` allocation that backs the cross-engine PK ↔
+    /// Surrogate map (`_system.surrogate_pk{,_rev}`). Bootstrapped
+    /// from the persisted hwm at `SharedState::open` and cloned into
+    /// every CP path that calls `assign_surrogate`.
+    pub surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle,
+
     /// Cached parsed procedural blocks for triggers and procedures.
     pub block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache,
 

@@ -137,6 +137,15 @@ impl SystemCatalog {
             let _ = write_txn
                 .open_table(super::types::L2_CLEANUP_QUEUE)
                 .map_err(|e| catalog_err("init l2_cleanup_queue table", e))?;
+            let _ = write_txn
+                .open_table(super::surrogate_hwm::SURROGATE_HWM)
+                .map_err(|e| catalog_err("init surrogate_hwm table", e))?;
+            let _ = write_txn
+                .open_table(super::types::SURROGATE_PK)
+                .map_err(|e| catalog_err("init surrogate_pk table", e))?;
+            let _ = write_txn
+                .open_table(super::types::SURROGATE_PK_REV)
+                .map_err(|e| catalog_err("init surrogate_pk_rev table", e))?;
         }
         write_txn
             .commit()

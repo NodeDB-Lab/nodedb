@@ -32,6 +32,7 @@ pub mod shutdown;
 pub mod sql_dispatch;
 pub mod startup;
 pub mod state;
+pub mod surrogate;
 pub mod trace_context;
 pub mod trace_export;
 pub mod trigger;

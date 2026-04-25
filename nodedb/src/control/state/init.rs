@@ -122,6 +122,9 @@ impl SharedState {
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             trigger_registry: crate::control::trigger::TriggerRegistry::new(),
             array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
+            surrogate_registry: Arc::new(std::sync::RwLock::new(
+                crate::control::surrogate::SurrogateRegistry::new(),
+            )),
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),
@@ -320,6 +323,20 @@ impl SharedState {
         let mut audit_log = AuditLog::new(10_000);
         audit_log.set_next_seq(audit_start_seq);
 
+        // Bootstrap the global surrogate registry from the persisted
+        // hwm. On a fresh database this seeds `next = 1`; on restart
+        // it seeds `next = persisted_hwm + 1` so post-restart
+        // allocations cannot collide with pre-restart ones.
+        let surrogate_registry_handle: crate::control::surrogate::SurrogateRegistryHandle = {
+            let initial = if let Some(catalog) = credentials.catalog() {
+                let hwm = catalog.get_surrogate_hwm()?;
+                crate::control::surrogate::SurrogateRegistry::from_persisted_hwm(hwm)
+            } else {
+                crate::control::surrogate::SurrogateRegistry::new()
+            };
+            Arc::new(std::sync::RwLock::new(initial))
+        };
+
         // Pre-load permission tree definitions before wrapping in RwLock
         // (avoids blocking_write() which panics inside async runtimes).
         let mut permission_cache =
@@ -357,6 +374,7 @@ impl SharedState {
             permissions,
             trigger_registry,
             array_catalog,
+            surrogate_registry: surrogate_registry_handle,
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),
