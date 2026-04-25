@@ -20,6 +20,7 @@ impl CoreLoop {
                 delta,
                 peer_id: _,
                 mutation_id: _,
+                surrogate: _,
             } => self.execute_crdt_apply(task, delta),
 
             CrdtOp::SetPolicy {
@@ -48,6 +49,7 @@ impl CoreLoop {
                 collection,
                 document_id,
                 target_version_json,
+                surrogate: _,
             } => self.execute_crdt_restore(task, collection, document_id, target_version_json),
 
             CrdtOp::CompactAtVersion {
@@ -60,6 +62,7 @@ impl CoreLoop {
                 list_path,
                 index,
                 fields_json,
+                surrogate: _,
             } => self.execute_crdt_list_insert(
                 task,
                 collection,
@@ -74,6 +77,7 @@ impl CoreLoop {
                 document_id,
                 list_path,
                 index,
+                surrogate: _,
             } => self.execute_crdt_list_delete(task, collection, document_id, list_path, *index),
 
             CrdtOp::ListMove {
@@ -82,6 +86,7 @@ impl CoreLoop {
                 list_path,
                 from_index,
                 to_index,
+                surrogate: _,
             } => self.execute_crdt_list_move(
                 task,
                 collection,

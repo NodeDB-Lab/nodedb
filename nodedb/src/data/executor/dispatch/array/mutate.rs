@@ -243,6 +243,7 @@ mod tests {
         let cells = vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(1), CoordValue::Int64(2)],
             attrs: vec![CellValue::Float64(3.5)],
+            surrogate: nodedb_types::Surrogate::ZERO,
         }];
         let cells_bytes = zerompk::to_msgpack_vec(&cells).unwrap();
         req_tx
@@ -346,6 +347,7 @@ mod tests {
         let cells = vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(3)],
             attrs: vec![CellValue::Float64(42.0)],
+            surrogate: nodedb_types::Surrogate::ZERO,
         }];
         let cells_bytes = zerompk::to_msgpack_vec(&cells).unwrap();
         req_tx

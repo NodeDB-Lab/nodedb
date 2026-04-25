@@ -138,6 +138,7 @@ fn cell(x: i64, y: i64, v: f64) -> ArrayPutCell {
     ArrayPutCell {
         coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
         attrs: vec![CellValue::Float64(v)],
+        surrogate: nodedb_types::Surrogate::ZERO,
     }
 }
 

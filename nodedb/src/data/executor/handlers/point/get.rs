@@ -5,11 +5,17 @@ use tracing::debug;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::surrogate_to_doc_id;
+use nodedb_types::Surrogate;
 
 pub(in crate::data::executor) struct PointGetParams<'a> {
     pub tid: u32,
     pub collection: &'a str,
     pub document_id: &'a str,
+    /// Catalog-bound identity. Hex-encoded into the substrate row key
+    /// at handler entry so storage addressing is independent of the
+    /// user-facing PK string.
+    pub surrogate: Surrogate,
     pub rls_filters: &'a [u8],
     pub system_as_of_ms: Option<i64>,
     pub valid_at_ms: Option<i64>,
@@ -25,10 +31,13 @@ impl CoreLoop {
             tid,
             collection,
             document_id,
+            surrogate,
             rls_filters,
             system_as_of_ms,
             valid_at_ms,
         } = p;
+        let row_key = surrogate_to_doc_id(surrogate);
+        let row_key = row_key.as_str();
         debug!(
             core = self.core_id,
             %collection,
@@ -59,7 +68,7 @@ impl CoreLoop {
             match self.sparse.versioned_get_as_of(
                 tid,
                 collection,
-                document_id,
+                row_key,
                 system_as_of_ms,
                 valid_at_ms,
             ) {
@@ -77,20 +86,19 @@ impl CoreLoop {
         } else {
             let cached = self
                 .doc_cache
-                .get(tid, collection, document_id)
+                .get(tid, collection, row_key)
                 .map(|v| v.to_vec());
             if let Some(data) = cached {
                 data
             } else {
                 let res = if bitemporal {
-                    self.sparse
-                        .versioned_get_current(tid, collection, document_id)
+                    self.sparse.versioned_get_current(tid, collection, row_key)
                 } else {
-                    self.sparse.get(tid, collection, document_id)
+                    self.sparse.get(tid, collection, row_key)
                 };
                 match res {
                     Ok(Some(data)) => {
-                        self.doc_cache.put(tid, collection, document_id, &data);
+                        self.doc_cache.put(tid, collection, row_key, &data);
                         data
                     }
                     Ok(None) => return self.response_with_payload(task, Vec::new()),

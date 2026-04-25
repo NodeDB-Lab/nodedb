@@ -11,17 +11,23 @@ use tracing::debug;
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::surrogate_to_doc_id;
+use nodedb_types::Surrogate;
 
 impl CoreLoop {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_point_insert(
         &mut self,
         task: &ExecutionTask,
         tid: u32,
         collection: &str,
         document_id: &str,
+        surrogate: Surrogate,
         value: &[u8],
         if_absent: bool,
     ) -> Response {
+        let row_key = surrogate_to_doc_id(surrogate);
+        let row_key = row_key.as_str();
         debug!(
             core = self.core_id,
             %collection, %document_id, if_absent,
@@ -41,10 +47,9 @@ impl CoreLoop {
         let bitemporal = self.is_bitemporal(tid, collection);
         let exists_result = if bitemporal {
             self.sparse
-                .versioned_exists_current_in_txn(&txn, tid, collection, document_id)
+                .versioned_exists_current_in_txn(&txn, tid, collection, row_key)
         } else {
-            self.sparse
-                .exists_in_txn(&txn, tid, collection, document_id)
+            self.sparse.exists_in_txn(&txn, tid, collection, row_key)
         };
         match exists_result {
             Ok(true) => {
@@ -72,7 +77,7 @@ impl CoreLoop {
         // `apply_point_put` returns prior bytes if any — for PointInsert this
         // must be `None` because the probe above already rejected the
         // conflict case. We intentionally drop it.
-        if let Err(e) = self.apply_point_put(&txn, tid, collection, document_id, value) {
+        if let Err(e) = self.apply_point_put(&txn, tid, collection, row_key, value) {
             return self.response_error(task, e);
         }
 
@@ -88,7 +93,7 @@ impl CoreLoop {
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        self.emit_put_event(task, tid, collection, document_id, value, None);
+        self.emit_put_event(task, tid, collection, row_key, value, None);
 
         self.response_ok(task)
     }

@@ -111,15 +111,43 @@ impl CoreLoop {
         // Step 4: Write both atomically (deterministic order for consistency).
         // Write lower key first to match the documented lock ordering.
         if source_key <= dest_key {
-            self.kv_engine
-                .put(tid, collection, source_key, &new_source, 0, now_ms);
-            self.kv_engine
-                .put(tid, collection, dest_key, &new_dest, 0, now_ms);
+            self.kv_engine.put(
+                tid,
+                collection,
+                source_key,
+                &new_source,
+                0,
+                now_ms,
+                nodedb_types::Surrogate::ZERO,
+            );
+            self.kv_engine.put(
+                tid,
+                collection,
+                dest_key,
+                &new_dest,
+                0,
+                now_ms,
+                nodedb_types::Surrogate::ZERO,
+            );
         } else {
-            self.kv_engine
-                .put(tid, collection, dest_key, &new_dest, 0, now_ms);
-            self.kv_engine
-                .put(tid, collection, source_key, &new_source, 0, now_ms);
+            self.kv_engine.put(
+                tid,
+                collection,
+                dest_key,
+                &new_dest,
+                0,
+                now_ms,
+                nodedb_types::Surrogate::ZERO,
+            );
+            self.kv_engine.put(
+                tid,
+                collection,
+                source_key,
+                &new_source,
+                0,
+                now_ms,
+                nodedb_types::Surrogate::ZERO,
+            );
         }
 
         if let Some(ref m) = self.metrics {
@@ -195,8 +223,15 @@ impl CoreLoop {
         // Step 2: Delete from source, insert at dest — atomic (single core).
         self.kv_engine
             .delete(tid, source_collection, &[item_key.to_vec()], now_ms);
-        self.kv_engine
-            .put(tid, dest_collection, dest_key, &item_data, 0, now_ms);
+        self.kv_engine.put(
+            tid,
+            dest_collection,
+            dest_key,
+            &item_data,
+            0,
+            now_ms,
+            nodedb_types::Surrogate::ZERO,
+        );
 
         if let Some(ref m) = self.metrics {
             m.record_kv_delete();

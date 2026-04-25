@@ -297,7 +297,10 @@ impl CoreLoop {
                                 self.vector_collections.entry(index_key).or_insert_with(|| {
                                     nodedb_vector::VectorCollection::new(*dim as usize, params)
                                 });
-                            coll.insert_with_doc_id(floats, document_id.to_string());
+                            // Document-engine-owned auto-indexing: surrogate
+                            // routing for these implicit vector binds rides
+                            // with the document engine retrofit.
+                            coll.insert_with_surrogate(floats, nodedb_types::Surrogate::ZERO);
                         }
                     }
                 }
@@ -355,7 +358,10 @@ impl CoreLoop {
                                 self.vector_collections.entry(store_key).or_insert_with(|| {
                                     nodedb_vector::VectorCollection::new(floats.len(), params)
                                 });
-                            coll.insert_with_doc_id(floats, document_id.to_string());
+                            // Document-engine-owned auto-indexing: surrogate
+                            // routing for these implicit vector binds rides
+                            // with the document engine retrofit.
+                            coll.insert_with_surrogate(floats, nodedb_types::Surrogate::ZERO);
                         }
                     }
                 }

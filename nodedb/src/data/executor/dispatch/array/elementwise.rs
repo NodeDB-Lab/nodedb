@@ -156,9 +156,15 @@ fn union_tiles(schema: &ArraySchema, tiles: Vec<TilePayload>) -> Result<SparseTi
                 .map(|d| d.values[d.indices[row] as usize].clone())
                 .collect();
             let attrs: Vec<_> = sparse.attr_cols.iter().map(|c| c[row].clone()).collect();
-            b.push(&coord, &attrs).map_err(|e| ErrorCode::Internal {
-                detail: format!("array elementwise union: {e}"),
-            })?;
+            let surrogate = sparse
+                .surrogates
+                .get(row)
+                .copied()
+                .unwrap_or(nodedb_types::Surrogate::ZERO);
+            b.push_with_surrogate(&coord, &attrs, surrogate)
+                .map_err(|e| ErrorCode::Internal {
+                    detail: format!("array elementwise union: {e}"),
+                })?;
         }
     }
     Ok(b.build())

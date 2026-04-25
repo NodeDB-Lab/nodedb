@@ -78,15 +78,18 @@ impl CoreLoop {
         for task in &batch {
             let PhysicalPlan::Document(DocumentOp::PointPut {
                 collection,
-                document_id,
+                document_id: _,
                 value,
+                surrogate,
+                pk_bytes: _,
             }) = task.plan()
             else {
                 unreachable!("batch only contains PointPut");
             };
             let tid = task.request.tenant_id.as_u32();
+            let row_key = crate::engine::document::store::surrogate_to_doc_id(*surrogate);
             results.push(
-                self.apply_point_put(&txn, tid, collection, document_id, value)
+                self.apply_point_put(&txn, tid, collection, &row_key, value)
                     .map_err(|e| {
                         self.response_error(
                             task,
@@ -135,6 +138,7 @@ impl CoreLoop {
                         collection,
                         document_id,
                         value,
+                        ..
                     }) = task.plan()
                     {
                         let tid = task.request.tenant_id.as_u32();

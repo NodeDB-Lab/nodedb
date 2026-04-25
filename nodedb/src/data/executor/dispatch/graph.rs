@@ -16,7 +16,19 @@ impl CoreLoop {
                 label,
                 dst_id,
                 properties,
-            } => self.execute_edge_put(task, tid, collection, src_id, label, dst_id, properties),
+                src_surrogate,
+                dst_surrogate,
+            } => self.execute_edge_put(
+                task,
+                tid,
+                collection,
+                src_id,
+                label,
+                dst_id,
+                properties,
+                *src_surrogate,
+                *dst_surrogate,
+            ),
 
             GraphOp::EdgePutBatch { edges } => self.execute_edge_put_batch(task, tid, edges),
 

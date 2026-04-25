@@ -24,25 +24,31 @@ impl CoreLoop {
                 key,
                 value,
                 ttl_ms,
-            } => self.execute_kv_put(task, tid, collection, key, value, *ttl_ms),
+                surrogate,
+            } => self.execute_kv_put(task, tid, collection, key, value, *ttl_ms, *surrogate),
             KvOp::Insert {
                 collection,
                 key,
                 value,
                 ttl_ms,
-            } => self.execute_kv_insert(task, tid, collection, key, value, *ttl_ms),
+                surrogate,
+            } => self.execute_kv_insert(task, tid, collection, key, value, *ttl_ms, *surrogate),
             KvOp::InsertIfAbsent {
                 collection,
                 key,
                 value,
                 ttl_ms,
-            } => self.execute_kv_insert_if_absent(task, tid, collection, key, value, *ttl_ms),
+                surrogate,
+            } => self.execute_kv_insert_if_absent(
+                task, tid, collection, key, value, *ttl_ms, *surrogate,
+            ),
             KvOp::InsertOnConflictUpdate {
                 collection,
                 key,
                 value,
                 ttl_ms,
                 updates,
+                surrogate,
             } => self.execute_kv_insert_on_conflict_update(
                 task,
                 super::crud::KvInsertOnConflictUpdateParams {
@@ -52,6 +58,7 @@ impl CoreLoop {
                     value,
                     ttl_ms: *ttl_ms,
                     updates,
+                    surrogate: *surrogate,
                 },
             ),
             KvOp::Delete { collection, keys } => {

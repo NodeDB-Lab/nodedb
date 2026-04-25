@@ -1,6 +1,7 @@
 //! Vector write handlers: VectorInsert, VectorBatchInsert, VectorDelete,
 //! SetVectorParams.
 
+use nodedb_types::Surrogate;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -33,7 +34,7 @@ pub(in crate::data::executor) struct VectorInsertParams<'a> {
     pub vector: &'a [f32],
     pub dim: usize,
     pub field_name: &'a str,
-    pub doc_id: Option<String>,
+    pub surrogate: Surrogate,
 }
 
 impl CoreLoop {
@@ -80,7 +81,7 @@ impl CoreLoop {
             vector,
             dim,
             field_name,
-            doc_id,
+            surrogate,
         } = params;
         debug!(core = self.core_id, %collection, dim, "vector insert");
         if vector.len() != dim {
@@ -102,17 +103,13 @@ impl CoreLoop {
             && cfg.index_type == crate::engine::vector::index_config::IndexType::IvfPq
         {
             let key = index_key.clone();
-            return self.ivf_insert(task, &key, vector, dim, doc_id);
+            return self.ivf_insert(task, &key, vector, dim, surrogate);
         }
 
         // Default: HNSW (with or without PQ).
         match self.get_or_create_vector_index(tid, collection, dim, field_name) {
             Ok(collection_ref) => {
-                if let Some(did) = doc_id {
-                    collection_ref.insert_with_doc_id(vector.to_vec(), did);
-                } else {
-                    collection_ref.insert(vector.to_vec());
-                }
+                collection_ref.insert_with_surrogate(vector.to_vec(), surrogate);
                 let seal_key = CoreLoop::vector_checkpoint_filename(&index_key);
                 if collection_ref.needs_seal()
                     && let Some(req) = collection_ref.seal(&seal_key)
@@ -135,7 +132,7 @@ impl CoreLoop {
         index_key: &(TenantId, String),
         vector: &[f32],
         dim: usize,
-        doc_id: Option<String>,
+        surrogate: Surrogate,
     ) -> Response {
         let ivf = self
             .ivf_indexes
@@ -163,13 +160,14 @@ impl CoreLoop {
 
         let vector_id = ivf.add(vector);
 
-        // Register doc_id mapping using the actual IVF-assigned vector ID.
-        if let Some(did) = doc_id {
+        // Register surrogate mapping using the actual IVF-assigned vector ID.
+        if surrogate != Surrogate::ZERO {
             let coll = self
                 .vector_collections
                 .entry(index_key.clone())
                 .or_insert_with(|| VectorCollection::new(dim, Default::default()));
-            coll.doc_id_map.insert(vector_id, did);
+            coll.surrogate_map.insert(vector_id, surrogate);
+            coll.surrogate_to_local.insert(surrogate, vector_id);
         }
 
         self.checkpoint_coordinator.mark_dirty("vector", 1);
@@ -184,12 +182,13 @@ impl CoreLoop {
         collection: &str,
         vectors: &[Vec<f32>],
         dim: usize,
+        surrogates: &[Surrogate],
     ) -> Response {
         debug!(core = self.core_id, %collection, dim, count = vectors.len(), "vector batch insert");
         let index_key = CoreLoop::vector_index_key(tid, collection, "");
         match self.get_or_create_vector_index(tid, collection, dim, "") {
             Ok(collection_ref) => {
-                for vector in vectors {
+                for (i, vector) in vectors.iter().enumerate() {
                     if vector.len() != dim {
                         return self.response_error(
                             task,
@@ -202,7 +201,8 @@ impl CoreLoop {
                             },
                         );
                     }
-                    collection_ref.insert(vector.clone());
+                    let s = surrogates.get(i).copied().unwrap_or(Surrogate::ZERO);
+                    collection_ref.insert_with_surrogate(vector.clone(), s);
                 }
                 let seal_key = CoreLoop::vector_checkpoint_filename(&index_key);
                 if collection_ref.needs_seal()

@@ -1,5 +1,11 @@
 //! Vector search handlers: VectorSearch, VectorMultiSearch.
+//!
+//! DP emits each hit's `id` as the bound `Surrogate.as_u32()` (or the
+//! local node id if the row is headless / pre-surrogate). `doc_id` is
+//! always `None` from DP; the Control Plane fills it via the catalog
+//! at the response boundary.
 
+use nodedb_types::Surrogate;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -7,22 +13,28 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::vector::collection::VectorCollection;
 
-/// Build a search hit from raw search result data.
+/// Build a search hit from raw search result data. `id` is the bound
+/// surrogate when present, else the local node id (so headless rows
+/// still round-trip).
 fn build_search_hit(
-    id: u32,
+    collection: Option<&VectorCollection>,
+    local_id: u32,
     distance: f32,
-    doc_id: Option<&str>,
 ) -> super::super::response_codec::VectorSearchHit {
+    let id = collection
+        .and_then(|c| c.get_surrogate(local_id))
+        .map(|s| s.as_u32())
+        .unwrap_or(local_id);
     super::super::response_codec::VectorSearchHit {
         id,
         distance,
-        doc_id: doc_id.map(String::from),
+        doc_id: None,
     }
 }
 
-/// Resolve a doc_id from a VectorCollection, if available.
-fn resolve_doc_id(collection: Option<&VectorCollection>, vector_id: u32) -> Option<&str> {
-    collection.and_then(|c| c.get_doc_id(vector_id))
+/// Surrogate-as-u32 resolver kept for IVF-PQ bitmap filter compatibility.
+fn resolve_surrogate(collection: Option<&VectorCollection>, vector_id: u32) -> Option<Surrogate> {
+    collection.and_then(|c| c.get_surrogate(vector_id))
 }
 
 /// Encode search hits and return response.
@@ -110,12 +122,11 @@ impl CoreLoop {
         if collection_ref.is_empty() {
             return self.response_with_payload(task, b"[]".to_vec());
         }
-        // Fetch extra candidates when RLS is active, since some will be filtered.
-        let fetch_k = if rls_filters.is_empty() {
-            top_k
-        } else {
-            top_k.saturating_mul(2).max(20)
-        };
+        // RLS post-filter for vector search now lives at the Control
+        // Plane response boundary (post-surrogate→PK translation). DP
+        // returns the raw HNSW top-K and ignores `rls_filters`.
+        let _ = rls_filters;
+        let fetch_k = top_k;
         let ef = effective_ef(ef_search, fetch_k);
         let results = match filter_bitmap {
             Some(bitmap_bytes) => {
@@ -124,60 +135,10 @@ impl CoreLoop {
             None => collection_ref.search(query_vector, fetch_k, ef),
         };
 
-        // RLS post-candidate filtering: look up each candidate's document.
-        // For strict collections, decode binary tuples via schema before filter eval.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
-        let strict_schema = self.doc_configs.get(&config_key).and_then(|config| {
-            if let crate::bridge::physical_plan::StorageMode::Strict { ref schema } =
-                config.storage_mode
-            {
-                Some(schema.clone())
-            } else {
-                None
-            }
-        });
-
-        let hits: Vec<_> = if rls_filters.is_empty() {
-            results
-                .iter()
-                .map(|r| build_search_hit(r.id, r.distance, collection_ref.get_doc_id(r.id)))
-                .collect()
-        } else {
-            results
-                .iter()
-                .filter(|r| {
-                    let doc_id_str = match collection_ref.get_doc_id(r.id) {
-                        Some(id) if !id.is_empty() => id,
-                        _ => return false,
-                    };
-                    match self.sparse.get(tid, collection, doc_id_str) {
-                        Ok(Some(bytes)) => {
-                            // For strict collections, decode binary tuple → JSON for filter eval.
-                            if let Some(ref schema) = strict_schema {
-                                if let Some(json) =
-                                    super::super::strict_format::binary_tuple_to_json(
-                                        &bytes, schema,
-                                    )
-                                {
-                                    let json_bytes = sonic_rs::to_vec(&json).unwrap_or_default();
-                                    super::rls_eval::rls_check_msgpack_bytes(
-                                        rls_filters,
-                                        &json_bytes,
-                                    )
-                                } else {
-                                    false
-                                }
-                            } else {
-                                super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
-                            }
-                        }
-                        _ => false,
-                    }
-                })
-                .take(top_k)
-                .map(|r| build_search_hit(r.id, r.distance, collection_ref.get_doc_id(r.id)))
-                .collect()
-        };
+        let hits: Vec<_> = results
+            .iter()
+            .map(|r| build_search_hit(Some(collection_ref), r.id, r.distance))
+            .collect();
         if let Some(ref m) = self.metrics {
             m.record_vector_search(0);
             m.record_query_by_engine("vector");
@@ -204,16 +165,18 @@ impl CoreLoop {
             top_k
         };
         let results = ivf.search(query_vector, fetch_k);
-        let doc_id_source = self.vector_collections.get(index_key);
+        let surrogate_source = self.vector_collections.get(index_key);
 
         let mut hits: Vec<_> = results
             .iter()
-            .map(|r| build_search_hit(r.id, r.distance, resolve_doc_id(doc_id_source, r.id)))
+            .map(|r| build_search_hit(surrogate_source, r.id, r.distance))
             .collect();
 
         if let Some(bitmap_bytes) = filter_bitmap {
             if let Ok(bm) = crate::query::bitmap::deserialize(bitmap_bytes) {
+                // Bitmap is a set of surrogates; hit.id is now the surrogate.
                 hits.retain(|h| bm.contains(h.id));
+                let _ = resolve_surrogate; // kept available for future bitmap modes
             }
             hits.truncate(top_k);
         }
@@ -271,7 +234,10 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::NotFound);
         }
 
-        // Single field — return directly (with RLS filtering).
+        // RLS for vector multi-search moved to CP response boundary.
+        let _ = rls_filters;
+
+        // Single field — return directly.
         if all_results.len() == 1 {
             let Some(results) = all_results.into_iter().next() else {
                 return self.response_error(task, ErrorCode::NotFound);
@@ -279,23 +245,8 @@ impl CoreLoop {
             let doc_source = self.vector_collections.get(&plain_key);
             let hits: Vec<_> = results
                 .iter()
-                .filter(|r| {
-                    if rls_filters.is_empty() {
-                        return true;
-                    }
-                    let doc_id_str = resolve_doc_id(doc_source, r.id).unwrap_or("");
-                    if doc_id_str.is_empty() {
-                        return false;
-                    }
-                    match self.sparse.get(tid, collection, doc_id_str) {
-                        Ok(Some(bytes)) => {
-                            super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
-                        }
-                        _ => false,
-                    }
-                })
                 .take(top_k)
-                .map(|r| build_search_hit(r.id, r.distance, resolve_doc_id(doc_source, r.id)))
+                .map(|r| build_search_hit(doc_source, r.id, r.distance))
                 .collect();
             if let Some(ref m) = self.metrics {
                 m.record_vector_search(0);
@@ -325,37 +276,22 @@ impl CoreLoop {
 
         let fused = reciprocal_rank_fusion(&ranked_lists, None, top_k);
 
-        // Look up doc_id for each fused result, apply RLS post-fusion filtering.
+        // Surface fused results with surrogate-as-id; CP fills doc_id.
+        let _ = (tid, collection);
         let hits: Vec<_> = fused
             .iter()
             .filter_map(|f| {
-                let id: u32 = f.document_id.parse().ok()?;
-                let doc_id = self
-                    .vector_collections
-                    .get(&plain_key)
-                    .and_then(|c| c.get_doc_id(id))
-                    .or_else(|| {
-                        self.vector_collections
-                            .iter()
-                            .filter(|(k, _)| {
-                                k.0 == tenant_id
-                                    && (k == &&plain_key || k.1.starts_with(&field_prefix))
-                            })
-                            .find_map(|(_, c)| c.get_doc_id(id))
-                    });
-                // RLS post-fusion: look up document and evaluate filters.
-                if !rls_filters.is_empty() {
-                    let doc_id_str = doc_id.unwrap_or("");
-                    if doc_id_str.is_empty() {
-                        return None;
-                    }
-                    match self.sparse.get(tid, collection, doc_id_str) {
-                        Ok(Some(bytes))
-                            if super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes) => {}
-                        _ => return None,
-                    }
-                }
-                Some(build_search_hit(id, f.rrf_score as f32, doc_id))
+                let local_id: u32 = f.document_id.parse().ok()?;
+                let source = self.vector_collections.get(&plain_key).or_else(|| {
+                    self.vector_collections
+                        .iter()
+                        .filter(|(k, _)| {
+                            k.0 == tenant_id && (k == &&plain_key || k.1.starts_with(&field_prefix))
+                        })
+                        .map(|(_, c)| c)
+                        .next()
+                });
+                Some(build_search_hit(source, local_id, f.rrf_score as f32))
             })
             .collect();
         if let Some(ref m) = self.metrics {

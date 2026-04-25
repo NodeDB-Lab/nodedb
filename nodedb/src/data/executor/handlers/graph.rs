@@ -34,6 +34,8 @@ impl CoreLoop {
         label: &str,
         dst_id: &str,
         properties: &[u8],
+        _src_surrogate: nodedb_types::Surrogate,
+        _dst_surrogate: nodedb_types::Surrogate,
     ) -> Response {
         debug!(core = self.core_id, tid, %collection, %src_id, %label, %dst_id, "edge put");
 

@@ -1,5 +1,6 @@
 //! KV Get, Put, Delete, Truncate handlers.
 
+use nodedb_types::Surrogate;
 use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -16,6 +17,7 @@ pub(in crate::data::executor) struct KvInsertOnConflictUpdateParams<'a> {
     pub value: &'a [u8],
     pub ttl_ms: u64,
     pub updates: &'a [(String, crate::bridge::physical_plan::UpdateValue)],
+    pub surrogate: Surrogate,
 }
 
 impl CoreLoop {
@@ -48,6 +50,7 @@ impl CoreLoop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_kv_put(
         &mut self,
         task: &ExecutionTask,
@@ -56,6 +59,7 @@ impl CoreLoop {
         key: &[u8],
         value: &[u8],
         ttl_ms: u64,
+        surrogate: Surrogate,
     ) -> Response {
         debug!(core = self.core_id, %collection, "kv put");
 
@@ -72,7 +76,7 @@ impl CoreLoop {
         let now_ms = current_ms();
         let old = self
             .kv_engine
-            .put(tid, collection, key, value, ttl_ms, now_ms);
+            .put(tid, collection, key, value, ttl_ms, now_ms, surrogate);
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
         }
@@ -99,6 +103,7 @@ impl CoreLoop {
     /// are pinned to one Data Plane core (vshard routing), and the core
     /// loop runs ops serially — no other writer can slip between the
     /// probe and the put on the same key.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_kv_insert(
         &mut self,
         task: &ExecutionTask,
@@ -107,6 +112,7 @@ impl CoreLoop {
         key: &[u8],
         value: &[u8],
         ttl_ms: u64,
+        surrogate: Surrogate,
     ) -> Response {
         debug!(core = self.core_id, %collection, "kv insert");
 
@@ -136,7 +142,7 @@ impl CoreLoop {
         }
 
         self.kv_engine
-            .put(tid, collection, key, value, ttl_ms, now_ms);
+            .put(tid, collection, key, value, ttl_ms, now_ms, surrogate);
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
         }
@@ -156,6 +162,7 @@ impl CoreLoop {
 
     /// SQL `INSERT ... ON CONFLICT DO NOTHING` semantics: write if absent,
     /// silent no-op on duplicate. No error on conflict.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_kv_insert_if_absent(
         &mut self,
         task: &ExecutionTask,
@@ -164,6 +171,7 @@ impl CoreLoop {
         key: &[u8],
         value: &[u8],
         ttl_ms: u64,
+        surrogate: Surrogate,
     ) -> Response {
         debug!(core = self.core_id, %collection, "kv insert-if-absent");
 
@@ -183,7 +191,7 @@ impl CoreLoop {
         }
 
         self.kv_engine
-            .put(tid, collection, key, value, ttl_ms, now_ms);
+            .put(tid, collection, key, value, ttl_ms, now_ms, surrogate);
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
         }
@@ -206,6 +214,7 @@ impl CoreLoop {
     /// decode the stored value, apply the updates (with `EXCLUDED`
     /// resolving to the would-be-inserted row), and write the merged
     /// result back.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_kv_insert_on_conflict_update(
         &mut self,
         task: &ExecutionTask,
@@ -218,6 +227,7 @@ impl CoreLoop {
             value,
             ttl_ms,
             updates,
+            surrogate,
         } = params;
         debug!(core = self.core_id, %collection, "kv insert-on-conflict-update");
 
@@ -281,8 +291,15 @@ impl CoreLoop {
             }
         };
 
-        self.kv_engine
-            .put(tid, collection, key, &stored_bytes, ttl_ms, now_ms);
+        self.kv_engine.put(
+            tid,
+            collection,
+            key,
+            &stored_bytes,
+            ttl_ms,
+            now_ms,
+            surrogate,
+        );
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
         }

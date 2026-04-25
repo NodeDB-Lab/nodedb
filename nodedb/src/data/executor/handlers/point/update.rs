@@ -11,17 +11,23 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::physical_plan::UpdateValue;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::surrogate_to_doc_id;
+use nodedb_types::Surrogate;
 
 impl CoreLoop {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_point_update(
         &mut self,
         task: &ExecutionTask,
         tid: u32,
         collection: &str,
         document_id: &str,
+        surrogate: Surrogate,
         updates: &[(String, UpdateValue)],
         returning: bool,
     ) -> Response {
+        let row_key = surrogate_to_doc_id(surrogate);
+        let row_key = row_key.as_str();
         debug!(
             core = self.core_id,
             %collection,
@@ -62,10 +68,9 @@ impl CoreLoop {
             0
         };
         let get_result = if bitemporal {
-            self.sparse
-                .versioned_get_current(tid, collection, document_id)
+            self.sparse.versioned_get_current(tid, collection, row_key)
         } else {
-            self.sparse.get(tid, collection, document_id)
+            self.sparse.get(tid, collection, row_key)
         };
         match get_result {
             Ok(Some(current_bytes)) => {
@@ -228,7 +233,7 @@ impl CoreLoop {
                         .versioned_put(crate::engine::sparse::btree_versioned::VersionedPut {
                             tenant: tid,
                             coll: collection,
-                            doc_id: document_id,
+                            doc_id: row_key,
                             sys_from_ms: sys_from_for_encode,
                             valid_from_ms: i64::MIN,
                             valid_until_ms: i64::MAX,
@@ -236,13 +241,11 @@ impl CoreLoop {
                         })
                         .map(|()| None::<Vec<u8>>)
                 } else {
-                    self.sparse
-                        .put(tid, collection, document_id, &updated_bytes)
+                    self.sparse.put(tid, collection, row_key, &updated_bytes)
                 };
                 match write_result {
                     Ok(_prior) => {
-                        self.doc_cache
-                            .put(tid, collection, document_id, &updated_bytes);
+                        self.doc_cache.put(tid, collection, row_key, &updated_bytes);
 
                         // Emit update event to Event Plane. `current_bytes`
                         // is the pre-update row already read above; the
@@ -253,7 +256,7 @@ impl CoreLoop {
                             task,
                             tid,
                             collection,
-                            document_id,
+                            row_key,
                             &updated_bytes,
                             Some(&current_bytes),
                         );

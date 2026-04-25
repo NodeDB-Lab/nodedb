@@ -15,7 +15,7 @@ impl CoreLoop {
                 vector,
                 dim,
                 field_name,
-                doc_id,
+                surrogate,
             } => self.execute_vector_insert(super::super::handlers::vector::VectorInsertParams {
                 task,
                 tid,
@@ -23,14 +23,15 @@ impl CoreLoop {
                 vector,
                 dim: *dim,
                 field_name,
-                doc_id: doc_id.clone(),
+                surrogate: *surrogate,
             }),
 
             VectorOp::BatchInsert {
                 collection,
                 vectors,
                 dim,
-            } => self.execute_vector_batch_insert(task, tid, collection, vectors, *dim),
+                surrogates,
+            } => self.execute_vector_batch_insert(task, tid, collection, vectors, *dim, surrogates),
 
             VectorOp::MultiSearch {
                 collection,
@@ -159,19 +160,32 @@ impl CoreLoop {
             VectorOp::MultiVectorInsert {
                 collection,
                 field_name,
-                doc_id,
+                document_surrogate,
                 vectors,
                 count,
                 dim,
             } => self.execute_multi_vector_insert(
-                task, tid, collection, field_name, doc_id, vectors, *count, *dim,
+                task,
+                tid,
+                collection,
+                field_name,
+                *document_surrogate,
+                vectors,
+                *count,
+                *dim,
             ),
 
             VectorOp::MultiVectorDelete {
                 collection,
                 field_name,
-                doc_id,
-            } => self.execute_multi_vector_delete(task, tid, collection, field_name, doc_id),
+                document_surrogate,
+            } => self.execute_multi_vector_delete(
+                task,
+                tid,
+                collection,
+                field_name,
+                *document_surrogate,
+            ),
 
             VectorOp::MultiVectorScoreSearch {
                 collection,

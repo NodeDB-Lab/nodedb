@@ -73,6 +73,8 @@ fn expired_task_returns_deadline_exceeded() {
                 ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
                     collection: "x".into(),
                     document_id: "y".into(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                     rls_filters: Vec::new(),
                     system_as_of_ms: None,
                     valid_at_ms: None,
@@ -96,6 +98,8 @@ fn watermark_in_response() {
             inner: make_request(PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: "x".into(),
                 document_id: "y".into(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
                 rls_filters: Vec::new(),
                 system_as_of_ms: None,
                 valid_at_ms: None,
@@ -118,6 +122,8 @@ fn cancel_removes_pending_task() {
                 ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
                     collection: "x".into(),
                     document_id: "y".into(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
                     rls_filters: Vec::new(),
                     system_as_of_ms: None,
                     valid_at_ms: None,
@@ -164,6 +170,8 @@ fn point_put_stores_schemaless_docs_as_canonical_msgpack_maps() {
                 collection: "orders".into(),
                 document_id: "o1".into(),
                 value: tagged,
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
             })),
         })
         .unwrap();
@@ -171,7 +179,10 @@ fn point_put_stores_schemaless_docs_as_canonical_msgpack_maps() {
     let resp = resp_rx.try_pop().unwrap();
     assert_eq!(resp.inner.status, Status::Ok);
 
-    let stored = core.sparse.get(1, "orders", "o1").unwrap().unwrap();
+    // The handler hex-encodes the surrogate to compute the substrate
+    // row key; this fixture used `Surrogate::ZERO`, which renders to
+    // "00000000".
+    let stored = core.sparse.get(1, "orders", "00000000").unwrap().unwrap();
     assert!(nodedb_query::msgpack_scan::map_header(&stored, 0).is_some());
     assert!(nodedb_query::msgpack_scan::extract_field(&stored, 0, "user_id").is_some());
     assert!(nodedb_query::msgpack_scan::extract_field(&stored, 0, "item").is_some());

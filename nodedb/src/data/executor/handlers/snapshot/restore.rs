@@ -65,7 +65,7 @@ impl CoreLoop {
             // `"{tid}:"` prefix to get the collection key for the tuple map.
             let tid_prefix = format!("{tenant_id}:");
             for (key, bytes) in &snap.vectors {
-                let vectors: Vec<(u32, Vec<f32>, Option<String>)> =
+                let vectors: Vec<(u32, Vec<f32>, Option<nodedb_types::Surrogate>)> =
                     match zerompk::from_msgpack(bytes) {
                         Ok(v) => v,
                         Err(e) => {
@@ -174,7 +174,7 @@ impl CoreLoop {
         &mut self,
         tenant_id: u32,
         coll_key: &str,
-        vectors: Vec<(u32, Vec<f32>, Option<String>)>,
+        vectors: Vec<(u32, Vec<f32>, Option<nodedb_types::Surrogate>)>,
     ) {
         if vectors.is_empty() {
             return;
@@ -189,15 +189,8 @@ impl CoreLoop {
         let coll = self.vector_collections.entry(map_key).or_insert_with(|| {
             crate::engine::vector::collection::VectorCollection::new(dim, params)
         });
-        for (_, data, doc_id) in vectors {
-            match doc_id {
-                Some(did) => {
-                    coll.insert_with_doc_id(data, did);
-                }
-                None => {
-                    coll.insert(data);
-                }
-            }
+        for (_, data, surrogate) in vectors {
+            coll.insert_with_surrogate(data, surrogate.unwrap_or(nodedb_types::Surrogate::ZERO));
         }
     }
 
@@ -220,8 +213,15 @@ impl CoreLoop {
             } else {
                 continue; // Already expired.
             };
-            self.kv_engine
-                .put(tenant_id, collection, &key, &value, ttl_ms, now_ms);
+            self.kv_engine.put(
+                tenant_id,
+                collection,
+                &key,
+                &value,
+                ttl_ms,
+                now_ms,
+                nodedb_types::Surrogate::ZERO,
+            );
         }
     }
 

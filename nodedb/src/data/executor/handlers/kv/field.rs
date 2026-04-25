@@ -120,8 +120,15 @@ impl CoreLoop {
             }
         };
 
-        self.kv_engine
-            .put(tid, collection, key, &new_value, 0, now_ms);
+        self.kv_engine.put(
+            tid,
+            collection,
+            key,
+            &new_value,
+            0,
+            now_ms,
+            nodedb_types::Surrogate::ZERO,
+        );
         match response_codec::encode_json(&serde_json::json!({ "fields_added": fields_added })) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(

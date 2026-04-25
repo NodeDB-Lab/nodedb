@@ -137,11 +137,12 @@ impl CoreLoop {
                         );
                         continue;
                     }
-                    if let Some(doc_id) = doc_id {
-                        index.insert_with_doc_id(vector, doc_id);
-                    } else {
-                        index.insert(vector);
-                    }
+                    // WAL replay rebinds vectors on the local node;
+                    // surrogate identity is restored via the dedicated
+                    // `SurrogateBind` replay path. Engine inserts here are
+                    // local-id-only and bind to `Surrogate::ZERO`.
+                    let _ = doc_id;
+                    index.insert_with_surrogate(vector, nodedb_types::Surrogate::ZERO);
                     inserted += 1;
                 } else if let Ok((collection, vector, dim)) =
                     zerompk::from_msgpack::<(String, Vec<f32>, usize)>(&record.payload)
@@ -300,8 +301,15 @@ impl CoreLoop {
                     if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
                         continue;
                     }
-                    self.kv_engine
-                        .put(tenant_id, &collection, &key, &value, ttl_ms, now_ms);
+                    self.kv_engine.put(
+                        tenant_id,
+                        &collection,
+                        &key,
+                        &value,
+                        ttl_ms,
+                        now_ms,
+                        nodedb_types::Surrogate::ZERO,
+                    );
                     puts += 1;
                     continue;
                 }

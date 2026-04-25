@@ -373,6 +373,7 @@ impl CoreLoop {
                 format,
                 intent,
                 on_conflict_updates,
+                surrogates: _,
             }) => self.execute_columnar_insert(
                 task,
                 collection,
@@ -429,6 +430,7 @@ impl CoreLoop {
                 payload,
                 format,
                 wal_lsn,
+                surrogates: _,
             }) => self.execute_timeseries_ingest(
                 task,
                 task.request.tenant_id,

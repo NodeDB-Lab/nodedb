@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_types::Surrogate;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -12,8 +13,8 @@ use crate::data::executor::task::ExecutionTask;
 impl CoreLoop {
     /// Insert multiple vectors for a single document into the HNSW index.
     ///
-    /// All vectors share the same `doc_id` in the `doc_id_map` and are tracked
-    /// in `multi_doc_map` for bulk deletion.
+    /// All vectors share the same `document_surrogate` in `surrogate_map`
+    /// and are tracked in `multi_doc_map` for bulk deletion.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_multi_vector_insert(
         &mut self,
@@ -21,14 +22,14 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         field_name: &str,
-        doc_id: &str,
+        document_surrogate: Surrogate,
         vectors_flat: &[f32],
         count: usize,
         dim: usize,
     ) -> Response {
         debug!(
             core = self.core_id,
-            %collection, %field_name, %doc_id, count, dim,
+            %collection, %field_name, doc_surrogate = document_surrogate.as_u32(), count, dim,
             "multi-vector insert"
         );
 
@@ -99,10 +100,10 @@ impl CoreLoop {
             .collect();
 
         // Delete old multi-vector entries for this doc if they exist (upsert).
-        coll.delete_multi_vector(doc_id);
+        coll.delete_multi_vector(document_surrogate);
 
-        // Insert all vectors with shared doc_id.
-        let ids = coll.insert_multi_vector(&vector_slices, doc_id.to_string());
+        // Insert all vectors with shared surrogate.
+        let ids = coll.insert_multi_vector(&vector_slices, document_surrogate);
 
         // Auto-seal if needed.
         let seal_key = CoreLoop::vector_checkpoint_filename(&index_key);
@@ -134,16 +135,20 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         field_name: &str,
-        doc_id: &str,
+        document_surrogate: Surrogate,
     ) -> Response {
-        debug!(core = self.core_id, %collection, %field_name, %doc_id, "multi-vector delete");
+        debug!(
+            core = self.core_id,
+            %collection, %field_name, doc_surrogate = document_surrogate.as_u32(),
+            "multi-vector delete"
+        );
 
         let index_key = CoreLoop::vector_index_key(tid, collection, field_name);
         let Some(coll) = self.vector_collections.get_mut(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
 
-        let deleted = coll.delete_multi_vector(doc_id);
+        let deleted = coll.delete_multi_vector(document_surrogate);
         if deleted > 0 {
             self.checkpoint_coordinator.mark_dirty("vector", deleted);
             self.response_ok(task)
@@ -213,46 +218,35 @@ impl CoreLoop {
 
         let candidates = coll.search(query_vector, over_fetch, ef);
 
-        // Group by doc_id. For distance metrics where lower = better (L2, cosine),
-        // we need to convert: similarity = 1.0 / (1.0 + distance) so higher = better.
-        // For inner product, distance is already a similarity score (higher = better).
-        let mut doc_scores: HashMap<String, Vec<f32>> = HashMap::new();
-
+        // Group by surrogate. For distance metrics where lower = better
+        // (L2, cosine) we convert similarity = 1 / (1 + distance) so
+        // higher = better. For inner product, distance is already a
+        // similarity score. Candidates without a bound surrogate fall
+        // back to the local node id wrapped as `Surrogate(local)` so
+        // headless inserts still group.
+        let mut doc_scores: HashMap<Surrogate, Vec<f32>> = HashMap::new();
         for result in &candidates {
-            let doc_id = match coll.get_doc_id(result.id) {
-                Some(id) => id.to_string(),
-                None => result.id.to_string(),
-            };
-            // Convert distance to similarity for aggregation.
-            // Lower distance = more similar → higher similarity score.
+            let key = coll
+                .get_surrogate(result.id)
+                .unwrap_or_else(|| Surrogate::new(result.id));
             let similarity = 1.0 / (1.0 + result.distance);
-            doc_scores.entry(doc_id).or_default().push(similarity);
+            doc_scores.entry(key).or_default().push(similarity);
         }
 
-        // Aggregate per-document and collect results.
-        let mut scored_docs: Vec<(String, f32)> = doc_scores
+        let mut scored_docs: Vec<(Surrogate, f32)> = doc_scores
             .iter()
-            .map(|(doc_id, scores)| (doc_id.clone(), mode.aggregate(scores)))
+            .map(|(s, scores)| (*s, mode.aggregate(scores)))
             .collect();
-
-        // Sort by aggregated score descending.
         scored_docs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Truncate to top_k.
         scored_docs.truncate(top_k);
 
-        // Build response hits.
+        // DP emits surrogate as `id`; CP translates to user PK at the response boundary.
         let hits: Vec<super::super::response_codec::VectorSearchHit> = scored_docs
             .iter()
-            .map(|(doc_id, score)| {
-                // Try to parse doc_id as u32 for the `id` field; if it's a string doc_id
-                // we use 0 as the numeric id and populate doc_id.
-                let numeric_id = doc_id.parse::<u32>().unwrap_or(0);
-                super::super::response_codec::VectorSearchHit {
-                    id: numeric_id,
-                    distance: *score, // This is the aggregated similarity score.
-                    doc_id: Some(doc_id.clone()),
-                }
+            .map(|(s, score)| super::super::response_codec::VectorSearchHit {
+                id: s.as_u32(),
+                distance: *score,
+                doc_id: None,
             })
             .collect();
 

@@ -43,6 +43,7 @@ impl CoreLoop {
                 collection,
                 document_id,
                 value,
+                ..
             }) => self.tx_point_put(
                 &dummy_task,
                 tid,
@@ -58,6 +59,7 @@ impl CoreLoop {
                 document_id,
                 value,
                 if_absent,
+                surrogate: _,
             }) => {
                 // Existence probe against the engine's current state. The
                 // transaction buffer is represented by `undo_log`: earlier
@@ -97,6 +99,7 @@ impl CoreLoop {
             PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection,
                 document_id,
+                ..
             }) => self.tx_point_delete(&dummy_task, tid, collection, document_id, undo_log),
 
             PhysicalPlan::Vector(VectorOp::Insert {
@@ -104,7 +107,7 @@ impl CoreLoop {
                 vector,
                 dim,
                 field_name,
-                doc_id,
+                surrogate,
             }) => {
                 let index_key = Self::vector_index_key(tid, collection, field_name);
                 let params = self
@@ -130,11 +133,7 @@ impl CoreLoop {
                 }
 
                 let vector_id = index.len() as u32;
-                if let Some(did) = doc_id.clone() {
-                    index.insert_with_doc_id(vector.clone(), did);
-                } else {
-                    index.insert(vector.clone());
-                }
+                index.insert_with_surrogate(vector.clone(), *surrogate);
                 undo_log.push(UndoEntry::InsertVector {
                     index_key,
                     vector_id,
@@ -164,6 +163,8 @@ impl CoreLoop {
                 label,
                 dst_id,
                 properties,
+                src_surrogate,
+                dst_surrogate,
             }) => {
                 // Capture old properties for rollback before writing.
                 let old_properties = self
@@ -186,6 +187,8 @@ impl CoreLoop {
                     label,
                     dst_id,
                     properties,
+                    *src_surrogate,
+                    *dst_surrogate,
                 );
                 if resp.status == Status::Error {
                     return Err(resp.error_code.unwrap_or(ErrorCode::Internal {

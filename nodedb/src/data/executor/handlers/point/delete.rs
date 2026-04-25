@@ -6,6 +6,8 @@ use tracing::{debug, warn};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::surrogate_to_doc_id;
+use nodedb_types::Surrogate;
 
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_point_delete(
@@ -14,7 +16,10 @@ impl CoreLoop {
         tid: u32,
         collection: &str,
         document_id: &str,
+        surrogate: Surrogate,
     ) -> Response {
+        let row_key = surrogate_to_doc_id(surrogate);
+        let row_key = row_key.as_str();
         debug!(core = self.core_id, %collection, %document_id, "point delete");
 
         // On bitemporal collections: append a doc tombstone + versioned
@@ -25,21 +30,14 @@ impl CoreLoop {
         // of bitemporal history.
         let bitemporal = self.is_bitemporal(tid, collection);
         let delete_result: crate::Result<Option<Vec<u8>>> = if bitemporal {
-            let prior = self
-                .sparse
-                .versioned_get_current(tid, collection, document_id);
+            let prior = self.sparse.versioned_get_current(tid, collection, row_key);
             match prior {
                 Ok(Some(body)) => {
                     let sys_from = self.bitemporal_now_ms();
                     let res: crate::Result<()> = (|| {
                         let txn = self.sparse.begin_write()?;
-                        self.sparse.versioned_tombstone_in_txn(
-                            &txn,
-                            tid,
-                            collection,
-                            document_id,
-                            sys_from,
-                        )?;
+                        self.sparse
+                            .versioned_tombstone_in_txn(&txn, tid, collection, row_key, sys_from)?;
                         // Index tombstones: reflect every current value so
                         // `index_lookup_as_of` at or after `sys_from` skips
                         // this doc_id.
@@ -60,12 +58,7 @@ impl CoreLoop {
                                         v
                                     };
                                     self.sparse.versioned_index_tombstone_in_txn(
-                                        &txn,
-                                        tid,
-                                        collection,
-                                        &path.path,
-                                        &value,
-                                        document_id,
+                                        &txn, tid, collection, &path.path, &value, row_key,
                                         sys_from,
                                     )?;
                                 }
@@ -83,16 +76,20 @@ impl CoreLoop {
                 Err(e) => Err(e),
             }
         } else {
-            self.sparse.delete(tid, collection, document_id)
+            self.sparse.delete(tid, collection, row_key)
         };
 
         match delete_result {
             Ok(prior) => {
-                // Cascade 1: Remove from full-text inverted index.
+                // Cascade 1: Remove from full-text inverted index. The
+                // inverted index was populated by `apply_point_put` with
+                // the substrate row key (hex surrogate), not the
+                // user-visible PK — keep the cascade keyed the same way
+                // so a delete actually wipes the term postings.
                 if let Err(e) = self.inverted.remove_document(
                     crate::types::TenantId::new(tid),
                     collection,
-                    document_id,
+                    row_key,
                 ) {
                     warn!(core = self.core_id, %collection, %document_id, error = %e, "inverted index removal failed");
                 }
@@ -100,9 +97,9 @@ impl CoreLoop {
                 // Cascade 2: Remove secondary index entries for this document.
                 // Secondary indexes use key format "{tenant}:{collection}:{field}:{value}:{doc_id}".
                 // We scan and delete all entries ending with this doc_id.
-                if let Err(e) =
-                    self.sparse
-                        .delete_indexes_for_document(tid, collection, document_id)
+                if let Err(e) = self
+                    .sparse
+                    .delete_indexes_for_document(tid, collection, row_key)
                 {
                     warn!(core = self.core_id, %collection, %document_id, error = %e, "secondary index cascade failed");
                 }
@@ -123,7 +120,11 @@ impl CoreLoop {
                 }
 
                 // Cascade 4: Remove from spatial R-tree indexes + reverse map.
-                let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
+                // `apply_point_put` hashes the substrate row key as the
+                // R-tree entry id, so delete must hash the same key to
+                // find the entry. Hashing the user PK would leak ghost
+                // bbox entries that survive the row's removal.
+                let entry_id = crate::util::fnv1a_hash(row_key.as_bytes());
                 let tid_id = crate::types::TenantId::new(tid);
                 let spatial_fields: Vec<String> = self
                     .spatial_indexes
@@ -144,7 +145,7 @@ impl CoreLoop {
                 self.mark_node_deleted(tid, document_id);
 
                 // Invalidate document cache.
-                self.doc_cache.invalidate(tid, collection, document_id);
+                self.doc_cache.invalidate(tid, collection, row_key);
 
                 self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
