@@ -470,7 +470,8 @@ impl CoreLoop {
             | PhysicalPlan::Vector(_)
             | PhysicalPlan::Crdt(_)
             | PhysicalPlan::Graph(_)
-            | PhysicalPlan::Text(_) => {
+            | PhysicalPlan::Text(_)
+            | PhysicalPlan::Array(_) => {
                 unreachable!("dispatch_other received plan variant that has its own dispatcher")
             }
         }

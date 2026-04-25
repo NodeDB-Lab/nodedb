@@ -1,6 +1,7 @@
 //! Main execute() dispatch: matches on PhysicalPlan variant and delegates
 //! to the appropriate sub-dispatcher.
 
+pub mod array;
 pub mod crdt;
 pub mod document;
 pub mod graph;
@@ -33,6 +34,7 @@ impl CoreLoop {
             PhysicalPlan::Crdt(op) => self.dispatch_crdt(task, op),
             PhysicalPlan::Graph(op) => self.dispatch_graph(task, op),
             PhysicalPlan::Text(op) => self.dispatch_text(task, op),
+            PhysicalPlan::Array(op) => self.dispatch_array(task, op),
             plan => self.dispatch_other(task, plan),
         }
     }

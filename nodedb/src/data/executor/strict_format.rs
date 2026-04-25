@@ -466,7 +466,8 @@ fn value_to_json(val: &Value) -> serde_json::Value {
         | Value::Set(_)
         | Value::Regex(_)
         | Value::Range { .. }
-        | Value::Record { .. } => serde_json::Value::Null,
+        | Value::Record { .. }
+        | Value::NdArrayCell(_) => serde_json::Value::Null,
     }
 }
 
