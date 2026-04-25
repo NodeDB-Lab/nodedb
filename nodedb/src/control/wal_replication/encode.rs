@@ -15,6 +15,8 @@ pub fn to_replicated_entry(
             collection,
             document_id,
             value,
+            surrogate: _,
+            pk_bytes: _,
         }) => ReplicatedWrite::PointPut {
             collection: collection.clone(),
             document_id: document_id.clone(),
@@ -25,6 +27,7 @@ pub fn to_replicated_entry(
             document_id,
             value,
             if_absent,
+            surrogate: _,
         }) => ReplicatedWrite::PointInsert {
             collection: collection.clone(),
             document_id: document_id.clone(),
@@ -34,6 +37,8 @@ pub fn to_replicated_entry(
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
             document_id,
+            surrogate: _,
+            pk_bytes: _,
         }) => ReplicatedWrite::PointDelete {
             collection: collection.clone(),
             document_id: document_id.clone(),
@@ -53,18 +58,23 @@ pub fn to_replicated_entry(
             vector,
             dim,
             field_name,
-            doc_id,
+            surrogate: _,
         }) => ReplicatedWrite::VectorInsert {
             collection: collection.clone(),
             vector: vector.clone(),
             dim: *dim,
             field_name: field_name.clone(),
-            doc_id: doc_id.clone(),
+            // Surrogates are not part of the cross-node wire shape;
+            // followers re-derive identity via the assigner. Without
+            // the originating user PK at this hop, headless followers
+            // call `assign_anonymous`.
+            pk_bytes: None,
         },
         PhysicalPlan::Vector(VectorOp::BatchInsert {
             collection,
             vectors,
             dim,
+            surrogates: _,
         }) => ReplicatedWrite::VectorBatchInsert {
             collection: collection.clone(),
             vectors: vectors.clone(),
@@ -102,6 +112,7 @@ pub fn to_replicated_entry(
             delta,
             peer_id,
             mutation_id: _,
+            surrogate: _,
         }) => ReplicatedWrite::CrdtApply {
             collection: collection.clone(),
             document_id: document_id.clone(),
@@ -114,6 +125,8 @@ pub fn to_replicated_entry(
             label,
             dst_id,
             properties,
+            src_surrogate: _,
+            dst_surrogate: _,
         }) => ReplicatedWrite::EdgePut {
             collection: collection.clone(),
             src_id: src_id.clone(),
@@ -137,6 +150,7 @@ pub fn to_replicated_entry(
             key,
             value,
             ttl_ms,
+            surrogate: _,
         }) => ReplicatedWrite::KvPut {
             collection: collection.clone(),
             key: key.clone(),

@@ -283,6 +283,7 @@ fn extract_write_metadata(
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
             document_id,
+            ..
         }) => Some((
             collection.clone(),
             document_id.clone(),

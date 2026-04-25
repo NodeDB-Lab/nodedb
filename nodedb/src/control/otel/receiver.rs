@@ -374,6 +374,7 @@ async fn ingest_ilp(
         payload,
         format: "ilp".into(),
         wal_lsn: None,
+        surrogates: Vec::new(),
     });
     dispatch_to_data_plane(shared, TenantId::new(1), VShardId::new(0), plan, 0).await?;
     Ok(1)

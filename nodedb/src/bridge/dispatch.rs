@@ -317,6 +317,8 @@ mod tests {
             plan: PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: "users".into(),
                 document_id: "u1".into(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
                 rls_filters: Vec::new(),
                 system_as_of_ms: None,
                 valid_at_ms: None,

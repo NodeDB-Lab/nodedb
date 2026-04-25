@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::control::array_catalog::ArrayCatalogHandle;
 use crate::control::security::credential::CredentialStore;
+use crate::control::surrogate::SurrogateAssigner;
 use crate::engine::timeseries::retention_policy::RetentionPolicyRegistry;
 use crate::types::TenantId;
 use crate::wal::WalManager;
@@ -27,6 +28,13 @@ pub struct ConvertContext {
     pub credentials: Option<Arc<CredentialStore>>,
     /// LSN allocator for array Put/Delete dispatches.
     pub wal: Option<Arc<WalManager>>,
+    /// CP-side surrogate assigner — bound to the same `Arc` held on
+    /// `SharedState`. Threaded into INSERT/UPSERT/KV-INSERT converters
+    /// to bind `(collection, pk_bytes)` → `Surrogate` before the op
+    /// crosses the SPSC bridge. `None` only for converters used by
+    /// sub-planners that never lower to the surrogate-bearing variants
+    /// (e.g. CREATE/DROP/ARRAY paths).
+    pub surrogate_assigner: Option<Arc<SurrogateAssigner>>,
 }
 
 /// Convert a list of SqlPlans to PhysicalTasks.
@@ -84,7 +92,9 @@ pub(super) fn convert_one(
             engine,
             key_column,
             key_value,
-        } => super::scan::convert_point_get(collection, engine, key_column, key_value, tenant_id),
+        } => super::scan::convert_point_get(
+            collection, engine, key_column, key_value, tenant_id, ctx,
+        ),
 
         SqlPlan::DocumentIndexLookup {
             collection,
@@ -118,6 +128,7 @@ pub(super) fn convert_one(
             column_defaults,
             *if_absent,
             tenant_id,
+            ctx,
         ),
 
         SqlPlan::Upsert {
@@ -133,6 +144,7 @@ pub(super) fn convert_one(
             column_defaults,
             on_conflict_updates,
             tenant_id,
+            ctx,
         ),
 
         SqlPlan::KvInsert {
@@ -148,6 +160,7 @@ pub(super) fn convert_one(
             *intent,
             on_conflict_updates,
             tenant_id,
+            ctx,
         ),
 
         SqlPlan::Update {
@@ -165,6 +178,7 @@ pub(super) fn convert_one(
             target_keys,
             *returning,
             tenant_id,
+            ctx,
         ),
 
         SqlPlan::Delete {
@@ -172,7 +186,7 @@ pub(super) fn convert_one(
             engine,
             filters,
             target_keys,
-        } => super::dml::convert_delete(collection, engine, filters, target_keys, tenant_id),
+        } => super::dml::convert_delete(collection, engine, filters, target_keys, tenant_id, ctx),
 
         SqlPlan::Truncate {
             collection,
@@ -240,7 +254,7 @@ pub(super) fn convert_one(
         }),
 
         SqlPlan::TimeseriesIngest { collection, rows } => {
-            super::scan::convert_timeseries_ingest(collection, rows, tenant_id)
+            super::scan::convert_timeseries_ingest(collection, rows, tenant_id, ctx)
         }
 
         SqlPlan::VectorSearch {

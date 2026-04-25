@@ -104,6 +104,9 @@ pub async fn search_vector(
     .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
 
     let schema = Arc::new(vec![text_field("result")]);
+    let payload = crate::control::server::response_translate::translate_vector_search_payload(
+        &payload, state, collection,
+    );
     let text = crate::data::executor::response_codec::decode_payload_to_json(&payload);
     let mut encoder = DataRowEncoder::new(schema.clone());
     encoder

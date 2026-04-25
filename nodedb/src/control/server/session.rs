@@ -250,9 +250,17 @@ impl Session {
                         detail: "missing 'document_id'".into(),
                     })?
                     .to_string();
+                let pk_bytes = document_id.as_bytes().to_vec();
+                let surrogate = self
+                    .state
+                    .surrogate_assigner
+                    .lookup(&collection, &pk_bytes)?
+                    .unwrap_or(nodedb_types::Surrogate::ZERO);
                 PhysicalPlan::Document(DocumentOp::PointGet {
                     collection,
                     document_id,
+                    surrogate,
+                    pk_bytes,
                     rls_filters: Vec::new(),
                     system_as_of_ms: None,
                     valid_at_ms: None,
@@ -321,12 +329,17 @@ impl Session {
                 // Decode base64 delta. For now accept raw bytes if not valid base64.
                 let delta = delta_b64.as_bytes().to_vec();
                 let peer_id = body["peer_id"].as_u64().unwrap_or(0);
+                let surrogate = self
+                    .state
+                    .surrogate_assigner
+                    .assign(&collection, document_id.as_bytes())?;
                 PhysicalPlan::Crdt(CrdtOp::Apply {
                     collection,
                     document_id,
                     delta,
                     peer_id,
                     mutation_id: 0,
+                    surrogate,
                 })
             }
             "graph_rag_fusion" => {

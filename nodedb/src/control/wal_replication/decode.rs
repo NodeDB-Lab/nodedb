@@ -3,82 +3,170 @@
 use super::types::{ReplicatedEntry, ReplicatedWrite};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, KvOp, VectorOp};
+use crate::control::surrogate::SurrogateAssigner;
 use crate::types::{TenantId, VShardId};
 
 ///
 /// Returns `None` if the data is not a valid ReplicatedEntry (e.g., ConfChange or no-op).
-pub fn from_replicated_entry(data: &[u8]) -> Option<(TenantId, VShardId, PhysicalPlan)> {
-    let entry = ReplicatedEntry::from_bytes(data)?;
-    let plan = to_physical_plan(&entry.write);
-    Some((
+///
+/// `assigner`, when `Some`, drives follower-local surrogate binding for
+/// the variants that carry one: each insert/upsert/put re-derives its
+/// stable identity by calling `assigner.assign(collection, pk_bytes)`,
+/// which writes the binding to the local catalog and emits a
+/// `SurrogateBind` WAL record. When `None`, all surrogate fields fall
+/// back to `Surrogate::ZERO` (used by tests that exercise the decoder
+/// in isolation without spinning up `SharedState`).
+pub fn from_replicated_entry(
+    data: &[u8],
+    assigner: Option<&SurrogateAssigner>,
+) -> crate::Result<Option<(TenantId, VShardId, PhysicalPlan)>> {
+    let entry = match ReplicatedEntry::from_bytes(data) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    let plan = to_physical_plan(&entry.write, assigner)?;
+    Ok(Some((
         TenantId::new(entry.tenant_id),
         VShardId::new(entry.vshard_id),
         plan,
-    ))
+    )))
+}
+
+fn assign_or_zero(
+    assigner: Option<&SurrogateAssigner>,
+    collection: &str,
+    pk_bytes: &[u8],
+) -> crate::Result<nodedb_types::Surrogate> {
+    match assigner {
+        Some(a) => a.assign(collection, pk_bytes),
+        None => Ok(nodedb_types::Surrogate::ZERO),
+    }
 }
 
 /// Convert a ReplicatedWrite back into a PhysicalPlan for Data Plane execution.
-fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
-    match write {
+fn to_physical_plan(
+    write: &ReplicatedWrite,
+    assigner: Option<&SurrogateAssigner>,
+) -> crate::Result<PhysicalPlan> {
+    Ok(match write {
         ReplicatedWrite::PointPut {
             collection,
             document_id,
             value,
-        } => PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: collection.clone(),
-            document_id: document_id.clone(),
-            value: value.clone(),
-        }),
+        } => {
+            let pk_bytes = document_id.as_bytes().to_vec();
+            let surrogate = assign_or_zero(assigner, collection, &pk_bytes)?;
+            PhysicalPlan::Document(DocumentOp::PointPut {
+                collection: collection.clone(),
+                document_id: document_id.clone(),
+                value: value.clone(),
+                surrogate,
+                pk_bytes,
+            })
+        }
         ReplicatedWrite::PointInsert {
             collection,
             document_id,
             value,
             if_absent,
-        } => PhysicalPlan::Document(DocumentOp::PointInsert {
-            collection: collection.clone(),
-            document_id: document_id.clone(),
-            value: value.clone(),
-            if_absent: *if_absent,
-        }),
+        } => {
+            let surrogate = assign_or_zero(assigner, collection, document_id.as_bytes())?;
+            PhysicalPlan::Document(DocumentOp::PointInsert {
+                collection: collection.clone(),
+                document_id: document_id.clone(),
+                value: value.clone(),
+                if_absent: *if_absent,
+                surrogate,
+            })
+        }
         ReplicatedWrite::PointDelete {
             collection,
             document_id,
-        } => PhysicalPlan::Document(DocumentOp::PointDelete {
-            collection: collection.clone(),
-            document_id: document_id.clone(),
-        }),
+        } => {
+            let pk_bytes = document_id.as_bytes().to_vec();
+            // Followers re-derive the surrogate via the local catalog
+            // rev table; a missing binding means the row is unknown to
+            // this replica and the delete is a no-op once dispatched.
+            let surrogate = match assigner {
+                Some(a) => a
+                    .lookup(collection, &pk_bytes)?
+                    .unwrap_or(nodedb_types::Surrogate::ZERO),
+                None => nodedb_types::Surrogate::ZERO,
+            };
+            PhysicalPlan::Document(DocumentOp::PointDelete {
+                collection: collection.clone(),
+                document_id: document_id.clone(),
+                surrogate,
+                pk_bytes,
+            })
+        }
         ReplicatedWrite::PointUpdate {
             collection,
             document_id,
             updates,
-        } => PhysicalPlan::Document(DocumentOp::PointUpdate {
-            collection: collection.clone(),
-            document_id: document_id.clone(),
-            updates: updates.clone(),
-            returning: false,
-        }),
+        } => {
+            let pk_bytes = document_id.as_bytes().to_vec();
+            let surrogate = match assigner {
+                Some(a) => a
+                    .lookup(collection, &pk_bytes)?
+                    .unwrap_or(nodedb_types::Surrogate::ZERO),
+                None => nodedb_types::Surrogate::ZERO,
+            };
+            PhysicalPlan::Document(DocumentOp::PointUpdate {
+                collection: collection.clone(),
+                document_id: document_id.clone(),
+                surrogate,
+                pk_bytes,
+                updates: updates.clone(),
+                returning: false,
+            })
+        }
         ReplicatedWrite::VectorInsert {
             collection,
             vector,
             dim,
             field_name,
-            doc_id,
-        } => PhysicalPlan::Vector(VectorOp::Insert {
-            collection: collection.clone(),
-            vector: vector.clone(),
-            dim: *dim,
-            field_name: field_name.clone(),
-            doc_id: doc_id.clone(),
-        }),
+            pk_bytes,
+        } => {
+            // Followers re-derive surrogate identity locally. With a
+            // PK we share the leader's binding; without one (headless
+            // batch element), allocate a follower-local anonymous
+            // surrogate so the row is still globally addressable.
+            let surrogate = match (assigner, pk_bytes) {
+                (Some(a), Some(pk)) => a.assign(collection, pk)?,
+                (Some(a), None) => a.assign_anonymous(collection)?,
+                (None, _) => nodedb_types::Surrogate::ZERO,
+            };
+            PhysicalPlan::Vector(VectorOp::Insert {
+                collection: collection.clone(),
+                vector: vector.clone(),
+                dim: *dim,
+                field_name: field_name.clone(),
+                surrogate,
+            })
+        }
         ReplicatedWrite::VectorBatchInsert {
             collection,
             vectors,
             dim,
-        } => PhysicalPlan::Vector(VectorOp::BatchInsert {
-            collection: collection.clone(),
-            vectors: vectors.clone(),
-            dim: *dim,
-        }),
+        } => {
+            let surrogates = match assigner {
+                Some(a) => {
+                    let mut out = Vec::with_capacity(vectors.len());
+                    for _ in vectors {
+                        out.push(a.assign_anonymous(collection)?);
+                    }
+                    out
+                }
+                None => vec![nodedb_types::Surrogate::ZERO; vectors.len()],
+            };
+            PhysicalPlan::Vector(VectorOp::BatchInsert {
+                collection: collection.clone(),
+                vectors: vectors.clone(),
+                dim: *dim,
+                surrogates,
+            })
+        }
         ReplicatedWrite::VectorDelete {
             collection,
             vector_id,
@@ -110,26 +198,36 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             document_id,
             delta,
             peer_id,
-        } => PhysicalPlan::Crdt(CrdtOp::Apply {
-            collection: collection.clone(),
-            document_id: document_id.clone(),
-            delta: delta.clone(),
-            peer_id: *peer_id,
-            mutation_id: 0,
-        }),
+        } => {
+            let surrogate = assign_or_zero(assigner, collection, document_id.as_bytes())?;
+            PhysicalPlan::Crdt(CrdtOp::Apply {
+                collection: collection.clone(),
+                document_id: document_id.clone(),
+                delta: delta.clone(),
+                peer_id: *peer_id,
+                mutation_id: 0,
+                surrogate,
+            })
+        }
         ReplicatedWrite::EdgePut {
             collection,
             src_id,
             label,
             dst_id,
             properties,
-        } => PhysicalPlan::Graph(GraphOp::EdgePut {
-            collection: collection.clone(),
-            src_id: src_id.clone(),
-            label: label.clone(),
-            dst_id: dst_id.clone(),
-            properties: properties.clone(),
-        }),
+        } => {
+            let src_surrogate = assign_or_zero(assigner, collection, src_id.as_bytes())?;
+            let dst_surrogate = assign_or_zero(assigner, collection, dst_id.as_bytes())?;
+            PhysicalPlan::Graph(GraphOp::EdgePut {
+                collection: collection.clone(),
+                src_id: src_id.clone(),
+                label: label.clone(),
+                dst_id: dst_id.clone(),
+                properties: properties.clone(),
+                src_surrogate,
+                dst_surrogate,
+            })
+        }
         ReplicatedWrite::EdgeDelete {
             collection,
             src_id,
@@ -146,12 +244,16 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
             key,
             value,
             ttl_ms,
-        } => PhysicalPlan::Kv(KvOp::Put {
-            collection: collection.clone(),
-            key: key.clone(),
-            value: value.clone(),
-            ttl_ms: *ttl_ms,
-        }),
+        } => {
+            let surrogate = assign_or_zero(assigner, collection, key)?;
+            PhysicalPlan::Kv(KvOp::Put {
+                collection: collection.clone(),
+                key: key.clone(),
+                value: value.clone(),
+                ttl_ms: *ttl_ms,
+                surrogate,
+            })
+        }
         ReplicatedWrite::KvDelete { collection, keys } => PhysicalPlan::Kv(KvOp::Delete {
             collection: collection.clone(),
             keys: keys.clone(),
@@ -242,5 +344,5 @@ fn to_physical_plan(write: &ReplicatedWrite) -> PhysicalPlan {
                 index_name: index_name.clone(),
             })
         }
-    }
+    })
 }

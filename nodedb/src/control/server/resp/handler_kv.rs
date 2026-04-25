@@ -108,11 +108,16 @@ pub(super) async fn handle_set(
         }
     }
 
+    let surrogate = match state.surrogate_assigner.assign(&session.collection, &key) {
+        Ok(s) => s,
+        Err(e) => return RespValue::err(format!("ERR {e}")),
+    };
     let plan = PhysicalPlan::Kv(KvOp::Put {
         collection: session.collection.clone(),
         key,
         value,
         ttl_ms,
+        surrogate,
     });
 
     match dispatch_kv_write(state, session, plan).await {

@@ -35,9 +35,17 @@ pub(crate) fn build_point_get(
                 .to_string(),
         }),
         Some(CollectionType::Document(_)) | None => {
+            let pk_bytes = doc_id.as_bytes().to_vec();
+            let surrogate = ctx
+                .state
+                .surrogate_assigner
+                .lookup(collection, &pk_bytes)?
+                .unwrap_or(nodedb_types::Surrogate::ZERO);
             Ok(PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: collection.to_string(),
                 document_id: doc_id,
+                surrogate,
+                pk_bytes,
                 rls_filters: Vec::new(),
                 system_as_of_ms: None,
                 valid_at_ms: None,
@@ -54,12 +62,17 @@ pub(crate) fn build_point_put(
     let doc_id = require_doc_id(fields)?;
     let value = fields.data.clone().unwrap_or_default();
     match collection_type(ctx, collection) {
-        Some(CollectionType::KeyValue(_)) => Ok(PhysicalPlan::Kv(KvOp::Put {
-            collection: collection.to_string(),
-            key: doc_id.into_bytes(),
-            value,
-            ttl_ms: 0,
-        })),
+        Some(CollectionType::KeyValue(_)) => {
+            let key = doc_id.into_bytes();
+            let surrogate = ctx.state.surrogate_assigner.assign(collection, &key)?;
+            Ok(PhysicalPlan::Kv(KvOp::Put {
+                collection: collection.to_string(),
+                key,
+                value,
+                ttl_ms: 0,
+                surrogate,
+            }))
+        }
         Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
             let json_str = String::from_utf8_lossy(&value);
             let ilp_line = format!("{collection} value={json_str}\n");
@@ -68,6 +81,7 @@ pub(crate) fn build_point_put(
                 payload: ilp_line.into_bytes(),
                 format: "ilp".to_string(),
                 wal_lsn: None,
+                surrogates: Vec::new(),
             }))
         }
         Some(CollectionType::Columnar(_)) => Err(crate::Error::BadRequest {
@@ -76,10 +90,14 @@ pub(crate) fn build_point_put(
                 .to_string(),
         }),
         Some(CollectionType::Document(_)) | None => {
+            let pk_bytes = doc_id.as_bytes().to_vec();
+            let surrogate = ctx.state.surrogate_assigner.assign(collection, &pk_bytes)?;
             Ok(PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: collection.to_string(),
                 document_id: doc_id,
                 value,
+                surrogate,
+                pk_bytes,
             }))
         }
     }
@@ -109,9 +127,17 @@ pub(crate) fn build_point_delete(
                 .to_string(),
         }),
         Some(CollectionType::Document(_)) | None => {
+            let pk_bytes = doc_id.as_bytes().to_vec();
+            let surrogate = ctx
+                .state
+                .surrogate_assigner
+                .lookup(collection, &pk_bytes)?
+                .unwrap_or(nodedb_types::Surrogate::ZERO);
             Ok(PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection: collection.to_string(),
                 document_id: doc_id,
+                surrogate,
+                pk_bytes,
             }))
         }
     }
@@ -170,7 +196,11 @@ pub(crate) fn build_batch_insert(
     }))
 }
 
-pub(crate) fn build_update(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+pub(crate) fn build_update(
+    ctx: &DispatchCtx<'_>,
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
     let updates: Vec<(String, crate::bridge::physical_plan::UpdateValue)> = fields
         .updates
@@ -186,9 +216,17 @@ pub(crate) fn build_update(fields: &TextFields, collection: &str) -> crate::Resu
             )
         })
         .collect();
+    let pk_bytes = doc_id.as_bytes().to_vec();
+    let surrogate = ctx
+        .state
+        .surrogate_assigner
+        .lookup(collection, &pk_bytes)?
+        .unwrap_or(nodedb_types::Surrogate::ZERO);
     Ok(PhysicalPlan::Document(DocumentOp::PointUpdate {
         collection: collection.to_string(),
         document_id: doc_id,
+        surrogate,
+        pk_bytes,
         updates,
         returning: false,
     }))
@@ -212,9 +250,17 @@ pub(crate) fn build_scan(fields: &TextFields, collection: &str) -> crate::Result
     }))
 }
 
-pub(crate) fn build_upsert(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+pub(crate) fn build_upsert(
+    ctx: &DispatchCtx<'_>,
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
     let value = fields.data.clone().unwrap_or_default();
+    let surrogate = ctx
+        .state
+        .surrogate_assigner
+        .assign(collection, doc_id.as_bytes())?;
     Ok(PhysicalPlan::Document(DocumentOp::Upsert {
         collection: collection.to_string(),
         document_id: doc_id,
@@ -222,6 +268,7 @@ pub(crate) fn build_upsert(fields: &TextFields, collection: &str) -> crate::Resu
         // The native text protocol carries no ON CONFLICT clause; plain
         // merge semantics apply.
         on_conflict_updates: Vec::new(),
+        surrogate,
     }))
 }
 

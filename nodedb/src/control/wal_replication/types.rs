@@ -67,8 +67,13 @@ pub enum ReplicatedWrite {
         dim: usize,
         #[serde(default)]
         field_name: String,
+        /// User PK bytes (UTF-8 of the document id) when the insert
+        /// originates from a PK-bearing path; `None` for headless
+        /// inserts. Followers re-derive the surrogate via
+        /// `assigner.assign(collection, &pk_bytes)` (or
+        /// `assign_anonymous(collection)` when `None`).
         #[serde(default)]
-        doc_id: Option<String>,
+        pk_bytes: Option<Vec<u8>>,
     },
     VectorBatchInsert {
         collection: String,

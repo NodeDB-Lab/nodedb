@@ -157,11 +157,21 @@ pub async fn create_graph_index(
                     continue;
                 }
                 let shard = VShardId::from_key(parent.as_bytes());
+                let src_surrogate = state
+                    .surrogate_assigner
+                    .assign(&collection, parent.as_bytes())
+                    .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+                let dst_surrogate = state
+                    .surrogate_assigner
+                    .assign(&collection, child.as_bytes())
+                    .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
                 edges_by_shard.entry(shard).or_default().push(BatchEdge {
                     collection: collection.to_string(),
                     src_id: parent.to_string(),
                     label: index_name.clone(),
                     dst_id: child.to_string(),
+                    src_surrogate,
+                    dst_surrogate,
                 });
                 total_edges += 1;
             }

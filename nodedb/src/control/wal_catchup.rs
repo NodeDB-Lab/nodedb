@@ -134,6 +134,9 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
             payload,
             format: "ilp".to_string(),
             wal_lsn: Some(record.header.lsn),
+            // Re-derived on the engine side during apply (record carries
+            // raw ILP — row identities are reconstructed from the wire).
+            surrogates: Vec::new(),
         });
 
         // Dispatch to Data Plane — do NOT re-append to WAL (already there).

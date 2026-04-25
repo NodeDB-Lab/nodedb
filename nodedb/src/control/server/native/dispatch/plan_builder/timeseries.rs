@@ -52,5 +52,10 @@ pub(crate) fn build_ingest(fields: &TextFields, collection: &str) -> crate::Resu
         payload,
         format,
         wal_lsn: None,
+        // Native bulk ingest forwards the opaque payload (typically ILP
+        // or pre-encoded msgpack); the CP cannot enumerate row PKs
+        // without a decode pass, so the engine integration owns
+        // per-row identity binding.
+        surrogates: Vec::new(),
     }))
 }

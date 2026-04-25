@@ -147,9 +147,11 @@ pub async fn run_apply_loop(
 ) {
     while let Some(batch) = apply_rx.recv().await {
         for entry in &batch.entries {
-            let (tenant_id, vshard_id, plan) = match from_replicated_entry(&entry.data) {
-                Some(t) => t,
-                None => {
+            let decoded =
+                from_replicated_entry(&entry.data, Some(state.surrogate_assigner.as_ref()));
+            let (tenant_id, vshard_id, plan) = match decoded {
+                Ok(Some(t)) => t,
+                Ok(None) => {
                     // Couldn't deserialize — might be a different format or corrupted.
                     debug!(
                         group_id = batch.group_id,
@@ -157,6 +159,22 @@ pub async fn run_apply_loop(
                         "skipping non-ReplicatedEntry commit"
                     );
                     tracker.complete(batch.group_id, entry.index, Ok(vec![]));
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        group_id = batch.group_id,
+                        index = entry.index,
+                        error = %e,
+                        "failed to decode replicated entry (surrogate bind error)"
+                    );
+                    tracker.complete(
+                        batch.group_id,
+                        entry.index,
+                        Err(crate::Error::Internal {
+                            detail: format!("decode replicated entry: {e}"),
+                        }),
+                    );
                     continue;
                 }
             };

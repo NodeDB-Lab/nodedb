@@ -50,7 +50,7 @@ fn all_write_variants_serialize() {
             vector: vec![1.0, 2.0, 3.0],
             dim: 3,
             field_name: "embedding".into(),
-            doc_id: Some("doc-1".into()),
+            pk_bytes: Some(b"doc-1".to_vec()),
         },
         ReplicatedWrite::CrdtApply {
             collection: "c".into(),
@@ -111,12 +111,16 @@ fn to_replicated_entry_writes_only() {
         collection: "c".into(),
         document_id: "d".into(),
         value: vec![],
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
     });
     assert!(to_replicated_entry(tenant, vshard, &plan).is_some());
 
     let plan = PhysicalPlan::Document(DocumentOp::PointGet {
         collection: "c".into(),
         document_id: "d".into(),
+        surrogate: nodedb_types::Surrogate::ZERO,
+        pk_bytes: Vec::new(),
         rls_filters: Vec::new(),
         system_as_of_ms: None,
         valid_at_ms: None,

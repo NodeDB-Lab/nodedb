@@ -74,6 +74,7 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
             collection,
             document_id,
             value,
+            ..
         }
         | DocumentOp::PointInsert {
             collection,
@@ -112,6 +113,7 @@ fn classify_document_op(op: &DocumentOp) -> Option<DmlWriteInfo> {
         DocumentOp::PointDelete {
             collection,
             document_id,
+            ..
         } => Some(DmlWriteInfo {
             collection: collection.clone(),
             document_id: Some(document_id.clone()),
@@ -255,9 +257,18 @@ pub async fn fetch_old_row(
     collection: &str,
     document_id: &str,
 ) -> HashMap<String, nodedb_types::Value> {
+    let pk_bytes = document_id.as_bytes().to_vec();
+    let surrogate = state
+        .surrogate_assigner
+        .lookup(collection, &pk_bytes)
+        .ok()
+        .flatten()
+        .unwrap_or(nodedb_types::Surrogate::ZERO);
     let plan = crate::bridge::envelope::PhysicalPlan::Document(DocumentOp::PointGet {
         collection: collection.to_string(),
         document_id: document_id.to_string(),
+        surrogate,
+        pk_bytes,
         rls_filters: Vec::new(),
         system_as_of_ms: None,
         valid_at_ms: None,

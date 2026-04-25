@@ -5,6 +5,7 @@ use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::CrdtOp;
+use crate::control::state::SharedState;
 
 use super::require_doc_id;
 
@@ -16,7 +17,11 @@ pub(crate) fn build_read(fields: &TextFields, collection: &str) -> crate::Result
     }))
 }
 
-pub(crate) fn build_apply(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+pub(crate) fn build_apply(
+    state: &SharedState,
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
     let document_id = require_doc_id(fields)?;
     let delta = fields
         .delta
@@ -35,12 +40,17 @@ pub(crate) fn build_apply(fields: &TextFields, collection: &str) -> crate::Resul
         crate::util::fnv1a_hash(&combined)
     });
 
+    let surrogate = state
+        .surrogate_assigner
+        .assign(collection, document_id.as_bytes())?;
+
     Ok(PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: collection.to_string(),
         document_id,
         delta,
         peer_id,
         mutation_id,
+        surrogate,
     }))
 }
 

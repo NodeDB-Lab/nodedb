@@ -5,6 +5,7 @@ use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::GraphOp;
+use crate::control::server::native::dispatch::DispatchCtx;
 use crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH;
 
 use super::parse_direction;
@@ -123,7 +124,11 @@ pub(crate) fn build_subgraph(fields: &TextFields) -> crate::Result<PhysicalPlan>
     }))
 }
 
-pub(crate) fn build_edge_put(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+pub(crate) fn build_edge_put(
+    ctx: &DispatchCtx<'_>,
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
     if collection.is_empty() {
         return Err(crate::Error::BadRequest {
             detail: "edge PUT requires a non-empty collection".to_string(),
@@ -152,12 +157,22 @@ pub(crate) fn build_edge_put(fields: &TextFields, collection: &str) -> crate::Re
         .as_ref()
         .map(|v| sonic_rs::to_string(v).unwrap_or_default())
         .unwrap_or_default();
+    let src_surrogate = ctx
+        .state
+        .surrogate_assigner
+        .assign(collection, src.as_bytes())?;
+    let dst_surrogate = ctx
+        .state
+        .surrogate_assigner
+        .assign(collection, dst.as_bytes())?;
     Ok(PhysicalPlan::Graph(GraphOp::EdgePut {
         collection: collection.to_string(),
         src_id: src.clone(),
         label: label.clone(),
         dst_id: dst.clone(),
         properties: props.into_bytes(),
+        src_surrogate,
+        dst_surrogate,
     }))
 }
 

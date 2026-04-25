@@ -9,6 +9,7 @@ pub mod native;
 pub mod pgwire;
 pub mod post_aggregate;
 pub mod resp;
+pub mod response_translate;
 pub mod session;
 pub mod session_auth;
 pub mod sync;

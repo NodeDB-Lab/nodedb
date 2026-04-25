@@ -2,6 +2,7 @@
 
 use nodedb_types::protocol::TextFields;
 
+use super::super::DispatchCtx;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::VectorOp;
 
@@ -28,6 +29,7 @@ pub(crate) fn build_search(fields: &TextFields, collection: &str) -> crate::Resu
 }
 
 pub(crate) fn build_batch_insert(
+    ctx: &DispatchCtx<'_>,
     fields: &TextFields,
     collection: &str,
 ) -> crate::Result<PhysicalPlan> {
@@ -47,14 +49,26 @@ pub(crate) fn build_batch_insert(
     let dim = batch_vectors[0].embedding.len();
     let vectors: Vec<Vec<f32>> = batch_vectors.iter().map(|v| v.embedding.clone()).collect();
 
+    // Headless batch — every vector gets a fresh anonymous surrogate.
+    let assigner = &ctx.state.surrogate_assigner;
+    let mut surrogates = Vec::with_capacity(vectors.len());
+    for _ in &vectors {
+        surrogates.push(assigner.assign_anonymous(collection)?);
+    }
+
     Ok(PhysicalPlan::Vector(VectorOp::BatchInsert {
         collection: collection.to_string(),
         vectors,
         dim,
+        surrogates,
     }))
 }
 
-pub(crate) fn build_insert(fields: &TextFields, collection: &str) -> crate::Result<PhysicalPlan> {
+pub(crate) fn build_insert(
+    ctx: &DispatchCtx<'_>,
+    fields: &TextFields,
+    collection: &str,
+) -> crate::Result<PhysicalPlan> {
     let vector = fields
         .vector
         .as_ref()
@@ -65,14 +79,19 @@ pub(crate) fn build_insert(fields: &TextFields, collection: &str) -> crate::Resu
         .clone();
     let dim = vector.len();
     let field_name = fields.field_name.clone().unwrap_or_default();
-    let doc_id = fields.document_id.clone();
+
+    let assigner = &ctx.state.surrogate_assigner;
+    let surrogate = match fields.document_id.as_deref() {
+        Some(pk) if !pk.is_empty() => assigner.assign(collection, pk.as_bytes())?,
+        _ => assigner.assign_anonymous(collection)?,
+    };
 
     Ok(PhysicalPlan::Vector(VectorOp::Insert {
         collection: collection.to_string(),
         vector,
         dim,
         field_name,
-        doc_id,
+        surrogate,
     }))
 }
 

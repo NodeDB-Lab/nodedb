@@ -122,12 +122,18 @@ pub async fn crdt_apply(
 
     let tenant_id = identity.tenant_id;
 
+    let surrogate = state
+        .surrogate_assigner
+        .assign(collection, document_id.as_bytes())
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+
     let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: collection.clone(),
         document_id: document_id.clone(),
         delta,
         peer_id: identity.user_id,
         mutation_id: 0,
+        surrogate,
     });
 
     super::sync_dispatch::dispatch_async(

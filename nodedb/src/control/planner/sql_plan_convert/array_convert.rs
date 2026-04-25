@@ -214,6 +214,13 @@ pub(super) fn convert_insert_array(
     let wal = ctx.wal.as_ref().ok_or_else(|| crate::Error::PlanError {
         detail: "INSERT INTO ARRAY: no WAL wired into convert context".into(),
     })?;
+    let surrogate_assigner =
+        ctx.surrogate_assigner
+            .as_ref()
+            .ok_or_else(|| crate::Error::PlanError {
+                detail: "INSERT INTO ARRAY: no surrogate assigner wired into convert context"
+                    .into(),
+            })?;
 
     let entry = {
         let cat = array_catalog.read().map_err(|_| crate::Error::PlanError {
@@ -230,12 +237,25 @@ pub(super) fn convert_insert_array(
             detail: format!("array schema decode: {e}"),
         })?;
 
-    // Coerce every row to typed engine cells.
+    // Coerce every row to typed engine cells. Each `(array, coord-tuple)`
+    // pair is bound to a stable global surrogate via the catalog
+    // surrogate map; UPSERT semantics (re-insert at same coord) preserve
+    // the original surrogate.
     let mut cells: Vec<ArrayPutCell> = Vec::with_capacity(rows.len());
     for row in rows {
         let coord = coerce_coords(&row.coords, &schema)?;
         let attrs = coerce_attrs(&row.attrs, &schema)?;
-        cells.push(ArrayPutCell { coord, attrs });
+        let pk_bytes =
+            zerompk::to_msgpack_vec(&coord).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("array coord pk encode: {e}"),
+            })?;
+        let surrogate = surrogate_assigner.assign(name, &pk_bytes)?;
+        cells.push(ArrayPutCell {
+            coord,
+            attrs,
+            surrogate,
+        });
     }
     let cells_msgpack =
         zerompk::to_msgpack_vec(&cells).map_err(|e| crate::Error::Serialization {

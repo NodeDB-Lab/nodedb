@@ -34,15 +34,15 @@ pub(crate) fn build_plan(
         OpCode::PointDelete => document::build_point_delete(ctx, fields, collection),
         OpCode::RangeScan => document::build_range_scan(fields, collection),
         OpCode::DocumentBatchInsert => document::build_batch_insert(fields, collection),
-        OpCode::DocumentUpdate => document::build_update(fields, collection),
+        OpCode::DocumentUpdate => document::build_update(ctx, fields, collection),
         OpCode::DocumentScan => document::build_scan(fields, collection),
-        OpCode::DocumentUpsert => document::build_upsert(fields, collection),
+        OpCode::DocumentUpsert => document::build_upsert(ctx, fields, collection),
         OpCode::DocumentBulkUpdate => document::build_bulk_update(fields, collection),
         OpCode::DocumentBulkDelete => document::build_bulk_delete(fields, collection),
         // Vector.
         OpCode::VectorSearch => vector::build_search(fields, collection),
-        OpCode::VectorBatchInsert => vector::build_batch_insert(fields, collection),
-        OpCode::VectorInsert => vector::build_insert(fields, collection),
+        OpCode::VectorBatchInsert => vector::build_batch_insert(ctx, fields, collection),
+        OpCode::VectorInsert => vector::build_insert(ctx, fields, collection),
         OpCode::VectorMultiSearch => vector::build_multi_search(fields, collection),
         OpCode::VectorDelete => vector::build_delete(fields, collection),
         // Graph.
@@ -51,7 +51,7 @@ pub(crate) fn build_plan(
         OpCode::GraphNeighbors => graph::build_neighbors(fields),
         OpCode::GraphPath => graph::build_path(fields),
         OpCode::GraphSubgraph => graph::build_subgraph(fields),
-        OpCode::EdgePut => graph::build_edge_put(fields, collection),
+        OpCode::EdgePut => graph::build_edge_put(ctx, fields, collection),
         OpCode::EdgeDelete => graph::build_edge_delete(fields, collection),
         // KV.
         OpCode::KvScan => kv::build_scan(fields, collection),
@@ -64,7 +64,7 @@ pub(crate) fn build_plan(
         OpCode::KvFieldSet => kv::build_field_set(fields, collection),
         // CRDT.
         OpCode::CrdtRead => crdt::build_read(fields, collection),
-        OpCode::CrdtApply => crdt::build_apply(fields, collection),
+        OpCode::CrdtApply => crdt::build_apply(ctx.state, fields, collection),
         OpCode::AlterCollectionPolicy => crdt::build_alter_policy(fields, collection),
         // Text/Search.
         OpCode::TextSearch => text::build_search(fields, collection),
@@ -76,7 +76,7 @@ pub(crate) fn build_plan(
         OpCode::TimeseriesIngest => timeseries::build_ingest(fields, collection),
         // Columnar.
         OpCode::ColumnarScan => columnar::build_scan(fields, collection),
-        OpCode::ColumnarInsert => columnar::build_insert(fields, collection),
+        OpCode::ColumnarInsert => columnar::build_insert(ctx, fields, collection),
         // Graph DDL.
         OpCode::GraphAlgo => graph::build_algo(fields, collection),
         OpCode::GraphMatch => graph::build_match(fields, collection),

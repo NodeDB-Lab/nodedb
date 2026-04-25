@@ -110,10 +110,18 @@ pub async fn tree_sum(
     for node_id in &all_ids {
         for coll_name in &collections_to_search {
             let coll_vshard = VShardId::from_collection(coll_name);
+            let pk_bytes = node_id.as_bytes().to_vec();
+            let surrogate = state
+                .surrogate_assigner
+                .lookup(coll_name, &pk_bytes)
+                .map_err(|e| sqlstate_error("XX000", &format!("surrogate lookup: {e}")))?
+                .unwrap_or(nodedb_types::Surrogate::ZERO);
             let get_plan =
                 PhysicalPlan::Document(crate::bridge::physical_plan::DocumentOp::PointGet {
                     collection: coll_name.clone(),
                     document_id: node_id.clone(),
+                    surrogate,
+                    pk_bytes,
                     rls_filters: Vec::new(),
                     system_as_of_ms: None,
                     valid_at_ms: None,

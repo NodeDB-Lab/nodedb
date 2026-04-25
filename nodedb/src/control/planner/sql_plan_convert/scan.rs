@@ -207,6 +207,7 @@ pub(super) fn convert_point_get(
     key_column: &str,
     key_value: &SqlValue,
     tenant_id: TenantId,
+    ctx: &super::convert::ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let physical = match engine {
@@ -216,9 +217,24 @@ pub(super) fn convert_point_get(
             rls_filters: Vec::new(),
         }),
         EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
+            let pk_string = sql_value_to_string(key_value);
+            let pk_bytes = pk_string.clone().into_bytes();
+            let surrogate = match ctx.surrogate_assigner.as_ref() {
+                Some(a) => match a.lookup(collection, &pk_bytes)? {
+                    Some(s) => s,
+                    None => {
+                        // Row not bound — return zero tasks; the
+                        // dispatcher emits an empty result set.
+                        return Ok(Vec::new());
+                    }
+                },
+                None => nodedb_types::Surrogate::ZERO,
+            };
             PhysicalPlan::Document(DocumentOp::PointGet {
                 collection: collection.into(),
-                document_id: sql_value_to_string(key_value),
+                document_id: pk_string,
+                surrogate,
+                pk_bytes,
                 rls_filters: Vec::new(),
                 system_as_of_ms: None,
                 valid_at_ms: None,
@@ -412,13 +428,34 @@ pub(super) fn convert_timeseries_ingest(
     collection: &str,
     rows: &[Vec<(String, SqlValue)>],
     tenant_id: TenantId,
+    ctx: &super::convert::ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let mut payload = Vec::with_capacity(rows.len() * 128);
     write_msgpack_array_header(&mut payload, rows.len());
+    let mut surrogates: Vec<nodedb_types::Surrogate> = Vec::with_capacity(rows.len());
     for row in rows {
         let row_bytes = row_to_msgpack(row)?;
         payload.extend_from_slice(&row_bytes);
+        // Timeseries PK is the (timestamp, tag-set) tuple, which is not
+        // canonically named. Use the same (id|document_id|key) heuristic
+        // as the columnar/document path; rows with no PK column receive
+        // `Surrogate::ZERO` (downstream re-derivation owned by the
+        // engine integration once the row's natural identity is known).
+        let pk = row
+            .iter()
+            .find(|(k, _)| k == "id" || k == "document_id" || k == "key")
+            .map(|(_, v)| sql_value_to_string(v))
+            .unwrap_or_default();
+        if pk.is_empty() {
+            surrogates.push(nodedb_types::Surrogate::ZERO);
+        } else {
+            let s = match ctx.surrogate_assigner.as_ref() {
+                Some(a) => a.assign(collection, pk.as_bytes())?,
+                None => nodedb_types::Surrogate::ZERO,
+            };
+            surrogates.push(s);
+        }
     }
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -428,6 +465,7 @@ pub(super) fn convert_timeseries_ingest(
             payload,
             format: "msgpack".into(),
             wal_lsn: None,
+            surrogates,
         }),
         post_set_op: PostSetOp::None,
     }])

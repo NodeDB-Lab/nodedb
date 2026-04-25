@@ -40,9 +40,17 @@ pub async fn balance_as_of(
 
     // Read current balance from the target document.
     let vshard = VShardId::from_collection(&collection);
+    let pk_bytes = key.as_bytes().to_vec();
+    let surrogate = state
+        .surrogate_assigner
+        .lookup(&collection, &pk_bytes)
+        .map_err(|e| sqlstate_error("XX000", &format!("surrogate lookup failed: {e}")))?
+        .unwrap_or(nodedb_types::Surrogate::ZERO);
     let get_plan = PhysicalPlan::Document(crate::bridge::physical_plan::DocumentOp::PointGet {
         collection: collection.clone(),
         document_id: key.clone(),
+        surrogate,
+        pk_bytes,
         rls_filters: Vec::new(),
         system_as_of_ms: None,
         valid_at_ms: None,

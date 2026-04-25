@@ -31,8 +31,12 @@ impl nodedb_cluster::CommitApplier for SpscCommitApplier {
                 continue;
             }
 
-            match crate::control::wal_replication::from_replicated_entry(&entry.data) {
-                Some((tenant_id, vshard_id, plan)) => {
+            let decoded = crate::control::wal_replication::from_replicated_entry(
+                &entry.data,
+                Some(self.shared.surrogate_assigner.as_ref()),
+            );
+            match decoded {
+                Ok(Some((tenant_id, vshard_id, plan))) => {
                     let request = crate::bridge::envelope::Request {
                         request_id: crate::types::RequestId::new(entry.index),
                         tenant_id,
@@ -68,13 +72,20 @@ impl nodedb_cluster::CommitApplier for SpscCommitApplier {
                         }
                     }
                 }
-                None => {
+                Ok(None) => {
                     // ConfChange or unrecognized entry — skip (ConfChanges are
                     // handled by the RaftLoop before calling the applier).
                     tracing::debug!(
                         index = entry.index,
                         data_len = entry.data.len(),
                         "skipping non-data entry"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        index = entry.index,
+                        error = %e,
+                        "failed to decode replicated entry on follower (surrogate bind error)"
                     );
                 }
             }

@@ -32,8 +32,33 @@ impl SharedState {
         wal: Arc<WalManager>,
         credentials: Arc<CredentialStore>,
     ) -> Arc<Self> {
+        let wal_for_assigner = Arc::clone(&wal);
         let mut state = Self::new_inner(dispatcher, wal);
         if let Some(s) = Arc::get_mut(&mut state) {
+            // Rebuild the surrogate assigner against the supplied
+            // credential store. `new_inner` constructs the assigner
+            // from a fresh in-memory `CredentialStore` whose
+            // `catalog()` is `None`, which causes every `assign()`
+            // call to short-circuit to `Surrogate::ZERO` — collapsing
+            // every row in every test to the same substrate key.
+            let registry = Arc::clone(&s.surrogate_registry);
+            // Seed the registry's high-watermark from the catalog so
+            // restarts in a re-opened test fixture pick up where the
+            // previous session left off.
+            if let Some(catalog) = credentials.catalog()
+                && let Ok(hwm) = catalog.get_surrogate_hwm()
+                && let Ok(mut reg) = registry.write()
+            {
+                *reg = crate::control::surrogate::SurrogateRegistry::from_persisted_hwm(hwm);
+            }
+            let wal_appender: Arc<dyn crate::control::surrogate::SurrogateWalAppender> = Arc::new(
+                crate::control::surrogate::WalSurrogateAppender::new(wal_for_assigner),
+            );
+            s.surrogate_assigner = Arc::new(crate::control::surrogate::SurrogateAssigner::new(
+                Arc::clone(&registry),
+                Arc::clone(&credentials),
+                wal_appender,
+            ));
             s.credentials = credentials;
         }
         state
@@ -52,13 +77,22 @@ impl SharedState {
         // StartupSequencer after calling `SharedState::open`.
         let startup_gate = crate::control::startup::StartupGate::pre_fired();
         let test_id = Self::unique_test_id();
+        let test_credentials = Arc::new(CredentialStore::new());
+        let test_surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle = Arc::new(
+            std::sync::RwLock::new(crate::control::surrogate::SurrogateRegistry::new()),
+        );
+        let test_surrogate_assigner = Arc::new(crate::control::surrogate::SurrogateAssigner::new(
+            Arc::clone(&test_surrogate_registry),
+            Arc::clone(&test_credentials),
+            Arc::new(crate::control::surrogate::NoopWalAppender),
+        ));
         let state = Arc::new(Self {
             dispatcher: Mutex::new(dispatcher),
             tracker: RequestTracker::new(),
             wal,
             quiesce: crate::bridge::quiesce::CollectionQuiesce::new(),
             http_client: Arc::new(reqwest::Client::new()),
-            credentials: Arc::new(CredentialStore::new()),
+            credentials: Arc::clone(&test_credentials),
             audit: Arc::new(Mutex::new(AuditLog::new(10_000))),
             api_keys: ApiKeyStore::new(),
             roles: RoleStore::new(),
@@ -122,9 +156,8 @@ impl SharedState {
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             trigger_registry: crate::control::trigger::TriggerRegistry::new(),
             array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
-            surrogate_registry: Arc::new(std::sync::RwLock::new(
-                crate::control::surrogate::SurrogateRegistry::new(),
-            )),
+            surrogate_registry: Arc::clone(&test_surrogate_registry),
+            surrogate_assigner: Arc::clone(&test_surrogate_assigner),
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),
@@ -337,6 +370,19 @@ impl SharedState {
             Arc::new(std::sync::RwLock::new(initial))
         };
 
+        // Wrap the credential store in an Arc up front so the surrogate
+        // assigner (and the SharedState field) can share the same handle.
+        let credentials = Arc::new(credentials);
+        let surrogate_wal_appender: Arc<dyn crate::control::surrogate::SurrogateWalAppender> =
+            Arc::new(crate::control::surrogate::WalSurrogateAppender::new(
+                Arc::clone(&wal),
+            ));
+        let surrogate_assigner = Arc::new(crate::control::surrogate::SurrogateAssigner::new(
+            Arc::clone(&surrogate_registry_handle),
+            Arc::clone(&credentials),
+            surrogate_wal_appender,
+        ));
+
         // Pre-load permission tree definitions before wrapping in RwLock
         // (avoids blocking_write() which panics inside async runtimes).
         let mut permission_cache =
@@ -367,7 +413,7 @@ impl SharedState {
             wal,
             quiesce,
             http_client: Arc::new(reqwest::Client::new()),
-            credentials: Arc::new(credentials),
+            credentials: Arc::clone(&credentials),
             audit: Arc::new(Mutex::new(audit_log)),
             api_keys,
             roles,
@@ -375,6 +421,7 @@ impl SharedState {
             trigger_registry,
             array_catalog,
             surrogate_registry: surrogate_registry_handle,
+            surrogate_assigner,
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),

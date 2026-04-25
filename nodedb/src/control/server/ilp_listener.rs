@@ -415,6 +415,7 @@ async fn flush_ilp_batch_inner(
             payload: payload_bytes,
             format: "ilp".to_string(),
             wal_lsn,
+            surrogates: Vec::new(),
         });
 
         let response = match state.gateway.as_ref() {

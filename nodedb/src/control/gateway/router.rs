@@ -137,6 +137,7 @@ mod tests {
             key: vec![],
             value: vec![],
             ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
         });
         let routes = route_plan(plan, 99, None);
         assert_eq!(routes.len(), 1);

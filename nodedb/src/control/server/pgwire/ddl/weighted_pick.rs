@@ -147,23 +147,35 @@ pub async fn weighted_pick(
                 .unwrap_or(0)
         );
         let audit_value = nodedb_types::json_to_msgpack(&audit_entry).unwrap_or_default();
-        let audit_plan = PhysicalPlan::Kv(KvOp::Put {
-            collection: "_system_random_audit".to_string(),
-            key: audit_key.into_bytes(),
-            value: audit_value,
-            ttl_ms: 0,
-        });
-        // Audit write failure doesn't block the pick result, but log the error.
-        if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
-            state,
-            tenant_id,
-            VShardId::from_collection("_system_random_audit"),
-            audit_plan,
-            0,
-        )
-        .await
+        let audit_key_bytes = audit_key.into_bytes();
+        match state
+            .surrogate_assigner
+            .assign("_system_random_audit", &audit_key_bytes)
         {
-            tracing::warn!(error = %e, "WEIGHTED_PICK: audit write failed");
+            Ok(audit_surrogate) => {
+                let audit_plan = PhysicalPlan::Kv(KvOp::Put {
+                    collection: "_system_random_audit".to_string(),
+                    key: audit_key_bytes,
+                    value: audit_value,
+                    ttl_ms: 0,
+                    surrogate: audit_surrogate,
+                });
+                // Audit write failure doesn't block the pick result, but log the error.
+                if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
+                    state,
+                    tenant_id,
+                    VShardId::from_collection("_system_random_audit"),
+                    audit_plan,
+                    0,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "WEIGHTED_PICK: audit write failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "WEIGHTED_PICK: audit surrogate bind failed");
+            }
         }
     }
 

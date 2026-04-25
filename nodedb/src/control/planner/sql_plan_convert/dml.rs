@@ -1,6 +1,7 @@
 //! DML plan conversions (INSERT, UPDATE, DELETE).
 
 use nodedb_sql::types::{EngineType, Filter, KvInsertIntent, SqlExpr, SqlValue};
+use nodedb_types::Surrogate;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::ColumnarInsertIntent;
@@ -8,12 +9,29 @@ use crate::bridge::physical_plan::*;
 use crate::types::{TenantId, VShardId};
 
 use super::super::physical::{PhysicalTask, PostSetOp};
+use super::convert::ConvertContext;
 use super::filter::serialize_filters;
 use super::value::{
     assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array, sql_value_to_bytes,
     sql_value_to_msgpack, sql_value_to_string, write_msgpack_map_header, write_msgpack_str,
     write_msgpack_value,
 };
+
+/// Assign a surrogate for `(collection, pk_string)` via the context's
+/// assigner, falling back to `Surrogate::ZERO` when the context lacks
+/// one (only legitimate caller path: in-tree test fixtures that
+/// construct `ConvertContext { surrogate_assigner: None, .. }` and
+/// never actually dispatch the resulting ops to a Data Plane).
+fn assign_for_pk(
+    ctx: &ConvertContext,
+    collection: &str,
+    pk_bytes: &[u8],
+) -> crate::Result<Surrogate> {
+    match ctx.surrogate_assigner.as_ref() {
+        Some(a) => a.assign(collection, pk_bytes),
+        None => Ok(Surrogate::ZERO),
+    }
+}
 
 pub(super) fn convert_insert(
     collection: &str,
@@ -22,6 +40,7 @@ pub(super) fn convert_insert(
     column_defaults: &[(String, String)],
     if_absent: bool,
     tenant_id: TenantId,
+    ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let mut tasks = Vec::new();
@@ -75,6 +94,7 @@ pub(super) fn convert_insert(
             }
             EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
                 let value_bytes = row_to_msgpack(row)?;
+                let surrogate = assign_for_pk(ctx, collection, doc_id.as_bytes())?;
                 tasks.push(PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
@@ -83,6 +103,7 @@ pub(super) fn convert_insert(
                         document_id: doc_id,
                         value: value_bytes,
                         if_absent,
+                        surrogate,
                     }),
                     post_set_op: PostSetOp::None,
                 });
@@ -105,6 +126,7 @@ pub(super) fn convert_insert(
         } else {
             ColumnarInsertIntent::Insert
         };
+        let surrogates = columnar_row_surrogates(ctx, collection, &columnar_rows)?;
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,
@@ -114,12 +136,40 @@ pub(super) fn convert_insert(
                 format: "msgpack".into(),
                 intent,
                 on_conflict_updates: Vec::new(),
+                surrogates,
             }),
             post_set_op: PostSetOp::None,
         });
     }
 
     Ok(tasks)
+}
+
+/// Build the per-row surrogate vector for a columnar batch. Extracts
+/// the row's `id` / `document_id` / `key` field as the PK; rows with no
+/// such field receive `Surrogate::ZERO` (matching the upstream document
+/// path's empty-doc-id fallback). Length is exactly `columnar_rows.len()`
+/// so the parallel-to-rows invariant on `ColumnarOp::Insert.surrogates`
+/// holds.
+fn columnar_row_surrogates(
+    ctx: &ConvertContext,
+    collection: &str,
+    columnar_rows: &[&Vec<(String, SqlValue)>],
+) -> crate::Result<Vec<Surrogate>> {
+    let mut out = Vec::with_capacity(columnar_rows.len());
+    for row in columnar_rows {
+        let pk = row
+            .iter()
+            .find(|(k, _)| k == "id" || k == "document_id" || k == "key")
+            .map(|(_, v)| sql_value_to_string(v))
+            .unwrap_or_default();
+        if pk.is_empty() {
+            out.push(Surrogate::ZERO);
+        } else {
+            out.push(assign_for_pk(ctx, collection, pk.as_bytes())?);
+        }
+    }
+    Ok(out)
 }
 
 pub(super) fn convert_upsert(
@@ -129,6 +179,7 @@ pub(super) fn convert_upsert(
     column_defaults: &[(String, String)],
     on_conflict_updates: &[(String, SqlExpr)],
     tenant_id: TenantId,
+    ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let mut tasks = Vec::new();
@@ -154,6 +205,7 @@ pub(super) fn convert_upsert(
         match engine {
             EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
                 let value_bytes = row_to_msgpack(row)?;
+                let surrogate = assign_for_pk(ctx, collection, doc_id.as_bytes())?;
                 tasks.push(PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
@@ -162,6 +214,7 @@ pub(super) fn convert_upsert(
                         document_id: doc_id,
                         value: value_bytes,
                         on_conflict_updates: on_conflict_values.clone(),
+                        surrogate,
                     }),
                     post_set_op: PostSetOp::None,
                 });
@@ -181,6 +234,7 @@ pub(super) fn convert_upsert(
 
     if !columnar_rows.is_empty() {
         let payload = rows_to_msgpack_array(&columnar_rows, column_defaults)?;
+        let surrogates = columnar_row_surrogates(ctx, collection, &columnar_rows)?;
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,
@@ -190,6 +244,7 @@ pub(super) fn convert_upsert(
                 format: "msgpack".into(),
                 intent: ColumnarInsertIntent::Put,
                 on_conflict_updates: on_conflict_values,
+                surrogates,
             }),
             post_set_op: PostSetOp::None,
         });
@@ -205,6 +260,7 @@ pub(super) fn convert_kv_insert(
     intent: KvInsertIntent,
     on_conflict_updates: &[(String, SqlExpr)],
     tenant_id: TenantId,
+    ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     // `ON CONFLICT (key) DO UPDATE SET ... = expr`: thread per-row
     // assignments through to the Data Plane as `UpdateValue`s. The
@@ -240,18 +296,21 @@ pub(super) fn convert_kv_insert(
             }
             buf
         };
+        let surrogate = assign_for_pk(ctx, collection, &key)?;
         let op = match intent {
             KvInsertIntent::Insert => KvOp::Insert {
                 collection: collection.into(),
                 key,
                 value,
                 ttl_ms,
+                surrogate,
             },
             KvInsertIntent::InsertIfAbsent => KvOp::InsertIfAbsent {
                 collection: collection.into(),
                 key,
                 value,
                 ttl_ms,
+                surrogate,
             },
             KvInsertIntent::Put if !update_values.is_empty() => KvOp::InsertOnConflictUpdate {
                 collection: collection.into(),
@@ -259,12 +318,14 @@ pub(super) fn convert_kv_insert(
                 value,
                 ttl_ms,
                 updates: update_values.clone(),
+                surrogate,
             },
             KvInsertIntent::Put => KvOp::Put {
                 collection: collection.into(),
                 key,
                 value,
                 ttl_ms,
+                surrogate,
             },
         };
         tasks.push(PhysicalTask {
@@ -277,6 +338,7 @@ pub(super) fn convert_kv_insert(
     Ok(tasks)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn convert_update(
     collection: &str,
     engine: &EngineType,
@@ -285,6 +347,7 @@ pub(super) fn convert_update(
     target_keys: &[SqlValue],
     returning: bool,
     tenant_id: TenantId,
+    ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
     let filter_bytes = serialize_filters(filters)?;
@@ -333,15 +396,29 @@ pub(super) fn convert_update(
     }
 
     if !target_keys.is_empty() {
-        // Point updates (document engine).
+        // Point updates (document engine). Each user-PK is resolved to
+        // its bound surrogate via the catalog rev table; a missing
+        // binding means the row does not exist, so the op is dropped
+        // (semantic no-op — UPDATE on a missing key is a 0-row update).
         let mut tasks = Vec::new();
         for key in target_keys {
+            let pk_string = sql_value_to_string(key);
+            let pk_bytes = pk_string.clone().into_bytes();
+            let surrogate = match ctx.surrogate_assigner.as_ref() {
+                Some(a) => match a.lookup(collection, &pk_bytes)? {
+                    Some(s) => s,
+                    None => continue,
+                },
+                None => Surrogate::ZERO,
+            };
             tasks.push(PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
                 plan: PhysicalPlan::Document(DocumentOp::PointUpdate {
                     collection: collection.into(),
-                    document_id: sql_value_to_string(key),
+                    document_id: pk_string,
+                    surrogate,
+                    pk_bytes,
                     updates: updates.clone(),
                     returning,
                 }),
@@ -370,6 +447,7 @@ pub(super) fn convert_delete(
     filters: &[Filter],
     target_keys: &[SqlValue],
     tenant_id: TenantId,
+    ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(collection);
 
@@ -390,12 +468,23 @@ pub(super) fn convert_delete(
     if !target_keys.is_empty() {
         let mut tasks = Vec::new();
         for key in target_keys {
+            let pk_string = sql_value_to_string(key);
+            let pk_bytes = pk_string.clone().into_bytes();
+            let surrogate = match ctx.surrogate_assigner.as_ref() {
+                Some(a) => match a.lookup(collection, &pk_bytes)? {
+                    Some(s) => s,
+                    None => continue,
+                },
+                None => Surrogate::ZERO,
+            };
             tasks.push(PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
                 plan: PhysicalPlan::Document(DocumentOp::PointDelete {
                     collection: collection.into(),
-                    document_id: sql_value_to_string(key),
+                    document_id: pk_string,
+                    surrogate,
+                    pk_bytes,
                 }),
                 post_set_op: PostSetOp::None,
             });

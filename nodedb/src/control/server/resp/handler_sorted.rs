@@ -60,11 +60,16 @@ pub(super) async fn handle_zadd(
         }))
         .unwrap_or_default();
 
+        let surrogate = match state.surrogate_assigner.assign(&index_name, &member) {
+            Ok(s) => s,
+            Err(e) => return RespValue::err(format!("ERR {e}")),
+        };
         let plan = PhysicalPlan::Kv(KvOp::Put {
             collection: index_name.clone(),
             key: member,
             value,
             ttl_ms: 0,
+            surrogate,
         });
 
         match dispatch_kv_write(state, session, plan).await {

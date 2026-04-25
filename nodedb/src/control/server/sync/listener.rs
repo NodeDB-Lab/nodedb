@@ -262,6 +262,7 @@ async fn handle_sync_session(
                                         payload: ingest.ilp_payload,
                                         format: "ilp".to_string(),
                                         wal_lsn: None,
+                                        surrogates: Vec::new(),
                                     },
                                 );
                                 // Use CrdtSync source to prevent triggers on synced data.

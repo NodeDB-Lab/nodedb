@@ -506,6 +506,11 @@ impl NodeDbPgHandler {
                 // `execute_kv_scan`, which already injects `key` at the
                 // engine level.
                 let payload = maybe_wrap_kv_point_get(&plan_for_response, &resp.payload);
+                let payload = crate::control::server::response_translate::translate_if_vector(
+                    &payload,
+                    &plan_for_response,
+                    &self.state,
+                );
                 responses.push(payload_to_response(&payload, plan_kind));
             }
         }

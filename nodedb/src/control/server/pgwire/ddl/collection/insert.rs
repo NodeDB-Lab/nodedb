@@ -195,12 +195,24 @@ pub async fn insert_document(
                 )));
             }
         }
+        let surrogate = match state
+            .surrogate_assigner
+            .assign(&parsed.coll_name, parsed.doc_id.as_bytes())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return Some(Err(sqlstate_error(
+                    "XX000",
+                    &format!("surrogate assign: {e}"),
+                )));
+            }
+        };
         let vec_plan = crate::bridge::envelope::PhysicalPlan::Vector(VectorOp::Insert {
             collection: parsed.coll_name.clone(),
             vector,
             dim,
             field_name: field_name.clone(),
-            doc_id: Some(parsed.doc_id.clone()),
+            surrogate,
         });
 
         if let Some(err) = dispatch_plan(state, tenant_id, vec_vshard, vec_plan).await {

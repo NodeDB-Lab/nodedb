@@ -219,6 +219,7 @@ mod tests {
                 array_catalog: None,
                 credentials: None,
                 wal: None,
+                surrogate_assigner: None,
             },
         )
         .expect("convert insert-select");
@@ -264,6 +265,7 @@ mod tests {
                 array_catalog: None,
                 credentials: None,
                 wal: None,
+                surrogate_assigner: None,
             },
         )
         .expect("convert insert-select with star");

@@ -143,12 +143,32 @@ pub(super) async fn validate_delta_constraints(
         return SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
     }
 
+    let surrogate = match shared
+        .surrogate_assigner
+        .assign(&delta_msg.collection, delta_msg.document_id.as_bytes())
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "sync: surrogate assignment failed");
+            let reject = DeltaRejectMsg {
+                mutation_id: delta_msg.mutation_id,
+                reason: e.to_string(),
+                compensation: Some(CompensationHint::Custom {
+                    constraint: "surrogate".into(),
+                    detail: e.to_string(),
+                }),
+            };
+            return SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+        }
+    };
+
     let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: delta_msg.collection.clone(),
         document_id: delta_msg.document_id.clone(),
         delta: delta_msg.delta.clone(),
         peer_id: delta_msg.peer_id,
         mutation_id: delta_msg.mutation_id,
+        surrogate,
     });
 
     shared.tenant_request_start(tenant_id);

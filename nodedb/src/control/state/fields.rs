@@ -267,6 +267,11 @@ pub struct SharedState {
     /// every CP path that calls `assign_surrogate`.
     pub surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle,
 
+    /// Owning CP-side surrogate assigner. Threaded into every INSERT/UPSERT
+    /// path that needs to bind a `(collection, pk_bytes)` tuple to a
+    /// stable `Surrogate` before the op crosses the SPSC bridge.
+    pub surrogate_assigner: Arc<crate::control::surrogate::SurrogateAssigner>,
+
     /// Cached parsed procedural blocks for triggers and procedures.
     pub block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache,
 

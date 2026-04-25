@@ -35,6 +35,8 @@ pub fn wal_append_if_write_with_creds(
             collection,
             document_id,
             value,
+            surrogate: _,
+            pk_bytes: _,
         }) => {
             let entry =
                 zerompk::to_msgpack_vec(&(collection, document_id, value)).map_err(|e| {
@@ -48,6 +50,8 @@ pub fn wal_append_if_write_with_creds(
         PhysicalPlan::Document(DocumentOp::PointDelete {
             collection,
             document_id,
+            surrogate: _,
+            pk_bytes: _,
         }) => {
             let entry = zerompk::to_msgpack_vec(&(collection, document_id)).map_err(|e| {
                 crate::Error::Serialization {
@@ -62,19 +66,33 @@ pub fn wal_append_if_write_with_creds(
             vector,
             dim,
             field_name,
-            doc_id,
+            surrogate,
         }) => {
-            let entry = zerompk::to_msgpack_vec(&(collection, vector, dim, field_name, doc_id))
-                .map_err(|e| crate::Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!("wal vector insert: {e}"),
-                })?;
+            // The local-WAL record carries the surrogate as a u32 so
+            // recovery can rebind without consulting the catalog. The
+            // `Option<String>` slot remains for follower decoders that
+            // pre-date surrogate identity (compatibility shape only —
+            // always None on this path).
+            let doc_id_compat: Option<String> = None;
+            let entry = zerompk::to_msgpack_vec(&(
+                collection,
+                vector,
+                dim,
+                field_name,
+                doc_id_compat,
+                surrogate.as_u32(),
+            ))
+            .map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("wal vector insert: {e}"),
+            })?;
             wal.append_vector_put(tenant_id, vshard_id, &entry)?;
         }
         PhysicalPlan::Vector(VectorOp::BatchInsert {
             collection,
             vectors,
             dim,
+            surrogates: _,
         }) => {
             let entry = zerompk::to_msgpack_vec(&(collection, vectors, dim)).map_err(|e| {
                 crate::Error::Serialization {
@@ -105,6 +123,8 @@ pub fn wal_append_if_write_with_creds(
             label,
             dst_id,
             properties,
+            src_surrogate: _,
+            dst_surrogate: _,
         }) => {
             let entry = zerompk::to_msgpack_vec(&(collection, src_id, label, dst_id, properties))
                 .map_err(|e| crate::Error::Serialization {
@@ -160,6 +180,7 @@ pub fn wal_append_if_write_with_creds(
             format: _,
             intent: _,
             on_conflict_updates: _,
+            surrogates: _,
         }) => {
             wal.append_timeseries_batch(tenant_id, vshard_id, payload)?;
         }
@@ -194,6 +215,7 @@ pub fn wal_append_if_write_with_creds(
             key,
             value,
             ttl_ms,
+            surrogate: _,
         }) => {
             let entry = zerompk::to_msgpack_vec(&("kv_put", collection, key, value, ttl_ms))
                 .map_err(|e| crate::Error::Serialization {

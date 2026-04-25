@@ -53,6 +53,11 @@ pub struct QueryContext {
     array_catalog: Option<crate::control::array_catalog::ArrayCatalogHandle>,
     /// WAL allocator — required by array DML for `wal_lsn` allocation.
     wal: Option<Arc<crate::wal::WalManager>>,
+    /// Surrogate assigner — `Some` when the planner has access to
+    /// `SharedState` (production path); `None` only for legacy
+    /// `QueryContext::new()` test fixtures that never lower to
+    /// surrogate-bearing variants.
+    surrogate_assigner: Option<Arc<crate::control::surrogate::SurrogateAssigner>>,
 }
 
 /// Inputs needed to construct an `OriginCatalog` per plan call.
@@ -97,6 +102,7 @@ impl QueryContext {
             retention_registry: None,
             array_catalog: None,
             wal: None,
+            surrogate_assigner: None,
         }
     }
 
@@ -110,10 +116,12 @@ impl QueryContext {
     /// sub-planner without a direct `Arc<SharedState>` reference
     /// would require threading one through every call site.
     pub fn for_state(state: &crate::control::state::SharedState) -> Self {
-        Self::with_catalog(
+        let mut ctx = Self::with_catalog(
             Arc::clone(&state.credentials),
             Some(Arc::clone(&state.retention_policy_registry)),
-        )
+        );
+        ctx.surrogate_assigner = Some(Arc::clone(&state.surrogate_assigner));
+        ctx
     }
 
     /// Create a query context with descriptor lease integration.
@@ -132,6 +140,7 @@ impl QueryContext {
             retention_registry: retention,
             array_catalog: Some(state.array_catalog.clone()),
             wal: Some(Arc::clone(&state.wal)),
+            surrogate_assigner: Some(Arc::clone(&state.surrogate_assigner)),
         }
     }
 
@@ -160,6 +169,7 @@ impl QueryContext {
             retention_registry: retention_policy_registry,
             array_catalog: None,
             wal: None,
+            surrogate_assigner: None,
         }
     }
 
@@ -229,6 +239,7 @@ impl QueryContext {
                 .as_ref()
                 .map(|i| Arc::clone(&i.credentials)),
             wal: self.wal.clone(),
+            surrogate_assigner: self.surrogate_assigner.clone(),
         };
         let tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
         Ok((tasks, version_set))
@@ -330,6 +341,7 @@ impl QueryContext {
                 .as_ref()
                 .map(|i| Arc::clone(&i.credentials)),
             wal: self.wal.clone(),
+            surrogate_assigner: self.surrogate_assigner.clone(),
         };
         let mut tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
 

@@ -76,6 +76,7 @@ pub async fn remote_write(
             payload: ilp_payload.into_bytes(),
             format: "ilp".into(),
             wal_lsn: None,
+            surrogates: Vec::new(),
         });
 
         // Route through gateway when available (cluster-aware dispatch);

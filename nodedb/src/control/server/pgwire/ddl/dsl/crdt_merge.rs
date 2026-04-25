@@ -66,12 +66,18 @@ pub async fn crdt_merge(
         ));
     }
 
+    let target_surrogate = state
+        .surrogate_assigner
+        .assign(collection, target_id.as_bytes())
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+
     let apply_plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: collection.to_string(),
         document_id: target_id.to_string(),
         delta: source_bytes,
         peer_id: identity.user_id,
         mutation_id: 0,
+        surrogate: target_surrogate,
     });
 
     crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async(

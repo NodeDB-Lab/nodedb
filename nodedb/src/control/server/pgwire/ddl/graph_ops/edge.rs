@@ -76,12 +76,23 @@ pub async fn insert_edge(
     let tenant_id = identity.tenant_id;
     let vshard_id = VShardId::from_key(src.as_bytes());
 
+    let src_surrogate = state
+        .surrogate_assigner
+        .assign(&collection, src.as_bytes())
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+    let dst_surrogate = state
+        .surrogate_assigner
+        .assign(&collection, dst.as_bytes())
+        .map_err(|e| sqlstate_error("XX000", &e.to_string()))?;
+
     let plan = PhysicalPlan::Graph(GraphOp::EdgePut {
         collection,
         src_id: src,
         label,
         dst_id: dst,
         properties: properties_json.into_bytes(),
+        src_surrogate,
+        dst_surrogate,
     });
 
     dispatch_utils::wal_append_if_write(&state.wal, tenant_id, vshard_id, &plan)

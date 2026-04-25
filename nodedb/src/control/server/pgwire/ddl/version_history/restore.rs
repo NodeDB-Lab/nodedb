@@ -32,10 +32,16 @@ pub async fn restore_version(
         &checkpoint_name,
     )?;
 
+    let surrogate = state
+        .surrogate_assigner
+        .assign(&collection, doc_id.as_bytes())
+        .map_err(|e| sqlstate_error("XX000", &format!("surrogate assign: {e}")))?;
+
     let plan = PhysicalPlan::Crdt(CrdtOp::RestoreToVersion {
         collection: collection.clone(),
         document_id: doc_id.clone(),
         target_version_json: vv_json,
+        surrogate,
     });
     let timeout = Duration::from_secs(state.tuning.network.default_deadline_secs);
     super::super::sync_dispatch::dispatch_async(state, tenant_id, &collection, plan, timeout)

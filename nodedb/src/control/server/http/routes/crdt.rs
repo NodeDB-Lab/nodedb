@@ -50,12 +50,19 @@ pub async fn crdt_apply(
 
     let _trace_id = extract_request_id(&headers);
 
+    let surrogate = state
+        .shared
+        .surrogate_assigner
+        .assign(&collection, doc_id.as_bytes())
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
     let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: collection.clone(),
         document_id: doc_id.to_string(),
         delta,
         peer_id: identity.user_id,
         mutation_id: 0,
+        surrogate,
     });
 
     state.shared.tenant_request_start(identity.tenant_id);
