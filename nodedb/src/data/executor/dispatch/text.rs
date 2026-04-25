@@ -15,11 +15,18 @@ impl CoreLoop {
                 query,
                 top_k,
                 fuzzy,
-                prefilter: _,
+                prefilter,
                 rls_filters,
-            } => {
-                self.execute_text_search(task, tid, collection, query, *top_k, *fuzzy, rls_filters)
-            }
+            } => self.execute_text_search(
+                task,
+                tid,
+                collection,
+                query,
+                *top_k,
+                *fuzzy,
+                prefilter.as_ref(),
+                rls_filters,
+            ),
 
             TextOp::HybridSearch {
                 collection,

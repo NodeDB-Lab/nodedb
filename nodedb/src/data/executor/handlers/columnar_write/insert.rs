@@ -3,6 +3,7 @@
 
 use nodedb_columnar::MutationEngine;
 use nodedb_types::columnar::ColumnType;
+use nodedb_types::surrogate::Surrogate;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
@@ -23,6 +24,7 @@ impl CoreLoop {
     /// PK (upsert-overwrite for `Insert` and `Put`, silent skip for
     /// `InsertIfAbsent`, merge-via-`apply_on_conflict_updates` for `Put`
     /// with non-empty `on_conflict_updates`).
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_columnar_insert(
         &mut self,
         task: &ExecutionTask,
@@ -31,6 +33,7 @@ impl CoreLoop {
         _format: &str,
         intent: ColumnarInsertIntent,
         on_conflict_updates: &[(String, UpdateValue)],
+        surrogates: &[Surrogate],
     ) -> Response {
         // Parse payload: msgpack-encoded nodedb_types::Value (array or object).
         let ndb_rows: Vec<nodedb_types::Value> = match nodedb_types::value_from_msgpack(payload) {
@@ -91,7 +94,7 @@ impl CoreLoop {
         };
         let mut accepted = 0u64;
 
-        for row in &ndb_rows {
+        for (row_idx, row) in ndb_rows.iter().enumerate() {
             let obj = match row {
                 nodedb_types::Value::Object(m) => m,
                 _ => continue,
@@ -208,11 +211,13 @@ impl CoreLoop {
                     );
                 }
             };
+            let row_surrogate = surrogates.get(row_idx).copied();
             let result = match intent {
                 ColumnarInsertIntent::InsertIfAbsent => engine.insert_if_absent(&final_values),
-                ColumnarInsertIntent::Insert | ColumnarInsertIntent::Put => {
-                    engine.insert(&final_values)
-                }
+                ColumnarInsertIntent::Insert | ColumnarInsertIntent::Put => match row_surrogate {
+                    Some(s) => engine.insert_with_surrogate(&final_values, s),
+                    None => engine.insert(&final_values),
+                },
             };
 
             match result {

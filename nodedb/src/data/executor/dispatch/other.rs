@@ -353,7 +353,7 @@ impl CoreLoop {
                 sort_keys,
                 system_as_of_ms,
                 valid_at_ms,
-                prefilter: _,
+                prefilter,
             }) => self.execute_columnar_scan(
                 task,
                 super::super::handlers::columnar_read::ColumnarScanParams {
@@ -365,6 +365,7 @@ impl CoreLoop {
                     sort_keys,
                     system_as_of_ms: *system_as_of_ms,
                     valid_at_ms: *valid_at_ms,
+                    prefilter: prefilter.as_ref(),
                 },
             ),
 
@@ -374,7 +375,7 @@ impl CoreLoop {
                 format,
                 intent,
                 on_conflict_updates,
-                surrogates: _,
+                surrogates,
             }) => self.execute_columnar_insert(
                 task,
                 collection,
@@ -382,6 +383,7 @@ impl CoreLoop {
                 format,
                 *intent,
                 on_conflict_updates,
+                surrogates,
             ),
 
             PhysicalPlan::Columnar(ColumnarOp::Update {
@@ -451,7 +453,7 @@ impl CoreLoop {
                 limit,
                 projection,
                 rls_filters,
-                prefilter: _,
+                prefilter,
             }) => self.execute_spatial_scan(
                 task,
                 tid,
@@ -464,6 +466,7 @@ impl CoreLoop {
                 *limit,
                 projection,
                 rls_filters,
+                prefilter.as_ref(),
             ),
 
             PhysicalPlan::Kv(kv_op) => self.execute_kv(task, tid, kv_op),

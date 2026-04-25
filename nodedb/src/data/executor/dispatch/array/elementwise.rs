@@ -11,7 +11,7 @@ use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::{MbrQueryPredicate, TilePayload};
 use nodedb_array::tile::sparse_tile::{SparseTile, SparseTileBuilder};
 use nodedb_array::types::ArrayId;
-use nodedb_types::Value;
+use nodedb_types::{SurrogateBitmap, Value};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::physical_plan::ArrayBinaryOp;
@@ -29,6 +29,7 @@ impl CoreLoop {
         right: &ArrayId,
         op: ArrayBinaryOp,
         _attr_idx: u32,
+        cell_filter: Option<&SurrogateBitmap>,
     ) -> Response {
         if let Err(resp) = self.ensure_array_open(task, left) {
             return resp;
@@ -102,7 +103,15 @@ impl CoreLoop {
             Ok(t) => t,
             Err(code) => return self.response_error(task, code),
         };
+        let left_union = match filter_by_surrogates(&schema, left_union, cell_filter) {
+            Ok(t) => t,
+            Err(code) => return self.response_error(task, code),
+        };
         let right_union = match union_tiles(&schema, right_tiles) {
+            Ok(t) => t,
+            Err(code) => return self.response_error(task, code),
+        };
+        let right_union = match filter_by_surrogates(&schema, right_union, cell_filter) {
             Ok(t) => t,
             Err(code) => return self.response_error(task, code),
         };
@@ -135,6 +144,42 @@ fn map_op(op: ArrayBinaryOp) -> BinaryOp {
         ArrayBinaryOp::Mul => BinaryOp::Mul,
         ArrayBinaryOp::Div => BinaryOp::Div,
     }
+}
+
+/// Return a copy of `tile` containing only rows whose surrogate is present in
+/// `filter`. When `filter` is `None` the original tile is returned unchanged.
+fn filter_by_surrogates(
+    schema: &ArraySchema,
+    tile: SparseTile,
+    filter: Option<&SurrogateBitmap>,
+) -> Result<SparseTile, ErrorCode> {
+    let f = match filter {
+        None => return Ok(tile),
+        Some(f) => f,
+    };
+    let n = tile.nnz() as usize;
+    let mut b = SparseTileBuilder::new(schema);
+    for row in 0..n {
+        let sur = tile
+            .surrogates
+            .get(row)
+            .copied()
+            .unwrap_or(nodedb_types::Surrogate::ZERO);
+        if !f.contains(sur) {
+            continue;
+        }
+        let coord: Vec<_> = tile
+            .dim_dicts
+            .iter()
+            .map(|d| d.values[d.indices[row] as usize].clone())
+            .collect();
+        let attrs: Vec<_> = tile.attr_cols.iter().map(|c| c[row].clone()).collect();
+        b.push_with_surrogate(&coord, &attrs, sur)
+            .map_err(|e| ErrorCode::Internal {
+                detail: format!("array elementwise filter: {e}"),
+            })?;
+    }
+    Ok(b.build())
 }
 
 fn union_tiles(schema: &ArraySchema, tiles: Vec<TilePayload>) -> Result<SparseTile, ErrorCode> {

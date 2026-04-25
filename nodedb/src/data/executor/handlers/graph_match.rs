@@ -13,6 +13,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u32,
         query_bytes: &[u8],
+        frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
     ) -> Response {
         debug!(core = self.core_id, tid, "graph match execution");
 
@@ -43,8 +44,12 @@ impl CoreLoop {
                 return self.response_with_payload(task, payload);
             }
         };
-        match crate::engine::graph::pattern::executor::execute(&query, partition, &self.edge_store)
-        {
+        match crate::engine::graph::pattern::executor::execute(
+            &query,
+            partition,
+            &self.edge_store,
+            frontier_bitmap,
+        ) {
             Ok(outcome) => {
                 match crate::engine::graph::pattern::executor::rows_to_msgpack(&outcome.rows) {
                     Ok(payload) => {

@@ -34,8 +34,8 @@ impl CoreLoop {
         label: &str,
         dst_id: &str,
         properties: &[u8],
-        _src_surrogate: nodedb_types::Surrogate,
-        _dst_surrogate: nodedb_types::Surrogate,
+        src_surrogate: nodedb_types::Surrogate,
+        dst_surrogate: nodedb_types::Surrogate,
     ) -> Response {
         debug!(core = self.core_id, tid, %collection, %src_id, %label, %dst_id, "edge put");
 
@@ -76,6 +76,10 @@ impl CoreLoop {
                 };
                 match csr_result {
                     Ok(()) => {
+                        // Populate the per-node surrogates so future bitmap-gated
+                        // traversals can check membership without a separate lookup.
+                        partition.set_node_surrogate(src_id, src_surrogate);
+                        partition.set_node_surrogate(dst_id, dst_surrogate);
                         self.checkpoint_coordinator.mark_dirty("sparse", 1);
                         self.response_ok(task)
                     }
@@ -147,6 +151,8 @@ impl CoreLoop {
                             },
                         );
                     }
+                    partition.set_node_surrogate(&edge.src_id, edge.src_surrogate);
+                    partition.set_node_surrogate(&edge.dst_id, edge.dst_surrogate);
                 }
                 Err(e) => {
                     return self.response_error(
@@ -231,6 +237,7 @@ impl CoreLoop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_graph_hop(
         &self,
         task: &ExecutionTask,
@@ -239,6 +246,7 @@ impl CoreLoop {
         edge_label: &Option<String>,
         direction: crate::engine::graph::edge_store::Direction,
         depth: usize,
+        frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -258,6 +266,7 @@ impl CoreLoop {
                 direction,
                 depth,
                 self.graph_tuning.max_visited,
+                frontier_bitmap,
             ),
             None => Vec::new(),
         };
@@ -392,6 +401,7 @@ impl CoreLoop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::data::executor) fn execute_graph_path(
         &self,
         task: &ExecutionTask,
@@ -400,6 +410,7 @@ impl CoreLoop {
         dst: &str,
         edge_label: &Option<String>,
         max_depth: usize,
+        frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
     ) -> Response {
         let max_depth =
             max_depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
@@ -411,6 +422,7 @@ impl CoreLoop {
                 edge_label.as_deref(),
                 max_depth,
                 self.graph_tuning.max_visited,
+                frontier_bitmap,
             ),
             None => None,
         };

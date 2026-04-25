@@ -15,7 +15,7 @@ use crate::bridge::physical_plan::SpatialPredicate;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use nodedb_types::Value;
+use nodedb_types::{Surrogate, SurrogateBitmap, Value};
 
 impl CoreLoop {
     /// Execute a spatial scan using the R-tree index.
@@ -38,6 +38,7 @@ impl CoreLoop {
         limit: usize,
         projection: &[String],
         rls_filters: &[u8],
+        prefilter: Option<&SurrogateBitmap>,
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -106,6 +107,7 @@ impl CoreLoop {
                 projection,
                 &attr_filters,
                 &row_level_filters,
+                prefilter,
             );
         }
 
@@ -156,6 +158,19 @@ impl CoreLoop {
                 Some(id) => id.clone(),
                 None => continue,
             };
+
+            // Prefilter: skip candidates not in the surrogate bitmap before
+            // any geometry evaluation. The doc_id is a hex-encoded surrogate.
+            if let Some(bitmap) = prefilter {
+                match u32::from_str_radix(&doc_id, 16) {
+                    Ok(raw) => {
+                        if !bitmap.contains(Surrogate(raw)) {
+                            continue;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
 
             let doc_bytes = match all_docs.get(&doc_id) {
                 Some(b) => b,
@@ -212,6 +227,7 @@ impl CoreLoop {
         projection: &[String],
         attr_filters: &[ScanFilter],
         rls_filters: &[ScanFilter],
+        prefilter: Option<&SurrogateBitmap>,
     ) -> Response {
         debug!(core = self.core_id, %collection, "spatial full scan (no R-tree index yet)");
 
@@ -232,6 +248,18 @@ impl CoreLoop {
         for (doc_id, doc_bytes) in &entries {
             if results.len() >= limit {
                 break;
+            }
+
+            // Prefilter: skip non-members before geometry evaluation.
+            if let Some(bitmap) = prefilter {
+                match u32::from_str_radix(doc_id, 16) {
+                    Ok(raw) => {
+                        if !bitmap.contains(Surrogate(raw)) {
+                            continue;
+                        }
+                    }
+                    Err(_) => continue,
+                }
             }
 
             let doc = match super::super::doc_format::decode_document_value(doc_bytes) {
@@ -342,4 +370,174 @@ fn expand_bbox(bbox: &nodedb_types::BoundingBox, meters: f64) -> nodedb_types::B
         bbox.max_lng + lng_delta,
         bbox.max_lat + lat_delta,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
+    use crate::bridge::physical_plan::SpatialOp;
+    use crate::data::executor::task::ExecutionTask;
+    use crate::engine::spatial::RTreeEntry;
+    use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
+    use crate::util::fnv1a_hash;
+    use nodedb_bridge::buffer::RingBuffer;
+    use nodedb_types::{Surrogate, SurrogateBitmap};
+    use std::time::{Duration, Instant};
+
+    fn make_core() -> (
+        crate::data::executor::core_loop::CoreLoop,
+        nodedb_bridge::buffer::Consumer<crate::bridge::dispatch::BridgeResponse>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (req_tx, req_rx) = RingBuffer::channel::<crate::bridge::dispatch::BridgeRequest>(64);
+        let (resp_tx, resp_rx) = RingBuffer::channel::<crate::bridge::dispatch::BridgeResponse>(64);
+        drop(req_tx);
+        let core = crate::data::executor::core_loop::CoreLoop::open(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+        )
+        .unwrap();
+        (core, resp_rx, dir)
+    }
+
+    fn make_task(plan: PhysicalPlan) -> ExecutionTask {
+        ExecutionTask::new(Request {
+            request_id: RequestId::new(1),
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            plan,
+            deadline: Instant::now() + Duration::from_secs(5),
+            priority: Priority::Normal,
+            trace_id: 0,
+            consistency: ReadConsistency::Strong,
+            idempotency_key: None,
+            event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
+        })
+    }
+
+    /// Insert a document directly into sparse storage and the R-tree.
+    /// Returns the hex doc_id.
+    fn insert_spatial_doc(
+        core: &mut crate::data::executor::core_loop::CoreLoop,
+        tid: u32,
+        collection: &str,
+        field: &str,
+        surrogate: Surrogate,
+        lng: f64,
+        lat: f64,
+    ) -> String {
+        let doc_id = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+
+        // Build a minimal msgpack document with a GeoJSON Point field.
+        let geojson = serde_json::json!({
+            field: { "type": "Point", "coordinates": [lng, lat] },
+            "id": &doc_id
+        });
+        let msgpack = nodedb_types::json_to_msgpack(&geojson).unwrap();
+
+        core.sparse.put(tid, collection, &doc_id, &msgpack).unwrap();
+
+        // Manually populate the R-tree and the doc-map.
+        let geom: nodedb_types::geometry::Geometry =
+            serde_json::from_value(serde_json::json!({"type":"Point","coordinates":[lng,lat]}))
+                .unwrap();
+        let bbox = nodedb_types::bbox::geometry_bbox(&geom);
+        let tid_id = TenantId::new(tid);
+        let spatial_key = (tid_id, collection.to_string(), field.to_string());
+        let entry_id = fnv1a_hash(doc_id.as_bytes());
+        let rtree = core.spatial_indexes.entry(spatial_key.clone()).or_default();
+        rtree.insert(RTreeEntry { id: entry_id, bbox });
+        core.spatial_doc_map.insert(
+            (tid_id, collection.to_string(), field.to_string(), entry_id),
+            doc_id.clone(),
+        );
+
+        doc_id
+    }
+
+    /// GeoJSON Point query centred on (0.0, 0.0) as bytes for DWithin.
+    fn origin_point_bytes() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"type":"Point","coordinates":[0.0,0.0]})).unwrap()
+    }
+
+    fn dummy_spatial_plan() -> PhysicalPlan {
+        PhysicalPlan::Spatial(SpatialOp::Scan {
+            collection: "places".into(),
+            field: "loc".into(),
+            predicate: crate::bridge::physical_plan::SpatialPredicate::DWithin,
+            query_geometry: origin_point_bytes(),
+            distance_meters: 1_000_000.0,
+            attribute_filters: Vec::new(),
+            limit: 100,
+            projection: Vec::new(),
+            rls_filters: Vec::new(),
+            prefilter: None,
+        })
+    }
+
+    #[test]
+    fn prefilter_skips_non_member_doc_ids() {
+        // Direct unit on the prefilter check: the candidate-loop logic
+        // parses doc_id as hex Surrogate and skips non-members.
+        let mut bitmap = SurrogateBitmap::new();
+        bitmap.insert(Surrogate(2));
+
+        let candidate_doc_ids = [
+            crate::engine::document::store::surrogate_to_doc_id(Surrogate(1)),
+            crate::engine::document::store::surrogate_to_doc_id(Surrogate(2)),
+            crate::engine::document::store::surrogate_to_doc_id(Surrogate(3)),
+        ];
+
+        let kept: Vec<_> = candidate_doc_ids
+            .iter()
+            .filter(|doc_id| match u32::from_str_radix(doc_id, 16) {
+                Ok(raw) => bitmap.contains(Surrogate(raw)),
+                Err(_) => false,
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0],
+            crate::engine::document::store::surrogate_to_doc_id(Surrogate(2))
+        );
+    }
+
+    #[test]
+    fn empty_prefilter_returns_nothing() {
+        let (mut core, _resp_rx, _dir) = make_core();
+        let tid = 1u32;
+        let collection = "geo";
+        let field = "loc";
+
+        insert_spatial_doc(&mut core, tid, collection, field, Surrogate(10), 0.0, 0.0);
+
+        let task = make_task(dummy_spatial_plan());
+        let empty_bitmap = SurrogateBitmap::new();
+
+        let resp = core.execute_spatial_scan(
+            &task,
+            tid,
+            collection,
+            field,
+            &crate::bridge::physical_plan::SpatialPredicate::DWithin,
+            &origin_point_bytes(),
+            1_000_000.0,
+            &[],
+            100,
+            &[],
+            &[],
+            Some(&empty_bitmap),
+        );
+        assert_eq!(resp.status, Status::Ok);
+        let decoded: Vec<nodedb_types::Value> =
+            zerompk::from_msgpack(resp.payload.as_bytes()).unwrap_or_default();
+        assert!(decoded.is_empty(), "empty prefilter must return no results");
+    }
 }

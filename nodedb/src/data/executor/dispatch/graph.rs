@@ -48,8 +48,16 @@ impl CoreLoop {
                 depth,
                 options: _,
                 rls_filters: _,
-                frontier_bitmap: _,
-            } => self.execute_graph_hop(task, tid, start_nodes, edge_label, *direction, *depth),
+                frontier_bitmap,
+            } => self.execute_graph_hop(
+                task,
+                tid,
+                start_nodes,
+                edge_label,
+                *direction,
+                *depth,
+                frontier_bitmap.as_ref(),
+            ),
 
             GraphOp::Neighbors {
                 node_id,
@@ -80,8 +88,16 @@ impl CoreLoop {
                 max_depth,
                 options: _,
                 rls_filters: _,
-                frontier_bitmap: _,
-            } => self.execute_graph_path(task, tid, src, dst, edge_label, *max_depth),
+                frontier_bitmap,
+            } => self.execute_graph_path(
+                task,
+                tid,
+                src,
+                dst,
+                edge_label,
+                *max_depth,
+                frontier_bitmap.as_ref(),
+            ),
 
             GraphOp::Subgraph {
                 start_nodes,
@@ -123,8 +139,8 @@ impl CoreLoop {
 
             GraphOp::Match {
                 query,
-                frontier_bitmap: _,
-            } => self.execute_graph_match(task, tid, query),
+                frontier_bitmap,
+            } => self.execute_graph_match(task, tid, query, frontier_bitmap.as_ref()),
 
             GraphOp::SetNodeLabels { node_id, labels } => {
                 let partition = self.csr_partition_mut(tid);

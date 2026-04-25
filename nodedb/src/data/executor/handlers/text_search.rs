@@ -22,6 +22,7 @@ impl CoreLoop {
         query: &str,
         top_k: usize,
         fuzzy: bool,
+        prefilter: Option<&nodedb_types::SurrogateBitmap>,
         rls_filters: &[u8],
     ) -> Response {
         let tenant_id = TenantId::new(tid);
@@ -42,7 +43,7 @@ impl CoreLoop {
 
         match self
             .inverted
-            .search(tenant_id, collection, query, fetch_k, fuzzy)
+            .search(tenant_id, collection, query, fetch_k, fuzzy, prefilter)
         {
             Ok(results) => {
                 // RLS post-score filtering: look up each candidate's document.
@@ -159,10 +160,10 @@ impl CoreLoop {
             Vec::new()
         };
 
-        // 2. Text search.
+        // 2. Text search (no surrogate prefilter for the text leg of hybrid search).
         let text_results = self
             .inverted
-            .search(tenant_id, collection, query_text, fetch_k, fuzzy)
+            .search(tenant_id, collection, query_text, fetch_k, fuzzy, None)
             .unwrap_or_default();
 
         // 3. Build ranked lists for weighted RRF.

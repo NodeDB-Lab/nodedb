@@ -298,12 +298,20 @@ impl InvertedIndex {
         query: &str,
         top_k: usize,
         fuzzy_enabled: bool,
+        prefilter: Option<&nodedb_types::SurrogateBitmap>,
     ) -> crate::Result<Vec<TextSearchResult>> {
-        self.inner
-            .search(tid.as_u32(), collection, query, top_k, fuzzy_enabled)
+        self.inner.search(
+            tid.as_u32(),
+            collection,
+            query,
+            top_k,
+            fuzzy_enabled,
+            prefilter,
+        )
     }
 
     /// Search with explicit boolean mode (AND or OR).
+    #[allow(clippy::too_many_arguments)]
     pub fn search_with_mode(
         &self,
         tid: TenantId,
@@ -312,9 +320,17 @@ impl InvertedIndex {
         top_k: usize,
         fuzzy_enabled: bool,
         mode: QueryMode,
+        prefilter: Option<&nodedb_types::SurrogateBitmap>,
     ) -> crate::Result<Vec<TextSearchResult>> {
-        self.inner
-            .search_with_mode(tid.as_u32(), collection, query, top_k, fuzzy_enabled, mode)
+        self.inner.search_with_mode(
+            tid.as_u32(),
+            collection,
+            query,
+            top_k,
+            fuzzy_enabled,
+            mode,
+            prefilter,
+        )
     }
 
     /// Generate highlighted text with matched query terms wrapped in tags.
@@ -368,7 +384,7 @@ mod tests {
         idx.index_document(T, "docs", "d3", "Rust programming language for systems")
             .unwrap();
 
-        let results = idx.search(T, "docs", "brown fox", 10, false).unwrap();
+        let results = idx.search(T, "docs", "brown fox", 10, false, None).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].doc_id, "d1");
     }
@@ -382,7 +398,7 @@ mod tests {
             .unwrap();
 
         let results = idx
-            .search(T, "docs", "database distribution", 10, false)
+            .search(T, "docs", "database distribution", 10, false, None)
             .unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].doc_id, "d1");
@@ -394,7 +410,7 @@ mod tests {
         idx.index_document(T, "docs", "d1", "distributed database systems")
             .unwrap();
 
-        let results = idx.search(T, "docs", "databse", 10, true).unwrap();
+        let results = idx.search(T, "docs", "databse", 10, true, None).unwrap();
         assert!(!results.is_empty());
         assert!(results[0].fuzzy);
     }
@@ -407,7 +423,7 @@ mod tests {
 
         idx.remove_document(T, "docs", "d1").unwrap();
 
-        let results = idx.search(T, "docs", "hello", 10, false).unwrap();
+        let results = idx.search(T, "docs", "hello", 10, false, None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].doc_id, "d2");
     }
@@ -418,7 +434,7 @@ mod tests {
         idx.index_document(T, "docs", "d1", "some text here")
             .unwrap();
 
-        let results = idx.search(T, "docs", "the a is", 10, false).unwrap();
+        let results = idx.search(T, "docs", "the a is", 10, false, None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -430,10 +446,10 @@ mod tests {
         idx.index_document(T, "col_b", "d1", "delta echo foxtrot")
             .unwrap();
 
-        let results = idx.search(T, "col_a", "alpha", 10, false).unwrap();
+        let results = idx.search(T, "col_a", "alpha", 10, false, None).unwrap();
         assert_eq!(results.len(), 1);
 
-        let results = idx.search(T, "col_b", "alpha", 10, false).unwrap();
+        let results = idx.search(T, "col_b", "alpha", 10, false, None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -448,12 +464,12 @@ mod tests {
         idx.purge_tenant(t1).unwrap();
 
         assert!(
-            idx.search(t1, "docs", "alpha", 10, false)
+            idx.search(t1, "docs", "alpha", 10, false, None)
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            !idx.search(t2, "docs", "alpha", 10, false)
+            !idx.search(t2, "docs", "alpha", 10, false, None)
                 .unwrap()
                 .is_empty()
         );

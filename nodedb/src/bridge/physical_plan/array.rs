@@ -142,7 +142,8 @@ pub enum ArrayOp {
         op: ArrayBinaryOp,
         attr_idx: u32,
         /// Optional surrogate prefilter restricting which cells participate
-        /// in the pairwise op. Applied to the left array's surrogate column.
+        /// in the pairwise op. Applied to both operands so outer-join
+        /// fallthroughs from either side are also excluded.
         /// `None` = all cells.
         cell_filter: Option<SurrogateBitmap>,
     },

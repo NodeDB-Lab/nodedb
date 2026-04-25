@@ -1,5 +1,7 @@
 //! Scan-params struct and the base scan entry point.
 
+use nodedb_types::surrogate_bitmap::SurrogateBitmap;
+
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -31,6 +33,11 @@ pub(in crate::data::executor) struct ColumnarScanParams<'a> {
     /// `[_ts_valid_from, _ts_valid_until)` interval does not contain this
     /// point. `None` skips valid-time filtering entirely.
     pub valid_at_ms: Option<i64>,
+    /// Optional cross-engine surrogate prefilter. When `Some`, the scan
+    /// skips whole memtable blocks whose surrogate range does not intersect
+    /// the bitmap (block boundary) and skips individual rows whose surrogate
+    /// is absent from the bitmap (row boundary). `None` = no prefilter.
+    pub prefilter: Option<&'a SurrogateBitmap>,
 }
 
 impl CoreLoop {
@@ -49,6 +56,7 @@ impl CoreLoop {
             sort_keys,
             system_as_of_ms,
             valid_at_ms,
+            prefilter,
         } = params;
         let limit = if limit == 0 { 1000 } else { limit };
 
@@ -109,34 +117,83 @@ impl CoreLoop {
             .iter()
             .position(|c| c.name == "_ts_valid_until");
 
-        for row in engine.scan_memtable_rows().take(scan_budget) {
-            if !bitemporal_row_visible(
-                &row,
-                ts_system_idx,
-                ts_valid_from_idx,
-                ts_valid_until_idx,
-                system_as_of_ms,
-                valid_at_ms,
-            ) {
-                continue;
+        // Block-boundary prefilter: if a prefilter is present and none of
+        // the memtable's surrogates fall within the bitmap's [min, max]
+        // range, the entire memtable block can be skipped before any row
+        // decoding takes place.
+        let block_skipped = if let Some(bitmap) = prefilter {
+            if bitmap.is_empty() {
+                true
+            } else {
+                let surrogates = engine.memtable_surrogates();
+                // Compute the surrogate range of non-None entries in the memtable.
+                let (mt_min, mt_max) = surrogates
+                    .iter()
+                    .flatten()
+                    .fold((u32::MAX, u32::MIN), |(lo, hi), s| {
+                        (lo.min(s.0), hi.max(s.0))
+                    });
+                // If no surrogate was found (mt_min > mt_max) or the bitmap's
+                // range lies entirely outside the memtable range, skip.
+                if mt_min > mt_max {
+                    // No surrogates in memtable — cannot apply block skip.
+                    false
+                } else {
+                    let bm_min = bitmap.0.min().unwrap_or(0);
+                    let bm_max = bitmap.0.max().unwrap_or(0);
+                    // Disjoint ranges: bitmap entirely before or after memtable.
+                    bm_max < mt_min || bm_min > mt_max
+                }
             }
-            if !filter_predicates.is_empty()
-                && !row_matches_filters(&row, schema, &filter_predicates)
+        } else {
+            false
+        };
+
+        if !block_skipped {
+            for (row_surrogate, row) in engine
+                .scan_memtable_rows_with_surrogates()
+                .take(scan_budget)
             {
-                continue;
-            }
-            let mut obj = serde_json::Map::new();
-            for (i, col_def) in schema.columns.iter().enumerate() {
-                if !projection.is_empty() && !projection.iter().any(|p| p == &col_def.name) {
+                // Row-boundary prefilter: skip this row when its surrogate is
+                // absent from the bitmap. Rows without a recorded surrogate
+                // (legacy / test paths) are always included when no prefilter
+                // is active; when a prefilter is active they are excluded
+                // because the surrogate identity is unknown.
+                if let Some(bitmap) = prefilter {
+                    match row_surrogate {
+                        Some(s) if bitmap.contains(s) => {}
+                        _ => continue,
+                    }
+                }
+
+                if !bitemporal_row_visible(
+                    &row,
+                    ts_system_idx,
+                    ts_valid_from_idx,
+                    ts_valid_until_idx,
+                    system_as_of_ms,
+                    valid_at_ms,
+                ) {
                     continue;
                 }
-                if i < row.len() {
-                    obj.insert(col_def.name.clone(), value_to_json(&row[i]));
+                if !filter_predicates.is_empty()
+                    && !row_matches_filters(&row, schema, &filter_predicates)
+                {
+                    continue;
                 }
-            }
-            matched.push((row, serde_json::Value::Object(obj)));
-            if sort_keys.is_empty() && matched.len() >= limit {
-                break;
+                let mut obj = serde_json::Map::new();
+                for (i, col_def) in schema.columns.iter().enumerate() {
+                    if !projection.is_empty() && !projection.iter().any(|p| p == &col_def.name) {
+                        continue;
+                    }
+                    if i < row.len() {
+                        obj.insert(col_def.name.clone(), value_to_json(&row[i]));
+                    }
+                }
+                matched.push((row, serde_json::Value::Object(obj)));
+                if sort_keys.is_empty() && matched.len() >= limit {
+                    break;
+                }
             }
         }
 

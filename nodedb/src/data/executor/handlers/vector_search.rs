@@ -6,6 +6,7 @@
 //! at the response boundary.
 
 use nodedb_types::Surrogate;
+use roaring::RoaringBitmap;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -35,6 +36,30 @@ fn build_search_hit(
 /// Surrogate-as-u32 resolver kept for IVF-PQ bitmap filter compatibility.
 fn resolve_surrogate(collection: Option<&VectorCollection>, vector_id: u32) -> Option<Surrogate> {
     collection.and_then(|c| c.get_surrogate(vector_id))
+}
+
+/// Translate a `SurrogateBitmap` (keyed by global surrogate IDs) into a
+/// `RoaringBitmap` keyed by the collection's global vector IDs.
+///
+/// The HNSW search layer checks candidate eligibility by testing whether
+/// `(local_node_id + segment_base_id)` is present in the bitmap. Global
+/// vector IDs are the collection's own monotonic counter, distinct from
+/// surrogate IDs allocated by the Control Plane. Using surrogate IDs
+/// directly would silently pass or reject wrong nodes.
+///
+/// Surrogates without a recorded local mapping (e.g. headless inserts) are
+/// omitted from the result bitmap — they would never match anyway.
+fn surrogate_bitmap_to_global_ids(
+    collection: &VectorCollection,
+    surrogate_bm: &nodedb_types::SurrogateBitmap,
+) -> RoaringBitmap {
+    let mut local_bm = RoaringBitmap::new();
+    for surrogate in surrogate_bm.iter() {
+        if let Some(&global_id) = collection.surrogate_to_local.get(&surrogate) {
+            local_bm.insert(global_id);
+        }
+    }
+    local_bm
 }
 
 /// Encode search hits and return response.
@@ -130,8 +155,9 @@ impl CoreLoop {
         let ef = effective_ef(ef_search, fetch_k);
         let results = match filter_bitmap {
             Some(surrogate_bm) => {
-                let mut buf = Vec::with_capacity(surrogate_bm.0.serialized_size());
-                if surrogate_bm.0.serialize_into(&mut buf).is_ok() {
+                let local_bm = surrogate_bitmap_to_global_ids(collection_ref, surrogate_bm);
+                let mut buf = Vec::with_capacity(local_bm.serialized_size());
+                if local_bm.serialize_into(&mut buf).is_ok() {
                     collection_ref.search_with_bitmap_bytes(query_vector, fetch_k, ef, &buf)
                 } else {
                     collection_ref.search(query_vector, fetch_k, ef)
@@ -227,8 +253,9 @@ impl CoreLoop {
                 let ef = effective_ef(ef_search, top_k);
                 let results = match filter_bitmap {
                     Some(surrogate_bm) => {
-                        let mut buf = Vec::with_capacity(surrogate_bm.0.serialized_size());
-                        if surrogate_bm.0.serialize_into(&mut buf).is_ok() {
+                        let local_bm = surrogate_bitmap_to_global_ids(coll, surrogate_bm);
+                        let mut buf = Vec::with_capacity(local_bm.serialized_size());
+                        if local_bm.serialize_into(&mut buf).is_ok() {
                             coll.search_with_bitmap_bytes(query_vector, top_k, ef, &buf)
                         } else {
                             coll.search(query_vector, top_k, ef)
@@ -321,5 +348,99 @@ fn effective_ef(ef_search: usize, top_k: usize) -> usize {
         ef_search.max(top_k).min(MAX_EF_SEARCH)
     } else {
         top_k.saturating_mul(4).clamp(64, MAX_EF_SEARCH)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::{Surrogate, SurrogateBitmap};
+
+    use crate::engine::vector::collection::VectorCollection;
+    use crate::engine::vector::hnsw::HnswParams;
+
+    use super::surrogate_bitmap_to_global_ids;
+
+    /// Build a `VectorCollection` with `n` vectors of dimension 1.
+    /// Vector `i` is `[i as f32]` and is bound to `Surrogate(i as u32 + 1)`
+    /// (surrogates are 1-based to distinguish them from local IDs).
+    fn make_collection_with_surrogates(n: usize) -> VectorCollection {
+        let mut coll = VectorCollection::new(1, HnswParams::default());
+        for i in 0..n {
+            let surrogate = Surrogate(i as u32 + 1);
+            coll.insert_with_surrogate(vec![i as f32], surrogate);
+        }
+        coll
+    }
+
+    #[test]
+    fn surrogate_bitmap_translates_to_correct_global_ids() {
+        let coll = make_collection_with_surrogates(10);
+
+        // Allow only surrogates 1, 3, 5 (global vector IDs 0, 2, 4).
+        let mut bm = SurrogateBitmap::new();
+        bm.insert(Surrogate(1));
+        bm.insert(Surrogate(3));
+        bm.insert(Surrogate(5));
+
+        let local_bm = surrogate_bitmap_to_global_ids(&coll, &bm);
+
+        assert!(local_bm.contains(0), "Surrogate(1) → global_id 0");
+        assert!(local_bm.contains(2), "Surrogate(3) → global_id 2");
+        assert!(local_bm.contains(4), "Surrogate(5) → global_id 4");
+        assert!(
+            !local_bm.contains(1),
+            "Surrogate(2) not in bitmap → global_id 1 absent"
+        );
+        assert!(
+            !local_bm.contains(3),
+            "Surrogate(4) not in bitmap → global_id 3 absent"
+        );
+        assert_eq!(local_bm.len(), 3);
+    }
+
+    #[test]
+    fn non_member_surrogates_never_appear_in_search_results() {
+        // Insert 20 vectors, bind each to a unique surrogate.
+        let coll = make_collection_with_surrogates(20);
+
+        // Permit only even surrogates: Surrogate(2), Surrogate(4), ..., Surrogate(20).
+        // Corresponding global IDs: 1, 3, ..., 19.
+        let mut surrogate_bm = SurrogateBitmap::new();
+        for i in (2u32..=20).step_by(2) {
+            surrogate_bm.insert(Surrogate(i));
+        }
+
+        // Translate to local IDs and serialise for HNSW.
+        let local_bm = surrogate_bitmap_to_global_ids(&coll, &surrogate_bm);
+        let mut buf = Vec::new();
+        local_bm.serialize_into(&mut buf).unwrap();
+
+        // Search for nearest neighbours — all results must be even surrogates.
+        let results = coll.search_with_bitmap_bytes(&[10.0], 5, 64, &buf);
+
+        assert!(!results.is_empty(), "expected at least one result");
+        for r in &results {
+            // `r.id` is the global vector ID; the bound surrogate is global_id + 1.
+            let surrogate = Surrogate(r.id + 1);
+            assert!(
+                surrogate_bm.contains(surrogate),
+                "result surrogate {:?} (global_id={}) is not in the filter bitmap",
+                surrogate,
+                r.id
+            );
+        }
+    }
+
+    #[test]
+    fn empty_surrogate_bitmap_returns_empty_results() {
+        let coll = make_collection_with_surrogates(10);
+        let empty_bm = SurrogateBitmap::new();
+
+        let local_bm = surrogate_bitmap_to_global_ids(&coll, &empty_bm);
+        let mut buf = Vec::new();
+        local_bm.serialize_into(&mut buf).unwrap();
+
+        let results = coll.search_with_bitmap_bytes(&[5.0], 5, 64, &buf);
+        assert!(results.is_empty(), "empty bitmap should yield no results");
     }
 }

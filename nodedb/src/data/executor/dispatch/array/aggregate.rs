@@ -10,10 +10,12 @@ use std::collections::{BTreeMap, HashMap};
 use nodedb_array::query::aggregate::{
     AggregateResult, GroupAggregate, Reducer, aggregate_attr, group_by_dim,
 };
+use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::{MbrQueryPredicate, TilePayload};
-use nodedb_array::tile::sparse_tile::SparseTile;
+use nodedb_array::tile::sparse_tile::{SparseTile, SparseTileBuilder};
 use nodedb_array::types::ArrayId;
 use nodedb_array::types::coord::value::CoordValue;
+use nodedb_types::SurrogateBitmap;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::physical_plan::ArrayReducer;
@@ -66,6 +68,7 @@ impl CoreLoop {
         attr_idx: u32,
         reducer: ArrayReducer,
         group_by_dim_idx: i32,
+        cell_filter: Option<&SurrogateBitmap>,
     ) -> Response {
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
@@ -89,11 +92,27 @@ impl CoreLoop {
         let r = map_reducer(reducer);
         let attr = attr_idx as usize;
 
+        let schema = match self.array_engine.store(array_id) {
+            Ok(store) => store.schema().clone(),
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("array '{}' not open: {e}", array_id.name),
+                    },
+                );
+            }
+        };
+
         if group_by_dim_idx < 0 {
             // Scalar fold across all tiles.
             let mut acc: Option<AggregateResult> = None;
             for tile in tiles {
                 let sparse = match unwrap_sparse(tile) {
+                    Ok(s) => s,
+                    Err(code) => return self.response_error(task, code),
+                };
+                let sparse = match apply_surrogate_filter(&schema, sparse, cell_filter) {
                     Ok(s) => s,
                     Err(code) => return self.response_error(task, code),
                 };
@@ -115,6 +134,10 @@ impl CoreLoop {
         let mut by_key: HashMap<CoordValue, AggregateResult> = HashMap::new();
         for tile in tiles {
             let sparse = match unwrap_sparse(tile) {
+                Ok(s) => s,
+                Err(code) => return self.response_error(task, code),
+            };
+            let sparse = match apply_surrogate_filter(&schema, sparse, cell_filter) {
                 Ok(s) => s,
                 Err(code) => return self.response_error(task, code),
             };
@@ -159,6 +182,42 @@ fn unwrap_sparse(t: TilePayload) -> Result<SparseTile, ErrorCode> {
             detail: "dense tile payload in aggregate".to_string(),
         }),
     }
+}
+
+/// Return a new tile containing only the rows whose surrogate is present in
+/// `filter`. When `filter` is `None` the original tile is returned unchanged.
+fn apply_surrogate_filter(
+    schema: &ArraySchema,
+    tile: SparseTile,
+    filter: Option<&SurrogateBitmap>,
+) -> Result<SparseTile, ErrorCode> {
+    let f = match filter {
+        None => return Ok(tile),
+        Some(f) => f,
+    };
+    let n = tile.nnz() as usize;
+    let mut b = SparseTileBuilder::new(schema);
+    for row in 0..n {
+        let sur = tile
+            .surrogates
+            .get(row)
+            .copied()
+            .unwrap_or(nodedb_types::Surrogate::ZERO);
+        if !f.contains(sur) {
+            continue;
+        }
+        let coord: Vec<_> = tile
+            .dim_dicts
+            .iter()
+            .map(|d| d.values[d.indices[row] as usize].clone())
+            .collect();
+        let attrs: Vec<_> = tile.attr_cols.iter().map(|c| c[row].clone()).collect();
+        b.push_with_surrogate(&coord, &attrs, sur)
+            .map_err(|e| ErrorCode::Internal {
+                detail: format!("array surrogate filter: {e}"),
+            })?;
+    }
+    Ok(b.build())
 }
 
 fn encode_agg_rows(

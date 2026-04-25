@@ -146,6 +146,7 @@ impl CoreLoop {
         projection: &[String],
         computed_columns_bytes: &[u8],
         window_functions_bytes: &[u8],
+        prefilter: Option<&nodedb_types::SurrogateBitmap>,
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -271,9 +272,22 @@ impl CoreLoop {
         };
 
         match scan_result {
-            Ok(filtered) => {
+            Ok(mut filtered) => {
                 if let Some(ref m) = self.metrics {
                     m.record_document_read();
+                }
+
+                // Apply surrogate prefilter before any msgpack decode.
+                // Row keys are 8-char lowercase hex encodings of the surrogate u32.
+                // Non-members are dropped here — their body bytes are never decoded.
+                if let Some(pf) = prefilter {
+                    filtered.retain(|(doc_id, _)| {
+                        if let Ok(n) = u32::from_str_radix(doc_id, 16) {
+                            pf.contains(nodedb_types::Surrogate::new(n))
+                        } else {
+                            false
+                        }
+                    });
                 }
 
                 // Strict collections may store binary tuples. Sort and projection

@@ -43,8 +43,15 @@ impl CoreLoop {
                 slice_msgpack,
                 attr_projection,
                 limit,
-                cell_filter: _,
-            } => self.dispatch_array_slice(task, array_id, slice_msgpack, attr_projection, *limit),
+                cell_filter,
+            } => self.dispatch_array_slice(
+                task,
+                array_id,
+                slice_msgpack,
+                attr_projection,
+                *limit,
+                cell_filter.as_ref(),
+            ),
             ArrayOp::Project {
                 array_id,
                 attr_indices,
@@ -54,15 +61,29 @@ impl CoreLoop {
                 attr_idx,
                 reducer,
                 group_by_dim,
-                cell_filter: _,
-            } => self.dispatch_array_aggregate(task, array_id, *attr_idx, *reducer, *group_by_dim),
+                cell_filter,
+            } => self.dispatch_array_aggregate(
+                task,
+                array_id,
+                *attr_idx,
+                *reducer,
+                *group_by_dim,
+                cell_filter.as_ref(),
+            ),
             ArrayOp::Elementwise {
                 left,
                 right,
                 op,
                 attr_idx,
-                cell_filter: _,
-            } => self.dispatch_array_elementwise(task, left, right, *op, *attr_idx),
+                cell_filter,
+            } => self.dispatch_array_elementwise(
+                task,
+                left,
+                right,
+                *op,
+                *attr_idx,
+                cell_filter.as_ref(),
+            ),
         }
     }
 

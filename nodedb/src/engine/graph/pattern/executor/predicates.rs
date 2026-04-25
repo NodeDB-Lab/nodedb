@@ -11,6 +11,7 @@ pub(super) fn apply_predicate(
     predicate: &WherePredicate,
     csr: &CsrIndex,
     edge_store: &EdgeStore,
+    _frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
     match predicate {
         WherePredicate::Equals {
@@ -60,8 +61,16 @@ pub(super) fn apply_predicate(
             // local state and inspect it.
             for row in rows {
                 let mut sub_state = ExecutionState::default();
-                let sub_rows =
-                    execute_clause(sub_pattern, csr, std::slice::from_ref(row), &mut sub_state)?;
+                // NOT EXISTS sub-patterns check structural connectivity
+                // against already-bound variables — no anchor enumeration
+                // occurs, so the frontier bitmap does not apply here.
+                let sub_rows = execute_clause(
+                    sub_pattern,
+                    csr,
+                    std::slice::from_ref(row),
+                    &mut sub_state,
+                    None,
+                )?;
                 if sub_state.truncated {
                     // Sub-pattern hit a cap — treat the outer match as
                     // truncated too. The outer caller of apply_predicate

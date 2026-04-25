@@ -12,7 +12,7 @@ use nodedb_array::query::slice::{Slice, slice_sparse, tile_overlaps_slice};
 use nodedb_array::segment::{MbrQueryPredicate, TilePayload};
 use nodedb_array::tile::sparse_tile::SparseTile;
 use nodedb_array::types::ArrayId;
-use nodedb_types::Value;
+use nodedb_types::{SurrogateBitmap, Value};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -29,6 +29,7 @@ impl CoreLoop {
         slice_msgpack: &[u8],
         attr_projection: &[u32],
         limit: u32,
+        cell_filter: Option<&SurrogateBitmap>,
     ) -> Response {
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
@@ -124,7 +125,20 @@ impl CoreLoop {
                 },
                 None => filtered,
             };
-            for cell in sparse_tile_to_array_cells(&schema, &final_tile) {
+            for (row_idx, cell) in sparse_tile_to_array_cells(&schema, &final_tile)
+                .into_iter()
+                .enumerate()
+            {
+                if let Some(f) = cell_filter {
+                    let sur = final_tile
+                        .surrogates
+                        .get(row_idx)
+                        .copied()
+                        .unwrap_or(nodedb_types::Surrogate::ZERO);
+                    if !f.contains(sur) {
+                        continue;
+                    }
+                }
                 rows.push(Value::NdArrayCell(cell));
                 if cap > 0 && rows.len() >= cap {
                     break;

@@ -38,15 +38,21 @@ pub(super) struct ExecutionState {
 /// Applies join order optimization before execution: triples within each
 /// PatternChain are reordered by selectivity (lowest edge count first,
 /// bound variables preferred).
+///
+/// `frontier_bitmap`: when `Some`, only nodes whose surrogate is present in the
+/// bitmap are eligible as pattern anchors. Bound variables (already resolved
+/// from a prior binding row) bypass the bitmap check — only free-variable
+/// anchor enumeration is restricted.
 pub fn execute(
     query: &MatchQuery,
     csr: &CsrIndex,
     edge_store: &EdgeStore,
+    frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Result<MatchOutcome, crate::Error> {
     // Optimize query before execution (reorder triples by selectivity).
     let mut optimized = query.clone();
     super::optimizer::optimize(&mut optimized, csr);
-    execute_query(&optimized, csr, edge_store)
+    execute_query(&optimized, csr, edge_store, frontier_bitmap)
 }
 
 /// Execute a pre-optimized MATCH query (internal, skip optimizer).
@@ -54,12 +60,13 @@ fn execute_query(
     query: &MatchQuery,
     csr: &CsrIndex,
     edge_store: &EdgeStore,
+    frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Result<MatchOutcome, crate::Error> {
     let mut rows: Vec<BindingRow> = vec![HashMap::new()];
     let mut state = ExecutionState::default();
 
     for clause in &query.clauses {
-        let clause_rows = execute_clause(clause, csr, &rows, &mut state)?;
+        let clause_rows = execute_clause(clause, csr, &rows, &mut state, frontier_bitmap)?;
         if clause.optional {
             rows = left_join_rows(&rows, &clause_rows, clause);
         } else {
@@ -68,7 +75,7 @@ fn execute_query(
     }
 
     for predicate in &query.where_predicates {
-        rows = predicates::apply_predicate(&rows, predicate, csr, edge_store)?;
+        rows = predicates::apply_predicate(&rows, predicate, csr, edge_store, frontier_bitmap)?;
     }
 
     if let Some(limit) = query.limit {
@@ -124,13 +131,14 @@ pub(super) fn execute_clause(
     csr: &CsrIndex,
     input_rows: &[BindingRow],
     state: &mut ExecutionState,
+    frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
     let mut result_rows = input_rows.to_vec();
 
     for chain in &clause.patterns {
         let mut next_rows = Vec::new();
         for row in &result_rows {
-            next_rows.extend(execute_chain(chain, csr, row, state)?);
+            next_rows.extend(execute_chain(chain, csr, row, state, frontier_bitmap)?);
         }
         result_rows = next_rows;
     }
@@ -144,13 +152,14 @@ fn execute_chain(
     csr: &CsrIndex,
     input_row: &BindingRow,
     state: &mut ExecutionState,
+    frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
     let mut rows = vec![input_row.clone()];
 
     for triple in &chain.triples {
         let mut next_rows = Vec::new();
         for row in &rows {
-            next_rows.extend(execute_triple(triple, csr, row, state)?);
+            next_rows.extend(execute_triple(triple, csr, row, state, frontier_bitmap)?);
         }
         rows = next_rows;
         if rows.is_empty() {
@@ -167,10 +176,11 @@ fn execute_triple(
     csr: &CsrIndex,
     input_row: &BindingRow,
     state: &mut ExecutionState,
+    frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
 ) -> Result<Vec<BindingRow>, crate::Error> {
     let direction = triple.edge.direction.to_csr_direction();
     let label_filter = triple.edge.edge_type.as_deref();
-    let src_nodes = resolve_binding(&triple.src, csr, input_row);
+    let src_nodes = resolve_binding(&triple.src, csr, input_row, frontier_bitmap);
 
     if src_nodes.is_empty() {
         return Ok(Vec::new());
@@ -236,7 +246,12 @@ fn execute_triple(
     Ok(results)
 }
 
-fn resolve_binding(binding: &NodeBinding, csr: &CsrIndex, row: &BindingRow) -> Vec<u32> {
+fn resolve_binding(
+    binding: &NodeBinding,
+    csr: &CsrIndex,
+    row: &BindingRow,
+    frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
+) -> Vec<u32> {
     if let Some(ref name) = binding.name
         && let Some(value) = row.get(name)
     {
@@ -251,13 +266,18 @@ fn resolve_binding(binding: &NodeBinding, csr: &CsrIndex, row: &BindingRow) -> V
         }
         return Vec::new();
     }
-    // No binding yet — enumerate all nodes, filtering by label if required.
+    // No binding yet — enumerate all nodes, filtering by label and bitmap.
     let all = 0..csr.node_count() as u32;
-    if let Some(ref label) = binding.label {
-        all.filter(|&id| csr.node_has_label(id, label)).collect()
-    } else {
-        all.collect()
-    }
+    all.filter(|&id| {
+        let label_ok = binding
+            .label
+            .as_ref()
+            .is_none_or(|l| csr.node_has_label(id, l));
+        let bitmap_ok = frontier_bitmap
+            .is_none_or(|bm| bm.contains(nodedb_types::Surrogate::new(csr.node_surrogate_raw(id))));
+        label_ok && bitmap_ok
+    })
+    .collect()
 }
 
 fn binding_compatible(
@@ -379,7 +399,7 @@ mod tests {
         let query =
             super::super::compiler::parse("MATCH (a)-[:KNOWS]->(b) WHERE a = 'alice' RETURN a, b")
                 .unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["a"], "alice");
         assert_eq!(rows[0]["b"], "bob");
@@ -392,7 +412,7 @@ mod tests {
             "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE a = 'alice' RETURN a, b, c",
         )
         .unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["c"], "carol");
     }
@@ -403,7 +423,7 @@ mod tests {
         let query = super::super::compiler::parse(
             "MATCH (a)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:LIKES]->(c) WHERE a = 'alice' RETURN a, b, c",
         ).unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["c"], "NULL");
     }
@@ -415,7 +435,7 @@ mod tests {
             "MATCH (a)-[:KNOWS]->(b) WHERE NOT EXISTS { MATCH (a)-[:BLOCKED]->(b) } RETURN a, b",
         )
         .unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 3);
     }
 
@@ -424,7 +444,7 @@ mod tests {
         let (csr, store, _dir) = make_social_graph();
         let query =
             super::super::compiler::parse("MATCH (a)-[:KNOWS]->(b) RETURN a, b LIMIT 2").unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 2);
     }
 
@@ -433,7 +453,7 @@ mod tests {
         let (csr, store, _dir) = make_social_graph();
         let query =
             super::super::compiler::parse("MATCH (a)-[:NONEXISTENT]->(b) RETURN a, b").unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert!(rows.is_empty());
     }
 
@@ -449,20 +469,20 @@ mod tests {
 
         // Without label filter — all KNOWS edges.
         let query = super::super::compiler::parse("MATCH (a)-[:KNOWS]->(b) RETURN a, b").unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 3);
 
         // With label filter — only Person src.
         let query =
             super::super::compiler::parse("MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b").unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         // alice->bob, bob->carol, carol->dave — all 3 srcs are Person.
         assert_eq!(rows.len(), 3);
 
         // With label filter — only Bot dst.
         let query =
             super::super::compiler::parse("MATCH (a)-[:KNOWS]->(b:Bot) RETURN a, b").unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         // Only carol->dave where dave is Bot.
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["a"], "carol");
@@ -471,14 +491,14 @@ mod tests {
         // Both labels — Person->Bot.
         let query = super::super::compiler::parse("MATCH (a:Person)-[:KNOWS]->(b:Bot) RETURN a, b")
             .unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["a"], "carol");
 
         // Non-matching labels — should return 0.
         let query = super::super::compiler::parse("MATCH (a:Bot)-[:KNOWS]->(b:Person) RETURN a, b")
             .unwrap();
-        let rows = execute(&query, &csr, &store).unwrap().rows;
+        let rows = execute(&query, &csr, &store, None).unwrap().rows;
         assert!(rows.is_empty());
     }
 
@@ -491,5 +511,33 @@ mod tests {
         let json = nodedb_types::json_from_msgpack(&msgpack).unwrap();
         let arr = json.as_array().unwrap();
         assert_eq!(arr[0]["a"], "alice");
+    }
+
+    /// Anchor nodes not in the frontier bitmap are never expanded as sources.
+    /// alice (surrogate 1) is in the bitmap; bob and carol (surrogates 2, 3)
+    /// are not. A free-variable MATCH should only yield rows where the src
+    /// anchor is alice.
+    #[test]
+    fn match_frontier_bitmap_excludes_non_member_anchors() {
+        use nodedb_types::{Surrogate, SurrogateBitmap};
+
+        let (mut csr, store, _dir) = make_social_graph();
+        // Assign surrogates: alice=1, bob=2, carol=3, dave=4.
+        csr.set_node_surrogate("alice", Surrogate::new(1));
+        csr.set_node_surrogate("bob", Surrogate::new(2));
+        csr.set_node_surrogate("carol", Surrogate::new(3));
+        csr.set_node_surrogate("dave", Surrogate::new(4));
+
+        // Bitmap contains only alice (surrogate 1).
+        let bm = SurrogateBitmap::from_iter([Surrogate::new(1)]);
+
+        let query = super::super::compiler::parse("MATCH (a)-[:KNOWS]->(b) RETURN a, b").unwrap();
+        let rows = execute(&query, &csr, &store, Some(&bm)).unwrap().rows;
+
+        // Only alice->bob should appear; bob->carol and carol->dave are blocked
+        // because the src anchor (bob, carol) is not in the bitmap.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["a"], "alice");
+        assert_eq!(rows[0]["b"], "bob");
     }
 }
