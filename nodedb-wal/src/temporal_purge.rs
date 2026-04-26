@@ -32,6 +32,9 @@ pub enum TemporalPurgeEngine {
     DocumentStrict = 2,
     Columnar = 3,
     Crdt = 4,
+    /// Array engine. Arrays are globally-scoped (not tenant-scoped), so
+    /// the associated WAL record uses `tenant_id = 0` as a sentinel.
+    Array = 5,
 }
 
 impl TemporalPurgeEngine {
@@ -41,6 +44,7 @@ impl TemporalPurgeEngine {
             2 => Some(Self::DocumentStrict),
             3 => Some(Self::Columnar),
             4 => Some(Self::Crdt),
+            5 => Some(Self::Array),
             _ => None,
         }
     }
@@ -50,7 +54,8 @@ impl TemporalPurgeEngine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemporalPurgePayload {
     pub engine: TemporalPurgeEngine,
-    pub collection: String,
+    /// Collection name or array id (depending on engine variant).
+    pub name: String,
     pub cutoff_system_ms: i64,
     pub purged_count: u64,
 }
@@ -58,24 +63,24 @@ pub struct TemporalPurgePayload {
 impl TemporalPurgePayload {
     pub fn new(
         engine: TemporalPurgeEngine,
-        collection: impl Into<String>,
+        name: impl Into<String>,
         cutoff_system_ms: i64,
         purged_count: u64,
     ) -> Self {
         Self {
             engine,
-            collection: collection.into(),
+            name: name.into(),
             cutoff_system_ms,
             purged_count,
         }
     }
 
     pub fn wire_size(&self) -> usize {
-        1 + 4 + self.collection.len() + 8 + 8
+        1 + 4 + self.name.len() + 8 + 8
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let name_bytes = self.collection.as_bytes();
+        let name_bytes = self.name.as_bytes();
         if name_bytes.len() > MAX_COLLECTION_NAME_LEN {
             return Err(WalError::PayloadTooLarge {
                 size: name_bytes.len(),
@@ -117,9 +122,9 @@ impl TemporalPurgePayload {
             });
         }
         let name_end = 5 + name_len;
-        let collection = std::str::from_utf8(&buf[5..name_end])
+        let name = std::str::from_utf8(&buf[5..name_end])
             .map_err(|e| WalError::InvalidPayload {
-                detail: format!("temporal-purge collection not utf8: {e}"),
+                detail: format!("temporal-purge name not utf8: {e}"),
             })?
             .to_string();
         let cutoff_system_ms = i64::from_le_bytes(
@@ -134,7 +139,7 @@ impl TemporalPurgePayload {
         );
         Ok(Self {
             engine,
-            collection,
+            name,
             cutoff_system_ms,
             purged_count,
         })
@@ -161,11 +166,28 @@ mod tests {
             TemporalPurgeEngine::DocumentStrict,
             TemporalPurgeEngine::Columnar,
             TemporalPurgeEngine::Crdt,
+            TemporalPurgeEngine::Array,
         ] {
             let p = TemporalPurgePayload::new(e, "c", 0, 0);
             let b = p.to_bytes().unwrap();
             assert_eq!(TemporalPurgePayload::from_bytes(&b).unwrap().engine, e);
         }
+    }
+
+    #[test]
+    fn array_variant_roundtrip() {
+        let p = TemporalPurgePayload::new(
+            TemporalPurgeEngine::Array,
+            "my_array",
+            1_700_000_000_000,
+            99,
+        );
+        let bytes = p.to_bytes().unwrap();
+        let decoded = TemporalPurgePayload::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.engine, TemporalPurgeEngine::Array);
+        assert_eq!(decoded.name, "my_array");
+        assert_eq!(decoded.cutoff_system_ms, 1_700_000_000_000);
+        assert_eq!(decoded.purged_count, 99);
     }
 
     #[test]
