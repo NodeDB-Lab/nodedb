@@ -15,6 +15,7 @@ use nodedb_array::segment::{MbrQueryPredicate, TilePayload};
 use nodedb_array::tile::sparse_tile::{SparseTile, SparseTileBuilder};
 use nodedb_array::types::ArrayId;
 use nodedb_array::types::coord::value::CoordValue;
+use nodedb_cluster::distributed_array::merge::ArrayAggPartial;
 use nodedb_types::SurrogateBitmap;
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -60,23 +61,43 @@ fn float_or_null(v: Option<f64>) -> AggCell {
     }
 }
 
+/// Aggregate query parameters bundled to avoid exceeding the 7-argument limit.
+pub(in crate::data::executor) struct AggParams<'a> {
+    pub array_id: &'a ArrayId,
+    pub attr_idx: u32,
+    pub reducer: ArrayReducer,
+    pub group_by_dim_idx: i32,
+    pub cell_filter: Option<&'a SurrogateBitmap>,
+    pub return_partial: bool,
+    /// Optional Hilbert-prefix range `[lo, hi]` for shard-level partitioning.
+    /// When set, only tiles whose Hilbert prefix falls within this range
+    /// contribute to the aggregate. Used by the distributed shard handler to
+    /// prevent double-counting when all vShards share a single Data Plane.
+    pub hilbert_range: Option<(u64, u64)>,
+}
+
 impl CoreLoop {
     pub(in crate::data::executor) fn dispatch_array_aggregate(
         &mut self,
         task: &ExecutionTask,
-        array_id: &ArrayId,
-        attr_idx: u32,
-        reducer: ArrayReducer,
-        group_by_dim_idx: i32,
-        cell_filter: Option<&SurrogateBitmap>,
+        p: AggParams<'_>,
     ) -> Response {
+        let AggParams {
+            array_id,
+            attr_idx,
+            reducer,
+            group_by_dim_idx,
+            cell_filter,
+            return_partial,
+            hilbert_range,
+        } = p;
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
         }
 
-        let tiles = match self
+        let all_tiles_with_prefix = match self
             .array_engine
-            .scan_tiles(array_id, &MbrQueryPredicate::default())
+            .scan_tiles_with_hilbert_prefix(array_id, &MbrQueryPredicate::default())
         {
             Ok(t) => t,
             Err(e) => {
@@ -87,6 +108,25 @@ impl CoreLoop {
                     },
                 );
             }
+        };
+
+        // Apply per-shard Hilbert-range pre-filter when set. This prevents
+        // double-counting in harnesses where all vShards share one Data Plane.
+        let all_tiles: Vec<TilePayload> = match hilbert_range {
+            Some((lo, hi)) => all_tiles_with_prefix
+                .into_iter()
+                .filter_map(|(hp, tile)| {
+                    if hp >= lo && hp <= hi {
+                        Some(tile)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            None => all_tiles_with_prefix
+                .into_iter()
+                .map(|(_, tile)| tile)
+                .collect(),
         };
 
         let r = map_reducer(reducer);
@@ -107,7 +147,7 @@ impl CoreLoop {
         if group_by_dim_idx < 0 {
             // Scalar fold across all tiles.
             let mut acc: Option<AggregateResult> = None;
-            for tile in tiles {
+            for tile in all_tiles {
                 let sparse = match unwrap_sparse(tile) {
                     Ok(s) => s,
                     Err(code) => return self.response_error(task, code),
@@ -122,6 +162,20 @@ impl CoreLoop {
                     None => part,
                 });
             }
+            if return_partial {
+                let partial =
+                    acc.map(|a| agg_result_to_partial(0, a))
+                        .unwrap_or_else(|| ArrayAggPartial {
+                            group_key: 0,
+                            count: 0,
+                            sum: 0.0,
+                            min: f64::INFINITY,
+                            max: f64::NEG_INFINITY,
+                            welford_mean: 0.0,
+                            welford_m2: 0.0,
+                        });
+                return encode_partials(self, task, &[partial]);
+            }
             let final_val = acc.and_then(|a| a.finalize());
             let mut row: BTreeMap<&'static str, AggCell> = BTreeMap::new();
             row.insert("result", float_or_null(final_val));
@@ -132,7 +186,7 @@ impl CoreLoop {
         let dim = group_by_dim_idx as usize;
         let mut order: Vec<CoordValue> = Vec::new();
         let mut by_key: HashMap<CoordValue, AggregateResult> = HashMap::new();
-        for tile in tiles {
+        for tile in all_tiles {
             let sparse = match unwrap_sparse(tile) {
                 Ok(s) => s,
                 Err(code) => return self.response_error(task, code),
@@ -151,6 +205,18 @@ impl CoreLoop {
                     }
                 }
             }
+        }
+
+        if return_partial {
+            let partials: Vec<ArrayAggPartial> = order
+                .iter()
+                .filter_map(|key| {
+                    by_key
+                        .remove(key)
+                        .map(|agg| agg_result_to_partial(coord_to_group_key(key), agg))
+                })
+                .collect();
+            return encode_partials(self, task, &partials);
         }
 
         let mut rows: Vec<BTreeMap<&'static str, AggCell>> = Vec::with_capacity(order.len());
@@ -218,6 +284,115 @@ fn apply_surrogate_filter(
             })?;
     }
     Ok(b.build())
+}
+
+/// Convert a local `AggregateResult` into the wire-safe `ArrayAggPartial`
+/// understood by the cluster coordinator. The `group_key` is an `i64`
+/// encoding of the group-by dimension value (see `coord_to_group_key`).
+fn agg_result_to_partial(group_key: i64, result: AggregateResult) -> ArrayAggPartial {
+    match result {
+        AggregateResult::Sum { value, count } => ArrayAggPartial {
+            group_key,
+            count,
+            sum: value,
+            min: value,
+            max: value,
+            welford_mean: if count > 0 { value / count as f64 } else { 0.0 },
+            welford_m2: 0.0,
+        },
+        AggregateResult::Count { count } => ArrayAggPartial {
+            group_key,
+            count,
+            sum: count as f64,
+            min: count as f64,
+            max: count as f64,
+            welford_mean: if count > 0 { 1.0 } else { 0.0 },
+            welford_m2: 0.0,
+        },
+        AggregateResult::Min { value, count } => ArrayAggPartial {
+            group_key,
+            count,
+            sum: value,
+            min: value,
+            max: value,
+            welford_mean: if count > 0 { value / count as f64 } else { 0.0 },
+            welford_m2: 0.0,
+        },
+        AggregateResult::Max { value, count } => ArrayAggPartial {
+            group_key,
+            count,
+            sum: value,
+            min: value,
+            max: value,
+            welford_mean: if count > 0 { value / count as f64 } else { 0.0 },
+            welford_m2: 0.0,
+        },
+        AggregateResult::Mean { sum, count } => {
+            let mean = if count > 0 { sum / count as f64 } else { 0.0 };
+            ArrayAggPartial {
+                group_key,
+                count,
+                sum,
+                min: mean,
+                max: mean,
+                welford_mean: mean,
+                welford_m2: 0.0,
+            }
+        }
+        AggregateResult::Empty(_) => ArrayAggPartial {
+            group_key,
+            count: 0,
+            sum: 0.0,
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            welford_mean: 0.0,
+            welford_m2: 0.0,
+        },
+    }
+}
+
+/// Map a `CoordValue` to a stable `i64` group key for use in `ArrayAggPartial`.
+///
+/// Int64 and TimestampMs values are used directly. Float64 is bit-cast.
+/// String values are hashed to a `u64` and reinterpreted as `i64` — collisions
+/// are theoretically possible but rare; the coordinator merges by this key, not
+/// by the original string, so groups that collide would be incorrectly merged.
+/// In practice string group-by dims use low-cardinality category values, making
+/// collisions extremely unlikely. A future version could use string interning or
+/// a wider key type.
+fn coord_to_group_key(c: &CoordValue) -> i64 {
+    match c {
+        CoordValue::Int64(v) | CoordValue::TimestampMs(v) => *v,
+        CoordValue::Float64(v) => v.to_bits() as i64,
+        CoordValue::String(s) => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish() as i64
+        }
+    }
+}
+
+/// Encode a slice of `ArrayAggPartial` as a zerompk array payload.
+///
+/// The coordinator decodes this payload on the other side of the SPSC bridge
+/// via `exec_agg` in `DataPlaneArrayExecutor`.
+fn encode_partials(
+    core: &CoreLoop,
+    task: &ExecutionTask,
+    partials: &[ArrayAggPartial],
+) -> Response {
+    let owned: Vec<&ArrayAggPartial> = partials.iter().collect();
+    match zerompk::to_msgpack_vec(&owned) {
+        Ok(bytes) => core.response_with_payload(task, bytes),
+        Err(e) => core.response_error(
+            task,
+            ErrorCode::Internal {
+                detail: format!("array aggregate partial encode: {e}"),
+            },
+        ),
+    }
 }
 
 fn encode_agg_rows(

@@ -13,6 +13,9 @@
 //!   [`crate::control::metadata_proposer`].
 
 pub mod applied_index_watcher;
+pub mod array_cluster_exec;
+pub mod array_cluster_helpers;
+pub mod array_executor;
 pub mod bootstrap_listener;
 pub mod handle;
 pub mod init;
@@ -25,6 +28,8 @@ pub mod tls;
 pub mod warm_peers;
 
 pub use applied_index_watcher::AppliedIndexWatcher;
+pub use array_cluster_exec::ClusterArrayExecutor;
+pub use array_executor::DataPlaneArrayExecutor;
 pub use handle::ClusterHandle;
 pub use init::{init_cluster, init_cluster_with_transport};
 pub use metadata_applier::MetadataCommitApplier;

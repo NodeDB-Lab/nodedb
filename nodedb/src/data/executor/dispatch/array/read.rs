@@ -14,6 +14,20 @@ use nodedb_array::tile::sparse_tile::SparseTile;
 use nodedb_array::types::ArrayId;
 use nodedb_types::{SurrogateBitmap, Value};
 
+/// Slice parameters bundled to avoid exceeding the 7-argument limit.
+pub(in crate::data::executor) struct SliceParams<'a> {
+    pub array_id: &'a ArrayId,
+    pub slice_msgpack: &'a [u8],
+    pub attr_projection: &'a [u32],
+    pub limit: u32,
+    pub cell_filter: Option<&'a SurrogateBitmap>,
+    /// Optional Hilbert-prefix range `[lo, hi]` for shard-level partitioning.
+    /// When set, only tiles whose Hilbert prefix falls within this range are
+    /// included. Used by the distributed shard handler to prevent duplicate
+    /// rows when all vShards share a single Data Plane.
+    pub hilbert_range: Option<(u64, u64)>,
+}
+
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
@@ -25,12 +39,17 @@ impl CoreLoop {
     pub(in crate::data::executor) fn dispatch_array_slice(
         &mut self,
         task: &ExecutionTask,
-        array_id: &ArrayId,
-        slice_msgpack: &[u8],
-        attr_projection: &[u32],
-        limit: u32,
-        cell_filter: Option<&SurrogateBitmap>,
+        p: SliceParams<'_>,
     ) -> Response {
+        let SliceParams {
+            array_id,
+            slice_msgpack,
+            attr_projection,
+            limit,
+            cell_filter,
+            hilbert_range,
+        } = p;
+
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
         }
@@ -60,9 +79,9 @@ impl CoreLoop {
             }
         };
 
-        let tiles = match self
+        let all_tiles_with_prefix = match self
             .array_engine
-            .scan_tiles(array_id, &MbrQueryPredicate::default())
+            .scan_tiles_with_hilbert_prefix(array_id, &MbrQueryPredicate::default())
         {
             Ok(t) => t,
             Err(e) => {
@@ -73,6 +92,25 @@ impl CoreLoop {
                     },
                 );
             }
+        };
+
+        // Apply per-shard Hilbert-range pre-filter when set. This prevents
+        // duplicate rows in harnesses where all vShards share one Data Plane.
+        let tiles: Vec<TilePayload> = match hilbert_range {
+            Some((lo, hi)) => all_tiles_with_prefix
+                .into_iter()
+                .filter_map(|(hp, tile)| {
+                    if hp >= lo && hp <= hi {
+                        Some(tile)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            None => all_tiles_with_prefix
+                .into_iter()
+                .map(|(_, tile)| tile)
+                .collect(),
         };
 
         let proj = if attr_projection.is_empty() {

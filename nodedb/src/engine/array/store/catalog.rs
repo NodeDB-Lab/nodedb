@@ -174,18 +174,39 @@ impl ArrayStore {
         &self,
         pred: &MbrQueryPredicate,
     ) -> Result<Vec<TilePayload>, nodedb_array::ArrayError> {
+        Ok(self
+            .scan_tiles_with_hilbert_prefix(pred)?
+            .into_iter()
+            .map(|(_hp, tile)| tile)
+            .collect())
+    }
+
+    /// Like `scan_tiles` but also returns the tile's `hilbert_prefix` so
+    /// callers can apply per-shard Hilbert-range filters (distributed agg).
+    pub fn scan_tiles_with_hilbert_prefix(
+        &self,
+        pred: &MbrQueryPredicate,
+    ) -> Result<Vec<(u64, TilePayload)>, nodedb_array::ArrayError> {
         let mut out = Vec::new();
         for h in self.segments.values() {
             let reader = h.reader();
             for idx in h.rtree().query(pred) {
-                out.push(reader.read_tile(idx)?);
+                let hilbert_prefix = reader
+                    .tiles()
+                    .get(idx)
+                    .map(|e| e.tile_id.hilbert_prefix)
+                    .unwrap_or(0);
+                out.push((hilbert_prefix, reader.read_tile(idx)?));
             }
         }
-        for (_tile_id, buf) in self.memtable.iter() {
+        for (tile_id, buf) in self.memtable.iter() {
             if buf.cell_count() == 0 {
                 continue;
             }
-            out.push(TilePayload::Sparse(buf.materialise(&self.schema)?));
+            out.push((
+                tile_id.hilbert_prefix,
+                TilePayload::Sparse(buf.materialise(&self.schema)?),
+            ));
         }
         Ok(out)
     }

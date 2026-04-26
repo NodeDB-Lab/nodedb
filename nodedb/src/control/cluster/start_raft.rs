@@ -1,12 +1,17 @@
 //! Start the Raft event loop, RPC server, and both appliers.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::info;
 
+use nodedb_cluster::distributed_array::{ArrayLocalExecutor, handle_array_shard_rpc};
+use nodedb_cluster::vshard_handler::{DispatchTarget, dispatch_by_type};
+use nodedb_cluster::wire::VShardEnvelope;
 use nodedb_types::config::tuning::ClusterTransportTuning;
 
+use crate::control::cluster::array_executor::DataPlaneArrayExecutor;
 use crate::control::cluster::handle::ClusterHandle;
 use crate::control::cluster::metadata_applier::MetadataCommitApplier;
 use crate::control::cluster::spsc_applier::SpscCommitApplier;
@@ -60,6 +65,69 @@ pub fn start_raft(
     // LocalPlanExecutor is the C-β physical-plan execution path (C-δ.6: sole execution path).
     let plan_executor = Arc::new(crate::control::LocalPlanExecutor::new(shared.clone()));
 
+    // Build the real ArrayLocalExecutor that bridges incoming array shard RPCs
+    // into the local Data Plane via the SPSC bridge.
+    let array_executor: Arc<dyn ArrayLocalExecutor> =
+        Arc::new(DataPlaneArrayExecutor::new(shared.clone()));
+
+    // Build the VShardEnvelope handler closure. This is the single entry point
+    // for all incoming VShardEnvelope RPCs from peer nodes. Currently handles
+    // array shard opcodes; other engine targets return a typed error so callers
+    // know no handler is registered rather than silently timing out.
+    let vshard_handler: nodedb_cluster::VShardEnvelopeHandler = {
+        let executor = array_executor.clone();
+        Arc::new(move |bytes: Vec<u8>| {
+            let executor = executor.clone();
+            let fut: Pin<
+                Box<
+                    dyn std::future::Future<Output = nodedb_cluster::error::Result<Vec<u8>>> + Send,
+                >,
+            > = Box::pin(async move {
+                let envelope = VShardEnvelope::from_bytes(&bytes).ok_or_else(|| {
+                    nodedb_cluster::error::ClusterError::Codec {
+                        detail: "vshard_handler: failed to deserialize VShardEnvelope".into(),
+                    }
+                })?;
+
+                let target = dispatch_by_type(&envelope);
+                match target {
+                    DispatchTarget::ArrayShard => {
+                        let opcode = envelope.msg_type as u16;
+                        let resp_payload = handle_array_shard_rpc(
+                            opcode,
+                            envelope.vshard_id,
+                            &envelope.payload,
+                            &executor,
+                        )
+                        .await?;
+
+                        // Response opcode = request opcode + 1 for all array shard RPCs.
+                        // Resolve the msg_type variant via a minimal scratch envelope parse
+                        // (avoids any unsafe transmute — the `from_bytes` mapping in wire.rs
+                        // is the canonical source of truth for the opcode→variant table).
+                        let resp_opcode = opcode + 1;
+                        let resp_msg_type = resolve_vshard_msg_type(resp_opcode)?;
+                        let resp_envelope = VShardEnvelope::new(
+                            resp_msg_type,
+                            envelope.target_node,
+                            envelope.source_node,
+                            envelope.vshard_id,
+                            resp_payload,
+                        );
+                        Ok(resp_envelope.to_bytes())
+                    }
+
+                    other => Err(nodedb_cluster::error::ClusterError::Transport {
+                        detail: format!(
+                            "vshard_handler: no handler registered for dispatch target {other:?}"
+                        ),
+                    }),
+                }
+            });
+            fut
+        })
+    };
+
     let tick_interval = Duration::from_millis(transport_tuning.raft_tick_interval_ms);
     let raft_loop = Arc::new(
         nodedb_cluster::RaftLoop::new(
@@ -70,6 +138,7 @@ pub fn start_raft(
         )
         .with_plan_executor(plan_executor)
         .with_metadata_applier(metadata_applier)
+        .with_vshard_handler(vshard_handler)
         .with_tick_interval(tick_interval),
     );
 
@@ -182,4 +251,28 @@ pub fn start_raft(
     info!(node_id = handle.node_id, "raft loop and RPC server started");
 
     Ok(ready_rx)
+}
+
+/// Resolve a raw opcode `u16` to a `VShardMessageType` variant.
+///
+/// Uses `VShardEnvelope::from_bytes` as the canonical opcode→variant mapping
+/// so this helper stays in sync with the wire format without duplicating the
+/// match table. Returns `ClusterError::Codec` for unknown opcodes.
+fn resolve_vshard_msg_type(
+    opcode: u16,
+) -> nodedb_cluster::error::Result<nodedb_cluster::wire::VShardMessageType> {
+    // A minimal 26-byte envelope with the target opcode and all other fields
+    // set to zero. `from_bytes` parses only the header — the empty payload is
+    // valid (payload_len = 0).
+    let mut scratch = [0u8; 26];
+    scratch[0..2].copy_from_slice(&1u16.to_le_bytes()); // version
+    scratch[2..4].copy_from_slice(&opcode.to_le_bytes()); // msg_type
+    // bytes[4..22] = source_node(0) + target_node(0) + vshard_id(0)
+    // bytes[22..26] = payload_len(0)
+
+    VShardEnvelope::from_bytes(&scratch)
+        .map(|e| e.msg_type)
+        .ok_or_else(|| nodedb_cluster::error::ClusterError::Codec {
+            detail: format!("resolve_vshard_msg_type: unknown opcode {opcode}"),
+        })
 }

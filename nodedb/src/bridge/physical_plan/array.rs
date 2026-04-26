@@ -78,6 +78,8 @@ pub enum ArrayOp {
         array_id: ArrayId,
         schema_msgpack: Vec<u8>,
         schema_hash: u64,
+        /// Hilbert-prefix bits for vShard routing. Immutable post-create.
+        prefix_bits: u8,
     },
 
     /// Insert one or more cells. `cells_msgpack` is an zerompk
@@ -113,6 +115,12 @@ pub enum ArrayOp {
         /// Only cells whose surrogate is present in this bitmap are included.
         /// `None` = no restriction.
         cell_filter: Option<SurrogateBitmap>,
+        /// Optional Hilbert-prefix range `[lo, hi]`. When set, only cells
+        /// whose Hilbert prefix falls within this range are included.
+        /// Used by distributed shard slice to prevent duplicate rows in
+        /// single-node harnesses where all vShards share one Data Plane.
+        /// `None` = no Hilbert filter (all cells included).
+        hilbert_range: Option<(u64, u64)>,
     },
 
     /// Attribute projection (no coord filter).
@@ -132,6 +140,18 @@ pub enum ArrayOp {
         /// Optional surrogate prefilter: only cells whose surrogate is in
         /// this bitmap contribute to the aggregate. `None` = all cells.
         cell_filter: Option<SurrogateBitmap>,
+        /// When `true` the Data Plane returns a zerompk-encoded
+        /// `Vec<ArrayAggPartial>` instead of the finalized scalar rows.
+        /// Used by the distributed shard handler so the coordinator can
+        /// merge partials across shards before finalizing.
+        /// Single-node SQL callers always pass `false`.
+        return_partial: bool,
+        /// Optional Hilbert-prefix range `[lo, hi]`. When set, only cells
+        /// whose Hilbert prefix falls within this range are included.
+        /// Used by distributed shard agg to prevent double-counting in
+        /// single-node harnesses where all vShards share one Data Plane.
+        /// `None` = no Hilbert filter (all cells included).
+        hilbert_range: Option<(u64, u64)>,
     },
 
     /// Pairwise op between two coord-aligned arrays. Both must share
@@ -219,6 +239,8 @@ mod tests {
             reducer: ArrayReducer::Sum,
             group_by_dim: -1,
             cell_filter: None,
+            return_partial: false,
+            hilbert_range: None,
         };
         let bytes = zerompk::to_msgpack_vec(&op).unwrap();
         let back: ArrayOp = zerompk::from_msgpack(&bytes).unwrap();

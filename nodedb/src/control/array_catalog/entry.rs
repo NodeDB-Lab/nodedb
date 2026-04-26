@@ -8,6 +8,10 @@
 use nodedb_array::types::ArrayId;
 use serde::{Deserialize, Serialize};
 
+fn default_prefix_bits() -> u8 {
+    8
+}
+
 /// One catalog row for a registered array.
 #[derive(
     Debug,
@@ -28,4 +32,9 @@ pub struct ArrayCatalogEntry {
     pub schema_hash: u64,
     /// Wall-clock creation time, epoch-millis.
     pub created_at_ms: i64,
+    /// Number of high-order Hilbert-prefix bits used to assign tiles to
+    /// vShards. Immutable after CREATE ARRAY. Default 8 → 256 buckets.
+    /// Existing rows without this field deserialize to 8.
+    #[serde(default = "default_prefix_bits")]
+    pub prefix_bits: u8,
 }

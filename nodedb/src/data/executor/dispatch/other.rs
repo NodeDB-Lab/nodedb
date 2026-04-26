@@ -487,6 +487,12 @@ impl CoreLoop {
             | PhysicalPlan::Array(_) => {
                 unreachable!("dispatch_other received plan variant that has its own dispatcher")
             }
+
+            // ClusterArray variants are handled exclusively on the Control Plane.
+            // They must never reach the Data Plane dispatcher.
+            PhysicalPlan::ClusterArray(_) => {
+                unreachable!("ClusterArray plans must not be dispatched to the Data Plane")
+            }
         }
     }
 }

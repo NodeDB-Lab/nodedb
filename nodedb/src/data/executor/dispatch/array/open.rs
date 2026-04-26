@@ -17,6 +17,7 @@ impl CoreLoop {
         array_id: &ArrayId,
         schema_msgpack: &[u8],
         schema_hash: u64,
+        prefix_bits: u8,
     ) -> Response {
         // Verify-or-register against the in-memory catalog. Persistence
         // into `_system.arrays` is owned by the Control-Plane DDL path
@@ -54,6 +55,7 @@ impl CoreLoop {
                     schema_msgpack: schema_msgpack.to_vec(),
                     schema_hash,
                     created_at_ms: now_epoch_ms(),
+                    prefix_bits,
                 };
                 let mut cat = match self.array_catalog.write() {
                     Ok(g) => g,

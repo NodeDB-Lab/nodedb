@@ -316,6 +316,47 @@ impl NodeDbPgHandler {
 
             self.check_permission(identity, &task.plan)?;
 
+            // ClusterArray plans are handled entirely on the Control Plane by the
+            // ArrayCoordinator — they must never reach the SPSC bridge or
+            // trigger/DML machinery. Intercept them here and short-circuit.
+            if let crate::bridge::physical_plan::PhysicalPlan::ClusterArray(ref cluster_op) =
+                task.plan
+            {
+                use crate::control::cluster::ClusterArrayExecutor;
+                use crate::control::server::pgwire::handler::plan::PlanKind;
+
+                let transport = self.state.cluster_transport.as_ref().ok_or_else(|| {
+                    PgWireError::UserError(Box::new(ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "XX000".to_owned(),
+                        "cluster transport not available for ClusterArray dispatch".to_owned(),
+                    )))
+                })?;
+                let routing = self.state.cluster_routing.as_ref().ok_or_else(|| {
+                    PgWireError::UserError(Box::new(ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "XX000".to_owned(),
+                        "cluster routing not available for ClusterArray dispatch".to_owned(),
+                    )))
+                })?;
+                let executor = ClusterArrayExecutor::new(
+                    Arc::clone(transport),
+                    Arc::clone(routing),
+                    self.state.node_id,
+                    Arc::clone(&self.state),
+                );
+                let payload_bytes = executor.execute(cluster_op).await.map_err(|e| {
+                    let (severity, code, message) = error_to_sqlstate(&e);
+                    PgWireError::UserError(Box::new(ErrorInfo::new(
+                        severity.to_owned(),
+                        code.to_owned(),
+                        message,
+                    )))
+                })?;
+                responses.push(payload_to_response(&payload_bytes, PlanKind::MultiRow));
+                continue;
+            }
+
             if self.sessions.transaction_state(addr)
                 == crate::control::server::pgwire::session::TransactionState::InBlock
             {

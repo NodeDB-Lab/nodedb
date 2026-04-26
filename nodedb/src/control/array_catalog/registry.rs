@@ -98,6 +98,7 @@ mod tests {
             schema_msgpack: vec![0x80], // empty msgpack map
             schema_hash: 0xDEAD_BEEF,
             created_at_ms: 1_700_000_000_000,
+            prefix_bits: 8,
         }
     }
 

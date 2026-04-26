@@ -220,6 +220,7 @@ mod tests {
                 credentials: None,
                 wal: None,
                 surrogate_assigner: None,
+                cluster_enabled: false,
             },
         )
         .expect("convert insert-select");
@@ -266,6 +267,7 @@ mod tests {
                 credentials: None,
                 wal: None,
                 surrogate_assigner: None,
+                cluster_enabled: false,
             },
         )
         .expect("convert insert-select with star");

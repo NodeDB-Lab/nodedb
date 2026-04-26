@@ -9,6 +9,8 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::physical_plan::ArrayOp;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::dispatch::array::aggregate::AggParams;
+use crate::data::executor::dispatch::array::read::SliceParams;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -22,7 +24,8 @@ impl CoreLoop {
                 array_id,
                 schema_msgpack,
                 schema_hash,
-            } => self.handle_array_open(task, array_id, schema_msgpack, *schema_hash),
+                prefix_bits,
+            } => self.handle_array_open(task, array_id, schema_msgpack, *schema_hash, *prefix_bits),
             ArrayOp::Put {
                 array_id,
                 cells_msgpack,
@@ -44,13 +47,17 @@ impl CoreLoop {
                 attr_projection,
                 limit,
                 cell_filter,
+                hilbert_range,
             } => self.dispatch_array_slice(
                 task,
-                array_id,
-                slice_msgpack,
-                attr_projection,
-                *limit,
-                cell_filter.as_ref(),
+                SliceParams {
+                    array_id,
+                    slice_msgpack,
+                    attr_projection,
+                    limit: *limit,
+                    cell_filter: cell_filter.as_ref(),
+                    hilbert_range: *hilbert_range,
+                },
             ),
             ArrayOp::SurrogateBitmapScan {
                 array_id,
@@ -66,13 +73,19 @@ impl CoreLoop {
                 reducer,
                 group_by_dim,
                 cell_filter,
+                return_partial,
+                hilbert_range,
             } => self.dispatch_array_aggregate(
                 task,
-                array_id,
-                *attr_idx,
-                *reducer,
-                *group_by_dim,
-                cell_filter.as_ref(),
+                AggParams {
+                    array_id,
+                    attr_idx: *attr_idx,
+                    reducer: *reducer,
+                    group_by_dim_idx: *group_by_dim,
+                    cell_filter: cell_filter.as_ref(),
+                    return_partial: *return_partial,
+                    hilbert_range: *hilbert_range,
+                },
             ),
             ArrayOp::Elementwise {
                 left,

@@ -35,6 +35,10 @@ pub struct ConvertContext {
     /// sub-planners that never lower to the surrogate-bearing variants
     /// (e.g. CREATE/DROP/ARRAY paths).
     pub surrogate_assigner: Option<Arc<SurrogateAssigner>>,
+    /// `true` when the node is running in cluster mode with a live
+    /// topology. Array DML/query converters emit `ClusterArray` variants
+    /// when this flag is set; single-node mode emits local `Array` variants.
+    pub cluster_enabled: bool,
 }
 
 /// Convert a list of SqlPlans to PhysicalTasks.
@@ -371,16 +375,18 @@ pub(super) fn convert_one(
             tile_extents,
             cell_order,
             tile_order,
-        } => super::array_convert::convert_create_array(
+            prefix_bits,
+        } => super::array_convert::convert_create_array(super::array_convert::CreateArrayArgs {
             name,
             dims,
             attrs,
             tile_extents,
-            *cell_order,
-            *tile_order,
+            cell_order: *cell_order,
+            tile_order: *tile_order,
+            prefix_bits: *prefix_bits,
             tenant_id,
             ctx,
-        ),
+        }),
 
         SqlPlan::DropArray { name, if_exists } => {
             super::array_convert::convert_drop_array(name, *if_exists, tenant_id, ctx)

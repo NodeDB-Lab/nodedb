@@ -5,6 +5,7 @@
 //! isolated.
 
 pub mod array;
+pub mod cluster_array;
 pub mod columnar;
 pub mod crdt;
 pub mod document;
@@ -19,6 +20,7 @@ pub mod vector;
 pub mod wire;
 
 pub use array::{ArrayBinaryOp, ArrayOp, ArrayReducer};
+pub use cluster_array::ClusterArrayOp;
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};
 pub use crdt::CrdtOp;
 pub use document::{
@@ -73,6 +75,9 @@ pub enum PhysicalPlan {
     Meta(MetaOp),
     /// Array engine: ND-array query operators + put/delete/flush/compact.
     Array(ArrayOp),
+    /// Cluster-mode array operations executed by the coordinator on the
+    /// Control Plane. Never sent to the Data Plane.
+    ClusterArray(ClusterArrayOp),
 }
 
 impl PhysicalPlan {

@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use nodedb_array::coord::encode::encode_hilbert_prefix;
 use nodedb_array::schema::{
     ArraySchema, ArraySchemaBuilder, AttrSpec, AttrType as EngineAttrType, CellOrder, DimSpec,
     DimType as EngineDimType, TileOrder,
@@ -37,7 +38,7 @@ use nodedb_sql::types_array::{
 };
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::ArrayOp;
+use crate::bridge::physical_plan::{ArrayOp, ClusterArrayOp};
 use crate::control::array_catalog::ArrayCatalogEntry;
 use crate::engine::array::wal::ArrayPutCell;
 use crate::types::{TenantId, VShardId};
@@ -45,17 +46,32 @@ use crate::types::{TenantId, VShardId};
 use super::super::physical::{PhysicalTask, PostSetOp};
 use super::convert::ConvertContext;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn convert_create_array(
-    name: &str,
-    dims: &[ArrayDimAst],
-    attrs: &[ArrayAttrAst],
-    tile_extents: &[i64],
-    cell_order: ArrayCellOrderAst,
-    tile_order: ArrayTileOrderAst,
-    tenant_id: TenantId,
-    ctx: &ConvertContext,
-) -> crate::Result<Vec<PhysicalTask>> {
+/// All inputs for `CREATE ARRAY` lowering, bundled to stay under
+/// the 7-parameter clippy limit.
+pub(super) struct CreateArrayArgs<'a> {
+    pub name: &'a str,
+    pub dims: &'a [ArrayDimAst],
+    pub attrs: &'a [ArrayAttrAst],
+    pub tile_extents: &'a [i64],
+    pub cell_order: ArrayCellOrderAst,
+    pub tile_order: ArrayTileOrderAst,
+    pub prefix_bits: u8,
+    pub tenant_id: TenantId,
+    pub ctx: &'a ConvertContext,
+}
+
+pub(super) fn convert_create_array(args: CreateArrayArgs<'_>) -> crate::Result<Vec<PhysicalTask>> {
+    let CreateArrayArgs {
+        name,
+        dims,
+        attrs,
+        tile_extents,
+        cell_order,
+        tile_order,
+        prefix_bits,
+        tenant_id,
+        ctx,
+    } = args;
     let array_catalog = ctx
         .array_catalog
         .as_ref()
@@ -94,6 +110,7 @@ pub(super) fn convert_create_array(
         schema_msgpack: schema_msgpack.clone(),
         schema_hash,
         created_at_ms: now_epoch_ms(),
+        prefix_bits,
     };
     {
         let mut cat = array_catalog.write().map_err(|_| crate::Error::PlanError {
@@ -126,6 +143,7 @@ pub(super) fn convert_create_array(
             array_id: aid,
             schema_msgpack,
             schema_hash,
+            prefix_bits,
         }),
         post_set_op: PostSetOp::None,
     }])
@@ -237,10 +255,60 @@ pub(super) fn convert_insert_array(
             detail: format!("array schema decode: {e}"),
         })?;
 
-    // Coerce every row to typed engine cells. Each `(array, coord-tuple)`
-    // pair is bound to a stable global surrogate via the catalog
-    // surrogate map; UPSERT semantics (re-insert at same coord) preserve
-    // the original surrogate.
+    let aid = ArrayId::new(tenant_id, name);
+    let wal_lsn = wal.next_lsn().as_u64();
+    let vshard = VShardId::from_collection(name);
+
+    if ctx.cluster_enabled {
+        // Cluster path: compute Hilbert prefix per cell so the coordinator
+        // can partition writes by shard. Each entry is
+        // `(hilbert_prefix, zerompk-encoded single ArrayPutCell)`.
+        let mut partitioned: Vec<(u64, Vec<u8>)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let coord = coerce_coords(&row.coords, &schema)?;
+            let attrs = coerce_attrs(&row.attrs, &schema)?;
+            let pk_bytes =
+                zerompk::to_msgpack_vec(&coord).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("array coord pk encode: {e}"),
+                })?;
+            let surrogate = surrogate_assigner.assign(name, &pk_bytes)?;
+            let hilbert =
+                encode_hilbert_prefix(&schema, &coord).map_err(|e| crate::Error::PlanError {
+                    detail: format!("INSERT INTO ARRAY {name}: Hilbert prefix: {e}"),
+                })?;
+            let cell = ArrayPutCell {
+                coord,
+                attrs,
+                surrogate,
+            };
+            let cell_bytes =
+                zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("array put cell encode: {e}"),
+                })?;
+            partitioned.push((hilbert, cell_bytes));
+        }
+        let array_id_msgpack =
+            zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("array id encode: {e}"),
+            })?;
+        return Ok(vec![PhysicalTask {
+            tenant_id,
+            vshard_id: vshard,
+            plan: PhysicalPlan::ClusterArray(ClusterArrayOp::Put {
+                array_id: aid,
+                array_id_msgpack,
+                cells: partitioned,
+                wal_lsn,
+                prefix_bits: entry.prefix_bits,
+            }),
+            post_set_op: PostSetOp::None,
+        }]);
+    }
+
+    // Single-node path: bundle all cells into one msgpack blob.
     let mut cells: Vec<ArrayPutCell> = Vec::with_capacity(rows.len());
     for row in rows {
         let coord = coerce_coords(&row.coords, &schema)?;
@@ -263,9 +331,6 @@ pub(super) fn convert_insert_array(
             detail: format!("array put cells encode: {e}"),
         })?;
 
-    let aid = ArrayId::new(tenant_id, name);
-    let wal_lsn = wal.next_lsn().as_u64();
-    let vshard = VShardId::from_collection(name);
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: vshard,
@@ -308,6 +373,47 @@ pub(super) fn convert_delete_array(
             detail: format!("array schema decode: {e}"),
         })?;
 
+    let aid = ArrayId::new(tenant_id, name);
+    let wal_lsn = wal.next_lsn().as_u64();
+    let vshard = VShardId::from_collection(name);
+
+    if ctx.cluster_enabled {
+        // Cluster path: compute Hilbert prefix per coord so the coordinator
+        // can partition deletes by shard.
+        let mut partitioned: Vec<(u64, Vec<u8>)> = Vec::with_capacity(coords.len());
+        for row in coords {
+            let typed = coerce_coords(row, &schema)?;
+            let hilbert =
+                encode_hilbert_prefix(&schema, &typed).map_err(|e| crate::Error::PlanError {
+                    detail: format!("DELETE FROM ARRAY {name}: Hilbert prefix: {e}"),
+                })?;
+            let coord_bytes =
+                zerompk::to_msgpack_vec(&typed).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("array coord encode: {e}"),
+                })?;
+            partitioned.push((hilbert, coord_bytes));
+        }
+        let array_id_msgpack =
+            zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("array id encode: {e}"),
+            })?;
+        return Ok(vec![PhysicalTask {
+            tenant_id,
+            vshard_id: vshard,
+            plan: PhysicalPlan::ClusterArray(ClusterArrayOp::Delete {
+                array_id: aid,
+                array_id_msgpack,
+                coords: partitioned,
+                wal_lsn,
+                prefix_bits: entry.prefix_bits,
+            }),
+            post_set_op: PostSetOp::None,
+        }]);
+    }
+
+    // Single-node path: bundle all coords into one msgpack blob.
     let mut typed: Vec<Vec<CoordValue>> = Vec::with_capacity(coords.len());
     for row in coords {
         typed.push(coerce_coords(row, &schema)?);
@@ -317,9 +423,6 @@ pub(super) fn convert_delete_array(
             format: "msgpack".into(),
             detail: format!("array delete coords encode: {e}"),
         })?;
-    let aid = ArrayId::new(tenant_id, name);
-    let wal_lsn = wal.next_lsn().as_u64();
-    let vshard = VShardId::from_collection(name);
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: vshard,

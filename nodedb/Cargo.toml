@@ -41,6 +41,7 @@ arrow = { workspace = true }
 
 # Async runtime (Control Plane)
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Error handling & diagnostics
 thiserror = { workspace = true }
@@ -109,7 +110,6 @@ reqwest = { workspace = true }
 
 # PostgreSQL wire protocol
 pgwire = { workspace = true }
-async-trait = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
 

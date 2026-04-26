@@ -5,25 +5,32 @@ use nodedb_array::types::domain::DomainBound;
 use nodedb_sql::types_array::{ArrayBinaryOpAst, ArrayCoordLiteral, ArrayReducerAst};
 
 use crate::bridge::physical_plan::{ArrayBinaryOp, ArrayReducer};
+use crate::control::array_catalog::ArrayCatalogEntry;
 
 use super::super::convert::ConvertContext;
 
-pub(super) fn load_schema(name: &str, ctx: &ConvertContext) -> crate::Result<ArraySchema> {
+/// Load the full catalog entry for an array by name.
+///
+/// Used by converters that need both the schema *and* catalog metadata
+/// (e.g. `prefix_bits` for cluster routing).
+pub(super) fn load_entry(name: &str, ctx: &ConvertContext) -> crate::Result<ArrayCatalogEntry> {
     let array_catalog = ctx
         .array_catalog
         .as_ref()
         .ok_or_else(|| crate::Error::PlanError {
             detail: format!("NDARRAY_*: no array catalog wired into convert context for '{name}'"),
         })?;
-    let entry = {
-        let cat = array_catalog.read().map_err(|_| crate::Error::PlanError {
-            detail: "array catalog lock poisoned".into(),
-        })?;
-        cat.lookup_by_name(name)
-            .ok_or_else(|| crate::Error::PlanError {
-                detail: format!("NDARRAY_*: array '{name}' not found"),
-            })?
-    };
+    let cat = array_catalog.read().map_err(|_| crate::Error::PlanError {
+        detail: "array catalog lock poisoned".into(),
+    })?;
+    cat.lookup_by_name(name)
+        .ok_or_else(|| crate::Error::PlanError {
+            detail: format!("NDARRAY_*: array '{name}' not found"),
+        })
+}
+
+pub(super) fn load_schema(name: &str, ctx: &ConvertContext) -> crate::Result<ArraySchema> {
+    let entry = load_entry(name, ctx)?;
     zerompk::from_msgpack(&entry.schema_msgpack).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("array schema decode: {e}"),

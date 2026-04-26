@@ -58,6 +58,10 @@ pub struct QueryContext {
     /// `QueryContext::new()` test fixtures that never lower to
     /// surrogate-bearing variants.
     surrogate_assigner: Option<Arc<crate::control::surrogate::SurrogateAssigner>>,
+    /// Cluster mode flag — `true` when the node has a live cluster
+    /// topology. Passed into `ConvertContext` so array converters can
+    /// emit `ClusterArray` variants instead of local `Array` variants.
+    cluster_enabled: bool,
 }
 
 /// Inputs needed to construct an `OriginCatalog` per plan call.
@@ -103,6 +107,7 @@ impl QueryContext {
             array_catalog: None,
             wal: None,
             surrogate_assigner: None,
+            cluster_enabled: false,
         }
     }
 
@@ -121,6 +126,7 @@ impl QueryContext {
             Some(Arc::clone(&state.retention_policy_registry)),
         );
         ctx.surrogate_assigner = Some(Arc::clone(&state.surrogate_assigner));
+        ctx.cluster_enabled = state.cluster_topology.is_some();
         ctx
     }
 
@@ -141,6 +147,7 @@ impl QueryContext {
             array_catalog: Some(state.array_catalog.clone()),
             wal: Some(Arc::clone(&state.wal)),
             surrogate_assigner: Some(Arc::clone(&state.surrogate_assigner)),
+            cluster_enabled: state.cluster_topology.is_some(),
         }
     }
 
@@ -170,6 +177,7 @@ impl QueryContext {
             array_catalog: None,
             wal: None,
             surrogate_assigner: None,
+            cluster_enabled: false,
         }
     }
 
@@ -240,6 +248,7 @@ impl QueryContext {
                 .map(|i| Arc::clone(&i.credentials)),
             wal: self.wal.clone(),
             surrogate_assigner: self.surrogate_assigner.clone(),
+            cluster_enabled: self.cluster_enabled,
         };
         let tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
         Ok((tasks, version_set))
@@ -342,6 +351,7 @@ impl QueryContext {
                 .map(|i| Arc::clone(&i.credentials)),
             wal: self.wal.clone(),
             surrogate_assigner: self.surrogate_assigner.clone(),
+            cluster_enabled: self.cluster_enabled,
         };
         let mut tasks = super::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
 

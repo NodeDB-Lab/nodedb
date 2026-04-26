@@ -329,6 +329,10 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
         // Arrays use a separate catalog from collection-based engines and
         // do not contribute to the version set.
         PhysicalPlan::Array(_) => {}
+
+        // ClusterArray variants are handled on the Control Plane before reaching
+        // the gateway; they carry no collection version set contribution.
+        PhysicalPlan::ClusterArray(_) => {}
     }
 
     out

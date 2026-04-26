@@ -117,6 +117,7 @@ impl Harness {
             array_id: aid.clone(),
             schema_msgpack: bytes,
             schema_hash,
+            prefix_bits: 8,
         });
         assert_eq!(r.status, Status::Ok, "open failed: {r:?}");
     }
@@ -242,6 +243,7 @@ fn slice_returns_only_cells_in_range() {
         attr_projection: vec![],
         limit: 0,
         cell_filter: None,
+        hilbert_range: None,
     });
     assert_eq!(r.status, Status::Ok, "slice failed: {r:?}");
     let rows = decode_value_vec(r.payload.as_ref());
@@ -278,6 +280,8 @@ fn aggregate_sum_scalar_across_multiple_tiles() {
         reducer: ArrayReducer::Sum,
         group_by_dim: -1,
         cell_filter: None,
+        return_partial: false,
+        hilbert_range: None,
     });
     assert_eq!(r.status, Status::Ok, "agg failed: {r:?}");
     let rows = decode_agg_rows(r.payload.as_ref());
@@ -307,6 +311,8 @@ fn aggregate_group_by_dim_buckets_per_x() {
         reducer: ArrayReducer::Sum,
         group_by_dim: 0,
         cell_filter: None,
+        return_partial: false,
+        hilbert_range: None,
     });
     assert_eq!(r.status, Status::Ok, "group agg failed: {r:?}");
     let rows = decode_agg_rows(r.payload.as_ref());
@@ -395,6 +401,7 @@ fn slice_cell_filter_excludes_non_member_surrogates() {
         attr_projection: vec![],
         limit: 0,
         cell_filter: Some(bm),
+        hilbert_range: None,
     });
     assert_eq!(r.status, Status::Ok, "slice+filter failed: {r:?}");
     let rows = decode_value_vec(r.payload.as_ref());
@@ -443,6 +450,8 @@ fn aggregate_cell_filter_excludes_non_member_surrogates() {
         reducer: ArrayReducer::Sum,
         group_by_dim: -1,
         cell_filter: Some(bm),
+        return_partial: false,
+        hilbert_range: None,
     });
     assert_eq!(r.status, Status::Ok, "agg+filter failed: {r:?}");
     let rows = decode_agg_rows(r.payload.as_ref());

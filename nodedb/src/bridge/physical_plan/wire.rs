@@ -7,7 +7,15 @@ use super::PhysicalPlan;
 use crate::Error;
 
 /// Encode a `PhysicalPlan` to MessagePack bytes.
+///
+/// Returns an error for `ClusterArray` variants, which are handled on the
+/// Control Plane and must never be shipped over the QUIC wire.
 pub fn encode(plan: &PhysicalPlan) -> Result<Vec<u8>, Error> {
+    if matches!(plan, PhysicalPlan::ClusterArray(_)) {
+        return Err(Error::Internal {
+            detail: "ClusterArray plans must not be sent over the wire".into(),
+        });
+    }
     zerompk::to_msgpack_vec(plan).map_err(|e| Error::Internal {
         detail: format!("plan encode: {e}"),
     })

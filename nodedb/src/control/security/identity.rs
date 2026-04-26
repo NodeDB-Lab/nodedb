@@ -384,6 +384,16 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Array(
             ArrayOp::Flush { .. } | ArrayOp::Compact { .. } | ArrayOp::DropArray { .. },
         ) => Permission::Admin,
+
+        // ClusterArray mirrors the local ArrayOp permission model.
+        PhysicalPlan::ClusterArray(
+            crate::bridge::physical_plan::ClusterArrayOp::Slice { .. }
+            | crate::bridge::physical_plan::ClusterArrayOp::Agg { .. },
+        ) => Permission::Read,
+        PhysicalPlan::ClusterArray(
+            crate::bridge::physical_plan::ClusterArrayOp::Put { .. }
+            | crate::bridge::physical_plan::ClusterArrayOp::Delete { .. },
+        ) => Permission::Write,
     }
 }
 
