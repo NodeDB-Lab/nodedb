@@ -3978,6 +3978,7 @@ dependencies = [
 name = "nodedb-sql"
 version = "0.0.6"
 dependencies = [
+ "chrono",
  "nodedb-query",
  "nodedb-types",
  "sqlparser",
