@@ -7,13 +7,21 @@
 //! flush overwrites the earlier one — last-write-wins semantics that
 //! match the memtable.
 //!
+//! When `audit_retain_ms` is set, the merger applies cell-level retention
+//! after the initial merge. Tile-versions are sparse: each version only
+//! stores the cells written at that `system_from_ms`. The retention merger
+//! therefore operates at cell granularity per Hilbert prefix group, not at
+//! the tile-version level, to avoid dropping cells that live exclusively in
+//! an older out-of-horizon version.
+//!
 //! The output is written via [`SegmentWriter`] in TileId order, which
 //! preserves Hilbert ordering for the next compaction pass.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use nodedb_array::ArrayResult;
+use nodedb_array::query::retention::encode_coord_key;
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::reader::TilePayload;
 use nodedb_array::segment::writer::SegmentWriter;
@@ -49,10 +57,18 @@ impl CompactionMerger {
     /// Merge `inputs` into one new segment at `output_level`. `flush_lsn`
     /// on the new ref is the max of the inputs' lsns (no new WAL writes
     /// happen during compaction — recovery already covers the inputs).
+    ///
+    /// When `audit_retain_ms` is `Some(w)`, out-of-horizon tile versions
+    /// (those with `system_from_ms < now_ms - w`) are collapsed into a
+    /// single synthetic ceiling tile per Hilbert prefix. Cell-level semantics
+    /// are preserved: each coordinate's newest out-of-horizon state is
+    /// carried forward (unless GDPR-erased), so no cells are silently lost.
     pub fn run(
         store: &ArrayStore,
         inputs: &[String],
         output_level: u8,
+        audit_retain_ms: Option<i64>,
+        now_ms: i64,
     ) -> Result<CompactionOutput, CompactionError> {
         let schema = store.schema().clone();
         let schema_hash = store.schema_hash();
@@ -82,6 +98,15 @@ impl CompactionMerger {
             }
         }
 
+        // Apply retention if configured.
+        let merged = match audit_retain_ms {
+            None => merged,
+            Some(retain_ms) => {
+                let horizon_ms = now_ms.saturating_sub(retain_ms);
+                apply_retention(merged, &schema, horizon_ms)?
+            }
+        };
+
         let id = next_segment_id_for_compaction(store, inputs);
         let seg_path = store.root().join(&id);
         let writer_bytes = build_segment_bytes(&schema, schema_hash, merged.into_iter())?;
@@ -108,6 +133,113 @@ impl CompactionMerger {
             removed: inputs.to_vec(),
         })
     }
+}
+
+/// Apply cell-level retention to the merged tile map.
+///
+/// For each Hilbert prefix group:
+/// - Tile versions with `system_from_ms >= horizon_ms` are in-horizon and
+///   pass through unchanged.
+/// - Tile versions with `system_from_ms < horizon_ms` are out-of-horizon.
+///   Their cells are collapsed into a single synthetic ceiling tile:
+///     - For each coordinate, the newest out-of-horizon row wins.
+///     - Coordinates already covered by any in-horizon tile version are
+///       excluded from the ceiling (the in-horizon version supersedes them).
+///     - GDPR-erased coordinates are excluded entirely — the erasure is
+///       propagated by omission.
+///
+/// The ceiling tile receives `system_from_ms = horizon_ms - 1` so it sorts
+/// strictly before all in-horizon tiles within the same prefix in the output
+/// segment (TileId order is `(prefix, system_from_ms)` ascending).
+fn apply_retention(
+    merged: BTreeMap<TileId, MergedTile>,
+    schema: &ArraySchema,
+    horizon_ms: i64,
+) -> Result<BTreeMap<TileId, MergedTile>, CompactionError> {
+    // Group tile versions by hilbert_prefix.
+    let mut by_prefix: HashMap<u64, Vec<(TileId, MergedTile)>> = HashMap::new();
+    for (tile_id, mt) in merged {
+        by_prefix
+            .entry(tile_id.hilbert_prefix)
+            .or_default()
+            .push((tile_id, mt));
+    }
+
+    let mut out: BTreeMap<TileId, MergedTile> = BTreeMap::new();
+
+    for (prefix, versions) in by_prefix {
+        // Partition into inside-horizon and outside-horizon.
+        let mut inside: Vec<(TileId, MergedTile)> = Vec::new();
+        let mut outside: Vec<(TileId, MergedTile)> = Vec::new();
+        for (tile_id, mt) in versions {
+            if tile_id.system_from_ms >= horizon_ms {
+                inside.push((tile_id, mt));
+            } else {
+                outside.push((tile_id, mt));
+            }
+        }
+
+        // Collect coord keys present in any in-horizon version so they can
+        // be excluded from the ceiling (the in-horizon version supersedes).
+        let mut inhorizon_coord_keys: HashSet<Vec<u8>> = HashSet::new();
+        for (_tile_id, mt) in &inside {
+            for row in &mt.rows {
+                let key = encode_coord_key(&row.coord)?;
+                inhorizon_coord_keys.insert(key);
+            }
+        }
+
+        // Pass in-horizon tiles through unchanged.
+        for (tile_id, mt) in inside {
+            out.insert(tile_id, mt);
+        }
+
+        // Nothing to collapse.
+        if outside.is_empty() {
+            continue;
+        }
+
+        // Sort outside-horizon versions newest → oldest.
+        outside.sort_by_key(|(tid, _)| std::cmp::Reverse(tid.system_from_ms));
+
+        // Build ceiling: coord → (newest out-of-horizon row).
+        // Maps encoded coord key → MergedRow.
+        let mut ceiling_rows: HashMap<Vec<u8>, MergedRow> = HashMap::new();
+        for (_tile_id, mt) in outside {
+            for row in mt.rows {
+                let key = encode_coord_key(&row.coord)?;
+                // Skip coords already covered by in-horizon versions.
+                if inhorizon_coord_keys.contains(&key) {
+                    continue;
+                }
+                // First occurrence (newest) wins.
+                ceiling_rows.entry(key).or_insert(row);
+            }
+        }
+
+        // Build synthetic ceiling MergedTile, excluding GDPR-erased coords.
+        let mut ceiling_tile = MergedTile::empty(schema);
+        // Deterministic order for stable segment output.
+        let mut ceiling_vec: Vec<(Vec<u8>, MergedRow)> = ceiling_rows.into_iter().collect();
+        ceiling_vec.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_key, row) in ceiling_vec {
+            if row.kind == RowKind::GdprErased {
+                // GDPR erasure: drop from ceiling entirely.
+                continue;
+            }
+            ceiling_tile.rows.push(row);
+        }
+
+        if !ceiling_tile.rows.is_empty() {
+            // Place ceiling just below the horizon so it sorts before all
+            // in-horizon tiles for this prefix.
+            let ceiling_sys_ms = horizon_ms.saturating_sub(1);
+            let ceiling_tile_id = TileId::new(prefix, ceiling_sys_ms);
+            out.insert(ceiling_tile_id, ceiling_tile);
+        }
+    }
+
+    Ok(out)
 }
 
 fn next_segment_id_for_compaction(_store: &ArrayStore, inputs: &[String]) -> String {
@@ -178,8 +310,8 @@ struct MergedRow {
 /// Per-tile merge accumulator. Stores the in-progress `coord → row` map so
 /// subsequent absorbs can override earlier versions — last-write-wins.
 /// Sentinel rows (Tombstone, GdprErased) are stored and passed through
-/// unchanged; the compaction picker's retention policy decides which tile
-/// versions to keep; the merger does not drop rows.
+/// unchanged; retention logic in [`apply_retention`] handles cell-level
+/// expiry when `audit_retain_ms` is set.
 struct MergedTile {
     rows: Vec<MergedRow>,
 }
@@ -312,7 +444,7 @@ mod tests {
         put_versioned(&mut e, 0, 0, 30, 300, 3);
         put_versioned(&mut e, 0, 0, 40, 400, 4);
         assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 4);
-        let merged = e.maybe_compact(&aid()).unwrap();
+        let merged = e.maybe_compact(&aid(), None, 0).unwrap();
         assert!(merged);
         let m = e.store(&aid()).unwrap().manifest();
         assert_eq!(m.segments.len(), 1);
@@ -367,7 +499,7 @@ mod tests {
         e.flush(&aid(), 8).unwrap();
 
         loop {
-            if !e.maybe_compact(&aid()).unwrap() {
+            if !e.maybe_compact(&aid(), None, 0).unwrap() {
                 break;
             }
         }

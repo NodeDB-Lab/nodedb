@@ -11,6 +11,7 @@ pub mod compaction;
 pub mod engine;
 pub mod flush;
 pub mod memtable;
+pub mod purge;
 pub mod read;
 pub mod recovery;
 pub mod store;

@@ -133,6 +133,46 @@ impl ArrayEngine {
             .get_mut(id)
             .ok_or_else(|| ArrayEngineError::UnknownArray(format!("{:?}", id)))
     }
+
+    /// Drop superseded tile-versions older than `cutoff_system_ms` for the
+    /// array named `array_id`.
+    ///
+    /// `tenant_id` is accepted for forward-compatibility. Arrays are currently
+    /// global (not tenant-scoped), so the catalog lookup uses only `array_id`.
+    ///
+    /// Returns the number of tile-versions dropped. Returns `Ok(0)` when the
+    /// array is not open (idempotent — array may have been dropped between
+    /// schedule and execution).
+    pub fn temporal_purge(
+        &mut self,
+        tenant_id: nodedb_types::TenantId,
+        array_id: &str,
+        cutoff_system_ms: i64,
+    ) -> ArrayEngineResult<u64> {
+        let aid = ArrayId::new(tenant_id, array_id);
+        // Idempotent: array may not be open on this core.
+        if !self.arrays.contains_key(&aid) {
+            return Ok(0);
+        }
+
+        let schema = {
+            let store = self.store(&aid)?;
+            store.schema().as_ref().clone()
+        };
+
+        let plan = {
+            let store = self.store(&aid)?;
+            super::purge::plan(store, cutoff_system_ms, &schema)?
+        };
+
+        if plan.segment_actions.is_empty() {
+            return Ok(0);
+        }
+
+        let store = self.store_mut(&aid)?;
+        let dropped = super::purge::execute(store, plan)?;
+        Ok(dropped)
+    }
 }
 
 pub(super) fn array_dir(root: &std::path::Path, id: &ArrayId) -> PathBuf {
