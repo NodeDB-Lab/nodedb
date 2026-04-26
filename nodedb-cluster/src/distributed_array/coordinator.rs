@@ -67,6 +67,18 @@ pub struct ArrayWriteCoordParams {
     pub timeout_ms: u64,
 }
 
+/// Result of a coordinated slice fan-out.
+///
+/// Carries the merged shard rows together with the OR-reduced
+/// `truncated_before_horizon` flag so the upstream caller can surface a
+/// below-horizon warning to the client. Mirrors the single-node
+/// `ArraySliceResponse` shape so downstream encoding is symmetric.
+#[derive(Debug, Clone, Default)]
+pub struct CoordSliceResult {
+    pub rows: Vec<Vec<u8>>,
+    pub truncated_before_horizon: bool,
+}
+
 /// Compute the inclusive Hilbert-prefix range `[lo, hi]` that vShard `shard_id`
 /// owns given the array's routing granularity `prefix_bits`.
 ///
@@ -151,14 +163,14 @@ impl ArrayCoordinator {
     /// Data Plane. The coordinator applies the same `limit` as a final
     /// cut-off on the merged result.
     ///
-    /// Returns merged rows as a flat list of zerompk-encoded row bytes.
-    /// If any shard fails the entire operation returns `Err` — partial
-    /// results are not silently dropped.
+    /// Returns merged rows plus the OR-reduced `truncated_before_horizon`
+    /// flag across all shards. If any shard fails the entire operation
+    /// returns `Err` — partial results are not silently dropped.
     pub async fn coord_slice(
         &self,
         req: ArrayShardSliceReq,
         coordinator_limit: u32,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> Result<CoordSliceResult> {
         let prefix_bits = self.params.prefix_bits;
         let per_shard: Vec<(u16, Vec<u8>)> = self
             .params
@@ -197,7 +209,12 @@ impl ArrayCoordinator {
         )
         .await?;
         let resps = decode_resps::<ArrayShardSliceResp>(&raw)?;
-        Ok(merge_slice_rows(&resps, coordinator_limit))
+        let truncated_before_horizon = super::merge::any_truncated_before_horizon_slice(&resps);
+        let rows = merge_slice_rows(&resps, coordinator_limit);
+        Ok(CoordSliceResult {
+            rows,
+            truncated_before_horizon,
+        })
     }
 
     /// Fan out an aggregate request and reduce partial aggregates from all shards.
@@ -489,6 +506,7 @@ mod tests {
                 shard_id: req.vshard_id,
                 rows_msgpack: self.rows.clone(),
                 truncated: false,
+                truncated_before_horizon: false,
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -512,6 +530,7 @@ mod tests {
             let resp = ArrayShardAggResp {
                 shard_id: req.vshard_id,
                 partials: self.partials.clone(),
+                truncated_before_horizon: false,
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -561,14 +580,17 @@ mod tests {
             prefix_bits: 0,
             slice_hilbert_ranges: vec![],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
 
         // 3 shards × 2 rows each = 6 merged rows.
-        let rows = coord
+        let result = coord
             .coord_slice(req, 0)
             .await
             .expect("coord_slice should succeed");
-        assert_eq!(rows.len(), 6);
+        assert_eq!(result.rows.len(), 6);
+        assert!(!result.truncated_before_horizon);
     }
 
     #[tokio::test]
@@ -588,13 +610,15 @@ mod tests {
             prefix_bits: 0,
             slice_hilbert_ranges: vec![],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
 
-        let rows = coord
+        let result = coord
             .coord_slice(req, 4)
             .await
             .expect("coord_slice with limit should succeed");
-        assert_eq!(rows.len(), 4);
+        assert_eq!(result.rows.len(), 4);
     }
 
     fn make_agg_req() -> ArrayShardAggReq {
@@ -606,6 +630,8 @@ mod tests {
             group_by_dim: -1,
             cell_filter_msgpack: vec![],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         }
     }
 
@@ -656,6 +682,7 @@ mod tests {
                 let resp = ArrayShardAggResp {
                     shard_id: req.vshard_id,
                     partials,
+                    truncated_before_horizon: false,
                 };
                 let payload = zerompk::to_msgpack_vec(&resp).unwrap();
                 Ok(VShardEnvelope::new(
@@ -707,14 +734,16 @@ mod tests {
             prefix_bits: 0,
             slice_hilbert_ranges: vec![],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
 
         // coordinator_limit = 0 → no cutoff → 20 rows.
-        let rows = coord
+        let result = coord
             .coord_slice(req, 0)
             .await
             .expect("coord_slice unlimited should succeed");
-        assert_eq!(rows.len(), 20);
+        assert_eq!(result.rows.len(), 20);
     }
 
     // ── coord_put / coord_delete tests ────────────────────────────────────

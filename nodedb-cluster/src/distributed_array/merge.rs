@@ -72,6 +72,21 @@ impl ArrayAggPartial {
     }
 }
 
+/// Returns `true` if any shard reported that `system_as_of` fell below its
+/// oldest tile version and it produced zero rows as a result.
+///
+/// Callers combine this flag via logical OR across shards to propagate the
+/// below-horizon signal to the upstream coordinator response.
+pub fn any_truncated_before_horizon_slice(shard_resps: &[ArrayShardSliceResp]) -> bool {
+    shard_resps.iter().any(|r| r.truncated_before_horizon)
+}
+
+/// Returns `true` if any shard reported that `system_as_of` fell below its
+/// oldest tile version, causing the shard to contribute zero partials.
+pub fn any_truncated_before_horizon_agg(shard_resps: &[ArrayShardAggResp]) -> bool {
+    shard_resps.iter().any(|r| r.truncated_before_horizon)
+}
+
 /// Merge row batches from multiple shards into one result set.
 ///
 /// Rows are concatenated in shard-arrival order (order-independent for
@@ -129,10 +144,12 @@ mod tests {
         let resp_a = ArrayShardAggResp {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 10.0)],
+            truncated_before_horizon: false,
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(0, 20.0)],
+            truncated_before_horizon: false,
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 1);
@@ -148,6 +165,7 @@ mod tests {
                 ArrayAggPartial::from_single(0, 5.0),
                 ArrayAggPartial::from_single(1, 15.0),
             ],
+            truncated_before_horizon: false,
         };
         let merged = reduce_agg_partials(&[resp]);
         assert_eq!(merged.len(), 2);
@@ -171,11 +189,13 @@ mod tests {
             shard_id: 0,
             rows_msgpack: vec![vec![1u8], vec![2u8]],
             truncated: false,
+            truncated_before_horizon: false,
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![vec![3u8]],
             truncated: false,
+            truncated_before_horizon: false,
         };
         let rows = merge_slice_rows(&[r0, r1], 0);
         assert_eq!(rows.len(), 3);
@@ -187,6 +207,7 @@ mod tests {
             shard_id: 0,
             rows_msgpack: vec![vec![1u8], vec![2u8], vec![3u8], vec![4u8], vec![5u8]],
             truncated: false,
+            truncated_before_horizon: false,
         };
         let rows = merge_slice_rows(&[resp], 3);
         assert_eq!(rows.len(), 3);
@@ -199,10 +220,12 @@ mod tests {
         let resp_a = ArrayShardAggResp {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 5.0)],
+            truncated_before_horizon: false,
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(0, 3.0)],
+            truncated_before_horizon: false,
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 1);
@@ -214,10 +237,12 @@ mod tests {
         let resp_a = ArrayShardAggResp {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 5.0)],
+            truncated_before_horizon: false,
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(0, 99.0)],
+            truncated_before_horizon: false,
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 1);
@@ -246,6 +271,7 @@ mod tests {
                 ArrayAggPartial::from_single(0, 5.0),
                 ArrayAggPartial::from_single(1, 10.0),
             ],
+            truncated_before_horizon: false,
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
@@ -253,6 +279,7 @@ mod tests {
                 ArrayAggPartial::from_single(1, 20.0),
                 ArrayAggPartial::from_single(2, 30.0),
             ],
+            truncated_before_horizon: false,
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 3);
@@ -265,15 +292,53 @@ mod tests {
     }
 
     #[test]
+    fn truncated_before_horizon_or_combines_across_shards() {
+        let r0 = ArrayShardSliceResp {
+            shard_id: 0,
+            rows_msgpack: vec![],
+            truncated: false,
+            truncated_before_horizon: true,
+        };
+        let r1 = ArrayShardSliceResp {
+            shard_id: 1,
+            rows_msgpack: vec![vec![1u8]],
+            truncated: false,
+            truncated_before_horizon: false,
+        };
+        assert!(any_truncated_before_horizon_slice(&[r0, r1]));
+
+        let a0 = ArrayShardAggResp {
+            shard_id: 0,
+            partials: vec![],
+            truncated_before_horizon: false,
+        };
+        let a1 = ArrayShardAggResp {
+            shard_id: 1,
+            partials: vec![],
+            truncated_before_horizon: true,
+        };
+        assert!(any_truncated_before_horizon_agg(&[a0, a1]));
+
+        let a_none = ArrayShardAggResp {
+            shard_id: 2,
+            partials: vec![],
+            truncated_before_horizon: false,
+        };
+        assert!(!any_truncated_before_horizon_agg(&[a_none]));
+    }
+
+    #[test]
     fn reduce_grouped_disjoint_keys() {
         // Shard A has only group 0; shard B has only group 1 — no overlap.
         let resp_a = ArrayShardAggResp {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 7.0)],
+            truncated_before_horizon: false,
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(1, 13.0)],
+            truncated_before_horizon: false,
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 2);
@@ -289,11 +354,13 @@ mod tests {
             shard_id: 0,
             rows_msgpack: vec![vec![1u8], vec![2u8]],
             truncated: false,
+            truncated_before_horizon: false,
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![vec![3u8], vec![4u8]],
             truncated: false,
+            truncated_before_horizon: false,
         };
         // Total 4 rows, limit 3 → first 3.
         let rows = merge_slice_rows(&[r0, r1], 3);
@@ -306,6 +373,7 @@ mod tests {
             shard_id: 0,
             rows_msgpack: (0u8..20).map(|i| vec![i]).collect(),
             truncated: false,
+            truncated_before_horizon: false,
         };
         let rows = merge_slice_rows(&[resp], 0);
         assert_eq!(rows.len(), 20);

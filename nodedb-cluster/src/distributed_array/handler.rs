@@ -68,22 +68,14 @@ async fn handle_slice(
 
     validate_slice_routing(&req, local_vshard_id)?;
 
-    let rows = executor
-        .exec_slice(
-            &req.array_id_msgpack,
-            &req.slice_msgpack,
-            &req.attr_projection,
-            req.limit,
-            &req.cell_filter_msgpack,
-            req.shard_hilbert_range,
-        )
-        .await?;
+    let rows = executor.exec_slice(&req).await?;
 
     let truncated = req.limit > 0 && rows.len() >= req.limit as usize;
     let resp = ArrayShardSliceResp {
         shard_id: local_vshard_id,
         rows_msgpack: rows,
         truncated,
+        truncated_before_horizon: false,
     };
     serialise(resp)
 }
@@ -103,6 +95,7 @@ async fn handle_agg(
     let resp = ArrayShardAggResp {
         shard_id: local_vshard_id,
         partials,
+        truncated_before_horizon: false,
     };
     serialise(resp)
 }
@@ -275,12 +268,7 @@ mod tests {
     impl ArrayLocalExecutor for StubExecutor {
         async fn exec_slice(
             &self,
-            _array_id_msgpack: &[u8],
-            _slice_msgpack: &[u8],
-            _attr_projection: &[u32],
-            _limit: u32,
-            _cell_filter_msgpack: &[u8],
-            _shard_hilbert_range: Option<(u64, u64)>,
+            _req: &super::super::wire::ArrayShardSliceReq,
         ) -> Result<Vec<Vec<u8>>> {
             Ok(self.rows.clone())
         }
@@ -322,6 +310,8 @@ mod tests {
             prefix_bits: 0,
             slice_hilbert_ranges: vec![],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }
@@ -339,6 +329,8 @@ mod tests {
             group_by_dim: -1,
             cell_filter_msgpack: vec![],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }
@@ -528,6 +520,8 @@ mod tests {
             prefix_bits: 10,
             slice_hilbert_ranges: vec![(0x0040_0000_0000_0000, 0x0040_0000_0000_0000)],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
         let err = super::validate_slice_routing(&req, 5)
             .expect_err("disjoint Hilbert range should reject");
@@ -552,6 +546,8 @@ mod tests {
             prefix_bits: 10,
             slice_hilbert_ranges: vec![(0x0040_0000_0000_0000, 0x0040_0000_0000_0000)],
             shard_hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
         super::validate_slice_routing(&req, 1).expect("overlapping range should accept");
     }

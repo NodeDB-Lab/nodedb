@@ -11,7 +11,7 @@
 //! `nodedb` while still producing real results from the Data Plane.
 
 use crate::distributed_array::merge::ArrayAggPartial;
-use crate::distributed_array::wire::{ArrayShardAggReq, ArrayShardPutReq};
+use crate::distributed_array::wire::{ArrayShardAggReq, ArrayShardPutReq, ArrayShardSliceReq};
 use crate::error::Result;
 
 /// Execute array operations against the local Data Plane.
@@ -36,15 +36,7 @@ pub trait ArrayLocalExecutor: Send + Sync + 'static {
     ///
     /// Returns `Vec<Vec<u8>>` — one element per matching row, each element
     /// being the zerompk encoding of that row.
-    async fn exec_slice(
-        &self,
-        array_id_msgpack: &[u8],
-        slice_msgpack: &[u8],
-        attr_projection: &[u32],
-        limit: u32,
-        cell_filter_msgpack: &[u8],
-        shard_hilbert_range: Option<(u64, u64)>,
-    ) -> Result<Vec<Vec<u8>>>;
+    async fn exec_slice(&self, req: &ArrayShardSliceReq) -> Result<Vec<Vec<u8>>>;
 
     /// Execute a surrogate-bitmap scan and return the zerompk-encoded
     /// `SurrogateBitmap` bytes for matching cells.
