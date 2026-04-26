@@ -48,6 +48,8 @@ impl CoreLoop {
                 limit,
                 cell_filter,
                 hilbert_range,
+                system_as_of,
+                valid_at_ms,
             } => self.dispatch_array_slice(
                 task,
                 SliceParams {
@@ -57,6 +59,8 @@ impl CoreLoop {
                     limit: *limit,
                     cell_filter: cell_filter.as_ref(),
                     hilbert_range: *hilbert_range,
+                    system_as_of: *system_as_of,
+                    valid_at_ms: *valid_at_ms,
                 },
             ),
             ArrayOp::SurrogateBitmapScan {
@@ -75,6 +79,8 @@ impl CoreLoop {
                 cell_filter,
                 return_partial,
                 hilbert_range,
+                system_as_of,
+                valid_at_ms,
             } => self.dispatch_array_aggregate(
                 task,
                 AggParams {
@@ -85,6 +91,8 @@ impl CoreLoop {
                     cell_filter: cell_filter.as_ref(),
                     return_partial: *return_partial,
                     hilbert_range: *hilbert_range,
+                    system_as_of: *system_as_of,
+                    valid_at_ms: *valid_at_ms,
                 },
             ),
             ArrayOp::Elementwise {

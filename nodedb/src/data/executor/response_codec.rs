@@ -550,6 +550,37 @@ pub(super) struct GraphRagResult {
     pub hop_distance: Option<usize>,
 }
 
+/// Structured response for `ArrayOp::Slice`.
+///
+/// Carries the row payload alongside a flag that signals whether the
+/// query's `system_as_of` cutoff fell below the oldest tile version on
+/// this shard, meaning history was truncated. The shape is identical for
+/// both local single-node responses and cluster shard responses.
+#[derive(Serialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
+pub(crate) struct ArraySliceResponse {
+    /// Msgpack-encoded row bytes. Each element is one encoded `Value`.
+    pub rows_msgpack: Vec<u8>,
+    /// True when `system_as_of` is below the oldest tile version and the
+    /// response may be incomplete due to horizon truncation.
+    pub truncated_before_horizon: bool,
+}
+
+/// Structured response for `ArrayOp::Aggregate` (non-partial path).
+///
+/// Carries the aggregate row payload plus the horizon-truncation flag.
+/// Partial responses (cluster fan-out) use a separate encoding to avoid
+/// coupling the partial merge protocol to this struct.
+#[derive(Serialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
+#[allow(dead_code)]
+pub(crate) struct ArrayAggregateResponse {
+    /// Msgpack-encoded rows.
+    pub rows_msgpack: Vec<u8>,
+    /// True when the query's `system_as_of` fell below the oldest tile version.
+    pub truncated_before_horizon: bool,
+}
+
 #[derive(Serialize, zerompk::ToMessagePack)]
 #[msgpack(map)]
 pub(super) struct TextSearchHit<'a> {

@@ -56,6 +56,7 @@ impl CoreLoop {
                     schema_hash,
                     created_at_ms: now_epoch_ms(),
                     prefix_bits,
+                    audit_retain_ms: None,
                 };
                 let mut cat = match self.array_catalog.write() {
                     Ok(g) => g,

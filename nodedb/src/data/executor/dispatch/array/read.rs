@@ -26,10 +26,15 @@ pub(in crate::data::executor) struct SliceParams<'a> {
     /// included. Used by the distributed shard handler to prevent duplicate
     /// rows when all vShards share a single Data Plane.
     pub hilbert_range: Option<(u64, u64)>,
+    /// Bitemporal system-time cutoff. `None` = live read.
+    pub system_as_of: Option<i64>,
+    /// Bitemporal valid-time point. `None` = no valid-time filter.
+    pub valid_at_ms: Option<i64>,
 }
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::response_codec::ArraySliceResponse;
 use crate::data::executor::task::ExecutionTask;
 
 use super::convert::sparse_tile_to_array_cells;
@@ -48,13 +53,13 @@ impl CoreLoop {
             limit,
             cell_filter,
             hilbert_range,
+            system_as_of,
+            valid_at_ms,
         } = p;
 
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
         }
-        // zerompk-encoded per the wire contract on
-        // `ArrayOp::Slice::slice_msgpack`.
         let slice: Slice = match zerompk::from_msgpack(slice_msgpack) {
             Ok(s) => s,
             Err(e) => {
@@ -79,40 +84,6 @@ impl CoreLoop {
             }
         };
 
-        let all_tiles_with_prefix = match self
-            .array_engine
-            .scan_tiles_with_hilbert_prefix(array_id, &MbrQueryPredicate::default())
-        {
-            Ok(t) => t,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("array slice scan: {e}"),
-                    },
-                );
-            }
-        };
-
-        // Apply per-shard Hilbert-range pre-filter when set. This prevents
-        // duplicate rows in harnesses where all vShards share one Data Plane.
-        let tiles: Vec<TilePayload> = match hilbert_range {
-            Some((lo, hi)) => all_tiles_with_prefix
-                .into_iter()
-                .filter_map(|(hp, tile)| {
-                    if hp >= lo && hp <= hi {
-                        Some(tile)
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            None => all_tiles_with_prefix
-                .into_iter()
-                .map(|(_, tile)| tile)
-                .collect(),
-        };
-
         let proj = if attr_projection.is_empty() {
             None
         } else {
@@ -120,74 +91,138 @@ impl CoreLoop {
                 attr_projection.iter().map(|&i| i as usize).collect(),
             ))
         };
-
-        let mut rows: Vec<Value> = Vec::new();
         let cap = limit as usize;
-        for tile in tiles {
-            let sparse: SparseTile = match tile {
-                TilePayload::Sparse(s) => s,
-                TilePayload::Dense(_) => {
-                    return self.response_error(
-                        task,
-                        ErrorCode::Unsupported {
-                            detail: "dense tile payload in slice".to_string(),
-                        },
-                    );
-                }
-            };
-            if !tile_overlaps_slice(&sparse.mbr.dim_mins, &sparse.mbr.dim_maxs, &slice) {
-                continue;
-            }
-            let filtered = match slice_sparse(&schema, &sparse, &slice) {
-                Ok(t) => t,
+
+        // Run through the Ceiling resolver. When no temporal filter is specified
+        // the cutoff is `i64::MAX` (live read); Ceiling still deduplicates
+        // multiple system-time versions of the same coord. The response shape
+        // is `ArraySliceResponse` (rows + truncated_before_horizon flag) for
+        // both local single-node and cluster shard responses.
+        let cutoff = system_as_of.unwrap_or(i64::MAX);
+        {
+            let store = match self.array_engine.store(array_id) {
+                Ok(s) => s,
                 Err(e) => {
                     return self.response_error(
                         task,
                         ErrorCode::Internal {
-                            detail: format!("array slice filter: {e}"),
+                            detail: format!("array '{}' not open: {e}", array_id.name),
                         },
                     );
                 }
             };
-            let final_tile = match proj.as_ref() {
-                Some(p) => match project_sparse(&filtered, p) {
+            let (resolved_tiles, truncated_before_horizon) =
+                match store.scan_tiles_at(cutoff, valid_at_ms) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("array bitemporal scan: {e}"),
+                            },
+                        );
+                    }
+                };
+
+            let mut rows: Vec<Value> = Vec::new();
+            'outer: for (hp, sparse) in resolved_tiles {
+                if let Some((lo, hi)) = hilbert_range
+                    && (hp < lo || hp > hi)
+                {
+                    continue;
+                }
+                if !tile_overlaps_slice(&sparse.mbr.dim_mins, &sparse.mbr.dim_maxs, &slice) {
+                    continue;
+                }
+                let filtered = match slice_sparse(&schema, &sparse, &slice) {
                     Ok(t) => t,
                     Err(e) => {
                         return self.response_error(
                             task,
                             ErrorCode::Internal {
-                                detail: format!("array slice project: {e}"),
+                                detail: format!("array slice filter: {e}"),
                             },
                         );
                     }
-                },
-                None => filtered,
-            };
-            for (row_idx, cell) in sparse_tile_to_array_cells(&schema, &final_tile)
-                .into_iter()
-                .enumerate()
-            {
-                if let Some(f) = cell_filter {
-                    let sur = final_tile
-                        .surrogates
-                        .get(row_idx)
-                        .copied()
-                        .unwrap_or(nodedb_types::Surrogate::ZERO);
-                    if !f.contains(sur) {
-                        continue;
+                };
+                let final_tile = match proj.as_ref() {
+                    Some(p) => match project_sparse(&filtered, p) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!("array slice project: {e}"),
+                                },
+                            );
+                        }
+                    },
+                    None => filtered,
+                };
+                for (row_idx, cell) in sparse_tile_to_array_cells(&schema, &final_tile)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(f) = cell_filter {
+                        let sur = final_tile
+                            .surrogates
+                            .get(row_idx)
+                            .copied()
+                            .unwrap_or(nodedb_types::Surrogate::ZERO);
+                        if !f.contains(sur) {
+                            continue;
+                        }
+                    }
+                    rows.push(Value::NdArrayCell(cell));
+                    if cap > 0 && rows.len() >= cap {
+                        break 'outer;
                     }
                 }
-                rows.push(Value::NdArrayCell(cell));
-                if cap > 0 && rows.len() >= cap {
-                    break;
-                }
             }
-            if cap > 0 && rows.len() >= cap {
-                break;
+
+            // Encode rows into the structured response. Build the rows msgpack
+            // in-line (same shape as encode_value_rows) then wrap in the response.
+            let rows_msgpack = {
+                let mut buf: Vec<u8> = Vec::with_capacity(rows.len() * 64);
+                let n = rows.len();
+                if n < 16 {
+                    buf.push(0x90 | n as u8);
+                } else if n <= u16::MAX as usize {
+                    buf.push(0xDC);
+                    buf.extend_from_slice(&(n as u16).to_be_bytes());
+                } else {
+                    buf.push(0xDD);
+                    buf.extend_from_slice(&(n as u32).to_be_bytes());
+                }
+                for row in &rows {
+                    match nodedb_types::value_to_msgpack(row) {
+                        Ok(b) => buf.extend_from_slice(&b),
+                        Err(e) => {
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!("array response encode: {e}"),
+                                },
+                            );
+                        }
+                    }
+                }
+                buf
+            };
+            let resp = ArraySliceResponse {
+                rows_msgpack,
+                truncated_before_horizon,
+            };
+            match zerompk::to_msgpack_vec(&resp) {
+                Ok(bytes) => self.response_with_payload(task, bytes),
+                Err(e) => self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("array slice response encode: {e}"),
+                    },
+                ),
             }
         }
-
-        encode_value_rows(self, task, &rows)
     }
 
     pub(in crate::data::executor) fn dispatch_array_project(

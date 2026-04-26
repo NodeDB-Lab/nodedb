@@ -146,6 +146,9 @@ fn cell(x: i64, y: i64, v: f64) -> ArrayPutCell {
         coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
         attrs: vec![CellValue::Float64(v)],
         surrogate: nodedb_types::Surrogate::ZERO,
+        system_from_ms: 0,
+        valid_from_ms: 0,
+        valid_until_ms: i64::MAX,
     }
 }
 
@@ -154,6 +157,9 @@ fn cell_sur(x: i64, y: i64, v: f64, sur: u32) -> ArrayPutCell {
         coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
         attrs: vec![CellValue::Float64(v)],
         surrogate: Surrogate(sur),
+        system_from_ms: 0,
+        valid_from_ms: 0,
+        valid_until_ms: i64::MAX,
     }
 }
 
@@ -165,13 +171,22 @@ fn decode_agg_rows(bytes: &[u8]) -> Vec<std::collections::BTreeMap<String, serde
 }
 
 fn decode_value_vec(bytes: &[u8]) -> Vec<Value> {
-    // Slice/Project/Elementwise ship rows as a standard msgpack array of
-    // `value_to_msgpack`-encoded values — `Value::NdArrayCell` lands as
-    // `{coords: [...], attrs: [...]}` so the pgwire transcoder is clean.
-    // Tests parse the JSON back into typed `Value`s here.
+    // Plain msgpack array of `value_to_msgpack`-encoded values (elementwise).
     let json = nodedb_types::msgpack_to_json_string(bytes).expect("payload msgpack→json");
     let arr: serde_json::Value = serde_json::from_str(&json).expect("payload json parse");
     let arr = arr.as_array().expect("rows are an array").clone();
+    arr.into_iter().map(json_to_value).collect()
+}
+
+fn decode_slice_rows(bytes: &[u8]) -> Vec<Value> {
+    // Slice responses are wrapped in `ArraySliceResponse { rows_msgpack, truncated_before_horizon }`.
+    use crate::data::executor::response_codec::ArraySliceResponse;
+    let envelope: ArraySliceResponse =
+        zerompk::from_msgpack(bytes).expect("ArraySliceResponse envelope decode");
+    let json = nodedb_types::msgpack_to_json_string(&envelope.rows_msgpack)
+        .expect("slice rows msgpack→json");
+    let arr: serde_json::Value = serde_json::from_str(&json).expect("slice rows json parse");
+    let arr = arr.as_array().expect("slice rows are an array").clone();
     arr.into_iter().map(json_to_value).collect()
 }
 
@@ -244,9 +259,11 @@ fn slice_returns_only_cells_in_range() {
         limit: 0,
         cell_filter: None,
         hilbert_range: None,
+        system_as_of: None,
+        valid_at_ms: None,
     });
     assert_eq!(r.status, Status::Ok, "slice failed: {r:?}");
-    let rows = decode_value_vec(r.payload.as_ref());
+    let rows = decode_slice_rows(r.payload.as_ref());
     assert_eq!(rows.len(), 2, "expected two cells, got {rows:?}");
     let mut sums = 0.0;
     for v in rows {
@@ -282,6 +299,8 @@ fn aggregate_sum_scalar_across_multiple_tiles() {
         cell_filter: None,
         return_partial: false,
         hilbert_range: None,
+        system_as_of: None,
+        valid_at_ms: None,
     });
     assert_eq!(r.status, Status::Ok, "agg failed: {r:?}");
     let rows = decode_agg_rows(r.payload.as_ref());
@@ -313,6 +332,8 @@ fn aggregate_group_by_dim_buckets_per_x() {
         cell_filter: None,
         return_partial: false,
         hilbert_range: None,
+        system_as_of: None,
+        valid_at_ms: None,
     });
     assert_eq!(r.status, Status::Ok, "group agg failed: {r:?}");
     let rows = decode_agg_rows(r.payload.as_ref());
@@ -402,9 +423,11 @@ fn slice_cell_filter_excludes_non_member_surrogates() {
         limit: 0,
         cell_filter: Some(bm),
         hilbert_range: None,
+        system_as_of: None,
+        valid_at_ms: None,
     });
     assert_eq!(r.status, Status::Ok, "slice+filter failed: {r:?}");
-    let rows = decode_value_vec(r.payload.as_ref());
+    let rows = decode_slice_rows(r.payload.as_ref());
     assert_eq!(rows.len(), 2, "expected 2 cells, got {rows:?}");
     let mut total = 0.0;
     for v in rows {
@@ -452,6 +475,8 @@ fn aggregate_cell_filter_excludes_non_member_surrogates() {
         cell_filter: Some(bm),
         return_partial: false,
         hilbert_range: None,
+        system_as_of: None,
+        valid_at_ms: None,
     });
     assert_eq!(r.status, Status::Ok, "agg+filter failed: {r:?}");
     let rows = decode_agg_rows(r.payload.as_ref());

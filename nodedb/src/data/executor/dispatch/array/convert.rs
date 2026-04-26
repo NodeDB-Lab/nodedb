@@ -11,7 +11,7 @@
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::schema::attr_spec::AttrType;
 use nodedb_array::schema::dim_spec::DimType;
-use nodedb_array::tile::sparse_tile::SparseTile;
+use nodedb_array::tile::sparse_tile::{RowKind, SparseTile};
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
 use nodedb_types::{ArrayCell, NodeDbError, Value};
@@ -124,10 +124,20 @@ pub fn value_to_cell_value(v: &Value, expected: AttrType) -> Result<CellValue, N
 /// Coordinates are reconstructed from each dim's dictionary + index
 /// stream; attributes are taken in column order.
 pub fn sparse_tile_to_array_cells(schema: &ArraySchema, tile: &SparseTile) -> Vec<ArrayCell> {
-    let nnz = tile.nnz() as usize;
     let arity = schema.arity();
-    let mut cells = Vec::with_capacity(nnz);
-    for row in 0..nnz {
+    let mut cells = Vec::with_capacity(tile.nnz() as usize);
+    let mut live_idx = 0usize;
+    for row in 0..tile.row_count() {
+        // Sentinel rows carry no attribute payload — skip them.
+        let kind = match tile.row_kind(row) {
+            Ok(k) => k,
+            Err(_) => break,
+        };
+        if kind != RowKind::Live {
+            continue;
+        }
+        let attr_row = live_idx;
+        live_idx += 1;
         let mut coords = Vec::with_capacity(arity);
         for dim in 0..arity {
             let dict = &tile.dim_dicts[dim];
@@ -136,7 +146,7 @@ pub fn sparse_tile_to_array_cells(schema: &ArraySchema, tile: &SparseTile) -> Ve
         }
         let mut attrs = Vec::with_capacity(schema.attrs.len());
         for col in &tile.attr_cols {
-            attrs.push(cell_value_to_value(&col[row]));
+            attrs.push(cell_value_to_value(&col[attr_row]));
         }
         cells.push(ArrayCell { coords, attrs });
     }

@@ -9,7 +9,7 @@
 use nodedb_array::query::elementwise::{BinaryOp, elementwise};
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::{MbrQueryPredicate, TilePayload};
-use nodedb_array::tile::sparse_tile::{SparseTile, SparseTileBuilder};
+use nodedb_array::tile::sparse_tile::{RowKind, SparseRow, SparseTile, SparseTileBuilder};
 use nodedb_array::types::ArrayId;
 use nodedb_types::{SurrogateBitmap, Value};
 
@@ -157,9 +157,18 @@ fn filter_by_surrogates(
         None => return Ok(tile),
         Some(f) => f,
     };
-    let n = tile.nnz() as usize;
+    let n = tile.row_count();
+    let mut live_idx = 0usize;
     let mut b = SparseTileBuilder::new(schema);
     for row in 0..n {
+        let kind = tile.row_kind(row).map_err(|e| ErrorCode::Internal {
+            detail: format!("array elementwise filter row_kind: {e}"),
+        })?;
+        if kind != RowKind::Live {
+            continue;
+        }
+        let attr_row = live_idx;
+        live_idx += 1;
         let sur = tile
             .surrogates
             .get(row)
@@ -173,11 +182,24 @@ fn filter_by_surrogates(
             .iter()
             .map(|d| d.values[d.indices[row] as usize].clone())
             .collect();
-        let attrs: Vec<_> = tile.attr_cols.iter().map(|c| c[row].clone()).collect();
-        b.push_with_surrogate(&coord, &attrs, sur)
-            .map_err(|e| ErrorCode::Internal {
-                detail: format!("array elementwise filter: {e}"),
-            })?;
+        let attrs: Vec<_> = tile.attr_cols.iter().map(|c| c[attr_row].clone()).collect();
+        let valid_from_ms = tile.valid_from_ms.get(row).copied().unwrap_or(0);
+        let valid_until_ms = tile
+            .valid_until_ms
+            .get(row)
+            .copied()
+            .unwrap_or(nodedb_types::OPEN_UPPER);
+        b.push_row(SparseRow {
+            coord: &coord,
+            attrs: &attrs,
+            surrogate: sur,
+            valid_from_ms,
+            valid_until_ms,
+            kind: RowKind::Live,
+        })
+        .map_err(|e| ErrorCode::Internal {
+            detail: format!("array elementwise filter: {e}"),
+        })?;
     }
     Ok(b.build())
 }
@@ -193,23 +215,49 @@ fn union_tiles(schema: &ArraySchema, tiles: Vec<TilePayload>) -> Result<SparseTi
                 });
             }
         };
-        let n = sparse.nnz() as usize;
+        let n = sparse.row_count();
+        let mut live_idx = 0usize;
         for row in 0..n {
+            let kind = sparse.row_kind(row).map_err(|e| ErrorCode::Internal {
+                detail: format!("array elementwise union row_kind: {e}"),
+            })?;
+            if kind != RowKind::Live {
+                continue;
+            }
+            let attr_row = live_idx;
+            live_idx += 1;
             let coord: Vec<_> = sparse
                 .dim_dicts
                 .iter()
                 .map(|d| d.values[d.indices[row] as usize].clone())
                 .collect();
-            let attrs: Vec<_> = sparse.attr_cols.iter().map(|c| c[row].clone()).collect();
+            let attrs: Vec<_> = sparse
+                .attr_cols
+                .iter()
+                .map(|c| c[attr_row].clone())
+                .collect();
             let surrogate = sparse
                 .surrogates
                 .get(row)
                 .copied()
                 .unwrap_or(nodedb_types::Surrogate::ZERO);
-            b.push_with_surrogate(&coord, &attrs, surrogate)
-                .map_err(|e| ErrorCode::Internal {
-                    detail: format!("array elementwise union: {e}"),
-                })?;
+            let valid_from_ms = sparse.valid_from_ms.get(row).copied().unwrap_or(0);
+            let valid_until_ms = sparse
+                .valid_until_ms
+                .get(row)
+                .copied()
+                .unwrap_or(nodedb_types::OPEN_UPPER);
+            b.push_row(SparseRow {
+                coord: &coord,
+                attrs: &attrs,
+                surrogate,
+                valid_from_ms,
+                valid_until_ms,
+                kind: RowKind::Live,
+            })
+            .map_err(|e| ErrorCode::Internal {
+                detail: format!("array elementwise union: {e}"),
+            })?;
         }
     }
     Ok(b.build())

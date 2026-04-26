@@ -1,12 +1,11 @@
 //! `ArrayOp::Put` / `Delete` / `Flush` / `Compact` handlers.
 
 use nodedb_array::types::ArrayId;
-use nodedb_array::types::coord::value::CoordValue;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::array::wal::ArrayPutCell;
+use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 
 impl CoreLoop {
     pub(in crate::data::executor) fn handle_array_put(
@@ -46,7 +45,7 @@ impl CoreLoop {
         coords_msgpack: &[u8],
         wal_lsn: u64,
     ) -> Response {
-        let coords: Vec<Vec<CoordValue>> = match zerompk::from_msgpack(coords_msgpack) {
+        let cells: Vec<ArrayDeleteCell> = match zerompk::from_msgpack(coords_msgpack) {
             Ok(c) => c,
             Err(e) => {
                 return self.response_error(
@@ -57,8 +56,8 @@ impl CoreLoop {
                 );
             }
         };
-        let n = coords.len();
-        if let Err(e) = self.array_engine.delete_cells(array_id, coords, wal_lsn) {
+        let n = cells.len();
+        if let Err(e) = self.array_engine.delete_cells(array_id, cells, wal_lsn) {
             return self.response_error(
                 task,
                 ErrorCode::Internal {
@@ -245,6 +244,9 @@ mod tests {
             coord: vec![CoordValue::Int64(1), CoordValue::Int64(2)],
             attrs: vec![CellValue::Float64(3.5)],
             surrogate: nodedb_types::Surrogate::ZERO,
+            system_from_ms: 0,
+            valid_from_ms: 0,
+            valid_until_ms: i64::MAX,
         }];
         let cells_bytes = zerompk::to_msgpack_vec(&cells).unwrap();
         req_tx
@@ -350,6 +352,9 @@ mod tests {
             coord: vec![CoordValue::Int64(3)],
             attrs: vec![CellValue::Float64(42.0)],
             surrogate: nodedb_types::Surrogate::ZERO,
+            system_from_ms: 0,
+            valid_from_ms: 0,
+            valid_until_ms: i64::MAX,
         }];
         let cells_bytes = zerompk::to_msgpack_vec(&cells).unwrap();
         req_tx
