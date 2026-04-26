@@ -30,10 +30,12 @@ use nodedb_cluster::error::{ClusterError, Result};
 use nodedb_query::msgpack_scan;
 use nodedb_types::Surrogate;
 use nodedb_types::SurrogateBitmap;
+use zerompk;
 
 use crate::bridge::envelope::{Priority, Request};
 use crate::bridge::physical_plan::{ArrayOp, ArrayReducer, PhysicalPlan};
 use crate::control::state::SharedState;
+use crate::data::executor::response_codec::ArraySliceResponse;
 use crate::event::types::EventSource;
 use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
 
@@ -121,35 +123,34 @@ impl DataPlaneArrayExecutor {
 impl ArrayLocalExecutor for DataPlaneArrayExecutor {
     async fn exec_slice(
         &self,
-        array_id_msgpack: &[u8],
-        slice_msgpack: &[u8],
-        attr_projection: &[u32],
-        limit: u32,
-        cell_filter_msgpack: &[u8],
-        shard_hilbert_range: Option<(u64, u64)>,
+        req: &nodedb_cluster::distributed_array::wire::ArrayShardSliceReq,
     ) -> Result<Vec<Vec<u8>>> {
         let array_id: ArrayId =
-            zerompk::from_msgpack(array_id_msgpack).map_err(|e| ClusterError::Codec {
+            zerompk::from_msgpack(&req.array_id_msgpack).map_err(|e| ClusterError::Codec {
                 detail: format!("array_id decode in exec_slice: {e}"),
             })?;
 
-        let cell_filter: Option<SurrogateBitmap> = if cell_filter_msgpack.is_empty() {
+        let cell_filter: Option<SurrogateBitmap> = if req.cell_filter_msgpack.is_empty() {
             None
         } else {
             Some(
-                zerompk::from_msgpack(cell_filter_msgpack).map_err(|e| ClusterError::Codec {
-                    detail: format!("cell_filter decode in exec_slice: {e}"),
+                zerompk::from_msgpack(&req.cell_filter_msgpack).map_err(|e| {
+                    ClusterError::Codec {
+                        detail: format!("cell_filter decode in exec_slice: {e}"),
+                    }
                 })?,
             )
         };
 
         let plan = PhysicalPlan::Array(ArrayOp::Slice {
             array_id,
-            slice_msgpack: slice_msgpack.to_vec(),
-            attr_projection: attr_projection.to_vec(),
-            limit,
+            slice_msgpack: req.slice_msgpack.clone(),
+            attr_projection: req.attr_projection.clone(),
+            limit: req.limit,
             cell_filter,
-            hilbert_range: shard_hilbert_range,
+            hilbert_range: req.shard_hilbert_range,
+            system_as_of: req.system_as_of,
+            valid_at_ms: req.valid_at_ms,
         });
 
         let resp = self.dispatch_and_await(plan).await?;
@@ -165,7 +166,13 @@ impl ArrayLocalExecutor for DataPlaneArrayExecutor {
             });
         }
 
-        split_msgpack_array_rows(&resp.payload)
+        // Decode the structured `ArraySliceResponse` envelope, then split the
+        // inner rows_msgpack into per-row byte slices for the cluster coordinator.
+        let slice_resp: ArraySliceResponse =
+            zerompk::from_msgpack(&resp.payload).map_err(|e| ClusterError::Codec {
+                detail: format!("array slice response decode: {e}"),
+            })?;
+        split_msgpack_array_rows(&slice_resp.rows_msgpack)
     }
 
     async fn exec_agg(&self, req: &ArrayShardAggReq) -> Result<Vec<ArrayAggPartial>> {
@@ -199,6 +206,8 @@ impl ArrayLocalExecutor for DataPlaneArrayExecutor {
             cell_filter,
             return_partial: true,
             hilbert_range: req.shard_hilbert_range,
+            system_as_of: req.system_as_of,
+            valid_at_ms: req.valid_at_ms,
         });
 
         let resp = self.dispatch_and_await(plan).await?;

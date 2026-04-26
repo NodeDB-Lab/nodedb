@@ -44,6 +44,10 @@ pub enum ClusterArrayOp {
         slice_hilbert_ranges: Vec<(u64, u64)>,
         /// Routing granularity from the array catalog entry.
         prefix_bits: u8,
+        /// Bitemporal system-time cutoff. `None` = live read.
+        system_as_of: Option<i64>,
+        /// Bitemporal valid-time point. `None` = no valid-time filter.
+        valid_at_ms: Option<i64>,
     },
 
     /// Fan-out an aggregate across all target vShards and reduce partials.
@@ -59,6 +63,10 @@ pub enum ClusterArrayOp {
         slice_hilbert_ranges: Vec<(u64, u64)>,
         /// Routing granularity.
         prefix_bits: u8,
+        /// Bitemporal system-time cutoff. `None` = live read.
+        system_as_of: Option<i64>,
+        /// Bitemporal valid-time point. `None` = no valid-time filter.
+        valid_at_ms: Option<i64>,
     },
 
     /// Fan-out a cell write batch, partitioned by Hilbert tile.

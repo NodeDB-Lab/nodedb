@@ -121,6 +121,14 @@ pub enum ArrayOp {
         /// single-node harnesses where all vShards share one Data Plane.
         /// `None` = no Hilbert filter (all cells included).
         hilbert_range: Option<(u64, u64)>,
+        /// Bitemporal system-time cutoff. When `Some(t)`, only tile versions
+        /// with `system_from_ms <= t` are considered. `None` = live read
+        /// (`i64::MAX` effective cutoff — returns current state).
+        system_as_of: Option<i64>,
+        /// Bitemporal valid-time point. When `Some(vt)`, a cell is only
+        /// returned if `valid_from_ms <= vt < valid_until_ms`. `None` =
+        /// no valid-time filter.
+        valid_at_ms: Option<i64>,
     },
 
     /// Attribute projection (no coord filter).
@@ -152,6 +160,14 @@ pub enum ArrayOp {
         /// single-node harnesses where all vShards share one Data Plane.
         /// `None` = no Hilbert filter (all cells included).
         hilbert_range: Option<(u64, u64)>,
+        /// Bitemporal system-time cutoff. When `Some(t)`, only tile versions
+        /// with `system_from_ms <= t` contribute to the aggregate. `None` =
+        /// live read.
+        system_as_of: Option<i64>,
+        /// Bitemporal valid-time point. When `Some(vt)`, only cells whose
+        /// `valid_from_ms <= vt < valid_until_ms` contribute. `None` = no
+        /// valid-time filter.
+        valid_at_ms: Option<i64>,
     },
 
     /// Pairwise op between two coord-aligned arrays. Both must share
@@ -241,6 +257,8 @@ mod tests {
             cell_filter: None,
             return_partial: false,
             hilbert_range: None,
+            system_as_of: None,
+            valid_at_ms: None,
         };
         let bytes = zerompk::to_msgpack_vec(&op).unwrap();
         let back: ArrayOp = zerompk::from_msgpack(&bytes).unwrap();

@@ -37,4 +37,9 @@ pub struct ArrayCatalogEntry {
     /// Existing rows without this field deserialize to 8.
     #[serde(default = "default_prefix_bits")]
     pub prefix_bits: u8,
+    /// Bitemporal audit retention window in milliseconds. Compaction may
+    /// discard superseded tile versions older than `now - audit_retain_ms`.
+    /// `None` means retain all versions forever (default).
+    #[serde(default)]
+    pub audit_retain_ms: Option<i64>,
 }

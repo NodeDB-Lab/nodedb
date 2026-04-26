@@ -2,6 +2,7 @@
 
 use nodedb_array::schema::{ArraySchema, AttrType as EngineAttrType, DimType as EngineDimType};
 use nodedb_array::types::domain::DomainBound;
+use nodedb_sql::temporal::{TemporalScope, ValidTime};
 use nodedb_sql::types_array::{ArrayBinaryOpAst, ArrayCoordLiteral, ArrayReducerAst};
 
 use crate::bridge::physical_plan::{ArrayBinaryOp, ArrayReducer};
@@ -96,6 +97,43 @@ pub(super) fn map_binary_op(o: ArrayBinaryOpAst) -> ArrayBinaryOp {
         ArrayBinaryOpAst::Mul => ArrayBinaryOp::Mul,
         ArrayBinaryOpAst::Div => ArrayBinaryOp::Div,
     }
+}
+
+/// Resolve a [`TemporalScope`] into the `(system_as_of, valid_at_ms)` pair
+/// expected by `ArrayOp::Slice` and `ArrayOp::Aggregate`.
+///
+/// Default semantics when neither clause was given: both `None` — the Data
+/// Plane handler treats this as the live-state fast path (equivalent to
+/// `system_as_of = i64::MAX`, no valid-time filter). This avoids allocating
+/// any bitemporal bookkeeping for the overwhelmingly common non-temporal case.
+///
+/// When `AS OF SYSTEM TIME` is given: `system_as_of = Some(t)`, the DP
+/// handler applies the Ceiling resolver to reconstruct the array's state at
+/// the named system timestamp. `valid_at_ms` remains `None` unless
+/// `AS OF VALID TIME` is also present.
+///
+/// When `AS OF VALID TIME` is given: `valid_at_ms = Some(v)`. Only the
+/// `ValidTime::At(v)` (point-in-time) form is supported by the array engine;
+/// a range predicate (`ValidTime::Range`) is rejected here with a typed error
+/// because array cells store a single valid-time point, not an interval.
+pub(super) fn resolve_array_temporal(
+    temporal: TemporalScope,
+    context: &str,
+) -> crate::Result<(Option<i64>, Option<i64>)> {
+    let system_as_of = temporal.system_as_of_ms;
+    let valid_at_ms = match temporal.valid_time {
+        ValidTime::Any => None,
+        ValidTime::At(ms) => Some(ms),
+        ValidTime::Range(lo, _hi) => {
+            return Err(crate::Error::PlanError {
+                detail: format!(
+                    "{context}: AS OF VALID TIME range predicates are not supported on array reads; \
+                     use AS OF VALID TIME <ms> (point-in-time). Got FOR VALID_TIME FROM {lo} ..."
+                ),
+            });
+        }
+    };
+    Ok((system_as_of, valid_at_ms))
 }
 
 const _UNUSED_ATTR_TYPE: Option<EngineAttrType> = None;

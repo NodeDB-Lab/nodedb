@@ -4,8 +4,14 @@
 //! WAL record type. Read operations are no-ops.
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::bridge::physical_plan::{CrdtOp, DocumentOp, GraphOp, KvOp, TimeseriesOp, VectorOp};
+use crate::bridge::physical_plan::{
+    ArrayOp, CrdtOp, DocumentOp, GraphOp, KvOp, TimeseriesOp, VectorOp,
+};
 use crate::control::security::credential::CredentialStore;
+use crate::engine::array::wal::{
+    ArrayDeleteCell, ArrayDeletePayload, ArrayPutPayload, encode_delete_with_version,
+    encode_put_with_version,
+};
 use crate::types::{TenantId, VShardId};
 use crate::wal::manager::WalManager;
 
@@ -403,6 +409,52 @@ pub fn wal_append_if_write_with_creds(
                 }
             })?;
             wal.append_delete(tenant_id, vshard_id, &entry)?;
+        }
+        PhysicalPlan::Array(ArrayOp::Put {
+            array_id,
+            cells_msgpack,
+            wal_lsn: _,
+        }) => {
+            let cells = zerompk::from_msgpack::<Vec<crate::engine::array::wal::ArrayPutCell>>(
+                cells_msgpack,
+            )
+            .map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("wal array put decode cells: {e}"),
+            })?;
+            let payload = ArrayPutPayload {
+                array_id: array_id.clone(),
+                cells,
+            };
+            let bytes =
+                encode_put_with_version(&payload).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("wal array put encode: {e}"),
+                })?;
+            wal.append_array_put(tenant_id, vshard_id, &bytes)?;
+        }
+        PhysicalPlan::Array(ArrayOp::Delete {
+            array_id,
+            coords_msgpack,
+            wal_lsn: _,
+        }) => {
+            let cells =
+                zerompk::from_msgpack::<Vec<ArrayDeleteCell>>(coords_msgpack).map_err(|e| {
+                    crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!("wal array delete decode cells: {e}"),
+                    }
+                })?;
+            let payload = ArrayDeletePayload {
+                array_id: array_id.clone(),
+                cells,
+            };
+            let bytes =
+                encode_delete_with_version(&payload).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("wal array delete encode: {e}"),
+                })?;
+            wal.append_array_delete(tenant_id, vshard_id, &bytes)?;
         }
         // Read operations and control commands: no WAL needed.
         _ => {}

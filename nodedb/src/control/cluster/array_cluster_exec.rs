@@ -37,6 +37,7 @@ use crate::control::cluster::array_cluster_helpers::{
 };
 use crate::control::cluster::array_executor::DataPlaneArrayExecutor;
 use crate::control::state::SharedState;
+use zerompk;
 
 /// Default RPC timeout for array cluster operations in milliseconds.
 const ARRAY_RPC_TIMEOUT_MS: u64 = 30_000;
@@ -183,6 +184,28 @@ pub struct ClusterArrayExecutor {
     total_shards: u16,
 }
 
+struct SliceArgs<'a> {
+    array_id: &'a nodedb_array::types::ArrayId,
+    slice_msgpack: &'a [u8],
+    attr_projection: &'a [u32],
+    limit: u32,
+    slice_hilbert_ranges: &'a [(u64, u64)],
+    prefix_bits: u8,
+    system_as_of: Option<i64>,
+    valid_at_ms: Option<i64>,
+}
+
+struct AggArgs<'a> {
+    array_id: &'a nodedb_array::types::ArrayId,
+    attr_idx: u32,
+    reducer_msgpack: &'a [u8],
+    group_by_dim: i32,
+    slice_hilbert_ranges: &'a [(u64, u64)],
+    prefix_bits: u8,
+    system_as_of: Option<i64>,
+    valid_at_ms: Option<i64>,
+}
+
 impl ClusterArrayExecutor {
     /// Construct from cluster state.
     ///
@@ -222,15 +245,19 @@ impl ClusterArrayExecutor {
                 limit,
                 slice_hilbert_ranges,
                 prefix_bits,
+                system_as_of,
+                valid_at_ms,
             } => {
-                self.execute_slice(
+                self.execute_slice(SliceArgs {
                     array_id,
                     slice_msgpack,
                     attr_projection,
-                    *limit,
+                    limit: *limit,
                     slice_hilbert_ranges,
-                    *prefix_bits,
-                )
+                    prefix_bits: *prefix_bits,
+                    system_as_of: *system_as_of,
+                    valid_at_ms: *valid_at_ms,
+                })
                 .await
             }
 
@@ -241,15 +268,19 @@ impl ClusterArrayExecutor {
                 group_by_dim,
                 slice_hilbert_ranges,
                 prefix_bits,
+                system_as_of,
+                valid_at_ms,
             } => {
-                self.execute_agg(
+                self.execute_agg(AggArgs {
                     array_id,
-                    *attr_idx,
+                    attr_idx: *attr_idx,
                     reducer_msgpack,
-                    *group_by_dim,
+                    group_by_dim: *group_by_dim,
                     slice_hilbert_ranges,
-                    *prefix_bits,
-                )
+                    prefix_bits: *prefix_bits,
+                    system_as_of: *system_as_of,
+                    valid_at_ms: *valid_at_ms,
+                })
                 .await
             }
 
@@ -277,15 +308,17 @@ impl ClusterArrayExecutor {
         }
     }
 
-    async fn execute_slice(
-        &self,
-        array_id: &nodedb_array::types::ArrayId,
-        slice_msgpack: &[u8],
-        attr_projection: &[u32],
-        limit: u32,
-        slice_hilbert_ranges: &[(u64, u64)],
-        prefix_bits: u8,
-    ) -> crate::Result<Vec<u8>> {
+    async fn execute_slice(&self, args: SliceArgs<'_>) -> crate::Result<Vec<u8>> {
+        let SliceArgs {
+            array_id,
+            slice_msgpack,
+            attr_projection,
+            limit,
+            slice_hilbert_ranges,
+            prefix_bits,
+            system_as_of,
+            valid_at_ms,
+        } = args;
         let coordinator = ArrayCoordinator::for_slice(
             self.source_node,
             ARRAY_RPC_TIMEOUT_MS,
@@ -311,42 +344,56 @@ impl ClusterArrayExecutor {
             prefix_bits: 0,
             slice_hilbert_ranges: vec![],
             shard_hilbert_range: None,
+            system_as_of,
+            valid_at_ms,
         };
-        let rows = coordinator
+        let result = coordinator
             .coord_slice(req, limit)
             .await
             .map_err(cluster_err)?;
 
-        // Re-encode as a flat msgpack array — one element per row — to match
-        // the local `ArrayOp::Slice` response shape that pgwire decodes via
-        // `split_msgpack_array_rows`. A nested `Vec<Vec<u8>>` would prepend
-        // an extra length header to each row.
-        let mut out = Vec::with_capacity(5 + rows.iter().map(|r| r.len()).sum::<usize>());
-        let n = rows.len();
+        // Encode rows into the structured `ArraySliceResponse` — identical to
+        // the shape that `dispatch_array_slice` emits for single-node requests.
+        // This makes local and cluster payloads byte-identical so the pgwire
+        // handler can use a single decoder regardless of topology. The
+        // `truncated_before_horizon` flag is OR-reduced across shards by the
+        // coordinator so the upstream NOTICE is emitted whenever any shard
+        // dropped data below its system-time horizon.
+        let mut rows_msgpack =
+            Vec::with_capacity(5 + result.rows.iter().map(|r| r.len()).sum::<usize>());
+        let n = result.rows.len();
         if n <= 15 {
-            out.push(0x90 | (n as u8));
+            rows_msgpack.push(0x90 | (n as u8));
         } else if n <= u16::MAX as usize {
-            out.push(0xdc);
-            out.extend_from_slice(&(n as u16).to_be_bytes());
+            rows_msgpack.push(0xdc);
+            rows_msgpack.extend_from_slice(&(n as u16).to_be_bytes());
         } else {
-            out.push(0xdd);
-            out.extend_from_slice(&(n as u32).to_be_bytes());
+            rows_msgpack.push(0xdd);
+            rows_msgpack.extend_from_slice(&(n as u32).to_be_bytes());
         }
-        for r in &rows {
-            out.extend_from_slice(r);
+        for r in &result.rows {
+            rows_msgpack.extend_from_slice(r);
         }
-        Ok(out)
+        let resp = crate::data::executor::response_codec::ArraySliceResponse {
+            rows_msgpack,
+            truncated_before_horizon: result.truncated_before_horizon,
+        };
+        zerompk::to_msgpack_vec(&resp).map_err(|e| crate::Error::Codec {
+            detail: format!("cluster slice response encode: {e}"),
+        })
     }
 
-    async fn execute_agg(
-        &self,
-        array_id: &nodedb_array::types::ArrayId,
-        attr_idx: u32,
-        reducer_msgpack: &[u8],
-        group_by_dim: i32,
-        slice_hilbert_ranges: &[(u64, u64)],
-        prefix_bits: u8,
-    ) -> crate::Result<Vec<u8>> {
+    async fn execute_agg(&self, args: AggArgs<'_>) -> crate::Result<Vec<u8>> {
+        let AggArgs {
+            array_id,
+            attr_idx,
+            reducer_msgpack,
+            group_by_dim,
+            slice_hilbert_ranges,
+            prefix_bits,
+            system_as_of,
+            valid_at_ms,
+        } = args;
         let coordinator = ArrayCoordinator::for_slice(
             self.source_node,
             ARRAY_RPC_TIMEOUT_MS,
@@ -366,6 +413,8 @@ impl ClusterArrayExecutor {
             group_by_dim,
             cell_filter_msgpack: vec![],
             shard_hilbert_range: None,
+            system_as_of,
+            valid_at_ms,
         };
         let partials: Vec<ArrayAggPartial> =
             coordinator.coord_agg(req).await.map_err(cluster_err)?;

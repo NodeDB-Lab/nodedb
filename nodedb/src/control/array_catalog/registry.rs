@@ -99,6 +99,7 @@ mod tests {
             schema_hash: 0xDEAD_BEEF,
             created_at_ms: 1_700_000_000_000,
             prefix_bits: 8,
+            audit_retain_ms: None,
         }
     }
 

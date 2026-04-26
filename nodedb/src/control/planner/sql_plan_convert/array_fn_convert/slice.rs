@@ -5,6 +5,7 @@ use nodedb_array::schema::ArraySchema;
 use nodedb_array::tile::layout::tile_id_for_cell;
 use nodedb_array::types::ArrayId;
 use nodedb_array::types::coord::value::CoordValue;
+use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types_array::ArraySliceAst;
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -20,6 +21,7 @@ pub(crate) fn convert_slice(
     slice_ast: &ArraySliceAst,
     attr_projection: &[String],
     limit: u32,
+    temporal: TemporalScope,
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
@@ -51,6 +53,8 @@ pub(crate) fn convert_slice(
             detail: format!("array slice encode: {e}"),
         })?;
 
+    let (system_as_of, valid_at_ms) =
+        super::helpers::resolve_array_temporal(temporal, "NDARRAY_SLICE")?;
     let attr_indices = resolve_attr_indices(name, attr_projection, &schema)?;
     let aid = ArrayId::new(tenant_id, name);
     let vshard = VShardId::from_collection(name);
@@ -73,6 +77,8 @@ pub(crate) fn convert_slice(
             limit,
             slice_hilbert_ranges,
             prefix_bits: entry.prefix_bits,
+            system_as_of,
+            valid_at_ms,
         })
     } else {
         PhysicalPlan::Array(ArrayOp::Slice {
@@ -82,6 +88,8 @@ pub(crate) fn convert_slice(
             limit,
             cell_filter: None,
             hilbert_range: None,
+            system_as_of,
+            valid_at_ms,
         })
     };
 
@@ -220,6 +228,7 @@ mod tests {
             schema_hash: 0,
             created_at_ms: 0,
             prefix_bits: 8,
+            audit_retain_ms: None,
         };
         {
             let mut cat = handle.write().expect("write lock");
@@ -240,8 +249,16 @@ mod tests {
     fn single_node_emits_local_array() {
         let (ctx, _handle) = make_ctx(false);
         let slice_ast = ArraySliceAst { dim_ranges: vec![] };
-        let tasks = convert_slice("test_arr", &slice_ast, &[], 100, TenantId::new(1), &ctx)
-            .expect("convert");
+        let tasks = convert_slice(
+            "test_arr",
+            &slice_ast,
+            &[],
+            100,
+            TemporalScope::default(),
+            TenantId::new(1),
+            &ctx,
+        )
+        .expect("convert");
         assert_eq!(tasks.len(), 1);
         assert!(
             matches!(&tasks[0].plan, PhysicalPlan::Array(ArrayOp::Slice { .. })),
@@ -254,8 +271,16 @@ mod tests {
     fn cluster_mode_emits_cluster_array() {
         let (ctx, _handle) = make_ctx(true);
         let slice_ast = ArraySliceAst { dim_ranges: vec![] };
-        let tasks = convert_slice("test_arr", &slice_ast, &[], 100, TenantId::new(1), &ctx)
-            .expect("convert");
+        let tasks = convert_slice(
+            "test_arr",
+            &slice_ast,
+            &[],
+            100,
+            TemporalScope::default(),
+            TenantId::new(1),
+            &ctx,
+        )
+        .expect("convert");
         assert_eq!(tasks.len(), 1);
         assert!(
             matches!(

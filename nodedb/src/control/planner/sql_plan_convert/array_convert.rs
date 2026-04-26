@@ -40,7 +40,7 @@ use nodedb_sql::types_array::{
 use crate::bridge::envelope::PhysicalPlan;
 use crate::bridge::physical_plan::{ArrayOp, ClusterArrayOp};
 use crate::control::array_catalog::ArrayCatalogEntry;
-use crate::engine::array::wal::ArrayPutCell;
+use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 use crate::types::{TenantId, VShardId};
 
 use super::super::physical::{PhysicalTask, PostSetOp};
@@ -111,6 +111,7 @@ pub(super) fn convert_create_array(args: CreateArrayArgs<'_>) -> crate::Result<V
         schema_hash,
         created_at_ms: now_epoch_ms(),
         prefix_bits,
+        audit_retain_ms: None,
     };
     {
         let mut cat = array_catalog.write().map_err(|_| crate::Error::PlanError {
@@ -258,6 +259,7 @@ pub(super) fn convert_insert_array(
     let aid = ArrayId::new(tenant_id, name);
     let wal_lsn = wal.next_lsn().as_u64();
     let vshard = VShardId::from_collection(name);
+    let system_now_ms = chrono::Utc::now().timestamp_millis();
 
     if ctx.cluster_enabled {
         // Cluster path: compute Hilbert prefix per cell so the coordinator
@@ -281,6 +283,9 @@ pub(super) fn convert_insert_array(
                 coord,
                 attrs,
                 surrogate,
+                system_from_ms: system_now_ms,
+                valid_from_ms: system_now_ms,
+                valid_until_ms: i64::MAX,
             };
             let cell_bytes =
                 zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
@@ -323,6 +328,9 @@ pub(super) fn convert_insert_array(
             coord,
             attrs,
             surrogate,
+            system_from_ms: system_now_ms,
+            valid_from_ms: system_now_ms,
+            valid_until_ms: i64::MAX,
         });
     }
     let cells_msgpack =
@@ -376,6 +384,7 @@ pub(super) fn convert_delete_array(
     let aid = ArrayId::new(tenant_id, name);
     let wal_lsn = wal.next_lsn().as_u64();
     let vshard = VShardId::from_collection(name);
+    let system_now_ms = chrono::Utc::now().timestamp_millis();
 
     if ctx.cluster_enabled {
         // Cluster path: compute Hilbert prefix per coord so the coordinator
@@ -387,12 +396,17 @@ pub(super) fn convert_delete_array(
                 encode_hilbert_prefix(&schema, &typed).map_err(|e| crate::Error::PlanError {
                     detail: format!("DELETE FROM ARRAY {name}: Hilbert prefix: {e}"),
                 })?;
-            let coord_bytes =
-                zerompk::to_msgpack_vec(&typed).map_err(|e| crate::Error::Serialization {
+            let cell = ArrayDeleteCell {
+                coord: typed,
+                system_from_ms: system_now_ms,
+                erasure: false,
+            };
+            let cell_bytes =
+                zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
                     format: "msgpack".into(),
-                    detail: format!("array coord encode: {e}"),
+                    detail: format!("array delete cell encode: {e}"),
                 })?;
-            partitioned.push((hilbert, coord_bytes));
+            partitioned.push((hilbert, cell_bytes));
         }
         let array_id_msgpack =
             zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
@@ -413,15 +427,19 @@ pub(super) fn convert_delete_array(
         }]);
     }
 
-    // Single-node path: bundle all coords into one msgpack blob.
-    let mut typed: Vec<Vec<CoordValue>> = Vec::with_capacity(coords.len());
+    // Single-node path: bundle all cells into one msgpack blob.
+    let mut cells: Vec<ArrayDeleteCell> = Vec::with_capacity(coords.len());
     for row in coords {
-        typed.push(coerce_coords(row, &schema)?);
+        cells.push(ArrayDeleteCell {
+            coord: coerce_coords(row, &schema)?,
+            system_from_ms: system_now_ms,
+            erasure: false,
+        });
     }
     let coords_msgpack =
-        zerompk::to_msgpack_vec(&typed).map_err(|e| crate::Error::Serialization {
+        zerompk::to_msgpack_vec(&cells).map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
-            detail: format!("array delete coords encode: {e}"),
+            detail: format!("array delete cells encode: {e}"),
         })?;
     Ok(vec![PhysicalTask {
         tenant_id,

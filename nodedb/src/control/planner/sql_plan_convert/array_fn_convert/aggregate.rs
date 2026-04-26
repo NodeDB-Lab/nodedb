@@ -2,6 +2,7 @@
 
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::types::ArrayId;
+use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types_array::ArrayReducerAst;
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -17,6 +18,7 @@ pub(crate) fn convert_agg(
     attr: &str,
     reducer: ArrayReducerAst,
     group_by_dim: Option<&str>,
+    temporal: TemporalScope,
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
@@ -46,6 +48,8 @@ pub(crate) fn convert_agg(
             })? as i32,
     };
 
+    let (system_as_of, valid_at_ms) =
+        super::helpers::resolve_array_temporal(temporal, "NDARRAY_AGG")?;
     let mapped = map_reducer(reducer);
     let aid = ArrayId::new(tenant_id, name);
     let vshard = VShardId::from_collection(name);
@@ -65,6 +69,8 @@ pub(crate) fn convert_agg(
             group_by_dim: group_by_dim_idx,
             slice_hilbert_ranges: vec![],
             prefix_bits: entry.prefix_bits,
+            system_as_of,
+            valid_at_ms,
         })
     } else {
         PhysicalPlan::Array(ArrayOp::Aggregate {
@@ -75,6 +81,8 @@ pub(crate) fn convert_agg(
             cell_filter: None,
             return_partial: false,
             hilbert_range: None,
+            system_as_of,
+            valid_at_ms,
         })
     };
 
@@ -120,6 +128,7 @@ mod tests {
                 schema_hash: 0,
                 created_at_ms: 0,
                 prefix_bits: 8,
+                audit_retain_ms: None,
             })
             .expect("register");
         }
@@ -141,6 +150,7 @@ mod tests {
             "revenue",
             ArrayReducerAst::Sum,
             None,
+            TemporalScope::default(),
             TenantId::new(1),
             &ctx,
         )
@@ -163,6 +173,7 @@ mod tests {
             "revenue",
             ArrayReducerAst::Sum,
             None,
+            TemporalScope::default(),
             TenantId::new(1),
             &ctx,
         )
