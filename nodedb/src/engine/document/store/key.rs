@@ -17,6 +17,17 @@ pub fn surrogate_to_doc_id(surrogate: Surrogate) -> String {
     format!("{:08x}", surrogate.as_u32())
 }
 
+/// Parse a hex-encoded document storage key back to a `Surrogate`.
+///
+/// Returns `None` if the key is not exactly 8 lowercase hex characters —
+/// this handles legacy non-surrogate document IDs gracefully.
+pub fn doc_id_to_surrogate(doc_id: &str) -> Option<Surrogate> {
+    if doc_id.len() != 8 {
+        return None;
+    }
+    u32::from_str_radix(doc_id, 16).ok().map(Surrogate::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

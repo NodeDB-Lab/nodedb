@@ -8,4 +8,4 @@ pub use config::CollectionConfig;
 pub use engine::DocumentEngine;
 pub use extract::{extract_index_values, json_to_msgpack};
 pub use index_path::IndexPath;
-pub use key::surrogate_to_doc_id;
+pub use key::{doc_id_to_surrogate, surrogate_to_doc_id};

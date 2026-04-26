@@ -11,9 +11,10 @@ use redb::TableDefinition;
 pub const POSTINGS: TableDefinition<(u32, &str, &str), &[u8]> =
     TableDefinition::new("text.postings");
 
-/// Document lengths: key = `(tenant_id, collection, doc_id)`,
+/// Document lengths: key = `(tenant_id, collection, surrogate)`,
 /// value = MessagePack-encoded `u32` token count.
-pub const DOC_LENGTHS: TableDefinition<(u32, &str, &str), &[u8]> =
+/// The surrogate is stored as its raw `u32` value (redb native key type).
+pub const DOC_LENGTHS: TableDefinition<(u32, &str, u32), &[u8]> =
     TableDefinition::new("text.doc_lengths");
 
 /// Index metadata blobs: key = `(tenant_id, collection, sub_key)`,

@@ -10,6 +10,7 @@ use redb::Database;
 
 use nodedb_fts::backend::FtsBackend;
 use nodedb_fts::posting::Posting;
+use nodedb_types::Surrogate;
 
 use super::shared::redb_err;
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, INDEX_META, POSTINGS, SEGMENTS, STATS};
@@ -80,7 +81,7 @@ impl FtsBackend for RedbFtsBackend {
         &self,
         tid: u32,
         collection: &str,
-        doc_id: &str,
+        doc_id: Surrogate,
     ) -> crate::Result<Option<u32>> {
         super::doc_lengths::read(self, tid, collection, doc_id)
     }
@@ -89,13 +90,18 @@ impl FtsBackend for RedbFtsBackend {
         &self,
         tid: u32,
         collection: &str,
-        doc_id: &str,
+        doc_id: Surrogate,
         length: u32,
     ) -> crate::Result<()> {
         super::doc_lengths::write(self, tid, collection, doc_id, length)
     }
 
-    fn remove_doc_length(&self, tid: u32, collection: &str, doc_id: &str) -> crate::Result<()> {
+    fn remove_doc_length(
+        &self,
+        tid: u32,
+        collection: &str,
+        doc_id: Surrogate,
+    ) -> crate::Result<()> {
         super::doc_lengths::remove(self, tid, collection, doc_id)
     }
 

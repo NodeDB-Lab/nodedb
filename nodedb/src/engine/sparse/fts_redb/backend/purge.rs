@@ -34,17 +34,18 @@ pub(super) fn collection(backend: &RedbFtsBackend, tid: u32, coll: &str) -> crat
     }
 
     {
+        // DOC_LENGTHS is keyed by (u32, &str, u32) — use numeric range bounds.
         let mut table = write_txn
             .open_table(DOC_LENGTHS)
             .map_err(|e| redb_err("open doc_lengths", e))?;
-        let keys: Vec<String> = table
-            .range((tid, coll, "")..=(tid, coll, MAX_SUBKEY))
+        let surrogates: Vec<u32> = table
+            .range((tid, coll, 0u32)..=(tid, coll, u32::MAX))
             .map_err(|e| redb_err("doc_lengths range", e))?
-            .filter_map(|r| r.ok().map(|(k, _)| k.value().2.to_string()))
+            .filter_map(|r| r.ok().map(|(k, _)| k.value().2))
             .collect();
-        removed += keys.len();
-        for doc in &keys {
-            let _ = table.remove((tid, coll, doc.as_str()));
+        removed += surrogates.len();
+        for s in surrogates {
+            let _ = table.remove((tid, coll, s));
         }
     }
 
@@ -97,9 +98,9 @@ pub(super) fn tenant(backend: &RedbFtsBackend, tid: u32) -> crate::Result<usize>
         .map_err(|e| redb_err("purge_tenant write txn", e))?;
     let mut removed = 0;
 
-    removed += drop_triple_range(&write_txn, POSTINGS, tid)?;
-    removed += drop_triple_range(&write_txn, DOC_LENGTHS, tid)?;
-    let _ = drop_triple_range(&write_txn, INDEX_META, tid)?;
+    removed += drop_str_triple_range(&write_txn, POSTINGS, tid)?;
+    removed += drop_doc_lengths_tenant(&write_txn, tid)?;
+    let _ = drop_str_triple_range(&write_txn, INDEX_META, tid)?;
 
     {
         let mut stats = write_txn
@@ -115,7 +116,7 @@ pub(super) fn tenant(backend: &RedbFtsBackend, tid: u32) -> crate::Result<usize>
         }
     }
 
-    removed += drop_triple_range(&write_txn, SEGMENTS, tid)?;
+    removed += drop_str_triple_range(&write_txn, SEGMENTS, tid)?;
 
     write_txn
         .commit()
@@ -124,7 +125,7 @@ pub(super) fn tenant(backend: &RedbFtsBackend, tid: u32) -> crate::Result<usize>
 }
 
 /// Delete every `(tid, *, *)` row from a `TableDefinition<(u32, &str, &str), &[u8]>`.
-fn drop_triple_range(
+fn drop_str_triple_range(
     txn: &redb::WriteTransaction,
     def: redb::TableDefinition<(u32, &str, &str), &[u8]>,
     tid: u32,
@@ -145,6 +146,28 @@ fn drop_triple_range(
     let n = keys.len();
     for (c, s) in &keys {
         let _ = table.remove((tid, c.as_str(), s.as_str()));
+    }
+    Ok(n)
+}
+
+/// Delete every `(tid, *, *)` row from DOC_LENGTHS (keyed by `(u32, &str, u32)`).
+fn drop_doc_lengths_tenant(txn: &redb::WriteTransaction, tid: u32) -> crate::Result<usize> {
+    let mut table = txn
+        .open_table(DOC_LENGTHS)
+        .map_err(|e| redb_err("open doc_lengths", e))?;
+    let keys: Vec<(String, u32)> = table
+        .range((tid, "", 0u32)..=(tid, MAX_COLLECTION, u32::MAX))
+        .map_err(|e| redb_err("doc_lengths tenant range", e))?
+        .filter_map(|r| {
+            r.ok().map(|(k, _)| {
+                let (_, c, s) = k.value();
+                (c.to_string(), s)
+            })
+        })
+        .collect();
+    let n = keys.len();
+    for (c, s) in &keys {
+        let _ = table.remove((tid, c.as_str(), *s));
     }
     Ok(n)
 }

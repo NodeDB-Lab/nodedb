@@ -10,6 +10,7 @@ use nodedb::engine::kv::KvEngine;
 use nodedb::engine::sparse::btree::SparseEngine;
 use nodedb::engine::sparse::inverted::InvertedIndex;
 use nodedb::types::TenantId;
+use nodedb_types::Surrogate;
 
 const TENANT: u32 = 7;
 
@@ -141,10 +142,10 @@ fn inverted_index_purge_is_scoped_to_collection() {
     let tid = TenantId::new(TENANT);
 
     inverted
-        .index_document(tid, "keep", "d1", "hello world")
+        .index_document(tid, "keep", Surrogate(1), "hello world")
         .unwrap();
     inverted
-        .index_document(tid, "purge_me", "d1", "hello universe")
+        .index_document(tid, "purge_me", Surrogate(2), "hello universe")
         .unwrap();
 
     inverted.purge_collection(tid, "purge_me").unwrap();

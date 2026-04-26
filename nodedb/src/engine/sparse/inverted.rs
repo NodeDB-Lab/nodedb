@@ -17,12 +17,12 @@ use redb::{Database, ReadableTable, WriteTransaction};
 use tracing::debug;
 
 use nodedb_fts::index::FtsIndex;
-use nodedb_types::TenantId;
+use nodedb_types::{Surrogate, TenantId};
 
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 
 use super::fts_redb::RedbFtsBackend;
-use super::fts_redb::tables::{DOC_LENGTHS, INDEX_META, POSTINGS, STATS};
+use super::fts_redb::tables::{DOC_LENGTHS, POSTINGS, STATS};
 
 /// Full-text inverted index backed by redb via `nodedb-fts`.
 pub struct InvertedIndex {
@@ -59,7 +59,7 @@ impl InvertedIndex {
         &self,
         tid: TenantId,
         collection: &str,
-        doc_id: &str,
+        surrogate: Surrogate,
         text: &str,
     ) -> crate::Result<()> {
         let tokens = nodedb_fts::analyze(text);
@@ -69,7 +69,7 @@ impl InvertedIndex {
 
         let db = self.inner.backend().db();
         let write_txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
-        self.write_index_data(&write_txn, tid, collection, doc_id, &tokens)?;
+        self.write_index_data(&write_txn, tid, collection, surrogate, &tokens)?;
         write_txn
             .commit()
             .map_err(|e| inverted_err("commit index", e))?;
@@ -82,14 +82,14 @@ impl InvertedIndex {
         txn: &WriteTransaction,
         tid: TenantId,
         collection: &str,
-        doc_id: &str,
+        surrogate: Surrogate,
         text: &str,
     ) -> crate::Result<()> {
         let tokens = nodedb_fts::analyze(text);
         if tokens.is_empty() {
             return Ok(());
         }
-        self.write_index_data(txn, tid, collection, doc_id, &tokens)
+        self.write_index_data(txn, tid, collection, surrogate, &tokens)
     }
 
     /// Core indexing logic: writes postings, doc length, and stats within
@@ -100,7 +100,7 @@ impl InvertedIndex {
         txn: &WriteTransaction,
         tid: TenantId,
         collection: &str,
-        doc_id: &str,
+        surrogate: Surrogate,
         tokens: &[String],
     ) -> crate::Result<()> {
         use std::collections::HashMap;
@@ -124,7 +124,7 @@ impl InvertedIndex {
 
         for (term, (freq, positions)) in &term_postings {
             let posting = Posting {
-                doc_id: doc_id.to_string(),
+                doc_id: surrogate,
                 term_freq: *freq,
                 positions: positions.clone(),
             };
@@ -136,7 +136,7 @@ impl InvertedIndex {
                 .and_then(|v| zerompk::from_msgpack(v.value()).ok())
                 .unwrap_or_default();
 
-            existing.retain(|p| p.doc_id != doc_id);
+            existing.retain(|p| p.doc_id != surrogate);
             existing.push(posting);
 
             let bytes = zerompk::to_msgpack_vec(&existing)
@@ -153,13 +153,13 @@ impl InvertedIndex {
         let len_bytes =
             zerompk::to_msgpack_vec(&doc_len).map_err(|e| inverted_err("serialize doc_len", e))?;
         lengths
-            .insert((t, collection, doc_id), len_bytes.as_slice())
+            .insert((t, collection, surrogate.as_u32()), len_bytes.as_slice())
             .map_err(|e| inverted_err("insert doc_len", e))?;
         drop(lengths);
 
         Self::update_stats_in_txn(txn, tid, collection, doc_len as i64)?;
 
-        debug!(tid = t, %collection, %doc_id, tokens = tokens.len(), terms = term_postings.len(), "indexed document");
+        debug!(tid = t, %collection, surrogate = surrogate.as_u32(), tokens = tokens.len(), terms = term_postings.len(), "indexed document");
         Ok(())
     }
 
@@ -202,7 +202,7 @@ impl InvertedIndex {
         &self,
         tid: TenantId,
         collection: &str,
-        doc_id: &str,
+        surrogate: Surrogate,
     ) -> crate::Result<()> {
         let t = tid.as_u32();
 
@@ -225,7 +225,7 @@ impl InvertedIndex {
                     let mut list: Vec<Posting> =
                         zerompk::from_msgpack(val.value()).unwrap_or_default();
                     let before = list.len();
-                    list.retain(|p| p.doc_id != doc_id);
+                    list.retain(|p| p.doc_id != surrogate);
                     if list.len() != before {
                         if list.is_empty() {
                             updates.push((term.clone(), None));
@@ -254,34 +254,22 @@ impl InvertedIndex {
                 .map_err(|e| inverted_err("open doc_lengths", e))?;
 
             let old_len = lengths
-                .get((t, collection, doc_id))
+                .get((t, collection, surrogate.as_u32()))
                 .ok()
                 .flatten()
                 .and_then(|v| zerompk::from_msgpack::<u32>(v.value()).ok())
                 .unwrap_or(0);
 
-            let _ = lengths.remove((t, collection, doc_id));
+            let _ = lengths.remove((t, collection, surrogate.as_u32()));
             drop(lengths);
 
             if old_len > 0 {
                 Self::update_stats_in_txn(&write_txn, tid, collection, -(old_len as i64))?;
             }
 
-            // Tombstone in docmap so future searches don't surface the removed doc.
-            let mut meta = write_txn
-                .open_table(INDEX_META)
-                .map_err(|e| inverted_err("open index_meta", e))?;
-            let docmap_bytes = meta
-                .get((t, collection, "docmap"))
-                .ok()
-                .flatten()
-                .map(|v| v.value().to_vec());
-            if let Some(bytes) = docmap_bytes
-                && let Some(mut map) = nodedb_fts::DocIdMap::from_bytes(&bytes)
-            {
-                map.remove(doc_id);
-                let _ = meta.insert((t, collection, "docmap"), map.to_bytes().as_slice());
-            }
+            // Note: the docmap sub-key in INDEX_META (previously maintained by the
+            // old DocIdMap abstraction) is no longer updated. Searches filter via
+            // Surrogate prefilter bitmaps instead.
         }
         write_txn
             .commit()
@@ -375,39 +363,54 @@ mod tests {
         idx.index_document(
             T,
             "docs",
-            "d1",
+            Surrogate::new(1),
             "The quick brown fox jumps over the lazy dog",
         )
         .unwrap();
-        idx.index_document(T, "docs", "d2", "A fast brown dog runs across the field")
-            .unwrap();
-        idx.index_document(T, "docs", "d3", "Rust programming language for systems")
-            .unwrap();
+        idx.index_document(
+            T,
+            "docs",
+            Surrogate::new(2),
+            "A fast brown dog runs across the field",
+        )
+        .unwrap();
+        idx.index_document(
+            T,
+            "docs",
+            Surrogate::new(3),
+            "Rust programming language for systems",
+        )
+        .unwrap();
 
         let results = idx.search(T, "docs", "brown fox", 10, false, None).unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].doc_id, "d1");
+        assert_eq!(results[0].doc_id, Surrogate::new(1));
     }
 
     #[test]
     fn search_with_stemming() {
         let (idx, _dir) = open_temp();
-        idx.index_document(T, "docs", "d1", "running distributed databases")
-            .unwrap();
-        idx.index_document(T, "docs", "d2", "the cat sat on a mat")
+        idx.index_document(
+            T,
+            "docs",
+            Surrogate::new(1),
+            "running distributed databases",
+        )
+        .unwrap();
+        idx.index_document(T, "docs", Surrogate::new(2), "the cat sat on a mat")
             .unwrap();
 
         let results = idx
             .search(T, "docs", "database distribution", 10, false, None)
             .unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].doc_id, "d1");
+        assert_eq!(results[0].doc_id, Surrogate::new(1));
     }
 
     #[test]
     fn fuzzy_search() {
         let (idx, _dir) = open_temp();
-        idx.index_document(T, "docs", "d1", "distributed database systems")
+        idx.index_document(T, "docs", Surrogate::new(1), "distributed database systems")
             .unwrap();
 
         let results = idx.search(T, "docs", "databse", 10, true, None).unwrap();
@@ -418,20 +421,22 @@ mod tests {
     #[test]
     fn remove_document() {
         let (idx, _dir) = open_temp();
-        idx.index_document(T, "docs", "d1", "hello world").unwrap();
-        idx.index_document(T, "docs", "d2", "hello rust").unwrap();
+        idx.index_document(T, "docs", Surrogate::new(1), "hello world")
+            .unwrap();
+        idx.index_document(T, "docs", Surrogate::new(2), "hello rust")
+            .unwrap();
 
-        idx.remove_document(T, "docs", "d1").unwrap();
+        idx.remove_document(T, "docs", Surrogate::new(1)).unwrap();
 
         let results = idx.search(T, "docs", "hello", 10, false, None).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].doc_id, "d2");
+        assert_eq!(results[0].doc_id, Surrogate::new(2));
     }
 
     #[test]
     fn empty_query() {
         let (idx, _dir) = open_temp();
-        idx.index_document(T, "docs", "d1", "some text here")
+        idx.index_document(T, "docs", Surrogate::new(1), "some text here")
             .unwrap();
 
         let results = idx.search(T, "docs", "the a is", 10, false, None).unwrap();
@@ -441,9 +446,9 @@ mod tests {
     #[test]
     fn collections_isolated() {
         let (idx, _dir) = open_temp();
-        idx.index_document(T, "col_a", "d1", "alpha bravo charlie")
+        idx.index_document(T, "col_a", Surrogate::new(1), "alpha bravo charlie")
             .unwrap();
-        idx.index_document(T, "col_b", "d1", "delta echo foxtrot")
+        idx.index_document(T, "col_b", Surrogate::new(1), "delta echo foxtrot")
             .unwrap();
 
         let results = idx.search(T, "col_a", "alpha", 10, false, None).unwrap();
@@ -458,8 +463,10 @@ mod tests {
         let (idx, _dir) = open_temp();
         let t1 = TenantId::new(1);
         let t2 = TenantId::new(2);
-        idx.index_document(t1, "docs", "d1", "alpha bravo").unwrap();
-        idx.index_document(t2, "docs", "d1", "alpha bravo").unwrap();
+        idx.index_document(t1, "docs", Surrogate::new(1), "alpha bravo")
+            .unwrap();
+        idx.index_document(t2, "docs", Surrogate::new(1), "alpha bravo")
+            .unwrap();
 
         idx.purge_tenant(t1).unwrap();
 
