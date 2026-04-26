@@ -198,7 +198,7 @@ fn gdpr_erasure_persists_through_flush_and_blocks_reads() {
 
     // Compact until stable.
     loop {
-        if !e.maybe_compact(&aid()).unwrap() {
+        if !e.maybe_compact(&aid(), None, 0).unwrap() {
             break;
         }
     }
@@ -286,7 +286,7 @@ fn gdpr_erasure_physically_dropped_outside_retention_horizon() {
     );
 
     loop {
-        if !e.maybe_compact(&aid()).unwrap() {
+        if !e.maybe_compact(&aid(), None, 0).unwrap() {
             break;
         }
     }

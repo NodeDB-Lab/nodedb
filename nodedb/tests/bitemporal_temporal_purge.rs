@@ -170,6 +170,7 @@ fn registry_snapshot_yields_one_entry_per_engine_kind() {
         BitemporalEngineKind::DocumentStrict => 1,
         BitemporalEngineKind::Columnar => 2,
         BitemporalEngineKind::Crdt => 3,
+        BitemporalEngineKind::Array => 4,
     });
     assert_eq!(
         kinds,
@@ -208,7 +209,7 @@ fn wal_temporal_purge_payload_survives_engine_roundtrip() {
     let bytes = payload.to_bytes().unwrap();
     let decoded = TemporalPurgePayload::from_bytes(&bytes).unwrap();
     assert_eq!(decoded.engine, TemporalPurgeEngine::EdgeStore);
-    assert_eq!(decoded.collection, "friends");
+    assert_eq!(decoded.name, "friends");
     assert_eq!(decoded.cutoff_system_ms, 1_700_000_000_000);
     assert_eq!(decoded.purged_count, 42);
 }
