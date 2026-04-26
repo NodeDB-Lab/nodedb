@@ -18,7 +18,7 @@ use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::reader::TilePayload;
 use nodedb_array::segment::writer::SegmentWriter;
 use nodedb_array::tile::dense_tile::DenseTile;
-use nodedb_array::tile::sparse_tile::{SparseTile, SparseTileBuilder};
+use nodedb_array::tile::sparse_tile::{RowKind, SparseRow, SparseTile, SparseTileBuilder};
 use nodedb_array::types::TileId;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
@@ -155,7 +155,9 @@ fn build_segment_bytes(
     let mut writer = SegmentWriter::new(schema_hash);
     for (tile_id, mt) in tiles {
         let tile = mt.into_sparse(schema)?;
-        if tile.nnz() == 0 {
+        // Skip tiles that have neither live rows nor sentinel rows.
+        let has_any_rows = tile.nnz() > 0 || !tile.row_kinds.is_empty();
+        if !has_any_rows {
             continue;
         }
         writer.append_sparse(tile_id, &tile)?;
@@ -163,10 +165,23 @@ fn build_segment_bytes(
     writer.finish()
 }
 
-/// Per-tile merge accumulator. Stores the in-progress (coord -> attrs)
-/// list so subsequent absorbs can override earlier coords.
+/// Row record inside a [`MergedTile`] accumulator.
+struct MergedRow {
+    coord: Vec<CoordValue>,
+    attrs: Vec<CellValue>,
+    surrogate: nodedb_types::Surrogate,
+    valid_from_ms: i64,
+    valid_until_ms: i64,
+    kind: RowKind,
+}
+
+/// Per-tile merge accumulator. Stores the in-progress `coord → row` map so
+/// subsequent absorbs can override earlier versions — last-write-wins.
+/// Sentinel rows (Tombstone, GdprErased) are stored and passed through
+/// unchanged; the compaction picker's retention policy decides which tile
+/// versions to keep; the merger does not drop rows.
 struct MergedTile {
-    rows: Vec<(Vec<CoordValue>, Vec<CellValue>)>,
+    rows: Vec<MergedRow>,
 }
 
 impl MergedTile {
@@ -182,24 +197,51 @@ impl MergedTile {
     }
 
     fn absorb_sparse(&mut self, _schema: &ArraySchema, tile: &SparseTile) -> ArrayResult<()> {
-        let n = tile.nnz() as usize;
+        let n = tile.row_count();
         for row in 0..n {
             let coord: Vec<CoordValue> = tile
                 .dim_dicts
                 .iter()
                 .map(|d| d.values[d.indices[row] as usize].clone())
                 .collect();
-            let attrs: Vec<CellValue> = tile.attr_cols.iter().map(|col| col[row].clone()).collect();
-            self.upsert(coord, attrs);
+            let kind = tile.row_kind(row)?;
+            let (attrs, surrogate, valid_from_ms, valid_until_ms) = match kind {
+                RowKind::Live => {
+                    let attrs: Vec<CellValue> =
+                        tile.attr_cols.iter().map(|col| col[row].clone()).collect();
+                    let surrogate = tile
+                        .surrogates
+                        .get(row)
+                        .copied()
+                        .unwrap_or(nodedb_types::Surrogate::ZERO);
+                    let vf = tile.valid_from_ms.get(row).copied().unwrap_or(0);
+                    let vu = tile
+                        .valid_until_ms
+                        .get(row)
+                        .copied()
+                        .unwrap_or(nodedb_types::OPEN_UPPER);
+                    (attrs, surrogate, vf, vu)
+                }
+                RowKind::Tombstone | RowKind::GdprErased => (
+                    Vec::new(),
+                    nodedb_types::Surrogate::ZERO,
+                    0,
+                    nodedb_types::OPEN_UPPER,
+                ),
+            };
+            self.upsert(MergedRow {
+                coord,
+                attrs,
+                surrogate,
+                valid_from_ms,
+                valid_until_ms,
+                kind,
+            });
         }
         Ok(())
     }
 
     fn absorb_dense(&mut self, _schema: &ArraySchema, _tile: &DenseTile) -> ArrayResult<()> {
-        // Memtable flushes only emit sparse tiles. Dense tiles arrive
-        // via promotion at query time, so a merger that encounters one
-        // here indicates a programming error rather than data — surface
-        // as a corruption error.
         Err(nodedb_array::ArrayError::SegmentCorruption {
             detail:
                 "compaction merger received a dense tile; only sparse tiles are produced by flush"
@@ -207,19 +249,157 @@ impl MergedTile {
         })
     }
 
-    fn upsert(&mut self, coord: Vec<CoordValue>, attrs: Vec<CellValue>) {
-        if let Some(slot) = self.rows.iter_mut().find(|(c, _)| c == &coord) {
-            slot.1 = attrs;
+    fn upsert(&mut self, new_row: MergedRow) {
+        if let Some(slot) = self.rows.iter_mut().find(|r| r.coord == new_row.coord) {
+            *slot = new_row;
         } else {
-            self.rows.push((coord, attrs));
+            self.rows.push(new_row);
         }
     }
 
     fn into_sparse(self, schema: &ArraySchema) -> ArrayResult<SparseTile> {
         let mut b = SparseTileBuilder::new(schema);
-        for (coord, attrs) in self.rows {
-            b.push(&coord, &attrs)?;
+        for row in self.rows {
+            b.push_row(SparseRow {
+                coord: &row.coord,
+                attrs: &row.attrs,
+                surrogate: row.surrogate,
+                valid_from_ms: row.valid_from_ms,
+                valid_until_ms: row.valid_until_ms,
+                kind: row.kind,
+            })?;
         }
         Ok(b.build())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig};
+    use crate::engine::array::test_support::{aid, put_one, schema};
+    use crate::engine::array::wal::ArrayPutCell;
+    use nodedb_array::types::cell_value::value::CellValue;
+    use nodedb_array::types::coord::value::CoordValue;
+    use tempfile::TempDir;
+
+    fn put_versioned(e: &mut ArrayEngine, x: i64, y: i64, v: i64, sys_ms: i64, lsn: u64) {
+        e.put_cells(
+            &aid(),
+            vec![ArrayPutCell {
+                coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
+                attrs: vec![CellValue::Int64(v)],
+                surrogate: nodedb_types::Surrogate::ZERO,
+                system_from_ms: sys_ms,
+                valid_from_ms: 0,
+                valid_until_ms: i64::MAX,
+            }],
+            lsn,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn versioned_tiles_preserved_through_merge() {
+        // Write 4 versions of the same cell at distinct system_from_ms so each
+        // flush produces one L0 segment with a unique TileId.
+        let dir = TempDir::new().unwrap();
+        let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
+        cfg.flush_cell_threshold = 1;
+        let mut e = ArrayEngine::new(cfg).unwrap();
+        e.open_array(aid(), schema(), 0x1).unwrap();
+        put_versioned(&mut e, 0, 0, 10, 100, 1);
+        put_versioned(&mut e, 0, 0, 20, 200, 2);
+        put_versioned(&mut e, 0, 0, 30, 300, 3);
+        put_versioned(&mut e, 0, 0, 40, 400, 4);
+        assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 4);
+        let merged = e.maybe_compact(&aid()).unwrap();
+        assert!(merged);
+        let m = e.store(&aid()).unwrap().manifest();
+        assert_eq!(m.segments.len(), 1);
+        // All 4 tile versions (distinct system_from_ms) must survive.
+        assert_eq!(m.segments[0].tile_count, 4);
+    }
+
+    #[test]
+    fn merger_preserves_tombstone_and_erasure_rows_inside_horizon() {
+        use crate::engine::array::wal::ArrayDeleteCell;
+        use nodedb_array::segment::SegmentReader;
+        use nodedb_array::tile::sparse_tile::RowKind;
+
+        // Write a live cell, tombstone, and erasure — each in their own flush
+        // so we get separate segments — then compact and confirm all three kinds
+        // survive in the merged output.
+        let dir = TempDir::new().unwrap();
+        let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
+        cfg.flush_cell_threshold = 1;
+        let mut e = ArrayEngine::new(cfg).unwrap();
+        e.open_array(aid(), schema(), 0x1).unwrap();
+
+        // Segment 1: live cell at (1,0)
+        put_one(&mut e, 1, 0, 10, 1);
+        e.flush(&aid(), 2).unwrap();
+
+        // Segment 2: tombstone at (2,0) system=200
+        e.delete_cells(
+            &aid(),
+            vec![ArrayDeleteCell {
+                coord: vec![CoordValue::Int64(2), CoordValue::Int64(0)],
+                system_from_ms: 200,
+                erasure: false,
+            }],
+            3,
+        )
+        .unwrap();
+        e.flush(&aid(), 4).unwrap();
+
+        // Segment 3: GDPR erasure at (3,0) system=300
+        e.gdpr_erase_cell(
+            &aid(),
+            vec![CoordValue::Int64(3), CoordValue::Int64(0)],
+            300,
+            5,
+        )
+        .unwrap();
+        e.flush(&aid(), 6).unwrap();
+
+        // Segment 4: another live cell to reach the L0_TRIGGER threshold.
+        put_one(&mut e, 4, 0, 40, 7);
+        e.flush(&aid(), 8).unwrap();
+
+        loop {
+            if !e.maybe_compact(&aid()).unwrap() {
+                break;
+            }
+        }
+
+        let store = e.store(&aid()).unwrap();
+        let mut found_tombstone = false;
+        let mut found_erased = false;
+        for seg in &store.manifest().segments {
+            let seg_path = store.root().join(&seg.id);
+            let bytes = std::fs::read(&seg_path).unwrap();
+            let reader = SegmentReader::open(&bytes).unwrap();
+            for idx in 0..reader.tile_count() {
+                if let nodedb_array::segment::TilePayload::Sparse(tile) =
+                    reader.read_tile(idx).unwrap()
+                {
+                    for &kind_byte in &tile.row_kinds {
+                        match RowKind::from_u8(kind_byte).unwrap() {
+                            RowKind::Tombstone => found_tombstone = true,
+                            RowKind::GdprErased => found_erased = true,
+                            RowKind::Live => {}
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_tombstone,
+            "merged segment must preserve tombstone rows"
+        );
+        assert!(
+            found_erased,
+            "merged segment must preserve GDPR-erased rows"
+        );
     }
 }

@@ -3,7 +3,6 @@
 //! ordering matches the live dispatch path.
 
 use nodedb_array::types::ArrayId;
-use nodedb_array::types::coord::value::CoordValue;
 
 use super::engine::{ArrayEngine, ArrayEngineResult};
 use super::store::ArrayStore;
@@ -27,19 +26,50 @@ impl ArrayEngine {
         Ok(())
     }
 
-    /// Stamps memtable tombstones with a caller-supplied LSN.
+    /// Stamps memtable tombstones (or GDPR erasure markers) with a
+    /// caller-supplied LSN. Each cell in `cells` independently selects
+    /// the sentinel byte via its `erasure` flag.
     pub fn delete_cells(
         &mut self,
         id: &ArrayId,
-        coords: Vec<Vec<CoordValue>>,
+        cells: Vec<super::wal::ArrayDeleteCell>,
         wal_lsn: u64,
     ) -> ArrayEngineResult<()> {
-        if coords.is_empty() {
+        if cells.is_empty() {
             return Ok(());
         }
-        stamp_delete_cells(self.store_mut(id)?, coords, wal_lsn)?;
+        stamp_delete_cells(self.store_mut(id)?, cells, wal_lsn)?;
         self.maybe_flush(id)?;
         Ok(())
+    }
+
+    /// GDPR-erase a single cell at `(array, coord, system_from_ms)`.
+    ///
+    /// Writes the `CELL_GDPR_ERASURE_SENTINEL` (`0xFE`) into the memtable as
+    /// a new tile version at `system_from_ms`. Any read at
+    /// `system_as_of >= system_from_ms` returns `CeilingResult::Erased` for
+    /// this coord. The sentinel is physically removed by compaction once the
+    /// tile version falls outside the array's `audit_retain_ms` horizon.
+    ///
+    /// This is equivalent to calling `delete_cells` with `erasure: true`
+    /// on a single cell, exposed as a named method for clarity at call sites.
+    pub fn gdpr_erase_cell(
+        &mut self,
+        id: &ArrayId,
+        coord: Vec<nodedb_array::types::coord::value::CoordValue>,
+        system_from_ms: i64,
+        wal_lsn: u64,
+    ) -> ArrayEngineResult<()> {
+        use super::wal::ArrayDeleteCell;
+        self.delete_cells(
+            id,
+            vec![ArrayDeleteCell {
+                coord,
+                system_from_ms,
+                erasure: true,
+            }],
+            wal_lsn,
+        )
     }
 
     pub(super) fn maybe_flush(&mut self, id: &ArrayId) -> ArrayEngineResult<()> {
@@ -64,21 +94,38 @@ pub(crate) fn stamp_put_cells(
 ) -> ArrayEngineResult<()> {
     let schema = store.schema().clone();
     for c in cells {
-        store
-            .memtable
-            .put_cell(&schema, c.coord, c.attrs, c.surrogate, lsn)?;
+        store.memtable.put_cell(
+            &schema,
+            super::memtable::PutCell {
+                coord: c.coord,
+                attrs: c.attrs,
+                surrogate: c.surrogate,
+                system_from_ms: c.system_from_ms,
+                valid_from_ms: c.valid_from_ms,
+                valid_until_ms: c.valid_until_ms,
+                lsn,
+            },
+        )?;
     }
     Ok(())
 }
 
 pub(crate) fn stamp_delete_cells(
     store: &mut ArrayStore,
-    coords: Vec<Vec<CoordValue>>,
+    cells: Vec<super::wal::ArrayDeleteCell>,
     lsn: u64,
 ) -> ArrayEngineResult<()> {
     let schema = store.schema().clone();
-    for coord in coords {
-        store.memtable.delete_cell(&schema, coord, lsn)?;
+    for c in cells {
+        if c.erasure {
+            store
+                .memtable
+                .erase_cell(&schema, c.coord, c.system_from_ms, lsn)?;
+        } else {
+            store
+                .memtable
+                .delete_cell(&schema, c.coord, c.system_from_ms, lsn)?;
+        }
     }
     Ok(())
 }
@@ -90,6 +137,7 @@ mod tests {
     use crate::engine::array::test_support::{aid, put_one, schema};
     use nodedb_array::segment::MbrQueryPredicate;
     use nodedb_array::types::cell_value::value::CellValue;
+    use nodedb_array::types::coord::value::CoordValue;
     use tempfile::TempDir;
 
     #[test]
@@ -115,6 +163,9 @@ mod tests {
             coord: vec![CoordValue::Int64(3), CoordValue::Int64(5)],
             attrs: vec![CellValue::Int64(77)],
             surrogate: nodedb_types::Surrogate::ZERO,
+            system_from_ms: 0,
+            valid_from_ms: 0,
+            valid_until_ms: i64::MAX,
         }];
         e.put_cells(&aid(), cells, 42).unwrap();
         let seg = e.flush(&aid(), 43).unwrap().unwrap();

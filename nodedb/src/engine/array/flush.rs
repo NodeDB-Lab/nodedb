@@ -30,18 +30,14 @@ impl ArrayEngine {
         let schema = store.schema().clone();
         let schema_hash = store.schema_hash();
         let drained = std::mem::replace(&mut store.memtable, Memtable::new()).drain_sorted();
-        let BuiltSegment {
-            bytes,
-            min_tile,
-            max_tile,
-        } = build_segment_from_memtable(&schema, schema_hash, &drained)?;
+        let built = build_segment_from_memtable(&schema, schema_hash, &drained)?;
         let segment_id = store.allocate_segment_id();
         Ok(Some(PreparedFlush {
             segment_id,
-            bytes,
-            tile_count: drained.len() as u32,
-            min_tile,
-            max_tile,
+            bytes: built.bytes,
+            tile_count: built.tile_count,
+            min_tile: built.min_tile,
+            max_tile: built.max_tile,
         }))
     }
 
@@ -82,6 +78,7 @@ struct BuiltSegment {
     bytes: Vec<u8>,
     min_tile: Option<TileId>,
     max_tile: Option<TileId>,
+    tile_count: u32,
 }
 
 fn build_segment_from_memtable(
@@ -92,19 +89,22 @@ fn build_segment_from_memtable(
     let mut writer = SegmentWriter::new(schema_hash);
     let mut min_tile: Option<TileId> = None;
     let mut max_tile: Option<TileId> = None;
+    let mut tile_count: u32 = 0;
     for (tile_id, buf) in drained {
-        let tile = buf.materialise(schema)?;
-        if tile.nnz() == 0 {
+        if buf.entry_count() == 0 {
             continue;
         }
+        let tile = buf.materialise(schema)?;
         writer.append_sparse(*tile_id, &tile)?;
         min_tile = Some(min_tile.map_or(*tile_id, |m| m.min(*tile_id)));
         max_tile = Some(max_tile.map_or(*tile_id, |m| m.max(*tile_id)));
+        tile_count += 1;
     }
     Ok(BuiltSegment {
         bytes: writer.finish()?,
         min_tile,
         max_tile,
+        tile_count,
     })
 }
 

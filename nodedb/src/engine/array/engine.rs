@@ -161,6 +161,9 @@ mod tests {
                 coord: vec![CoordValue::Int64(4), CoordValue::Int64(4)],
                 attrs: vec![CellValue::Int64(99)],
                 surrogate: nodedb_types::Surrogate::ZERO,
+                system_from_ms: 0,
+                valid_from_ms: 0,
+                valid_until_ms: i64::MAX,
             }],
             1,
         )

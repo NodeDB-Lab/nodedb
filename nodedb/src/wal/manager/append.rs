@@ -95,6 +95,14 @@ impl WalManager {
         self.append_record(RecordType::LogBatch, tid, vs, p)
     }
 
+    pub fn append_array_put(&self, tid: TenantId, vs: VShardId, p: &[u8]) -> crate::Result<Lsn> {
+        self.append_record(RecordType::ArrayPut, tid, vs, p)
+    }
+
+    pub fn append_array_delete(&self, tid: TenantId, vs: VShardId, p: &[u8]) -> crate::Result<Lsn> {
+        self.append_record(RecordType::ArrayDelete, tid, vs, p)
+    }
+
     /// Append a `CollectionTombstoned` record. Any subsequent replay
     /// that extracts this record will filter prior writes for
     /// `(tid, collection)` whose LSN is less than `purge_lsn`.

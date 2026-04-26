@@ -4,12 +4,16 @@
 //! `engine.rs` keeps a `HashMap<ArrayId, ArrayStore>`. Stores are
 //! Data-Plane only (`!Send`-compatible — no atomics, no shared mutability).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use nodedb_array::query::ceiling::{CeilingParams, CeilingResult, ceiling_resolve_cell};
 use nodedb_array::schema::ArraySchema;
-use nodedb_array::segment::{MbrQueryPredicate, TilePayload};
+use nodedb_array::segment::{MbrQueryPredicate, TilePayload, extract_cell_bytes};
+use nodedb_array::tile::sparse_tile::{SparseTile, SparseTileBuilder};
+use nodedb_array::types::TileId;
+use nodedb_array::types::coord::value::CoordValue;
 
 use super::manifest::{Manifest, ManifestError, SegmentRef, segment_path};
 use super::segment_handle::{SegmentHandle, SegmentHandleError};
@@ -200,7 +204,7 @@ impl ArrayStore {
             }
         }
         for (tile_id, buf) in self.memtable.iter() {
-            if buf.cell_count() == 0 {
+            if buf.entry_count() == 0 {
                 continue;
             }
             out.push((
@@ -209,6 +213,204 @@ impl ArrayStore {
             ));
         }
         Ok(out)
+    }
+
+    /// Bitemporal scan: resolve the ceiling for every cell coordinate at the
+    /// given `system_as_of` and optional `valid_at_ms` point.
+    ///
+    /// Returns one `(hilbert_prefix, SparseTile)` pair per prefix that has at
+    /// least one `Live` cell after ceiling resolution. Tombstoned and erased
+    /// coords are omitted.
+    ///
+    /// Also returns `truncated_before_horizon`: `true` when the store contains
+    /// at least one tile version but the `system_as_of` cutoff is below every
+    /// version's `system_from_ms` (i.e., the cutoff predates all data).
+    pub fn scan_tiles_at(
+        &self,
+        system_as_of: i64,
+        valid_at_ms: Option<i64>,
+    ) -> Result<(Vec<(u64, SparseTile)>, bool), nodedb_array::ArrayError> {
+        let params = CeilingParams {
+            system_as_of,
+            valid_at_ms,
+        };
+
+        // Collect all distinct hilbert_prefix values present in any version.
+        let mut all_prefixes: HashSet<u64> = HashSet::new();
+        for h in self.segments.values() {
+            let reader = h.reader();
+            for entry in reader.tiles() {
+                all_prefixes.insert(entry.tile_id.hilbert_prefix);
+            }
+        }
+        for (tile_id, _) in self.memtable.iter() {
+            all_prefixes.insert(tile_id.hilbert_prefix);
+        }
+
+        // Did any version exist at all in the store?
+        let any_versions = !all_prefixes.is_empty();
+
+        let mut out: Vec<(u64, SparseTile)> = Vec::new();
+        let mut any_qualifying = false;
+
+        for prefix in all_prefixes {
+            // Collect all distinct coords across every version for this prefix.
+            let mut coords: Vec<Vec<CoordValue>> = Vec::new();
+
+            // From memtable versions.
+            for (_, buf) in self.memtable.iter_tile_versions(prefix, i64::MAX) {
+                for coord_key in buf.all_coord_keys() {
+                    let coord = Memtable::decode_coord_key(coord_key)?;
+                    if !coords.contains(&coord) {
+                        coords.push(coord);
+                    }
+                }
+            }
+
+            // From segment versions (newest-first per segment, but we only need
+            // coords here so order within a segment doesn't matter).
+            for h in self.segments.values() {
+                let reader = h.reader();
+                for item in reader.iter_tile_versions(prefix, i64::MAX)? {
+                    let (_, tile_payload) = item?;
+                    if let TilePayload::Sparse(sparse) = &tile_payload {
+                        let n = sparse.nnz() as usize;
+                        for row in 0..n {
+                            let coord: Vec<CoordValue> = sparse
+                                .dim_dicts
+                                .iter()
+                                .map(|d| d.values[d.indices[row] as usize].clone())
+                                .collect();
+                            if !coords.contains(&coord) {
+                                coords.push(coord);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut builder = SparseTileBuilder::new(&self.schema);
+            for coord in &coords {
+                // Build the version iterator for this coord across all sources.
+                // Memtable versions (newer) first, then segment versions (older).
+                let cell_versions = self.cell_versions_for_coord(prefix, coord, i64::MAX)?;
+
+                // Check if there are any versions at or before the cutoff.
+                if cell_versions
+                    .iter()
+                    .any(|(tid, _)| tid.system_from_ms <= system_as_of)
+                {
+                    any_qualifying = true;
+                }
+
+                let iter = cell_versions
+                    .iter()
+                    .map(|(tid, bytes)| (*tid, bytes.as_slice()));
+                match ceiling_resolve_cell(iter, coord, &params)? {
+                    CeilingResult::Live(payload) => {
+                        builder
+                            .push_row(nodedb_array::tile::sparse_tile::SparseRow {
+                                coord,
+                                attrs: &payload.attrs,
+                                surrogate: payload.surrogate,
+                                valid_from_ms: payload.valid_from_ms,
+                                valid_until_ms: payload.valid_until_ms,
+                                kind: nodedb_array::tile::sparse_tile::RowKind::Live,
+                            })
+                            .map_err(|e| nodedb_array::ArrayError::SegmentCorruption {
+                                detail: format!("scan_tiles_at builder: {e}"),
+                            })?;
+                    }
+                    CeilingResult::Tombstoned | CeilingResult::Erased | CeilingResult::NotFound => {
+                    }
+                }
+            }
+
+            let tile = builder.build();
+            if tile.nnz() > 0 {
+                out.push((prefix, tile));
+            }
+        }
+
+        let truncated_before_horizon = any_versions && !any_qualifying;
+        Ok((out, truncated_before_horizon))
+    }
+
+    /// Resolve the ceiling for a specific cell coordinate.
+    ///
+    /// Returns the raw `CeilingResult` so callers can distinguish between
+    /// `Live`, `Tombstoned`, `Erased`, and `NotFound` — unlike `scan_tiles_at`
+    /// which collapses Tombstoned/Erased/NotFound into "no row in output tile".
+    ///
+    /// Useful for testing and diagnostic code that needs the exact sentinel type.
+    pub fn ceiling_for_coord(
+        &self,
+        coord: &[CoordValue],
+        system_as_of: i64,
+        valid_at_ms: Option<i64>,
+    ) -> nodedb_array::ArrayResult<nodedb_array::query::ceiling::CeilingResult> {
+        use nodedb_array::query::ceiling::CeilingParams;
+        // Find the hilbert_prefix for this coord.
+        let hilbert_prefix = {
+            use nodedb_array::tile::tile_id_for_cell;
+            let tile = tile_id_for_cell(&self.schema, coord, 0).map_err(|e| {
+                nodedb_array::ArrayError::SegmentCorruption {
+                    detail: format!("ceiling_for_coord: tile id: {e}"),
+                }
+            })?;
+            tile.hilbert_prefix
+        };
+        let versions = self.cell_versions_for_coord(hilbert_prefix, coord, system_as_of)?;
+        let params = CeilingParams {
+            system_as_of,
+            valid_at_ms,
+        };
+        ceiling_resolve_cell(
+            versions.iter().map(|(tid, b)| (*tid, b.as_slice())),
+            coord,
+            &params,
+        )
+    }
+
+    /// Build a `(TileId, raw_bytes)` list for a specific `coord` across all
+    /// versions (memtable + segments), ordered newest-first by `system_from_ms`.
+    fn cell_versions_for_coord(
+        &self,
+        hilbert_prefix: u64,
+        coord: &[CoordValue],
+        system_as_of: i64,
+    ) -> Result<Vec<(TileId, Vec<u8>)>, nodedb_array::ArrayError> {
+        let mut versions: Vec<(TileId, Vec<u8>)> = Vec::new();
+
+        // Memtable (most recent writes, already newest-first from iter_tile_versions).
+        for (tile_id, buf) in self
+            .memtable
+            .iter_tile_versions(hilbert_prefix, system_as_of)
+        {
+            if let Some(bytes) = buf.get_cell_bytes(coord) {
+                versions.push((tile_id, bytes.to_vec()));
+            }
+        }
+
+        // Segment versions — gather all qualifying versions across all segments,
+        // then sort newest-first so memtable + segment ordering is correct.
+        let mut seg_versions: Vec<(TileId, Vec<u8>)> = Vec::new();
+        for h in self.segments.values() {
+            let reader = h.reader();
+            for item in reader.iter_tile_versions(hilbert_prefix, system_as_of)? {
+                let (tile_id, tile_payload) = item?;
+                if let TilePayload::Sparse(sparse) = &tile_payload
+                    && let Some(bytes) = extract_cell_bytes(sparse, coord)?
+                {
+                    seg_versions.push((tile_id, bytes));
+                }
+            }
+        }
+        // Sort segment versions newest-first by system_from_ms.
+        seg_versions.sort_by_key(|(a, _)| std::cmp::Reverse(a.system_from_ms));
+        versions.extend(seg_versions);
+
+        Ok(versions)
     }
 }
 
