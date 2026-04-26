@@ -329,6 +329,9 @@ fn surrogate_round_trip_all_engines() {
                 coord: vec![CoordValue::Int64(i as i64)],
                 attrs: vec![CellValue::Float64(s as f64)],
                 surrogate: Surrogate::new(s),
+                system_from_ms: 0,
+                valid_from_ms: 0,
+                valid_until_ms: i64::MAX,
             })
             .collect();
         let cells_mp = zerompk::to_msgpack_vec(&cells).unwrap();
@@ -605,6 +608,8 @@ fn surrogate_round_trip_all_engines() {
                 limit: 100,
                 cell_filter: None,
                 hilbert_range: None,
+                system_as_of: None,
+                valid_at_ms: None,
             }),
         );
         // Unfiltered: should see all ARR_SURS cells.
@@ -625,6 +630,8 @@ fn surrogate_round_trip_all_engines() {
                 limit: 100,
                 cell_filter: Some(intersection.clone()),
                 hilbert_range: None,
+                system_as_of: None,
+                valid_at_ms: None,
             }),
         );
         // Filtered: intersection ∩ ARR_SURS = {10}.  Surrogate 10 is at
@@ -632,16 +639,27 @@ fn surrogate_round_trip_all_engines() {
         // Surrogates 13 (coord [1]), 60 (coord [2]), 61 (coord [3]) must not
         // appear.  The response is zerompk-encoded NdArrayCell values; we
         // transcode to JSON for inspection.
-        let filtered_json_str =
-            nodedb_types::msgpack_to_json_string(&slice_filtered).unwrap_or_default();
-        let filtered_cells: serde_json::Value =
-            serde_json::from_str(&filtered_json_str).unwrap_or(serde_json::Value::Array(vec![]));
-
-        // Unfiltered had 4 cells; filtered must have exactly 1.
-        let unfiltered_json_str =
-            nodedb_types::msgpack_to_json_string(&slice_all).unwrap_or_default();
-        let unfiltered_cells: serde_json::Value =
-            serde_json::from_str(&unfiltered_json_str).unwrap_or(serde_json::Value::Array(vec![]));
+        // Local DP slice responses are wrapped as `ArraySliceResponse { rows_msgpack:
+        // Vec<u8>, truncated_before_horizon: bool }`. The inner `rows_msgpack` is a
+        // separate msgpack array of `NdArrayCell` values.
+        #[derive(serde::Deserialize, zerompk::FromMessagePack)]
+        #[msgpack(map)]
+        struct SliceEnvelope {
+            rows_msgpack: Vec<u8>,
+            #[allow(dead_code)]
+            truncated_before_horizon: bool,
+        }
+        fn unwrap_rows(payload: &[u8]) -> serde_json::Value {
+            let envelope: SliceEnvelope = match zerompk::from_msgpack(payload) {
+                Ok(e) => e,
+                Err(_) => return serde_json::Value::Array(vec![]),
+            };
+            let json_str =
+                nodedb_types::msgpack_to_json_string(&envelope.rows_msgpack).unwrap_or_default();
+            serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Array(vec![]))
+        }
+        let filtered_cells = unwrap_rows(&slice_filtered);
+        let unfiltered_cells = unwrap_rows(&slice_all);
         assert_eq!(
             unfiltered_cells.as_array().map(|a| a.len()).unwrap_or(0),
             ARR_SURS.len(),
