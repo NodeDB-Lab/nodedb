@@ -20,7 +20,7 @@ pub(super) fn apply_set_ops(
         }
         _ => dedup_union_payloads(dedup_payloads),
     };
-    payload_to_response(&merged, PlanKind::MultiRow)
+    payload_to_response(&merged, PlanKind::MultiRow).response
 }
 
 /// Merge multiple Data Plane response payloads and deduplicate rows (UNION DISTINCT).

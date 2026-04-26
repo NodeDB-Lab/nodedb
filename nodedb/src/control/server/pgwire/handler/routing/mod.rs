@@ -353,7 +353,19 @@ impl NodeDbPgHandler {
                         message,
                     )))
                 })?;
-                responses.push(payload_to_response(&payload_bytes, PlanKind::MultiRow));
+                // Slice responses are wrapped in `ArraySliceResponse`; all
+                // other cluster array ops return plain msgpack.
+                let cluster_plan_kind = match cluster_op {
+                    crate::bridge::physical_plan::ClusterArrayOp::Slice { .. } => {
+                        PlanKind::ArraySlice
+                    }
+                    _ => PlanKind::MultiRow,
+                };
+                let shaped = payload_to_response(&payload_bytes, cluster_plan_kind);
+                if let Some(notice) = shaped.notice {
+                    self.sessions.push_notice(addr, notice);
+                }
+                responses.push(shaped.response);
                 continue;
             }
 
@@ -552,7 +564,11 @@ impl NodeDbPgHandler {
                     &plan_for_response,
                     &self.state,
                 );
-                responses.push(payload_to_response(&payload, plan_kind));
+                let shaped = payload_to_response(&payload, plan_kind);
+                if let Some(notice) = shaped.notice {
+                    self.sessions.push_notice(addr, notice);
+                }
+                responses.push(shaped.response);
             }
         }
 

@@ -11,6 +11,8 @@ use crate::bridge::physical_plan::{
     ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp, QueryOp, SpatialOp, TextOp,
     TimeseriesOp, VectorOp,
 };
+use crate::data::executor::response_codec::{ArraySliceResponse, decode_payload_to_json};
+use zerompk;
 
 use super::super::types::text_field;
 
@@ -18,6 +20,9 @@ use super::super::types::text_field;
 pub(super) enum PlanKind {
     SingleDocument,
     MultiRow,
+    /// Array slice result — decoded via `ArraySliceResponse` to surface the
+    /// `truncated_before_horizon` flag as a pgwire NOTICE when set.
+    ArraySlice,
     Execution,
     /// DML operation that returns affected row count.
     /// The tag name is used in the pgwire `CommandComplete` message (e.g., "UPDATE", "DELETE").
@@ -168,8 +173,10 @@ pub(super) fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         // is plain msgpack (decode_payload_to_json transcodes); Slice /
         // Project payloads use the tagged Value codec which transcodes
         // to a JSON array of arrays — clients receive JSON text per row.
-        PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Slice { .. })
-        | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Project { .. })
+        PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Slice { .. }) => {
+            PlanKind::ArraySlice
+        }
+        PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Project { .. })
         | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Aggregate { .. })
         | PhysicalPlan::Array(crate::bridge::physical_plan::ArrayOp::Elementwise { .. }) => {
             PlanKind::MultiRow
@@ -206,9 +213,33 @@ fn extract_affected_count(payload: &[u8]) -> Option<u64> {
         .and_then(|n| n.as_u64())
 }
 
-pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> Response {
+/// Outcome of shaping a Data Plane payload into a pgwire `Response`.
+///
+/// `notice` is set when the response shaper detected a condition the client
+/// should know about (e.g. `truncated_before_horizon` on an array slice).
+/// Callers forward it to the per-connection notice queue.
+pub(super) struct ShapedResponse {
+    pub response: Response,
+    pub notice: Option<String>,
+}
+
+impl From<Response> for ShapedResponse {
+    fn from(response: Response) -> Self {
+        Self {
+            response,
+            notice: None,
+        }
+    }
+}
+
+/// NOTICE message emitted when a slice request's `system_as_of` cutoff fell
+/// below the oldest tile version on at least one shard.
+const TRUNCATED_BEFORE_HORIZON_NOTICE: &str = "AS OF SYSTEM TIME cutoff is older than the oldest retained tile version; \
+     results may be incomplete";
+
+pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> ShapedResponse {
     match kind {
-        PlanKind::Execution => Response::Execution(Tag::new("OK")),
+        PlanKind::Execution => Response::Execution(Tag::new("OK")).into(),
         PlanKind::DmlResult(tag) => {
             let count = if payload.is_empty() {
                 // Point operations with empty payload succeeded on exactly 1 row.
@@ -216,7 +247,52 @@ pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> Response {
             } else {
                 extract_affected_count(payload).unwrap_or(1) as usize
             };
-            Response::Execution(Tag::new(tag).with_rows(count))
+            Response::Execution(Tag::new(tag).with_rows(count)).into()
+        }
+        PlanKind::ArraySlice => {
+            // Decode `ArraySliceResponse` envelope: extract rows and flag.
+            // Fall back to treating the payload as a plain array when the
+            // decode fails (e.g., empty payload or legacy shape).
+            let schema = Arc::new(vec![text_field("result")]);
+            if payload.is_empty() {
+                return Response::Query(QueryResponse::new(schema, stream::empty())).into();
+            }
+            let (rows_json, truncated) =
+                if let Ok(resp) = zerompk::from_msgpack::<ArraySliceResponse>(payload) {
+                    let text = decode_payload_to_json(&resp.rows_msgpack);
+                    (text, resp.truncated_before_horizon)
+                } else {
+                    // Fallback for any legacy or plain-array payloads.
+                    (decode_payload_to_json(payload), false)
+                };
+            let notice = if truncated {
+                Some(TRUNCATED_BEFORE_HORIZON_NOTICE.to_string())
+            } else {
+                None
+            };
+            let response = if let Ok(serde_json::Value::Array(items)) =
+                sonic_rs::from_str::<serde_json::Value>(&rows_json)
+            {
+                let row_schema = schema.clone();
+                let rows: Vec<_> = items
+                    .iter()
+                    .map(|item| {
+                        let mut encoder = DataRowEncoder::new(row_schema.clone());
+                        let _ = encoder.encode_field(&item.to_string());
+                        Ok(encoder.take_row())
+                    })
+                    .collect();
+                Response::Query(QueryResponse::new(schema, stream::iter(rows)))
+            } else {
+                let mut encoder = DataRowEncoder::new(schema.clone());
+                if let Err(e) = encoder.encode_field(&rows_json) {
+                    tracing::error!(error = %e, "failed to encode array slice field");
+                    return Response::Execution(Tag::new("ERROR")).into();
+                }
+                let row = encoder.take_row();
+                Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)])))
+            };
+            ShapedResponse { response, notice }
         }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
             let col_name = if matches!(kind, PlanKind::SingleDocument) {
@@ -226,38 +302,37 @@ pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> Response {
             };
             let schema = Arc::new(vec![text_field(col_name)]);
             if payload.is_empty() {
-                Response::Query(QueryResponse::new(schema, stream::empty()))
-            } else {
-                let text = crate::data::executor::response_codec::decode_payload_to_json(payload);
-
-                // For multi-row results, parse the JSON array and stream each
-                // element as a separate pgwire row. This avoids materializing
-                // a single giant row for large result sets.
-                if matches!(kind, PlanKind::MultiRow)
-                    && let Ok(serde_json::Value::Array(items)) =
-                        sonic_rs::from_str::<serde_json::Value>(&text)
-                {
-                    let row_schema = schema.clone();
-                    let rows: Vec<_> = items
-                        .iter()
-                        .map(|item| {
-                            let mut encoder = DataRowEncoder::new(row_schema.clone());
-                            let _ = encoder.encode_field(&item.to_string());
-                            Ok(encoder.take_row())
-                        })
-                        .collect();
-                    return Response::Query(QueryResponse::new(schema, stream::iter(rows)));
-                }
-
-                // Single document or non-array: send as one row.
-                let mut encoder = DataRowEncoder::new(schema.clone());
-                if let Err(e) = encoder.encode_field(&text) {
-                    tracing::error!(error = %e, "failed to encode field");
-                    return Response::Execution(Tag::new("ERROR"));
-                }
-                let row = encoder.take_row();
-                Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)])))
+                return Response::Query(QueryResponse::new(schema, stream::empty())).into();
             }
+            let text = decode_payload_to_json(payload);
+
+            // For multi-row results, parse the JSON array and stream each
+            // element as a separate pgwire row. This avoids materializing
+            // a single giant row for large result sets.
+            if matches!(kind, PlanKind::MultiRow)
+                && let Ok(serde_json::Value::Array(items)) =
+                    sonic_rs::from_str::<serde_json::Value>(&text)
+            {
+                let row_schema = schema.clone();
+                let rows: Vec<_> = items
+                    .iter()
+                    .map(|item| {
+                        let mut encoder = DataRowEncoder::new(row_schema.clone());
+                        let _ = encoder.encode_field(&item.to_string());
+                        Ok(encoder.take_row())
+                    })
+                    .collect();
+                return Response::Query(QueryResponse::new(schema, stream::iter(rows))).into();
+            }
+
+            // Single document or non-array: send as one row.
+            let mut encoder = DataRowEncoder::new(schema.clone());
+            if let Err(e) = encoder.encode_field(&text) {
+                tracing::error!(error = %e, "failed to encode field");
+                return Response::Execution(Tag::new("ERROR")).into();
+            }
+            let row = encoder.take_row();
+            Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)]))).into()
         }
     }
 }

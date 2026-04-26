@@ -249,6 +249,17 @@ impl SimpleQueryHandler for NodeDbPgHandler {
 
         let result = self.execute_sql(&identity, &addr, query).await;
 
+        // Drain queued NOTICE messages emitted by response shapers (e.g.
+        // `truncated_before_horizon` on array slices) and send them before
+        // the query result so the client associates the warning with the
+        // current statement.
+        for message in self.sessions.drain_notices(&addr) {
+            let notice = notice_warning(&message);
+            let _ = client
+                .send(PgWireBackendMessage::NoticeResponse(notice))
+                .await;
+        }
+
         // Drain pending LIVE SELECT notifications and send as pgwire
         // async NotificationResponse messages. This is the standard
         // PostgreSQL notification delivery model: notifications are
@@ -293,7 +304,17 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        self.execute_prepared(client, portal, max_rows).await
+        let result = self.execute_prepared(client, portal, max_rows).await;
+        // Mirror the simple-query path: surface any queued NOTICE messages
+        // (e.g. `truncated_before_horizon`) before returning.
+        let addr = client.socket_addr();
+        for message in self.sessions.drain_notices(&addr) {
+            let notice = notice_warning(&message);
+            let _ = client
+                .send(PgWireBackendMessage::NoticeResponse(notice))
+                .await;
+        }
+        result
     }
 
     async fn do_describe_statement<C>(

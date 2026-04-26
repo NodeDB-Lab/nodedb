@@ -111,7 +111,9 @@ impl NodeDbPgHandler {
                 responses.push(Response::Execution(Tag::new("OK")));
             } else {
                 for payload in &payloads {
-                    responses.push(payload_to_response(payload, PlanKind::MultiRow));
+                    // MultiRow path never produces a NOTICE — discard it.
+                    let shaped = payload_to_response(payload, PlanKind::MultiRow);
+                    responses.push(shaped.response);
                 }
             }
         }

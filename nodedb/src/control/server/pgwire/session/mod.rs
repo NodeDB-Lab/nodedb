@@ -3,6 +3,7 @@ mod cursor;
 pub mod cursor_spill;
 pub mod ddl_buffer;
 mod live;
+mod notice;
 mod params;
 pub mod read_consistency;
 mod state;

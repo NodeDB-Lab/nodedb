@@ -69,6 +69,13 @@ pub struct PgSession {
     /// Each subscription receives filtered change events from the broadcast channel.
     /// Drained between queries to deliver pgwire NotificationResponse messages.
     pub live_subscriptions: Vec<(String, crate::control::change_stream::Subscription)>,
+    /// Pending pgwire NOTICE messages queued during query execution.
+    /// Drained between query and response delivery so the client receives a
+    /// `NoticeResponse` for warnings raised by the response shaper (e.g. an
+    /// array slice request whose `system_as_of` fell below the oldest tile
+    /// version). Populated by `payload_to_response` when the decoded
+    /// `ArraySliceResponse` carries `truncated_before_horizon = true`.
+    pub pending_notices: Vec<String>,
     /// SQL-level prepared statements: PREPARE name(types) AS query.
     /// Separate from pgwire wire-level prepared statements (managed by pgwire crate).
     pub prepared_stmts: super::prepared_cache::PreparedStatementCache,
@@ -112,6 +119,7 @@ impl PgSession {
             pending_offset_commits: Vec::new(),
             cursors: HashMap::new(),
             live_subscriptions: Vec::new(),
+            pending_notices: Vec::new(),
             prepared_stmts: super::prepared_cache::PreparedStatementCache::new(256),
             temp_tables: super::temp_tables::TempTableRegistry::new(),
             plan_cache:
