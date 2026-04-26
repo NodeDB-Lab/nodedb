@@ -92,6 +92,14 @@ pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
         }
     }
 
+    if !(1..=16).contains(&ast.prefix_bits) {
+        return Err(SqlError::Parse {
+            detail: format!(
+                "CREATE ARRAY {}: prefix_bits {} is not in range 1–16",
+                ast.name, ast.prefix_bits
+            ),
+        });
+    }
     Ok(SqlPlan::CreateArray {
         name: ast.name.clone(),
         dims: ast.dims.clone(),
@@ -99,6 +107,7 @@ pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
         tile_extents: ast.tile_extents.clone(),
         cell_order: ast.cell_order,
         tile_order: ast.tile_order,
+        prefix_bits: ast.prefix_bits,
     })
 }
 
@@ -173,6 +182,7 @@ mod tests {
             tile_extents: vec![4],
             cell_order: Default::default(),
             tile_order: Default::default(),
+            prefix_bits: 8,
         }
     }
 

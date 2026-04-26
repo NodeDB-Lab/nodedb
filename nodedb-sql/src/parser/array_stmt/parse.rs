@@ -165,6 +165,26 @@ impl<'a> Parser<'a> {
         if self.match_kw("TILE_ORDER") {
             tile_order = self.parse_tile_order()?;
         }
+
+        // Optional `WITH (prefix_bits = N)` clause.
+        let mut prefix_bits: u8 = 8;
+        if self.match_kw("WITH") {
+            self.expect(&Tok::LParen)?;
+            let key = self.expect_ident()?;
+            if !key.eq_ignore_ascii_case("prefix_bits") {
+                return Err(self.err(format!(
+                    "WITH: unknown option `{key}`; expected `prefix_bits`"
+                )));
+            }
+            self.expect(&Tok::Eq)?;
+            let n = self.expect_int()?;
+            if !(1..=16).contains(&n) {
+                return Err(self.err(format!("WITH (prefix_bits = {n}): must be 1–16")));
+            }
+            prefix_bits = n as u8;
+            self.expect(&Tok::RParen)?;
+        }
+
         if !self.at_end() {
             return Err(self.err(format!(
                 "trailing tokens after CREATE ARRAY: {:?}",
@@ -179,6 +199,7 @@ impl<'a> Parser<'a> {
             tile_extents,
             cell_order,
             tile_order,
+            prefix_bits,
         })
     }
 

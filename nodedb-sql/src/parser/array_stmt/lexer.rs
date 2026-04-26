@@ -19,6 +19,8 @@ pub enum Tok {
     RBracket,
     Comma,
     DotDot,
+    /// `=` — used by `WITH (prefix_bits = N)`.
+    Eq,
     /// `NULL` literal — kept distinct from `Ident` so insert parsing is
     /// unambiguous about a bare `NULL` value vs an identifier value.
     Null,
@@ -99,6 +101,14 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, SqlError> {
                     pos: i,
                 });
                 i += 2;
+                continue;
+            }
+            b'=' => {
+                out.push(Token {
+                    tok: Tok::Eq,
+                    pos: i,
+                });
+                i += 1;
                 continue;
             }
             _ => {}

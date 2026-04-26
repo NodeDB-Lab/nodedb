@@ -22,6 +22,9 @@ pub struct CreateArrayAst {
     pub tile_extents: Vec<i64>,
     pub cell_order: ArrayCellOrderAst,
     pub tile_order: ArrayTileOrderAst,
+    /// Number of Hilbert-prefix bits used for vShard routing.
+    /// Accepted via optional `WITH (prefix_bits = N)` clause; default 8.
+    pub prefix_bits: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]

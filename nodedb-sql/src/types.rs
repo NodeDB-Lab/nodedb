@@ -299,6 +299,8 @@ pub enum SqlPlan {
         tile_extents: Vec<i64>,
         cell_order: crate::types_array::ArrayCellOrderAst,
         tile_order: crate::types_array::ArrayTileOrderAst,
+        /// Hilbert-prefix bits for vShard routing (1–16, default 8).
+        prefix_bits: u8,
     },
     /// `DROP ARRAY [IF EXISTS] <name>` — pure Control-Plane catalog
     /// mutation. Per-core array store cleanup happens lazily.
