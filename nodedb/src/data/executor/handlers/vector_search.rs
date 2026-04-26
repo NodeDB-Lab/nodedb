@@ -5,7 +5,6 @@
 //! always `None` from DP; the Control Plane fills it via the catalog
 //! at the response boundary.
 
-use nodedb_types::Surrogate;
 use roaring::RoaringBitmap;
 use tracing::{debug, warn};
 
@@ -31,11 +30,6 @@ fn build_search_hit(
         distance,
         doc_id: None,
     }
-}
-
-/// Surrogate-as-u32 resolver kept for IVF-PQ bitmap filter compatibility.
-fn resolve_surrogate(collection: Option<&VectorCollection>, vector_id: u32) -> Option<Surrogate> {
-    collection.and_then(|c| c.get_surrogate(vector_id))
 }
 
 /// Translate a `SurrogateBitmap` (keyed by global surrogate IDs) into a
@@ -114,6 +108,23 @@ pub(in crate::data::executor) struct VectorMultiSearchParams<'a> {
 }
 
 impl CoreLoop {
+    /// RLS post-filter check: fetch the document body via the sparse engine
+    /// (keyed by surrogate-hex) and evaluate the compiled predicate against
+    /// it. Returns `true` when `rls_filters` is empty (no filtering active),
+    /// or the document passes the predicate. Returns `false` when the row
+    /// cannot be fetched, the body is missing, or the predicate rejects it.
+    #[inline]
+    fn rls_check_hit(&self, tid: u32, collection: &str, rls_filters: &[u8], hit_id: u32) -> bool {
+        if rls_filters.is_empty() {
+            return true;
+        }
+        let hex = format!("{:08x}", hit_id);
+        matches!(
+            self.sparse.get(tid, collection, &hex),
+            Ok(Some(bytes)) if super::rls_eval::rls_check_msgpack_bytes(rls_filters, &bytes)
+        )
+    }
+
     pub(in crate::data::executor) fn execute_vector_search(
         &mut self,
         params: VectorSearchParams<'_>,
@@ -161,7 +172,17 @@ impl CoreLoop {
 
         // Check for IVF-PQ index first.
         if let Some(ivf) = self.ivf_indexes.get(&index_key) {
-            return self.search_ivf(task, &index_key, ivf, query_vector, top_k, filter_bitmap);
+            return self.search_ivf(
+                task,
+                tid,
+                collection,
+                &index_key,
+                ivf,
+                query_vector,
+                top_k,
+                filter_bitmap,
+                rls_filters,
+            );
         }
 
         // Default: HNSW collection.
@@ -171,11 +192,13 @@ impl CoreLoop {
         if collection_ref.is_empty() {
             return self.response_with_payload(task, b"[]".to_vec());
         }
-        // RLS post-filter for vector search now lives at the Control
-        // Plane response boundary (post-surrogate→PK translation). DP
-        // returns the raw HNSW top-K and ignores `rls_filters`.
-        let _ = rls_filters;
-        let fetch_k = top_k;
+        // Over-fetch when RLS is active so post-filter has enough headroom
+        // to still return `top_k` after dropping rejected candidates.
+        let fetch_k = if rls_filters.is_empty() {
+            top_k
+        } else {
+            top_k.saturating_mul(2).max(20)
+        };
         let ef = effective_ef(ef_search, fetch_k);
         let results = match filter_bitmap {
             Some(surrogate_bm) => {
@@ -190,9 +213,14 @@ impl CoreLoop {
             None => collection_ref.search(query_vector, fetch_k, ef),
         };
 
+        // RLS post-filter: drop candidates that fail the predicate against
+        // their document body (looked up via sparse engine, surrogate-keyed).
+        // Mirrors the pattern in text_search/kv/spatial handlers.
         let hits: Vec<_> = results
             .iter()
             .map(|r| build_search_hit(Some(collection_ref), r.id, r.distance))
+            .filter(|hit| self.rls_check_hit(tid, collection, rls_filters, hit.id))
+            .take(top_k)
             .collect();
         if let Some(ref m) = self.metrics {
             m.record_vector_search(0);
@@ -202,20 +230,24 @@ impl CoreLoop {
     }
 
     /// Search an IVF-PQ index with optional bitmap post-filtering.
+    #[allow(clippy::too_many_arguments)]
     fn search_ivf(
         &self,
         task: &ExecutionTask,
+        tid: u32,
+        collection: &str,
         index_key: &(crate::types::TenantId, String),
         ivf: &crate::engine::vector::ivf::IvfPqIndex,
         query_vector: &[f32],
         top_k: usize,
         filter_bitmap: Option<&nodedb_types::SurrogateBitmap>,
+        rls_filters: &[u8],
     ) -> Response {
         if ivf.is_empty() {
             return self.response_with_payload(task, b"[]".to_vec());
         }
-        let fetch_k = if filter_bitmap.is_some() {
-            top_k * self.query_tuning.bitmap_over_fetch_factor
+        let fetch_k = if filter_bitmap.is_some() || !rls_filters.is_empty() {
+            top_k * self.query_tuning.bitmap_over_fetch_factor.max(2)
         } else {
             top_k
         };
@@ -230,9 +262,11 @@ impl CoreLoop {
         if let Some(surrogate_bm) = filter_bitmap {
             // Bitmap is a set of surrogates; hit.id is now the surrogate.
             hits.retain(|h| surrogate_bm.0.contains(h.id));
-            let _ = resolve_surrogate; // kept available for future bitmap modes
-            hits.truncate(top_k);
         }
+        if !rls_filters.is_empty() {
+            hits.retain(|h| self.rls_check_hit(tid, collection, rls_filters, h.id));
+        }
+        hits.truncate(top_k);
 
         if let Some(ref m) = self.metrics {
             m.record_vector_search(0);
@@ -295,9 +329,6 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::NotFound);
         }
 
-        // RLS for vector multi-search moved to CP response boundary.
-        let _ = rls_filters;
-
         // Single field — return directly.
         if all_results.len() == 1 {
             let Some(results) = all_results.into_iter().next() else {
@@ -306,8 +337,9 @@ impl CoreLoop {
             let doc_source = self.vector_collections.get(&plain_key);
             let hits: Vec<_> = results
                 .iter()
-                .take(top_k)
                 .map(|r| build_search_hit(doc_source, r.id, r.distance))
+                .filter(|hit| self.rls_check_hit(tid, collection, rls_filters, hit.id))
+                .take(top_k)
                 .collect();
             if let Some(ref m) = self.metrics {
                 m.record_vector_search(0);
@@ -338,7 +370,7 @@ impl CoreLoop {
         let fused = reciprocal_rank_fusion(&ranked_lists, None, top_k);
 
         // Surface fused results with surrogate-as-id; CP fills doc_id.
-        let _ = (tid, collection);
+        // RLS post-filter on the fused output via the shared helper.
         let hits: Vec<_> = fused
             .iter()
             .filter_map(|f| {
@@ -352,7 +384,9 @@ impl CoreLoop {
                         .map(|(_, c)| c)
                         .next()
                 });
-                Some(build_search_hit(source, local_id, f.rrf_score as f32))
+                let hit = build_search_hit(source, local_id, f.rrf_score as f32);
+                self.rls_check_hit(tid, collection, rls_filters, hit.id)
+                    .then_some(hit)
             })
             .collect();
         if let Some(ref m) = self.metrics {
