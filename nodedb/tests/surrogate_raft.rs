@@ -106,7 +106,26 @@ async fn surrogate_hwm_survives_leader_failover() {
         .await;
     }
 
-    // Record the hwm on all 3 nodes — they must agree.
+    // Wait for all 3 nodes' hwm to converge to the same value before sampling.
+    // With the cross-engine Raft proposer wired up, hwm advancement now flows
+    // through the same propose+commit+apply path as other writes, so followers
+    // catch up on Raft tick cadence rather than the prior best-effort path.
+    wait_for(
+        "all 3 nodes' hwm converged",
+        Duration::from_secs(15),
+        Duration::from_millis(50),
+        || {
+            let hwms: Vec<u32> = cluster
+                .nodes
+                .iter()
+                .map(|n| catalog_hwm(&n.shared))
+                .collect();
+            let max = hwms.iter().copied().max().unwrap_or(0);
+            max > 0 && hwms.iter().all(|&h| h == max)
+        },
+    )
+    .await;
+
     let hwms_before: Vec<u32> = cluster
         .nodes
         .iter()
@@ -117,12 +136,10 @@ async fn surrogate_hwm_survives_leader_failover() {
         pre_failover_hwm > 0,
         "pre-failover hwm must be non-zero (surrogates were allocated)"
     );
-    // All nodes must have the same hwm (Raft convergence).
     for (idx, &hwm) in hwms_before.iter().enumerate() {
         assert_eq!(
             hwm, pre_failover_hwm,
-            "node {idx} hwm {hwm} differs from expected {pre_failover_hwm}: \
-             hwm replication must converge before failover"
+            "node {idx} hwm {hwm} differs from expected {pre_failover_hwm} after wait_for"
         );
     }
 
