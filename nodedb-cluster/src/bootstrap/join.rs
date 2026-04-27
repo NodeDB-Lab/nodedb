@@ -531,7 +531,11 @@ mod tests {
         ));
 
         assert_eq!(state2.topology.node_count(), 2);
-        assert_eq!(state2.routing.num_groups(), 2);
+        // 1 data group + metadata group = 2 in old config; with metadata-skip
+        // routing the count includes group 0 → 1 data + 1 metadata = 2 still
+        // when num_groups=1. For num_groups=2 it's 3 total. The test config
+        // bootstraps with 2 data groups (see config above), so total = 3.
+        assert_eq!(state2.routing.num_groups(), 3);
 
         // Verify node 2's state was persisted (reorder check: catalog
         // is saved before MultiRaft files are touched).

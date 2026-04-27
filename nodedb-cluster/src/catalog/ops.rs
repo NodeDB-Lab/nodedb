@@ -125,11 +125,12 @@ mod tests {
     fn routing_save_load_roundtrip() {
         let (_dir, catalog) = temp_catalog();
 
+        // uniform(4, ...) creates 4 data groups + 1 metadata group = 5 total.
         let rt = RoutingTable::uniform(4, &[1, 2, 3], 3);
         catalog.save_routing(&rt).unwrap();
         let loaded = catalog.load_routing().unwrap().unwrap();
 
-        assert_eq!(loaded.num_groups(), 4);
+        assert_eq!(loaded.num_groups(), 5);
         assert_eq!(loaded.vshard_to_group().len(), 1024);
         for i in 0..1024u16 {
             assert_eq!(

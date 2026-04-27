@@ -355,9 +355,10 @@ mod tests {
         topo.add_node(NodeInfo::new(1, addr1, NodeState::Active));
         topo.add_node(NodeInfo::new(2, addr2, NodeState::Active));
 
+        // uniform(2, ...) creates data groups 1 and 2 (+ metadata group 0).
         let routing = RoutingTable::uniform(2, &[1, 2], 1);
-        let moves = plan_hot_split(0, &routing, &topo).unwrap();
-        // Group 0 has 512 vShards → split moves 256.
+        let moves = plan_hot_split(1, &routing, &topo).unwrap();
+        // Data group 1 has 512 vShards → split moves up to 256.
         assert!(!moves.is_empty());
         assert!(moves.len() <= 512);
     }

@@ -108,9 +108,23 @@ pub fn partition_for_key(key: &str, num_partitions: usize) -> u32 {
 /// Plan the node assignments for a shuffle join.
 ///
 /// Returns `(partition_id → target_node_id)` mapping.
+///
+/// Only data groups (group_id > METADATA_GROUP_ID) are used as shuffle
+/// targets. The metadata group (0) is excluded — it does not own any vShards
+/// and its leader should not receive data-plane shuffle traffic.
 pub fn plan_shuffle_partitions(routing: &RoutingTable, num_partitions: usize) -> HashMap<u32, u64> {
-    let group_ids = routing.group_ids();
+    use crate::metadata_group::METADATA_GROUP_ID;
+    let mut group_ids: Vec<u64> = routing
+        .group_ids()
+        .into_iter()
+        .filter(|&id| id != METADATA_GROUP_ID)
+        .collect();
+    group_ids.sort_unstable();
     let mut partition_map = HashMap::new();
+
+    if group_ids.is_empty() {
+        return partition_map;
+    }
 
     for p in 0..num_partitions {
         let group_idx = p % group_ids.len();

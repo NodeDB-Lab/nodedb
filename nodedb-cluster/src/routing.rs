@@ -55,23 +55,33 @@ pub struct GroupInfo {
 }
 
 impl RoutingTable {
-    /// Create a routing table with uniform distribution of vShards across groups.
+    /// Create a routing table with uniform distribution of vShards across data groups.
     ///
-    /// `num_groups` Raft groups are created. vShards are distributed round-robin.
-    /// Each group initially contains `nodes_per_group` nodes from the `nodes` list.
+    /// `num_groups` is the number of **data** Raft groups. vShards are distributed
+    /// round-robin across groups `1..=num_groups`. Group 0 is the metadata group and
+    /// is always included in `group_members` but is never assigned any vShards —
+    /// it is accessed only via `propose_to_metadata_group`, never via
+    /// `propose(vshard_id, data)`.
+    ///
+    /// Each data group initially contains `replication_factor` nodes from `nodes`.
+    /// The metadata group (0) receives the same membership as the first data group.
     pub fn uniform(num_groups: u64, nodes: &[u64], replication_factor: usize) -> Self {
         assert!(!nodes.is_empty(), "need at least one node");
+        assert!(num_groups > 0, "need at least 1 data group");
         assert!(replication_factor > 0, "need at least RF=1");
 
+        // vShards map to data groups 1..=num_groups, skipping group 0 (metadata).
         let mut vshard_to_group = Vec::with_capacity(VSHARD_COUNT as usize);
         for i in 0..VSHARD_COUNT {
-            vshard_to_group.push((i as u64) % num_groups);
+            vshard_to_group.push(1 + (i as u64) % num_groups);
         }
 
         let mut group_members = HashMap::new();
-        for group_id in 0..num_groups {
+        // Data groups: 1..=num_groups.
+        for idx in 0..num_groups {
+            let group_id = idx + 1;
             let rf = replication_factor.min(nodes.len());
-            let start = (group_id as usize * rf) % nodes.len();
+            let start = (idx as usize * rf) % nodes.len();
             let members: Vec<u64> = (0..rf).map(|i| nodes[(start + i) % nodes.len()]).collect();
             let leader = members[0];
             group_members.insert(
@@ -83,6 +93,18 @@ impl RoutingTable {
                 },
             );
         }
+        // Metadata group 0: same membership as the first data group.
+        let rf = replication_factor.min(nodes.len());
+        let meta_members: Vec<u64> = (0..rf).map(|i| nodes[i % nodes.len()]).collect();
+        let meta_leader = meta_members[0];
+        group_members.insert(
+            0,
+            GroupInfo {
+                leader: meta_leader,
+                members: meta_members,
+                learners: Vec::new(),
+            },
+        );
 
         Self {
             vshard_to_group,
@@ -263,20 +285,27 @@ mod tests {
 
     #[test]
     fn uniform_distribution() {
+        // 16 data groups → groups 1..=16 for vShards, plus metadata group 0.
+        // Total group_members entries = 17, but vShard groups = 16.
         let rt = RoutingTable::uniform(16, &[1, 2, 3], 3);
-        assert_eq!(rt.num_groups(), 16);
+        // num_groups() returns group_members.len() = 17 (16 data + 1 metadata).
+        assert_eq!(rt.num_groups(), 17);
 
-        // Each group should have ~64 vShards (1024/16).
-        for gid in 0..16 {
+        // Each data group (1..=16) should have ~64 vShards (1024/16).
+        for gid in 1..=16u64 {
             let shards = rt.vshards_for_group(gid);
             assert_eq!(shards.len(), 64);
         }
+
+        // Metadata group 0 has no vShards.
+        assert_eq!(rt.vshards_for_group(0).len(), 0);
     }
 
     #[test]
     fn leader_lookup() {
         let rt = RoutingTable::uniform(4, &[10, 20, 30], 3);
         let leader = rt.leader_for_vshard(0).unwrap();
+        // vshard 0 maps to data group 1, which has a valid leader.
         assert!(leader > 0);
     }
 
@@ -284,7 +313,8 @@ mod tests {
     fn reassign_vshard() {
         let mut rt = RoutingTable::uniform(4, &[1, 2, 3], 3);
         let old_group = rt.group_for_vshard(0).unwrap();
-        let new_group = (old_group + 1) % 4;
+        // old_group is 1 (first data group); reassign to data group 2.
+        let new_group = if old_group < 4 { old_group + 1 } else { 1 };
         rt.reassign_vshard(0, new_group);
         assert_eq!(rt.group_for_vshard(0).unwrap(), new_group);
     }
@@ -292,16 +322,18 @@ mod tests {
     #[test]
     fn set_leader() {
         let mut rt = RoutingTable::uniform(2, &[1, 2, 3], 3);
-        rt.set_leader(0, 99);
+        // Data group 1 owns vshard 0.
+        rt.set_leader(1, 99);
         assert_eq!(rt.leader_for_vshard(0).unwrap(), 99);
     }
 
     #[test]
     fn remove_group_member_strips_voter_and_clears_leader() {
         let mut rt = RoutingTable::uniform(2, &[1, 2, 3], 3);
-        rt.set_leader(0, 2);
-        assert!(rt.remove_group_member(0, 2));
-        let info = rt.group_info(0).unwrap();
+        // Use data group 1 (vshard 0 owner).
+        rt.set_leader(1, 2);
+        assert!(rt.remove_group_member(1, 2));
+        let info = rt.group_info(1).unwrap();
         assert!(!info.members.contains(&2));
         assert_eq!(info.leader, 0, "leader hint should be cleared");
     }
@@ -309,9 +341,9 @@ mod tests {
     #[test]
     fn remove_group_member_strips_learner_only() {
         let mut rt = RoutingTable::uniform(2, &[1, 2, 3], 3);
-        rt.add_group_learner(0, 9);
-        assert!(rt.remove_group_member(0, 9));
-        let info = rt.group_info(0).unwrap();
+        rt.add_group_learner(1, 9);
+        assert!(rt.remove_group_member(1, 9));
+        let info = rt.group_info(1).unwrap();
         assert!(!info.learners.contains(&9));
     }
 

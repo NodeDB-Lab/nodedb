@@ -410,6 +410,101 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         mr.group_statuses()
     }
 
+    /// Propose a command to the data Raft group owning the given vShard,
+    /// transparently forwarding to the group leader if this node is not it.
+    ///
+    /// Tries a local propose first. On `NotLeader { leader_hint: Some(id) }`,
+    /// looks up the hinted leader's address in the cluster topology and sends
+    /// a `DataProposeRequest` over QUIC. The receiving leader applies the
+    /// proposal locally and returns `(group_id, log_index)`.
+    ///
+    /// On `NotLeader { leader_hint: None }` (election in progress) the call
+    /// returns the original `NotLeader` error so the caller can retry.
+    pub async fn propose_via_data_leader(
+        &self,
+        vshard_id: u16,
+        data: Vec<u8>,
+    ) -> Result<(u64, u64)> {
+        // Phase 1: try local propose.
+        match self.propose(vshard_id, data.clone()) {
+            Ok(pair) => Ok(pair),
+            Err(crate::error::ClusterError::Raft(nodedb_raft::RaftError::NotLeader {
+                leader_hint,
+            })) => {
+                let Some(leader_id) = leader_hint else {
+                    return Err(crate::error::ClusterError::Raft(
+                        nodedb_raft::RaftError::NotLeader { leader_hint: None },
+                    ));
+                };
+                if leader_id == self.node_id {
+                    return Err(crate::error::ClusterError::Raft(
+                        nodedb_raft::RaftError::NotLeader {
+                            leader_hint: Some(leader_id),
+                        },
+                    ));
+                }
+                // Phase 2: forward to the hinted leader.
+                self.forward_data_propose(leader_id, vshard_id, data).await
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Send a `DataProposeRequest` to `leader_id`.
+    async fn forward_data_propose(
+        &self,
+        leader_id: u64,
+        vshard_id: u16,
+        data: Vec<u8>,
+    ) -> Result<(u64, u64)> {
+        {
+            let topo = self.topology.read().unwrap_or_else(|p| p.into_inner());
+            let Some(node) = topo.get_node(leader_id) else {
+                return Err(crate::error::ClusterError::Transport {
+                    detail: format!(
+                        "data propose forward: leader {leader_id} not in local topology"
+                    ),
+                });
+            };
+            let Some(addr) = node.socket_addr() else {
+                return Err(crate::error::ClusterError::Transport {
+                    detail: format!(
+                        "data propose forward: leader {leader_id} has unparseable addr {:?}",
+                        node.addr
+                    ),
+                });
+            };
+            self.transport.register_peer(leader_id, addr);
+        }
+
+        let req =
+            crate::rpc_codec::RaftRpc::DataProposeRequest(crate::rpc_codec::DataProposeRequest {
+                vshard_id,
+                bytes: data,
+            });
+        let resp = self.transport.send_rpc(leader_id, req).await?;
+        match resp {
+            crate::rpc_codec::RaftRpc::DataProposeResponse(r) => {
+                if r.success {
+                    Ok((r.group_id, r.log_index))
+                } else if let Some(hint) = r.leader_hint {
+                    Err(crate::error::ClusterError::Raft(
+                        nodedb_raft::RaftError::NotLeader {
+                            leader_hint: Some(hint),
+                        },
+                    ))
+                } else {
+                    Err(crate::error::ClusterError::Transport {
+                        detail: format!("data propose forward failed: {}", r.error_message),
+                    })
+                }
+            }
+            other => Err(crate::error::ClusterError::Transport {
+                detail: format!("data propose forward: unexpected response variant {other:?}"),
+            }),
+        }
+    }
+
     /// Propose a configuration change to a Raft group.
     ///
     /// Returns `(group_id, log_index)` on success.
@@ -489,9 +584,12 @@ mod tests {
     async fn single_node_raft_loop_commits() {
         let dir = tempfile::tempdir().unwrap();
         let transport = make_transport(1);
+        // uniform(1, ...) creates metadata group 0 + data group 1.
         let rt = RoutingTable::uniform(1, &[1], 1);
         let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
+        // Add both the metadata group (0) and the data group (1).
         mr.add_group(0, vec![]).unwrap();
+        mr.add_group(1, vec![]).unwrap();
 
         for node in mr.groups_mut().values_mut() {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
@@ -518,6 +616,7 @@ mod tests {
             raft_loop.applier.count()
         );
 
+        // vshard 0 maps to data group 1 (not metadata group 0).
         let (_gid, idx) = raft_loop.propose(0, b"hello".to_vec()).unwrap();
         assert!(idx >= 2);
 
@@ -546,11 +645,15 @@ mod tests {
         t3.register_peer(1, t1.local_addr());
         t3.register_peer(2, t2.local_addr());
 
+        // uniform(1, ...) creates metadata group 0 + data group 1.
+        // Both are added to every MultiRaft so vshard proposals (group 1)
+        // and metadata proposals (group 0) both work.
         let rt = RoutingTable::uniform(1, &[1, 2, 3], 3);
 
         let dir1 = tempfile::tempdir().unwrap();
         let mut mr1 = MultiRaft::new(1, rt.clone(), dir1.path().to_path_buf());
         mr1.add_group(0, vec![2, 3]).unwrap();
+        mr1.add_group(1, vec![2, 3]).unwrap();
         for node in mr1.groups_mut().values_mut() {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
@@ -563,11 +666,13 @@ mod tests {
         let mut mr2 = MultiRaft::new(2, rt.clone(), dir2.path().to_path_buf())
             .with_election_timeout(election_timeout_min, election_timeout_max);
         mr2.add_group(0, vec![1, 3]).unwrap();
+        mr2.add_group(1, vec![1, 3]).unwrap();
 
         let dir3 = tempfile::tempdir().unwrap();
         let mut mr3 = MultiRaft::new(3, rt.clone(), dir3.path().to_path_buf())
             .with_election_timeout(election_timeout_min, election_timeout_max);
         mr3.add_group(0, vec![1, 2]).unwrap();
+        mr3.add_group(1, vec![1, 2]).unwrap();
 
         let a1 = CountingApplier::new();
         let m1 = a1.metadata_applier();

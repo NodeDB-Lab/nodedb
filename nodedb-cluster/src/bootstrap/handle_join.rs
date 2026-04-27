@@ -159,7 +159,8 @@ mod tests {
         assert!(resp.success);
         assert_eq!(resp.nodes.len(), 2);
         assert_eq!(resp.vshard_to_group.len(), 1024);
-        assert_eq!(resp.groups.len(), 2);
+        // uniform(2, ...) creates 2 data groups + 1 metadata group = 3 total.
+        assert_eq!(resp.groups.len(), 3);
 
         assert!(topology.contains(2));
         assert_eq!(topology.node_count(), 2);

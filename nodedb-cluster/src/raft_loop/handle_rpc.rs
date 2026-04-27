@@ -157,6 +157,24 @@ impl<A: CommitApplier, P: PlanExecutor> RaftRpcHandler for RaftLoop<A, P> {
                 };
                 Ok(RaftRpc::MetadataProposeResponse(resp))
             }
+            // Data-group proposal forwarding — apply locally if we are the
+            // data-group leader for the given vshard, otherwise return
+            // NotLeader with a hint so the forwarder can chase the redirect.
+            RaftRpc::DataProposeRequest(req) => {
+                let resp = {
+                    let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+                    match mr.propose(req.vshard_id, req.bytes) {
+                        Ok((group_id, log_index)) => {
+                            crate::rpc_codec::DataProposeResponse::ok(group_id, log_index)
+                        }
+                        Err(crate::error::ClusterError::Raft(
+                            nodedb_raft::RaftError::NotLeader { leader_hint },
+                        )) => crate::rpc_codec::DataProposeResponse::err("not leader", leader_hint),
+                        Err(e) => crate::rpc_codec::DataProposeResponse::err(e.to_string(), None),
+                    }
+                };
+                Ok(RaftRpc::DataProposeResponse(resp))
+            }
             // VShardEnvelope — dispatch to registered handler (Event Plane, etc.).
             RaftRpc::VShardEnvelope(bytes) => {
                 if let Some(ref handler) = self.vshard_handler {
@@ -280,10 +298,12 @@ mod tests {
     async fn rpc_handler_accepts_join_on_bootstrap_seed() {
         let dir = tempfile::tempdir().unwrap();
         let transport = make_transport(1);
+        // uniform(2, ...) creates metadata group 0 + data groups 1 and 2.
         let rt = RoutingTable::uniform(2, &[1], 1);
         let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
         mr.add_group(0, vec![]).unwrap();
         mr.add_group(1, vec![]).unwrap();
+        mr.add_group(2, vec![]).unwrap();
         // Force immediate election so both groups reach Leader before
         // the join flow proposes AddLearner.
         for node in mr.groups_mut().values_mut() {
@@ -317,7 +337,8 @@ mod tests {
                     r.error
                 );
                 assert_eq!(r.nodes.len(), 2);
-                assert_eq!(r.groups.len(), 2);
+                // uniform(2, ...) creates 3 groups (metadata + 2 data).
+                assert_eq!(r.groups.len(), 3);
                 assert_eq!(r.vshard_to_group.len(), 1024);
                 // The new node should appear as a learner on every group,
                 // not as a voter — voter promotion happens asynchronously

@@ -29,6 +29,9 @@ pub const RPC_METADATA_PROPOSE_REQ: u8 = 16;
 pub const RPC_METADATA_PROPOSE_RESP: u8 = 17;
 pub const RPC_EXECUTE_REQ: u8 = 18;
 pub const RPC_EXECUTE_RESP: u8 = 19;
+/// Data-group (non-metadata) proposal forwarding — vshard_id + payload.
+pub const RPC_DATA_PROPOSE_REQ: u8 = 20;
+pub const RPC_DATA_PROPOSE_RESP: u8 = 21;
 
 // VShardMessageType discriminants for distributed array ops (u16, range 80-89).
 // These mirror `crate::wire::VShardMessageType` repr values and are declared

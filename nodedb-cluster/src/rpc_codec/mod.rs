@@ -8,6 +8,7 @@
 
 pub mod auth_envelope;
 pub mod cluster_mgmt;
+pub mod data_propose;
 pub mod discriminants;
 pub mod execute;
 pub mod header;
@@ -25,6 +26,7 @@ pub use cluster_mgmt::{
     JoinGroupInfo, JoinNodeInfo, JoinRequest, JoinResponse, LEADER_REDIRECT_PREFIX, PingRequest,
     PongResponse, TopologyAck, TopologyUpdate,
 };
+pub use data_propose::{DataProposeRequest, DataProposeResponse};
 pub use execute::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, PLAN_DECODE_FAILED, TypedClusterError,
 };

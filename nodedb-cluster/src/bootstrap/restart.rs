@@ -134,7 +134,8 @@ mod tests {
         let state = restart(&config, &catalog, &transport).unwrap();
 
         assert_eq!(state.topology.node_count(), 1);
-        assert_eq!(state.routing.num_groups(), 4);
-        assert_eq!(state.multi_raft.group_count(), 4);
+        // num_groups() counts data groups + metadata group: 4 data + 1 = 5.
+        assert_eq!(state.routing.num_groups(), 5);
+        assert_eq!(state.multi_raft.group_count(), 5);
     }
 }

@@ -264,29 +264,31 @@ mod tests {
     #[test]
     fn single_node_multi_raft() {
         let dir = tempfile::tempdir().unwrap();
+        // uniform(4, ...) creates 4 data groups (1..=4) plus metadata group 0.
         let rt = RoutingTable::uniform(4, &[1], 1);
-        let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
+        let mut mr = MultiRaft::new(1, rt.clone(), dir.path().to_path_buf());
 
-        for gid in 0..4 {
+        for gid in rt.group_ids() {
             mr.add_group(gid, vec![]).unwrap();
         }
-        assert_eq!(mr.group_count(), 4);
+        // 4 data groups + 1 metadata group.
+        assert_eq!(mr.group_count(), 5);
 
         for node in mr.groups.values_mut() {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
 
         let ready = mr.tick();
-        assert_eq!(ready.groups.len(), 4);
+        assert_eq!(ready.groups.len(), 5);
     }
 
     #[test]
     fn propose_routes_to_correct_group() {
         let dir = tempfile::tempdir().unwrap();
         let rt = RoutingTable::uniform(4, &[1], 1);
-        let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
+        let mut mr = MultiRaft::new(1, rt.clone(), dir.path().to_path_buf());
 
-        for gid in 0..4 {
+        for gid in rt.group_ids() {
             mr.add_group(gid, vec![]).unwrap();
         }
         for node in mr.groups.values_mut() {
@@ -299,6 +301,7 @@ mod tests {
             }
         }
 
+        // vshard 0 maps to data group 1, vshard 256 also maps to group 1 (256 % 4 + 1 = 1).
         let (_gid, idx) = mr.propose(0, b"cmd-shard-0".to_vec()).unwrap();
         assert!(idx > 0);
 
@@ -310,12 +313,14 @@ mod tests {
     fn add_group_as_learner_starts_in_learner_role() {
         use nodedb_raft::NodeRole;
         let dir = tempfile::tempdir().unwrap();
+        // uniform(1, ...) creates data group 1 plus metadata group 0.
         let rt = RoutingTable::uniform(1, &[1, 2], 2);
         let mut mr = MultiRaft::new(2, rt, dir.path().to_path_buf());
 
-        mr.add_group_as_learner(0, vec![1], vec![]).unwrap();
+        // Data group 1: join as learner (node 1 is the voter, we're node 2 = learner).
+        mr.add_group_as_learner(1, vec![1], vec![]).unwrap();
 
-        let node = mr.groups.get(&0).unwrap();
+        let node = mr.groups.get(&1).unwrap();
         assert_eq!(node.role(), NodeRole::Learner);
         assert_eq!(node.voters(), &[1]);
     }

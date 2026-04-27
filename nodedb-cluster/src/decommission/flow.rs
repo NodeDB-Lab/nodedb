@@ -149,6 +149,8 @@ mod tests {
         ));
 
         // Every group the target is in must get a RemoveMember.
+        // uniform(2, ...) creates 3 groups (metadata group 0 + data groups 1 and 2),
+        // and node 1 is a member of all three.
         let remove_count = plan
             .entries
             .iter()
@@ -159,17 +161,19 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(remove_count, 2);
+        assert_eq!(remove_count, 3);
     }
 
     #[test]
     fn plan_emits_leadership_transfer_when_target_leads() {
         let t = topo(&[1, 2, 3]);
+        // Data groups are 1..=2 (group 0 is metadata). Move metadata leader
+        // off the decommission target so we get exactly one data-group transfer.
         let mut routing = RoutingTable::uniform(2, &[1, 2, 3], 3);
-        routing.set_leader(0, 1);
-        routing.set_leader(1, 2);
+        routing.set_leader(0, 2);
+        routing.set_leader(1, 1);
+        routing.set_leader(2, 2);
         let plan = plan_full_decommission(1, &t, &routing, 2).unwrap();
-        // Exactly one LeadershipTransfer for group 0.
         let transfers: Vec<_> = plan
             .entries
             .iter()
@@ -182,7 +186,7 @@ mod tests {
             })
             .collect();
         assert_eq!(transfers.len(), 1);
-        assert_eq!(transfers[0].0, 0);
+        assert_eq!(transfers[0].0, 1);
         assert_ne!(transfers[0].1, 1, "new leader must not be the target");
     }
 
@@ -206,11 +210,14 @@ mod tests {
     #[test]
     fn plan_skips_groups_target_is_not_in() {
         let t = topo(&[1, 2, 3]);
+        // uniform(4, ...) creates metadata group 0 + data groups 1..=4.
         let mut routing = RoutingTable::uniform(4, &[1, 2, 3], 3);
+        // Remove node 1 from groups 0, 1, 4 so only groups 2 and 3 have node 1.
         routing.set_group_members(0, vec![2, 3]);
         routing.set_group_members(1, vec![2, 3]);
         routing.set_group_members(2, vec![1, 2, 3]);
         routing.set_group_members(3, vec![1, 2, 3]);
+        routing.set_group_members(4, vec![2, 3]);
         let plan = plan_full_decommission(1, &t, &routing, 2).unwrap();
         let removes: Vec<u64> = plan
             .entries

@@ -112,14 +112,14 @@ mod tests {
 
         assert_eq!(state.topology.node_count(), 1);
         assert_eq!(state.topology.active_nodes().len(), 1);
-        assert_eq!(state.routing.num_groups(), 4);
-        assert_eq!(state.multi_raft.group_count(), 4);
+        // num_groups() includes the metadata group (id 0); 4 data groups + metadata = 5.
+        assert_eq!(state.routing.num_groups(), 5);
+        assert_eq!(state.multi_raft.group_count(), 5);
 
-        // Verify persistence.
         assert!(catalog.is_bootstrapped().unwrap());
         let loaded_topo = catalog.load_topology().unwrap().unwrap();
         assert_eq!(loaded_topo.node_count(), 1);
         let loaded_rt = catalog.load_routing().unwrap().unwrap();
-        assert_eq!(loaded_rt.num_groups(), 4);
+        assert_eq!(loaded_rt.num_groups(), 5);
     }
 }

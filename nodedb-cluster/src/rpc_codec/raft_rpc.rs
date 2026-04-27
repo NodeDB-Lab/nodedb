@@ -8,11 +8,12 @@ use nodedb_raft::message::{
 use super::cluster_mgmt::{
     JoinRequest, JoinResponse, PingRequest, PongResponse, TopologyAck, TopologyUpdate,
 };
+use super::data_propose::{DataProposeRequest, DataProposeResponse};
 use super::discriminants::*;
 use super::execute::{ExecuteRequest, ExecuteResponse};
 use super::header::HEADER_SIZE;
 use super::metadata::{MetadataProposeRequest, MetadataProposeResponse};
-use super::{cluster_mgmt, execute, metadata, raft_msgs, vshard};
+use super::{cluster_mgmt, data_propose, execute, metadata, raft_msgs, vshard};
 use crate::error::{ClusterError, Result};
 
 /// An RPC message — Raft consensus or cluster management.
@@ -43,6 +44,9 @@ pub enum RaftRpc {
     // Physical-plan execution (Batch C-β onwards)
     ExecuteRequest(ExecuteRequest),
     ExecuteResponse(ExecuteResponse),
+    // Data-group proposal forwarding (groups 1+)
+    DataProposeRequest(DataProposeRequest),
+    DataProposeResponse(DataProposeResponse),
 }
 
 /// Encode a [`RaftRpc`] into a framed binary message.
@@ -66,6 +70,8 @@ pub fn encode(rpc: &RaftRpc) -> Result<Vec<u8>> {
         RaftRpc::MetadataProposeResponse(m) => metadata::encode_metadata_propose_resp(m, &mut out),
         RaftRpc::ExecuteRequest(m) => execute::encode_execute_req(m, &mut out),
         RaftRpc::ExecuteResponse(m) => execute::encode_execute_resp(m, &mut out),
+        RaftRpc::DataProposeRequest(m) => data_propose::encode_data_propose_req(m, &mut out),
+        RaftRpc::DataProposeResponse(m) => data_propose::encode_data_propose_resp(m, &mut out),
     }?;
     Ok(out)
 }
@@ -100,6 +106,8 @@ pub fn decode(data: &[u8]) -> Result<RaftRpc> {
         RPC_METADATA_PROPOSE_RESP => metadata::decode_metadata_propose_resp(payload),
         RPC_EXECUTE_REQ => execute::decode_execute_req(payload),
         RPC_EXECUTE_RESP => execute::decode_execute_resp(payload),
+        RPC_DATA_PROPOSE_REQ => data_propose::decode_data_propose_req(payload),
+        RPC_DATA_PROPOSE_RESP => data_propose::decode_data_propose_resp(payload),
         _ => Err(ClusterError::Codec {
             detail: format!("unknown rpc_type: {rpc_type}"),
         }),
