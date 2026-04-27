@@ -8,6 +8,8 @@
 use super::format::{
     SegmentFooter, SegmentHeader, TileEntry, TileKind, framing::BlockFraming, header::HEADER_SIZE,
 };
+use crate::codec::tag::peek_tag;
+use crate::codec::tile_decode::decode_sparse_tile;
 use crate::error::{ArrayError, ArrayResult};
 use crate::tile::cell_payload::{CELL_GDPR_ERASURE_SENTINEL, CELL_TOMBSTONE_SENTINEL, CellPayload};
 use crate::tile::dense_tile::DenseTile;
@@ -95,6 +97,23 @@ pub fn extract_cell_bytes(tile: &SparseTile, coord: &[CoordValue]) -> ArrayResul
         return payload.encode().map(Some);
     }
     Ok(None)
+}
+
+/// Dispatch sparse tile decoding by peeking the tag byte.
+///
+/// - New-format tiles (tag = 0 or 1): delegate to `decode_sparse_tile`.
+/// - Legacy v3 tiles (msgpack map-start byte): fall back to `zerompk::from_msgpack`.
+/// - Unknown bytes: return a corruption error.
+fn read_sparse_tile(payload: &[u8]) -> ArrayResult<SparseTile> {
+    match peek_tag(payload) {
+        Some(_) => {
+            // New-format tile (Raw or Structural codec).
+            decode_sparse_tile(payload)
+        }
+        None => zerompk::from_msgpack(payload).map_err(|e| ArrayError::SegmentCorruption {
+            detail: format!("legacy sparse tile decode failed: {e}"),
+        }),
+    }
 }
 
 /// Decoded tile payload.
@@ -257,10 +276,7 @@ impl<'a> SegmentReader<'a> {
         let (payload, _) = BlockFraming::decode(&self.bytes[off..end])?;
         match entry.kind {
             TileKind::Sparse => {
-                let t: SparseTile =
-                    zerompk::from_msgpack(payload).map_err(|e| ArrayError::SegmentCorruption {
-                        detail: format!("sparse tile decode failed: {e}"),
-                    })?;
+                let t = read_sparse_tile(payload)?;
                 Ok(TilePayload::Sparse(t))
             }
             TileKind::Dense => {

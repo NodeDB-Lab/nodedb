@@ -15,6 +15,7 @@ test-utils = []
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-codec = { workspace = true }
 serde = { workspace = true }
 zerompk = { workspace = true }
 thiserror = { workspace = true }

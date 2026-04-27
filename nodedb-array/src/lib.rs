@@ -5,6 +5,7 @@
 //! (server) and Lite (embedded) deployments. Storage, WAL integration,
 //! and SQL routing live in their respective Origin-side crates.
 
+pub mod codec;
 pub mod coord;
 pub mod error;
 pub mod query;

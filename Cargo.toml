@@ -170,7 +170,7 @@ lexical-core = "1"
 rand = "0.9"
 
 # ID types
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde", "js"] }
 ulid = "1"
 nanoid = "0.4"
 

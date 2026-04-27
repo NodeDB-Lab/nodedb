@@ -32,9 +32,8 @@ impl SegmentWriter {
     }
 
     pub fn append_sparse(&mut self, tile_id: TileId, tile: &SparseTile) -> ArrayResult<()> {
-        let payload = zerompk::to_msgpack_vec(tile).map_err(|e| ArrayError::SegmentCorruption {
-            detail: format!("sparse tile encode failed: {e}"),
-        })?;
+        let mut payload = Vec::new();
+        crate::codec::tile_encode::encode_sparse_tile(tile, &mut payload)?;
         self.append_framed(tile_id, TileKind::Sparse, &payload, tile.mbr.clone())
     }
 
