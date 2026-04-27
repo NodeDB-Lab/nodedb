@@ -14,6 +14,7 @@ pub mod segment;
 pub mod sync;
 pub mod tile;
 pub mod types;
+pub mod wal;
 
 pub use coord::{
     bits_per_dim, decode_hilbert_prefix, decode_zorder_prefix, encode_hilbert_prefix,
@@ -37,3 +38,4 @@ pub use tile::{
     sparse_to_dense, tile_id_for_cell, tile_indices_for_cell,
 };
 pub use types::{ArrayId, CellValue, Coord, Domain, TileId};
+pub use wal::ArrayWalRecord;
