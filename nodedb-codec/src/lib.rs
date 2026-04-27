@@ -33,6 +33,7 @@ pub mod pipeline;
 pub mod rans;
 pub mod raw;
 pub mod spherical;
+pub mod vector_quant;
 pub mod zstd_codec;
 
 /// Number of values to sample for codec auto-detection and exponent selection.

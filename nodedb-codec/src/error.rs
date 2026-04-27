@@ -22,4 +22,8 @@ pub enum CodecError {
     /// The codec stored in metadata doesn't match the expected codec.
     #[error("codec mismatch: expected {expected}, found {found}")]
     CodecMismatch { expected: String, found: String },
+
+    /// Invalid layout construction or access (vector quantization).
+    #[error("layout error: {detail}")]
+    LayoutError { detail: String },
 }
