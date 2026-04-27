@@ -146,8 +146,9 @@ impl PresenceManager {
         let mut empty_channels = Vec::new();
         for channel_name in &channel_names {
             if let Some(channel) = self.channels.get_mut(channel_name) {
-                if let Some(leave) = channel.remove_peer(session_id) {
-                    let bytes = serialize_frame(SyncMessageType::PresenceLeave, &leave);
+                if let Some(leave) = channel.remove_peer(session_id)
+                    && let Some(bytes) = serialize_frame(SyncMessageType::PresenceLeave, &leave)
+                {
                     outbound.add_broadcast_all(channel, bytes);
                 }
                 if channel.is_empty() {
@@ -219,8 +220,9 @@ impl PresenceManager {
             .or_default()
             .insert(msg.channel.clone());
 
-        let bytes = serialize_frame(SyncMessageType::PresenceBroadcast, &broadcast);
-        outbound.add_broadcast(channel, session_id, bytes);
+        if let Some(bytes) = serialize_frame(SyncMessageType::PresenceBroadcast, &broadcast) {
+            outbound.add_broadcast(channel, session_id, bytes);
+        }
 
         debug!(
             session = session_id,
@@ -269,10 +271,12 @@ impl PresenceManager {
             let leaves = channel.sweep_expired(ttl);
             total_evicted += leaves.len();
             for leave in &leaves {
-                let bytes = serialize_frame(SyncMessageType::PresenceLeave, leave);
-                // Collect remaining session IDs from the channel.
-                let targets: Vec<String> = channel.session_ids().map(|s| s.to_owned()).collect();
-                pending_leaves.push((targets, bytes));
+                if let Some(bytes) = serialize_frame(SyncMessageType::PresenceLeave, leave) {
+                    // Collect remaining session IDs from the channel.
+                    let targets: Vec<String> =
+                        channel.session_ids().map(|s| s.to_owned()).collect();
+                    pending_leaves.push((targets, bytes));
+                }
             }
             if channel.is_empty() {
                 empty_channels.push(channel_name.clone());
@@ -319,9 +323,9 @@ impl PresenceManager {
 fn serialize_frame<T: serde::Serialize + zerompk::ToMessagePack>(
     msg_type: SyncMessageType,
     msg: &T,
-) -> SharedBytes {
-    let frame = SyncFrame::encode_or_empty(msg_type, msg);
-    Arc::new(frame.to_bytes())
+) -> Option<SharedBytes> {
+    let frame = SyncFrame::try_encode(msg_type, msg)?;
+    Some(Arc::new(frame.to_bytes()))
 }
 
 #[cfg(test)]

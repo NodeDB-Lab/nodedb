@@ -273,9 +273,11 @@ async fn handle_sync_session(
                                     )
                                     .await;
                             }
-                            let ack_bytes = ack.to_bytes();
-                            if ws.send(Message::Binary(ack_bytes.into())).await.is_err() {
-                                break;
+                            if let Some(ack) = ack {
+                                let ack_bytes = ack.to_bytes();
+                                if ws.send(Message::Binary(ack_bytes.into())).await.is_err() {
+                                    break;
+                                }
                             }
                         }
                         continue; // Skip process_frame for this message type.
@@ -298,23 +300,22 @@ async fn handle_sync_session(
                         session.process_frame(&frame, &jwt_validator, None, None, None, None)
                     };
 
-                    if let Some(mut response) = response {
+                    if let Some(response) = response {
                         // For DeltaAck, run async constraint validation before sending.
-                        if response.msg_type == SyncMessageType::DeltaAck
+                        let final_response = if response.msg_type == SyncMessageType::DeltaAck
                             && let Some(shared) = shared
                             && let Some(delta_msg) = frame.decode_body::<DeltaPushMsg>()
                         {
-                            response = super::async_dispatch::validate_delta_constraints(
+                            super::async_dispatch::validate_delta_constraints(
                                 shared, &delta_msg, response,
                             )
-                            .await;
-                        }
-
-                        let response_bytes = response.to_bytes();
-                        if ws
-                            .send(Message::Binary(response_bytes.into()))
                             .await
-                            .is_err()
+                        } else {
+                            Some(response)
+                        };
+
+                        if let Some(r) = final_response
+                            && ws.send(Message::Binary(r.to_bytes().into())).await.is_err()
                         {
                             break;
                         }

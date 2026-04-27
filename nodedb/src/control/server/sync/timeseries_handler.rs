@@ -31,7 +31,7 @@ impl SyncSession {
     pub fn handle_timeseries_push(
         &mut self,
         msg: &TimeseriesPushMsg,
-    ) -> (SyncFrame, Option<TimeseriesIngestData>) {
+    ) -> (Option<SyncFrame>, Option<TimeseriesIngestData>) {
         self.last_activity = std::time::Instant::now();
 
         if !self.authenticated {
@@ -42,7 +42,7 @@ impl SyncSession {
                 lsn: 0,
             };
             return (
-                SyncFrame::encode_or_empty(SyncMessageType::TimeseriesAck, &ack),
+                SyncFrame::try_encode(SyncMessageType::TimeseriesAck, &ack),
                 None,
             );
         }
@@ -60,7 +60,7 @@ impl SyncSession {
                 lsn: 0,
             };
             return (
-                SyncFrame::encode_or_empty(SyncMessageType::TimeseriesAck, &ack),
+                SyncFrame::try_encode(SyncMessageType::TimeseriesAck, &ack),
                 None,
             );
         }
@@ -108,7 +108,7 @@ impl SyncSession {
         };
 
         (
-            SyncFrame::encode_or_empty(SyncMessageType::TimeseriesAck, &ack),
+            SyncFrame::try_encode(SyncMessageType::TimeseriesAck, &ack),
             Some(ingest),
         )
     }

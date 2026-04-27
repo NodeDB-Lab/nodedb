@@ -33,10 +33,7 @@ impl SyncSession {
                 reason: "not authenticated".into(),
                 compensation: Some(CompensationHint::PermissionDenied),
             };
-            return Some(SyncFrame::encode_or_empty(
-                SyncMessageType::DeltaReject,
-                &reject,
-            ));
+            return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
         }
 
         if msg.delta.is_empty() {
@@ -46,10 +43,7 @@ impl SyncSession {
                 reason: "empty delta".into(),
                 compensation: None,
             };
-            return Some(SyncFrame::encode_or_empty(
-                SyncMessageType::DeltaReject,
-                &reject,
-            ));
+            return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
         }
 
         // CRC32C integrity check (skip for legacy clients with checksum=0).
@@ -72,10 +66,7 @@ impl SyncSession {
                     ),
                     compensation: Some(CompensationHint::IntegrityViolation),
                 };
-                return Some(SyncFrame::encode_or_empty(
-                    SyncMessageType::DeltaReject,
-                    &reject,
-                ));
+                return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
             }
         }
 
@@ -100,7 +91,7 @@ impl SyncSession {
                 lsn: 0,
                 clock_skew_warning_ms: None,
             };
-            return Some(SyncFrame::encode_or_empty(SyncMessageType::DeltaAck, &ack));
+            return SyncFrame::try_encode(SyncMessageType::DeltaAck, &ack);
         }
 
         let identity = match &self.identity {
@@ -112,10 +103,7 @@ impl SyncSession {
                     reason: "identity not established".into(),
                     compensation: Some(CompensationHint::PermissionDenied),
                 };
-                return Some(SyncFrame::encode_or_empty(
-                    SyncMessageType::DeltaReject,
-                    &reject,
-                ));
+                return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
             }
         };
 
@@ -214,7 +202,7 @@ impl SyncSession {
             lsn: 0,
             clock_skew_warning_ms,
         };
-        Some(SyncFrame::encode_or_empty(SyncMessageType::DeltaAck, &ack))
+        SyncFrame::try_encode(SyncMessageType::DeltaAck, &ack)
     }
 }
 

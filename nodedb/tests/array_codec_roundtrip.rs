@@ -103,6 +103,7 @@ fn ten_k_tile_roundtrip_exact_equality() {
 ///      whether zerompk emits a map-header or array-header byte).
 ///   2. `zerompk::from_msgpack` — the body of that None branch — decodes the
 ///      payload back into the original `SparseTile`.
+///
 /// Together these are equivalent to invoking the reader's full dispatch path
 /// with a v3-style payload.
 #[test]

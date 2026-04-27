@@ -99,7 +99,7 @@ pub fn handle_subscribe<F>(
     registry: &ShapeRegistry,
     current_lsn: u64,
     snapshot_provider: F,
-) -> SyncFrame
+) -> Option<SyncFrame>
 where
     F: FnOnce(&ShapeDefinition, u64) -> ShapeSnapshotData,
 {
@@ -126,7 +126,7 @@ where
         "shape subscribed, snapshot sent"
     );
 
-    SyncFrame::encode_or_empty(SyncMessageType::ShapeSnapshot, &snapshot)
+    SyncFrame::try_encode(SyncMessageType::ShapeSnapshot, &snapshot)
 }
 
 /// Handle a ShapeUnsubscribe message.
@@ -285,7 +285,8 @@ mod tests {
                 data: zerompk::to_msgpack_vec(&vec!["doc1", "doc2"]).unwrap_or_default(),
                 doc_count: 2,
             }
-        });
+        })
+        .expect("encode");
         assert_eq!(frame.msg_type, SyncMessageType::ShapeSnapshot);
 
         let snapshot: ShapeSnapshotMsg = frame.decode_body().unwrap();

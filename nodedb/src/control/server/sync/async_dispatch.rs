@@ -106,7 +106,7 @@ pub(super) async fn handle_shape_subscribe_async(
         "shape subscribed with WAL LSN watermark"
     );
 
-    Some(response)
+    response
 }
 
 /// Async constraint validation for a delta before sending DeltaAck.
@@ -118,7 +118,7 @@ pub(super) async fn validate_delta_constraints(
     shared: &SharedState,
     delta_msg: &DeltaPushMsg,
     ack_frame: SyncFrame,
-) -> SyncFrame {
+) -> Option<SyncFrame> {
     use crate::bridge::envelope::PhysicalPlan;
     use crate::bridge::physical_plan::CrdtOp;
     use crate::control::server::pgwire::ddl::sync_dispatch::dispatch_async_with_source;
@@ -140,7 +140,7 @@ pub(super) async fn validate_delta_constraints(
                 detail: e.to_string(),
             }),
         };
-        return SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+        return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
     }
 
     let surrogate = match shared
@@ -158,7 +158,7 @@ pub(super) async fn validate_delta_constraints(
                     detail: e.to_string(),
                 }),
             };
-            return SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+            return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
         }
     };
 
@@ -186,7 +186,7 @@ pub(super) async fn validate_delta_constraints(
     match dispatch_result {
         Ok(_payload) => {
             // Constraint check passed — send the original DeltaAck.
-            ack_frame
+            Some(ack_frame)
         }
         Err(e) => {
             let error_detail = e.to_string();
@@ -219,7 +219,7 @@ pub(super) async fn validate_delta_constraints(
                 reason: error_detail,
                 compensation: Some(hint),
             };
-            SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject)
+            SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject)
         }
     }
 }

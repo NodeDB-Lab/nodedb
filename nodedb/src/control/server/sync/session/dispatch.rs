@@ -32,12 +32,12 @@ impl SyncSession {
         match frame.msg_type {
             SyncMessageType::Handshake => {
                 let msg: HandshakeMsg = frame.decode_body()?;
-                Some(self.handle_handshake(
+                self.handle_handshake(
                     &msg,
                     jwt_validator,
                     self.server_clock.clone(),
                     epoch_tracker,
-                ))
+                )
             }
             SyncMessageType::DeltaPush => {
                 let msg: DeltaPushMsg = frame.decode_body()?;
@@ -45,7 +45,7 @@ impl SyncSession {
             }
             SyncMessageType::VectorClockSync => {
                 let msg: VectorClockSyncMsg = frame.decode_body()?;
-                Some(self.handle_vector_clock_sync(&msg))
+                self.handle_vector_clock_sync(&msg)
             }
             SyncMessageType::ShapeSubscribe => {
                 let msg: super::super::shape::handler::ShapeSubscribeMsg = frame.decode_body()?;
@@ -59,15 +59,14 @@ impl SyncSession {
                 if let Some(coll) = msg.shape.collection() {
                     self.track_collection(tenant_id, coll);
                 }
-                let response = super::super::shape::handler::handle_subscribe(
+                super::super::shape::handler::handle_subscribe(
                     &self.session_id,
                     tenant_id,
                     &msg,
                     &registry,
                     current_lsn,
                     |_shape, _lsn| super::super::shape::handler::ShapeSnapshotData::empty(),
-                );
-                Some(response)
+                )
             }
             SyncMessageType::ShapeUnsubscribe => {
                 let msg: super::super::shape::handler::ShapeUnsubscribeMsg = frame.decode_body()?;
@@ -78,7 +77,7 @@ impl SyncSession {
             SyncMessageType::TimeseriesPush => {
                 let msg: TimeseriesPushMsg = frame.decode_body()?;
                 let (ack, _ingest_data) = self.handle_timeseries_push(&msg);
-                Some(ack)
+                ack
             }
             SyncMessageType::TimeseriesAck => None,
             SyncMessageType::ResyncRequest => {
@@ -95,7 +94,7 @@ impl SyncSession {
             }
             SyncMessageType::TokenRefresh => {
                 let msg: TokenRefreshMsg = frame.decode_body()?;
-                Some(self.handle_token_refresh(&msg, jwt_validator))
+                self.handle_token_refresh(&msg, jwt_validator)
             }
             SyncMessageType::Throttle => {
                 if let Some(msg) = frame.decode_body::<ThrottleMsg>() {
@@ -114,7 +113,7 @@ impl SyncSession {
                 if msg.is_pong {
                     None
                 } else {
-                    Some(self.handle_ping(&msg))
+                    self.handle_ping(&msg)
                 }
             }
             SyncMessageType::PresenceUpdate

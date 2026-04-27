@@ -18,7 +18,7 @@ impl SyncSession {
         &mut self,
         msg: &TokenRefreshMsg,
         jwt_validator: &JwtValidator,
-    ) -> SyncFrame {
+    ) -> Option<SyncFrame> {
         self.last_activity = Instant::now();
 
         if msg.new_token.is_empty() {
@@ -27,7 +27,7 @@ impl SyncSession {
                 error: Some("empty token".into()),
                 expires_in_secs: 0,
             };
-            return SyncFrame::encode_or_empty(SyncMessageType::TokenRefreshAck, &ack);
+            return SyncFrame::try_encode(SyncMessageType::TokenRefreshAck, &ack);
         }
 
         match jwt_validator.validate(&msg.new_token) {
@@ -46,7 +46,7 @@ impl SyncSession {
                         error: Some("tenant mismatch".into()),
                         expires_in_secs: 0,
                     };
-                    return SyncFrame::encode_or_empty(SyncMessageType::TokenRefreshAck, &ack);
+                    return SyncFrame::try_encode(SyncMessageType::TokenRefreshAck, &ack);
                 }
                 self.username = Some(new_identity.username.clone());
                 self.identity = Some(new_identity);
@@ -59,7 +59,7 @@ impl SyncSession {
                     error: None,
                     expires_in_secs: 3600,
                 };
-                SyncFrame::encode_or_empty(SyncMessageType::TokenRefreshAck, &ack)
+                SyncFrame::try_encode(SyncMessageType::TokenRefreshAck, &ack)
             }
             Err(e) => {
                 warn!(
@@ -72,7 +72,7 @@ impl SyncSession {
                     error: Some(e.to_string()),
                     expires_in_secs: 0,
                 };
-                SyncFrame::encode_or_empty(SyncMessageType::TokenRefreshAck, &ack)
+                SyncFrame::try_encode(SyncMessageType::TokenRefreshAck, &ack)
             }
         }
     }

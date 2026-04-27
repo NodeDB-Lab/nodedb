@@ -24,7 +24,7 @@ impl SyncSession {
         jwt_validator: &JwtValidator,
         current_server_clock: HashMap<String, u64>,
         epoch_tracker: Option<&std::sync::Mutex<HashMap<String, u64>>>,
-    ) -> SyncFrame {
+    ) -> Option<SyncFrame> {
         self.last_activity = Instant::now();
 
         // Wire format compatibility check: reject incompatible clients early.
@@ -48,7 +48,7 @@ impl SyncSession {
                 fork_detected: false,
                 server_wire_version: crate::version::WIRE_FORMAT_VERSION,
             };
-            return SyncFrame::encode_or_empty(SyncMessageType::HandshakeAck, &ack);
+            return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
         }
 
         // Trust mode: empty token auto-authenticates as default identity.
@@ -83,7 +83,7 @@ impl SyncSession {
             if let Some(fork_ack) =
                 self.check_fork_detection(msg, &current_server_clock, epoch_tracker)
             {
-                return fork_ack;
+                return Some(fork_ack);
             }
 
             info!(session = %self.session_id, "sync handshake OK (trust mode)");
@@ -96,7 +96,7 @@ impl SyncSession {
                 fork_detected: false,
                 server_wire_version: crate::version::WIRE_FORMAT_VERSION,
             };
-            return SyncFrame::encode_or_empty(SyncMessageType::HandshakeAck, &ack);
+            return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
         }
 
         // Validate JWT.
@@ -124,7 +124,7 @@ impl SyncSession {
                 if let Some(fork_ack) =
                     self.check_fork_detection(msg, &current_server_clock, epoch_tracker)
                 {
-                    return fork_ack;
+                    return Some(fork_ack);
                 }
 
                 info!(
@@ -143,7 +143,7 @@ impl SyncSession {
                     fork_detected: false,
                     server_wire_version: crate::version::WIRE_FORMAT_VERSION,
                 };
-                SyncFrame::encode_or_empty(SyncMessageType::HandshakeAck, &ack)
+                SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack)
             }
             Err(e) => {
                 warn!(
@@ -159,7 +159,7 @@ impl SyncSession {
                     fork_detected: false,
                     server_wire_version: crate::version::WIRE_FORMAT_VERSION,
                 };
-                SyncFrame::encode_or_empty(SyncMessageType::HandshakeAck, &ack)
+                SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack)
             }
         }
     }
@@ -197,10 +197,7 @@ impl SyncSession {
                 fork_detected: true,
                 server_wire_version: crate::version::WIRE_FORMAT_VERSION,
             };
-            return Some(SyncFrame::encode_or_empty(
-                SyncMessageType::HandshakeAck,
-                &ack,
-            ));
+            return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
         }
 
         epochs.insert(msg.lite_id.clone(), msg.epoch);

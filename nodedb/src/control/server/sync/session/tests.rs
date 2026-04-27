@@ -46,7 +46,9 @@ fn handshake_rejects_invalid_jwt() {
         wire_version: 1,
     };
 
-    let response = session.handle_handshake(&msg, &validator, HashMap::new(), None);
+    let response = session
+        .handle_handshake(&msg, &validator, HashMap::new(), None)
+        .expect("handshake response");
     assert_eq!(response.msg_type, SyncMessageType::HandshakeAck);
 
     let ack: HandshakeAckMsg = response.decode_body().unwrap();
@@ -218,7 +220,7 @@ fn ping_pong() {
         timestamp_ms: 99999,
         is_pong: false,
     };
-    let response = session.handle_ping(&ping);
+    let response = session.handle_ping(&ping).expect("ping response");
     let pong: PingPongMsg = response.decode_body().unwrap();
     assert!(pong.is_pong);
     assert_eq!(pong.timestamp_ms, 99999);
@@ -236,7 +238,9 @@ fn vector_clock_sync() {
         clocks,
         sender_id: 5,
     };
-    let response = session.handle_vector_clock_sync(&msg);
+    let response = session
+        .handle_vector_clock_sync(&msg)
+        .expect("clock sync response");
     let sync: VectorClockSyncMsg = response.decode_body().unwrap();
     assert_eq!(*sync.clocks.get("orders").unwrap(), 42);
 }

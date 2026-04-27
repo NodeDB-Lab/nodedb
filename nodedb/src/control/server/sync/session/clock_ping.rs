@@ -10,7 +10,7 @@ use super::state::SyncSession;
 impl SyncSession {
     /// Update the server's view of the client's clock and return the
     /// server's current clock.
-    pub fn handle_vector_clock_sync(&mut self, msg: &VectorClockSyncMsg) -> SyncFrame {
+    pub fn handle_vector_clock_sync(&mut self, msg: &VectorClockSyncMsg) -> Option<SyncFrame> {
         self.last_activity = Instant::now();
         for (collection, lsn) in &msg.clocks {
             self.server_clock
@@ -27,15 +27,15 @@ impl SyncSession {
             clocks: self.server_clock.clone(),
             sender_id: 0,
         };
-        SyncFrame::encode_or_empty(SyncMessageType::VectorClockSync, &response)
+        SyncFrame::try_encode(SyncMessageType::VectorClockSync, &response)
     }
 
-    pub fn handle_ping(&mut self, msg: &PingPongMsg) -> SyncFrame {
+    pub fn handle_ping(&mut self, msg: &PingPongMsg) -> Option<SyncFrame> {
         self.last_activity = Instant::now();
         let pong = PingPongMsg {
             timestamp_ms: msg.timestamp_ms,
             is_pong: true,
         };
-        SyncFrame::encode_or_empty(SyncMessageType::PingPong, &pong)
+        SyncFrame::try_encode(SyncMessageType::PingPong, &pong)
     }
 }

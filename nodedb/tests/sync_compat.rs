@@ -74,7 +74,7 @@ fn origin_reject_unique_violation_hint() {
         }),
     };
 
-    let frame = SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+    let frame = SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject).expect("encode");
     let parsed: DeltaRejectMsg = SyncFrame::from_bytes(&frame.to_bytes())
         .unwrap()
         .decode_body()
@@ -103,7 +103,7 @@ fn origin_reject_fk_missing_hint() {
         }),
     };
 
-    let frame = SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+    let frame = SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject).expect("encode");
     let parsed: DeltaRejectMsg = SyncFrame::from_bytes(&frame.to_bytes())
         .unwrap()
         .decode_body()
@@ -123,7 +123,7 @@ fn origin_reject_permission_denied_no_leak() {
         compensation: Some(CompensationHint::PermissionDenied),
     };
 
-    let frame = SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+    let frame = SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject).expect("encode");
     let parsed: DeltaRejectMsg = SyncFrame::from_bytes(&frame.to_bytes())
         .unwrap()
         .decode_body()
@@ -146,7 +146,7 @@ fn origin_reject_rate_limited_hint() {
         }),
     };
 
-    let frame = SyncFrame::encode_or_empty(SyncMessageType::DeltaReject, &reject);
+    let frame = SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject).expect("encode");
     let parsed: DeltaRejectMsg = SyncFrame::from_bytes(&frame.to_bytes())
         .unwrap()
         .decode_body()
