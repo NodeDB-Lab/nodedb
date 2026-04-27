@@ -1,4 +1,5 @@
 pub mod batch_distance;
+pub mod codec_index;
 pub mod delta;
 pub mod distance;
 pub mod error;
@@ -21,7 +22,7 @@ pub mod navix;
 // SIEVE workload-driven subindex collection for stable predicates (SIEVE 2025).
 pub mod sieve;
 
-// Cost-based multidimensional vector query planner (Tier 10).
+// Cost-based multidimensional vector query planner.
 pub mod planner;
 
 // Origin-only modules (always compiled for native targets).

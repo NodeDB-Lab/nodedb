@@ -4,8 +4,6 @@
 //! exact distance computation.  On a single node these live in an mmap region;
 //! in a distributed deployment they would come from a remote RPC or RDMA read.
 //! This trait provides that seam without coupling search to any I/O mechanism.
-//!
-//! See Tier 13 of the Vector Frontier Checklist for the distributed roadmap.
 
 /// Abstraction over a single partition's vector store.
 ///

@@ -49,7 +49,7 @@ pub struct VectorQueryOptions {
     /// Quantization codec for in-graph distance computation.
     pub quantization: QuantizationKind,
 
-    /// Matryoshka coarse dimension for adaptive-dim querying (Tier 6).
+    /// Matryoshka coarse dimension for adaptive-dim querying.
     ///
     /// When `Some(d)`, the first `d` dimensions are used for coarse-pass
     /// traversal; a full-dimension rerank follows over top-`ef_search`
@@ -62,7 +62,7 @@ pub struct VectorQueryOptions {
     /// Ignored when `quantization == None`.
     pub oversample: u8,
 
-    /// MetaEmbed Meta Token budget for budgeted MaxSim (Tier 4).
+    /// MetaEmbed Meta Token budget for budgeted MaxSim.
     ///
     /// `None` uses the default token count for the collection.
     pub meta_token_budget: Option<u8>,

@@ -17,6 +17,8 @@
 //! shared headers/footers), most of the 256 centroids alias to one or two
 //! points and PQ recall collapses.
 
+#![cfg(feature = "ivf")]
+
 use nodedb_vector::quantize::pq::PqCodec;
 
 /// Training set of 200 vectors: 190 near-duplicates at the origin plus

@@ -38,7 +38,7 @@ pub enum FilterRoute {
     ///
     /// Returned only when `compass_enabled == true` and the query has three
     /// or more numeric range predicates.  Gated because Compass (VLDB 2025)
-    /// requires a separate index build step (Tier 3.25).
+    /// requires a separate index build step.
     Compass,
 }
 
