@@ -36,6 +36,59 @@ pub struct ShapeDefinition {
     pub field_filter: Vec<String>,
 }
 
+/// Coordinate range filter for array shapes.
+///
+/// Tile-aligned: subscriptions cover whole tiles; sub-tile filtering
+/// happens at receive time (per the checklist "Out of scope" declaration).
+/// Both `start` and `end` are inclusive, with `end` of `None` meaning
+/// "all coords from `start` onwards".
+///
+/// Defined here in `nodedb-types` (not in `nodedb-array`) to avoid
+/// adding a cross-crate dependency from `nodedb-types` on `nodedb-array`.
+/// Callers that hold a `nodedb_array::sync::snapshot::CoordRange` convert
+/// to this type before constructing a `ShapeType::Array`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct ArrayCoordRange {
+    /// Inclusive lower bound (one element per dimension).
+    pub start: Vec<u64>,
+    /// Inclusive upper bound (one element per dimension).
+    /// `None` = unbounded (all coords from `start` onwards).
+    pub end: Option<Vec<u64>>,
+}
+
+impl ArrayCoordRange {
+    /// Return `true` if `coord` falls within this range.
+    ///
+    /// Comparison is per-dimension lexicographic. A missing dimension in
+    /// `coord` compared to `start`/`end` causes the check to return `false`.
+    pub fn contains(&self, coord: &[u64]) -> bool {
+        if coord.len() != self.start.len() {
+            return false;
+        }
+        if coord < self.start.as_slice() {
+            return false;
+        }
+        if let Some(end) = &self.end
+            && (coord.len() != end.len() || coord > end.as_slice())
+        {
+            return false;
+        }
+        true
+    }
+}
+
 /// Shape type: determines how mutations are evaluated for inclusion.
 #[derive(
     Debug,
@@ -75,6 +128,16 @@ pub enum ShapeType {
         collection: String,
         field_name: Option<String>,
     },
+
+    /// Array shape: all ops on a named ND-array within an optional
+    /// coordinate range.
+    ///
+    /// `coord_range = None` means "subscribe to all ops on this array".
+    /// When set, only ops whose coord falls within the range are delivered.
+    Array {
+        array_name: String,
+        coord_range: Option<ArrayCoordRange>,
+    },
 }
 
 impl ShapeDefinition {
@@ -82,6 +145,7 @@ impl ShapeDefinition {
     ///
     /// This is a fast pre-check — returns true if the mutation COULD match.
     /// Actual predicate evaluation happens separately for document shapes.
+    /// Returns `false` for `ShapeType::Array` (use `matches_array_op` instead).
     pub fn could_match(&self, collection: &str, _doc_id: &str) -> bool {
         match &self.shape_type {
             ShapeType::Document {
@@ -96,6 +160,29 @@ impl ShapeDefinition {
                 collection: shape_coll,
                 ..
             } => shape_coll == collection,
+            ShapeType::Array { .. } => false,
+        }
+    }
+
+    /// Check if an array op on `array` at `coord` matches this shape.
+    ///
+    /// Returns `false` for non-Array shape types — use `could_match` for those.
+    /// `coord` is the raw dimension values cast to `u64` (unsigned index space).
+    pub fn matches_array_op(&self, array: &str, coord: &[u64]) -> bool {
+        match &self.shape_type {
+            ShapeType::Array {
+                array_name,
+                coord_range,
+            } => {
+                if array_name != array {
+                    return false;
+                }
+                match coord_range {
+                    None => true,
+                    Some(range) => range.contains(coord),
+                }
+            }
+            _ => false,
         }
     }
 
@@ -105,6 +192,7 @@ impl ShapeDefinition {
             ShapeType::Document { collection, .. } => Some(collection),
             ShapeType::Vector { collection, .. } => Some(collection),
             ShapeType::Graph { .. } => None,
+            ShapeType::Array { .. } => None,
         }
     }
 }
@@ -183,5 +271,85 @@ mod tests {
         assert_eq!(decoded.shape_id, "test");
         assert_eq!(decoded.tenant_id, 5);
         assert!(matches!(decoded.shape_type, ShapeType::Document { .. }));
+    }
+
+    #[test]
+    fn array_shape_matches_array_op_no_range() {
+        let shape = ShapeDefinition {
+            shape_id: "a1".into(),
+            tenant_id: 1,
+            shape_type: ShapeType::Array {
+                array_name: "prices".into(),
+                coord_range: None,
+            },
+            description: "all prices".into(),
+            field_filter: vec![],
+        };
+        assert!(shape.matches_array_op("prices", &[0, 0]));
+        assert!(shape.matches_array_op("prices", &[999, 999]));
+        assert!(!shape.matches_array_op("other", &[0, 0]));
+        // could_match returns false for Array shapes.
+        assert!(!shape.could_match("prices", "x"));
+        assert_eq!(shape.collection(), None);
+    }
+
+    #[test]
+    fn array_shape_matches_array_op_with_range() {
+        let range = ArrayCoordRange {
+            start: vec![10, 10],
+            end: Some(vec![20, 20]),
+        };
+        let shape = ShapeDefinition {
+            shape_id: "a2".into(),
+            tenant_id: 1,
+            shape_type: ShapeType::Array {
+                array_name: "temps".into(),
+                coord_range: Some(range),
+            },
+            description: "temps sub-range".into(),
+            field_filter: vec![],
+        };
+        assert!(shape.matches_array_op("temps", &[10, 10]));
+        assert!(shape.matches_array_op("temps", &[15, 15]));
+        assert!(shape.matches_array_op("temps", &[20, 20]));
+        assert!(!shape.matches_array_op("temps", &[9, 9]));
+        assert!(!shape.matches_array_op("temps", &[21, 21]));
+        assert!(!shape.matches_array_op("temps", &[10])); // wrong ndim
+    }
+
+    #[test]
+    fn array_coord_range_msgpack_roundtrip() {
+        let range = ArrayCoordRange {
+            start: vec![1, 2, 3],
+            end: Some(vec![4, 5, 6]),
+        };
+        let bytes = zerompk::to_msgpack_vec(&range).unwrap();
+        let decoded: ArrayCoordRange = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded.start, vec![1, 2, 3]);
+        assert_eq!(decoded.end, Some(vec![4, 5, 6]));
+    }
+
+    #[test]
+    fn array_shape_msgpack_roundtrip() {
+        let shape = ShapeDefinition {
+            shape_id: "a3".into(),
+            tenant_id: 7,
+            shape_type: ShapeType::Array {
+                array_name: "sensor_matrix".into(),
+                coord_range: Some(ArrayCoordRange {
+                    start: vec![0, 0],
+                    end: None,
+                }),
+            },
+            description: "half-open range".into(),
+            field_filter: vec![],
+        };
+        let bytes = zerompk::to_msgpack_vec(&shape).unwrap();
+        let decoded: ShapeDefinition = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded.shape_id, "a3");
+        assert!(matches!(
+            decoded.shape_type,
+            ShapeType::Array { ref array_name, .. } if array_name == "sensor_matrix"
+        ));
     }
 }

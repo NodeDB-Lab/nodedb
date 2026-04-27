@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
     zerompk::FromMessagePack,
 )]
 pub struct ArrayAckMsg {
+    /// Name of the array being acked.
+    pub array: String,
     /// The acking replica's numeric ID.
     pub replica_id: u64,
     /// Highest durably applied HLC on this replica (18-byte layout).
@@ -30,6 +32,7 @@ mod tests {
     #[test]
     fn roundtrip_via_msgpack() {
         let msg = ArrayAckMsg {
+            array: "test_array".into(),
             replica_id: 99,
             ack_hlc_bytes: [0xABu8; 18],
         };
