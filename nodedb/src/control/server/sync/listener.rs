@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
+use nodedb_types::sync::wire::array::{
+    ArrayAckMsg, ArrayCatchupRequestMsg, ArrayDeltaBatchMsg, ArrayDeltaMsg, ArrayRejectMsg,
+    ArraySchemaSyncMsg, ArraySnapshotChunkMsg, ArraySnapshotMsg,
+};
+
 use super::wire::{DeltaPushMsg, PresenceUpdateMsg, SyncMessageType, TimeseriesPushMsg};
 
 use crate::control::security::jwt::JwtConfig;
@@ -139,8 +144,7 @@ async fn accept_loop(
                     match tokio_tungstenite::accept_async(stream).await {
                         Ok(ws) => {
                             info!(%addr, "sync: WebSocket connection established");
-                            handle_sync_session(ws, addr, &state_clone, shared_clone.as_deref())
-                                .await;
+                            handle_sync_session(ws, addr, &state_clone, shared_clone).await;
                         }
                         Err(e) => {
                             warn!(%addr, error = %e, "sync: WebSocket upgrade failed");
@@ -161,7 +165,7 @@ async fn handle_sync_session(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     addr: SocketAddr,
     state: &SyncListenerState,
-    shared: Option<&SharedState>,
+    shared: Option<Arc<SharedState>>,
 ) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -193,13 +197,47 @@ async fn handle_sync_session(
     let mut presence_rx: Option<tokio::sync::mpsc::Receiver<std::sync::Arc<Vec<u8>>>> = None;
     let mut presence_registered = false;
 
+    // Array CRDT sync inbound dispatcher — one per session so the snapshot
+    // assembly buffer survives across header + chunk frames.
+    // Tenant ID starts as 0 and is resolved at dispatch time from session state.
+    let array_inbound: Option<Arc<crate::control::array_sync::OriginArrayInbound>> =
+        shared.as_ref().map(|s| {
+            let engine = Arc::new(crate::control::array_sync::OriginApplyEngine::new(
+                Arc::clone(&s.array_sync_schemas),
+                Arc::clone(&s.array_sync_op_log),
+            ));
+            let fanout = Arc::new(crate::control::array_sync::ArrayFanout::new(
+                Arc::clone(&s.shape_registry),
+                Arc::clone(&s.array_delivery),
+                Arc::clone(&s.array_subscriber_cursors),
+                Arc::clone(&s.array_snapshot_hlcs),
+                Arc::clone(&s.array_merger_registry),
+                // shard_id: 0 in single-node mode; in multi-shard the fanout
+                // is constructed per-shard leader and carries its vShard id.
+                0,
+                0, // tenant_id: Array shapes carry their own tenant_id inside ShapeDefinition
+            ));
+            let inbound = crate::control::array_sync::OriginArrayInbound::new(
+                engine,
+                Arc::clone(&s.array_sync_schemas),
+                Arc::clone(s),
+                crate::types::TenantId::new(0),
+            )
+            .with_observer(fanout);
+            Arc::new(inbound)
+        });
+
+    // Outbound array CRDT frame channel — registered after authentication.
+    let mut array_delivery_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>> = None;
+    let mut array_delivery_registered = false;
+
     while let Some(msg_result) = ws.next().await {
         match msg_result {
             Ok(Message::Binary(data)) => {
                 if let Some(frame) = super::wire::SyncFrame::from_bytes(&data) {
                     // Handle ShapeSubscribe at listener level (needs async WAL LSN + Data Plane).
                     if frame.msg_type == SyncMessageType::ShapeSubscribe
-                        && let Some(shared) = shared
+                        && let Some(shared) = shared.as_ref()
                         && let Some(response) = super::async_dispatch::handle_shape_subscribe_async(
                             shared, &session, &frame,
                         )
@@ -233,7 +271,7 @@ async fn handle_sync_session(
                     // Handle PresenceUpdate at listener level (needs async RwLock).
                     if frame.msg_type == SyncMessageType::PresenceUpdate
                         && session.authenticated
-                        && let Some(shared) = shared
+                        && let Some(shared) = shared.as_ref()
                     {
                         if let Some(msg) = frame.decode_body::<PresenceUpdateMsg>() {
                             let user_id = session.username.as_deref().unwrap_or("anonymous");
@@ -251,7 +289,7 @@ async fn handle_sync_session(
                         if let Some(ts_msg) = frame.decode_body::<TimeseriesPushMsg>() {
                             let (ack, ingest_data) = session.handle_timeseries_push(&ts_msg);
                             // Dispatch to Data Plane if we have data and SharedState.
-                            if let (Some(ingest), Some(shared)) = (ingest_data, shared) {
+                            if let (Some(ingest), Some(shared)) = (ingest_data, shared.as_ref()) {
                                 let tenant_id =
                                     session.tenant_id.unwrap_or(crate::types::TenantId::new(0));
                                 let vshard =
@@ -283,8 +321,138 @@ async fn handle_sync_session(
                         continue; // Skip process_frame for this message type.
                     }
 
+                    // ── Array CRDT sync message types ──────────────────────
+                    //
+                    // ArrayReject (0x96) is outbound-only; if received, warn
+                    // and ignore. All other array types are dispatched to
+                    // OriginArrayInbound if SharedState is available.
+                    if matches!(
+                        frame.msg_type,
+                        SyncMessageType::ArrayDelta
+                            | SyncMessageType::ArrayDeltaBatch
+                            | SyncMessageType::ArraySnapshot
+                            | SyncMessageType::ArraySnapshotChunk
+                            | SyncMessageType::ArraySchema
+                            | SyncMessageType::ArrayAck
+                            | SyncMessageType::ArrayReject
+                            | SyncMessageType::ArrayCatchupRequest
+                    ) {
+                        if frame.msg_type == SyncMessageType::ArrayReject {
+                            if let Some(msg) = frame.decode_body::<ArrayRejectMsg>() {
+                                warn!(
+                                    session = %session_id,
+                                    array = %msg.array,
+                                    reason = ?msg.reason,
+                                    "sync: received ArrayReject (outbound-only); ignoring"
+                                );
+                            }
+                            continue;
+                        }
+
+                        if let Some(inbound) = &array_inbound {
+                            let reject_frame = match frame.msg_type {
+                                SyncMessageType::ArrayDelta => {
+                                    if let Some(msg) = frame.decode_body::<ArrayDeltaMsg>() {
+                                        match inbound.handle_delta(&msg).await {
+                                            Ok(_) => None,
+                                            Err(Some(r)) => super::wire::SyncFrame::try_encode(
+                                                SyncMessageType::ArrayReject,
+                                                &r,
+                                            ),
+                                            Err(None) => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                SyncMessageType::ArrayDeltaBatch => {
+                                    if let Some(msg) = frame.decode_body::<ArrayDeltaBatchMsg>() {
+                                        let outcomes = inbound.handle_delta_batch(&msg).await;
+                                        // Emit one reject for the first failing op.
+                                        outcomes.into_iter().find_map(|r| match r {
+                                            Err(Some(reject)) => {
+                                                super::wire::SyncFrame::try_encode(
+                                                    SyncMessageType::ArrayReject,
+                                                    &reject,
+                                                )
+                                            }
+                                            _ => None,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }
+                                SyncMessageType::ArraySnapshot => {
+                                    if let Some(msg) = frame.decode_body::<ArraySnapshotMsg>() {
+                                        match inbound.handle_snapshot_header(&msg) {
+                                            Ok(_) => None,
+                                            Err(Some(r)) => super::wire::SyncFrame::try_encode(
+                                                SyncMessageType::ArrayReject,
+                                                &r,
+                                            ),
+                                            Err(None) => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                SyncMessageType::ArraySnapshotChunk => {
+                                    if let Some(msg) = frame.decode_body::<ArraySnapshotChunkMsg>()
+                                    {
+                                        match inbound.handle_snapshot_chunk(&msg).await {
+                                            Ok(_) => None,
+                                            Err(Some(r)) => super::wire::SyncFrame::try_encode(
+                                                SyncMessageType::ArrayReject,
+                                                &r,
+                                            ),
+                                            Err(None) => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                SyncMessageType::ArraySchema => {
+                                    if let Some(msg) = frame.decode_body::<ArraySchemaSyncMsg>() {
+                                        match inbound.handle_schema(&msg) {
+                                            Ok(_) => None,
+                                            Err(Some(r)) => super::wire::SyncFrame::try_encode(
+                                                SyncMessageType::ArrayReject,
+                                                &r,
+                                            ),
+                                            Err(None) => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                SyncMessageType::ArrayAck => {
+                                    if let Some(msg) = frame.decode_body::<ArrayAckMsg>() {
+                                        let _ = inbound.handle_ack(&msg);
+                                    }
+                                    None
+                                }
+                                SyncMessageType::ArrayCatchupRequest => {
+                                    if let Some(msg) = frame.decode_body::<ArrayCatchupRequestMsg>()
+                                    {
+                                        let _ = inbound.handle_catchup_request(&msg, &session_id);
+                                    }
+                                    None
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(f) = reject_frame
+                                && ws.send(Message::Binary(f.to_bytes().into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    // ── End array CRDT sync ────────────────────────────────
+
                     // Wire RLS, audit, DLQ from SharedState.
-                    let response = if let Some(shared) = shared {
+                    let response = if let Some(shared) = shared.as_ref() {
                         let rls_store = &shared.rls;
                         let mut audit = shared.audit.lock().unwrap_or_else(|p| p.into_inner());
                         let mut dlq = shared.sync_dlq.lock().unwrap_or_else(|p| p.into_inner());
@@ -303,7 +471,7 @@ async fn handle_sync_session(
                     if let Some(response) = response {
                         // For DeltaAck, run async constraint validation before sending.
                         let final_response = if response.msg_type == SyncMessageType::DeltaAck
-                            && let Some(shared) = shared
+                            && let Some(shared) = shared.as_ref()
                             && let Some(delta_msg) = frame.decode_body::<DeltaPushMsg>()
                         {
                             super::async_dispatch::validate_delta_constraints(
@@ -338,7 +506,7 @@ async fn handle_sync_session(
         // Register for CRDT sync delivery once authenticated.
         if session.authenticated
             && !crdt_registered
-            && let Some(shared) = shared
+            && let Some(shared) = shared.as_ref()
         {
             let tenant_id = session.tenant_id.map(|t| t.as_u32()).unwrap_or(0);
             let peer_id = session.device_metadata.peer_id;
@@ -355,10 +523,20 @@ async fn handle_sync_session(
             crdt_registered = true;
         }
 
+        // Register for outbound array CRDT frame delivery once authenticated.
+        if session.authenticated
+            && !array_delivery_registered
+            && let Some(shared) = shared.as_ref()
+        {
+            let rx = shared.array_delivery.register(session_id.clone());
+            array_delivery_rx = Some(rx);
+            array_delivery_registered = true;
+        }
+
         // Register for presence broadcasts once authenticated.
         if session.authenticated
             && !presence_registered
-            && let Some(shared) = shared
+            && let Some(shared) = shared.as_ref()
         {
             let (tx, rx) = tokio::sync::mpsc::channel(256);
             shared
@@ -380,6 +558,17 @@ async fn handle_sync_session(
                     .await
                     .is_err()
                 {
+                    break;
+                }
+            }
+        }
+
+        // Drain outbound array CRDT frames and push to Lite device.
+        if let Some(ref mut rx) = array_delivery_rx {
+            while let Ok(frame_bytes) = rx.try_recv() {
+                use futures::SinkExt;
+                use tokio_tungstenite::tungstenite::Message;
+                if ws.send(Message::Binary(frame_bytes.into())).await.is_err() {
                     break;
                 }
             }
@@ -439,12 +628,18 @@ async fn handle_sync_session(
     }
 
     // Unregister from CRDT sync delivery.
-    if crdt_registered && let Some(shared) = shared {
+    if crdt_registered && let Some(shared) = shared.as_ref() {
         shared.crdt_sync_delivery.unregister(&session_id);
     }
 
+    // Unregister from array delivery and remove subscriber cursors.
+    if array_delivery_registered && let Some(shared) = shared.as_ref() {
+        shared.array_delivery.unregister(&session_id);
+        shared.array_subscriber_cursors.remove_session(&session_id);
+    }
+
     // Unregister from presence: removes from all channels, broadcasts leave.
-    if presence_registered && let Some(shared) = shared {
+    if presence_registered && let Some(shared) = shared.as_ref() {
         let mut mgr = shared.presence.write().await;
         let outbound = mgr.unregister_session(&session_id);
         let senders = mgr.senders().clone();

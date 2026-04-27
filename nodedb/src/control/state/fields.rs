@@ -240,7 +240,7 @@ pub struct SharedState {
     pub topic_registry: crate::control::pubsub::TopicRegistry,
 
     /// Shape subscription registry for Lite client sync.
-    pub shape_registry: crate::control::server::sync::shape::ShapeRegistry,
+    pub shape_registry: Arc<crate::control::server::sync::shape::ShapeRegistry>,
 
     /// Change stream bus: broadcasts committed mutations to subscribers.
     pub change_stream: crate::control::change_stream::ChangeStream,
@@ -259,6 +259,63 @@ pub struct SharedState {
     /// Data-Plane `CoreLoop` so dispatch handlers can resolve array
     /// names and schema digests without crossing planes.
     pub array_catalog: crate::control::array_catalog::ArrayCatalogHandle,
+
+    /// Durable op-log for array CRDT sync (Phase F).
+    ///
+    /// Shared across sync sessions; append-only per op `(array, hlc)`.
+    pub array_sync_op_log: std::sync::Arc<crate::control::array_sync::OriginOpLog>,
+
+    /// Ack registry: per-replica acknowledged HLC per array (Phase H).
+    ///
+    /// Origin reads this in the GC task and in catch-up serving to determine
+    /// the GC frontier.
+    pub array_ack_registry: std::sync::Arc<crate::control::array_sync::ArrayAckRegistry>,
+
+    /// Tile snapshot store for array CRDT sync (Phase H).
+    ///
+    /// Snapshots are written by the GC task and read by the catch-up server.
+    pub array_snapshot_store: std::sync::Arc<crate::control::array_sync::OriginSnapshotStore>,
+
+    /// Per-array GC boundary HLC (Phase H).
+    ///
+    /// Written by the GC task after each compaction run; read by
+    /// `snapshot_trigger::check_and_trigger` to decide when to send a
+    /// `RetentionFloor` reject. `Hlc::ZERO` means no GC has occurred.
+    pub array_snapshot_hlcs: std::sync::Arc<
+        std::sync::RwLock<std::collections::HashMap<String, nodedb_array::sync::hlc::Hlc>>,
+    >,
+
+    /// GC background task handle (Phase H).
+    ///
+    /// Stored so `main.rs` can await it during shutdown.
+    pub array_gc_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// Per-array schema CRDT registry for array sync (Phase F).
+    ///
+    /// Persists Loro schema snapshots so Origin survives restarts without
+    /// requiring a full schema re-sync from Lite peers.
+    pub array_sync_schemas: std::sync::Arc<crate::control::array_sync::OriginSchemaRegistry>,
+
+    /// Per-session outbound array CRDT frame channels (Phase G).
+    ///
+    /// The sync listener registers a receiver here on authenticate and
+    /// drains it in its WebSocket send loop. `ArrayFanout` enqueues frames
+    /// into the matching session's channel after each applied op.
+    pub array_delivery: std::sync::Arc<crate::control::array_sync::ArrayDeliveryRegistry>,
+
+    /// Per-subscriber HLC cursor map for array outbound sync (Phase G).
+    ///
+    /// Shared between `ArrayFanout` (writer) and the subscribe handler
+    /// (initializer). Persists cursors across restarts.
+    pub array_subscriber_cursors: std::sync::Arc<crate::control::array_sync::SubscriberMap>,
+
+    /// Cross-shard merger registry for HLC-ordered multi-shard delivery (Phase I).
+    ///
+    /// `ArrayFanout` uses this to buffer ops from multiple vShards and drain
+    /// them in HLC order before forwarding to each subscriber's delivery channel.
+    /// Shared across all fanout instances so a subscriber's ops from different
+    /// shards converge in a single buffer.
+    pub array_merger_registry: std::sync::Arc<crate::control::array_sync::MergerRegistry>,
 
     /// Global surrogate registry — the source of monotonic
     /// `Surrogate(u32)` allocation that backs the cross-engine PK ↔

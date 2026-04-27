@@ -153,6 +153,38 @@ impl ShapeRegistry {
         sessions.len()
     }
 
+    /// Evaluate an array op against all active shapes.
+    ///
+    /// Returns a list of `(session_id, shape_id)` pairs for `ShapeType::Array`
+    /// shapes that match the mutation. The caller then pushes `ArrayDeltaMsg`
+    /// frames to the matching sessions.
+    ///
+    /// This is a sibling of [`evaluate_mutation`] rather than a refactor so
+    /// that the existing document/vector matching path is not disturbed.
+    pub fn evaluate_array_mutation(
+        &self,
+        tenant_id: u32,
+        array_name: &str,
+        coord: &[u64],
+    ) -> Vec<(String, ShapeId)> {
+        let sessions =
+            crate::control::lock_utils::read_or_recover(self.sessions.read(), "shape_sessions");
+        let mut matches = Vec::new();
+
+        for (session_id, client) in sessions.iter() {
+            if client.tenant_id != tenant_id {
+                continue;
+            }
+            for (shape_id, shape) in &client.shapes {
+                if shape.matches_array_op(array_name, coord) {
+                    matches.push((session_id.clone(), shape_id.clone()));
+                }
+            }
+        }
+
+        matches
+    }
+
     /// Get a shape definition by session + shape_id.
     pub fn get_shape(&self, session_id: &str, shape_id: &str) -> Option<ShapeDefinition> {
         let sessions =
@@ -272,5 +304,64 @@ mod tests {
 
         let matches = reg.evaluate_mutation(1, "users", "u1");
         assert!(matches.is_empty());
+    }
+
+    fn make_array_shape(id: &str, array: &str) -> ShapeDefinition {
+        ShapeDefinition {
+            shape_id: id.into(),
+            tenant_id: 1,
+            shape_type: ShapeType::Array {
+                array_name: array.into(),
+                coord_range: None,
+            },
+            description: format!("all {array}"),
+            field_filter: vec![],
+        }
+    }
+
+    #[test]
+    fn evaluate_array_mutation_matches() {
+        let reg = ShapeRegistry::new();
+        reg.subscribe("s1", 1, make_array_shape("ah1", "prices"));
+        reg.subscribe("s2", 1, make_array_shape("ah2", "prices"));
+        reg.subscribe("s3", 2, make_array_shape("ah3", "prices")); // Different tenant.
+        reg.subscribe("s4", 1, make_array_shape("ah4", "other")); // Different array.
+
+        let matches = reg.evaluate_array_mutation(1, "prices", &[5, 5]);
+        assert_eq!(matches.len(), 2);
+        let session_ids: Vec<&str> = matches.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(session_ids.contains(&"s1"));
+        assert!(session_ids.contains(&"s2"));
+    }
+
+    #[test]
+    fn evaluate_array_mutation_coord_range_filter() {
+        use nodedb_types::sync::shape::ArrayCoordRange;
+        let reg = ShapeRegistry::new();
+        let in_range = ShapeDefinition {
+            shape_id: "ar1".into(),
+            tenant_id: 1,
+            shape_type: ShapeType::Array {
+                array_name: "mat".into(),
+                coord_range: Some(ArrayCoordRange {
+                    start: vec![0],
+                    end: Some(vec![10]),
+                }),
+            },
+            description: "narrow".into(),
+            field_filter: vec![],
+        };
+        let all = make_array_shape("ar2", "mat");
+        reg.subscribe("s1", 1, in_range);
+        reg.subscribe("s2", 1, all);
+
+        // coord = [5] — in range for both.
+        let matches = reg.evaluate_array_mutation(1, "mat", &[5]);
+        assert_eq!(matches.len(), 2);
+
+        // coord = [50] — only the unbounded shape matches.
+        let matches = reg.evaluate_array_mutation(1, "mat", &[50]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, "s2");
     }
 }

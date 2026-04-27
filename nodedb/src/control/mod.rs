@@ -1,4 +1,5 @@
 pub mod array_catalog;
+pub mod array_sync;
 pub mod arrow_convert;
 pub mod backup;
 pub mod cascade;

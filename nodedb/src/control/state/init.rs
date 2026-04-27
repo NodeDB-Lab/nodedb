@@ -152,10 +152,61 @@ impl SharedState {
             idle_timeout_secs: 0,
             ws_sessions: std::sync::RwLock::new(std::collections::HashMap::new()),
             topic_registry: crate::control::pubsub::TopicRegistry::new(10_000),
-            shape_registry: crate::control::server::sync::shape::ShapeRegistry::new(),
+            shape_registry: Arc::new(crate::control::server::sync::shape::ShapeRegistry::new()),
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             trigger_registry: crate::control::trigger::TriggerRegistry::new(),
             array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
+            array_sync_op_log: {
+                std::sync::Arc::new(
+                    crate::control::array_sync::OriginOpLog::open_in_memory()
+                        .expect("failed to open test array op-log"),
+                )
+            },
+            array_ack_registry: {
+                crate::control::array_sync::ArrayAckRegistry::open_in_memory()
+                    .expect("failed to open test ack registry")
+            },
+            array_snapshot_store: {
+                crate::control::array_sync::OriginSnapshotStore::open_in_memory()
+                    .expect("failed to open test snapshot store")
+            },
+            array_snapshot_hlcs: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            array_gc_handle: None,
+            array_sync_schemas: {
+                let db = std::sync::Arc::new(
+                    redb::Database::builder()
+                        .create_with_backend(redb::backends::InMemoryBackend::new())
+                        .expect("failed to create test schema_registry db"),
+                );
+                {
+                    let txn = db.begin_write().expect("schema_registry init txn");
+                    txn.open_table(redb::TableDefinition::<&[u8], &[u8]>::new(
+                        "array_schema_docs",
+                    ))
+                    .expect("schema_registry init table");
+                    txn.commit().expect("schema_registry init commit");
+                }
+                let replica_id = nodedb_array::sync::ReplicaId::new(0);
+                let hlc_gen =
+                    std::sync::Arc::new(nodedb_array::sync::HlcGenerator::new(replica_id));
+                std::sync::Arc::new(
+                    crate::control::array_sync::OriginSchemaRegistry::open(db, replica_id, hlc_gen)
+                        .expect("failed to open test array schema registry"),
+                )
+            },
+            array_delivery: std::sync::Arc::new(
+                crate::control::array_sync::ArrayDeliveryRegistry::new(),
+            ),
+            array_subscriber_cursors: {
+                let store = crate::control::array_sync::SubscriberStore::in_memory()
+                    .expect("failed to open test subscriber store");
+                std::sync::Arc::new(crate::control::array_sync::SubscriberMap::new(store))
+            },
+            array_merger_registry: std::sync::Arc::new(
+                crate::control::array_sync::MergerRegistry::new(),
+            ),
             surrogate_registry: Arc::clone(&test_surrogate_registry),
             surrogate_assigner: Arc::clone(&test_surrogate_assigner),
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
@@ -420,6 +471,70 @@ impl SharedState {
             permissions,
             trigger_registry,
             array_catalog,
+            array_sync_op_log: {
+                let data_dir = catalog_path.parent().unwrap_or(std::path::Path::new("."));
+                std::sync::Arc::new(crate::control::array_sync::OriginOpLog::open(data_dir)?)
+            },
+            array_ack_registry: {
+                let data_dir = catalog_path.parent().unwrap_or(std::path::Path::new("."));
+                crate::control::array_sync::ArrayAckRegistry::open(data_dir)?
+            },
+            array_snapshot_store: {
+                let data_dir = catalog_path.parent().unwrap_or(std::path::Path::new("."));
+                crate::control::array_sync::OriginSnapshotStore::open(data_dir)?
+            },
+            array_snapshot_hlcs: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            array_gc_handle: None,
+            array_sync_schemas: {
+                let data_dir = catalog_path.parent().unwrap_or(std::path::Path::new("."));
+                let schema_db = {
+                    let dir = data_dir.join("array_sync");
+                    std::fs::create_dir_all(&dir).map_err(|e| crate::Error::Storage {
+                        engine: "array_sync".into(),
+                        detail: format!("create array_sync dir: {e}"),
+                    })?;
+                    let path = dir.join("schema_docs.redb");
+                    std::sync::Arc::new(redb::Database::create(&path).map_err(|e| {
+                        crate::Error::Storage {
+                            engine: "array_sync".into(),
+                            detail: format!("schema_registry db open: {e}"),
+                        }
+                    })?)
+                };
+                let replica_id = nodedb_array::sync::ReplicaId::new(0);
+                let hlc_gen =
+                    std::sync::Arc::new(nodedb_array::sync::HlcGenerator::new(replica_id));
+                std::sync::Arc::new(crate::control::array_sync::OriginSchemaRegistry::open(
+                    schema_db, replica_id, hlc_gen,
+                )?)
+            },
+            array_delivery: std::sync::Arc::new(
+                crate::control::array_sync::ArrayDeliveryRegistry::new(),
+            ),
+            array_subscriber_cursors: {
+                let data_dir = catalog_path.parent().unwrap_or(std::path::Path::new("."));
+                let cursor_db = {
+                    let dir = data_dir.join("array_sync");
+                    std::fs::create_dir_all(&dir).map_err(|e| crate::Error::Storage {
+                        engine: "array_sync".into(),
+                        detail: format!("create array_sync dir for cursors: {e}"),
+                    })?;
+                    let path = dir.join("subscriber_cursors.redb");
+                    std::sync::Arc::new(redb::Database::create(&path).map_err(|e| {
+                        crate::Error::Storage {
+                            engine: "array_sync".into(),
+                            detail: format!("subscriber_cursor db open: {e}"),
+                        }
+                    })?)
+                };
+                let store = crate::control::array_sync::SubscriberStore::open(cursor_db)?;
+                std::sync::Arc::new(crate::control::array_sync::SubscriberMap::new(store))
+            },
+            array_merger_registry: std::sync::Arc::new(
+                crate::control::array_sync::MergerRegistry::new(),
+            ),
             surrogate_registry: surrogate_registry_handle,
             surrogate_assigner,
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
@@ -514,7 +629,7 @@ impl SharedState {
             idle_timeout_secs: auth_config.idle_timeout_secs,
             ws_sessions: std::sync::RwLock::new(std::collections::HashMap::new()),
             topic_registry: crate::control::pubsub::TopicRegistry::new(10_000),
-            shape_registry: crate::control::server::sync::shape::ShapeRegistry::new(),
+            shape_registry: Arc::new(crate::control::server::sync::shape::ShapeRegistry::new()),
             change_stream: crate::control::change_stream::ChangeStream::new(4096),
             connections_rejected: AtomicU64::new(0),
             connections_accepted: AtomicU64::new(0),
@@ -551,6 +666,21 @@ impl SharedState {
         });
 
         Self::wire_session_handle_audit(&state);
+
+        // Spawn the array GC background task. The handle is stored by the caller
+        // (main.rs) which has mutable access at that point via Arc::get_mut.
+        // The task shuts itself down via ShutdownWatch, so dropping the handle
+        // here is safe — the task keeps running until shutdown is signalled.
+        let _gc_handle = crate::control::array_sync::spawn_gc_task(
+            Arc::clone(&state.array_sync_op_log),
+            Arc::clone(&state.array_snapshot_store),
+            Arc::clone(&state.array_ack_registry),
+            Arc::clone(&state.array_snapshot_hlcs),
+            Arc::clone(&state.shutdown),
+            crate::control::array_sync::gc_task::DEFAULT_GC_INTERVAL,
+        );
+        // `array_gc_handle` in SharedState stays None; main.rs may install the
+        // handle via Arc::get_mut after open() returns (before cloning the Arc).
 
         Ok(state)
     }

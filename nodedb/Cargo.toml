@@ -146,6 +146,7 @@ tokio-postgres = { workspace = true }
 proptest = "1"
 nodedb-types = { workspace = true }
 reqwest = { workspace = true }
+nodedb-array = { workspace = true, features = ["test-utils"] }
 
 [features]
 default = []

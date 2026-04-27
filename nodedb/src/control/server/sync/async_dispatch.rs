@@ -84,6 +84,53 @@ pub(super) async fn handle_shape_subscribe_async(
             // For now, return empty — full graph snapshot needs BFS dispatch.
             super::shape::handler::ShapeSnapshotData::empty()
         }
+        nodedb_types::sync::shape::ShapeType::Array {
+            array_name,
+            coord_range,
+        } => {
+            // Array shapes: validate the array exists, initialize the subscriber
+            // cursor, and return empty snapshot data. Full catch-up (op-log
+            // replay or tile snapshot) is driven by Phase H on the Lite side.
+            //
+            // 1. Validate the array exists in the schema registry.
+            let array_known = shared.array_sync_schemas.schema_hlc(array_name).is_some();
+            if !array_known {
+                warn!(
+                    session = %session.session_id,
+                    array = %array_name,
+                    "array shape subscribe: array not known to Origin schema registry"
+                );
+                // Return without registering — the subscribe response will go
+                // back with an empty snapshot, and the Lite peer will retry
+                // when the schema is synced.
+                shared.tenant_request_end(tid);
+                return super::shape::handler::handle_subscribe(
+                    &session.session_id,
+                    tenant_id,
+                    &msg,
+                    &super::shape::registry::ShapeRegistry::new(),
+                    current_lsn,
+                    |_, _| super::shape::handler::ShapeSnapshotData::empty(),
+                );
+            }
+
+            // 2. Initialize the subscriber cursor at Hlc::ZERO so Phase H's
+            //    catch-up path delivers all history on first sync.
+            shared.array_subscriber_cursors.register(
+                &session.session_id,
+                array_name,
+                coord_range.clone(),
+            );
+
+            info!(
+                session = %session.session_id,
+                array = %array_name,
+                "array shape subscribed; cursor initialized at HLC::ZERO"
+            );
+
+            // 3. Return empty snapshot data — catch-up via Phase H.
+            super::shape::handler::ShapeSnapshotData::empty()
+        }
     };
 
     shared.tenant_request_end(tid);
