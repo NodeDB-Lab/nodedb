@@ -5,7 +5,9 @@
 //! through to the standard sqlparser path. When the prefix matches, the
 //! parser commits — any further error is surfaced as `SqlError::Parse`.
 
-use super::ast::{ArrayStatement, CreateArrayAst, DeleteArrayAst, DropArrayAst, InsertArrayAst};
+use super::ast::{
+    AlterArrayAst, ArrayStatement, CreateArrayAst, DeleteArrayAst, DropArrayAst, InsertArrayAst,
+};
 use super::lexer::{Tok, Token, tokenize};
 use crate::error::{Result, SqlError};
 use crate::types_array::{
@@ -52,6 +54,13 @@ pub fn try_parse_array_statement(sql: &str) -> Result<Option<ArrayStatement>> {
         p.expect_kw("FROM")?;
         p.expect_kw("ARRAY")?;
         return Ok(Some(ArrayStatement::Delete(p.parse_delete()?)));
+    }
+    if upper.starts_with("ALTER NDARRAY ") || upper == "ALTER NDARRAY" {
+        let toks = tokenize(trimmed)?;
+        let mut p = Parser::new(&toks);
+        p.expect_kw("ALTER")?;
+        p.expect_kw("NDARRAY")?;
+        return Ok(Some(ArrayStatement::Alter(p.parse_alter()?)));
     }
     Ok(None)
 }
@@ -412,6 +421,80 @@ impl<'a> Parser<'a> {
         }
     }
 
+    // ── ALTER NDARRAY ────────────────────────────────────────────
+
+    fn parse_alter(&mut self) -> Result<AlterArrayAst> {
+        let name = self.expect_ident()?;
+        self.expect_kw("SET")?;
+        self.expect(&Tok::LParen)?;
+        let mut set = Vec::new();
+        loop {
+            let key = self.expect_ident()?;
+            self.expect(&Tok::Eq)?;
+            let value = match self.peek() {
+                Some(Tok::Null) => {
+                    self.i += 1;
+                    None
+                }
+                Some(Tok::Int(_)) => {
+                    let n = self.expect_int()?;
+                    Some(n)
+                }
+                other => {
+                    return Err(self.err(format!(
+                        "SET {key}: expected integer or NULL, got {other:?}"
+                    )));
+                }
+            };
+            let key_lower = key.to_ascii_lowercase();
+            match key_lower.as_str() {
+                "audit_retain_ms" => {
+                    if let Some(n) = value
+                        && n < 0
+                    {
+                        return Err(
+                            self.err(format!("SET audit_retain_ms = {n}: must be >= 0 or NULL"))
+                        );
+                    }
+                }
+                "minimum_audit_retain_ms" => match value {
+                    Some(n) if n < 0 => {
+                        return Err(
+                            self.err(format!("SET minimum_audit_retain_ms = {n}: must be >= 0"))
+                        );
+                    }
+                    None => {
+                        return Err(self.err(
+                            "SET minimum_audit_retain_ms = NULL: floor cannot be NULL".to_string(),
+                        ));
+                    }
+                    _ => {}
+                },
+                other => {
+                    return Err(self.err(format!(
+                        "SET: unknown key `{other}`; expected `audit_retain_ms` \
+                         or `minimum_audit_retain_ms`"
+                    )));
+                }
+            }
+            set.push((key_lower, value));
+            if !self.match_token(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RParen)?;
+        if !self.at_end() {
+            return Err(self.err(format!(
+                "trailing tokens after ALTER NDARRAY: {:?}",
+                self.peek()
+            )));
+        }
+        if set.is_empty() {
+            return Err(self.err("ALTER NDARRAY SET (): at least one key is required"));
+        }
+        Ok(AlterArrayAst { name, set })
+    }
+
     // ── DELETE FROM ARRAY ────────────────────────────────────────
 
     fn parse_delete(&mut self) -> Result<DeleteArrayAst> {
@@ -614,5 +697,76 @@ mod tests {
                    TILE_EXTENTS (1) \
                    WITH (audit_retain_ms = -1)";
         assert!(try_parse_array_statement(sql).is_err());
+    }
+
+    #[test]
+    fn parse_alter_ndarray_single_key() {
+        let sql = "ALTER NDARRAY my_array SET (audit_retain_ms = 86400000)";
+        let stmt = try_parse_array_statement(sql).unwrap().unwrap();
+        match stmt {
+            ArrayStatement::Alter(a) => {
+                assert_eq!(a.name, "my_array");
+                assert_eq!(a.set.len(), 1);
+                assert_eq!(a.set[0].0, "audit_retain_ms");
+                assert_eq!(a.set[0].1, Some(86_400_000));
+            }
+            _ => panic!("expected Alter variant"),
+        }
+    }
+
+    #[test]
+    fn parse_alter_ndarray_null_value() {
+        let sql = "ALTER NDARRAY my_array SET (audit_retain_ms = NULL)";
+        let stmt = try_parse_array_statement(sql).unwrap().unwrap();
+        match stmt {
+            ArrayStatement::Alter(a) => {
+                assert_eq!(a.set[0].0, "audit_retain_ms");
+                assert_eq!(a.set[0].1, None);
+            }
+            _ => panic!("expected Alter variant"),
+        }
+    }
+
+    #[test]
+    fn parse_alter_ndarray_multi_key() {
+        let sql = "ALTER NDARRAY arr SET (audit_retain_ms = 5000, minimum_audit_retain_ms = 1000)";
+        let stmt = try_parse_array_statement(sql).unwrap().unwrap();
+        match stmt {
+            ArrayStatement::Alter(a) => {
+                assert_eq!(a.set.len(), 2);
+                assert!(
+                    a.set
+                        .iter()
+                        .any(|(k, v)| k == "audit_retain_ms" && *v == Some(5000))
+                );
+                assert!(
+                    a.set
+                        .iter()
+                        .any(|(k, v)| k == "minimum_audit_retain_ms" && *v == Some(1000))
+                );
+            }
+            _ => panic!("expected Alter variant"),
+        }
+    }
+
+    #[test]
+    fn parse_alter_ndarray_unknown_key_rejected() {
+        let sql = "ALTER NDARRAY arr SET (bogus_key = 42)";
+        assert!(try_parse_array_statement(sql).is_err());
+    }
+
+    #[test]
+    fn parse_alter_ndarray_minimum_null_rejected() {
+        let sql = "ALTER NDARRAY arr SET (minimum_audit_retain_ms = NULL)";
+        assert!(try_parse_array_statement(sql).is_err());
+    }
+
+    #[test]
+    fn parse_alter_not_matched_for_other_sql() {
+        assert!(
+            try_parse_array_statement("ALTER TABLE foo ADD COLUMN x INT")
+                .unwrap()
+                .is_none()
+        );
     }
 }

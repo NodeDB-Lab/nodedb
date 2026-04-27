@@ -12,6 +12,20 @@ pub enum ArrayStatement {
     Drop(DropArrayAst),
     Insert(InsertArrayAst),
     Delete(DeleteArrayAst),
+    Alter(AlterArrayAst),
+}
+
+/// `ALTER NDARRAY <name> SET ( key = value [, key = value]* )`
+///
+/// Supported keys:
+/// - `audit_retain_ms`         — `NULL` or non-negative integer.
+/// - `minimum_audit_retain_ms` — non-negative integer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterArrayAst {
+    pub name: String,
+    /// Key-value pairs from the SET clause. Values are either integer
+    /// literals or NULL (represented as `None`).
+    pub set: Vec<(String, Option<i64>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

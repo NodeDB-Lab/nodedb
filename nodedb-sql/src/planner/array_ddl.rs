@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use crate::error::{Result, SqlError};
-use crate::parser::array_stmt::{CreateArrayAst, DropArrayAst};
+use crate::parser::array_stmt::{AlterArrayAst, CreateArrayAst, DropArrayAst};
 use crate::types::SqlPlan;
 use crate::types_array::{ArrayDimType, ArrayDomainBound};
 
@@ -110,6 +110,54 @@ pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
         prefix_bits: ast.prefix_bits,
         audit_retain_ms: ast.audit_retain_ms,
         minimum_audit_retain_ms: ast.minimum_audit_retain_ms,
+    })
+}
+
+pub fn plan_alter_array(ast: &AlterArrayAst) -> Result<SqlPlan> {
+    if ast.name.is_empty() {
+        return Err(SqlError::Parse {
+            detail: "ALTER NDARRAY: array name must not be empty".into(),
+        });
+    }
+    if ast.set.is_empty() {
+        return Err(SqlError::Parse {
+            detail: format!("ALTER NDARRAY {}: SET clause is empty", ast.name),
+        });
+    }
+
+    let mut audit_retain_ms: Option<Option<i64>> = None;
+    let mut minimum_audit_retain_ms: Option<u64> = None;
+
+    for (key, value) in &ast.set {
+        match key.as_str() {
+            "audit_retain_ms" => {
+                audit_retain_ms = Some(*value);
+            }
+            "minimum_audit_retain_ms" => {
+                let n = value.ok_or_else(|| SqlError::Parse {
+                    detail: format!(
+                        "ALTER NDARRAY {}: minimum_audit_retain_ms cannot be NULL",
+                        ast.name
+                    ),
+                })?;
+                minimum_audit_retain_ms = Some(n as u64);
+            }
+            other => {
+                return Err(SqlError::Parse {
+                    detail: format!(
+                        "ALTER NDARRAY {}: unknown SET key `{other}`; \
+                         expected `audit_retain_ms` or `minimum_audit_retain_ms`",
+                        ast.name
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(SqlPlan::AlterArray {
+        name: ast.name.clone(),
+        audit_retain_ms,
+        minimum_audit_retain_ms,
     })
 }
 

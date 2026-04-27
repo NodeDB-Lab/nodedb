@@ -170,5 +170,6 @@ fn plan_array_statement(stmt: ArrayStatement, catalog: &dyn SqlCatalog) -> Resul
         ArrayStatement::Drop(d) => Ok(vec![planner::array_ddl::plan_drop_array(&d)?]),
         ArrayStatement::Insert(i) => planner::array_dml::plan_insert_array(&i, catalog),
         ArrayStatement::Delete(d) => planner::array_dml::plan_delete_array(&d, catalog),
+        ArrayStatement::Alter(a) => Ok(vec![planner::array_ddl::plan_alter_array(&a)?]),
     }
 }

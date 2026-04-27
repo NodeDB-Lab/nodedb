@@ -9,5 +9,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parse;
 
-pub use ast::{ArrayStatement, CreateArrayAst, DeleteArrayAst, DropArrayAst, InsertArrayAst};
+pub use ast::{
+    AlterArrayAst, ArrayStatement, CreateArrayAst, DeleteArrayAst, DropArrayAst, InsertArrayAst,
+};
 pub use parse::try_parse_array_statement;

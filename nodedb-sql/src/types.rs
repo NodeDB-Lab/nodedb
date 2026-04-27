@@ -309,6 +309,20 @@ pub enum SqlPlan {
     /// `DROP ARRAY [IF EXISTS] <name>` — pure Control-Plane catalog
     /// mutation. Per-core array store cleanup happens lazily.
     DropArray { name: String, if_exists: bool },
+    /// `ALTER NDARRAY <name> SET (audit_retain_ms = N, ...)`.
+    ///
+    /// Double-`Option` semantics for each diff field:
+    /// - `None`          = key was absent from SET clause → field unchanged.
+    /// - `Some(None)`    = key present with value `NULL` → field set to NULL.
+    /// - `Some(Some(v))` = key present with integer value → field set to v.
+    AlterArray {
+        name: String,
+        /// New value for `audit_retain_ms`. `Some(None)` unregisters
+        /// the array from the bitemporal retention registry.
+        audit_retain_ms: Option<Option<i64>>,
+        /// New value for `minimum_audit_retain_ms`. Cannot be NULL.
+        minimum_audit_retain_ms: Option<u64>,
+    },
     /// `INSERT INTO ARRAY <name> COORDS (...) VALUES (...) [, ...]`.
     InsertArray {
         name: String,
