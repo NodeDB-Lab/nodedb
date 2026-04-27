@@ -3,6 +3,7 @@
 
 use sqlparser::ast::{self, Query, SetExpr};
 
+use super::entry_ann::parse_ann_options;
 use super::helpers::{
     extract_column_name, extract_float, extract_float_array, extract_func_args,
     extract_string_literal,
@@ -14,6 +15,13 @@ use crate::parser::normalize::normalize_ident;
 use crate::resolver::expr::convert_expr;
 use crate::temporal::TemporalScope;
 use crate::types::*;
+
+/// Default `ef_search` multiplier applied when the user has not supplied
+/// `ef_search_override` in the `vector_distance` options. Wider beams trade
+/// extra distance computations for higher recall; `2 * top_k` is a standard
+/// HNSW heuristic that keeps planning predictable while leaving room for
+/// the executor's own recall-based escalation.
+const DEFAULT_EF_SEARCH_MULTIPLIER: usize = 2;
 
 /// Plan a SELECT query.
 pub fn plan_query(
@@ -195,22 +203,27 @@ fn try_extract_sort_search(
                 }
                 let field = extract_column_name(&args[0])?;
                 let vector = extract_float_array(&args[1])?;
+                let ann_options = parse_ann_options(args.get(2))?;
                 let limit = match plan {
                     SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
                     SqlPlan::Join { limit, .. } => *limit,
                     _ => 10,
                 };
+                let ef_search = ann_options
+                    .ef_search_override
+                    .unwrap_or(limit * DEFAULT_EF_SEARCH_MULTIPLIER);
                 return Ok(Some(SqlPlan::VectorSearch {
                     collection,
                     field,
                     query_vector: vector,
                     top_k: limit,
-                    ef_search: limit * 2,
+                    ef_search,
                     filters: match plan {
                         SqlPlan::Scan { filters, .. } => filters.clone(),
                         _ => Vec::new(),
                     },
                     array_prefilter,
+                    ann_options,
                 }));
             }
             SearchTrigger::TextSearch if args.len() >= 2 => {
@@ -337,6 +350,7 @@ fn apply_limit(mut plan: SqlPlan, limit_clause: &Option<ast::LimitClause>) -> Sq
         SqlPlan::VectorSearch {
             top_k: ref mut k,
             ef_search: ref mut ef,
+            ann_options: ref opts,
             ..
         } => {
             // Fused VectorSearch (e.g. ORDER BY vector_distance + JOIN
@@ -345,7 +359,9 @@ fn apply_limit(mut plan: SqlPlan, limit_clause: &Option<ast::LimitClause>) -> Sq
             // 10000 limit instead of the user's `LIMIT N`.
             if let Some(lv) = limit_val {
                 *k = lv;
-                *ef = lv * 2;
+                *ef = opts
+                    .ef_search_override
+                    .unwrap_or(lv * DEFAULT_EF_SEARCH_MULTIPLIER);
             }
         }
         _ => {}

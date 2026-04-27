@@ -5,6 +5,7 @@
 //! instead of reverse-engineering an optimizer's output.
 
 mod entry;
+mod entry_ann;
 mod helpers;
 mod select_stmt;
 mod where_search;

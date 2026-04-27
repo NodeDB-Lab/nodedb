@@ -233,3 +233,45 @@ fn order_by_vector_distance_with_array_join_fuses_into_vector_search() {
     assert_eq!(prefilter.array_name, "genome");
     assert_eq!(prefilter.slice.dim_ranges.len(), 2);
 }
+
+#[test]
+fn vector_distance_two_args_produces_default_ann_options() {
+    let plan = plan_select_sql(
+        "SELECT id FROM embeddings ORDER BY vector_distance(embedding, [1.0, 0.0]) LIMIT 5",
+    );
+    let SqlPlan::VectorSearch { ann_options, .. } = plan else {
+        panic!("expected VectorSearch plan");
+    };
+    assert_eq!(ann_options, VectorAnnOptions::default());
+}
+
+#[test]
+fn vector_distance_three_args_parses_ann_options() {
+    let plan = plan_select_sql(
+        r#"SELECT id FROM embeddings ORDER BY vector_distance(embedding, [1.0, 0.0], '{"quantization":"rabitq","oversample":3}') LIMIT 5"#,
+    );
+    let SqlPlan::VectorSearch {
+        ann_options,
+        ef_search,
+        top_k,
+        ..
+    } = plan
+    else {
+        panic!("expected VectorSearch plan");
+    };
+    assert_eq!(ann_options.quantization, Some(VectorQuantization::RaBitQ));
+    assert_eq!(ann_options.oversample, Some(3));
+    // ef_search falls back to top_k * 2 (no ef_search_override in this JSON).
+    assert_eq!(ef_search, top_k * 2);
+}
+
+#[test]
+fn vector_distance_ef_search_override_applied() {
+    let plan = plan_select_sql(
+        r#"SELECT id FROM embeddings ORDER BY vector_distance(embedding, [1.0], '{"ef_search_override":150}') LIMIT 5"#,
+    );
+    let SqlPlan::VectorSearch { ef_search, .. } = plan else {
+        panic!("expected VectorSearch plan");
+    };
+    assert_eq!(ef_search, 150);
+}

@@ -3984,6 +3984,7 @@ dependencies = [
  "chrono",
  "nodedb-query",
  "nodedb-types",
+ "sonic-rs",
  "sqlparser",
  "thiserror 2.0.18",
 ]

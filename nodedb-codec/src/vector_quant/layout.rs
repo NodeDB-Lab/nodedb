@@ -32,9 +32,9 @@ pub enum QuantMode {
     TurboQuant4b = 5,
     Sq8 = 6,
     Pq = 7,
-    /// Reserved for ITQ3_S (Tier 14).
+    /// Reserved discriminant for ITQ3_S (Interleaved Ternary Quantization).
     Itq3S = 8,
-    /// Reserved for PolarQuant (Tier 14).
+    /// Reserved discriminant for PolarQuant (Cartesian→polar 0.5 bpw).
     PolarQuant = 9,
 }
 

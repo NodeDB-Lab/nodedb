@@ -14,6 +14,69 @@ pub struct NdArrayPrefilter {
     pub slice: crate::types_array::ArraySliceAst,
 }
 
+/// Knobs the vector planner exposes via SQL.
+///
+/// All fields default to `None` / sensible defaults, in which case the
+/// executor falls back to the collection's configured quantization and
+/// `ef_search` heuristic.
+///
+/// Parsed from an optional JSON-string third argument to
+/// `vector_distance(field, query, '{"quantization":"rabitq","oversample":3}')`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VectorAnnOptions {
+    pub quantization: Option<VectorQuantization>,
+    pub oversample: Option<u8>,
+    pub query_dim: Option<u32>,
+    pub meta_token_budget: Option<u8>,
+    /// Override `ef_search`; falls back to `2 * top_k` when None.
+    pub ef_search_override: Option<usize>,
+    /// Target recall used with the cost model to escalate from coarse to
+    /// fine quantization.
+    pub target_recall: Option<f32>,
+}
+
+/// Quantization choices exposed at SQL level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorQuantization {
+    None,
+    Sq8,
+    Pq,
+    RaBitQ,
+    Bbq,
+    Binary,
+    Ternary,
+    Opq,
+}
+
+impl VectorQuantization {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Sq8 => "sq8",
+            Self::Pq => "pq",
+            Self::RaBitQ => "rabitq",
+            Self::Bbq => "bbq",
+            Self::Binary => "binary",
+            Self::Ternary => "ternary",
+            Self::Opq => "opq",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "sq8" => Some(Self::Sq8),
+            "pq" => Some(Self::Pq),
+            "rabitq" => Some(Self::RaBitQ),
+            "bbq" => Some(Self::Bbq),
+            "binary" => Some(Self::Binary),
+            "ternary" => Some(Self::Ternary),
+            "opq" => Some(Self::Opq),
+            _ => None,
+        }
+    }
+}
+
 /// The top-level plan produced by the SQL planner.
 #[derive(Debug, Clone)]
 pub enum SqlPlan {
@@ -217,6 +280,9 @@ pub enum SqlPlan {
         /// `NDARRAY_SLICE(...)`. The convert layer lowers this to
         /// `VectorOp::Search { inline_prefilter_plan: Some(ArrayOp::SurrogateBitmapScan) }`.
         array_prefilter: Option<NdArrayPrefilter>,
+        /// ANN knobs parsed from the optional third JSON-string argument
+        /// to `vector_distance(field, query, '{...}')`.
+        ann_options: VectorAnnOptions,
     },
     MultiVectorSearch {
         collection: String,
