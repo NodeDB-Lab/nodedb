@@ -1,3 +1,4 @@
+pub mod array_routing;
 pub mod bootstrap;
 pub mod bootstrap_listener;
 pub mod catalog;
@@ -102,6 +103,7 @@ pub use metadata_group::{
 };
 pub use quic_transport::{QuicTransport, QuicTransportConfig};
 
+pub use array_routing::{tile_id_of_coord, vshard_for_array_coord, vshard_for_array_tile};
 pub use distributed_join::{BroadcastJoinRequest, JoinStrategy, ShufflePartition, select_strategy};
 pub use lifecycle::{
     DecommissionResult, handle_learner_promotion, handle_node_join, plan_decommission,
