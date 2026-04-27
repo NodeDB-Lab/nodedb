@@ -41,6 +41,8 @@ pub enum Namespace {
     /// KV engine: direct key-value storage (bypasses Loro CRDT).
     /// Used when sync is disabled or for the local-only KV fast path.
     Kv = 8,
+    /// Array engine: ND sparse arrays, catalog, manifests, segment bytes.
+    Array = 9,
 }
 
 impl Namespace {
@@ -56,6 +58,7 @@ impl Namespace {
             6 => Some(Self::Strict),
             7 => Some(Self::Columnar),
             8 => Some(Self::Kv),
+            9 => Some(Self::Array),
             _ => None,
         }
     }
@@ -67,10 +70,10 @@ mod tests {
 
     #[test]
     fn namespace_roundtrip() {
-        for v in 0u8..=8 {
+        for v in 0u8..=9 {
             let ns = Namespace::from_u8(v).unwrap();
             assert_eq!(ns as u8, v);
         }
-        assert!(Namespace::from_u8(9).is_none());
+        assert!(Namespace::from_u8(10).is_none());
     }
 }
