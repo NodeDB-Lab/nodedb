@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
 use crate::control::state::SharedState;
-use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
+use crate::types::{ReadConsistency, TenantId, VShardId};
 
 /// Send `plan` to the Data Plane and await the response.
 ///
@@ -44,12 +44,7 @@ pub async fn dispatch_async_with_source(
     event_source: crate::event::EventSource,
 ) -> crate::Result<Vec<u8>> {
     let vshard_id = VShardId::from_collection(collection);
-    let request_id = RequestId::new(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64,
-    );
+    let request_id = state.next_request_id();
 
     let request = Request {
         request_id,

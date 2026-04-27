@@ -268,10 +268,11 @@ impl MetadataCommitApplier {
             // moving past `last` is guaranteed to see the sync side
             // effects of every entry up to `last`.
             //
-            // The async tail (today: Data Plane Register dispatches
-            // for PutCollection) is spawned separately and is NOT
-            // part of the applied-index contract — it's a
-            // performance optimisation, not a correctness gate.
+            // `PutCollection` Register dispatch runs synchronously
+            // (block_in_place) inside spawn_post_apply_async_side_effects
+            // and IS part of the applied-index contract: the watcher
+            // only bumps after doc_configs is populated on every core,
+            // so subsequent scans always find the schema.
             catalog_entry::post_apply::apply_post_apply_side_effects_sync(&stamped, &shared);
 
             // J.4: emit a DdlChange audit record on every replica.

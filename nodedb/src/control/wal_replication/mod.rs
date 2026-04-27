@@ -11,7 +11,7 @@ pub mod types;
 
 pub use decode::from_replicated_entry;
 pub use encode::to_replicated_entry;
-pub use types::{RaftProposer, ReplicatedEntry, ReplicatedWrite};
+pub use types::{AsyncRaftProposer, RaftProposer, ReplicatedEntry, ReplicatedWrite};
 
 pub use crate::control::distributed_applier::{
     ApplyBatch, DistributedApplier, ProposeResult, ProposeTracker, create_distributed_applier,

@@ -156,7 +156,18 @@ impl OriginArrayInbound {
 
         let mut ops_applied: u64 = 0;
         for op in &ops {
-            match self.apply_op(op.clone()).await {
+            let raw = match op_codec::encode_op(op) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(
+                        array = %msg.array,
+                        error = %e,
+                        "array_inbound: snapshot op re-encode failed; skipping"
+                    );
+                    continue;
+                }
+            };
+            match self.apply_op(op.clone(), &raw).await {
                 Ok(InboundOutcome::Applied) => ops_applied += 1,
                 Ok(_) => {}
                 Err(Some(reject)) => {

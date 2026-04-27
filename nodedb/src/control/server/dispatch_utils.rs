@@ -2,22 +2,19 @@
 //!
 //! Re-exports from focused sub-modules for backward compatibility.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::bridge::envelope::Payload;
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
 use crate::bridge::physical_plan::{DocumentOp, KvOp, TimeseriesOp};
 use crate::control::state::SharedState;
-use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
+use crate::types::{ReadConsistency, TenantId, VShardId};
 
 pub use super::broadcast::{broadcast_count_to_all_cores, broadcast_raw, broadcast_to_all_cores};
 pub use super::graph_dispatch::{
     cross_core_bfs, cross_core_bfs_with_options, cross_core_shortest_path,
 };
 pub use super::wal_dispatch::wal_append_if_write;
-
-static DISPATCH_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
 
 #[derive(Debug)]
 pub(crate) enum DispatchCollectError {
@@ -136,7 +133,7 @@ pub async fn dispatch_to_data_plane_with_source(
     let dispatch_started = Instant::now();
     let vshard_u16 = vshard_id.as_u16();
 
-    let request_id = RequestId::new(DISPATCH_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let request_id = shared.next_request_id();
     let request = Request {
         request_id,
         tenant_id,
@@ -393,7 +390,7 @@ fn is_timeseries_cdc_enabled(shared: &SharedState, tenant_id: TenantId, collecti
 mod collect_budget_tests {
     use super::*;
     use crate::bridge::envelope::{Payload, Status};
-    use crate::types::Lsn;
+    use crate::types::{Lsn, RequestId};
     use tokio::sync::mpsc;
 
     fn partial(bytes: usize) -> Response {

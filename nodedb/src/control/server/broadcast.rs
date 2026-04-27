@@ -12,14 +12,10 @@ use crate::control::arrow_convert;
 use crate::control::state::SharedState;
 use crate::types::{Lsn, ReadConsistency, RequestId, TenantId, VShardId};
 
-static BROADCAST_COUNTER: AtomicU64 = AtomicU64::new(2_000_000);
-
 /// Total number of `broadcast_to_all_cores` / `broadcast_count_to_all_cores`
 /// invocations since process start. Exposed so callers (including test
 /// harnesses) can assert O(hops) call-count budgets on batched BFS
-/// paths. Separate from `BROADCAST_COUNTER`, which allocates request
-/// IDs — that grows by `num_cores` per call, so it's a poor call-count
-/// proxy.
+/// paths.
 static BROADCAST_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Read the total broadcast call count for observability / tests.
@@ -46,7 +42,7 @@ pub async fn broadcast_to_all_cores(
 
     let mut receivers = Vec::with_capacity(num_cores);
     for core_id in 0..num_cores {
-        let request_id = RequestId::new(BROADCAST_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let request_id = shared.next_request_id();
         let vshard_id = VShardId::new(core_id as u16);
         let request = Request {
             request_id,
@@ -168,7 +164,7 @@ pub async fn broadcast_count_to_all_cores(
 
     let mut receivers = Vec::with_capacity(num_cores);
     for core_id in 0..num_cores {
-        let request_id = RequestId::new(BROADCAST_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let request_id = shared.next_request_id();
         let vshard_id = VShardId::new(core_id as u16);
         let request = Request {
             request_id,
@@ -267,7 +263,7 @@ pub async fn broadcast_raw(
 
     let mut receivers = Vec::with_capacity(num_cores);
     for core_id in 0..num_cores {
-        let request_id = RequestId::new(BROADCAST_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let request_id = shared.next_request_id();
         let vshard_id = VShardId::new(core_id as u16);
         let request = Request {
             request_id,

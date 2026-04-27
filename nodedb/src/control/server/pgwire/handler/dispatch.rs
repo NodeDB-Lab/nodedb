@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::bridge::envelope::{Payload, Priority, Request, Response};
+use crate::bridge::envelope::{Priority, Request, Response};
 use crate::control::planner::physical::PhysicalTask;
 use crate::types::{Lsn, ReadConsistency};
 use sonic_rs;
@@ -255,78 +255,50 @@ impl NodeDbPgHandler {
             return Ok(resp);
         }
 
-        if let (Some(proposer), Some(tracker)) =
-            (&self.state.raft_proposer, &self.state.propose_tracker)
+        if let Some(async_proposer) = self.state.async_raft_proposer.get()
             && let Some(entry) = crate::control::wal_replication::to_replicated_entry(
                 task.tenant_id,
                 task.vshard_id,
                 &task.plan,
             )
         {
-            return self
-                .dispatch_replicated_write(entry, proposer, tracker)
-                .await;
+            return self.dispatch_replicated_write(entry, async_proposer).await;
         }
 
         self.dispatch_local(task).await
     }
 
-    /// Dispatch a write through Raft: propose → await commit → return result.
+    /// Dispatch a write through Raft: propose → register waiter → await apply.
+    ///
+    /// The `AsyncRaftProposer` handles propose + waiter registration in one
+    /// step. The `ProposeTracker` is race-safe: if the entry commits and
+    /// applies on this node before `register()` is called, the result is
+    /// stored and `register()` picks it up immediately.
     async fn dispatch_replicated_write(
         &self,
         entry: crate::control::wal_replication::ReplicatedEntry,
-        proposer: &Arc<crate::control::wal_replication::RaftProposer>,
-        tracker: &Arc<crate::control::wal_replication::ProposeTracker>,
+        proposer: &Arc<crate::control::wal_replication::AsyncRaftProposer>,
     ) -> crate::Result<Response> {
         let data = entry.to_bytes();
         let vshard_id = entry.vshard_id;
 
         let request_id = self.next_request_id();
 
-        let (group_id, log_index) =
-            proposer(vshard_id, data).map_err(|e| crate::Error::Dispatch {
+        let payload = proposer(vshard_id, data)
+            .await
+            .map_err(|e| crate::Error::Dispatch {
                 detail: format!("raft propose failed: {e}"),
             })?;
 
-        let rx = tracker.register(group_id, log_index);
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(self.state.tuning.network.default_deadline_secs),
-            rx,
-        )
-        .await
-        .map_err(|_| crate::Error::Dispatch {
-            detail: format!("raft commit timeout for group {group_id} index {log_index}"),
-        })?
-        .map_err(|_| crate::Error::Dispatch {
-            detail: "propose waiter channel closed".into(),
-        })?;
-
-        match result {
-            Ok(payload) => Ok(Response {
-                request_id,
-                status: crate::bridge::envelope::Status::Ok,
-                attempt: 1,
-                partial: false,
-                payload: payload.into(),
-                watermark_lsn: Lsn::new(log_index),
-                error_code: None,
-            }),
-            Err(err_msg) => {
-                let err_str = err_msg.to_string();
-                Ok(Response {
-                    request_id,
-                    status: crate::bridge::envelope::Status::Error,
-                    attempt: 1,
-                    partial: false,
-                    payload: Payload::from_arc(Arc::from(err_str.as_bytes())),
-                    watermark_lsn: Lsn::new(0),
-                    error_code: Some(crate::bridge::envelope::ErrorCode::Internal {
-                        detail: err_str,
-                    }),
-                })
-            }
-        }
+        Ok(Response {
+            request_id,
+            status: crate::bridge::envelope::Status::Ok,
+            attempt: 1,
+            partial: false,
+            payload: payload.into(),
+            watermark_lsn: Lsn::new(0),
+            error_code: None,
+        })
     }
 
     /// Dispatch a task directly to the local Data Plane (single-node or reads).

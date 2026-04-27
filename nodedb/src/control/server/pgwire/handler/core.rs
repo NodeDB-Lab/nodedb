@@ -4,7 +4,6 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use futures::SinkExt;
@@ -47,7 +46,6 @@ use super::prepared::{NodeDbQueryParser, ParsedStatement};
 pub struct NodeDbPgHandler {
     pub(crate) state: Arc<SharedState>,
     pub(super) query_ctx: QueryContext,
-    next_request_id: AtomicU64,
     query_parser: Arc<NodeDbQueryParser>,
     auth_mode: AuthMode,
     /// Per-connection session state (transaction blocks, parameters).
@@ -69,7 +67,6 @@ impl NodeDbPgHandler {
         Self {
             state,
             query_ctx,
-            next_request_id: AtomicU64::new(1_000_000),
             query_parser,
             auth_mode,
             sessions: SessionStore::new(),
@@ -78,7 +75,7 @@ impl NodeDbPgHandler {
     }
 
     pub(super) fn next_request_id(&self) -> RequestId {
-        RequestId::new(self.next_request_id.fetch_add(1, Ordering::Relaxed))
+        self.state.next_request_id()
     }
 
     /// Resolve the authenticated identity from pgwire client metadata.

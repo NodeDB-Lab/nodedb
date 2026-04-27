@@ -11,7 +11,7 @@ use tracing::debug;
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
 use crate::bridge::physical_plan::MetaOp;
 use crate::control::state::SharedState;
-use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
+use crate::types::{ReadConsistency, TenantId, VShardId};
 
 /// Dispatch `MetaOp::UnregisterMaterializedView` to every core on
 /// this node. Fire-and-forget: any core that fails or times out
@@ -24,14 +24,11 @@ pub async fn delete_async(tenant_id: u32, name: String, shared: Arc<SharedState>
     };
     let timeout = std::time::Duration::from_secs(30);
     let mut receivers = Vec::with_capacity(num_cores);
-    static MV_UNREG_COUNTER: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0xFFFE_0000_0000_0000);
 
     {
         let mut d = shared.dispatcher.lock().unwrap_or_else(|p| p.into_inner());
         for core_id in 0..num_cores {
-            let request_id =
-                RequestId::new(MV_UNREG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            let request_id = shared.next_request_id();
             let request = Request {
                 request_id,
                 tenant_id: TenantId::new(tenant_id),

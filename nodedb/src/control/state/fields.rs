@@ -175,11 +175,20 @@ pub struct SharedState {
     /// has returned. `None` in single-node / no-cluster mode.
     pub metadata_raft: OnceLock<Arc<dyn crate::control::metadata_proposer::MetadataRaftHandle>>,
 
-    /// Propose tracker for distributed writes (None in single-node mode).
-    pub propose_tracker: Option<Arc<crate::control::wal_replication::ProposeTracker>>,
+    /// Propose tracker for distributed writes. Set exactly once by
+    /// `control::cluster::start_raft`; absent in single-node mode.
+    pub propose_tracker: OnceLock<Arc<crate::control::wal_replication::ProposeTracker>>,
 
-    /// Raft propose function — wraps RaftLoop::propose (None in single-node mode).
-    pub raft_proposer: Option<Arc<crate::control::wal_replication::RaftProposer>>,
+    /// Raft propose function — wraps RaftLoop::propose. Set exactly once by
+    /// `control::cluster::start_raft`; absent in single-node mode.
+    pub raft_proposer: OnceLock<Arc<crate::control::wal_replication::RaftProposer>>,
+
+    /// Async Raft propose function with transparent leader forwarding.
+    ///
+    /// Used by array sync inbound handlers that may run on follower nodes.
+    /// Wraps `RaftLoop::propose_via_data_leader`. Set exactly once by
+    /// `control::cluster::start_raft`; absent in single-node mode.
+    pub async_raft_proposer: OnceLock<Arc<crate::control::wal_replication::AsyncRaftProposer>>,
 
     /// Query Raft group statuses for observability (None in single-node mode).
     pub raft_status_fn: Option<Arc<dyn Fn() -> Vec<nodedb_cluster::GroupStatus> + Send + Sync>>,
@@ -413,6 +422,16 @@ pub struct SharedState {
 
     /// Total connections accepted since startup.
     pub connections_accepted: AtomicU64,
+
+    /// Per-node monotonic request ID allocator.
+    ///
+    /// All callers that dispatch to the local Data Plane (pgwire handlers,
+    /// DDL helpers, Raft apply loop, LocalPlanExecutor, DataPlaneArrayExecutor,
+    /// sync_dispatch) MUST obtain their request IDs from this single counter
+    /// so IDs registered in `state.tracker` are unique within a node.
+    ///
+    /// Starts at 1 — 0 is never allocated (acts as a sentinel).
+    pub request_id_counter: AtomicU64,
 
     /// System-wide metrics (Prometheus format).
     pub system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,

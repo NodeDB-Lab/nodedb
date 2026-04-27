@@ -1,7 +1,6 @@
 use sonic_rs;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -60,7 +59,6 @@ use super::conn_stream::ConnStream;
 pub struct Session {
     stream: ConnStream,
     peer_addr: SocketAddr,
-    next_request_id: AtomicU64,
     state: Arc<SharedState>,
     auth_mode: crate::config::auth::AuthMode,
     /// Bound after auth handshake. None until first frame is processed.
@@ -77,7 +75,6 @@ impl Session {
         Self {
             stream,
             peer_addr,
-            next_request_id: AtomicU64::new(1),
             state,
             auth_mode,
             identity: None,
@@ -104,9 +101,9 @@ impl Session {
         Self::with_stream(ConnStream::tls(stream), peer_addr, state, auth_mode)
     }
 
-    /// Allocate a monotonically increasing request ID for this connection.
+    /// Allocate a unique request ID via the per-node counter.
     fn next_request_id(&self) -> RequestId {
-        RequestId::new(self.next_request_id.fetch_add(1, Ordering::Relaxed))
+        self.state.next_request_id()
     }
 
     /// Run the session loop: read frames, parse, dispatch, respond.

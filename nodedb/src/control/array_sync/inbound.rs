@@ -1,26 +1,34 @@
 //! [`OriginArrayInbound`] — dispatcher for inbound array CRDT wire messages.
 //!
 //! Receives decoded wire messages from the WebSocket listener, validates
-//! them (schema gating, idempotency), dispatches cell-level ops to the
-//! Data Plane via `PhysicalPlan::Array`, and buffers snapshot chunks until
-//! a full snapshot is assembled.
+//! them (schema gating, idempotency), and proposes ops through Raft for
+//! durable, ordered replication to all Origin replicas.
 //!
-//! # Data Plane dispatch
+//! # Write flow
 //!
-//! Cell-level writes follow the same pattern as Timeseries ingest:
+//! 1. Decode op payload via `nodedb_array::sync::op_codec::decode_op`.
+//! 2. Fast-path idempotency check (before proposing, to avoid wasting Raft
+//!    proposals for already-seen ops; this mirrors the Document handler pattern).
+//! 3. Schema-gate: reject if the array is unknown or the op's schema HLC is
+//!    ahead of the local registry.
+//! 4. Build `ReplicatedWrite::ArrayOp` and serialize to a `ReplicatedEntry`.
+//! 5. `raft_proposer(vshard_id, bytes)` — propose to the Raft group that
+//!    owns the destination vShard.
+//! 6. Await Raft commit via `ProposeTracker`.
+//! 7. On commit: `distributed_applier` decodes the entry, dispatches it to
+//!    the Data Plane, calls `record_applied`.
 //!
-//! 1. Decode op payload via `nodedb_array::sync::op_codec`.
-//! 2. Schema-gate and idempotency-check on the Control Plane.
-//! 3. Build `PhysicalPlan::Array(ArrayOp::Put | Delete)` and call
-//!    `dispatch_to_data_plane_with_source` with `EventSource::CrdtSync`.
-//! 4. On success: record the op in the op-log via `OriginApplyEngine::record_applied`.
+//! # Schema sync
 //!
-//! # Raft
+//! `handle_schema` builds `ReplicatedWrite::ArraySchema` and follows the same
+//! propose → commit flow. After commit the `distributed_applier` calls
+//! `OriginSchemaRegistry::import_snapshot`.
 //!
-//! The existing Document/Vector delta handlers on Origin also do not wire
-//! Raft for inbound sync ops (they go directly to Data Plane). This handler
-//! matches that pattern. Raft-backed durability for array sync ops is deferred
-//! to Phase I (multi-shard).
+//! # Non-Raft paths
+//!
+//! Acks and catchup requests are advisory / read-only and never touch Raft.
+//! Snapshot chunks are buffered until a full snapshot arrives, then applied
+//! as a batch of ArrayOp proposals (one per contained op).
 //!
 //! # Thread safety
 //!
@@ -37,11 +45,12 @@ use nodedb_types::sync::wire::array::{
     ArrayAckMsg, ArrayCatchupRequestMsg, ArrayDeltaBatchMsg, ArrayDeltaMsg, ArrayRejectMsg,
     ArrayRejectReason, ArraySchemaSyncMsg,
 };
-use tracing::{error, warn};
+use tracing::warn;
 
-use nodedb_cluster::array_routing::{vshard_for_array_coord, vshard_from_collection};
+use nodedb_cluster::array_routing::vshard_from_collection;
 
 use crate::control::state::SharedState;
+use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::types::{TenantId, VShardId};
 
 use super::apply::OriginApplyEngine;
@@ -99,6 +108,26 @@ impl OriginArrayInbound {
     pub(super) fn snapshots(&self) -> &Mutex<HashMap<(String, [u8; 18]), SnapshotAssembly>> {
         &self.snapshots
     }
+
+    pub(super) fn shared(&self) -> &Arc<SharedState> {
+        &self.shared
+    }
+
+    pub(super) fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    pub(super) fn engine(&self) -> &Arc<OriginApplyEngine> {
+        &self.engine
+    }
+
+    pub(super) fn schemas(&self) -> &Arc<OriginSchemaRegistry> {
+        &self.schemas
+    }
+
+    pub(super) fn apply_observer(&self) -> Option<&Arc<dyn ArrayApplyObserver>> {
+        self.apply_observer.as_ref()
+    }
 }
 
 impl OriginArrayInbound {
@@ -145,7 +174,7 @@ impl OriginArrayInbound {
             }
         };
 
-        self.apply_op(op).await
+        self.apply_op(op, &msg.op_payload).await
     }
 
     /// Handle a batch of delta messages from a Lite peer.
@@ -159,7 +188,7 @@ impl OriginArrayInbound {
         let mut outcomes = Vec::with_capacity(msg.op_payloads.len());
         for payload in &msg.op_payloads {
             let outcome = match op_codec::decode_op(payload) {
-                Ok(op) => self.apply_op(op).await,
+                Ok(op) => self.apply_op(op, payload).await,
                 Err(e) => {
                     warn!(array = %msg.array, error = %e, "array_inbound: batch decode failed");
                     Err(Some(build_reject(
@@ -178,27 +207,50 @@ impl OriginArrayInbound {
     // ─── Schema ──────────────────────────────────────────────────────────────
 
     /// Import an array schema CRDT snapshot from a Lite peer.
-    pub fn handle_schema(
+    ///
+    /// Proposes the schema through Raft so it is applied atomically on all
+    /// replicas. Returns `SchemaImported` on successful commit.
+    pub async fn handle_schema(
         &self,
         msg: &ArraySchemaSyncMsg,
     ) -> Result<InboundOutcome, Option<ArrayRejectMsg>> {
         let hlc_arr: [u8; 18] = msg.schema_hlc_bytes;
         let remote_hlc = Hlc::from_bytes(&hlc_arr);
 
-        if let Err(e) = self
-            .schemas
-            .import_snapshot(&msg.array, &msg.snapshot_payload, remote_hlc)
-        {
-            warn!(array = %msg.array, error = %e, "array_inbound: schema import failed");
-            return Err(Some(build_reject(
-                &msg.array,
-                remote_hlc,
-                ArrayRejectReason::EngineRejected,
-                format!("schema import error: {e}"),
-            )));
+        // In single-node mode (no raft_proposer) fall back to direct import.
+        if self.shared.raft_proposer.get().is_none() {
+            if let Err(e) =
+                self.schemas
+                    .import_snapshot(&msg.array, &msg.snapshot_payload, remote_hlc)
+            {
+                warn!(array = %msg.array, error = %e, "array_inbound: schema import failed");
+                return Err(Some(build_reject(
+                    &msg.array,
+                    remote_hlc,
+                    ArrayRejectReason::EngineRejected,
+                    format!("schema import error: {e}"),
+                )));
+            }
+            return Ok(InboundOutcome::SchemaImported);
         }
 
-        Ok(InboundOutcome::SchemaImported)
+        let vshard_id = VShardId::new(vshard_from_collection(&msg.array));
+        let write = ReplicatedWrite::ArraySchema {
+            array: msg.array.clone(),
+            snapshot_payload: msg.snapshot_payload.clone(),
+            schema_hlc_bytes: hlc_arr,
+        };
+        let entry = ReplicatedEntry {
+            tenant_id: self.tenant_id.as_u32(),
+            vshard_id: vshard_id.as_u16(),
+            write,
+        };
+
+        match self.propose_and_await(entry, &msg.array, remote_hlc).await {
+            Ok(()) => Ok(InboundOutcome::SchemaImported),
+            Err(Some(r)) => Err(Some(r)),
+            Err(None) => Err(None),
+        }
     }
 
     // ─── Ack ─────────────────────────────────────────────────────────────────
@@ -258,10 +310,20 @@ impl OriginArrayInbound {
 
     // ─── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Validate and dispatch a single decoded op to the Data Plane.
+    /// Validate a decoded op, then route it through Raft (or directly to the
+    /// Data Plane in single-node mode) before returning.
+    ///
+    /// # Fast-path idempotency
+    ///
+    /// The idempotency check here is a *pre-proposal fast-path*: it avoids
+    /// wasting a Raft round-trip for ops the local replica already knows
+    /// about. The authoritative check happens in the distributed applier
+    /// (after Raft commit) so replicas that missed the original entry still
+    /// accept it on re-delivery.
     pub(super) async fn apply_op(
         &self,
         op: ArrayOp,
+        raw_op_bytes: &[u8],
     ) -> Result<InboundOutcome, Option<ArrayRejectMsg>> {
         // 1. Shape validation.
         if let Err(e) = op.validate_shape() {
@@ -297,160 +359,49 @@ impl OriginArrayInbound {
             Some(_) => {}
         }
 
-        // 3. Idempotency check.
+        // 3. Fast-path idempotency check (before proposing).
         if self.engine.already_seen(&op.header.array, op.header.hlc) {
             return Ok(InboundOutcome::Idempotent);
         }
 
-        // 4. Build Data Plane plan and dispatch.
-        let data_plane_op = self.op_to_data_plane_plan(&op)?;
+        // 4. In single-node mode (no raft_proposer): apply directly to the
+        //    Data Plane, matching the pre-Raft behaviour. This path is only
+        //    exercised when the cluster stack has not been started (development,
+        //    single-node Origin, unit tests without a raft setup).
+        if self.shared.raft_proposer.get().is_none() {
+            return self.apply_op_direct(op).await;
+        }
+
+        // 5. Multi-node path: propose through Raft.
+        let hlc_bytes = op.header.hlc.to_bytes();
+        let write = ReplicatedWrite::ArrayOp {
+            array: op.header.array.clone(),
+            op_bytes: raw_op_bytes.to_vec(),
+            schema_hlc_bytes: hlc_bytes,
+        };
         let vshard = self.vshard_for_op(&op);
-
-        let dispatch_result =
-            crate::control::server::dispatch_utils::dispatch_to_data_plane_with_source(
-                &self.shared,
-                self.tenant_id,
-                vshard,
-                data_plane_op,
-                0,
-                crate::event::EventSource::CrdtSync,
-            )
-            .await;
-
-        match dispatch_result {
-            Ok(_) => {}
-            Err(e) => {
-                warn!(
-                    array = %op.header.array,
-                    error = %e,
-                    "array_inbound: Data Plane dispatch failed"
-                );
-                return Err(Some(build_reject(
-                    &op.header.array,
-                    op.header.hlc,
-                    ArrayRejectReason::EngineRejected,
-                    format!("dispatch error: {e}"),
-                )));
-            }
-        }
-
-        // 5. Record in op-log so future replays are idempotent.
-        if let Err(e) = self.engine.record_applied(&op) {
-            // Non-fatal: the Data Plane has already applied the op. Log the
-            // op-log failure and continue — the worst outcome is a duplicate
-            // apply on the next replay, which the Data Plane handles
-            // idempotently via its own seen-HLC check.
-            error!(
-                array = %op.header.array,
-                hlc = ?op.header.hlc,
-                error = %e,
-                "array_inbound: op applied but op-log append failed (replay may re-apply)"
-            );
-        }
-
-        // 6. Notify outbound fan-out observer so subscribed Lite peers receive
-        //    this op. This runs on the Control Plane (Tokio async task) —
-        //    the observer's `on_op_applied` is synchronous and fast (enqueue
-        //    only; no I/O).
-        if let Some(observer) = &self.apply_observer {
-            observer.on_op_applied(&op);
-        }
-
-        Ok(InboundOutcome::Applied)
-    }
-
-    /// Compute the vShard that owns this op's tile.
-    ///
-    /// Extracts tile extents from the schema registry and casts the op's coord
-    /// to `u64` for tile routing. Falls back to collection-level routing with
-    /// a warning when the schema is unavailable or coord cannot be cast.
-    fn vshard_for_op(&self, op: &ArrayOp) -> VShardId {
-        use nodedb_array::types::coord::value::CoordValue;
-
-        let tile_extents = self.schemas.tile_extents(&op.header.array);
-
-        let Some(tile_extents) = tile_extents else {
-            warn!(
-                array = %op.header.array,
-                "array_inbound: schema unavailable; routing by name only"
-            );
-            return VShardId::new(vshard_from_collection(&op.header.array));
+        let entry = ReplicatedEntry {
+            tenant_id: self.tenant_id.as_u32(),
+            vshard_id: vshard.as_u16(),
+            write,
         };
 
-        let coord_u64: Vec<u64> = op
-            .coord
-            .iter()
-            .map(|c| match c {
-                CoordValue::Int64(v) | CoordValue::TimestampMs(v) => *v as u64,
-                CoordValue::Float64(v) => v.to_bits(),
-                CoordValue::String(_) => 0,
-            })
-            .collect();
-
-        VShardId::new(vshard_for_array_coord(
-            &op.header.array,
-            &coord_u64,
-            &tile_extents,
-        ))
+        match self
+            .propose_and_await(entry, &op.header.array, op.header.hlc)
+            .await
+        {
+            Ok(()) => {
+                // Notify outbound fan-out observer so subscribed Lite peers
+                // receive this op. The observer enqueues; no I/O here.
+                if let Some(observer) = &self.apply_observer {
+                    observer.on_op_applied(&op);
+                }
+                Ok(InboundOutcome::Applied)
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    /// Convert a decoded `ArrayOp` (from sync) into a `PhysicalPlan::Array` variant.
-    fn op_to_data_plane_plan(
-        &self,
-        op: &ArrayOp,
-    ) -> Result<crate::bridge::envelope::PhysicalPlan, Option<ArrayRejectMsg>> {
-        use crate::bridge::physical_plan::ArrayOp as DataArrayOp;
-        use nodedb_array::sync::op::ArrayOpKind;
-        use nodedb_types::TenantId as NdTenantId;
-
-        let array_id = nodedb_array::types::ArrayId::new(
-            NdTenantId::new(self.tenant_id.as_u32()),
-            &op.header.array,
-        );
-
-        // Encode the coord and attrs as the Data Plane's msgpack payloads.
-        let data_op = match op.kind {
-            ArrayOpKind::Put => {
-                let cells = vec![crate::engine::array::wal::ArrayPutCell {
-                    coord: op.coord.clone(),
-                    attrs: op.attrs.clone().unwrap_or_default(),
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                    system_from_ms: op.header.system_from_ms,
-                    valid_from_ms: op.header.valid_from_ms,
-                    valid_until_ms: op.header.valid_until_ms,
-                }];
-                let cells_msgpack = zerompk::to_msgpack_vec(&cells).map_err(|e| {
-                    Some(build_reject(
-                        &op.header.array,
-                        op.header.hlc,
-                        ArrayRejectReason::ShapeInvalid,
-                        format!("cells encode: {e}"),
-                    ))
-                })?;
-                DataArrayOp::Put {
-                    array_id,
-                    cells_msgpack,
-                    wal_lsn: 0,
-                }
-            }
-            ArrayOpKind::Delete | ArrayOpKind::Erase => {
-                let coords = vec![op.coord.clone()];
-                let coords_msgpack = zerompk::to_msgpack_vec(&coords).map_err(|e| {
-                    Some(build_reject(
-                        &op.header.array,
-                        op.header.hlc,
-                        ArrayRejectReason::ShapeInvalid,
-                        format!("coords encode: {e}"),
-                    ))
-                })?;
-                DataArrayOp::Delete {
-                    array_id,
-                    coords_msgpack,
-                    wal_lsn: 0,
-                }
-            }
-        };
-
-        Ok(crate::bridge::envelope::PhysicalPlan::Array(data_op))
-    }
+    // Raft propose / direct-dispatch helpers live in `inbound_propose.rs`
+    // to keep this file under the size limit.
 }

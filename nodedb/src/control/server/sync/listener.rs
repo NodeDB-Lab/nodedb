@@ -413,7 +413,7 @@ async fn handle_sync_session(
                                 }
                                 SyncMessageType::ArraySchema => {
                                     if let Some(msg) = frame.decode_body::<ArraySchemaSyncMsg>() {
-                                        match inbound.handle_schema(&msg) {
+                                        match inbound.handle_schema(&msg).await {
                                             Ok(_) => None,
                                             Err(Some(r)) => super::wire::SyncFrame::try_encode(
                                                 SyncMessageType::ArrayReject,

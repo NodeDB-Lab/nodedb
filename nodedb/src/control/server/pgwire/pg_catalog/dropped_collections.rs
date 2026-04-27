@@ -123,11 +123,9 @@ async fn query_collection_size(
 ) -> Option<u64> {
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
     use crate::bridge::physical_plan::MetaOp;
-    use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
+    use crate::types::{ReadConsistency, TenantId, VShardId};
 
-    static COUNTER: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0xFFFC_0000_0000_0000);
-    let request_id = RequestId::new(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let request_id = state.next_request_id();
     let timeout = std::time::Duration::from_millis(500);
 
     let request = Request {

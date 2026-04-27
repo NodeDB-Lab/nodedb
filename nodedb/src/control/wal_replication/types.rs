@@ -9,11 +9,28 @@
 //! 6. Background task dispatches each write to the local Data Plane
 //! 7. If a waiter exists (leader path), sends the response; otherwise just applies (follower)
 
-/// Type alias for the Raft propose callback.
+/// Type alias for the synchronous Raft propose callback.
 ///
 /// Takes `(vshard_id, serialized_entry)` and returns `(group_id, log_index)`.
+/// Works only when the current node is the group leader. Use
+/// [`AsyncRaftProposer`] when proposals may originate from non-leader nodes.
 pub type RaftProposer =
     dyn Fn(u16, Vec<u8>) -> std::result::Result<(u64, u64), crate::Error> + Send + Sync;
+
+/// Type alias for the asynchronous Raft propose callback with leader forwarding.
+///
+/// Takes `(vshard_id, serialized_entry)` and returns the Data Plane apply
+/// payload bytes on success. When this node is the leader the payload comes
+/// from the local `ProposeTracker`; when the entry is forwarded to a remote
+/// leader the payload is returned directly in the QUIC response — no separate
+/// tracker registration is needed by the caller.
+pub type AsyncRaftProposer = dyn Fn(
+        u16,
+        Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::result::Result<Vec<u8>, crate::Error>> + Send>,
+    > + Send
+    + Sync;
 
 fn default_pq_m() -> usize {
     crate::engine::vector::index_config::DEFAULT_PQ_M
@@ -175,6 +192,27 @@ pub enum ReplicatedWrite {
     },
     KvDropSortedIndex {
         index_name: String,
+    },
+    /// An array CRDT op (Put or Delete) from a Lite peer, to be applied via
+    /// the distributed applier on all replicas.
+    ///
+    /// `op_bytes` is the raw zerompk encoding of the `ArrayOp` as produced by
+    /// `nodedb_array::sync::op_codec::encode_op`.
+    /// `schema_hlc_bytes` carries the 18-byte HLC from the op header so the
+    /// applier can perform the authoritative idempotency check.
+    ArrayOp {
+        array: String,
+        op_bytes: Vec<u8>,
+        schema_hlc_bytes: [u8; 18],
+    },
+    /// An array schema CRDT snapshot from a Lite peer.
+    ///
+    /// `snapshot_payload` is the raw Loro export bytes as received in
+    /// `ArraySchemaSyncMsg`.
+    ArraySchema {
+        array: String,
+        snapshot_payload: Vec<u8>,
+        schema_hlc_bytes: [u8; 18],
     },
 }
 

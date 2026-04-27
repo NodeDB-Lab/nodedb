@@ -15,6 +15,9 @@ use crate::control::cluster::array_executor::DataPlaneArrayExecutor;
 use crate::control::cluster::handle::ClusterHandle;
 use crate::control::cluster::metadata_applier::MetadataCommitApplier;
 use crate::control::cluster::spsc_applier::SpscCommitApplier;
+use crate::control::distributed_applier::{
+    ProposeTracker, create_distributed_applier, run_apply_loop,
+};
 use crate::control::state::SharedState;
 
 /// Start the Raft event loop and RPC server.
@@ -43,7 +46,17 @@ pub fn start_raft(
             detail: "start_raft called twice: cluster multi_raft already consumed".into(),
         })?;
 
-    let data_applier = SpscCommitApplier::new(shared.clone());
+    // Build the propose tracker and distributed applier.
+    let tracker = Arc::new(ProposeTracker::new());
+    let (dist_applier, apply_rx) = create_distributed_applier(tracker.clone());
+    let dist_applier = Arc::new(dist_applier);
+
+    // Install the propose tracker so CP dispatch paths can await commit.
+    if shared.propose_tracker.set(tracker.clone()).is_err() {
+        tracing::warn!("propose_tracker already set — start_raft appears to have run twice");
+    }
+
+    let data_applier = SpscCommitApplier::new(shared.clone(), dist_applier);
 
     // Production metadata applier: writes to the shared cache,
     // writes back to the `SystemCatalog` redb so every non-cache
@@ -129,6 +142,7 @@ pub fn start_raft(
     };
 
     let tick_interval = Duration::from_millis(transport_tuning.raft_tick_interval_ms);
+
     let raft_loop = Arc::new(
         nodedb_cluster::RaftLoop::new(
             multi_raft,
@@ -141,6 +155,84 @@ pub fn start_raft(
         .with_vshard_handler(vshard_handler)
         .with_tick_interval(tick_interval),
     );
+
+    // Wire the Raft proposer into SharedState so CP dispatch paths
+    // (pgwire, HTTP, array inbound) can route writes through Raft.
+    let raft_loop_for_propose = raft_loop.clone();
+    let proposer: Arc<crate::control::wal_replication::RaftProposer> =
+        Arc::new(move |vshard_id, data| {
+            raft_loop_for_propose
+                .propose(vshard_id, data)
+                .map_err(|e| crate::Error::Internal {
+                    detail: format!("raft propose: {e}"),
+                })
+        });
+    if shared.raft_proposer.set(proposer).is_err() {
+        tracing::warn!("raft_proposer already set — start_raft appears to have run twice");
+    }
+
+    // Install the async proposer with transparent leader forwarding.
+    //
+    // Proposes via the data group leader (forwarding to a remote leader if
+    // needed), then registers a ProposeTracker waiter and awaits apply.
+    //
+    // The ProposeTracker is race-safe: if `run_apply_loop` calls complete()
+    // before register() is called (possible on fast clusters where the entry
+    // commits and applies on this node before the proposer returns), the
+    // result is stored and register() picks it up immediately with no timeout.
+    let raft_loop_async = raft_loop.clone();
+    let tracker_for_proposer = tracker.clone();
+    let deadline_secs = shared.tuning.network.default_deadline_secs;
+    let async_proposer: Arc<crate::control::wal_replication::AsyncRaftProposer> =
+        Arc::new(move |vshard_id, data| {
+            let rl = raft_loop_async.clone();
+            let tk = tracker_for_proposer.clone();
+            Box::pin(async move {
+                let (group_id, log_index) = rl
+                    .propose_via_data_leader(vshard_id, data)
+                    .await
+                    .map_err(|e| crate::Error::Internal {
+                        detail: format!("raft propose (async): {e}"),
+                    })?;
+
+                // Register the waiter. The ProposeTracker stores a pending
+                // result if complete() already fired, so the rx resolves
+                // immediately rather than timing out.
+                let rx = tk.register(group_id, log_index);
+                tokio::time::timeout(std::time::Duration::from_secs(deadline_secs), rx)
+                    .await
+                    .map_err(|_| crate::Error::Dispatch {
+                        detail: format!(
+                            "raft commit timeout for group {group_id} index {log_index}"
+                        ),
+                    })?
+                    .map_err(|_| crate::Error::Dispatch {
+                        detail: "propose waiter channel closed".into(),
+                    })?
+                    .map_err(|e| crate::Error::Dispatch {
+                        detail: format!("apply error: {e}"),
+                    })
+            })
+        });
+    if shared.async_raft_proposer.set(async_proposer).is_err() {
+        tracing::warn!("async_raft_proposer already set — start_raft appears to have run twice");
+    }
+
+    // Spawn the background apply loop. It reads from the mpsc channel
+    // pushed by `DistributedApplier::apply_committed`, dispatches to the
+    // Data Plane, and notifies propose waiters.
+    let apply_state = shared.clone();
+    let apply_tracker = tracker.clone();
+    let sr_apply = shutdown_rx.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = run_apply_loop(apply_rx, apply_state, apply_tracker) => {}
+            _ = async {
+                let mut rx = sr_apply;
+                let _ = rx.changed().await;
+            } => {}
+        }
+    });
 
     // Publish the cluster observability handle to SharedState before
     // any listener starts serving.

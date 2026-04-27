@@ -24,11 +24,13 @@ pub fn put_owner_sync(stored: &StoredCollection, shared: Arc<SharedState>) {
     });
 }
 
-/// Asynchronous half: dispatch a `Register` request to this node's
-/// Data Plane so the first cross-node INSERT doesn't need to
-/// rediscover the storage mode. Spawned as a best-effort task —
-/// correctness does not depend on it completing before the
-/// `applied_index` watcher bumps, only performance does.
+/// Register-dispatch half: dispatch a `Register` request to this node's
+/// Data Plane so subsequent `DocumentOp::Scan` calls find the collection
+/// in `doc_configs` and decode strict (Binary Tuple) documents correctly.
+///
+/// Called via `block_in_place` inside `spawn_post_apply_async_side_effects`
+/// for `PutCollection` — it completes synchronously before the applied-index
+/// watcher bumps, making it part of the applied-index contract.
 pub async fn put_async(stored: StoredCollection, shared: Arc<SharedState>) {
     crate::control::server::pgwire::ddl::collection::create::dispatch_register_from_stored(
         &shared, &stored,

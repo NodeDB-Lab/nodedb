@@ -18,7 +18,6 @@
 //! zerompk-serializes it as the response.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -37,17 +36,12 @@ use crate::bridge::physical_plan::{ArrayOp, ArrayReducer, PhysicalPlan};
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec::ArraySliceResponse;
 use crate::event::types::EventSource;
-use crate::types::{ReadConsistency, RequestId, TenantId, VShardId};
+use crate::types::{ReadConsistency, TenantId, VShardId};
 
 /// Timeout for a single shard-side array operation dispatched through the
 /// local SPSC bridge. This bounds how long the cluster handler waits for the
 /// Data Plane to respond before returning an error to the coordinator.
 const LOCAL_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Base offset for request IDs allocated by this executor. Chosen to avoid
-/// collision with client-originated IDs (which start at 1) and forwarded
-/// execution IDs (which start at 2_000_000_000 in `LocalPlanExecutor`).
-const REQUEST_ID_BASE: u64 = 3_000_000_000;
 
 /// Concrete implementation of `ArrayLocalExecutor` backed by the local Data Plane.
 ///
@@ -56,20 +50,12 @@ const REQUEST_ID_BASE: u64 = 3_000_000_000;
 /// `RequestTracker`.
 pub struct DataPlaneArrayExecutor {
     state: Arc<SharedState>,
-    next_request_id: AtomicU64,
 }
 
 impl DataPlaneArrayExecutor {
     /// Construct an executor backed by the given shared state.
     pub fn new(state: Arc<SharedState>) -> Self {
-        Self {
-            state,
-            next_request_id: AtomicU64::new(REQUEST_ID_BASE),
-        }
-    }
-
-    fn next_id(&self) -> RequestId {
-        RequestId::new(self.next_request_id.fetch_add(1, Ordering::Relaxed))
+        Self { state }
     }
 
     /// Dispatch a `PhysicalPlan` through the local SPSC bridge and await the
@@ -78,7 +64,7 @@ impl DataPlaneArrayExecutor {
         &self,
         plan: PhysicalPlan,
     ) -> Result<crate::bridge::envelope::Response> {
-        let request_id = self.next_id();
+        let request_id = self.state.next_request_id();
 
         let request = Request {
             request_id,

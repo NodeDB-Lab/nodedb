@@ -10,6 +10,21 @@ use crate::types::TenantId;
 use super::SharedState;
 
 impl SharedState {
+    /// Allocate the next unique request ID for this node.
+    ///
+    /// All callers that dispatch to the local Data Plane and register a waiter
+    /// in `self.tracker` MUST obtain their IDs here. Using per-source counters
+    /// that start at the same value causes `RequestTracker::register` to
+    /// silently overwrite a prior registration, dropping its response channel
+    /// and causing the original waiter to observe a "channel closed" error.
+    #[inline]
+    pub fn next_request_id(&self) -> crate::types::RequestId {
+        crate::types::RequestId::new(
+            self.request_id_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     /// Advance the per-tenant observed write-HLC high-water to the current
     /// HLC wall time. Idempotent and monotonic: no-op if a larger value is
     /// already recorded. Callers MUST invoke this only after a successful

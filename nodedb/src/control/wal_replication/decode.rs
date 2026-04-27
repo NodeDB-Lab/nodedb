@@ -24,6 +24,15 @@ pub fn from_replicated_entry(
         Some(e) => e,
         None => return Ok(None),
     };
+    // Array CRDT variants are handled by the distributed applier before this
+    // function is called. They have no Data Plane representation; return None
+    // so the applier skips the dispatch path gracefully.
+    match &entry.write {
+        ReplicatedWrite::ArrayOp { .. } | ReplicatedWrite::ArraySchema { .. } => {
+            return Ok(None);
+        }
+        _ => {}
+    }
     let plan = to_physical_plan(&entry.write, assigner)?;
     Ok(Some((
         TenantId::new(entry.tenant_id),
@@ -343,6 +352,16 @@ fn to_physical_plan(
             PhysicalPlan::Kv(KvOp::DropSortedIndex {
                 index_name: index_name.clone(),
             })
+        }
+        // Array CRDT ops are intercepted by `from_replicated_entry` before
+        // this function is called; they are never dispatched to the Data Plane.
+        // This arm is unreachable in practice but required for exhaustiveness.
+        ReplicatedWrite::ArrayOp { .. } | ReplicatedWrite::ArraySchema { .. } => {
+            return Err(crate::Error::Internal {
+                detail:
+                    "ArrayOp/ArraySchema reached to_physical_plan (should have been intercepted)"
+                        .into(),
+            });
         }
     })
 }

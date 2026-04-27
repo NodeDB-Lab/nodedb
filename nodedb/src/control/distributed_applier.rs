@@ -4,6 +4,7 @@
 //! See [`crate::control::wal_replication`] for the full write flow description.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,22 +15,35 @@ use nodedb_cluster::raft_loop::CommitApplier;
 use nodedb_raft::message::LogEntry;
 
 use crate::bridge::envelope::{Priority, Request, Status};
+use crate::control::array_sync::raft_apply::{apply_array_op, apply_array_schema};
 use crate::control::state::SharedState;
-use crate::control::wal_replication::from_replicated_entry;
-use crate::types::{ReadConsistency, RequestId};
+use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite, from_replicated_entry};
+use crate::types::ReadConsistency;
 
 // ── Propose tracker ─────────────────────────────────────────────────
 
 /// Response payload sent back to the proposer after commit + execution.
 pub type ProposeResult = std::result::Result<Vec<u8>, crate::Error>;
 
+/// Slot in the propose tracker — either a pending waiter or a completed result
+/// that arrived before the waiter was registered.
+enum TrackerSlot {
+    /// Waiter registered by the proposer; awaiting `complete()`.
+    Waiting(oneshot::Sender<ProposeResult>),
+    /// `complete()` was called before `register()`. Stored so `register()`
+    /// can resolve the channel immediately.
+    Completed(ProposeResult),
+}
+
 /// Tracks pending proposals awaiting Raft commit.
 ///
-/// Keyed by `(group_id, log_index)`. The proposer registers a oneshot
-/// receiver before calling `propose()`, and awaits it. When the entry
-/// is committed and executed, the result is sent through the channel.
+/// Keyed by `(group_id, log_index)`. The proposer calls `register()` after
+/// the proposal returns the log index; `run_apply_loop` calls `complete()`
+/// after the entry is applied. Either side may win the race — `complete()`
+/// stores the result if no waiter exists yet, and `register()` picks it up
+/// immediately if `complete()` already fired.
 pub struct ProposeTracker {
-    waiters: Mutex<HashMap<(u64, u64), oneshot::Sender<ProposeResult>>>,
+    slots: Mutex<HashMap<(u64, u64), TrackerSlot>>,
 }
 
 impl Default for ProposeTracker {
@@ -41,28 +55,75 @@ impl Default for ProposeTracker {
 impl ProposeTracker {
     pub fn new() -> Self {
         Self {
-            waiters: Mutex::new(HashMap::new()),
+            slots: Mutex::new(HashMap::new()),
         }
     }
 
     /// Register a waiter for a proposed entry. Returns a receiver that
     /// resolves when the entry is committed and executed.
+    ///
+    /// If `complete()` was called first (the entry was applied before this
+    /// node could register), the receiver is pre-resolved and ready
+    /// immediately.
     pub fn register(&self, group_id: u64, log_index: u64) -> oneshot::Receiver<ProposeResult> {
         let (tx, rx) = oneshot::channel();
-        let mut waiters = self.waiters.lock().unwrap_or_else(|p| p.into_inner());
-        waiters.insert((group_id, log_index), tx);
+        let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        match slots.entry((group_id, log_index)) {
+            Entry::Vacant(e) => {
+                e.insert(TrackerSlot::Waiting(tx));
+            }
+            Entry::Occupied(e) => {
+                match e.get() {
+                    TrackerSlot::Completed(_) => {
+                        // complete() already fired — extract the result, resolve
+                        // the receiver immediately, and clean up the slot.
+                        if let TrackerSlot::Completed(result) = e.remove() {
+                            let _ = tx.send(result);
+                        }
+                    }
+                    TrackerSlot::Waiting(_) => {
+                        // Duplicate register — shouldn't happen. Insert the new
+                        // sender; the old receiver will see channel-closed.
+                        *e.into_mut() = TrackerSlot::Waiting(tx);
+                    }
+                }
+            }
+        }
         rx
     }
 
     /// Complete a waiter after the entry has been committed and executed.
-    /// Returns false if no waiter was registered (follower path).
+    ///
+    /// If the proposer has already called `register()`, the result is sent
+    /// immediately. If not, the result is stored so the next `register()`
+    /// call picks it up without waiting.
+    ///
+    /// Returns true if a live waiter was found and notified, false otherwise.
     pub fn complete(&self, group_id: u64, log_index: u64, result: ProposeResult) -> bool {
-        let mut waiters = self.waiters.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(tx) = waiters.remove(&(group_id, log_index)) {
-            let _ = tx.send(result);
-            true
-        } else {
-            false
+        let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        match slots.entry((group_id, log_index)) {
+            Entry::Vacant(e) => {
+                // No waiter yet — store result for the upcoming register().
+                e.insert(TrackerSlot::Completed(result));
+                false
+            }
+            Entry::Occupied(e) => {
+                match e.get() {
+                    TrackerSlot::Waiting(_) => {
+                        if let TrackerSlot::Waiting(tx) = e.remove() {
+                            let _ = tx.send(result);
+                            return true;
+                        }
+                    }
+                    TrackerSlot::Completed(_) => {
+                        // Already completed — overwrite with newer result.
+                        // Duplicate completes should not occur in practice;
+                        // last write wins.
+                        *e.into_mut() = TrackerSlot::Completed(result);
+                    }
+                }
+                false
+            }
         }
     }
 }
@@ -133,9 +194,6 @@ impl CommitApplier for DistributedApplier {
 
 // ── Background apply loop ───────────────────────────────────────────
 
-static APPLY_REQUEST_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(2_000_000_000);
-
 /// Run the background loop that applies committed Raft entries to the local Data Plane.
 ///
 /// This task reads from the apply channel, deserializes each entry, dispatches
@@ -147,6 +205,45 @@ pub async fn run_apply_loop(
 ) {
     while let Some(batch) = apply_rx.recv().await {
         for entry in &batch.entries {
+            // ── Array CRDT variants — handled on the Control Plane, bypass Data Plane ──
+            if let Some(replicated) = ReplicatedEntry::from_bytes(&entry.data) {
+                match replicated.write {
+                    ReplicatedWrite::ArrayOp {
+                        ref array,
+                        ref op_bytes,
+                        ..
+                    } => {
+                        apply_array_op(
+                            &state,
+                            &tracker,
+                            batch.group_id,
+                            entry.index,
+                            array,
+                            op_bytes,
+                        )
+                        .await;
+                        continue;
+                    }
+                    ReplicatedWrite::ArraySchema {
+                        ref array,
+                        ref snapshot_payload,
+                        schema_hlc_bytes,
+                    } => {
+                        apply_array_schema(
+                            &state,
+                            &tracker,
+                            batch.group_id,
+                            entry.index,
+                            array,
+                            snapshot_payload,
+                            schema_hlc_bytes,
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             let decoded =
                 from_replicated_entry(&entry.data, Some(state.surrogate_assigner.as_ref()));
             let (tenant_id, vshard_id, plan) = match decoded {
@@ -179,9 +276,7 @@ pub async fn run_apply_loop(
                 }
             };
 
-            let request_id = RequestId::new(
-                APPLY_REQUEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            );
+            let request_id = state.next_request_id();
 
             let request = Request {
                 request_id,

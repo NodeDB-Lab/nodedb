@@ -115,6 +115,28 @@ impl SchemaDoc {
         Ok(())
     }
 
+    /// Import a Loro snapshot from a Raft-committed entry.
+    ///
+    /// Unlike [`import_snapshot`], this method sets `schema_hlc` to exactly
+    /// `remote_hlc` rather than bumping past it. This is the correct
+    /// behaviour for Raft replication: every replica must converge to the
+    /// *same* `schema_hlc` after applying the same log entry so that
+    /// schema-gating checks on ops are consistent across the cluster.
+    ///
+    /// Call this only from the distributed applier (Raft commit path), not
+    /// from the CRDT sync path where bumping is required.
+    pub fn import_snapshot_replicated(
+        &mut self,
+        bytes: &[u8],
+        committed_hlc: Hlc,
+    ) -> ArrayResult<()> {
+        self.doc.import(bytes).map_err(|e| ArrayError::LoroError {
+            detail: format!("loro import (replicated) failed: {e}"),
+        })?;
+        self.schema_hlc = committed_hlc;
+        Ok(())
+    }
+
     /// Replace the stored schema with `schema`.
     ///
     /// Re-encodes the schema as MessagePack and overwrites `root["content"]`.

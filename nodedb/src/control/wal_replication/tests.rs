@@ -71,6 +71,16 @@ fn all_write_variants_serialize() {
             label: "knows".into(),
             dst_id: "b".into(),
         },
+        ReplicatedWrite::ArrayOp {
+            array: "genome".into(),
+            op_bytes: vec![0xde, 0xad],
+            schema_hlc_bytes: [0u8; 18],
+        },
+        ReplicatedWrite::ArraySchema {
+            array: "genome".into(),
+            snapshot_payload: vec![0xbe, 0xef],
+            schema_hlc_bytes: [1u8; 18],
+        },
     ];
 
     for write in writes {

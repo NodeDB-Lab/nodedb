@@ -130,6 +130,56 @@ impl OriginSchemaRegistry {
         self.persist(array, schema_hlc, snapshot)
     }
 
+    /// Apply a Raft-committed Loro snapshot for `array`, preserving the exact
+    /// committed HLC on every replica.
+    ///
+    /// Unlike [`import_snapshot`] (CRDT sync path), this sets `schema_hlc`
+    /// to exactly `committed_hlc` so all replicas converge to the same value
+    /// after applying the same Raft log entry. Persists the updated snapshot.
+    pub fn import_snapshot_replicated(
+        &self,
+        array: &str,
+        snapshot_bytes: &[u8],
+        committed_hlc: Hlc,
+    ) -> crate::Result<()> {
+        let mut docs = self.docs.lock().map_err(|_| Error::Storage {
+            engine: "array_sync".into(),
+            detail: "schema_registry lock poisoned".into(),
+        })?;
+
+        let doc = docs
+            .entry(array.to_owned())
+            .or_insert_with(|| SchemaDoc::new(self.replica_id));
+
+        doc.import_snapshot_replicated(snapshot_bytes, committed_hlc)
+            .map_err(|e| Error::Storage {
+                engine: "array_sync".into(),
+                detail: format!("schema_registry import_snapshot_replicated '{array}': {e}"),
+            })?;
+
+        let snapshot = doc.export_snapshot().map_err(|e| Error::Storage {
+            engine: "array_sync".into(),
+            detail: format!("schema_registry export after replicated import '{array}': {e}"),
+        })?;
+        drop(docs);
+
+        self.persist(array, committed_hlc, snapshot)
+    }
+
+    /// Decode and return the `ArraySchema` for `array`, or `None` if unknown or
+    /// if the schema document cannot be decoded.
+    ///
+    /// Used by the distributed applier to build `ArrayCatalogEntry` on every node
+    /// after applying a committed `ArraySchema` Raft entry.
+    pub fn to_array_schema(
+        &self,
+        array: &str,
+    ) -> Option<nodedb_array::schema::array_schema::ArraySchema> {
+        let docs = self.docs.lock().ok()?;
+        let doc = docs.get(array)?;
+        doc.to_schema().ok()
+    }
+
     /// Export the current Loro snapshot bytes for `array`, or `None` if unknown.
     pub fn export_snapshot(&self, array: &str) -> crate::Result<Option<Vec<u8>>> {
         let docs = self.docs.lock().map_err(|_| Error::Storage {

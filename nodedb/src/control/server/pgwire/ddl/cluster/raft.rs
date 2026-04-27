@@ -214,7 +214,7 @@ pub fn alter_raft_group(
         }
     };
 
-    let proposer = match &state.raft_proposer {
+    let proposer = match state.raft_proposer.get() {
         Some(p) => p,
         None => {
             return Err(sqlstate_error(

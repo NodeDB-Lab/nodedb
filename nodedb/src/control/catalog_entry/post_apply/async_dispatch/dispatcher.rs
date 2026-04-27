@@ -1,10 +1,24 @@
-//! Async post-apply dispatch function.
+//! Post-apply side-effect dispatcher.
 //!
-//! Spawns per-variant tokio tasks for `CatalogEntry` mutations that need
-//! async follow-up on **every node** (leader and followers). The match is
-//! exhaustive by design — adding a new `CatalogEntry` variant without
-//! wiring an async branch (even if that branch is `()`) is a compile
-//! error. Best-effort per variant: failures log and drop.
+//! Dispatches per-variant side effects for `CatalogEntry` mutations on
+//! **every node** (leader and followers). The match is exhaustive by design —
+//! adding a new `CatalogEntry` variant without wiring a branch (even if that
+//! branch is `()`) is a compile error.
+//!
+//! ## Applied-index contract for `PutCollection`
+//!
+//! `DocumentOp::Register` MUST complete before `apply` returns and before the
+//! applied-index watcher bumps. Correctness depends on this: any subsequent
+//! `DocumentOp::Scan` on the same node must find the collection registered in
+//! `doc_configs` so Binary Tuple (strict) documents decode correctly.
+//!
+//! `tokio::task::block_in_place` is used for the Register dispatch so it runs
+//! synchronously on the calling tokio worker thread. The raft tick loop always
+//! runs on a tokio worker thread, so `block_in_place` is valid here.
+//!
+//! All other variants (purge, MV delete, etc.) are fire-and-forget and are
+//! spawned as background tasks — their correctness does not depend on
+//! completing before the watcher bumps.
 
 use std::sync::Arc;
 
@@ -13,12 +27,9 @@ use crate::control::state::SharedState;
 
 use super::collection;
 
-/// Spawn the async post-apply side effects of `entry`. Runs on
-/// **every node** (leader and followers) so each node's local Data
-/// Plane observes catalog mutations symmetrically. Any cluster-global
-/// side effect that must not double-fire is the responsibility of
-/// the individual dispatcher — this function never gates on
-/// leadership.
+/// Dispatch post-apply side effects of `entry`. Runs on every node (leader
+/// and followers) so each node's local Data Plane observes catalog mutations
+/// symmetrically.
 pub fn spawn_post_apply_async_side_effects(
     entry: CatalogEntry,
     shared: Arc<SharedState>,
@@ -26,8 +37,14 @@ pub fn spawn_post_apply_async_side_effects(
 ) {
     match entry {
         CatalogEntry::PutCollection(stored) => {
-            tokio::spawn(async move {
-                collection::put_async(*stored, shared).await;
+            // SYNCHRONOUS: Register must complete before the applied-index
+            // watcher bumps so any subsequent scan on this node finds the
+            // collection in doc_configs. block_in_place is valid because
+            // the raft tick loop runs on a tokio worker thread.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    collection::put_async(*stored, shared).await;
+                });
             });
         }
         CatalogEntry::PurgeCollection { tenant_id, name } => {

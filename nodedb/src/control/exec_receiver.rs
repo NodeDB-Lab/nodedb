@@ -9,7 +9,6 @@
 //! entirely — the plan is already encoded by the sender.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{Instrument, info_span};
@@ -20,7 +19,7 @@ use nodedb_cluster::rpc_codec::{ExecuteRequest, ExecuteResponse, TypedClusterErr
 use crate::bridge::envelope::{Priority, Request};
 use crate::bridge::physical_plan::wire as plan_wire;
 use crate::control::state::SharedState;
-use crate::types::{ReadConsistency, RequestId};
+use crate::types::ReadConsistency;
 
 /// Numeric code for `TypedClusterError::Internal` when plan bytes fail to decode.
 const PLAN_DECODE_FAILED: u32 = nodedb_cluster::rpc_codec::PLAN_DECODE_FAILED;
@@ -28,20 +27,11 @@ const PLAN_DECODE_FAILED: u32 = nodedb_cluster::rpc_codec::PLAN_DECODE_FAILED;
 /// Executes pre-planned `PhysicalPlan` on the local Data Plane.
 pub struct LocalPlanExecutor {
     state: Arc<SharedState>,
-    next_request_id: AtomicU64,
 }
 
 impl LocalPlanExecutor {
     pub fn new(state: Arc<SharedState>) -> Self {
-        Self {
-            state,
-            // Offset to avoid collision with direct client and forwarded request IDs.
-            next_request_id: AtomicU64::new(2_000_000_000),
-        }
-    }
-
-    fn next_request_id(&self) -> RequestId {
-        RequestId::new(self.next_request_id.fetch_add(1, Ordering::Relaxed))
+        Self { state }
     }
 }
 
@@ -142,7 +132,7 @@ impl LocalPlanExecutor {
         // ── 4. Dispatch through local SPSC bridge ─────────────────────────────
         //
         // Build a Request, register a oneshot tracker, dispatch, and await the response.
-        let request_id = self.next_request_id();
+        let request_id = self.state.next_request_id();
         let tenant_id = crate::types::TenantId::new(req.tenant_id);
 
         let request = Request {

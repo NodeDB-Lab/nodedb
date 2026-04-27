@@ -81,7 +81,7 @@ impl RangeAllocator {
         let chunk_size = self.default_chunk_size;
 
         // In cluster mode, propose through Raft for distributed uniqueness.
-        if let Some(ref proposer) = state.raft_proposer {
+        if let Some(proposer) = state.raft_proposer.get() {
             let request = RangeAllocationRequest {
                 tenant_id,
                 sequence_name: sequence_name.to_string(),
@@ -159,7 +159,7 @@ impl RangeAllocator {
         reserved_value: i64,
         epoch: u64,
     ) -> Result<(), crate::Error> {
-        let Some(ref proposer) = state.raft_proposer else {
+        let Some(proposer) = state.raft_proposer.get() else {
             // Single-node mode — local counter is authoritative, no Raft needed.
             return Ok(());
         };
