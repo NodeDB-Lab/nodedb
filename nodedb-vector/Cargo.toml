@@ -22,6 +22,7 @@ collection = ["simd", "ivf", "dep:memmap2", "dep:libc"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-codec = { workspace = true }
 serde = { workspace = true }
 zerompk = { workspace = true }
 rkyv = { workspace = true }
