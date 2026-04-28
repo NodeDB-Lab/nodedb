@@ -5,7 +5,7 @@ Welcome to the NodeDB docs. These guides explain what each engine does, when to 
 ## Getting Started
 
 - [Getting Started](getting-started.md) — Prerequisites, build, run, first queries
-- [Architecture](architecture.md) — How the three-plane execution model works
+- [Architecture](architecture.md) — How the three-plane execution model works (now includes cross-engine identity)
 - [Query Language](query-language.md) — Full SQL reference (DDL, DML, engine-specific syntax, functions)
 - [Protocols](protocols.md) — Six wire protocols (pgwire, NDB, HTTP, RESP, ILP, Sync)
 
@@ -19,6 +19,7 @@ Welcome to the NodeDB docs. These guides explain what each engine does, when to 
 - [Spatial](spatial.md) — R\*-tree, geohash, H3, OGC predicates, hybrid spatial-vector
 - [Key-Value](kv.md) — O(1) lookups, TTL, atomic INCR/CAS, sorted indexes (leaderboards), rate gates, SQL-queryable
 - [Full-Text Search](full-text-search.md) — BM25, stemming, fuzzy, hybrid vector fusion
+- [Array (NDArray)](array.md) — Multi-dimensional tiles with Z-order indexing, compression, bitemporal support
 
 ## AI/ML Patterns
 
@@ -33,9 +34,18 @@ Welcome to the NodeDB docs. These guides explain what each engine does, when to 
 - [Evaluation Tracking](ai/evaluation-tracking.md) — Experiment metrics, retriever comparison, drift detection
 - [Multi-Tenancy for AI SaaS](ai/multi-tenancy.md) — WAL-level isolation, RLS during search, per-tenant budgets
 
+## Cross-Engine Features
+
+- [Bitemporal Queries](bitemporal.md) — System time and valid time, audit trails, corrections, compliance
+- [Cross-Engine Identity](architecture.md#cross-engine-identity) — Surrogate bitmaps for fused multi-engine queries
+
+## Deployment & Clients
+
+- [WASM (Experimental)](wasm.md) — Browser and Node.js build, offline-first CRDT sync
+- [NodeDB-Lite](https://github.com/NodeDB-Lab/nodedb-lite) — Embedded database for phones, browsers, desktops (separate repo)
+
 ## Platform & Operations
 
-- [NodeDB-Lite](https://github.com/NodeDB-Lab/nodedb-lite) — Embedded database for phones, browsers, desktops (separate repo)
 - [Security](security/README.md) — Overview, encryption, quick reference
   - [Authentication](security/auth.md) — Users, passwords, API keys, JWKS, mTLS
   - [Roles & Permissions](security/rbac.md) — RBAC, GRANT, REVOKE

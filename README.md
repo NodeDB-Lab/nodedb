@@ -1,14 +1,14 @@
 # NodeDB
 
-**Seven database engines in a single Rust binary. One SQL dialect. Zero network hops between engines.**
+**Eight database engines in a single Rust binary. One SQL dialect. Zero network hops between engines.**
 
-NodeDB replaces the combination of PostgreSQL + pgvector + Redis + Neo4j + ClickHouse + Elasticsearch with a single process. Vector search, graph traversal, document storage, columnar analytics, timeseries, key-value, and full-text search share the same storage, memory, and query planner.
+NodeDB replaces the combination of PostgreSQL + pgvector + Redis + Neo4j + ClickHouse + Elasticsearch with a single process. Vector search, graph traversal, document storage, columnar analytics, timeseries, key-value, full-text search, and multi-dimensional arrays share the same storage, memory, and query planner.
 
 ## Why NodeDB
 
 - **One binary, not seven services.** No inter-service networking, no schema drift between systems, no data synchronization pipelines. A graph query that feeds a vector search that filters by full-text relevance executes in one process.
 - **PostgreSQL wire protocol.** Connect with `psql` or any PostgreSQL client library. Standard SQL with engine-specific extensions where SQL can't express the operation.
-- **Edge to cloud.** The same engines run embedded on phones and browsers (NodeDB-Lite, 4.5 MB WASM) with CRDT-based offline-first sync to the server.
+- **Edge to cloud.** The same engines run embedded on phones and browsers (NodeDB-Lite, WASM) with CRDT-based offline-first sync to the server.
 - **Serious about performance.** Thread-per-Core data plane with io_uring, SIMD-accelerated distance functions, zero-copy MessagePack transport, per-column compression (ALP, FastLanes, FSST, Gorilla). See benchmarks below.
 
 ## Performance
@@ -53,6 +53,7 @@ NodeDB is not a specialized timeseries database, yet it ingests 1.65x faster tha
 | [Spatial](docs/spatial.md)                   | PostGIS                      | R\*-tree, geohash, H3, OGC predicates, hybrid spatial-vector                                                            |
 | [Key-Value](docs/kv.md)                      | Redis, DynamoDB              | O(1) lookups, TTL, sorted indexes, rate limiting, SQL-queryable                                                         |
 | [Full-Text Search](docs/full-text-search.md) | Elasticsearch                | BMW BM25, 27-language support, CJK bigrams, fuzzy, hybrid vector fusion                                                 |
+| [Array (NDArray)](docs/array.md)             | TileDB, Zarr                 | Multi-dimensional tiles, Z-order indexing, bitemporal support, tile-level retention                                     |
 
 ## Install
 
@@ -104,9 +105,9 @@ See [Getting Started](docs/getting-started.md) for build-from-source and configu
 
 ## NodeDB-Lite
 
-All seven engines as an embedded library. Linux, macOS, Windows, Android, iOS, and browser (WASM, ~4.5 MB).
+All eight engines as an embedded library. Linux, macOS, Windows, Android, iOS, and browser (WASM, experimental).
 
-- **Lite only** -- local-first apps that don't need a server. Vector search, graph, FTS, documents, all in-process with sub-ms reads.
+- **Lite only** -- local-first apps that don't need a server. Vector search, graph, FTS, documents, arrays, all in-process with sub-ms reads.
 - **Lite + Origin** -- offline-first with CRDT sync. Writes happen locally, deltas merge to Origin when online. Multiple devices converge regardless of order.
 - **Same API** -- the `NodeDb` trait is identical across Lite and Origin. Switch between embedded and server without changing application code.
 
@@ -115,6 +116,10 @@ See [NodeDB-Lite](https://github.com/NodeDB-Lab/nodedb-lite) for platform detail
 ## Key Features
 
 **Write-time validation** -- Typeguards enforce types, required fields, CHECK constraints, and DEFAULT/VALUE expressions on schemaless collections. Graduate to strict schema with `CONVERT COLLECTION x TO strict`.
+
+**Bitemporal queries** -- System time (audit trail) and valid time (temporal semantics) across all engines. Query data as it existed in the past, or as it was valid on a past date. GDPR-compliant tile purge on array engine.
+
+**Multi-dimensional arrays** -- Scientific computing with Z-order indexed tiles, tile-level compression, and bitemporal support. Combine with vector/graph/text in fused queries via cross-engine identity.
 
 **Real-time** -- CDC change streams with consumer groups (~1-5ms latency). Streaming materialized views. Durable topics. Cron scheduler. LISTEN/NOTIFY. All powered by the Event Plane.
 
