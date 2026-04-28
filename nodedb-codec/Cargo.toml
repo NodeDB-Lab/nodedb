@@ -22,6 +22,9 @@ lz4_flex = { workspace = true }
 # Pcodec — numerical compression for irregular sequences
 pco = { workspace = true }
 
+# Linear algebra (SVD for OPQ Procrustes rotation update)
+nalgebra = { workspace = true }
+
 # Zstd — native target uses C libzstd (fast), WASM target uses pure Rust decoder
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zstd = { workspace = true }
