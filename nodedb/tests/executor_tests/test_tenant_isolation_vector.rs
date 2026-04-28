@@ -46,6 +46,7 @@ fn vector_search_isolated() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -66,6 +67,7 @@ fn vector_search_isolated() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     // Tenant B has no vector index for this collection — the engine returns

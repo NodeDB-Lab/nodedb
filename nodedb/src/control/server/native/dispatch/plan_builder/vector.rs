@@ -26,6 +26,12 @@ pub(crate) fn build_search(fields: &TextFields, collection: &str) -> crate::Resu
         field_name,
         rls_filters: Vec::new(),
         inline_prefilter_plan: None,
+        // The native protocol carries primitive top_k / ef_search fields
+        // directly; Tier 10 ANN tuning (quantization, oversample, target
+        // recall, …) is exposed only through the SQL planner today. A
+        // default-valued struct keeps the wire shape uniform until the
+        // native fields gain matching options.
+        ann_options: Default::default(),
     }))
 }
 

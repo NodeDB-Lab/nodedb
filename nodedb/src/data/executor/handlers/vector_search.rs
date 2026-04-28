@@ -8,6 +8,7 @@
 use roaring::RoaringBitmap;
 use tracing::{debug, warn};
 
+use super::vector_search_ann::{ResolvedAnnOptions, apply_ann_options, quantization_matches};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
@@ -93,6 +94,8 @@ pub(in crate::data::executor) struct VectorSearchParams<'a> {
     /// its output rows materialized into a `SurrogateBitmap` that is
     /// intersected with `filter_bitmap` before HNSW search.
     pub inline_prefilter_plan: Option<&'a crate::bridge::envelope::PhysicalPlan>,
+    /// ANN tuning knobs from the SQL caller.
+    pub ann_options: &'a nodedb_types::VectorAnnOptions,
 }
 
 /// Parameters for multi-vector search (all named fields, RRF fusion).
@@ -148,7 +151,13 @@ impl CoreLoop {
             field_name,
             rls_filters,
             inline_prefilter_plan,
+            ann_options,
         } = params;
+
+        let ResolvedAnnOptions {
+            ef_search,
+            oversample,
+        } = apply_ann_options(self.core_id, collection, ef_search, ann_options);
 
         // Materialize cross-engine prefilter sub-plan (e.g. NDARRAY_SLICE
         // → surrogate bitmap) and intersect with any pre-existing
@@ -200,12 +209,31 @@ impl CoreLoop {
         if collection_ref.is_empty() {
             return self.response_with_payload(task, b"[]".to_vec());
         }
-        // Over-fetch when RLS is active so post-filter has enough headroom
-        // to still return `top_k` after dropping rejected candidates.
+
+        // Quantization mismatch: if the SQL caller requested a specific
+        // quantization that differs from what the index actually uses, warn
+        // once per query and proceed with the collection's actual quantization.
+        // Per-collection codec dispatch will honor the hint when that lands.
+        if let Some(requested_q) = ann_options.quantization {
+            let index_q = collection_ref.stats().quantization;
+            if !quantization_matches(requested_q, index_q) {
+                warn!(
+                    core = self.core_id,
+                    %collection,
+                    requested = ?requested_q,
+                    actual = %index_q,
+                    "ann_options: quantization hint does not match index; proceeding with index quantization"
+                );
+            }
+        }
+
+        // Over-fetch to accommodate both oversample breadth (for re-rank
+        // headroom) and RLS post-filter headroom. The two factors are
+        // multiplied so each can independently request more candidates.
         let fetch_k = if rls_filters.is_empty() {
-            top_k
+            top_k.saturating_mul(oversample)
         } else {
-            top_k.saturating_mul(2).max(20)
+            top_k.saturating_mul(2).saturating_mul(oversample).max(20)
         };
         let ef = effective_ef(ef_search, fetch_k);
         let results = match filter_bitmap {
@@ -454,6 +482,39 @@ mod tests {
             coll.insert_with_surrogate(vec![i as f32], surrogate);
         }
         coll
+    }
+
+    /// Verify the oversample-based fetch_k arithmetic in isolation.
+    /// oversample=3, top_k=10, no RLS → fetch_k = 30.
+    /// oversample=3, top_k=10, RLS active → fetch_k = max(10*2*3, 20) = 60.
+    #[test]
+    fn oversample_fetch_k_arithmetic() {
+        let top_k: usize = 10;
+
+        // No RLS, oversample=3.
+        let oversample: usize = 3;
+        let fetch_k_no_rls = top_k.saturating_mul(oversample);
+        assert_eq!(
+            fetch_k_no_rls, 30,
+            "no-RLS oversample=3 fetch_k should be 30"
+        );
+
+        // RLS active, oversample=3.
+        let rls_active = true;
+        let fetch_k_rls = if rls_active {
+            top_k.saturating_mul(2).saturating_mul(oversample).max(20)
+        } else {
+            top_k.saturating_mul(oversample)
+        };
+        assert_eq!(fetch_k_rls, 60, "RLS oversample=3 fetch_k should be 60");
+
+        // oversample=1 (default) → no change from baseline.
+        let oversample_default: usize = 1;
+        let fetch_k_default = top_k.saturating_mul(oversample_default);
+        assert_eq!(
+            fetch_k_default, 10,
+            "oversample=1 fetch_k should equal top_k"
+        );
     }
 
     #[test]

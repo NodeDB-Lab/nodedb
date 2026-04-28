@@ -274,15 +274,7 @@ pub(super) fn convert_one(
             ef_search,
             filters,
             array_prefilter,
-            // Tier 10 ANN options (quantization/oversample/target_recall/etc.)
-            // are parsed by nodedb-sql but not yet threaded into
-            // `VectorOp::Search`. Wiring them through PhysicalPlan, the
-            // wire codec, and the Data Plane executor is tracked as a
-            // separate piece of work. Bound here with `_` so the
-            // exhaustiveness guarantee remains intact and the field is
-            // surfaced by the compiler the moment the executor side
-            // lands.
-            ann_options: _,
+            ann_options,
         } => super::scan::convert_vector_search(super::scan_params::VectorSearchParams {
             collection,
             field,
@@ -291,6 +283,7 @@ pub(super) fn convert_one(
             ef_search,
             filters,
             array_prefilter: array_prefilter.as_ref(),
+            ann_options,
             tenant_id,
             ctx,
         }),

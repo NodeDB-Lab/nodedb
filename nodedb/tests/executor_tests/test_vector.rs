@@ -46,6 +46,7 @@ fn vector_insert_and_search() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
 
@@ -70,6 +71,7 @@ fn vector_search_no_index_returns_not_found() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     assert_eq!(resp.status, Status::Error);

@@ -486,6 +486,7 @@ fn surrogate_round_trip_all_engines() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     let all_vec_surs = extract_vector_surrogates(&all_vec);
@@ -507,6 +508,7 @@ fn surrogate_round_trip_all_engines() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     let filtered_vec_surs = extract_vector_surrogates(&filtered_vec);

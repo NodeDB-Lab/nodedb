@@ -67,6 +67,7 @@ impl CoreLoop {
                 field_name,
                 rls_filters,
                 inline_prefilter_plan,
+                ann_options,
             } => self.execute_vector_search(
                 super::super::handlers::vector_search::VectorSearchParams {
                     task,
@@ -79,6 +80,7 @@ impl CoreLoop {
                     field_name,
                     rls_filters,
                     inline_prefilter_plan: inline_prefilter_plan.as_deref(),
+                    ann_options,
                 },
             ),
 

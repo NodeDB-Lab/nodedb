@@ -206,6 +206,7 @@ fn fts_derived_bitmap_filters_vector_search() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     let all_ids = extract_vector_surrogates(&all_payload);
@@ -237,6 +238,7 @@ fn fts_derived_bitmap_filters_vector_search() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     let filtered_ids = extract_vector_surrogates(&filtered_payload);

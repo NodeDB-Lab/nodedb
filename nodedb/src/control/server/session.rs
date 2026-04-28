@@ -282,6 +282,10 @@ impl Session {
                     field_name: String::new(),
                     rls_filters: Vec::new(),
                     inline_prefilter_plan: None,
+                    // The HTTP/JSON session protocol surfaces only the
+                    // primitive top_k field today. Tier 10 ANN tuning is
+                    // SQL-only; defaulting keeps the wire shape uniform.
+                    ann_options: Default::default(),
                 })
             }
             "range_scan" => {

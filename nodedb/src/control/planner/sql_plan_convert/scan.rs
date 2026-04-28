@@ -28,7 +28,7 @@ use super::expr::convert_sort_keys;
 use super::filter::{expr_filter_qualified, serialize_filters};
 use super::scan_params::{
     HybridSearchParams, JoinPlanParams, RecursiveScanParams, ScanParams, SpatialScanParams,
-    TimeseriesScanParams,
+    TimeseriesScanParams, VectorSearchParams,
 };
 use super::value::{
     extract_time_range, row_to_msgpack, sql_value_to_bytes, sql_value_to_string,
@@ -513,9 +513,7 @@ pub(super) fn convert_timeseries_ingest(
     }])
 }
 
-pub(super) fn convert_vector_search(
-    p: super::scan_params::VectorSearchParams<'_>,
-) -> crate::Result<Vec<PhysicalTask>> {
+pub(super) fn convert_vector_search(p: VectorSearchParams<'_>) -> crate::Result<Vec<PhysicalTask>> {
     let vshard = VShardId::from_collection(p.collection);
     let filter_bytes = serialize_filters(p.filters)?;
     let inline_prefilter_plan = match p.array_prefilter {
@@ -526,6 +524,7 @@ pub(super) fn convert_vector_search(
         )?)),
         None => None,
     };
+    let ann_options = p.ann_options.to_runtime();
     Ok(vec![PhysicalTask {
         tenant_id: p.tenant_id,
         vshard_id: vshard,
@@ -538,6 +537,7 @@ pub(super) fn convert_vector_search(
             field_name: p.field.to_string(),
             rls_filters: filter_bytes,
             inline_prefilter_plan,
+            ann_options,
         }),
         post_set_op: PostSetOp::None,
     }])

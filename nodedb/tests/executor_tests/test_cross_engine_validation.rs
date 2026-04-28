@@ -93,6 +93,7 @@ fn cross_model_query_vector_graph_relational() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     let vector_json = payload_json(&vector_payload);

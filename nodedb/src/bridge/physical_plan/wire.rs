@@ -63,6 +63,7 @@ mod tests {
             field_name: "vec".into(),
             rls_filters: vec![],
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }));
     }
 

@@ -222,6 +222,7 @@ fn kv_and_vector_coexist() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
 }

@@ -73,6 +73,7 @@ pub(super) struct VectorSearchParams<'a> {
     pub ef_search: &'a usize,
     pub filters: &'a [Filter],
     pub array_prefilter: Option<&'a nodedb_sql::types::NdArrayPrefilter>,
+    pub ann_options: &'a nodedb_sql::types::VectorAnnOptions,
     pub tenant_id: TenantId,
     pub ctx: &'a ConvertContext,
 }

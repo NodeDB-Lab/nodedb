@@ -607,6 +607,7 @@ fn vector_search_with_array_surrogate_prefilter() {
                 slice_msgpack,
             },
         ))),
+        ann_options: Default::default(),
     }));
     assert_eq!(r.status, Status::Ok, "vector+prefilter failed: {r:?}");
 

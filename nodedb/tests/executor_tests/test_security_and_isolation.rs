@@ -394,6 +394,7 @@ fn mixed_engine_isolation_no_cross_eviction() {
             field_name: String::new(),
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
+            ann_options: Default::default(),
         }),
     );
     assert_eq!(

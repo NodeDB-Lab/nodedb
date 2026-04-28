@@ -40,6 +40,8 @@ pub enum VectorOp {
         /// reduced candidate set. Mirrors `HashJoin`'s `inline_*_bitmap`
         /// mechanism so the Data Plane composition is uniform.
         inline_prefilter_plan: Option<Box<PhysicalPlan>>,
+        /// ANN tuning knobs from the SQL caller. Defaults to no overrides.
+        ann_options: nodedb_types::VectorAnnOptions,
     },
 
     /// Insert a vector into the HNSW index (write path).
