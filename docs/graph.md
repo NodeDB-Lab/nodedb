@@ -355,8 +355,34 @@ Scatter-gather with continuations:
 
 ---
 
+## Bitemporal Support
+
+Graph edges support both system time and valid time, enabling relationship timelines and historical traversal.
+
+```sql
+-- Insert an edge that becomes valid in the future (scheduled relationship)
+GRAPH INSERT EDGE IN 'edges' FROM 'user:alice' TO 'project:rocket'
+  TYPE 'assigned_to'
+  PROPERTIES { assigned_date: '2026-05-01' }
+  VALID_TIME '2026-05-01T00:00:00Z';
+
+-- Query the graph as it existed at a past moment
+GRAPH TRAVERSE FROM 'user:alice' DEPTH 2
+AS OF SYSTEM TIME 1700000000000;
+
+-- Query relationships that were valid at a specific date
+MATCH (u:User)-[:assigned_to]->(p:Project)
+WHERE u.id = 'alice'
+AS OF VALID TIME 1746086400000;  -- May 1, 2026
+```
+
+This is useful for organizational hierarchies, historical relationship analysis, and compliance audits. See [Bitemporal](bitemporal.md) for detailed examples.
+
+---
+
 ## Related
 
+- [Bitemporal](bitemporal.md) — Cross-engine temporal queries and audit trails
 - [Vector Search](vectors.md) — GraphRAG combines graph traversal with vector similarity
 - [Full-Text Search](full-text-search.md) — BM25 results can be re-ranked using graph context
 - [GraphRAG Patterns](ai/graphrag.md) — Detailed retrieval-augmented generation with graphs

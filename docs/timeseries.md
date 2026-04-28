@@ -186,8 +186,32 @@ NodeDB works as a native Grafana data source:
 
 NodeDB also supports Grafana's health check, metadata, annotations, and label discovery endpoints.
 
+## Bitemporal Support
+
+Timeseries data can be backdated or corrected using bitemporal queries — distinguishing between system time (when the metric was recorded) and valid time (when it represents).
+
+```sql
+-- Query metrics as recorded yesterday (system time)
+SELECT host, AVG(cpu_usage) FROM cpu_metrics
+WHERE ts > now() - INTERVAL '1 hour'
+GROUP BY host
+AS OF SYSTEM TIME (extract(epoch from now()) * 1000 - 86400000);
+
+-- Correct historical metric (recorded with wrong timestamp, corrected later)
+INSERT INTO cpu_metrics (ts, host, cpu_usage) VALUES
+  ('2026-04-01T10:00:00Z', 'web-01', 65.0);  -- backdated
+
+-- Query what was valid at the original time
+SELECT * FROM cpu_metrics
+WHERE ts BETWEEN '2026-04-01' AND '2026-04-02'
+AS OF VALID TIME 1712000000000;  -- April 1st
+```
+
+This is useful for metric corrections, forecast updates, and audit trails. See [Bitemporal](bitemporal.md) for detailed examples.
+
 ## Related
 
+- [Bitemporal](bitemporal.md) — Cross-engine temporal queries and audit trails
 - [Columnar](columnar.md) — Timeseries is a columnar profile
 - [Spatial](spatial.md) — Combine time and location (fleet tracking, IoT)
 - [Architecture](architecture.md) — How storage tiers handle hot/warm/cold data

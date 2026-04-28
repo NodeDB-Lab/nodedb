@@ -161,8 +161,28 @@ CONVERT COLLECTION events TO STORAGE='document';
 CONVERT COLLECTION sessions TO STORAGE='kv';
 ```
 
+## Bitemporal Support
+
+Columnar collections track both system time and valid time, enabling corrections, audit trails, and temporal analytics.
+
+```sql
+-- Query as of a past system time (historical database state)
+SELECT level, COUNT(*) FROM logs
+WHERE ts > now() - INTERVAL '1 hour'
+GROUP BY level
+AS OF SYSTEM TIME (extract(epoch from now()) * 1000 - 3600000);
+
+-- Query records valid at a specific date (forecast corrections, backdated data)
+SELECT host, cpu_usage FROM metrics
+WHERE ts BETWEEN '2026-04-01' AND '2026-04-02'
+AS OF VALID TIME 1712000000000;
+```
+
+See [Bitemporal](bitemporal.md) for detailed examples and compliance workflows.
+
 ## Related
 
+- [Bitemporal](bitemporal.md) — Cross-engine temporal queries and audit trails
 - [Timeseries](timeseries.md) — Columnar profile for time-ordered data
 - [Spatial](spatial.md) — Columnar profile for geospatial data
 - [Documents (strict)](documents.md) — HTAP bridge source for OLTP + OLAP

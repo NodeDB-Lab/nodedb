@@ -126,4 +126,67 @@ See [NodeDB-Lite](lite.md) for details on the embedded database.
 
 All engines share the same snapshot, transaction context, and memory budget. A query that combines vector similarity, graph traversal, spatial filtering, and document field access executes inside one process — no network hops between engines, no application-level joins.
 
+## Cross-Engine Identity
+
+All engines use a unified, distributed identity space called **surrogate identity**. Each row, cell, node, and document has a surrogate ID (u64) that is globally unique within a database. Surrogates enable fused queries that combine filtering across all engines in a single bitmap.
+
+**Why surrogates matter:**
+
+- **Bitmap fusion** — A predicate like "documents matching this full-text query AND vectors similar to this query AND graph nodes reachable in 2 hops" compiles to a single Roaring Bitmap of candidate surrogates. No three-way JOIN needed.
+- **Fast intersection** — Combine constraints across engines in microseconds using bitwise operations.
+- **Distributed execution** — Surrogates map to vShards; the planner scatters the fused predicate to the correct shard cores in parallel.
+
+### How It Works
+
+When you insert a row into any engine, the Control Plane assigns a unique `surrogate_id`. This ID is embedded in:
+
+- Vector index payloads (allows pre-filtering vector search by document properties, graph reachability, etc.)
+- Graph node attributes (allows querying nodes by document properties)
+- Document metadata (allows filtering documents by vector similarity, graph membership)
+- Array cell metadata (allows filtering cells by spatial properties, text search)
+- Full-text posting lists (allows narrowing FTS results by vector similarity, graph traversal)
+
+### Example: Multimodal RAG Query
+
+```sql
+-- Vector + Graph + Text fusion in one query
+SELECT docs.id, docs.title, rrf_score() AS score
+FROM documents AS docs
+WHERE docs.id IN (
+    SEARCH vectors USING VECTOR(docs.embedding, query_vec, 1000)
+  )
+  AND docs.id IN (
+    GRAPH TRAVERSE FROM 'topic:ml' DEPTH 2
+  )
+  AND text_match(docs.body, 'machine learning transformers')
+LIMIT 10;
+```
+
+Internally:
+
+1. Vector search returns a Roaring Bitmap of surrogate IDs (documents similar to the query)
+2. Graph traverse returns a Roaring Bitmap of surrogate IDs (documents reachable from the topic node)
+3. Full-text search returns a Roaring Bitmap of surrogate IDs (documents matching the text query)
+4. The planner intersects the three bitmaps in parallel: `vector_bitmap & graph_bitmap & fts_bitmap`
+5. The result is a single bitmap of surrogates that satisfy all three constraints
+6. Final fetch pulls documents, re-ranks by RRF score, and returns top 10
+
+All bitmap operations happen on the Data Plane in microseconds. No network hops, no intermediate result sets.
+
+### Distributed Surrogate Routing
+
+On a cluster, surrogates map to vShards using a consistent hash:
+
+```
+surrogate_id = hash(tenant_id, global_row_id) % num_vshards
+```
+
+All operations on a surrogate route to the same vShard core. Fused bitmap queries scatter-gather across shards: each shard computes its local bitmap intersection, results merge at the Control Plane.
+
+### Performance
+
+- **Bitmap intersection** — O(log n) bitwise operations on compressed Roaring Bitmaps
+- **No intermediate sets** — Predicates fuse before any documents are fetched
+- **Cache-friendly** — Bitmaps are small (kilobytes for millions of rows) and fit in L1/L2 cache
+
 [Back to docs](README.md)

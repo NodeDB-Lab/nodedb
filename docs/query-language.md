@@ -734,6 +734,86 @@ SELECT crdt_state('collab_docs', 'doc123');
 SELECT crdt_apply('collab_docs', 'doc123', '<delta_bytes>');
 ```
 
+### Array (NDArray)
+
+```sql
+-- Create array with dimensions and attributes
+CREATE ARRAY spatial_grid
+  DIMS (
+    x INT64 DOMAIN [0, 1000),
+    y INT64 DOMAIN [0, 1000),
+    z INT64 DOMAIN [0, 1000)
+  )
+  ATTRS (
+    temperature FLOAT32,
+    pressure FLOAT32
+  )
+  TILE_EXTENTS (64, 64, 64);
+
+-- Insert cells
+INSERT INTO spatial_grid (x, y, z, temperature, pressure) VALUES
+  (10, 20, 5, 23.5, 1013.2),
+  (10, 20, 10, 22.1, 1013.1);
+
+-- Slice: range query over dimensions
+SELECT x, y, z, temperature FROM NDARRAY_SLICE(
+  'spatial_grid',
+  {x: [0, 100), y: [0, 100), z: [0, 50)},
+  ['temperature']
+);
+
+-- Project: select specific attributes
+SELECT * FROM NDARRAY_PROJECT('spatial_grid', ['temperature', 'pressure']);
+
+-- Aggregate: reduce dimensionality via aggregation
+SELECT * FROM NDARRAY_AGG('spatial_grid', 'temperature', 'AVG', 'x');
+
+-- Element-wise operations
+SELECT * FROM NDARRAY_ELEMENTWISE(
+  'current',
+  'baseline',
+  'SUBTRACT',
+  'temperature'
+);
+
+-- Flush and compact
+SELECT NDARRAY_FLUSH('spatial_grid');
+SELECT NDARRAY_COMPACT('spatial_grid');
+```
+
+## Temporal Queries (Bitemporal)
+
+Temporal queries use `AS OF` clauses to query data at a point in time. Both system time (when data entered) and valid time (when it represents) are supported across Document, Columnar, Timeseries, Spatial, Graph, and Array engines.
+
+```sql
+-- Read as of system time (historical database state)
+SELECT * FROM orders
+AS OF SYSTEM TIME 1700000000000;
+
+-- Read rows valid at a specific time (temporal semantics)
+SELECT * FROM metrics
+AS OF VALID TIME 1700000000000;
+
+-- Both dimensions: what did we know at a past moment about a past date?
+SELECT * FROM orders
+AS OF SYSTEM TIME 1700000000000
+AS OF VALID TIME 1700000001000;
+
+-- With predicates
+SELECT customer_id, total FROM orders
+WHERE status = 'shipped'
+AS OF SYSTEM TIME (extract(epoch from now()) * 1000 - 86400000);
+
+-- Column-level temporal
+SELECT id, balance FROM accounts
+WHERE balance > 0
+AS OF VALID TIME 1700000000000;
+```
+
+Time values are milliseconds since Unix epoch. For current time, use `extract(epoch from now()) * 1000` or `(SELECT extract(epoch from now() at time zone 'utc') * 1000)`.
+
+See [Bitemporal Queries](../bitemporal.md) for detailed use cases.
+
 ## Transactions
 
 ```sql
@@ -927,6 +1007,8 @@ SHOW USERS;
 
 - [Getting Started](getting-started.md) — First queries walkthrough
 - [Architecture](architecture.md) — How the three-plane execution model works
-- Engine guides: [Vectors](vectors.md) | [Graph](graph.md) | [Documents](documents.md) | [KV](kv.md) | [Timeseries](timeseries.md) | [Spatial](spatial.md) | [Full-Text](full-text-search.md)
+- Engine guides: [Vectors](vectors.md) | [Graph](graph.md) | [Documents](documents.md) | [KV](kv.md) | [Timeseries](timeseries.md) | [Spatial](spatial.md) | [Full-Text](full-text-search.md) | [Array](array.md)
+- [Bitemporal Queries](../bitemporal.md) — System time and valid time semantics
+- [WASM](../wasm.md) — Browser and Node.js deployment
 
 [Back to docs](README.md)

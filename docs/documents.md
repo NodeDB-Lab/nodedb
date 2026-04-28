@@ -161,8 +161,30 @@ CONVERT COLLECTION cache TO kv;
 
 No data loss on conversion. NodeDB infers the schema from existing documents when converting to strict mode.
 
+## Bitemporal Support
+
+Both schemaless and strict documents support bitemporal queries — tracking system time (when data was inserted) and valid time (when the data represents).
+
+```sql
+-- Query documents as they existed yesterday (system time)
+SELECT * FROM users
+AS OF SYSTEM TIME (extract(epoch from now()) * 1000 - 86400000);
+
+-- Query documents that were valid at a past date (valid time)
+SELECT * FROM users
+AS OF VALID TIME 1700000000000;
+
+-- Full temporal lineage: what did we know then?
+SELECT * FROM users
+AS OF SYSTEM TIME 1700000000000
+AS OF VALID TIME 1700000001000;
+```
+
+This enables audit trails, compliance (GDPR history), and correction workflows. See [Bitemporal](bitemporal.md) for detailed examples.
+
 ## Related
 
+- [Bitemporal](bitemporal.md) — Cross-engine temporal queries and audit trails
 - [Columnar](columnar.md) — HTAP bridge from strict documents to columnar analytics
 - [Key-Value](kv.md) — For key-dominant access patterns
 - [NodeDB-Lite](lite.md) — Schemaless documents with CRDT sync on edge devices
