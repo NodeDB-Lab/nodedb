@@ -11,13 +11,14 @@
 
 use std::collections::HashMap;
 
-use nodedb_types::Surrogate;
+use nodedb_types::{Surrogate, VectorQuantization};
 
 use crate::flat::FlatIndex;
 use crate::hnsw::{HnswIndex, HnswParams};
 use crate::index_config::{IndexConfig, IndexType};
 
 use super::codec_dispatch::CollectionCodec;
+use super::payload_index::PayloadIndexSet;
 use super::segment::{BuildRequest, BuildingSegment, DEFAULT_SEAL_THRESHOLD, SealedSegment};
 
 /// Manages all vector segments for a single collection (one index key).
@@ -64,6 +65,23 @@ pub struct VectorCollection {
     /// Coexists with sealed segments — for codec-dispatched collections the
     /// per-segment Sq8 builder is skipped and this index is used instead.
     pub codec_dispatch: Option<CollectionCodec>,
+    /// Quantization mode requested at collection-creation time.
+    ///
+    /// When `!= None && != Sq8`, each call to `complete_build` additionally
+    /// rebuilds `codec_dispatch` over all vectors so the codec-dispatch path
+    /// is always up-to-date after a segment seals.
+    pub(crate) quantization: VectorQuantization,
+    /// In-memory payload bitmap indexes for vector-primary collections.
+    ///
+    /// Empty (no indexes) by default; populated at construction time from
+    /// `VectorPrimaryConfig::payload_indexes`.
+    pub payload: PayloadIndexSet,
+    /// Optional dedicated memory arena index for this collection.
+    ///
+    /// Set by the Data Plane after requesting a per-collection arena from
+    /// `nodedb_mem::CollectionArenaRegistry`. Used only for stats reporting;
+    /// the actual arena pinning is handled externally.
+    pub arena_index: Option<u32>,
 }
 
 impl VectorCollection {
@@ -112,6 +130,9 @@ impl VectorCollection {
             seal_threshold,
             index_config: config,
             codec_dispatch: None,
+            quantization: VectorQuantization::default(),
+            payload: PayloadIndexSet::default(),
+            arena_index: None,
         }
     }
 
@@ -288,6 +309,11 @@ impl VectorCollection {
     }
 
     /// Accept a completed HNSW build from the background thread.
+    ///
+    /// After promoting the segment to sealed, rebuilds the collection-level
+    /// codec-dispatch index when `self.quantization` is `RaBitQ` or `Bbq`.
+    /// The rebuild trains over all vectors so the codec index always covers
+    /// every sealed segment.
     pub fn complete_build(&mut self, segment_id: u32, index: HnswIndex) {
         if let Some(pos) = self
             .building
@@ -295,8 +321,16 @@ impl VectorCollection {
             .position(|b| b.segment_id == segment_id)
         {
             let building = self.building.remove(pos);
-            let use_pq = self.index_config.index_type == IndexType::HnswPq;
-            let (sq8, pq) = if use_pq {
+            // For codec-dispatched collections (RaBitQ/BBQ), skip per-segment
+            // Sq8/PQ quantization — the codec index handles traversal.
+            let use_codec_dispatch = matches!(
+                self.quantization,
+                VectorQuantization::RaBitQ | VectorQuantization::Bbq
+            );
+            let use_pq = !use_codec_dispatch && self.index_config.index_type == IndexType::HnswPq;
+            let (sq8, pq) = if use_codec_dispatch {
+                (None, None)
+            } else if use_pq {
                 (
                     None,
                     Self::build_pq_for_index(&index, self.index_config.pq_m),
@@ -314,6 +348,16 @@ impl VectorCollection {
                 tier,
                 mmap_vectors,
             });
+
+            // Rebuild the collection-level codec index to include the new segment.
+            if use_codec_dispatch {
+                let tag = match self.quantization {
+                    VectorQuantization::RaBitQ => "rabitq",
+                    VectorQuantization::Bbq => "bbq",
+                    _ => unreachable!(),
+                };
+                self.build_codec_dispatch(tag);
+            }
         }
     }
 
@@ -469,5 +513,31 @@ impl VectorCollection {
     /// Update HNSW parameters for future builds.
     pub fn set_params(&mut self, params: HnswParams) {
         self.params = params;
+    }
+
+    /// Set the collection-level quantization.
+    ///
+    /// Called when a vector-primary collection is first created so the
+    /// quantization is stored in checkpoints and drives codec-dispatch
+    /// rebuilds after each `complete_build`.
+    pub fn set_quantization(&mut self, q: VectorQuantization) {
+        self.quantization = q;
+    }
+
+    /// Return the configured quantization mode.
+    pub fn quantization(&self) -> VectorQuantization {
+        self.quantization
+    }
+
+    /// Configure payload bitmap indexes from a list of field names.
+    ///
+    /// Uses `PayloadIndexKind::Equality` for all fields (range support can be
+    /// added later without breaking the checkpoint format). Idempotent.
+    pub fn configure_payload_indexes(&mut self, fields: &[String]) {
+        use super::payload_index::PayloadIndexKind;
+        for field in fields {
+            self.payload
+                .add_index(field.as_str(), PayloadIndexKind::Equality);
+        }
     }
 }

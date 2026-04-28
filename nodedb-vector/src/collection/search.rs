@@ -1,9 +1,17 @@
 //! VectorCollection search: multi-segment merging with SQ8 reranking.
+//!
+//! The `search_with_payload_filter` method wires payload bitmap pre-filtering
+//! into the search path. When all referenced fields in the predicate are
+//! indexed, the bitmap is built and passed to `search_with_bitmap_bytes`.
+//! When any field is un-indexed, the search falls back to the full unfiltered
+//! path and lets the caller apply post-filtering — the un-indexed predicate is
+//! never silently dropped.
 
 use crate::distance::{DistanceMetric, distance};
 use crate::hnsw::SearchResult;
 
 use super::lifecycle::VectorCollection;
+use super::payload_index::FilterPredicate;
 use super::segment::SealedSegment;
 
 /// Score a single candidate via the SQ8 codec, using the metric-appropriate
@@ -234,6 +242,45 @@ impl VectorCollection {
         });
         all.truncate(top_k);
         all
+    }
+
+    /// Search with a structured payload predicate.
+    ///
+    /// If `predicate` is fully covered by indexed fields (all leaf fields have
+    /// a bitmap index), the bitmap is built and HNSW traversal uses it as a
+    /// pre-filter.
+    ///
+    /// If any field in `predicate` is un-indexed, the method returns
+    /// `(results, false)` where `false` signals that the predicate was NOT
+    /// applied and the caller must apply it as a post-filter. This guarantees
+    /// the un-indexed predicate is never silently dropped.
+    ///
+    /// Returns `(results, filter_was_applied)`.
+    pub fn search_with_payload_filter(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        ef: usize,
+        predicate: &FilterPredicate,
+    ) -> (Vec<SearchResult>, bool) {
+        match self.payload.pre_filter(predicate) {
+            Some(bm) => {
+                // Serialize the bitmap to the byte format expected by
+                // `search_with_bitmap_bytes`.
+                let mut bm_bytes = Vec::new();
+                if bm.serialize_into(&mut bm_bytes).is_ok() {
+                    let results = self.search_with_bitmap_bytes(query, top_k, ef, &bm_bytes);
+                    (results, true)
+                } else {
+                    // Serialization failure: fall back to unfiltered search.
+                    (self.search(query, top_k, ef), false)
+                }
+            }
+            None => {
+                // Un-indexed field present: full scan, caller must post-filter.
+                (self.search(query, top_k, ef), false)
+            }
+        }
     }
 }
 

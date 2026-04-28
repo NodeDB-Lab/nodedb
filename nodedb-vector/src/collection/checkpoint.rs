@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 
-use nodedb_types::Surrogate;
+use nodedb_types::{Surrogate, VectorQuantization};
 use serde::{Deserialize, Serialize};
 
+use crate::collection::payload_index::PayloadIndexSetSnapshot;
 use crate::collection::segment::{DEFAULT_SEAL_THRESHOLD, SealedSegment};
 use crate::collection::tier::StorageTier;
 use crate::distance::DistanceMetric;
@@ -33,6 +34,15 @@ pub(crate) struct CollectionSnapshot {
     /// `(document_surrogate_u32, [global_vector_ids])` pairs.
     #[serde(default)]
     pub multi_doc_map: Vec<(u32, Vec<u32>)>,
+    /// Quantization mode for the collection-level codec-dispatch index.
+    /// Serialised as a u8 matching `VectorQuantization` discriminants.
+    /// 0 = None (default, backward-compatible).
+    #[serde(default)]
+    pub quantization_tag: u8,
+    /// Serialised `PayloadIndexSetSnapshot` (msgpack bytes).
+    /// Empty vec = no payload indexes (default, backward-compatible).
+    #[serde(default)]
+    pub payload_index_bytes: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
@@ -111,6 +121,20 @@ impl VectorCollection {
                 .iter()
                 .map(|(k, v)| (k.as_u32(), v.clone()))
                 .collect(),
+            quantization_tag: quantization_to_tag(self.quantization),
+            payload_index_bytes: {
+                let snap = self.payload.to_snapshot();
+                match zerompk::to_msgpack_vec(&snap) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "vector payload index snapshot serialization failed"
+                        );
+                        return Vec::new();
+                    }
+                }
+            },
         };
         match zerompk::to_msgpack_vec(&snapshot) {
             Ok(bytes) => bytes,
@@ -239,7 +263,45 @@ impl VectorCollection {
             seal_threshold: DEFAULT_SEAL_THRESHOLD,
             index_config,
             codec_dispatch: None,
+            quantization: quantization_from_tag(snap.quantization_tag),
+            payload: if snap.payload_index_bytes.is_empty() {
+                super::payload_index::PayloadIndexSet::default()
+            } else {
+                zerompk::from_msgpack::<PayloadIndexSetSnapshot>(&snap.payload_index_bytes)
+                    .map(super::payload_index::PayloadIndexSet::from_snapshot)
+                    .unwrap_or_default()
+            },
+            arena_index: None,
         })
+    }
+}
+
+/// Encode a `VectorQuantization` to a u8 tag for storage.
+fn quantization_to_tag(q: VectorQuantization) -> u8 {
+    match q {
+        VectorQuantization::None => 0,
+        VectorQuantization::Sq8 => 1,
+        VectorQuantization::Pq => 2,
+        VectorQuantization::RaBitQ => 3,
+        VectorQuantization::Bbq => 4,
+        VectorQuantization::Binary => 5,
+        VectorQuantization::Ternary => 6,
+        VectorQuantization::Opq => 7,
+    }
+}
+
+/// Decode a u8 tag back to `VectorQuantization`.
+fn quantization_from_tag(tag: u8) -> VectorQuantization {
+    match tag {
+        0 => VectorQuantization::None,
+        1 => VectorQuantization::Sq8,
+        2 => VectorQuantization::Pq,
+        3 => VectorQuantization::RaBitQ,
+        4 => VectorQuantization::Bbq,
+        5 => VectorQuantization::Binary,
+        6 => VectorQuantization::Ternary,
+        7 => VectorQuantization::Opq,
+        _ => VectorQuantization::None,
     }
 }
 
@@ -268,5 +330,50 @@ mod tests {
 
         let results = restored.search(&[25.0, 0.0, 0.0], 1, 64);
         assert_eq!(results[0].id, 25);
+    }
+
+    /// Payload bitmap indexes registered on a vector-primary collection
+    /// must survive a checkpoint round-trip — otherwise `WHERE` filters
+    /// would silently return zero rows after a node restart.
+    #[test]
+    fn checkpoint_roundtrip_preserves_payload_bitmap() {
+        use crate::collection::PayloadIndexKind;
+        use crate::collection::payload_index::FilterPredicate;
+        use nodedb_types::Value;
+        use std::collections::HashMap;
+
+        let mut coll = VectorCollection::new(
+            3,
+            HnswParams {
+                metric: DistanceMetric::L2,
+                ..HnswParams::default()
+            },
+        );
+        coll.payload
+            .add_index("category".to_string(), PayloadIndexKind::Equality);
+        for i in 0u32..10 {
+            let node_id = coll.insert(vec![i as f32, 0.0, 0.0]);
+            let mut fields = HashMap::new();
+            let cat = if i % 2 == 0 { "A" } else { "B" };
+            fields.insert("category".to_string(), Value::String(cat.to_string()));
+            coll.payload.insert_row(node_id, &fields);
+        }
+
+        let bytes = coll.checkpoint_to_bytes();
+        let restored = VectorCollection::from_checkpoint(&bytes).unwrap();
+
+        let pred = FilterPredicate::Eq {
+            field: "category".to_string(),
+            value: Value::String("A".to_string()),
+        };
+        let bm = restored
+            .payload
+            .pre_filter(&pred)
+            .expect("payload index 'category' must be present after restore");
+        assert_eq!(
+            bm.len(),
+            5,
+            "5 rows of category=A must survive checkpoint round-trip"
+        );
     }
 }

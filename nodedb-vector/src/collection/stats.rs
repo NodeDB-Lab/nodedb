@@ -92,6 +92,11 @@ impl VectorCollection {
             dimensions: self.dim,
             seal_threshold: self.seal_threshold,
             mmap_segment_count: self.mmap_segment_count,
+            // `arena_bytes` is populated by the Data Plane handler which
+            // has access to `nodedb_mem::CollectionArenaHandle`. The field
+            // is always `None` here; callers overwrite it after calling
+            // `stats()` when a dedicated arena handle is available.
+            arena_bytes: None,
         }
     }
 }
