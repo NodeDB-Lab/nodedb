@@ -287,30 +287,17 @@ async fn handle_sync_session(
                     // Handle TimeseriesPush directly (avoid double-decode in process_frame).
                     if frame.msg_type == SyncMessageType::TimeseriesPush {
                         if let Some(ts_msg) = frame.decode_body::<TimeseriesPushMsg>() {
-                            let (ack, ingest_data) = session.handle_timeseries_push(&ts_msg);
-                            // Dispatch to Data Plane if we have data and SharedState.
-                            if let (Some(ingest), Some(shared)) = (ingest_data, shared.as_ref()) {
-                                let tenant_id =
-                                    session.tenant_id.unwrap_or(crate::types::TenantId::new(0));
-                                let vshard =
-                                    crate::types::VShardId::from_collection(&ts_msg.collection);
-                                let plan = crate::bridge::envelope::PhysicalPlan::Timeseries(
-                                    crate::bridge::physical_plan::TimeseriesOp::Ingest {
-                                        collection: ingest.collection,
-                                        payload: ingest.ilp_payload,
-                                        format: "ilp".to_string(),
-                                        wal_lsn: None,
-                                        surrogates: Vec::new(),
-                                    },
-                                );
-                                // Use CrdtSync source to prevent triggers on synced data.
-                                let _ =
-                                    crate::control::server::dispatch_utils::dispatch_to_data_plane_with_source(
-                                        shared, tenant_id, vshard, plan, 0,
-                                        crate::event::EventSource::CrdtSync,
-                                    )
-                                    .await;
-                            }
+                            // Route through SharedStateDispatcher when available so that
+                            // ingest and ACK are always coupled — it is structurally
+                            // impossible for an ACK to be sent without the dispatch attempt.
+                            let ack = if let Some(shared) = shared.as_ref() {
+                                let dispatcher =
+                                    super::timeseries_handler::SharedStateDispatcher { shared };
+                                session.handle_timeseries_push(&ts_msg, &dispatcher).await
+                            } else {
+                                let dispatcher = super::timeseries_handler::NoOpDispatcher;
+                                session.handle_timeseries_push(&ts_msg, &dispatcher).await
+                            };
                             if let Some(ack) = ack {
                                 let ack_bytes = ack.to_bytes();
                                 if ws.send(Message::Binary(ack_bytes.into())).await.is_err() {

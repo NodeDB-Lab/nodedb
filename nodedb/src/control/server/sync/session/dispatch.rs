@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::control::security::audit::AuditLog;
 use crate::control::security::jwt::JwtValidator;
@@ -20,6 +20,18 @@ impl SyncSession {
     /// per-delta RLS enforcement, rate limiting, silent rejection,
     /// and DLQ persistence are active. `None` puts the session in
     /// permissive mode (testing / internal replication channels).
+    ///
+    /// # Timeseries push
+    ///
+    /// In production, the listener intercepts `TimeseriesPush` before
+    /// calling `process_frame` and routes it through
+    /// [`SharedStateDispatcher`] for Data Plane ingest. If a frame of
+    /// this type ever reaches `process_frame`, it means the listener
+    /// interception is broken and `SharedState` is not available here;
+    /// we emit a loud rejection ACK and an `error!` log so the failure
+    /// is audible rather than silently dropping data after ACKing.
+    ///
+    /// [`SharedStateDispatcher`]: super::super::timeseries_handler::SharedStateDispatcher
     pub fn process_frame(
         &mut self,
         frame: &SyncFrame,
@@ -75,9 +87,28 @@ impl SyncSession {
                 None
             }
             SyncMessageType::TimeseriesPush => {
+                // Production path: listener.rs intercepts TimeseriesPush
+                // before this dispatch and runs it through
+                // SharedStateDispatcher. Reaching this arm means the
+                // listener interception is broken — emit a rejection
+                // ACK and a loud error log instead of silently dropping
+                // data.
                 let msg: TimeseriesPushMsg = frame.decode_body()?;
-                let (ack, _ingest_data) = self.handle_timeseries_push(&msg);
-                ack
+                error!(
+                    session = %self.session_id,
+                    collection = %msg.collection,
+                    samples = msg.sample_count,
+                    "timeseries push reached generic process_frame — listener \
+                     interception is broken; data NOT ingested, returning \
+                     rejection ACK"
+                );
+                let ack = TimeseriesAckMsg {
+                    collection: msg.collection.clone(),
+                    accepted: 0,
+                    rejected: msg.sample_count,
+                    lsn: 0,
+                };
+                SyncFrame::try_encode(SyncMessageType::TimeseriesAck, &ack)
             }
             SyncMessageType::TimeseriesAck => None,
             SyncMessageType::ResyncRequest => {

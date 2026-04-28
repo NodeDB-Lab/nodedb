@@ -15,6 +15,7 @@ use super::header::HEADER_SIZE;
 use super::metadata::{MetadataProposeRequest, MetadataProposeResponse};
 use super::{cluster_mgmt, data_propose, execute, metadata, raft_msgs, vshard};
 use crate::error::{ClusterError, Result};
+use crate::wire_version::{unwrap_bytes_versioned, wrap_bytes_versioned};
 
 /// An RPC message — Raft consensus or cluster management.
 #[derive(Debug, Clone)]
@@ -74,6 +75,32 @@ pub fn encode(rpc: &RaftRpc) -> Result<Vec<u8>> {
         RaftRpc::DataProposeResponse(m) => data_propose::encode_data_propose_resp(m, &mut out),
     }?;
     Ok(out)
+}
+
+/// Encode a [`RaftRpc`] and wrap the framed bytes in a v2 versioned envelope.
+///
+/// The outer envelope allows peers to detect and reject incompatible future
+/// wire versions rather than silently misinterpreting them.
+pub fn versioned_encode(rpc: &RaftRpc) -> Result<Vec<u8>> {
+    let framed = encode(rpc)?;
+    wrap_bytes_versioned(&framed).map_err(|e| ClusterError::Codec {
+        detail: format!("RaftRpc versioned encode: {e}"),
+    })
+}
+
+/// Decode a versioned-envelope-wrapped [`RaftRpc`] frame.
+///
+/// Accepts both v2 versioned envelopes and raw v1 (pre-versioning) frames;
+/// rejects envelopes with unsupported future version numbers.
+///
+/// The v1 fallback preserves wire compat with peers running pre-versioning
+/// cluster code: if the bytes do not match the `fixarray(2)` envelope shape,
+/// they are passed directly to [`decode`] as-is.
+pub fn versioned_decode(data: &[u8]) -> Result<RaftRpc> {
+    let inner = unwrap_bytes_versioned(data).map_err(|e| ClusterError::Codec {
+        detail: format!("RaftRpc versioned decode: {e}"),
+    })?;
+    decode(inner)
 }
 
 /// Decode a framed binary message into a [`RaftRpc`].

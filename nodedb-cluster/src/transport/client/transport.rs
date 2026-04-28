@@ -35,7 +35,7 @@ pub struct NexarTransport {
     /// Known peer addresses for connection establishment.
     pub(super) peer_addrs: RwLock<HashMap<u64, SocketAddr>>,
     pub(super) rpc_timeout: Duration,
-    pub(super) circuit_breaker: CircuitBreaker,
+    pub(super) circuit_breaker: Arc<CircuitBreaker>,
     pub(super) retry_policy: RetryPolicy,
     /// MAC key + per-peer sequence trackers. Shared with every spawned
     /// per-connection / per-stream task via `Arc::clone`.
@@ -127,7 +127,7 @@ impl NexarTransport {
             peers: RwLock::new(HashMap::new()),
             peer_addrs: RwLock::new(HashMap::new()),
             rpc_timeout,
-            circuit_breaker: CircuitBreaker::new(CircuitBreakerConfig::default()),
+            circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
             retry_policy: RetryPolicy::default(),
             auth,
         })
@@ -139,8 +139,9 @@ impl NexarTransport {
         &self.auth
     }
 
-    /// Access the circuit breaker (for observability / testing).
-    pub fn circuit_breaker(&self) -> &CircuitBreaker {
+    /// Access the circuit breaker (for observability / testing and
+    /// for subsystems that need to share the same breaker instance).
+    pub fn circuit_breaker(&self) -> &Arc<CircuitBreaker> {
         &self.circuit_breaker
     }
 
@@ -152,6 +153,12 @@ impl NexarTransport {
     /// This node's ID.
     pub fn node_id(&self) -> u64 {
         self.node_id
+    }
+
+    /// The cluster MAC key carried by this transport. SWIM subsystem
+    /// uses it to authenticate UDP datagrams on the same key material.
+    pub fn mac_key(&self) -> crate::rpc_codec::MacKey {
+        self.auth.mac_key.clone()
     }
 
     /// Snapshot of every peer the transport has addresses cached for,
