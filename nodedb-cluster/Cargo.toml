@@ -31,6 +31,9 @@ rkyv = { workspace = true }
 # Checksums
 crc32c = { workspace = true }
 
+# UUIDs for migration IDs
+uuid = { workspace = true }
+
 # Authenticated frame envelope (origin + anti-replay MAC) for Raft RPCs.
 hmac = { workspace = true }
 sha2 = { workspace = true }
