@@ -23,6 +23,19 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
+/// Decode MessagePack payload bytes into `HashMap<String, Value>` and
+/// lower-case all field names so bitmap inserts agree with SELECT
+/// pre-filters regardless of caller capitalisation.
+pub(in crate::data::executor) fn decode_payload_lowercased(
+    bytes: &[u8],
+) -> Result<HashMap<String, Value>, zerompk::Error> {
+    zerompk::from_msgpack::<HashMap<String, Value>>(bytes).map(|m| {
+        m.into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect()
+    })
+}
+
 impl CoreLoop {
     /// Handle `VectorOp::DirectUpsert`.
     #[allow(clippy::too_many_arguments)]
@@ -72,11 +85,8 @@ impl CoreLoop {
         let payload_fields: HashMap<String, Value> = if payload.is_empty() {
             HashMap::new()
         } else {
-            match zerompk::from_msgpack::<HashMap<String, Value>>(payload) {
-                Ok(m) => m
-                    .into_iter()
-                    .map(|(k, v)| (k.to_ascii_lowercase(), v))
-                    .collect(),
+            match decode_payload_lowercased(payload) {
+                Ok(m) => m,
                 Err(e) => {
                     return self.response_error(
                         task,
@@ -142,6 +152,14 @@ impl CoreLoop {
         if !payload.is_empty() {
             let row_key = format!("{:08x}", surrogate.as_u32());
             if let Err(e) = self.sparse.put(tid, collection, &row_key, payload) {
+                // Roll back Steps 3 + 4 so the HNSW node and bitmap entries
+                // do not survive a failed payload persist. Without this,
+                // the orphan node would be returned by future searches
+                // with `body: null` on the slow path.
+                if let Some(coll) = self.vector_collections.get_mut(&index_key) {
+                    coll.payload.delete_row(node_id, &payload_fields);
+                    coll.delete(node_id);
+                }
                 return self.response_error(
                     task,
                     ErrorCode::Internal {
