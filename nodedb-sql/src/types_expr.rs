@@ -18,6 +18,23 @@ pub enum SqlValue {
     Array(Vec<SqlValue>),
 }
 
+/// SQL-side payload-bitmap predicate atom. Mirrors `nodedb_types::PayloadAtom`
+/// but holds `SqlValue` (not `nodedb_types::Value`) so the planner can build
+/// it without a sql→types translation step. The convert layer lowers
+/// `SqlPayloadAtom` to `nodedb_types::PayloadAtom` before crossing the bridge.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlPayloadAtom {
+    Eq(String, SqlValue),
+    In(String, Vec<SqlValue>),
+    Range {
+        field: String,
+        low: Option<SqlValue>,
+        low_inclusive: bool,
+        high: Option<SqlValue>,
+        high_inclusive: bool,
+    },
+}
+
 /// SQL expression tree.
 #[derive(Debug, Clone)]
 pub enum SqlExpr {

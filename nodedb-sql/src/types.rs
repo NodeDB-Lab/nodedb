@@ -306,6 +306,20 @@ pub enum SqlPlan {
         /// ANN knobs parsed from the optional third JSON-string argument
         /// to `vector_distance(field, query, '{...}')`.
         ann_options: VectorAnnOptions,
+        /// When `true`, the projection contains only the surrogate/PK column
+        /// and/or `vector_distance(...)` — no payload fields. The Data Plane
+        /// can skip the document-body fetch entirely for vector-primary
+        /// collections. Always `false` for non-vector-primary collections
+        /// (document body is the primary result).
+        skip_payload_fetch: bool,
+        /// Predicates against payload-indexed columns on a vector-primary
+        /// collection. Each atom is `Eq(field, value)`, `In(field, values)`,
+        /// or `Range(field, ...)`. The convert layer translates SqlValue →
+        /// nodedb_types::Value and emits them as
+        /// `VectorOp::Search::payload_filters`. The Data Plane intersects
+        /// the resulting bitmap with the HNSW candidate set via the
+        /// per-collection `PayloadIndexSet::pre_filter`.
+        payload_filters: Vec<SqlPayloadAtom>,
     },
     MultiVectorSearch {
         collection: String,
@@ -464,6 +478,45 @@ pub enum SqlPlan {
     NdArrayFlush { name: String },
     /// `SELECT NDARRAY_COMPACT(name)` — returns one row `{result: BOOL}`.
     NdArrayCompact { name: String },
+
+    // ── Vector-primary ──────────────────────────────────────────────────
+    /// INSERT into a vector-primary collection.
+    ///
+    /// Emitted by the planner instead of the generic `Insert` variant when the
+    /// target collection has `primary = PrimaryEngine::Vector`. The Data Plane
+    /// routes each row through `VectorOp::DirectUpsert`, bypassing full-document
+    /// MessagePack encoding.
+    VectorPrimaryInsert {
+        collection: String,
+        /// Vector column name (matches `VectorPrimaryConfig::vector_field`).
+        /// Plumbed to `VectorOp::DirectUpsert` so the Data Plane keys its
+        /// HNSW index by `(tid, collection, field)` — the same key the SELECT
+        /// path uses.
+        field: String,
+        /// Collection-level quantization. Applied via `set_quantization` on
+        /// the first DirectUpsert so subsequent seals trigger codec-dispatch
+        /// rebuilds against the configured codec.
+        quantization: nodedb_types::VectorQuantization,
+        /// Payload field names that get equality bitmap indexes. Registered
+        /// via `payload.add_index` on the first DirectUpsert.
+        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+        rows: Vec<VectorPrimaryRow>,
+    },
+}
+
+/// A single row for a vector-primary INSERT.
+///
+/// The surrogate is allocated by the Control Plane before the op reaches
+/// the Data Plane; the Data Plane only stores the binding.
+#[derive(Debug, Clone)]
+pub struct VectorPrimaryRow {
+    /// Global surrogate allocated by the Control Plane (`Surrogate::ZERO`
+    /// is a sentinel meaning "not yet assigned").
+    pub surrogate: nodedb_types::Surrogate,
+    /// FP32 vector extracted from the vector-field column.
+    pub vector: Vec<f32>,
+    /// Payload fields (non-vector columns that may feed bitmap indexes).
+    pub payload_fields: std::collections::HashMap<String, SqlValue>,
 }
 
 /// INSERT-vs-UPSERT intent carried on `SqlPlan::KvInsert`.
@@ -629,7 +682,7 @@ pub struct WindowSpec {
 // Extracted to `crate::types_expr` so this file stays under the 500-line limit.
 // Re-exported so downstream `use crate::types::*` continues to resolve these
 // symbols without change.
-pub use crate::types_expr::{BinaryOp, SqlDataType, SqlExpr, SqlValue, UnaryOp};
+pub use crate::types_expr::{BinaryOp, SqlDataType, SqlExpr, SqlPayloadAtom, SqlValue, UnaryOp};
 
 // ── Catalog trait ──
 // The `SqlCatalog` trait itself and its error type live in
@@ -656,6 +709,11 @@ pub struct CollectionInfo {
     /// and `FOR VALID_TIME` queries. Only meaningful for document engines
     /// today; other engines ignore this flag.
     pub bitemporal: bool,
+    /// Primary engine hint from the catalog.
+    pub primary: nodedb_types::PrimaryEngine,
+    /// Vector-primary configuration. `Some` only when
+    /// `primary == PrimaryEngine::Vector`.
+    pub vector_primary: Option<nodedb_types::VectorPrimaryConfig>,
 }
 
 /// Secondary index metadata surfaced to the SQL planner.

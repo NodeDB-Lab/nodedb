@@ -14,5 +14,6 @@ mod schedule;
 mod sequence;
 mod trigger;
 mod user_auth;
+pub mod vector_primary;
 
 pub use dispatch::parse;

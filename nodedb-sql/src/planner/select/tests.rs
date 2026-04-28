@@ -22,6 +22,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             "users" => Some(CollectionInfo {
                 name: "users".into(),
@@ -31,6 +33,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             "orders" => Some(CollectionInfo {
                 name: "orders".into(),
@@ -40,6 +44,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             "docs" => Some(CollectionInfo {
                 name: "docs".into(),
@@ -49,6 +55,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             "tags" => Some(CollectionInfo {
                 name: "tags".into(),
@@ -58,6 +66,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             "user_prefs" => Some(CollectionInfo {
                 name: "user_prefs".into(),
@@ -67,6 +77,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             "embeddings" => Some(CollectionInfo {
                 name: "embeddings".into(),
@@ -76,6 +88,8 @@ impl SqlCatalog for TestCatalog {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }),
             _ => None,
         };

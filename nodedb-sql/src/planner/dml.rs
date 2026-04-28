@@ -120,6 +120,14 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
         return build_kv_insert_plan(table_name, &columns, rows_ast, intent, Vec::new());
     }
 
+    // Vector-primary collection: bypass document encoding.
+    if info.primary == nodedb_types::PrimaryEngine::Vector
+        && let Some(ref vpc) = info.vector_primary
+    {
+        let rows_parsed = convert_value_rows(&columns, rows_ast)?;
+        return build_vector_primary_insert_plan(&table_name, vpc, &columns, rows_parsed);
+    }
+
     // All other engines: delegate to engine rules.
     let rows = convert_value_rows(&columns, rows_ast)?;
     let column_defaults: Vec<(String, String)> = info
@@ -135,6 +143,77 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
         column_defaults,
         if_absent,
     })
+}
+
+/// Build a `SqlPlan::VectorPrimaryInsert` from parsed rows.
+///
+/// Extracts the vector-field column into `vector: Vec<f32>` and collects
+/// all remaining columns into `payload_fields`. Rows missing the vector
+/// column are rejected.
+fn build_vector_primary_insert_plan(
+    collection: &str,
+    vpc: &nodedb_types::VectorPrimaryConfig,
+    _columns: &[String],
+    rows: Vec<Vec<(String, SqlValue)>>,
+) -> Result<Vec<SqlPlan>> {
+    let mut result_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut vector: Option<Vec<f32>> = None;
+        let mut payload_fields = std::collections::HashMap::new();
+
+        for (col, val) in row {
+            if col == vpc.vector_field {
+                match val {
+                    SqlValue::Array(items) => {
+                        let floats: Result<Vec<f32>> = items
+                            .iter()
+                            .map(|v| match v {
+                                SqlValue::Float(f) => Ok(*f as f32),
+                                SqlValue::Int(i) => Ok(*i as f32),
+                                other => Err(SqlError::Parse {
+                                    detail: format!(
+                                        "vector field must contain numbers, got {other:?}"
+                                    ),
+                                }),
+                            })
+                            .collect();
+                        vector = Some(floats?);
+                    }
+                    other => {
+                        return Err(SqlError::Parse {
+                            detail: format!(
+                                "vector field '{}' must be an array literal, got {other:?}",
+                                vpc.vector_field
+                            ),
+                        });
+                    }
+                }
+            } else {
+                payload_fields.insert(col, val);
+            }
+        }
+
+        let vector = vector.ok_or_else(|| SqlError::Parse {
+            detail: format!(
+                "vector-primary INSERT missing required vector field '{}'",
+                vpc.vector_field
+            ),
+        })?;
+
+        result_rows.push(VectorPrimaryRow {
+            surrogate: nodedb_types::Surrogate::ZERO,
+            vector,
+            payload_fields,
+        });
+    }
+
+    Ok(vec![SqlPlan::VectorPrimaryInsert {
+        collection: collection.to_string(),
+        field: vpc.vector_field.clone(),
+        quantization: vpc.quantization,
+        payload_indexes: vpc.payload_indexes.clone(),
+        rows: result_rows,
+    }])
 }
 
 /// Plan an UPSERT statement (pre-processed from `UPSERT INTO` to `INSERT INTO`).

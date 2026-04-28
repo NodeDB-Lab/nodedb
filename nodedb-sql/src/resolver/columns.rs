@@ -219,6 +219,8 @@ fn resolve_array_tvf(
         has_auto_tier: false,
         indexes: Vec::new(),
         bitemporal: false,
+        primary: nodedb_types::PrimaryEngine::Document,
+        vector_primary: None,
     };
     Ok(Some(ResolvedTable {
         name: view.name,

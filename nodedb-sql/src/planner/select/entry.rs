@@ -14,7 +14,7 @@ use crate::functions::registry::{FunctionRegistry, SearchTrigger};
 use crate::parser::normalize::normalize_ident;
 use crate::resolver::expr::convert_expr;
 use crate::temporal::TemporalScope;
-use crate::types::*;
+use crate::types::{Projection, SqlExpr, *};
 
 /// Default `ef_search` multiplier applied when the user has not supplied
 /// `ef_search_override` in the `vector_distance` options. Wider beams trade
@@ -22,6 +22,38 @@ use crate::types::*;
 /// HNSW heuristic that keeps planning predictable while leaving room for
 /// the executor's own recall-based escalation.
 const DEFAULT_EF_SEARCH_MULTIPLIER: usize = 2;
+
+/// Returns `true` when every projection item is either:
+/// - a plain column reference to the surrogate/PK column (`id` or `document_id`), or
+/// - a `vector_distance(...)` function call (any alias).
+///
+/// Anything else — a payload field, `*`, or an unrecognised expression — returns `false`.
+fn is_pure_vector_projection(projection: &[Projection]) -> bool {
+    if projection.is_empty() {
+        return false;
+    }
+    for item in projection {
+        match item {
+            Projection::Column(name) => {
+                let lower = name.to_ascii_lowercase();
+                if lower != "id" && lower != "document_id" {
+                    return false;
+                }
+            }
+            Projection::Computed { expr, .. } => {
+                // Accept vector_distance(...) calls only.
+                let SqlExpr::Function { name, .. } = expr else {
+                    return false;
+                };
+                if !name.eq_ignore_ascii_case("vector_distance") {
+                    return false;
+                }
+            }
+            Projection::Star | Projection::QualifiedStar(_) => return false,
+        }
+    }
+    true
+}
 
 /// Plan a SELECT query.
 pub fn plan_query(
@@ -80,8 +112,182 @@ pub fn plan_query(
     match &*query.body {
         SetExpr::Select(select) => {
             let mut plan = plan_select(select, catalog, functions, temporal)?;
+            // Snapshot the projection before ORDER BY transforms the plan,
+            // in case `apply_order_by` converts a Scan into VectorSearch.
+            let pre_order_by_projection: Option<Vec<Projection>> = match &plan {
+                SqlPlan::Scan { projection, .. } => Some(projection.clone()),
+                _ => None,
+            };
+            let pre_order_by_collection: Option<String> = match &plan {
+                SqlPlan::Scan { collection, .. } => Some(collection.clone()),
+                _ => None,
+            };
             if let Some(order_by) = &query.order_by {
                 plan = apply_order_by(&plan, order_by, functions)?;
+            }
+            // After ORDER BY: if we now have a VectorSearch, check whether
+            // the collection is vector-primary and the projection is
+            // payload-free. If so, set `skip_payload_fetch`.
+            if let SqlPlan::VectorSearch {
+                ref collection,
+                ref mut skip_payload_fetch,
+                ref mut filters,
+                ref mut payload_filters,
+                ..
+            } = plan
+            {
+                let info = catalog.get_collection(collection).ok().flatten();
+                let is_vector_primary = info
+                    .as_ref()
+                    .map(|c| c.primary == nodedb_types::PrimaryEngine::Vector)
+                    .unwrap_or(false);
+                if is_vector_primary {
+                    if let Some(ref proj) = pre_order_by_projection
+                        && pre_order_by_collection.as_deref() == Some(collection.as_str())
+                    {
+                        *skip_payload_fetch = is_pure_vector_projection(proj);
+                    }
+                    if let Some(vp) = info.as_ref().and_then(|c| c.vector_primary.as_ref()) {
+                        let mut peeled: Vec<SqlPayloadAtom> = Vec::new();
+                        let is_indexed = |name: &str| {
+                            vp.payload_indexes
+                                .iter()
+                                .any(|(p, _)| p.eq_ignore_ascii_case(name))
+                        };
+                        filters.retain(|f| match &f.expr {
+                            FilterExpr::Comparison {
+                                field,
+                                op: CompareOp::Eq,
+                                value,
+                            } if is_indexed(field) => {
+                                peeled.push(SqlPayloadAtom::Eq(field.clone(), value.clone()));
+                                false
+                            }
+                            FilterExpr::InList { field, values } if is_indexed(field) => {
+                                peeled.push(SqlPayloadAtom::In(field.clone(), values.clone()));
+                                false
+                            }
+                            FilterExpr::Between { field, low, high } if is_indexed(field) => {
+                                peeled.push(SqlPayloadAtom::Range {
+                                    field: field.clone(),
+                                    low: Some(low.clone()),
+                                    low_inclusive: true,
+                                    high: Some(high.clone()),
+                                    high_inclusive: true,
+                                });
+                                false
+                            }
+                            FilterExpr::Comparison { field, op, value }
+                                if matches!(
+                                    op,
+                                    CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
+                                ) && is_indexed(field) =>
+                            {
+                                let inclusive = matches!(op, CompareOp::Le | CompareOp::Ge);
+                                let upper = matches!(op, CompareOp::Lt | CompareOp::Le);
+                                peeled.push(SqlPayloadAtom::Range {
+                                    field: field.clone(),
+                                    low: if upper { None } else { Some(value.clone()) },
+                                    low_inclusive: !upper && inclusive,
+                                    high: if upper { Some(value.clone()) } else { None },
+                                    high_inclusive: upper && inclusive,
+                                });
+                                false
+                            }
+                            FilterExpr::Expr(SqlExpr::BinaryOp {
+                                left,
+                                op: BinaryOp::Eq,
+                                right,
+                            }) => match (&**left, &**right) {
+                                (SqlExpr::Column { name, .. }, SqlExpr::Literal(v))
+                                    if is_indexed(name) =>
+                                {
+                                    peeled.push(SqlPayloadAtom::Eq(name.clone(), v.clone()));
+                                    false
+                                }
+                                (SqlExpr::Literal(v), SqlExpr::Column { name, .. })
+                                    if is_indexed(name) =>
+                                {
+                                    peeled.push(SqlPayloadAtom::Eq(name.clone(), v.clone()));
+                                    false
+                                }
+                                _ => true,
+                            },
+                            FilterExpr::Expr(SqlExpr::InList {
+                                expr,
+                                list,
+                                negated: false,
+                            }) => match &**expr {
+                                SqlExpr::Column { name, .. } if is_indexed(name) => {
+                                    let mut lits = Vec::with_capacity(list.len());
+                                    let all_lit = list.iter().all(|e| {
+                                        if let SqlExpr::Literal(v) = e {
+                                            lits.push(v.clone());
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if all_lit {
+                                        peeled.push(SqlPayloadAtom::In(name.clone(), lits));
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                _ => true,
+                            },
+                            FilterExpr::Expr(SqlExpr::Between {
+                                expr,
+                                low,
+                                high,
+                                negated: false,
+                            }) => match (&**expr, &**low, &**high) {
+                                (
+                                    SqlExpr::Column { name, .. },
+                                    SqlExpr::Literal(lo),
+                                    SqlExpr::Literal(hi),
+                                ) if is_indexed(name) => {
+                                    peeled.push(SqlPayloadAtom::Range {
+                                        field: name.clone(),
+                                        low: Some(lo.clone()),
+                                        low_inclusive: true,
+                                        high: Some(hi.clone()),
+                                        high_inclusive: true,
+                                    });
+                                    false
+                                }
+                                _ => true,
+                            },
+                            FilterExpr::Expr(SqlExpr::BinaryOp { left, op, right })
+                                if matches!(
+                                    op,
+                                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+                                ) =>
+                            {
+                                match (&**left, &**right) {
+                                    (SqlExpr::Column { name, .. }, SqlExpr::Literal(v))
+                                        if is_indexed(name) =>
+                                    {
+                                        let inclusive = matches!(op, BinaryOp::Le | BinaryOp::Ge);
+                                        let upper = matches!(op, BinaryOp::Lt | BinaryOp::Le);
+                                        peeled.push(SqlPayloadAtom::Range {
+                                            field: name.clone(),
+                                            low: if upper { None } else { Some(v.clone()) },
+                                            low_inclusive: !upper && inclusive,
+                                            high: if upper { Some(v.clone()) } else { None },
+                                            high_inclusive: upper && inclusive,
+                                        });
+                                        false
+                                    }
+                                    _ => true,
+                                }
+                            }
+                            _ => true,
+                        });
+                        *payload_filters = peeled;
+                    }
+                }
             }
             plan = apply_limit(plan, &query.limit_clause);
             Ok(plan)
@@ -224,6 +430,11 @@ fn try_extract_sort_search(
                     },
                     array_prefilter,
                     ann_options,
+                    // Projection analysis and payload-filter peeling require
+                    // catalog access; the caller (`plan_query`) fills these
+                    // fields after `apply_order_by` returns.
+                    skip_payload_fetch: false,
+                    payload_filters: Vec::new(),
                 }));
             }
             SearchTrigger::TextSearch if args.len() >= 2 => {
@@ -390,6 +601,8 @@ impl SqlCatalog for CteCatalog<'_> {
                 has_auto_tier: false,
                 indexes: Vec::new(),
                 bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
             }));
         }
         self.inner.get_collection(name)
