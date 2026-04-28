@@ -35,6 +35,7 @@ pub mod text_search;
 pub mod timeseries;
 pub mod typeguard;
 pub mod value;
+pub mod vector_ann;
 pub mod vector_distance;
 pub mod vector_index_stats;
 pub mod vector_model;
@@ -79,5 +80,6 @@ pub use temporal::{
 pub use text_search::{Bm25Params, QueryMode, TextSearchParams};
 pub use typeguard::TypeGuardFieldDef;
 pub use value::Value;
+pub use vector_ann::{VectorAnnOptions, VectorQuantization};
 pub use vector_index_stats::{VectorIndexQuantization, VectorIndexStats, VectorIndexType};
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};

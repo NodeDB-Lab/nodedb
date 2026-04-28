@@ -48,6 +48,29 @@ pub enum VectorQuantization {
     Opq,
 }
 
+impl VectorAnnOptions {
+    /// Convert into the runtime mirror used by `nodedb-types`.
+    pub fn to_runtime(&self) -> nodedb_types::VectorAnnOptions {
+        nodedb_types::VectorAnnOptions {
+            quantization: self.quantization.map(|q| match q {
+                VectorQuantization::None => nodedb_types::VectorQuantization::None,
+                VectorQuantization::Sq8 => nodedb_types::VectorQuantization::Sq8,
+                VectorQuantization::Pq => nodedb_types::VectorQuantization::Pq,
+                VectorQuantization::RaBitQ => nodedb_types::VectorQuantization::RaBitQ,
+                VectorQuantization::Bbq => nodedb_types::VectorQuantization::Bbq,
+                VectorQuantization::Binary => nodedb_types::VectorQuantization::Binary,
+                VectorQuantization::Ternary => nodedb_types::VectorQuantization::Ternary,
+                VectorQuantization::Opq => nodedb_types::VectorQuantization::Opq,
+            }),
+            oversample: self.oversample,
+            query_dim: self.query_dim,
+            meta_token_budget: self.meta_token_budget,
+            ef_search_override: self.ef_search_override,
+            target_recall: self.target_recall,
+        }
+    }
+}
+
 impl VectorQuantization {
     pub fn as_str(self) -> &'static str {
         match self {

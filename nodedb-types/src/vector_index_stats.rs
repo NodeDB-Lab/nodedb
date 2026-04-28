@@ -23,6 +23,8 @@ pub enum VectorIndexQuantization {
     Sq8 = 1,
     Pq = 2,
     Binary = 3,
+    RaBitQ = 4,
+    Bbq = 5,
 }
 
 impl std::fmt::Display for VectorIndexQuantization {
@@ -32,6 +34,8 @@ impl std::fmt::Display for VectorIndexQuantization {
             Self::Sq8 => write!(f, "sq8"),
             Self::Pq => write!(f, "pq"),
             Self::Binary => write!(f, "binary"),
+            Self::RaBitQ => write!(f, "rabitq"),
+            Self::Bbq => write!(f, "bbq"),
         }
     }
 }
