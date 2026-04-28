@@ -487,6 +487,8 @@ fn surrogate_round_trip_all_engines() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     let all_vec_surs = extract_vector_surrogates(&all_vec);
@@ -509,6 +511,8 @@ fn surrogate_round_trip_all_engines() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     let filtered_vec_surs = extract_vector_surrogates(&filtered_vec);

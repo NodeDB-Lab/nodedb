@@ -94,6 +94,8 @@ fn cross_model_query_vector_graph_relational() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     let vector_json = payload_json(&vector_payload);

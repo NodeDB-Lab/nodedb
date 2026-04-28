@@ -395,6 +395,8 @@ fn mixed_engine_isolation_no_cross_eviction() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     assert_eq!(

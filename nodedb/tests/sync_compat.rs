@@ -304,3 +304,77 @@ fn all_11_message_types_valid() {
     }
     assert!(SyncMessageType::from_u8(0x99).is_none());
 }
+
+/// Roundtrip the `VectorPrimaryConfig` through the same MessagePack channel
+/// the catalog and sync layer use. If this fails, vector-primary collections
+/// either lose configuration on persist/restore or diverge between Origin
+/// and Lite after a sync handshake.
+#[test]
+fn vector_primary_config_msgpack_roundtrip_via_sync_channel() {
+    use nodedb_types::collection_config::{PrimaryEngine, VectorPrimaryConfig};
+    use nodedb_types::vector_ann::VectorQuantization;
+    use nodedb_types::vector_distance::DistanceMetric;
+
+    let cfg = VectorPrimaryConfig {
+        vector_field: "embedding".into(),
+        dim: 1024,
+        quantization: VectorQuantization::RaBitQ,
+        m: 32,
+        ef_construction: 200,
+        metric: DistanceMetric::Cosine,
+        payload_indexes: vec![
+            ("category".into(), nodedb_types::PayloadIndexKind::Equality),
+            ("timestamp".into(), nodedb_types::PayloadIndexKind::Range),
+        ],
+    };
+
+    let bytes = zerompk::to_msgpack_vec(&cfg).expect("encode");
+    let back: VectorPrimaryConfig = zerompk::from_msgpack(&bytes).expect("decode");
+
+    assert_eq!(back, cfg);
+    // Sanity: PrimaryEngine roundtrips too (used as a sibling field on
+    // StoredCollection).
+    let pe = PrimaryEngine::Vector;
+    let pe_bytes = zerompk::to_msgpack_vec(&pe).expect("encode primary");
+    let pe_back: PrimaryEngine = zerompk::from_msgpack(&pe_bytes).expect("decode primary");
+    assert_eq!(pe_back, pe);
+}
+
+/// A pre-existing catalog entry written before the `primary` /
+/// `vector_primary` fields existed must still deserialize, defaulting to
+/// `PrimaryEngine::Document` and `vector_primary = None`. This guards the
+/// upgrade path when an older Lite client connects to a newer Origin (or
+/// vice-versa).
+#[test]
+fn legacy_stored_collection_without_primary_fields_roundtrips() {
+    use nodedb_types::collection_config::PrimaryEngine;
+
+    // A msgpack map with a single field — analogous to a 1-field early
+    // version of `StoredCollection`. We then read it back as a struct
+    // that has the new `primary` and `vector_primary` fields with
+    // `#[msgpack(default)]`. This proves the defaults are honored.
+    #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, PartialEq)]
+    #[msgpack(map)]
+    struct LegacyShape {
+        pub name: String,
+    }
+
+    #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, PartialEq)]
+    #[msgpack(map)]
+    struct NewShape {
+        pub name: String,
+        #[msgpack(default)]
+        pub primary: PrimaryEngine,
+        #[msgpack(default)]
+        pub vector_primary: Option<nodedb_types::collection_config::VectorPrimaryConfig>,
+    }
+
+    let legacy = LegacyShape {
+        name: "users".into(),
+    };
+    let bytes = zerompk::to_msgpack_vec(&legacy).expect("encode legacy");
+    let upgraded: NewShape = zerompk::from_msgpack(&bytes).expect("decode upgraded");
+    assert_eq!(upgraded.name, "users");
+    assert_eq!(upgraded.primary, PrimaryEngine::Document);
+    assert!(upgraded.vector_primary.is_none());
+}

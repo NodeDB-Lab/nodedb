@@ -47,6 +47,8 @@ fn vector_search_isolated() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -68,6 +70,8 @@ fn vector_search_isolated() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     // Tenant B has no vector index for this collection — the engine returns

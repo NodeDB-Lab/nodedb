@@ -47,6 +47,8 @@ fn vector_insert_and_search() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
 
@@ -72,6 +74,8 @@ fn vector_search_no_index_returns_not_found() {
             rls_filters: Vec::new(),
             inline_prefilter_plan: None,
             ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
         }),
     );
     assert_eq!(resp.status, Status::Error);
