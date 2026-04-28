@@ -156,6 +156,37 @@ pub fn start_raft(
         .with_tick_interval(tick_interval),
     );
 
+    // Spawn cluster subsystems now that the loop owns `MultiRaft`.
+    // They share the same `Arc<Mutex<MultiRaft>>` the loop holds, so
+    // shutdown is symmetric (subsystems are torn down before the
+    // loop's strong ref drops). See `nodedb_cluster::start_cluster`
+    // doc for the two-phase startup rationale.
+    let pending = handle
+        .pending_subsystems
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .ok_or_else(|| crate::Error::Config {
+            detail: "start_raft called twice: pending_subsystems already consumed".into(),
+        })?;
+    let raft_loop_handle = raft_loop.multi_raft_handle();
+    let running = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(nodedb_cluster::start_cluster_subsystems(
+            &pending.config,
+            Arc::clone(&handle.topology),
+            Arc::clone(&handle.routing),
+            Arc::clone(&handle.transport),
+            raft_loop_handle,
+        ))
+    })
+    .map_err(|e| crate::Error::Config {
+        detail: format!("cluster subsystem start: {e}"),
+    })?;
+    *handle
+        .running_cluster
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(running);
+
     // Wire the Raft proposer into SharedState so CP dispatch paths
     // (pgwire, HTTP, array inbound) can route writes through Raft.
     let raft_loop_for_propose = raft_loop.clone();

@@ -90,23 +90,43 @@ pub async fn init_cluster_with_transport(
     };
 
     let lifecycle = nodedb_cluster::ClusterLifecycleTracker::new();
-    let state = nodedb_cluster::start_cluster(&cluster_config, &catalog, &transport, &lifecycle)
-        .await
-        .map_err(|e| crate::Error::Config {
-            detail: format!("cluster start: {e}"),
-        })?;
+    let state = nodedb_cluster::start_cluster(
+        &cluster_config,
+        &catalog,
+        Arc::clone(&transport),
+        &lifecycle,
+    )
+    .await
+    .map_err(|e| crate::Error::Config {
+        detail: format!("cluster start: {e}"),
+    })?;
 
     info!(
         node_id = config.node_id,
-        nodes = state.topology.node_count(),
-        groups = state.routing.num_groups(),
+        nodes = state.topology.read().map(|t| t.node_count()).unwrap_or(0),
+        groups = state.routing.read().map(|r| r.num_groups()).unwrap_or(0),
         "cluster initialized"
     );
 
-    let topology = Arc::new(RwLock::new(state.topology));
-    let routing = Arc::new(RwLock::new(state.routing));
+    // ClusterState carries Arc<RwLock<T>> fields — use them directly.
+    let topology = state.topology;
+    let routing = state.routing;
     let metadata_cache = Arc::new(RwLock::new(nodedb_cluster::MetadataCache::new()));
     let applied_index_watcher = Arc::new(AppliedIndexWatcher::new());
+
+    // `start_cluster` does not start any subsystems, so the `Arc<Mutex<MultiRaft>>`
+    // it returns has exactly one strong owner (this scope). `try_unwrap`
+    // succeeds and we hand the inner `MultiRaft` to the cluster handle for
+    // `start_raft` to move into the `RaftLoop`.
+    let multi_raft_inner = Arc::try_unwrap(state.multi_raft)
+        .map_err(|_| crate::Error::Config {
+            detail: "MultiRaft Arc has unexpected extra owners after start_cluster; \
+                     this should be impossible — subsystems are spawned only after \
+                     RaftLoop::new in start_raft, which clones the loop's own Arc"
+                .into(),
+        })?
+        .into_inner()
+        .unwrap_or_else(|p| p.into_inner());
 
     Ok(ClusterHandle {
         transport,
@@ -116,8 +136,12 @@ pub async fn init_cluster_with_transport(
         metadata_cache,
         applied_index_watcher,
         node_id: config.node_id,
-        multi_raft: Mutex::new(Some(state.multi_raft)),
+        multi_raft: Mutex::new(Some(multi_raft_inner)),
         catalog,
+        running_cluster: Mutex::new(None),
+        pending_subsystems: Mutex::new(Some(crate::control::cluster::handle::PendingSubsystems {
+            config: cluster_config,
+        })),
     })
 }
 

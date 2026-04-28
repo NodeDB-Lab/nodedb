@@ -1,5 +1,7 @@
 //! Restart path: reload topology/routing from catalog after a clean shutdown or crash.
 
+use std::sync::{Arc, Mutex, RwLock};
+
 use tracing::info;
 
 use crate::catalog::ClusterCatalog;
@@ -81,9 +83,9 @@ pub(super) fn restart(
     );
 
     Ok(ClusterState {
-        topology,
-        routing,
-        multi_raft,
+        topology: Arc::new(RwLock::new(topology)),
+        routing: Arc::new(RwLock::new(routing)),
+        multi_raft: Arc::new(Mutex::new(multi_raft)),
     })
 }
 
@@ -133,9 +135,9 @@ mod tests {
         // Restart — should load from catalog.
         let state = restart(&config, &catalog, &transport).unwrap();
 
-        assert_eq!(state.topology.node_count(), 1);
+        assert_eq!(state.topology.read().unwrap().node_count(), 1);
         // num_groups() counts data groups + metadata group: 4 data + 1 = 5.
-        assert_eq!(state.routing.num_groups(), 5);
-        assert_eq!(state.multi_raft.group_count(), 5);
+        assert_eq!(state.routing.read().unwrap().num_groups(), 5);
+        assert_eq!(state.multi_raft.lock().unwrap().group_count(), 5);
     }
 }

@@ -3,6 +3,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use std::sync::{Arc, Mutex, RwLock};
+
 use crate::multi_raft::MultiRaft;
 use crate::routing::RoutingTable;
 use crate::topology::ClusterTopology;
@@ -98,8 +100,15 @@ pub struct ClusterConfig {
 }
 
 /// Result of cluster startup — everything needed to run the Raft loop.
+///
+/// All mutable fields are wrapped in `Arc<RwLock<T>>` or `Arc<Mutex<T>>`
+/// so subsystems started during `start_cluster` can hold live references
+/// to the same shared state without copying it out of the initial
+/// bootstrap result. The `RunningCluster` produced by the subsystem
+/// registry holds `Arc` clones that keep the data alive alongside the
+/// caller's `ClusterHandle`.
 pub struct ClusterState {
-    pub topology: ClusterTopology,
-    pub routing: RoutingTable,
-    pub multi_raft: MultiRaft,
+    pub topology: Arc<RwLock<ClusterTopology>>,
+    pub routing: Arc<RwLock<RoutingTable>>,
+    pub multi_raft: Arc<Mutex<MultiRaft>>,
 }

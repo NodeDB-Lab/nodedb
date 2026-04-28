@@ -11,7 +11,7 @@ use nodedb_cluster::bootstrap_listener::{
     BootstrapCredsRequest, BootstrapCredsResponse, BootstrapHandler,
 };
 
-use crate::ctl::join_token::verify_token;
+use nodedb_cluster::verify_token;
 
 /// Binds the local node's TLS material (CA key + cluster secret)
 /// to the generic listener handler. Constructed in `main.rs` once
@@ -61,6 +61,7 @@ impl BootstrapHandler for HostBootstrapHandler {
                 Ok(v) => v,
                 Err(e) => return BootstrapCredsResponse::error(format!("token: {e}")),
             };
+            // verify_token uses constant-time MAC comparison via hmac::Mac::verify_slice
             if token_node != req.node_id {
                 return BootstrapCredsResponse::error(format!(
                     "node id mismatch: token bound to {token_node}, request claims {}",

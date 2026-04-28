@@ -1,5 +1,7 @@
 //! Bootstrap path: the founding member of a new cluster.
 
+use std::sync::{Arc, Mutex, RwLock};
+
 use tracing::info;
 
 use crate::catalog::ClusterCatalog;
@@ -66,9 +68,9 @@ pub(super) fn bootstrap(config: &ClusterConfig, catalog: &ClusterCatalog) -> Res
     );
 
     Ok(ClusterState {
-        topology,
-        routing,
-        multi_raft,
+        topology: Arc::new(RwLock::new(topology)),
+        routing: Arc::new(RwLock::new(routing)),
+        multi_raft: Arc::new(Mutex::new(multi_raft)),
     })
 }
 
@@ -109,12 +111,15 @@ mod tests {
         };
 
         let state = bootstrap(&config, &catalog).unwrap();
+        let topo = state.topology.read().unwrap();
+        let routing = state.routing.read().unwrap();
+        let multi_raft = state.multi_raft.lock().unwrap();
 
-        assert_eq!(state.topology.node_count(), 1);
-        assert_eq!(state.topology.active_nodes().len(), 1);
+        assert_eq!(topo.node_count(), 1);
+        assert_eq!(topo.active_nodes().len(), 1);
         // num_groups() includes the metadata group (id 0); 4 data groups + metadata = 5.
-        assert_eq!(state.routing.num_groups(), 5);
-        assert_eq!(state.multi_raft.group_count(), 5);
+        assert_eq!(routing.num_groups(), 5);
+        assert_eq!(multi_raft.group_count(), 5);
 
         assert!(catalog.is_bootstrapped().unwrap());
         let loaded_topo = catalog.load_topology().unwrap().unwrap();

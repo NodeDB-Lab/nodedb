@@ -20,6 +20,7 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracing::{debug, info, warn};
 
@@ -331,9 +332,9 @@ fn apply_join_response(
     );
 
     Ok(ClusterState {
-        topology,
-        routing,
-        multi_raft,
+        topology: Arc::new(RwLock::new(topology)),
+        routing: Arc::new(RwLock::new(routing)),
+        multi_raft: Arc::new(Mutex::new(multi_raft)),
     })
 }
 
@@ -343,7 +344,7 @@ mod tests {
     use super::super::config::JoinRetryPolicy;
     use super::super::handle_join::handle_join_request;
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn temp_catalog() -> (tempfile::TempDir, ClusterCatalog) {
@@ -471,20 +472,23 @@ mod tests {
         };
         let state1 = bootstrap(&config1, &catalog1).unwrap();
 
-        let topology1 = Arc::new(Mutex::new(state1.topology));
-        let routing1 = Arc::new(state1.routing);
+        // state1.topology and state1.routing are Arc<RwLock<T>> after the
+        // ClusterState refactor.
+        let topology1 = state1.topology.clone();
+        let routing1 = state1.routing.clone();
 
         struct JoinHandler {
-            topology: Arc<Mutex<ClusterTopology>>,
-            routing: Arc<RoutingTable>,
+            topology: std::sync::Arc<std::sync::RwLock<ClusterTopology>>,
+            routing: std::sync::Arc<std::sync::RwLock<RoutingTable>>,
         }
 
         impl crate::transport::RaftRpcHandler for JoinHandler {
             async fn handle_rpc(&self, rpc: RaftRpc) -> Result<RaftRpc> {
                 match rpc {
                     RaftRpc::JoinRequest(req) => {
-                        let mut topo = self.topology.lock().unwrap();
-                        let resp = handle_join_request(&req, &mut topo, &self.routing, 99);
+                        let mut topo = self.topology.write().unwrap();
+                        let routing = self.routing.read().unwrap();
+                        let resp = handle_join_request(&req, &mut topo, &routing, 99);
                         Ok(RaftRpc::JoinResponse(resp))
                     }
                     other => Err(ClusterError::Transport {
@@ -530,12 +534,12 @@ mod tests {
             crate::lifecycle_state::ClusterLifecycleState::Joining { .. }
         ));
 
-        assert_eq!(state2.topology.node_count(), 2);
+        assert_eq!(state2.topology.read().unwrap().node_count(), 2);
         // 1 data group + metadata group = 2 in old config; with metadata-skip
         // routing the count includes group 0 → 1 data + 1 metadata = 2 still
         // when num_groups=1. For num_groups=2 it's 3 total. The test config
         // bootstraps with 2 data groups (see config above), so total = 3.
-        assert_eq!(state2.routing.num_groups(), 3);
+        assert_eq!(state2.routing.read().unwrap().num_groups(), 3);
 
         // Verify node 2's state was persisted (reorder check: catalog
         // is saved before MultiRaft files are touched).
@@ -543,7 +547,7 @@ mod tests {
         assert!(catalog2.load_routing().unwrap().is_some());
 
         // Verify node 1's topology was updated.
-        let topo1 = topology1.lock().unwrap();
+        let topo1 = topology1.read().unwrap();
         assert_eq!(topo1.node_count(), 2);
         assert!(topo1.contains(2));
 
