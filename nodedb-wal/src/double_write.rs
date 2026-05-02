@@ -37,6 +37,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -167,6 +168,7 @@ impl DoubleWriteBuffer {
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).create(true).truncate(false);
         if mode == DwbMode::Direct {
+            #[cfg(target_os = "linux")]
             opts.custom_flags(libc::O_DIRECT);
         }
 

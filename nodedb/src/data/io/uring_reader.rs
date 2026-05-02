@@ -22,32 +22,44 @@
 //!   → return [Vec<u8>, Vec<u8>, Vec<u8>]
 //! ```
 
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
+
+#[cfg(target_os = "linux")]
 use super::aligned_buf::{ALIGNMENT, AlignedBuf};
 use super::io_metrics::{IoMetrics, TIER_CRITICAL, TIER_HIGH, TIER_LOW};
 use crate::bridge::envelope::Priority;
 
 /// Queue depth for the io_uring instance.
+#[cfg(target_os = "linux")]
 const QUEUE_DEPTH: u32 = 64;
 
 /// Maximum number of pre-allocated buffers in the pool.
+#[cfg(target_os = "linux")]
 const POOL_SIZE: usize = 32;
 
 /// Default buffer size (4 MiB — fits most column files).
+#[cfg(target_os = "linux")]
 const DEFAULT_BUF_SIZE: usize = 4 * 1024 * 1024;
 
 /// Per-core batched io_uring reader.
 ///
 /// Not `Send` — owned by a single Data Plane core.
+/// On non-Linux platforms this is a zero-size stub; `new()` always returns
+/// `None` and `read_files()` falls back to `std::fs::read`.
 pub struct UringReader {
+    #[cfg(target_os = "linux")]
     ring: io_uring::IoUring,
+    #[cfg(target_os = "linux")]
     /// Pre-allocated aligned buffer pool.
     pool: Vec<AlignedBuf>,
+    #[cfg(target_os = "linux")]
     /// Indices of available buffers in the pool.
     free: Vec<usize>,
+    #[cfg(target_os = "linux")]
     /// Buffer size for each pool slot.
     buf_size: usize,
 }
@@ -55,47 +67,67 @@ pub struct UringReader {
 impl UringReader {
     /// Create a new io_uring reader with a pre-allocated buffer pool.
     ///
-    /// Returns `None` if io_uring is not available (old kernel, WASM).
+    /// Returns `None` if io_uring is not available (old kernel, non-Linux).
     pub fn new() -> Option<Self> {
+        #[cfg(not(target_os = "linux"))]
+        return None;
+        #[cfg(target_os = "linux")]
         Self::with_config(QUEUE_DEPTH, POOL_SIZE, DEFAULT_BUF_SIZE)
     }
 
     /// Create with custom configuration.
+    ///
+    /// Always returns `None` on non-Linux platforms.
     pub fn with_config(queue_depth: u32, pool_size: usize, buf_size: usize) -> Option<Self> {
-        let ring = io_uring::IoUring::new(queue_depth).ok()?;
-
-        let mut pool = Vec::with_capacity(pool_size);
-        let mut free = Vec::with_capacity(pool_size);
-        for i in 0..pool_size {
-            match AlignedBuf::new(buf_size) {
-                Ok(buf) => {
-                    pool.push(buf);
-                    free.push(i);
-                }
-                Err(_) => break,
-            }
-        }
-
-        if pool.is_empty() {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (queue_depth, pool_size, buf_size);
             return None;
         }
+        #[cfg(target_os = "linux")]
+        {
+            let ring = io_uring::IoUring::new(queue_depth).ok()?;
 
-        Some(Self {
-            ring,
-            pool,
-            free,
-            buf_size,
-        })
+            let mut pool = Vec::with_capacity(pool_size);
+            let mut free = Vec::with_capacity(pool_size);
+            for i in 0..pool_size {
+                match AlignedBuf::new(buf_size) {
+                    Ok(buf) => {
+                        pool.push(buf);
+                        free.push(i);
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if pool.is_empty() {
+                return None;
+            }
+
+            Some(Self {
+                ring,
+                pool,
+                free,
+                buf_size,
+            })
+        }
     }
 
-    /// Read multiple files in a single batched io_uring submission.
-    ///
-    /// Opens each file, submits `IORING_OP_READ` SQEs for all, then
-    /// waits for all completions. Returns file contents in the same
-    /// order as `paths`.
+    /// Read multiple files in a single batched submission (io_uring on Linux,
+    /// sequential `std::fs::read` on other platforms).
     ///
     /// Files that fail to open are returned as empty `Vec<u8>`.
     pub fn read_files(&mut self, paths: &[&Path]) -> Vec<Vec<u8>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            return paths
+                .iter()
+                .map(|p| std::fs::read(p).unwrap_or_default())
+                .collect();
+        }
+
+        #[cfg(target_os = "linux")]
+        {
         if paths.is_empty() {
             return Vec::new();
         }
@@ -239,6 +271,7 @@ impl UringReader {
         }
 
         results
+        } // end #[cfg(target_os = "linux")]
     }
 
     /// Priority-aware variant of [`read_files`].
@@ -273,6 +306,7 @@ impl UringReader {
 }
 
 /// Tracks which buffer a read uses.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 enum BufSource {
     Pool(usize),
@@ -281,6 +315,7 @@ enum BufSource {
 }
 
 /// A pending read operation.
+#[cfg(target_os = "linux")]
 struct PendingRead {
     index: usize,
     file: Option<std::fs::File>,
@@ -288,6 +323,7 @@ struct PendingRead {
     buf_source: BufSource,
 }
 
+#[cfg(target_os = "linux")]
 impl PendingRead {
     fn failed(index: usize) -> Self {
         Self {
@@ -300,12 +336,13 @@ impl PendingRead {
 }
 
 /// Round a read size up to ALIGNMENT.
+#[cfg(target_os = "linux")]
 #[inline]
 fn round_up_read(size: usize) -> usize {
     super::aligned_buf::round_up(size, ALIGNMENT)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::io::Write;

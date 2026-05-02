@@ -19,6 +19,7 @@
 //! added once the bridge crate provides the TPC event loop integration.
 
 use std::fs::{File, OpenOptions};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,7 +138,8 @@ impl WalWriter {
         opts.create(true).write(true).append(false);
 
         if config.use_direct_io {
-            // O_DIRECT: bypass page cache.
+            // O_DIRECT: bypass page cache (Linux only).
+            #[cfg(target_os = "linux")]
             opts.custom_flags(libc::O_DIRECT);
         }
 
@@ -226,6 +228,7 @@ impl WalWriter {
         opts.create(true).write(true).append(false);
 
         if config.use_direct_io {
+            #[cfg(target_os = "linux")]
             opts.custom_flags(libc::O_DIRECT);
         }
 

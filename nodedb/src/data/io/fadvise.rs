@@ -15,6 +15,7 @@
 //! call `advise_dontneed_files()` to hint the kernel that those pages
 //! can be evicted — freeing page cache for other engines.
 
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
@@ -30,10 +31,14 @@ pub fn advise_willneed(path: &Path) -> std::io::Result<u64> {
     if len == 0 {
         return Ok(0);
     }
-    let ret =
-        unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, len as i64, libc::POSIX_FADV_WILLNEED) };
-    if ret != 0 {
-        return Err(std::io::Error::from_raw_os_error(ret));
+    #[cfg(target_os = "linux")]
+    {
+        let ret = unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, len as i64, libc::POSIX_FADV_WILLNEED)
+        };
+        if ret != 0 {
+            return Err(std::io::Error::from_raw_os_error(ret));
+        }
     }
     Ok(len)
 }
@@ -49,10 +54,14 @@ pub fn advise_dontneed(path: &Path) -> std::io::Result<()> {
     if len == 0 {
         return Ok(());
     }
-    let ret =
-        unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, len as i64, libc::POSIX_FADV_DONTNEED) };
-    if ret != 0 {
-        return Err(std::io::Error::from_raw_os_error(ret));
+    #[cfg(target_os = "linux")]
+    {
+        let ret = unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, len as i64, libc::POSIX_FADV_DONTNEED)
+        };
+        if ret != 0 {
+            return Err(std::io::Error::from_raw_os_error(ret));
+        }
     }
     Ok(())
 }

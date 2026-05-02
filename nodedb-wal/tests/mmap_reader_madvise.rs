@@ -119,6 +119,7 @@ fn replay_limit_returns_only_records_in_range() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn fadvise_dontneed_called_after_segment_iteration() {
     // Spec: after iterating a segment to end during replay, the fd's pages
     // must be hinted via POSIX_FADV_DONTNEED so replay doesn't retain
