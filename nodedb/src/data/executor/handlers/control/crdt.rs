@@ -11,10 +11,14 @@ use nodedb_types::sync::wire::{AckStatus, SyncProvenance};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::sync_gate::SyncAdmit;
-use crate::engine::crdt::tenant_state::ValidatedApplyOutcome;
+use crate::engine::crdt::tenant_state::{TenantCrdtEngine, ValidatedApplyOutcome};
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::doc_format::canonicalize_document_for_storage;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::crdt_store::loro_value_to_json;
+use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::sparse::btree_versioned::VersionedPut;
 
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_crdt_read(
@@ -225,33 +229,58 @@ impl CoreLoop {
             // Non-sync path (SQL / native client): validate + apply, no gate.
             // There is no client to reject here, so the validated outcome is
             // only observed for its DLQ side effect and logged.
-            let engine = match self.get_crdt_engine(tenant_id) {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
-                    return self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    );
+            // Borrow the engine in a nested block so the &mut borrow is dropped
+            // before the sparse write below takes &self. On a Clean apply we
+            // read the merged row back and encode it while the borrow is live,
+            // carrying the materialized bytes out.
+            let materialized = {
+                let engine = match self.get_crdt_engine(tenant_id) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: e.to_string(),
+                            },
+                        );
+                    }
+                };
+                let outcome = engine.apply_committed_delta_validated(
+                    collection,
+                    delta,
+                    surrogate,
+                    document_id,
+                    peer_id,
+                );
+                match outcome {
+                    ValidatedApplyOutcome::Clean => {
+                        if surrogate != Surrogate::ZERO {
+                            Self::encode_crdt_row(engine, collection, document_id)
+                        } else {
+                            None
+                        }
+                    }
+                    ValidatedApplyOutcome::Rejected(vt) => {
+                        debug!(core = self.core_id, %collection, reason = %vt, "crdt apply violated constraint (DLQ)");
+                        None
+                    }
+                    ValidatedApplyOutcome::Malformed => {
+                        warn!(core = self.core_id, %collection, "crdt apply skipped malformed delta");
+                        None
+                    }
                 }
             };
-            let outcome = engine.apply_committed_delta_validated(
-                collection,
-                delta,
-                surrogate,
-                document_id,
-                peer_id,
-            );
-            match outcome {
-                ValidatedApplyOutcome::Clean => {}
-                ValidatedApplyOutcome::Rejected(vt) => {
-                    debug!(core = self.core_id, %collection, reason = %vt, "crdt apply violated constraint (DLQ)");
-                }
-                ValidatedApplyOutcome::Malformed => {
-                    warn!(core = self.core_id, %collection, "crdt apply skipped malformed delta");
-                }
+            // engine borrow dropped here; materialize into the sparse document
+            // store so DocumentScan / ShapeSnapshot see the synced document.
+            if let Some(bytes) = materialized {
+                self.materialize_synced_document(
+                    task.request.database_id.as_u64(),
+                    tenant_id.as_u64(),
+                    collection,
+                    surrogate,
+                    &bytes,
+                );
             }
             self.checkpoint_coordinator.mark_dirty("crdt", 1);
             return self.response_ok(task);
@@ -284,7 +313,7 @@ impl CoreLoop {
                     Pending { installed: u64 },
                     Applied(ValidatedApplyOutcome),
                 }
-                let outcome = {
+                let (outcome, materialized) = {
                     let engine = match self.get_crdt_engine(tenant_id) {
                         Ok(e) => e,
                         Err(e) => {
@@ -299,19 +328,30 @@ impl CoreLoop {
                     };
                     let installed = engine.installed_constraint_version(collection);
                     if constraint_version_required > installed {
-                        GateOutcome::Pending { installed }
+                        (GateOutcome::Pending { installed }, None)
                     } else {
-                        GateOutcome::Applied(engine.apply_committed_delta_validated(
+                        let applied = engine.apply_committed_delta_validated(
                             collection,
                             delta,
                             surrogate,
                             document_id,
                             peer_id,
-                        ))
+                        );
+                        // On a Clean apply, read the merged row back and encode
+                        // it while the engine borrow is still live so the bytes
+                        // can be materialized into the sparse store below.
+                        let mat = if matches!(applied, ValidatedApplyOutcome::Clean)
+                            && surrogate != Surrogate::ZERO
+                        {
+                            Self::encode_crdt_row(engine, collection, document_id)
+                        } else {
+                            None
+                        };
+                        (GateOutcome::Applied(applied), mat)
                     }
                 };
                 // engine borrow is dropped here; mark_dirty / sync_commit take
-                // &mut self.
+                // &mut self, and the sparse materialize takes &self.
                 let reject = match outcome {
                     GateOutcome::Pending { installed } => {
                         // Create-race: the constraints this delta was admitted
@@ -348,6 +388,18 @@ impl CoreLoop {
                         None
                     }
                 };
+                // Materialize the merged document into the sparse store so
+                // DocumentScan / ShapeSnapshot see the synced write. `materialized`
+                // is Some only on a Clean apply with an assigned surrogate.
+                if let Some(bytes) = materialized {
+                    self.materialize_synced_document(
+                        task.request.database_id.as_u64(),
+                        tenant_id.as_u64(),
+                        collection,
+                        surrogate,
+                        &bytes,
+                    );
+                }
                 // Advance the HWM unconditionally after apply — a rejected,
                 // fenced, or malformed delta must not wedge the sync stream.
                 self.sync_commit(prov);
@@ -415,5 +467,77 @@ impl CoreLoop {
         stream_id: u64,
     ) -> u64 {
         *self.sync_hwm.get(&(producer_id, stream_id)).unwrap_or(&0)
+    }
+
+    /// Read the merged Loro row back and encode it into the canonical
+    /// schemaless storage bytes the native put path writes.
+    ///
+    /// Called while the CRDT engine `&mut` borrow is still live (the borrow
+    /// checker forbids touching `self.sparse` here), so it is an associated
+    /// function over the borrowed engine rather than a method. Returns `None`
+    /// when the row is absent or cannot be converted — the caller then skips
+    /// the sparse write. A materialization miss must never fail the delta
+    /// apply: the Loro merge has already succeeded and the sync stream must
+    /// not wedge.
+    fn encode_crdt_row(
+        engine: &TenantCrdtEngine,
+        collection: &str,
+        document_id: &str,
+    ) -> Option<Vec<u8>> {
+        let loro_val = engine.read_row(collection, document_id)?;
+        let json = loro_value_to_json(&loro_val);
+        let msgpack = match nodedb_types::json_to_msgpack(&json) {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+        Some(canonicalize_document_for_storage(&msgpack))
+    }
+
+    /// Write the merged CRDT document into the sparse document store so
+    /// `DocumentScan` / `ShapeSnapshot` observe the synced write, matching the
+    /// key and bytes the native schemaless put path produces.
+    ///
+    /// The storage key is the hex-encoded surrogate (identical to the native
+    /// path), NOT the CRDT `document_id` (which is the user-facing Loro row
+    /// id). Bitemporal collections append a version per applied delta;
+    /// non-bitemporal collections overwrite by key (idempotent under replay).
+    /// FTS is intentionally NOT indexed here — the sync path delivers a
+    /// separate `FtsIndex` frame, and re-indexing would double-index. A write
+    /// failure is logged and swallowed so a materialization miss never wedges
+    /// the sync stream.
+    fn materialize_synced_document(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        surrogate: Surrogate,
+        stored: &[u8],
+    ) {
+        let storage_key = surrogate_to_doc_id(surrogate);
+        let result = if self.is_bitemporal(tid, collection) {
+            self.sparse.versioned_put(VersionedPut {
+                database_id,
+                tenant: tid,
+                coll: collection,
+                doc_id: storage_key.as_str(),
+                sys_from_ms: self.bitemporal_now_ms(),
+                valid_from_ms: i64::MIN,
+                valid_until_ms: i64::MAX,
+                body: stored,
+            })
+        } else {
+            self.sparse
+                .put(database_id, tid, collection, storage_key.as_str(), stored)
+                .map(|_| ())
+        };
+        if let Err(e) = result {
+            warn!(
+                core = self.core_id,
+                %collection,
+                document_id = %storage_key,
+                error = %e,
+                "crdt sync materialize into sparse document store failed"
+            );
+        }
     }
 }
