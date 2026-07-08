@@ -100,6 +100,8 @@ Accessing a collection in a different database than your bound database returns 
 
 The only exception: privileged admin DDL (CLONE, MIRROR, MOVE TENANT) can reference multiple databases explicitly.
 
+Isolation is structural, not just a permission check: `database_id` is the outermost key component in every engine's storage — KV, document, graph (CSR and edge store), vector, sparse-vector, spatial, timeseries, columnar, and full-text indexes — as well as the surrogate identity catalog, WAL replication entries, and per-database features like retention policies, continuous aggregates, and alerts. Two databases can hold same-named collections with zero key-space overlap in any engine.
+
 ## Quotas
 
 Quotas form a three-tier hierarchy: global (cluster-wide), database (per database), and tenant (per tenant within a database). Each tier has its own budget for memory, storage, queries-per-second, and connections. A request is admitted only if it passes all three tiers.

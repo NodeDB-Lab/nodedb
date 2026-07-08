@@ -140,6 +140,30 @@ client_ca = "/path/to/ca.crt"     # enables mTLS
 crl = "/path/to/revocation.crl"   # optional CRL
 ```
 
+## Dropping Users
+
+`DROP USER` is safe against dangling references. Before the user row is deleted:
+
+- Every object the user owns — collections, functions, procedures, triggers, materialized views, sequences, schedules, change streams, continuous aggregates, indexes — is reassigned to the tenant admin (`{tenant}_admin`).
+- All grants held by the user are revoked.
+
+The operation is fail-closed: if any reassignment fails, the user is not deleted, so a partially-cleaned user can never leave orphaned owner references.
+
+```sql
+DROP USER alice;
+DROP USER IF EXISTS alice;
+```
+
+## Login Rate Limiting
+
+Pre-auth rate limits protect against brute-force and Argon2/SCRAM CPU exhaustion:
+
+- **Per-IP failure cap** — default 30 failed attempts/min (`cluster.login_attempts_per_ip_per_min`)
+- **Per-user failure cap** — default 10 failed attempts/min (`cluster.login_attempts_per_user_per_min`)
+- **Per-IP verification ceiling** — `max(ip_cap × 4, 120)` credential verifications/min, consumed on every attempt (successful or not) to bound password-hashing CPU
+
+Only genuine credential failures consume the failure budgets — a burst of successful reconnects (e.g., a warming connection pool) is never rejected. Set a cap to `0` to disable it. A rate-limit rejection returns a distinct, retryable `TOO_MANY_CONNECTIONS` error rather than a generic credential failure, so clients can distinguish "slow down and retry" from "bad password." All denials take constant time with a uniform delay to prevent timing leaks.
+
 ## Auth Priority
 
 When multiple methods are configured, NodeDB checks in order:

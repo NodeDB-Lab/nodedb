@@ -18,6 +18,7 @@ Spatial is a **columnar profile**. Collections with a `SPATIAL_INDEX` column mod
 - **Geohash** — Encode/decode, neighbor cells, area covering
 - **H3 hexagonal index** — Uber's H3 via h3o for uniform-area spatial binning
 - **OGC predicates** — `ST_Contains`, `ST_Intersects`, `ST_Within`, `ST_DWithin`, `ST_Distance`, `ST_Intersection`, `ST_Buffer`, `ST_Envelope`, `ST_Union`
+- **Geometry constructors** — `ST_MakePoint`, `ST_GeomFromText` (WKT), `ST_GeomFromWKB`, `ST_GeomFromGeoJSON` — usable directly in `INSERT VALUES`
 - **Format support** — WKB, WKT, GeoJSON interchange. GeoParquet v1.1.0 + GeoArrow metadata.
 - **Hybrid spatial-vector** — Spatial R\*-tree narrows candidates by location, then HNSW ranks by semantic similarity in one query
 - **Spatial join** — R\*-tree probe join between two collections
@@ -45,6 +46,12 @@ INSERT INTO restaurants {
     cuisine: 'japanese',
     rating: 4.5
 };
+
+-- Insert with geometry constructors (WKT, WKB, or coordinates)
+INSERT INTO restaurants (name, location) VALUES
+    ('Taco Stand', ST_MakePoint(-73.982, 40.742)),
+    ('Pho House',  ST_GeomFromText('POINT(-73.978 40.751)')),
+    ('Deli',       ST_GeomFromWKB(X'01010000000000000000000040000000000000F03F'));
 
 -- Find restaurants within 1km
 SELECT name, rating, ST_Distance(location, ST_Point(-73.990, 40.750)) AS dist_m

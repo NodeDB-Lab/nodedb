@@ -322,7 +322,7 @@ RETURN DISTINCT related.id, related.description;
 
 ## Distributed Execution (BSP)
 
-In multi-shard deployments, graph algorithms and pattern matching execute via Bulk Synchronous Parallel (BSP) coordination.
+In multi-shard deployments, graph algorithms and pattern matching execute via Bulk Synchronous Parallel (BSP) coordination. There is no separate distributed syntax — the same `GRAPH ALGO` and `MATCH` statements run single-node or distributed transparently; the coordinator picks the BSP pipeline when the graph is partitioned. Distributed PageRank (including `PERSONALIZATION`), WCC, and cross-shard MATCH are supported; results are globally correct (e.g., PageRank sums to ≈1.0 across shards).
 
 ### Distributed PageRank
 
@@ -353,6 +353,19 @@ Scatter-gather with continuations:
 4. Target shards resume from continuations
 5. Coordinator collects completed rows and new continuations
 6. Repeat until no pending continuations or max rounds reached
+
+### Variable-Length Expansion Caps
+
+Variable-length `[*min..max]` MATCH expansion is bounded by operational knobs in the `[tuning.graph]` section of `config.toml`:
+
+| Knob                 | Default | Effect                                                                                                  |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------- |
+| `varlen_max_results` | 100000  | Cap on results from one variable-length expansion. On overflow, truncates at the hop boundary and pages via a resume cursor — no row is silently dropped. |
+| `varlen_max_frontier`| 100000  | Cap on the live per-hop frontier; overflow pages via resume.                                              |
+| `max_depth`          | 10      | Maximum traversal depth.                                                                                  |
+| `max_visited`        | 100000  | Memory budget on visited nodes.                                                                           |
+
+Resume cursors work both locally and across shards, so a capped expansion continues from where it stopped instead of failing.
 
 ---
 

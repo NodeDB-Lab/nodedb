@@ -28,7 +28,11 @@ psql -h localhost -p 6432
 
 **SQL coverage:** Everything in the [query language reference](query-language.md).
 
-**Introspection:** NodeDB exposes PostgreSQL-compatible `pg_catalog` virtual tables (e.g., `pg_class`, `pg_namespace`, `pg_attribute`, `pg_type`) so that standard Postgres clients, ORMs, and business intelligence tools can introspect the database schema without modification. Queries against `pg_catalog.*` tables are transparently rewritten to pull from NodeDB's internal catalog.
+**Driver compatibility:** NodeDB advertises `server_version` (`NodeDB <version>`) and a PostgreSQL-compatible `server_version_num` in the startup parameter burst, and supports the probes drivers issue on connect: `version()` returns a PostgreSQL-compatible string, `current_setting(name [, missing_ok])` resolves the same settings as `SHOW`, and `::regclass`/`::regtype` casts, `ANY(current_schemas(...))`, and cross-catalog-table JOINs evaluate PostgreSQL-identically. Binary result formats requested at Bind are honored per column; types the encoder cannot yet emit in binary (timestamp, numeric, json/jsonb, arrays) downgrade to text, with the Describe-phase RowDescription kept in sync.
+
+**Introspection:** NodeDB exposes PostgreSQL-compatible `pg_catalog` virtual tables (e.g., `pg_class`, `pg_namespace`, `pg_attribute`, `pg_type`) so that standard Postgres clients, ORMs, and business intelligence tools can introspect the database schema without modification (`psql \d`, driver type caches, ORM bootstraps). Queries against `pg_catalog.*` tables are transparently rewritten to pull from NodeDB's internal catalog.
+
+**Streaming:** Unordered multi-row SELECTs stream lazily to the client — rows are not buffered and merged on the coordinator first. Ordered, aggregate, point-get, and search queries use the materialized path.
 
 ## NDB (Native Protocol)
 
@@ -63,6 +67,8 @@ client.put("users", "u1", &doc).await?;
 ```
 
 Use SQL for complex queries, ad-hoc exploration, and rapid prototyping. Use native methods for hot-path CRUD, vector search, and high-throughput ingest where parsing overhead matters.
+
+**Transactions:** The native protocol supports full transaction blocks including savepoints (`BEGIN` / `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` / `COMMIT`), sharing the same protocol-neutral session state as pgwire. Native writes issued inside a transaction stage into the same per-transaction overlay, so read-your-own-writes semantics hold across SQL and native opcodes on one connection. HTTP is stateless and does not support transaction blocks.
 
 **Connection:**
 
@@ -102,6 +108,8 @@ curl http://localhost:6480/metrics
 ```
 
 All non-probe routes are under `/v1/`. JSON responses carry `Content-Type: application/vnd.nodedb.v1+json; charset=utf-8`. Probes are unversioned and always reachable.
+
+`/v1/query/stream` streams rows lazily as NDJSON — one line per row, produced as shards return batches. A mid-stream error surfaces in-band as a final `{"error": "..."}` line (the HTTP status stays `200` since headers are already sent). HTTP is stateless: transaction blocks (`BEGIN`/`COMMIT`) are not supported.
 
 **Additional endpoints:**
 
@@ -220,12 +228,18 @@ CRDT sync protocol for NodeDB-Lite clients (mobile, WASM, desktop). Bidirectiona
 **Flow:**
 
 1. Client connects and sends `Handshake` with JWT + vector clock
-2. Server responds with `HandshakeAck`
+2. Peer announces `CollectionSchema` for each synced collection before any shape or delta data — unknown collections are materialized into the local catalog (create-only; an existing collection is never clobbered) and propagate cluster-wide via Raft
 3. Server pushes `DeltaPush` messages (CRDT mutations)
 4. Client acknowledges with `DeltaAck`
-5. Conflicts rejected with `DeltaReject` + `CompensationHint`
+5. Constraint violations rejected with `DeltaReject` + a typed `CompensationHint`
 
-**Message types:** `Handshake`, `HandshakeAck`, `DeltaPush`, `DeltaAck`, `DeltaReject`, `Throttle`, `PingPong`, `ResyncRequest`, `ShapeSnapshot`, `ShapeSubscribe`, `TimeseriesPush`.
+**Message types:** `Handshake`, `HandshakeAck`, `CollectionSchema`, `DeltaPush`, `DeltaAck`, `DeltaReject`, `Throttle`, `PingPong`, `ResyncRequest`, `ShapeSnapshot`, `ShapeSubscribe`, `TimeseriesPush`.
+
+**Durability:** An acknowledged sync write is quorum-durable — the delta is committed through the data group's Raft log before the ack, so it survives leader failover.
+
+**Constraint validation:** UNIQUE, FK, required-field, and CHECK constraints are validated at apply time on Origin. A rejection carries a machine-readable `CompensationHint` (e.g., `UniqueViolation { field, conflicting_value }`, `RetryWithDifferentValue`, `ManualIntervention`) rather than a string, and a rejected delta does not wedge the stream — subsequent deltas continue to apply. Rate-limit rejections are a distinct retryable error, so clients can tell "slow down" apart from a constraint conflict.
+
+**Idempotent producers:** Every per-engine sync message carries `(producer_id, epoch, seq)` provenance; replayed deltas are acknowledged as duplicates instead of double-applied.
 
 This protocol is used by NodeDB-Lite for offline-first sync. See [NodeDB-Lite](lite.md) for details.
 

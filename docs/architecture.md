@@ -134,6 +134,10 @@ NodeDB uses Multi-Raft — each vShard is its own independent Raft group. Three 
 
 Each kind has independent leader election. A sequencer leader failure does not affect data-group leaders.
 
+**Placement and rebalancing.** Each Raft group's voter set is derived deterministically by rendezvous (highest-random-weight) hashing over active nodes, taking the top `min(replication_factor, node_count)` nodes per group. A reconcile loop on the metadata-group leader converges membership toward placement on every tick: it proposes learners for placement nodes not yet in membership, promotes them when caught up, evicts out-of-placement learners, removes leaving voters, and transfers leadership away from placement-excluded leaders (via TimeoutNow). Node joins kick an immediate reconcile. `REBALANCE` triggers it manually.
+
+**Log compaction and snapshots.** Raft log auto-compaction is opt-in (`log_compaction_threshold`; disabled by default) and gated on the durable Data-Plane applied watermark — entries are only truncated once their effects are applied, not merely committed. Lagging followers catch up via per-group snapshots that carry the full Data-Plane state (rows, CRDT state, graph edges, PK→surrogate identity map) using exact clear-then-install semantics; persisted `.snap` files re-install on follower boot.
+
 ## Cross-Shard Transactions
 
 Write transactions that touch multiple vShards go through the **Calvin sequencer** rather than two-phase commit. The sequencer Raft group produces a globally-ordered log of transaction batches (epochs, default 20 ms). Within each epoch, the scheduler derives a deterministic lock order and the executor runs all writes concurrently without cross-shard coordination.
@@ -149,6 +153,18 @@ SET cross_shard_txn = 'best_effort_non_atomic';
 ```
 
 Single-shard writes bypass the sequencer entirely and go directly through the relevant data-group Raft.
+
+## Distributed Query Execution
+
+Multi-node SELECTs pick their execution strategy from `ANALYZE` statistics — run `ANALYZE <collection>` to collect per-column `row_count`, `distinct_count`, and `avg_value_len` into the catalog (auto-ANALYZE re-runs after ~10% of rows change).
+
+**Joins** — The cost model estimates each side's size from statistics and chooses between **broadcast join** (small side shipped to every node) and **shuffle join** (both sides hash-partitioned across nodes over the QUIC streaming transport). Unanalyzed or empty sides fall back to broadcast. Overrides: `SET nodedb.force_shuffle_join = true`, `SET nodedb.broadcast_threshold_bytes = ...` (default from `[tuning.cluster_transport] broadcast_threshold_bytes`, 8 MiB).
+
+**GROUP BY** — High-cardinality aggregations shuffle groups across nodes instead of gathering all rows at the coordinator. Selection is driven by `distinct_count`; overrides: `SET nodedb.shuffle_agg_threshold`, `nodedb.force_shuffle_agg`, `nodedb.shuffle_agg_num_parts`.
+
+**Spill** — Hash joins and aggregations that exceed memory spill to disk via grace-hash partitioning (recursive re-partitioning, io_uring sequential writers). Knobs in `[tuning.query]`: `groupby_max_groups_in_mem` (default 1M), `aggregate_chunk_size` (default 10K), `max_scan_result_bytes` (default 512 MiB — the memory-budget bound on unbounded SELECTs; exceeding it returns a typed `ResourcesExhausted` error, never a silent truncation).
+
+**Streaming** — Eligible unordered SELECT results stream from Data Plane cores over QUIC to the coordinator and on to the client (pgwire, native, HTTP NDJSON) without materializing the full result set on the coordinator.
 
 ## Cross-Engine Queries
 
@@ -268,10 +284,11 @@ user:{id} → org:{id} → tenant:{id} → database:{id}
 
 The database bucket capacity is `database.quota.max_qps`. Additionally, pre-auth login rate limits are enforced:
 
-- `login_ip:{addr}` — capacity `cluster.login_attempts_per_ip_per_min` (default 30)
-- `login_user:{username}` — capacity `cluster.login_attempts_per_user_per_min` (default 10)
+- `login_ip:{addr}` — capacity `cluster.login_attempts_per_ip_per_min` (default 30 **failures**/min)
+- `login_user:{username}` — capacity `cluster.login_attempts_per_user_per_min` (default 10 **failures**/min)
+- Argon2-DoS ceiling per IP — `max(ip_cap × 4, 120)` credential verifications/min, consumed on every attempt
 
-These pre-auth buckets are consulted before SCRAM/Argon2 verification (cheap exit path) and run in constant time with a uniform delay on any denial to prevent timing leaks.
+Only genuine credential failures consume the failure budgets — the admission check peeks the buckets, so a burst of successful reconnects (e.g., a warming connection pool) is never rejected. These pre-auth buckets are consulted before SCRAM/Argon2 verification (cheap exit path) and run in constant time with a uniform delay on any denial to prevent timing leaks. A rate-limit denial returns a distinct, retryable `TOO_MANY_CONNECTIONS` error rather than a generic credential failure.
 
 ### Per-Tenant Compute Caps
 

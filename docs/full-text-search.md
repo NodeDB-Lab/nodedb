@@ -20,7 +20,7 @@ NodeDB's full-text search engine provides Block-Max WAND (BMW) optimized BM25 ra
 - **Korean Hangul decomposition** — Decomposes Hangul syllables into Jamo components for morphological matching.
 - **AND-first with OR fallback** — Tries AND semantics first; if zero results, falls back to OR with a coverage penalty (`matched_terms / total_terms`).
 - **Phrase proximity boost** — Consecutive query tokens at consecutive positions get up to 3x score boost.
-- **Per-collection analyzer binding** — Each collection can configure its analyzer and language. Applied consistently at both index time and query time, eliminating mismatch bugs.
+- **Per-collection analyzer binding** — Each collection can configure its analyzer and language (`CREATE SEARCH INDEX ... ANALYZER '<name>'` or `ALTER COLLECTION ... SET text_analyzer = '<name>'`). The bound analyzer is honored in every tokenization path — index time, query time, phrase-term canonicalization, and in-transaction staged writes (read-your-own-writes) — eliminating mismatch bugs.
 - **Field-aware BM25** — Weighted multi-field scoring: `final_score = Σ(weight_i × bm25(field_i))`. Title matches score higher than body matches.
 - **Fuzzy matching** — Levenshtein distance-based matching with adaptive thresholds (1 edit for 4-6 chars, 2 for 7+).
 - **Synonyms** — Define synonym groups for query-time expansion.

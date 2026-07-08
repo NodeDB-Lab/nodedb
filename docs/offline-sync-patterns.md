@@ -115,6 +115,12 @@ LIMIT 1;
 
 Columnar, Vector, FTS, and Spatial collections now participate in **inbound sync** to NodeDB-Lite (alongside the document and CRDT engines). Schema changes (DDL) broadcast to connected Lite and WASM sessions after the Origin catalog commits, so embedded clients automatically pick up new collections and columns without explicit subscription. This enables seamless schema evolution in offline-first applications.
 
+**Schema announce.** A sync peer announces each collection's schema (`CollectionSchema` message) before sending any shape or delta data. Collections unknown to the receiver are materialized into its catalog and propagate cluster-wide via Raft — create-only, so an existing collection is never clobbered. A Lite client can therefore bootstrap collections on Origin simply by announcing their schema.
+
+**Constraint validation and rejects.** UNIQUE, FK, required-field, and CHECK constraints are validated when deltas apply on Origin. Because CRDT deltas are commutative and already merged on import, enforcement is a post-hoc pass: a violating row is quarantined and the client receives a `DeltaReject` carrying a typed `CompensationHint` (e.g., `UniqueViolation { field, conflicting_value }`, `RetryWithDifferentValue`, `ManualIntervention`) telling it precisely what to fix. A rejected delta does not wedge the stream — later deltas continue to apply.
+
+**Durability.** Acknowledged sync writes are quorum-durable: the delta commits through the data group's Raft log before the ack, so it survives leader failover. Producers carry `(producer_id, epoch, seq)` provenance; replays are acknowledged as duplicates rather than double-applied.
+
 ## NodeDB-Lite Usage
 
 ### Creating Offline Invoices (Swift/Kotlin via FFI)

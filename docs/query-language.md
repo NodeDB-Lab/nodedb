@@ -22,10 +22,12 @@ The Rust SDK (`nodedb-client`), FFI bindings (`nodedb-lite-ffi`), and WASM bindi
 SELECT [DISTINCT] <columns>
 FROM <collection>
 [WHERE <predicate>]
-[GROUP BY <fields>] [HAVING <predicate>]
+[GROUP BY <exprs>] [HAVING <predicate>]
 [ORDER BY <field> [ASC|DESC], ...]
 [LIMIT <n>] [OFFSET <m>]
 ```
+
+An unbounded `SELECT` (no `LIMIT`) is capped by a per-core memory budget (`[tuning.query] max_scan_result_bytes`, default 512 MiB) rather than a silent row cap. Exceeding the budget returns a typed `ResourcesExhausted` error suggesting a `LIMIT` — results are never silently truncated. Unordered multi-row SELECTs stream lazily to the client on pgwire, native, and HTTP.
 
 ### Filtering
 
@@ -57,7 +59,18 @@ GROUP BY status
 HAVING COUNT(*) > 5;
 
 SELECT COUNT(DISTINCT user_id) FROM orders;
+
+-- Computed expressions as GROUP BY keys
+SELECT UPPER(label) AS u, SUM(score) FROM events GROUP BY UPPER(label);
+
+-- GROUP BY a SELECT alias or ordinal also works
+SELECT UPPER(label) AS u, SUM(score) FROM events GROUP BY u;
+SELECT UPPER(label), SUM(score) FROM events GROUP BY 1;
 ```
+
+GROUP BY keys follow PostgreSQL semantics: output columns appear in SELECT-list order, and a key projected as `SELECT k AS label` is emitted under its alias.
+
+A scalar aggregate (no GROUP BY) over zero input rows returns one identity row: `COUNT(*)` → `0`; `SUM`/`AVG`/`MIN`/`MAX` → `NULL`. A `GROUP BY` aggregate over zero rows returns zero rows.
 
 ### Joins
 
@@ -332,6 +345,9 @@ CREATE COLLECTION orders (
 CREATE COLLECTION sessions (key TEXT PRIMARY KEY) WITH (engine='kv');
 -- extra columns are optional typed value fields
 
+-- Trailing ENGINE suffix (MySQL-style) is equivalent to WITH (engine='...')
+CREATE COLLECTION metrics (ts TIMESTAMP TIME_KEY, cpu FLOAT) ENGINE = timeseries;
+
 -- Graph edges are overlays on document collections, not a separate collection type.
 -- Use GRAPH INSERT EDGE to add edges between documents in any collection.
 
@@ -375,7 +391,7 @@ listing every dependent.
 
 #### Columnar Family DDL
 
-`columnar`, `timeseries`, and `spatial` are peer engines sharing the same compressed-column storage core. Pick one per collection via `WITH (engine='<name>')`. Column modifiers designate special columns:
+`columnar`, `timeseries`, and `spatial` are peer engines sharing the same compressed-column storage core. Pick one per collection via `WITH (engine='<name>')` or the trailing `ENGINE = <name>` suffix (the two forms are equivalent; specifying both with different values is rejected). Valid engine names: `document_schemaless`, `document_strict`, `kv`, `columnar`, `timeseries`, `spatial`, `vector`. Column modifiers designate special columns:
 
 | Modifier        | Column type              | Effect                                                                                                              |
 | --------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
@@ -608,9 +624,20 @@ COPY tenant_restore(acme) FROM STDIN DRY RUN;
 -- Restore
 COPY tenant_restore(acme) FROM STDIN;
 
+-- SQL form (server-side path)
+RESTORE TENANT acme FROM '/backups/acme.ndb';
+RESTORE TENANT acme FROM '/backups/acme.ndb' DRY RUN;
+
+-- Bypass the staleness guard
+RESTORE TENANT acme FROM '/backups/acme.ndb' FORCE;
+-- COPY form accepts the same modifiers:
+COPY tenant_restore(acme) FROM STDIN FORCE;
+
 -- Remove ALL tenant data across all engines and caches (requires CONFIRM)
 PURGE TENANT acme CONFIRM;
 ```
+
+**Staleness guard.** A restore is refused when the backup's watermark is older than the cluster's last observed write for that tenant — newer writes would be silently overwritten. `FORCE` overrides the guard (and logs that newer writes will be overwritten). `FORCE` and `DRY RUN` are independent modifiers and may appear in either order.
 
 ### Indexes
 
@@ -809,6 +836,12 @@ SELECT * FROM locations WHERE ST_Contains(region, geom);
 SELECT * FROM locations WHERE ST_Intersects(geom, boundary);
 SELECT * FROM locations WHERE ST_Within(geom, area);
 SELECT ST_Distance(a.geom, b.geom) FROM locations a, locations b;
+
+-- Geometry constructors in INSERT VALUES
+INSERT INTO locations (id, geom) VALUES ('p1', ST_MakePoint(-122.4, 37.8));
+INSERT INTO locations (id, geom) VALUES ('p2', ST_GeomFromText('POINT(-122.4 37.8)'));
+INSERT INTO locations (id, geom) VALUES ('l1', ST_GeomFromText('LINESTRING(-122.4 37.8, -121.0 36.5)'));
+INSERT INTO locations (id, geom) VALUES ('w1', ST_GeomFromWKB(X'0101000000...'));
 ```
 
 ### Document Navigation
@@ -927,11 +960,25 @@ ROLLBACK;
 BEGIN;
 SAVEPOINT sp1;
 INSERT INTO users (id, name) VALUES ('u1', 'Alice');
-ROLLBACK TO sp1;
+ROLLBACK TO SAVEPOINT sp1;   -- the SAVEPOINT keyword is optional
+RELEASE SAVEPOINT sp1;       -- also: RELEASE sp1
 COMMIT;
 ```
 
-Isolation level: **Snapshot Isolation (SI)**. Reads see a consistent snapshot from `BEGIN` time. Write conflicts detected at `COMMIT`.
+Isolation level: **Snapshot Isolation (SI)**. Reads see a consistent snapshot from `BEGIN` time. Write conflicts detected at `COMMIT` and surfaced as SQLSTATE `40001` (`could not serialize access due to concurrent update`).
+
+### Read-Your-Own-Writes
+
+Statements inside `BEGIN ... COMMIT` are staged in a per-transaction overlay on the Data Plane. Reads within the same transaction observe staged writes **across every engine**: KV, document (schemaless and strict), columnar, timeseries, graph (single-hop, multi-hop, shortest path), vector search, spatial predicates, full-text search, and hybrid search fusion. Constraint violations (e.g., primary-key uniqueness) surface immediately at statement time, not at COMMIT.
+
+### Savepoints
+
+Savepoints work on pgwire and the native protocol (HTTP is stateless — no transaction blocks). `ROLLBACK TO SAVEPOINT` rewinds the staging overlay itself via an undo journal — staged inserts disappear from reads, updates restore the prior staged value, deletes make rows reappear, and graph-edge staging reverts. Rollback undo covers index side-effects too: secondary indexes, FTS postings, HNSW vectors, R-tree entries, and column statistics.
+
+| Error                                        | SQLSTATE |
+| -------------------------------------------- | -------- |
+| `ROLLBACK TO` / `RELEASE` unknown savepoint | `3B001`  |
+| Savepoint outside a transaction              | `25P01`  |
 
 ### Atomic Transfers
 
@@ -989,11 +1036,23 @@ COPY users FROM STDIN WITH (FORMAT csv);
 -- Query plan
 EXPLAIN SELECT * FROM users WHERE age > 30;
 
+-- Collect per-column statistics for the cost-based planner
+-- (row_count, distinct_count, avg_value_len; used to pick distributed
+-- join/aggregate strategies). Auto-ANALYZE re-runs after ~10% of rows change.
+ANALYZE orders;
+ANALYZE;             -- all collections
+
 -- Session variables
 SET nodedb.consistency = 'eventual';
 SHOW nodedb.consistency;
 SHOW ALL;
 RESET nodedb.consistency;
+
+-- Server version (PostgreSQL-compatible)
+SELECT version();                              -- 'PostgreSQL 15 ... NodeDB ...'
+SHOW server_version_num;
+SELECT current_setting('server_version_num');
+SELECT current_setting('nodedb.foo', true);    -- missing_ok: NULL if unset
 
 -- Roles and permissions
 SHOW ROLES;
@@ -1034,7 +1093,7 @@ CREATE ROLE IF NOT EXISTS analyst;
 CREATE USER IF NOT EXISTS alice PASSWORD 'secret';
 DROP ROLE analyst;
 DROP ROLE IF EXISTS analyst;
-DROP USER alice;
+DROP USER alice;                 -- owned objects reassigned to {tenant}_admin, grants revoked
 DROP USER IF EXISTS alice;
 GRANT READ ON analytics TO analyst;
 GRANT ROLE analyst TO alice;
@@ -1090,6 +1149,10 @@ SHOW USERS;
 
 `CAST(expr AS type)`, `TRY_CAST(expr AS type)`, `expr::type`
 
+### System
+
+`version()`, `current_setting(name [, missing_ok])`
+
 ### KV Atomic
 
 `KV_INCR(collection, key, delta [, TTL => secs])`, `KV_DECR(collection, key, delta)`, `KV_INCR_FLOAT(collection, key, delta)`, `KV_CAS(collection, key, expected, new_value)`, `KV_GETSET(collection, key, new_value)`
@@ -1116,7 +1179,7 @@ SHOW USERS;
 | ----------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WITH RECURSIVE`              | Supported     | Iterative fixed-point execution. For graph traversal, the native `GRAPH TRAVERSE`, `GRAPH PATH`, and algorithm functions remain more efficient.                                                                                                                                                                                     |
 | `UPDATE/DELETE ... JOIN`      | Not supported | The Data Plane executes mutations as single-collection atomic operations through the SPSC bridge. Multi-collection mutations would require cross-engine coordination that breaks the isolation model. Rewrite as a subquery: `DELETE FROM orders WHERE user_id IN (SELECT id FROM users WHERE ...)`.                                |
-| `FOREIGN KEY`                 | Not enforced  | In a distributed system with CRDT sync and eventual consistency at the edge, enforcing FK constraints across collections would require cross-shard coordination on every write — killing write throughput. CRDT constraint validation (UNIQUE, FK) is enforced at Raft commit time for synced collections, but not for general SQL. |
+| `FOREIGN KEY`                 | Not enforced  | In a distributed system with CRDT sync and eventual consistency at the edge, enforcing FK constraints across collections would require cross-shard coordination on every write — killing write throughput. CRDT constraint validation (UNIQUE, FK, CHECK) is enforced at delta-apply time for synced collections, but not for general SQL. |
 | `COPY TO` (export)            | Not supported | The Data Plane is write-optimized with io_uring for ingest, but export requires serialization across all shards and cores. Use the HTTP API (`/v1/query/stream`) for NDJSON export or query into Parquet via L2 cold storage.                                                                                                       |
 | `UPDATE/DELETE` on timeseries | Not supported | Timeseries collections use append-only columnar memtables with cascading compression (ALP + FastLanes + FSST + Gorilla + LZ4). In-place mutation would break compression chains and invalidate block statistics. Use retention policies to age out old data.                                                                        |
 | `EXPLAIN ANALYZE`             | Not yet       | Requires instrumentation across the SPSC bridge to collect per-core execution stats from the Data Plane and merge them on the Control Plane. The bridge currently returns results but not timing metadata. Planned.                                                                                                                 |

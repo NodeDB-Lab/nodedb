@@ -162,7 +162,9 @@ AS OF SYSTEM TIME NULL  -- returns every system-time version, ascending
 ORDER BY _ts_system ASC;
 ```
 
-`AS OF SYSTEM TIME NULL` returns every system-time version of each matching row, ordered ascending, with the `_ts_system` column projected into the result. It is supported on the Document (strict and schemaless), Columnar, and Timeseries engines. It is not supported on the Graph or Array engines, nor when reading through a database clone — those return a typed error rather than collapsing to a single version.
+`AS OF SYSTEM TIME NULL` returns every system-time version of each matching row, ordered ascending. Each version row carries the user columns plus three synthetic temporal columns: `_ts_system`, `_ts_valid_from`, and `_ts_valid_until`. Unbounded valid-time ends surface as the raw `i64::MIN` / `i64::MAX` sentinels (matching the Columnar and Timeseries engines). It is supported on the Document (strict and schemaless), Columnar, and Timeseries engines. It is not supported on the Graph or Array engines, nor when reading through a database clone — those return a typed error rather than collapsing to a single version.
+
+**Reserved columns never leak.** Bitemporal collections store their temporal envelope in reserved columns (`__system_from_ms`, `__valid_from_ms`, `__valid_until_ms`). These are hidden from user projections: `SELECT *` on a bitemporal collection returns exactly the declared user columns. Temporal data is only exposed through the synthetic `_ts_*` columns of audit queries.
 
 ## Index Engines and Temporal Composition
 
