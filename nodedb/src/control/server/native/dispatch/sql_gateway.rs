@@ -39,6 +39,7 @@ pub(super) async fn dispatch_task_via_gateway(
                 tenant_id,
                 trace_id: TraceId::generate(),
                 database_id,
+                txn_id,
             };
             gw.execute(&gw_ctx, plan)
                 .await

@@ -126,6 +126,9 @@ pub async fn run_preexec_scan(
             tenant_id,
             trace_id: TraceId::ZERO,
             database_id,
+            // OLLP reconnaissance reads latest COMMITTED state by design —
+            // never a transaction's staged overlay.
+            txn_id: None,
         };
         let payloads =
             gateway

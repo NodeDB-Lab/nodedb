@@ -345,6 +345,9 @@ pub async fn coordinate_cross_shard_hop(
                     tenant_id: crate::types::TenantId::new(tenant_id_u64),
                     trace_id: TraceId::generate(),
                     database_id,
+                    // Graph traversal scatter reads committed state only;
+                    // in-transaction graph reads stage no overlay here.
+                    txn_id: None,
                 };
 
                 // Build a fresh QueryContext per traversal using cloned inputs

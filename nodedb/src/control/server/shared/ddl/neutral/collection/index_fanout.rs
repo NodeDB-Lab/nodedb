@@ -130,6 +130,8 @@ pub(super) async fn backfill_on_peers(
             deadline_remaining_ms: deadline_ms,
             trace_id: trace_id.0,
             descriptor_versions: Vec::new(),
+            // DDL backfill fan-out is not transactional.
+            txn_id: None,
         });
         joins.push(tokio::spawn(async move {
             let outcome = transport.send_rpc(node_id, req).await;

@@ -155,7 +155,7 @@ mod tests {
         let sessions = SessionStore::new();
         let a = addr();
         sessions.ensure_session(a);
-        sessions.begin(&a, Lsn::new(5), 0).expect("begin");
+        sessions.begin(&a, Lsn::new(5), 0, 0).expect("begin");
         (sessions, a)
     }
 

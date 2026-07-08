@@ -98,6 +98,8 @@ fn push_dispatch_fut<'f>(
                     TraceId::ZERO,
                     deadline_ms,
                     &version_set,
+                    // Graph scatter reads committed state only (no overlay merge).
+                    None,
                 )
                 .await?;
                 collect_remote_envelopes(node_id, payloads)

@@ -48,6 +48,13 @@ pub struct QueryContext {
     /// catalog lookups. Single-database deployments pass
     /// [`DatabaseId::DEFAULT`].
     pub database_id: DatabaseId,
+    /// The session's active transaction id when this plan executes inside an
+    /// explicit transaction block, `None` for autocommit. Threaded through
+    /// remote dispatch (`ExecuteRequest.txn_id`) so every shard a plan
+    /// touches — local or on another node — keys the staging overlay
+    /// correctly: staged writes land under it and in-transaction reads merge
+    /// the transaction's own staged rows (read-your-own-writes).
+    pub txn_id: Option<crate::types::TxnId>,
 }
 
 /// The gateway: routes, dispatches, retries, and caches physical plans.
@@ -243,6 +250,7 @@ impl Gateway {
                 let tenant_id = ctx.tenant_id;
                 let database_id = ctx.database_id;
                 let trace_id = ctx.trace_id;
+                let txn_id = ctx.txn_id;
                 let version_set = version_set_for_route.clone();
                 async move {
                     let decision = {
@@ -285,6 +293,7 @@ impl Gateway {
                         trace_id,
                         deadline_ms,
                         &version_set,
+                        txn_id,
                     )
                     .await
                 }

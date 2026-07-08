@@ -237,7 +237,58 @@ impl NodeDbPgHandler {
             return self.dispatch_replicated_write(entry, async_proposer).await;
         }
 
+        // In-transaction tasks must execute on the vShard that OWNS the
+        // transaction's staging overlay — the target shard's leader — never a
+        // local replica. The staged writes live in the owning shard's per-core
+        // `txn_overlays[txn_id]`, so a local-replica read would miss the
+        // transaction's own staged rows, and a locally-dispatched
+        // `MetaOp::StageWrite` would strand the overlay on the coordinator
+        // where no leader-routed read can find it. `Strong` forces the
+        // leader-required check regardless of the session's read consistency.
+        if task.txn_id.is_some()
+            && self
+                .should_forward_via_gateway(std::slice::from_ref(&task), ReadConsistency::Strong)
+        {
+            return self.dispatch_in_txn_via_gateway(task).await;
+        }
+
         self.dispatch_local(task, user_id).await
+    }
+
+    /// Dispatch a single in-transaction task through the gateway to the vShard
+    /// leader that owns the transaction's staging overlay, returning the raw
+    /// envelope [`Response`] (no pgwire shaping — this sits on the neutral
+    /// dispatch path, whose callers do their own tagging). Mirrors the shape
+    /// of the native `TxnDataPlane` gateway leg: the first payload is carried
+    /// so staging-overlay meta-op responses still decode.
+    ///
+    /// The gateway carries no LSN metadata yet, so `watermark_lsn` is ZERO —
+    /// an over-conservative read version (never unsafe: a ZERO version can
+    /// only widen, not narrow, later conflict detection).
+    async fn dispatch_in_txn_via_gateway(&self, task: PhysicalTask) -> crate::Result<Response> {
+        let Some(gateway) = self.state.gateway.as_ref() else {
+            return Err(crate::Error::Internal {
+                detail: "gateway unavailable for in-transaction leader forward".into(),
+            });
+        };
+        let gw_ctx = crate::control::gateway::core::QueryContext {
+            tenant_id: task.tenant_id,
+            trace_id: TraceId::generate(),
+            database_id: task.database_id,
+            txn_id: task.txn_id,
+        };
+        let payloads = gateway.execute(&gw_ctx, task.plan).await?;
+        Ok(Response {
+            request_id: crate::types::RequestId::new(0),
+            status: crate::bridge::envelope::Status::Ok,
+            attempt: 1,
+            partial: false,
+            payload: crate::bridge::envelope::Payload::from_vec(
+                payloads.into_iter().next().unwrap_or_default(),
+            ),
+            watermark_lsn: Lsn::new(0),
+            error_code: None,
+        })
     }
 
     /// Dispatch a write through Raft: propose → register waiter → await apply.
@@ -324,6 +375,18 @@ impl NodeDbPgHandler {
             return Err(crate::Error::SourceFrozen {
                 database_id: task.database_id,
             });
+        }
+        // Overlay meta-ops (no WAL record: StageWrite, DropTxnOverlay,
+        // savepoint marks) must reach the vShard leader that owns the
+        // transaction's staging overlay — the same routing rule as
+        // `dispatch_task_inner`. WAL-stamped COMMIT-replay tasks are NOT
+        // rerouted: their write version is bound to this node's WAL record.
+        if wal_lsn.is_none()
+            && task.txn_id.is_some()
+            && self
+                .should_forward_via_gateway(std::slice::from_ref(&task), ReadConsistency::Strong)
+        {
+            return self.dispatch_in_txn_via_gateway(task).await;
         }
         let txn_id = task.txn_id;
         // The transaction's writes were durably recorded under a single

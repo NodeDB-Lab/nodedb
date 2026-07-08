@@ -53,6 +53,10 @@ impl TxnDataPlane for NativeTxnDp<'_> {
                         tenant_id: task.tenant_id,
                         trace_id: TraceId::generate(),
                         database_id: task.database_id,
+                        // Carries the transaction's id so staging-overlay
+                        // meta-ops (StageWrite / DropTxnOverlay) reach remote
+                        // shards correctly keyed.
+                        txn_id: task.txn_id,
                     };
                     let payloads = gw.execute(&gw_ctx, task.plan).await?;
                     Ok(Response {

@@ -398,6 +398,7 @@ async fn dispatch_single_task_raw(
                 tenant_id,
                 trace_id: TraceId::generate(),
                 database_id: ctx.database_id(),
+                txn_id,
             };
             match gw.execute(&gw_ctx, plan).await {
                 Ok(payloads) => Ok(gateway_payloads_to_response(payloads)),

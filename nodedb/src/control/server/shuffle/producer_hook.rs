@@ -98,6 +98,8 @@ impl RegistryShuffleProducer {
             database_id: req.database_id,
             deadline_remaining_ms: req.deadline_remaining_ms,
             trace_id: req.trace_id,
+            // Shuffle produce is not transactional.
+            txn_id: None,
             descriptor_versions: req
                 .descriptor_versions
                 .iter()

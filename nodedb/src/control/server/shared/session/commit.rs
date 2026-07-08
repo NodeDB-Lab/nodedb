@@ -309,7 +309,9 @@ pub(super) async fn drop_txn_overlay(
         database_id: crate::types::DatabaseId::DEFAULT,
         plan: PhysicalPlan::Meta(MetaOp::DropTxnOverlay { txn_id }),
         post_set_op: PostSetOp::None,
-        txn_id: None,
+        // Envelope id doubles as the routing signal: the drop must reach the
+        // vShard leader hosting this transaction's overlay, not a local replica.
+        txn_id: Some(txn_id),
     };
     // Overlay teardown is not a write — no WAL record, no write version.
     if let Err(e) = dp.dispatch_no_wal(task, None).await {

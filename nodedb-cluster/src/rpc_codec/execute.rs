@@ -38,6 +38,13 @@ pub struct ExecuteRequest {
     pub trace_id: [u8; 16],
     /// Caller's view of descriptor versions for every collection touched by the plan.
     pub descriptor_versions: Vec<DescriptorVersionEntry>,
+    /// The coordinator session's active transaction id, when this plan runs
+    /// inside an explicit transaction block. The receiver stamps it onto the
+    /// local task so the Data Plane keys the staging overlay correctly:
+    /// `MetaOp::StageWrite` stages under it, and in-transaction reads merge
+    /// the transaction's own staged rows (read-your-own-writes). `None` for
+    /// autocommit plans.
+    pub txn_id: Option<u64>,
 }
 
 /// Response to an `ExecuteRequest`.
@@ -238,6 +245,7 @@ mod tests {
                     version: 1,
                 },
             ],
+            txn_id: Some(0xFEED_BEEF),
         };
         let decoded = roundtrip_req(req.clone());
         assert_eq!(decoded.plan_bytes, req.plan_bytes);
@@ -250,6 +258,11 @@ mod tests {
         assert_eq!(decoded.descriptor_versions.len(), 2);
         assert_eq!(decoded.descriptor_versions[0].collection, "orders");
         assert_eq!(decoded.descriptor_versions[0].version, 42);
+        assert_eq!(
+            decoded.txn_id,
+            Some(0xFEED_BEEF),
+            "an in-transaction plan's txn_id must survive the wire"
+        );
     }
 
     #[test]
@@ -261,9 +274,11 @@ mod tests {
             deadline_remaining_ms: 1000,
             trace_id: [0u8; 16],
             descriptor_versions: vec![],
+            txn_id: None,
         };
         let decoded = roundtrip_req(req);
         assert!(decoded.descriptor_versions.is_empty());
+        assert_eq!(decoded.txn_id, None, "autocommit plans carry no txn_id");
     }
 
     #[test]
@@ -382,6 +397,7 @@ mod tests {
                 collection: "wide".into(),
                 version: 3,
             }],
+            txn_id: Some(77),
         };
         let rpc = RaftRpc::ExecuteStreamRequest(req.clone());
         let encoded = super::super::encode(&rpc).unwrap();

@@ -38,6 +38,8 @@ pub(super) async fn dispatch_kv(
                 tenant_id: session.tenant_id,
                 trace_id: TraceId::generate(),
                 database_id: DatabaseId::DEFAULT,
+                // RESP has no transaction blocks — autocommit only.
+                txn_id: None,
             };
             gw.execute(&gw_ctx, plan)
                 .await
@@ -86,6 +88,8 @@ pub(super) async fn dispatch_kv_write(
                 tenant_id: session.tenant_id,
                 trace_id: TraceId::generate(),
                 database_id: DatabaseId::DEFAULT,
+                // RESP has no transaction blocks — autocommit only.
+                txn_id: None,
             };
             gw.execute(&gw_ctx, plan)
                 .await

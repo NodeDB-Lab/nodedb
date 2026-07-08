@@ -230,6 +230,7 @@ async fn execute_stream_roundtrip() {
         deadline_remaining_ms: 5000,
         trace_id: [0u8; 16],
         descriptor_versions: vec![],
+        txn_id: None,
     });
 
     let stream = client.send_rpc_stream(1, req).await.unwrap();

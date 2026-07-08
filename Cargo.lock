@@ -2272,6 +2272,8 @@ checksum = "28a80e3145d8ad11ba0995949bbcf48b9df2be62772b3d351ef017dff6ecb853"
 [[package]]
 name = "fluxbench"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323b4f98b988b9779c6aa3f93781ef7421e36e73a5c610497857b2c01398acdc"
 dependencies = [
  "fluxbench-cli",
  "fluxbench-core",
@@ -2286,6 +2288,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-cli"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42072e01658451938143f620a08f13b308e30a7fe41f3de87a79f351c5753328"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2313,6 +2317,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-core"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "780bc18df5d1aa766ab5394389fb989c51d5d6ac3b00e51340f97c6510268edf"
 dependencies = [
  "fluxbench-ipc",
  "inventory",
@@ -2325,6 +2331,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-ipc"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c44dcc5fe5705f4933b7768a4fdb552ab97c098d4d3e49b93096152527b89fe"
 dependencies = [
  "rkyv 0.8.16",
  "thiserror 2.0.18",
@@ -2333,6 +2341,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-logic"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab4809eb2b1c33ee46c51cc28ee5d8c8ea8dbc4977151af00a03a1d1f5d487ab"
 dependencies = [
  "evalexpr",
  "fluxbench-core",
@@ -2347,6 +2357,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-macros"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71729e5cb94b94beb14f6a9319a129e6cf3e116112f56578182edadeaaddc79a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2356,6 +2368,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-report"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02bf8934a0c315e390d691e3c9993e52b59ed88ecb8993d882a69721559342d0"
 dependencies = [
  "chrono",
  "fluxbench-core",
@@ -2369,6 +2383,8 @@ dependencies = [
 [[package]]
 name = "fluxbench-stats"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bec71a4355a6558d47beea9abda1fda67580e124fefdb9e93f0aaab4cc872063"
 dependencies = [
  "rand 0.8.6",
  "rayon",
@@ -4117,6 +4133,8 @@ dependencies = [
 [[package]]
 name = "nexar"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dac038912d8e0f36309f3368c0980377730edd4ad5d082627227277cdd870c3a"
 dependencies = [
  "bytes",
  "crossbeam-queue",

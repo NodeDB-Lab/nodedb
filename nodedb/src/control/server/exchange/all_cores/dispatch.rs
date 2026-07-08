@@ -44,6 +44,7 @@ pub async fn execute_plan_all_local_cores(
     database_id: DatabaseId,
     plan: PhysicalPlan,
     trace_id: TraceId,
+    txn_id: Option<crate::types::TxnId>,
 ) -> crate::Result<NodeLevelResult> {
     match &plan {
         PhysicalPlan::Graph(g) => match g {
@@ -111,7 +112,7 @@ pub async fn execute_plan_all_local_cores(
             | GraphOp::TemporalNeighbors { .. }
             | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. } => {
-                generic_gather(state, tenant_id, database_id, plan, trace_id).await
+                generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }
         },
 
@@ -181,7 +182,7 @@ pub async fn execute_plan_all_local_cores(
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. } => {
-                generic_gather(state, tenant_id, database_id, plan, trace_id).await
+                generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }
         },
 
@@ -197,7 +198,7 @@ pub async fn execute_plan_all_local_cores(
         | PhysicalPlan::Query(_)
         | PhysicalPlan::Array(_)
         | PhysicalPlan::ClusterArray(_) => {
-            generic_gather(state, tenant_id, database_id, plan, trace_id).await
+            generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
         }
     }
 }
@@ -209,13 +210,11 @@ async fn generic_gather(
     database_id: DatabaseId,
     plan: PhysicalPlan,
     trace_id: TraceId,
+    txn_id: Option<crate::types::TxnId>,
 ) -> crate::Result<NodeLevelResult> {
     use crate::control::server::exchange::gather::gather_all_cores;
 
-    // Cluster RPC receiver path (remote-node local execution): no session
-    // transaction context crosses the node boundary yet, so `txn_id` is
-    // `None` here. TRACKED: cross-node in-transaction reads are a known gap.
-    let outcome = gather_all_cores(state, tenant_id, database_id, plan, trace_id, None).await?;
+    let outcome = gather_all_cores(state, tenant_id, database_id, plan, trace_id, txn_id).await?;
     Ok(NodeLevelResult {
         payload: outcome.merged_array,
         watermark_lsn: outcome.watermark_lsn,

@@ -106,6 +106,38 @@ pub async fn dispatch_to_data_plane(
     .await
 }
 
+/// Dispatch a physical plan to the Data Plane carrying an in-transaction id.
+///
+/// The gateway's local dispatch leg uses this for plans executing inside an
+/// explicit transaction block: the id lands on the `Request` envelope so the
+/// Data Plane keys the staging overlay for this transaction (staged writes
+/// land under it; reads merge the transaction's own staged rows). Callers
+/// with no transaction context stay on [`dispatch_to_data_plane`].
+pub async fn dispatch_to_data_plane_in_txn(
+    shared: &SharedState,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    vshard_id: VShardId,
+    plan: PhysicalPlan,
+    trace_id: TraceId,
+    txn_id: Option<crate::types::TxnId>,
+) -> crate::Result<Response> {
+    dispatch_to_data_plane_inner(
+        shared,
+        DataPlaneDispatch {
+            tenant_id,
+            database_id,
+            vshard_id,
+            plan,
+            trace_id,
+            event_source: crate::event::EventSource::User,
+            txn_id,
+            wal_lsn: None,
+        },
+    )
+    .await
+}
+
 /// Dispatch a physical plan to the Data Plane with an explicit event source.
 ///
 /// Trigger-generated writes pass `EventSource::Trigger` so the Data Plane

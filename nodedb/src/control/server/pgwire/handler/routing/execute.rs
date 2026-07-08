@@ -194,7 +194,19 @@ impl NodeDbPgHandler {
         let consistency = consistency_for_tasks(&tasks);
 
         // When all tasks target a remote leader, route through the gateway.
-        if self.should_forward_via_gateway(&tasks, consistency) {
+        //
+        // This whole-batch fast path is an AUTOCOMMIT optimization only. Inside
+        // an explicit transaction block it MUST be skipped: an in-transaction
+        // write forwarded here would reach the leader as a bare write and
+        // commit via Raft, bypassing the staging overlay entirely (no
+        // read-your-own-writes, and ROLLBACK could not undo it). In-block tasks
+        // instead fall through to the per-task staging gate (`route_task_in_txn`),
+        // which stages writes to the transaction's overlay and forwards reads +
+        // stage-ops to the owning leader carrying the transaction id.
+        if self.sessions.transaction_state(addr)
+            != crate::control::server::shared::session::TransactionState::InBlock
+            && self.should_forward_via_gateway(&tasks, consistency)
+        {
             let database_id = self
                 .sessions
                 .get_current_database(addr)

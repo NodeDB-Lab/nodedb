@@ -35,6 +35,7 @@ pub async fn execute_sql(
                     tenant_id: task.tenant_id,
                     trace_id,
                     database_id: nodedb_types::id::DatabaseId::DEFAULT,
+                    txn_id: task.txn_id,
                 };
                 gw.execute(&gw_ctx, task.plan).await
             }

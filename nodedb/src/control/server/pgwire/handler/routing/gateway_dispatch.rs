@@ -28,7 +28,7 @@ impl NodeDbPgHandler {
     /// Returns `true` when every task targets a single remote leader and the
     /// gateway is available to forward them. This replaces the old
     /// `remote_leader_for_tasks` helper which returned the leader node id.
-    pub(super) fn should_forward_via_gateway(
+    pub(in crate::control::server::pgwire::handler) fn should_forward_via_gateway(
         &self,
         tasks: &[PhysicalTask],
         consistency: ReadConsistency,
@@ -103,6 +103,9 @@ impl NodeDbPgHandler {
             tenant_id,
             trace_id: TraceId::generate(),
             database_id,
+            // Every task in the batch belongs to this one session, so they
+            // all carry the same transaction id (stamped at the staging gate).
+            txn_id: tasks.first().and_then(|t| t.txn_id),
         };
 
         let mut responses: Vec<Response> = Vec::with_capacity(tasks.len());

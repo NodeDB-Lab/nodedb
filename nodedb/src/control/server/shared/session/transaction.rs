@@ -37,6 +37,7 @@ impl SessionStore {
         addr: &SocketAddr,
         current_lsn: Lsn,
         snapshot_epoch: u64,
+        node_id: u64,
     ) -> Result<(), &'static str> {
         self.write_session(addr, |session| match session.tx_state {
             TransactionState::Idle => {
@@ -44,7 +45,14 @@ impl SessionStore {
                 session.tx_snapshot_lsn = Some(current_lsn);
                 session.tx_snapshot_epoch = Some(snapshot_epoch);
                 session.tx_read_set.clear();
-                session.tx_id = Some(TxnId::new(NEXT_TXN_ID.fetch_add(1, Ordering::Relaxed)));
+                // Transaction ids travel cross-node (staging overlays live on
+                // the OWNING shard), so they must be globally unique: node id in
+                // the high 16 bits, process-local counter in the low 48. Two
+                // coordinators can never mint the same id, so their overlays
+                // never collide on a shard that hosts both transactions.
+                session.tx_id = Some(TxnId::new(
+                    (node_id << 48) | (NEXT_TXN_ID.fetch_add(1, Ordering::Relaxed) & 0xFFFF_FFFF_FFFF),
+                ));
                 session.tx_vshards.clear();
                 Ok(())
             }

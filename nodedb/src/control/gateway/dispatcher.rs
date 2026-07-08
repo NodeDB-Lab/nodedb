@@ -23,10 +23,11 @@ use nodedb_cluster::rpc_codec::{ExecuteRequest, RaftRpc, TypedClusterError};
 use tracing::debug;
 
 use crate::Error;
-use crate::control::server::dispatch_utils::dispatch_to_data_plane;
+use crate::control::server::dispatch_utils::dispatch_to_data_plane_in_txn;
 use crate::control::server::result_stream::{ResultStream, RowBatch};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, VShardId};
+use crate::types::TxnId;
 use nodedb_physical::physical_plan::wire as plan_wire;
 
 use super::route::{RouteDecision, TaskRoute};
@@ -46,10 +47,11 @@ pub async fn dispatch_route(
     trace_id: TraceId,
     deadline_ms: u64,
     version_set: &GatewayVersionSet,
+    txn_id: Option<TxnId>,
 ) -> Result<Vec<Vec<u8>>, Error> {
     match route.decision {
         RouteDecision::Local => {
-            dispatch_local(route, shared, tenant_id, database_id, trace_id).await
+            dispatch_local(route, shared, tenant_id, database_id, trace_id, txn_id).await
         }
         RouteDecision::Remote { node_id, vshard_id } => {
             dispatch_remote(RemoteDispatchArgs {
@@ -62,6 +64,7 @@ pub async fn dispatch_route(
                 trace_id,
                 deadline_ms,
                 version_set,
+                txn_id,
             })
             .await
         }
@@ -96,6 +99,11 @@ pub struct DispatchRouteStreamParams<'a> {
     pub trace_id: TraceId,
     pub deadline_ms: u64,
     pub version_set: &'a GatewayVersionSet,
+    /// Active transaction id when streaming inside an explicit transaction
+    /// block; `None` for autocommit. See [`QueryContext::txn_id`].
+    ///
+    /// [`QueryContext::txn_id`]: super::core::QueryContext::txn_id
+    pub txn_id: Option<TxnId>,
 }
 
 /// Streaming sibling of [`dispatch_route`]: dispatch a single route and return
@@ -118,18 +126,16 @@ pub async fn dispatch_route_stream(
         trace_id,
         deadline_ms,
         version_set,
+        txn_id,
     } = args;
     match route.decision {
-        // Cluster gateway route dispatch: no session-transaction context
-        // crosses this boundary yet, so `None`. TRACKED: cross-node
-        // in-transaction reads are a known gap (see resolve/exchange.rs).
         RouteDecision::Local => crate::control::server::exchange::gather::gather_all_cores_stream(
             shared,
             tenant_id,
             database_id,
             route.plan,
             trace_id,
-            None,
+            txn_id,
         ),
         RouteDecision::Remote { node_id, vshard_id } => {
             dispatch_remote_stream(RemoteDispatchArgs {
@@ -142,6 +148,7 @@ pub async fn dispatch_route_stream(
                 trace_id,
                 deadline_ms,
                 version_set,
+                txn_id,
             })
             .await
         }
@@ -164,15 +171,17 @@ async fn dispatch_local(
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
+    txn_id: Option<TxnId>,
 ) -> Result<Vec<Vec<u8>>, Error> {
     let vshard_id = VShardId::new(route.vshard_id);
-    let resp = dispatch_to_data_plane(
+    let resp = dispatch_to_data_plane_in_txn(
         shared,
         tenant_id,
         database_id,
         vshard_id,
         route.plan,
         trace_id,
+        txn_id,
     )
     .await?;
     Ok(vec![resp.payload.to_vec()])
@@ -190,6 +199,10 @@ struct RemoteDispatchArgs<'a> {
     trace_id: TraceId,
     deadline_ms: u64,
     version_set: &'a GatewayVersionSet,
+    /// Active transaction id when dispatching inside an explicit transaction
+    /// block; carried on [`ExecuteRequest::txn_id`] so the remote executor
+    /// keys the staging overlay for this transaction. `None` for autocommit.
+    txn_id: Option<TxnId>,
 }
 
 /// Remote dispatch via `ExecuteRequest` RPC.
@@ -204,6 +217,7 @@ async fn dispatch_remote(args: RemoteDispatchArgs<'_>) -> Result<Vec<Vec<u8>>, E
         trace_id,
         deadline_ms,
         version_set,
+        txn_id,
     } = args;
     let transport = shared.cluster_transport.as_ref().ok_or(Error::Internal {
         detail: "gateway: cluster transport not available for remote dispatch".into(),
@@ -218,16 +232,13 @@ async fn dispatch_remote(args: RemoteDispatchArgs<'_>) -> Result<Vec<Vec<u8>>, E
     // already done upstream on the pgwire/native paths that own the identity.
     // (`Box::pin` breaks the async-recursion cycle: resolving a Broadcast build
     // side calls `gather_all_vshards` → `gateway.execute` → routing → here.)
-    // Cluster remote-dispatch: no session-transaction context crosses this
-    // boundary yet, so `None`. TRACKED: cross-node in-transaction reads are a
-    // known gap (see resolve/exchange.rs).
     let plan = match Box::pin(crate::control::server::exchange::resolve_exchange_in_plan(
         shared,
         database_id,
         tenant_id,
         plan,
         trace_id,
-        None,
+        txn_id,
     ))
     .await?
     {
@@ -270,6 +281,7 @@ async fn dispatch_remote(args: RemoteDispatchArgs<'_>) -> Result<Vec<Vec<u8>>, E
         deadline_remaining_ms: deadline_ms,
         trace_id: trace_id.0,
         descriptor_versions,
+        txn_id: txn_id.map(TxnId::as_u64),
     });
 
     debug!(
@@ -337,20 +349,20 @@ async fn dispatch_remote_stream(args: RemoteDispatchArgs<'_>) -> Result<ResultSt
         trace_id,
         deadline_ms,
         version_set,
+        txn_id,
     } = args;
     let transport = shared.cluster_transport.as_ref().ok_or(Error::Internal {
         detail: "gateway: cluster transport not available for remote stream dispatch".into(),
     })?;
 
     // Resolve Exchange nodes before shipping (symmetric with `dispatch_remote`).
-    // No session-transaction context crosses this boundary yet, so `None`.
     let plan = match Box::pin(crate::control::server::exchange::resolve_exchange_in_plan(
         shared,
         database_id,
         tenant_id,
         plan,
         trace_id,
-        None,
+        txn_id,
     ))
     .await?
     {
@@ -390,6 +402,7 @@ async fn dispatch_remote_stream(args: RemoteDispatchArgs<'_>) -> Result<ResultSt
         deadline_remaining_ms: deadline_ms,
         trace_id: trace_id.0,
         descriptor_versions,
+        txn_id: txn_id.map(TxnId::as_u64),
     });
 
     debug!(

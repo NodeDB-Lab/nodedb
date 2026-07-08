@@ -13,13 +13,13 @@ fn transaction_lifecycle() {
 
     assert_eq!(store.transaction_state(&addr), TransactionState::Idle);
 
-    store.begin(&addr, crate::types::Lsn::new(1), 0).unwrap();
+    store.begin(&addr, crate::types::Lsn::new(1), 0, 0).unwrap();
     assert_eq!(store.transaction_state(&addr), TransactionState::InBlock);
 
     store.commit(&addr).unwrap();
     assert_eq!(store.transaction_state(&addr), TransactionState::Idle);
 
-    store.begin(&addr, crate::types::Lsn::new(1), 0).unwrap();
+    store.begin(&addr, crate::types::Lsn::new(1), 0, 0).unwrap();
     store.fail_transaction(&addr);
     assert_eq!(store.transaction_state(&addr), TransactionState::Failed);
 
@@ -320,7 +320,7 @@ async fn multi_vshard_rollback_to_savepoint_rewinds_each_vshard() {
     let store = SessionStore::new();
     let addr: std::net::SocketAddr = "127.0.0.1:5201".parse().unwrap();
     store.ensure_session(addr);
-    store.begin(&addr, Lsn::new(1), 0).unwrap();
+    store.begin(&addr, Lsn::new(1), 0, 0).unwrap();
     let tenant = TenantId::new(1);
     let dp = RecordingDp::default();
 

@@ -93,6 +93,8 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             database_id,
             plan,
             TraceId::ZERO,
+            // Graph scatter reads committed state only (no overlay merge).
+            None,
         )
         .await?;
         Ok(Payload::from_vec(node_result.payload))
@@ -114,6 +116,8 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             TraceId::ZERO,
             deadline_ms,
             version_set,
+            // Graph scatter reads committed state only (no overlay merge).
+            None,
         )
         .await?;
         payloads

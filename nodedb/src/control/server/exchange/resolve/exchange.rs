@@ -165,15 +165,14 @@ async fn resolve_exchange(
             // `shard_watermarks`.
             if !as_aggregate && txn_id.is_none() && child.is_streamable_unordered_scan() {
                 let stream = if let Some(gw) = state.gateway.as_ref() {
+                    // `txn_id` is None on this branch (guarded above); carried
+                    // verbatim so the invariant lives in one place.
                     let ctx = crate::control::gateway::core::QueryContext {
                         tenant_id,
                         trace_id,
                         database_id,
+                        txn_id,
                     };
-                    // NOTE: cluster mode does not yet thread `txn_id` through
-                    // `gateway.execute_stream` — cross-node in-transaction
-                    // read-your-own-writes is a tracked gap; single-node
-                    // (`gather_all_cores_stream` below) is fixed.
                     gw.execute_stream(&ctx, child).await?
                 } else {
                     gather_all_cores_stream(state, tenant_id, database_id, child, trace_id, txn_id)?

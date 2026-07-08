@@ -82,6 +82,7 @@ impl NodeDbPgHandler {
                 tenant_id: task.tenant_id,
                 trace_id: crate::types::TraceId::ZERO,
                 database_id: task.database_id,
+                txn_id: task.txn_id,
             };
             gw.execute_stream(&ctx, child_plan).await
         } else {

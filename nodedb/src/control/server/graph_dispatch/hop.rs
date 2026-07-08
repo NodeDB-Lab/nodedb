@@ -340,6 +340,8 @@ async fn expand_remote(
                 TraceId::ZERO,
                 deadline_ms,
                 &version_set,
+                // Graph scatter reads committed state only (no overlay merge).
+                None,
             )
             .await
         })
