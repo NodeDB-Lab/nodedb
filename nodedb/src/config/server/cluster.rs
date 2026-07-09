@@ -160,6 +160,21 @@ impl ClusterSettings {
                 detail: "cluster.node_id must be non-zero".into(),
             });
         }
+        // Transaction ids pack the node id into the high 16 bits
+        // (`session::transaction`), so a node id that does not fit in 16 bits
+        // would silently lose its high bits and mint colliding ids across
+        // nodes. Reject it loudly rather than mask (see CLAUDE.md on silent
+        // truncation at hard caps).
+        if self.node_id >= 1 << 16 {
+            return Err(crate::Error::Config {
+                detail: format!(
+                    "cluster.node_id must be < 65536 (got {}): it is packed into the \
+                     high 16 bits of a transaction id, and a larger value would silently \
+                     collide with another node's ids",
+                    self.node_id
+                ),
+            });
+        }
         if self.seed_nodes.is_empty() {
             return Err(crate::Error::Config {
                 detail: "cluster.seed_nodes must contain at least one address".into(),
@@ -183,5 +198,45 @@ impl ClusterSettings {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClusterSettings;
+
+    fn settings_with_node_id(node_id: u64) -> ClusterSettings {
+        let toml = format!(
+            r#"
+            node_id = {node_id}
+            listen = "127.0.0.1:7000"
+            seed_nodes = ["127.0.0.1:7000"]
+            cert = "/tmp/cert.pem"
+            key = "/tmp/key.pem"
+            ca = "/tmp/ca.pem"
+            "#
+        );
+        toml::from_str(&toml).expect("valid cluster TOML")
+    }
+
+    #[test]
+    fn node_id_fitting_in_16_bits_is_accepted() {
+        assert!(settings_with_node_id(1).validate().is_ok());
+        assert!(settings_with_node_id(65_535).validate().is_ok());
+    }
+
+    #[test]
+    fn node_id_at_or_above_16_bits_is_rejected_not_truncated() {
+        // 65536 would pack to 0 in the high 16 bits of a TxnId and collide
+        // with node 1's ids — must be rejected, never silently masked.
+        for bad in [65_536u64, 65_537, 1 << 20] {
+            let err = settings_with_node_id(bad)
+                .validate()
+                .expect_err("node_id >= 65536 must be rejected");
+            assert!(
+                matches!(err, crate::Error::Config { .. }),
+                "expected Config error for node_id {bad}, got {err:?}"
+            );
+        }
     }
 }

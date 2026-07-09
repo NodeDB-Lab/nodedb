@@ -13,10 +13,12 @@ use super::read_set::ReadSetEntry;
 use super::state::{SavepointEntry, TransactionState};
 use super::store::SessionStore;
 
-/// Global monotonic counter minting `TxnId`s across all sessions on this
-/// shard. Unique per shard for the lifetime of the process — sufficient
-/// for keying the per-transaction staging overlay, which is scoped to a
-/// single shard's in-memory state.
+/// Process-local monotonic counter forming the low 48 bits of a `TxnId`.
+/// The high 16 bits carry the node id (see [`SessionStore::begin`]), so the
+/// full id is globally unique across the cluster — a transaction's staging
+/// overlay lives on whichever shard leader owns the write, which may be a
+/// different node than the coordinator, so two coordinators must never mint
+/// the same id.
 static NEXT_TXN_ID: AtomicU64 = AtomicU64::new(1);
 
 impl SessionStore {
