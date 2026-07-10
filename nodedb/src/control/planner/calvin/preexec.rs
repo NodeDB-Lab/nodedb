@@ -126,6 +126,8 @@ pub async fn run_preexec_scan(
             tenant_id,
             trace_id: TraceId::ZERO,
             database_id,
+            // Calvin preexecution uses its own deterministic transaction model.
+            txn_id: None,
         };
         let payloads =
             gateway

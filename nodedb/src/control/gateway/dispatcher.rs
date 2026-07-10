@@ -5,7 +5,8 @@
 //! The dispatcher takes a single [`TaskRoute`] and executes it:
 //!
 //! - `RouteDecision::Local` → dispatch through the SPSC bridge via
-//!   [`dispatch_to_data_plane`].
+//!   [`dispatch_to_data_plane_with_txn`] (threading the owning transaction so a
+//!   local-leader in-transaction read resolves its staging overlay).
 //! - `RouteDecision::Remote { node_id, .. }` → encode the plan as
 //!   [`ExecuteRequest`] bytes and send via [`NexarTransport::send_rpc`].
 //! - `RouteDecision::Broadcast { .. }` → each individual route in the
@@ -23,33 +24,52 @@ use nodedb_cluster::rpc_codec::{ExecuteRequest, RaftRpc, TypedClusterError};
 use tracing::debug;
 
 use crate::Error;
-use crate::control::server::dispatch_utils::dispatch_to_data_plane;
+use crate::control::server::dispatch_utils::dispatch_to_data_plane_with_txn;
 use crate::control::server::result_stream::{ResultStream, RowBatch};
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, TraceId, VShardId};
+use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
 use nodedb_physical::physical_plan::wire as plan_wire;
 
 use super::route::{RouteDecision, TaskRoute};
 use super::version_set::GatewayVersionSet;
 
-/// Dispatch a single route and return the raw payload bytes.
+/// Parameters for [`dispatch_route`] (bundled to stay within clippy's
+/// `too_many_arguments` limit once the `txn_id` thread was added).
 ///
 /// `tenant_id` — the authenticated tenant for this query.
 /// `trace_id` — distributed trace ID propagated from the client request.
+/// `txn_id` — owning interactive transaction, threaded to the **local** hop so
+///   the leaseholder resolves this transaction's staging overlay
+///   (read-your-own-writes). The remote `ExecuteRequest` path cannot yet carry
+///   it (tracked cross-node in-transaction gap), so a remote route drops it.
 /// `deadline_ms` — remaining deadline in milliseconds.
 /// `version_set` — descriptor versions for the collections touched by the plan.
-pub async fn dispatch_route(
-    route: TaskRoute,
-    shared: &Arc<SharedState>,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    trace_id: TraceId,
-    deadline_ms: u64,
-    version_set: &GatewayVersionSet,
-) -> Result<Vec<Vec<u8>>, Error> {
+pub struct DispatchRouteParams<'a> {
+    pub route: TaskRoute,
+    pub shared: &'a Arc<SharedState>,
+    pub tenant_id: TenantId,
+    pub database_id: DatabaseId,
+    pub trace_id: TraceId,
+    pub txn_id: Option<TxnId>,
+    pub deadline_ms: u64,
+    pub version_set: &'a GatewayVersionSet,
+}
+
+/// Dispatch a single route and return the raw payload bytes.
+pub async fn dispatch_route(params: DispatchRouteParams<'_>) -> Result<Vec<Vec<u8>>, Error> {
+    let DispatchRouteParams {
+        route,
+        shared,
+        tenant_id,
+        database_id,
+        trace_id,
+        txn_id,
+        deadline_ms,
+        version_set,
+    } = params;
     match route.decision {
         RouteDecision::Local => {
-            dispatch_local(route, shared, tenant_id, database_id, trace_id).await
+            dispatch_local(route, shared, tenant_id, database_id, trace_id, txn_id).await
         }
         RouteDecision::Remote { node_id, vshard_id } => {
             dispatch_remote(RemoteDispatchArgs {
@@ -164,15 +184,17 @@ async fn dispatch_local(
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
+    txn_id: Option<TxnId>,
 ) -> Result<Vec<Vec<u8>>, Error> {
     let vshard_id = VShardId::new(route.vshard_id);
-    let resp = dispatch_to_data_plane(
+    let resp = dispatch_to_data_plane_with_txn(
         shared,
         tenant_id,
         database_id,
         vshard_id,
         route.plan,
         trace_id,
+        txn_id,
     )
     .await?;
     Ok(vec![resp.payload.to_vec()])

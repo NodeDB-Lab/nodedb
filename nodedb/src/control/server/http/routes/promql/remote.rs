@@ -90,6 +90,8 @@ pub async fn remote_write(
                     tenant_id,
                     trace_id: TraceId::generate(),
                     database_id: nodedb_types::id::DatabaseId::DEFAULT,
+                    // PromQL remote-read is a stateless autocommit query.
+                    txn_id: None,
                 };
                 gw.execute(&gw_ctx, plan).await
             }

@@ -169,6 +169,9 @@ async fn resolve_exchange(
                         tenant_id,
                         trace_id,
                         database_id,
+                        // `None` here by the `txn_id.is_none()` guard above
+                        // (streaming is autocommit-only); threaded for honesty.
+                        txn_id,
                     };
                     // NOTE: cluster mode does not yet thread `txn_id` through
                     // `gateway.execute_stream` — cross-node in-transaction

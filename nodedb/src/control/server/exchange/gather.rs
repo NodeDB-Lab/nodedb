@@ -370,6 +370,9 @@ pub async fn gather_all_vshards(
         tenant_id,
         trace_id,
         database_id,
+        // Carry the in-block transaction id into the single-vShard gateway
+        // dispatch so the owning vShard resolves this txn's staging overlay.
+        txn_id,
     };
 
     // `Box::pin` breaks an async-fn recursion cycle: the gateway dispatches the

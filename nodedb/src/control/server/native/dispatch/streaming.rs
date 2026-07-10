@@ -106,6 +106,10 @@ pub(crate) async fn try_open_sql_stream(
             tenant_id: task.tenant_id,
             trace_id: crate::types::TraceId::ZERO,
             database_id,
+            // In-block transactions are excluded above (streaming fast-path is
+            // autocommit-only), so this is `None` today; propagate the task's
+            // own id regardless to stay correct if that guard ever relaxes.
+            txn_id: task.txn_id,
         };
         gw.execute_stream(&gw_ctx, child_plan).await?
     } else {

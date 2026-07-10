@@ -53,6 +53,11 @@ impl TxnDataPlane for NativeTxnDp<'_> {
                         tenant_id: task.tenant_id,
                         trace_id: TraceId::generate(),
                         database_id: task.database_id,
+                        // COMMIT applies the buffered writes as an atomic
+                        // TransactionBatch (self-describing plan); it is a
+                        // write-apply, not an overlay-resolving read, so no
+                        // `txn_id` is threaded.
+                        txn_id: None,
                     };
                     let payloads = gw.execute(&gw_ctx, task.plan).await?;
                     Ok(Response {

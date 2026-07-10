@@ -82,6 +82,9 @@ impl NodeDbPgHandler {
                 tenant_id: task.tenant_id,
                 trace_id: crate::types::TraceId::ZERO,
                 database_id: task.database_id,
+                // Autocommit-only fast path (`maybe_stream_select` bails on
+                // InBlock), so this is `None` today; thread the task id honestly.
+                txn_id: task.txn_id,
             };
             gw.execute_stream(&ctx, child_plan).await
         } else {

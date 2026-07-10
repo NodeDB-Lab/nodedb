@@ -402,6 +402,10 @@ async fn dispatch_single_task_raw(
                 tenant_id,
                 trace_id: TraceId::generate(),
                 database_id: ctx.database_id(),
+                // Propagate the active transaction id so direct-op reads resolve
+                // this txn's staging overlay (read-your-own-writes), mirroring
+                // the SQL path in `sql_gateway.rs`.
+                txn_id,
             };
             match gw.execute(&gw_ctx, plan).await {
                 Ok(payloads) => Ok(gateway_payloads_to_response(payloads)),

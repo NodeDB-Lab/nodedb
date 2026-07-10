@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use crate::bridge::envelope::{Payload, PhysicalPlan};
-use crate::control::gateway::dispatcher::dispatch_route;
+use crate::control::gateway::dispatcher::{DispatchRouteParams, dispatch_route};
 use crate::control::gateway::router::resolve_decision;
 use crate::control::gateway::version_set::GatewayVersionSet;
 use crate::control::gateway::{RouteDecision, TaskRoute};
@@ -106,15 +106,18 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             },
             vshard_id: route_vshard,
         };
-        let payloads = dispatch_route(
+        let payloads = dispatch_route(DispatchRouteParams {
             route,
-            shared_arc,
+            shared: shared_arc,
             tenant_id,
             database_id,
-            TraceId::ZERO,
+            trace_id: TraceId::ZERO,
+            // Cross-node graph superstep read; no owning interactive txn and a
+            // remote route cannot carry txn_id regardless.
+            txn_id: None,
             deadline_ms,
             version_set,
-        )
+        })
         .await?;
         payloads
             .into_iter()

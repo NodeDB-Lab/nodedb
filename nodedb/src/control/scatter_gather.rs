@@ -345,6 +345,9 @@ pub async fn coordinate_cross_shard_hop(
                     tenant_id: crate::types::TenantId::new(tenant_id_u64),
                     trace_id: TraceId::generate(),
                     database_id,
+                    // Cross-node graph hop; cross-node txn propagation (RPC
+                    // envelope) is tracked debt, so no txn_id here.
+                    txn_id: None,
                 };
 
                 // Build a fresh QueryContext per traversal using cloned inputs

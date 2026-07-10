@@ -39,6 +39,11 @@ pub(super) async fn dispatch_task_via_gateway(
                 tenant_id,
                 trace_id: TraceId::generate(),
                 database_id,
+                // Propagate the in-block transaction id so gateway dispatch
+                // resolves the per-txn staging overlay (read-your-own-writes).
+                // `route_in_tx_write` stamps this for in-block reads; the
+                // gateway branch previously dropped it, defeating native RYOW.
+                txn_id,
             };
             gw.execute(&gw_ctx, plan)
                 .await

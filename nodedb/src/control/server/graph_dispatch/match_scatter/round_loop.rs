@@ -9,7 +9,7 @@ use std::sync::Arc;
 use futures::future::join_all;
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::gateway::dispatcher::dispatch_route;
+use crate::control::gateway::dispatcher::{DispatchRouteParams, dispatch_route};
 use crate::control::gateway::version_set::GatewayVersionSet;
 use crate::control::gateway::{RouteDecision, TaskRoute};
 use crate::control::server::graph_dispatch::match_broadcast::broadcast_match_to_all_cores;
@@ -90,15 +90,18 @@ fn push_dispatch_fut<'f>(
             let shared_arc = ctx.shared_arc;
             let version_set = ctx.version_set.clone();
             futs.push(Box::pin(async move {
-                let payloads = dispatch_route(
+                let payloads = dispatch_route(DispatchRouteParams {
                     route,
-                    shared_arc,
+                    shared: shared_arc,
                     tenant_id,
                     database_id,
-                    TraceId::ZERO,
+                    trace_id: TraceId::ZERO,
+                    // Cross-node pattern-match scatter round; remote route, no
+                    // owning interactive transaction.
+                    txn_id: None,
                     deadline_ms,
-                    &version_set,
-                )
+                    version_set: &version_set,
+                })
                 .await?;
                 collect_remote_envelopes(node_id, payloads)
             }));

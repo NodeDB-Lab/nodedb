@@ -61,6 +61,8 @@ pub(super) async fn try_open_stream(
             tenant_id: task.tenant_id,
             trace_id,
             database_id,
+            // HTTP streaming query endpoint is autocommit.
+            txn_id: None,
         };
         gw.execute_stream(&ctx, child_plan).await
     } else {

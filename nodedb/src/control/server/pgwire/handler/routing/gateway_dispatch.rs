@@ -103,6 +103,12 @@ impl NodeDbPgHandler {
             tenant_id,
             trace_id: TraceId::generate(),
             database_id,
+            // This is the remote-leader forward path (`should_forward_via_gateway`
+            // requires a non-local leader). Local in-block reads take
+            // `dispatch_task_loop`, which stamps `task.txn_id` onto the Request
+            // directly. Cross-node txn propagation over the RPC envelope is
+            // tracked debt, so no txn_id is carried here.
+            txn_id: None,
         };
 
         let mut responses: Vec<Response> = Vec::with_capacity(tasks.len());

@@ -27,10 +27,10 @@ use tracing::{Instrument, debug, info_span};
 use crate::Error;
 use crate::control::state::SharedState;
 use crate::control::trace_export::EmitSpanParams;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use super::dispatcher::{default_deadline_ms, dispatch_route};
+use super::dispatcher::{DispatchRouteParams, default_deadline_ms, dispatch_route};
 use super::fuser::fuse_payloads;
 use super::key_extractor::UnwiredKeyExtractor;
 use super::plan_cache::{PlanCache, PlanCacheKey, SqlKey, hash_placeholder_types, hash_sql};
@@ -48,6 +48,16 @@ pub struct QueryContext {
     /// catalog lookups. Single-database deployments pass
     /// [`DatabaseId::DEFAULT`].
     pub database_id: DatabaseId,
+    /// Owning interactive transaction, when this plan is dispatched inside a
+    /// `BEGIN`/`COMMIT` session. Threaded to the local Data Plane hop so the
+    /// leaseholder resolves this transaction's staging overlay
+    /// (read-your-own-writes) instead of reading only committed state. `None`
+    /// for autocommit statements and all non-session callers.
+    ///
+    /// Only the **local-leader** dispatch (`dispatch_local`) forwards it today;
+    /// cross-node in-transaction reads (remote `ExecuteRequest`, streaming)
+    /// remain a tracked gap because the RPC envelope carries no `txn_id`.
+    pub txn_id: Option<TxnId>,
 }
 
 /// The gateway: routes, dispatches, retries, and caches physical plans.
@@ -243,6 +253,7 @@ impl Gateway {
                 let tenant_id = ctx.tenant_id;
                 let database_id = ctx.database_id;
                 let trace_id = ctx.trace_id;
+                let txn_id = ctx.txn_id;
                 let version_set = version_set_for_route.clone();
                 async move {
                     let decision = {
@@ -277,15 +288,16 @@ impl Gateway {
                         decision,
                         vshard_id: vshard_id_u32,
                     };
-                    dispatch_route(
+                    dispatch_route(DispatchRouteParams {
                         route,
-                        &shared,
+                        shared: &shared,
                         tenant_id,
                         database_id,
                         trace_id,
+                        txn_id,
                         deadline_ms,
-                        &version_set,
-                    )
+                        version_set: &version_set,
+                    })
                     .await
                 }
             })
