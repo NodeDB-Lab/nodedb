@@ -5,7 +5,7 @@
 //! bespoke single-blob merge (see `snapshot.rs`, `bsp.rs`, `wcc.rs`).
 
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, TraceId};
+use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId};
 use nodedb_physical::physical_plan::{GraphOp, MetaOp, PhysicalPlan};
 
 use super::bsp::fan_bsp_all_cores;
@@ -38,12 +38,22 @@ pub struct NodeLevelResult {
 ///
 /// At 1 core/node every branch is behaviour-identical to the prior single-core
 /// paths.
+///
+/// `txn_id` is the owning interactive transaction when this plan was dispatched
+/// inside a `BEGIN`/`COMMIT` session (threaded from the remote `ExecuteRequest`
+/// since `WIRE_VERSION` 3). It selects this transaction's staging overlay so a
+/// cross-node in-transaction read (or `StageWrite`) resolves the same overlay
+/// the owning shard's local session would — cross-node read-your-own-writes.
+/// `None` for autocommit statements. The MATCH branch is a deliberate
+/// exception: its overlay lives on the origin node, so cross-node MATCH RYOW is
+/// a separate unit and it always runs committed-only.
 pub async fn execute_plan_all_local_cores(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     plan: PhysicalPlan,
     trace_id: TraceId,
+    txn_id: Option<TxnId>,
 ) -> crate::Result<NodeLevelResult> {
     match &plan {
         PhysicalPlan::Graph(g) => match g {
@@ -111,7 +121,7 @@ pub async fn execute_plan_all_local_cores(
             | GraphOp::TemporalNeighbors { .. }
             | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. } => {
-                generic_gather(state, tenant_id, database_id, plan, trace_id).await
+                generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }
         },
 
@@ -192,7 +202,7 @@ pub async fn execute_plan_all_local_cores(
             | MetaOp::RecordCalvinWriteVersions { .. }
             | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. } => {
-                generic_gather(state, tenant_id, database_id, plan, trace_id).await
+                generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }
         },
 
@@ -208,25 +218,27 @@ pub async fn execute_plan_all_local_cores(
         | PhysicalPlan::Query(_)
         | PhysicalPlan::Array(_)
         | PhysicalPlan::ClusterArray(_) => {
-            generic_gather(state, tenant_id, database_id, plan, trace_id).await
+            generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
         }
     }
 }
 
 /// Generic gather path: delegate to [`gather_all_cores`] and wrap.
+///
+/// `txn_id` is forwarded to the row gather so a cross-node in-transaction read
+/// (or `StageWrite`) resolves the owning transaction's staging overlay
+/// (read-your-own-writes). `None` for autocommit statements.
 async fn generic_gather(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     plan: PhysicalPlan,
     trace_id: TraceId,
+    txn_id: Option<TxnId>,
 ) -> crate::Result<NodeLevelResult> {
     use crate::control::server::exchange::gather::gather_all_cores;
 
-    // Cluster RPC receiver path (remote-node local execution): no session
-    // transaction context crosses the node boundary yet, so `txn_id` is
-    // `None` here. TRACKED: cross-node in-transaction reads are a known gap.
-    let outcome = gather_all_cores(state, tenant_id, database_id, plan, trace_id, None).await?;
+    let outcome = gather_all_cores(state, tenant_id, database_id, plan, trace_id, txn_id).await?;
     Ok(NodeLevelResult {
         payload: outcome.merged_array,
         watermark_lsn: outcome.watermark_lsn,

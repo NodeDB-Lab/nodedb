@@ -14,10 +14,16 @@ impl WireVersion {
     /// v1: legacy — no `Versioned<T>` envelope. Raw inner type bytes.
     pub const V1: WireVersion = WireVersion(1);
 
-    /// v2: first explicit envelope version. Introduced alongside this module.
-    /// `encode_versioned` always emits v2; `decode_versioned` falls back to v1
-    /// if the outer envelope is absent or unparseable.
-    pub const CURRENT: WireVersion = WireVersion(2);
+    /// The current envelope version this build emits. `encode_versioned`
+    /// always stamps `CURRENT`, and `decode_versioned` rejects any envelope
+    /// whose version exceeds it — so a newer peer's frames fail loudly on an
+    /// older node rather than being silently misdecoded.
+    ///
+    /// - v2: first explicit envelope version, introduced alongside this module.
+    /// - v3: bumped alongside `crate::wire::WIRE_VERSION` for the
+    ///   `ExecuteRequest.txn_id` rkyv layout change (cross-node in-transaction
+    ///   read-your-own-writes).
+    pub const CURRENT: WireVersion = WireVersion(3);
 }
 
 impl std::fmt::Display for WireVersion {

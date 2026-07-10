@@ -38,6 +38,8 @@ pub(super) async fn dispatch_remote(
         deadline_remaining_ms: NODE_RESTORE_TIMEOUT.as_millis() as u64,
         trace_id: TraceId::generate().0,
         descriptor_versions: Vec::new(),
+        // Restore streams committed backup data, never an interactive txn.
+        txn_id: None,
     });
     let resp = transport
         .send_rpc(node_id, req)

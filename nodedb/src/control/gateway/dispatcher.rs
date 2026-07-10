@@ -38,10 +38,9 @@ use super::version_set::GatewayVersionSet;
 ///
 /// `tenant_id` — the authenticated tenant for this query.
 /// `trace_id` — distributed trace ID propagated from the client request.
-/// `txn_id` — owning interactive transaction, threaded to the **local** hop so
-///   the leaseholder resolves this transaction's staging overlay
-///   (read-your-own-writes). The remote `ExecuteRequest` path cannot yet carry
-///   it (tracked cross-node in-transaction gap), so a remote route drops it.
+/// `txn_id` — owning interactive transaction, threaded to both the **local**
+///   hop and the **remote** `ExecuteRequest` so the leaseholder (wherever it
+///   lives) resolves this transaction's staging overlay (read-your-own-writes).
 /// `deadline_ms` — remaining deadline in milliseconds.
 /// `version_set` — descriptor versions for the collections touched by the plan.
 pub struct DispatchRouteParams<'a> {
@@ -80,6 +79,7 @@ pub async fn dispatch_route(params: DispatchRouteParams<'_>) -> Result<Vec<Vec<u
                 tenant_id,
                 database_id,
                 trace_id,
+                txn_id,
                 deadline_ms,
                 version_set,
             })
@@ -108,12 +108,21 @@ pub async fn dispatch_route(params: DispatchRouteParams<'_>) -> Result<Vec<Vec<u
 }
 
 /// Parameters for [`dispatch_route_stream`].
+///
+/// `txn_id` — owning interactive transaction, threaded to the local
+///   `gather_all_cores_stream` and the remote `ExecuteStreamRequest` so a
+///   streamed in-transaction read resolves this transaction's staging overlay.
+///   In practice in-transaction reads take the non-streaming path today
+///   (`maybe_stream_select` bails inside a block), so this is `None` for
+///   autocommit streaming scans; it is threaded for correctness if that gate
+///   ever changes.
 pub struct DispatchRouteStreamParams<'a> {
     pub route: TaskRoute,
     pub shared: &'a Arc<SharedState>,
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
     pub trace_id: TraceId,
+    pub txn_id: Option<TxnId>,
     pub deadline_ms: u64,
     pub version_set: &'a GatewayVersionSet,
 }
@@ -136,20 +145,20 @@ pub async fn dispatch_route_stream(
         tenant_id,
         database_id,
         trace_id,
+        txn_id,
         deadline_ms,
         version_set,
     } = args;
     match route.decision {
-        // Cluster gateway route dispatch: no session-transaction context
-        // crosses this boundary yet, so `None`. TRACKED: cross-node
-        // in-transaction reads are a known gap (see resolve/exchange.rs).
+        // Local streamed scan: thread the owning transaction so the all-cores
+        // gather resolves this transaction's staging overlay when present.
         RouteDecision::Local => crate::control::server::exchange::gather::gather_all_cores_stream(
             shared,
             tenant_id,
             database_id,
             route.plan,
             trace_id,
-            None,
+            txn_id,
         ),
         RouteDecision::Remote { node_id, vshard_id } => {
             dispatch_remote_stream(RemoteDispatchArgs {
@@ -160,6 +169,7 @@ pub async fn dispatch_route_stream(
                 tenant_id,
                 database_id,
                 trace_id,
+                txn_id,
                 deadline_ms,
                 version_set,
             })
@@ -200,7 +210,7 @@ async fn dispatch_local(
     Ok(vec![resp.payload.to_vec()])
 }
 
-/// Arguments for a remote dispatch call (bundles the 8 parameters to stay
+/// Arguments for a remote dispatch call (bundles the parameters to stay
 /// within clippy's `too_many_arguments` limit).
 struct RemoteDispatchArgs<'a> {
     plan: nodedb_physical::physical_plan::PhysicalPlan,
@@ -210,6 +220,10 @@ struct RemoteDispatchArgs<'a> {
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
+    /// Owning session transaction, stamped into the outgoing `ExecuteRequest`
+    /// so the remote leaseholder resolves this transaction's staging overlay
+    /// (cross-node read-your-own-writes). `None` for autocommit statements.
+    txn_id: Option<TxnId>,
     deadline_ms: u64,
     version_set: &'a GatewayVersionSet,
 }
@@ -224,6 +238,7 @@ async fn dispatch_remote(args: RemoteDispatchArgs<'_>) -> Result<Vec<Vec<u8>>, E
         tenant_id,
         database_id,
         trace_id,
+        txn_id,
         deadline_ms,
         version_set,
     } = args;
@@ -292,6 +307,7 @@ async fn dispatch_remote(args: RemoteDispatchArgs<'_>) -> Result<Vec<Vec<u8>>, E
         deadline_remaining_ms: deadline_ms,
         trace_id: trace_id.0,
         descriptor_versions,
+        txn_id: txn_id.map(|t| t.as_u64()),
     });
 
     debug!(
@@ -357,6 +373,7 @@ async fn dispatch_remote_stream(args: RemoteDispatchArgs<'_>) -> Result<ResultSt
         tenant_id,
         database_id,
         trace_id,
+        txn_id,
         deadline_ms,
         version_set,
     } = args;
@@ -412,6 +429,7 @@ async fn dispatch_remote_stream(args: RemoteDispatchArgs<'_>) -> Result<ResultSt
         deadline_remaining_ms: deadline_ms,
         trace_id: trace_id.0,
         descriptor_versions,
+        txn_id: txn_id.map(|t| t.as_u64()),
     });
 
     debug!(

@@ -93,6 +93,10 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             database_id,
             plan,
             TraceId::ZERO,
+            // Cross-node MATCH resolve: the transaction's staged overlay lives
+            // on the origin node and is unreachable here, so run committed-only.
+            // Cross-node MATCH read-your-own-writes is a separate unit.
+            None,
         )
         .await?;
         Ok(Payload::from_vec(node_result.payload))

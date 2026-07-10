@@ -149,7 +149,14 @@ pub enum VShardMessageType {
 ///
 /// v2 widens `vshard_id` u16→u32 in the binary frame, increasing min header
 /// size from 26 to 28 bytes.
-pub const WIRE_VERSION: u16 = 2;
+///
+/// v3 adds the `txn_id` field to `ExecuteRequest` (cross-node in-transaction
+/// read-your-own-writes). `ExecuteRequest` is an rkyv fixed-layout message, so
+/// the added field changes its archived layout: a v2 node cannot decode a v3
+/// frame and vice versa. The matching `WireVersion::CURRENT` bump makes a v2
+/// node reject a v3-stamped envelope outright rather than silently misdecode —
+/// so a mixed v2/v3 cluster fails loudly and nodes must be upgraded together.
+pub const WIRE_VERSION: u16 = 3;
 
 impl VShardEnvelope {
     pub fn new(
@@ -265,8 +272,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_version_is_2() {
-        assert_eq!(WIRE_VERSION, 2, "v2 widened vshard_id to u32");
+    fn wire_version_is_3() {
+        assert_eq!(
+            WIRE_VERSION, 3,
+            "v3 added ExecuteRequest.txn_id for cross-node in-transaction RYOW"
+        );
     }
 
     #[test]

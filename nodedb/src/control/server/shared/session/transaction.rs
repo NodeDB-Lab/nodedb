@@ -13,10 +13,12 @@ use super::read_set::ReadSetEntry;
 use super::state::{SavepointEntry, TransactionState};
 use super::store::SessionStore;
 
-/// Global monotonic counter minting `TxnId`s across all sessions on this
-/// shard. Unique per shard for the lifetime of the process — sufficient
-/// for keying the per-transaction staging overlay, which is scoped to a
-/// single shard's in-memory state.
+/// Per-process monotonic sequence feeding the low bits of every minted
+/// `TxnId`. On its own it is only unique within this process; combined with
+/// the origin node id via [`TxnId::from_origin`] it becomes cluster-globally
+/// unique, so two coordinators staging onto the same owner shard never collide
+/// on the same overlay key. Starts at 1 so a single-node deployment (node id 0)
+/// still mints 1, 2, 3, … exactly as before.
 static NEXT_TXN_ID: AtomicU64 = AtomicU64::new(1);
 
 impl SessionStore {
@@ -32,11 +34,18 @@ impl SessionStore {
     /// fast path) and the last globally-applied Calvin `snapshot_epoch` as the
     /// cross-shard-valid version anchor. All reads within this transaction see
     /// data as of this LSN.
+    ///
+    /// `node_id` is this coordinator's cluster node id (`SharedState.node_id`,
+    /// 0 in single-node deployments). It is packed into the minted [`TxnId`] so
+    /// the id is globally unique — required for cross-node read-your-own-write:
+    /// two coordinators staging onto a shared owner shard must not collide on
+    /// the same `txn_overlays` key.
     pub fn begin(
         &self,
         addr: &SocketAddr,
         current_lsn: Lsn,
         snapshot_epoch: u64,
+        node_id: u64,
     ) -> Result<(), &'static str> {
         self.write_session(addr, |session| match session.tx_state {
             TransactionState::Idle => {
@@ -44,7 +53,10 @@ impl SessionStore {
                 session.tx_snapshot_lsn = Some(current_lsn);
                 session.tx_snapshot_epoch = Some(snapshot_epoch);
                 session.tx_read_set.clear();
-                session.tx_id = Some(TxnId::new(NEXT_TXN_ID.fetch_add(1, Ordering::Relaxed)));
+                session.tx_id = Some(TxnId::from_origin(
+                    node_id,
+                    NEXT_TXN_ID.fetch_add(1, Ordering::Relaxed),
+                ));
                 session.tx_vshards.clear();
                 Ok(())
             }

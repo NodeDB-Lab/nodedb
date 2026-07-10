@@ -106,8 +106,17 @@ impl NodeDbPgHandler {
             // This is the remote-leader forward path (`should_forward_via_gateway`
             // requires a non-local leader). Local in-block reads take
             // `dispatch_task_loop`, which stamps `task.txn_id` onto the Request
-            // directly. Cross-node txn propagation over the RPC envelope is
-            // tracked debt, so no txn_id is carried here.
+            // directly and runs the in-txn staging gate (`route_in_tx_write`).
+            //
+            // Cross-node in-transaction statements are DEFERRED to U4/U5
+            // (cross-shard transactions): this short-circuit runs BEFORE the
+            // staging gate, so a non-owner's in-txn write ships to the owner as a
+            // plain committed write (not a `StageWrite` into `txn_overlays`) and
+            // its read carries no txn id. Carrying `txn_id` here is necessary but
+            // not sufficient — the owner would also have to STAGE (not commit) the
+            // write and flush/rollback the overlay at COMMIT/ROLLBACK. U3 is
+            // single-node only (LOCKED design §8); the ignored
+            // `cross_node_ryow_probe.rs` is the executable spec for the U4/U5 fix.
             txn_id: None,
         };
 

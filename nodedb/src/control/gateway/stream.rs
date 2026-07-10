@@ -70,6 +70,7 @@ impl Gateway {
                 let tenant_id = ctx.tenant_id;
                 let database_id = ctx.database_id;
                 let trace_id = ctx.trace_id;
+                let txn_id = ctx.txn_id;
                 let version_set = version_set_for_route.clone();
                 async move {
                     let decision = {
@@ -110,6 +111,7 @@ impl Gateway {
                         tenant_id,
                         database_id,
                         trace_id,
+                        txn_id,
                         deadline_ms,
                         version_set: &version_set,
                     })

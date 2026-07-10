@@ -36,7 +36,7 @@ pub fn run_begin(
         .load(std::sync::atomic::Ordering::Acquire);
     ddl_buffer::activate();
     sessions
-        .begin(addr, snapshot_lsn, snapshot_epoch)
+        .begin(addr, snapshot_lsn, snapshot_epoch, state.node_id)
         .map_err(|msg| crate::Error::BadRequest {
             detail: msg.to_owned(),
         })

@@ -38,6 +38,19 @@ pub struct ExecuteRequest {
     pub trace_id: [u8; 16],
     /// Caller's view of descriptor versions for every collection touched by the plan.
     pub descriptor_versions: Vec<DescriptorVersionEntry>,
+    /// Owning session transaction, when this plan executes inside an explicit
+    /// `BEGIN` block. `Some(txn_id)` directs the receiving leaseholder to
+    /// resolve this transaction's staging overlay so a cross-node in-transaction
+    /// read observes its own staged writes (read-your-own-writes); `None` is an
+    /// autocommit statement with no session transaction.
+    ///
+    /// Wire compatibility: this field was added in `WIRE_VERSION` 3. Because
+    /// `ExecuteRequest` is an rkyv fixed-layout message, the added field changes
+    /// its archived layout. The bumped envelope version means a v2 node rejects
+    /// a v3-stamped frame outright (`unwrap_bytes_versioned`) rather than
+    /// silently misdecoding it, so nodes must be upgraded together (see
+    /// `crate::wire`).
+    pub txn_id: Option<u64>,
 }
 
 /// Response to an `ExecuteRequest`.
@@ -238,11 +251,17 @@ mod tests {
                     version: 1,
                 },
             ],
+            txn_id: Some(0xABCD_1234),
         };
         let decoded = roundtrip_req(req.clone());
         assert_eq!(decoded.plan_bytes, req.plan_bytes);
         assert_eq!(decoded.tenant_id, 7);
         assert_eq!(decoded.deadline_remaining_ms, 5000);
+        assert_eq!(
+            decoded.txn_id,
+            Some(0xABCD_1234),
+            "txn_id roundtrips for an in-transaction plan"
+        );
         assert_eq!(
             decoded.trace_id, req.trace_id,
             "trace_id roundtrips correctly"
@@ -261,9 +280,11 @@ mod tests {
             deadline_remaining_ms: 1000,
             trace_id: [0u8; 16],
             descriptor_versions: vec![],
+            txn_id: None,
         };
         let decoded = roundtrip_req(req);
         assert!(decoded.descriptor_versions.is_empty());
+        assert_eq!(decoded.txn_id, None, "autocommit plan carries no txn_id");
     }
 
     #[test]
@@ -382,6 +403,7 @@ mod tests {
                 collection: "wide".into(),
                 version: 3,
             }],
+            txn_id: Some(99),
         };
         let rpc = RaftRpc::ExecuteStreamRequest(req.clone());
         let encoded = super::super::encode(&rpc).unwrap();
@@ -395,6 +417,7 @@ mod tests {
                 assert_eq!(r.descriptor_versions.len(), 1);
                 assert_eq!(r.descriptor_versions[0].collection, "wide");
                 assert_eq!(r.descriptor_versions[0].version, 3);
+                assert_eq!(r.txn_id, Some(99), "stream request carries txn_id");
             }
             other => panic!("expected ExecuteStreamRequest, got {other:?}"),
         }

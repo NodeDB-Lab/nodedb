@@ -226,6 +226,10 @@ impl LocalPlanExecutor {
 
         let tenant_id = crate::types::TenantId::new(req.tenant_id);
         let trace_id = nodedb_types::TraceId(req.trace_id);
+        // Owning interactive transaction (WIRE_VERSION 3+). Threaded into the
+        // all-cores fan so an in-transaction StageWrite / read resolves this
+        // transaction's staging overlay on the owning shard (cross-node RYOW).
+        let txn_id = req.txn_id.map(crate::types::TxnId::new);
 
         // ── Replicable write: drive through Raft, NOT local cores ─────────────
         //
@@ -281,7 +285,14 @@ impl LocalPlanExecutor {
 
         match tokio::time::timeout(
             deadline,
-            execute_plan_all_local_cores(&self.state, tenant_id, database_id, plan, trace_id),
+            execute_plan_all_local_cores(
+                &self.state,
+                tenant_id,
+                database_id,
+                plan,
+                trace_id,
+                txn_id,
+            ),
         )
         .await
         {
@@ -316,16 +327,17 @@ impl LocalPlanExecutor {
 
         let tenant_id = crate::types::TenantId::new(req.tenant_id);
         let trace_id = nodedb_types::TraceId(req.trace_id);
+        // Owning interactive transaction (WIRE_VERSION 3+): resolve this
+        // transaction's staging overlay for a streamed in-transaction read.
+        let txn_id = req.txn_id.map(crate::types::TxnId::new);
 
-        // Cluster RPC receiver (remote-node local execution): `ExecuteRequest`
-        // carries no session-transaction context yet, so `None`.
         let mut stream = match crate::control::server::exchange::gather::gather_all_cores_stream(
             &self.state,
             tenant_id,
             database_id,
             plan,
             trace_id,
-            None,
+            txn_id,
         ) {
             Ok(s) => s,
             Err(e) => {

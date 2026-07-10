@@ -106,6 +106,10 @@ impl RegistryShuffleProducer {
                     version: d.version,
                 })
                 .collect(),
+            // Shuffle produce is the cross-node Exchange path; in-transaction
+            // RYOW across a distributed shuffle is a separate (deferred) unit,
+            // and `ShuffleProduceRequest` carries no `txn_id`, so this is `None`.
+            txn_id: None,
         };
 
         let executor = LocalPlanExecutor::new(Arc::clone(&self.state));

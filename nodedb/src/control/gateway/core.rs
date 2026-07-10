@@ -49,14 +49,14 @@ pub struct QueryContext {
     /// [`DatabaseId::DEFAULT`].
     pub database_id: DatabaseId,
     /// Owning interactive transaction, when this plan is dispatched inside a
-    /// `BEGIN`/`COMMIT` session. Threaded to the local Data Plane hop so the
+    /// `BEGIN`/`COMMIT` session. Threaded to the Data Plane hop so the
     /// leaseholder resolves this transaction's staging overlay
     /// (read-your-own-writes) instead of reading only committed state. `None`
     /// for autocommit statements and all non-session callers.
     ///
-    /// Only the **local-leader** dispatch (`dispatch_local`) forwards it today;
-    /// cross-node in-transaction reads (remote `ExecuteRequest`, streaming)
-    /// remain a tracked gap because the RPC envelope carries no `txn_id`.
+    /// Forwarded on both the **local-leader** dispatch (`dispatch_local`) and
+    /// the remote `ExecuteRequest` (`WIRE_VERSION` 3 carries `txn_id`), so
+    /// cross-node in-transaction reads resolve the overlay on the owning shard.
     pub txn_id: Option<TxnId>,
 }
 

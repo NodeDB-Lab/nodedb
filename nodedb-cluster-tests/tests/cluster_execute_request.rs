@@ -53,6 +53,7 @@ fn make_kv_put_request(
             collection: collection.into(),
             version: descriptor_version,
         }],
+        txn_id: None,
     }
 }
 
@@ -209,6 +210,7 @@ async fn execute_request_cross_node_dispatch() {
             collection: "cross_node_kv".into(),
             version: 0, // Accept any version (pre-B.1 sentinel bypass)
         }],
+        txn_id: None,
     };
 
     let resp = send_execute_request(sender_transport, target_addr, req).await;
