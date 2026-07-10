@@ -91,6 +91,14 @@ impl TxnDataPlane for NativeTxnDp<'_> {
 }
 
 pub(crate) fn handle_begin(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResponse {
+    // Ensure a session exists before BEGIN. pgwire creates the session at
+    // connection startup (`pgwire/factory.rs`), but the native transport only
+    // lazily ensures one when an SQL statement arrives (`sql.rs`). A native
+    // client that sends BEGIN as its first frame would otherwise reach
+    // `run_begin` with no session, where `SessionStore::begin` silently
+    // no-ops (never setting `InBlock`) — so the first in-block write would
+    // autocommit instead of buffering into the staging overlay.
+    ctx.sessions.ensure_session(*ctx.peer_addr);
     match lifecycle::run_begin(ctx.sessions, ctx.peer_addr, ctx.state) {
         Ok(()) => NativeResponse::status_row(seq, "BEGIN"),
         Err(e) => {
