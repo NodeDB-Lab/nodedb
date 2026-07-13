@@ -75,6 +75,7 @@ impl CoreLoop {
             plan: PhysicalPlan::Meta(MetaOp::Cancel {
                 target_request_id: crate::types::RequestId::new(0),
             }),
+            // no-determinism: ephemeral deadline is not written to Calvin state.
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
             priority: crate::bridge::envelope::Priority::Normal,
             trace_id: TraceId::ZERO,

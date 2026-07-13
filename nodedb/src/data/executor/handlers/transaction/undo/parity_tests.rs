@@ -224,6 +224,7 @@ fn dummy_task() -> ExecutionTask {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
         }),
+        // no-determinism: test-only deadline is not written to Calvin state.
         deadline: Instant::now() + Duration::from_secs(30),
         priority: Priority::Normal,
         trace_id: TraceId::ZERO,

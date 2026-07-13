@@ -31,6 +31,7 @@ impl Scheduler {
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(self.vshard_id),
             plan,
+            // no-determinism: scheduler deadline controls waiting, not ordered state.
             deadline: Instant::now()
                 + Duration::from_millis(
                     self.config.epoch_duration_ms * u64::from(self.config.txn_deadline_multiplier),
