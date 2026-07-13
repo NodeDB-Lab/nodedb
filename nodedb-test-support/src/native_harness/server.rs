@@ -17,6 +17,7 @@ use nodedb::wal::WalManager;
 /// A running native-protocol test server.
 pub struct NativeTestServer {
     pub addr: std::net::SocketAddr,
+    pub shared: Arc<SharedState>,
     pub(super) shutdown_bus: nodedb::control::shutdown::ShutdownBus,
     pub(super) poller_shutdown_tx: tokio::sync::watch::Sender<bool>,
     pub(super) core_stop_tx: std::sync::mpsc::Sender<()>,
@@ -31,6 +32,15 @@ impl NativeTestServer {
     /// Spawn a single-core NodeDB server with the native listener bound to
     /// an ephemeral `127.0.0.1` port (trust-mode auth).
     pub async fn start() -> Self {
+        Self::start_with_auth_mode(AuthMode::Trust).await
+    }
+
+    /// Spawn a single-core server that requires an explicit native Auth frame.
+    pub async fn start_authenticated() -> Self {
+        Self::start_with_auth_mode(AuthMode::Password).await
+    }
+
+    async fn start_with_auth_mode(auth_mode: AuthMode) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal_path = dir.path().join("test.wal");
         let wal = Arc::new(WalManager::open_for_testing(&wal_path).expect("open wal"));
@@ -128,7 +138,7 @@ impl NativeTestServer {
             listener
                 .run(nodedb::control::server::listener::ListenerRunParams {
                     state: shared_listener,
-                    auth_mode: AuthMode::Trust,
+                    auth_mode,
                     tls_acceptor: None,
                     conn_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
                     startup_gate: test_startup_gate,
@@ -145,6 +155,7 @@ impl NativeTestServer {
 
         Self {
             addr,
+            shared,
             shutdown_bus,
             poller_shutdown_tx,
             core_stop_tx,

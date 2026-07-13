@@ -11,8 +11,8 @@ use tokio::net::TcpStream;
 use nodedb_types::protocol::request_fields::RequestFields;
 use nodedb_types::protocol::text_fields::TextFields;
 use nodedb_types::protocol::{
-    FRAME_HEADER_LEN, HELLO_ACK_MAGIC, HELLO_ERROR_MAGIC_U32, HelloAckFrame, HelloErrorFrame,
-    HelloFrame, NativeRequest, NativeResponse, OpCode,
+    AuthMethod, FRAME_HEADER_LEN, HELLO_ACK_MAGIC, HELLO_ERROR_MAGIC_U32, HelloAckFrame,
+    HelloErrorFrame, HelloFrame, NativeRequest, NativeResponse, OpCode,
 };
 
 /// Perform the handshake with a custom `HelloFrame`.
@@ -125,6 +125,21 @@ pub async fn send_request(
         .expect("timeout waiting for response")
         .expect("response frame");
     sonic_rs::from_slice(&response_payload).expect("json decode NativeResponse")
+}
+
+/// Authenticate a fresh native connection with an API key. The JSON Auth
+/// request also selects JSON framing for the rest of the session.
+pub async fn send_api_key_auth(stream: &mut TcpStream, seq: u64, token: String) -> NativeResponse {
+    send_request(
+        stream,
+        seq,
+        OpCode::Auth,
+        TextFields {
+            auth: Some(AuthMethod::ApiKey { token }),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 /// Send a `SHOW`/SQL statement over an established JSON-encoding session and
