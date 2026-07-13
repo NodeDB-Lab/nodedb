@@ -103,3 +103,4 @@ dmypy.json
 
 .cargo/
 .claude/prep/
+.pi-subagents
