@@ -10,10 +10,14 @@ use nodedb_types::{CloneStatus, Lsn, TenantId};
 
 use crate::control::clone::copyup::{KvCopyUpParams, perform_kv_clone_copyup};
 use crate::control::clone::tombstone::{KvTombstoneParams, perform_kv_clone_tombstone};
+use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::server::shared::authorization::authorize_collection;
 use crate::types::VShardId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
+use super::super::super::auth::pgwire_authorization_error;
 use super::super::super::core::NodeDbPgHandler;
 use super::entry::CloneWriteOutcome;
 use super::probes::{dispatch_data_plane_raw, fetch_kv_source_value, probe_kv_key_in_target};
@@ -24,6 +28,7 @@ impl NodeDbPgHandler {
     pub(super) async fn intercept_kv_clone_write(
         &self,
         task: &PhysicalTask,
+        identity: &AuthenticatedIdentity,
         tenant_id: TenantId,
     ) -> PgWireResult<CloneWriteOutcome> {
         let (collection_qualified, kv_key, is_delete) = match &task.plan {
@@ -45,13 +50,25 @@ impl NodeDbPgHandler {
                 let Some(desc) = desc else {
                     return Ok(CloneWriteOutcome::Passthrough);
                 };
-                if desc.cloned_from.is_none() {
+                let Some(ref origin) = desc.cloned_from else {
                     return Ok(CloneWriteOutcome::Passthrough);
-                }
+                };
                 match desc.clone_status {
                     CloneStatus::Materialized => return Ok(CloneWriteOutcome::Passthrough),
                     CloneStatus::Shadowed | CloneStatus::Materializing { .. } => {}
                 }
+
+                let emitter = ArcAuditEmitter(Arc::clone(&self.state.audit));
+                authorize_collection(
+                    identity,
+                    origin.source_database,
+                    &origin.source_collection,
+                    Permission::Read,
+                    &self.state.permissions,
+                    &self.state.roles,
+                    &emitter,
+                )
+                .map_err(pgwire_authorization_error)?;
 
                 // Split each key into one of two paths:
                 //   • key absent in target (source-only) → record a tombstone
@@ -136,6 +153,18 @@ impl NodeDbPgHandler {
             CloneStatus::Materialized => return Ok(CloneWriteOutcome::Passthrough),
             CloneStatus::Shadowed | CloneStatus::Materializing { .. } => {}
         }
+
+        let emitter = ArcAuditEmitter(Arc::clone(&self.state.audit));
+        authorize_collection(
+            identity,
+            origin.source_database,
+            &origin.source_collection,
+            Permission::Read,
+            &self.state.permissions,
+            &self.state.roles,
+            &emitter,
+        )
+        .map_err(pgwire_authorization_error)?;
 
         // FieldSet is not a delete.
         let _ = is_delete;

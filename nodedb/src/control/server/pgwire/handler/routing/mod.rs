@@ -18,5 +18,6 @@ pub(in crate::control::server::pgwire::handler) mod execute;
 mod execute_dml_hooks;
 mod gateway_dispatch;
 mod planning;
+pub(in crate::control::server::pgwire::handler) mod result_shaping;
 mod set_ops;
 mod streaming;

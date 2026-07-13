@@ -16,7 +16,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::control::clone::resolver::{
     CloneReadParams, ResolveOutcome, filter_tombstoned_rows, resolve_read,
 };
-use crate::control::server::pgwire::handler::plan::{PlanKind, payload_to_response};
+use crate::control::server::pgwire::handler::plan::{PlanKind, multirow_payload_to_response};
 use crate::control::server::pgwire::handler::shape_encode;
 use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::kv::apply_kv_wrap;
@@ -40,6 +40,7 @@ impl NodeDbPgHandler {
     pub(in crate::control::server::pgwire::handler::routing) async fn maybe_dispatch_clone_reads(
         &self,
         tasks: Vec<PhysicalTask>,
+        identity: &crate::control::security::identity::AuthenticatedIdentity,
         tenant_id: TenantId,
         addr: &std::net::SocketAddr,
         projection: Option<&OutputSchema>,
@@ -103,7 +104,7 @@ impl NodeDbPgHandler {
                         Ok(Some(vec![response]))
                     }
                     ShapeOutcome::Passthrough => {
-                        let shaped = payload_to_response(&empty, PlanKind::MultiRow);
+                        let shaped = multirow_payload_to_response(&empty);
                         if let Some(notice) = shaped.notice {
                             self.sessions.push_notice(addr, notice);
                         }
@@ -125,6 +126,11 @@ impl NodeDbPgHandler {
                         "clone read: T_lsn < clone_created_at (note attached)"
                     );
                 }
+
+                // Clone resolution adds source-database tasks after the initial
+                // authorization pass. Re-authorize the complete augmented set
+                // before either half can be dispatched.
+                self.authorize_tasks(identity, &tasks)?;
 
                 // Split tasks into target and source halves.
                 let (target_tasks, source_tasks) = tasks.split_at(source_start_idx);
@@ -293,8 +299,7 @@ impl NodeDbPgHandler {
                             pg_responses.push(response);
                         }
                         ShapeOutcome::Passthrough => {
-                            let shaped =
-                                payload_to_response(resp.payload.as_ref(), PlanKind::MultiRow);
+                            let shaped = multirow_payload_to_response(resp.payload.as_ref());
                             if let Some(notice) = shaped.notice {
                                 self.sessions.push_notice(addr, notice);
                             }

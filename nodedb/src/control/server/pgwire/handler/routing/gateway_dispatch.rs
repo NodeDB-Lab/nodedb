@@ -21,7 +21,7 @@ use crate::types::{ReadConsistency, TenantId, TraceId};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::core::NodeDbPgHandler;
-use super::super::plan::{PlanKind, payload_to_response};
+use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::shape_encode;
 
 impl NodeDbPgHandler {
@@ -134,8 +134,7 @@ impl NodeDbPgHandler {
                             responses.push(response);
                         }
                         ShapeOutcome::Passthrough => {
-                            responses
-                                .push(payload_to_response(payload, PlanKind::MultiRow).response);
+                            responses.push(multirow_payload_to_response(payload).response);
                         }
                     }
                 }

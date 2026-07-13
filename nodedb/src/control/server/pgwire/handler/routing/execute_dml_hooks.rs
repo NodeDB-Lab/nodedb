@@ -241,7 +241,10 @@ impl NodeDbPgHandler {
         // Non-cloned collections and Materialized clones short-circuit here.
         {
             use super::clone_write_dispatch::CloneWriteOutcome;
-            match self.maybe_intercept_clone_write(&task, tenant_id).await? {
+            match self
+                .maybe_intercept_clone_write(&task, identity, tenant_id)
+                .await?
+            {
                 CloneWriteOutcome::Handled(resp) => {
                     use crate::control::server::response_shape::compose::{
                         ShapeOutcome, shape_payload_no_plan,
@@ -265,7 +268,7 @@ impl NodeDbPgHandler {
                                 crate::control::server::pgwire::handler::plan::payload_to_response(
                                     resp.payload.as_ref(),
                                     plan_kind,
-                                );
+                                )?;
                             if let Some(notice) = shaped.notice {
                                 self.sessions.push_notice(addr, notice);
                             }

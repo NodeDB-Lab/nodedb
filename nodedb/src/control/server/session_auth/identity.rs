@@ -21,22 +21,19 @@ pub fn resolve_certificate_identity(
     peer_addr: &str,
 ) -> crate::Result<AuthenticatedIdentity> {
     // Map cert CN to username (direct mapping: CN = username).
-    let identity = state
-        .credentials
-        .to_identity(cn, AuthMethod::Certificate)
-        .ok_or_else(|| {
-            state.audit_record(
-                AuditEvent::AuthFailure,
-                None,
-                peer_addr,
-                &format!("mTLS auth failed: no user for cert CN '{cn}'"),
-            );
-            state.auth_metrics.record_auth_failure("certificate");
-            crate::Error::RejectedAuthz {
-                tenant_id: TenantId::new(0),
-                resource: format!("no user mapped to certificate CN '{cn}'"),
-            }
-        })?;
+    let identity = stored_user_identity(state, cn, AuthMethod::Certificate).ok_or_else(|| {
+        state.audit_record(
+            AuditEvent::AuthFailure,
+            None,
+            peer_addr,
+            &format!("mTLS auth failed: no user for cert CN '{cn}'"),
+        );
+        state.auth_metrics.record_auth_failure("certificate");
+        crate::Error::RejectedAuthz {
+            tenant_id: TenantId::new(0),
+            resource: format!("no user mapped to certificate CN '{cn}'"),
+        }
+    })?;
 
     state.audit_record(
         AuditEvent::AuthSuccess,
@@ -71,6 +68,24 @@ fn build_owner_database_set(state: &SharedState, user: &UserRecord) -> DatabaseS
         .ok()
         .unwrap_or_else(|| vec![DatabaseId::DEFAULT]);
     DatabaseSet::Some(SmallVec::from_iter(db_ids))
+}
+
+/// Build a session identity from a persisted user, including live database grants.
+///
+/// [`CredentialStore::to_identity`](crate::control::security::credential::CredentialStore::to_identity)
+/// only materializes credential fields. Session bind must additionally resolve the
+/// user's default database and the current `_system.database_grants` set.
+pub fn stored_user_identity(
+    state: &SharedState,
+    username: &str,
+    method: AuthMethod,
+) -> Option<AuthenticatedIdentity> {
+    let user = state.credentials.get_user(username)?;
+    let mut identity = state.credentials.to_identity(username, method)?;
+    identity.default_database =
+        (user.default_database_id != 0).then(|| DatabaseId::new(user.default_database_id));
+    identity.accessible_databases = build_owner_database_set(state, &user);
+    Some(identity)
 }
 
 /// Verify an API key token and build an authenticated identity.
@@ -124,7 +139,7 @@ pub fn verify_api_key_identity(
 ///
 /// Used by both explicit auth requests and auto-auth on first frame.
 pub fn trust_identity(state: &SharedState, username: &str) -> AuthenticatedIdentity {
-    if let Some(id) = state.credentials.to_identity(username, AuthMethod::Trust) {
+    if let Some(id) = stored_user_identity(state, username, AuthMethod::Trust) {
         id
     } else {
         AuthenticatedIdentity {

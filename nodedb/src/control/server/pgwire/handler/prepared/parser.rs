@@ -12,11 +12,16 @@ use async_trait::async_trait;
 use pgwire::api::results::{FieldFormat, FieldInfo};
 use pgwire::api::stmt::QueryParser;
 use pgwire::api::{ClientInfo, Type};
-use pgwire::error::PgWireResult;
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
+use crate::config::auth::AuthMode;
+use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::response_shape::types::DdlColType;
+use crate::control::server::shared::authorization::{authorize_database, authorize_task_set};
+use crate::control::server::shared::session::SessionStore;
 use crate::control::state::SharedState;
 
+use super::super::auth::{pgwire_authorization_error, resolve_session_identity};
 use super::statement::ParsedStatement;
 use parser_schema::{
     count_placeholders, is_dsl_statement, result_fields_for_returning,
@@ -57,11 +62,92 @@ fn ddl_col_type_to_pg(ty: &DdlColType) -> Type {
 /// from the catalog schema, and computes the result schema.
 pub struct NodeDbQueryParser {
     state: Arc<SharedState>,
+    auth_mode: AuthMode,
+    sessions: Arc<SessionStore>,
 }
 
 impl NodeDbQueryParser {
-    pub fn new(state: Arc<SharedState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<SharedState>, auth_mode: AuthMode, sessions: Arc<SessionStore>) -> Self {
+        Self {
+            state,
+            auth_mode,
+            sessions,
+        }
+    }
+
+    fn placeholder_types(sql: &str, client_types: &[Option<Type>]) -> Vec<Option<Type>> {
+        let param_count = count_placeholders(sql);
+        let mut param_types = vec![None; param_count.max(client_types.len())];
+        for (index, client_type) in client_types.iter().enumerate() {
+            if let Some(client_type) = client_type {
+                param_types[index] = Some(client_type.clone());
+            }
+        }
+        param_types
+    }
+
+    async fn authorize_plannable_sql(
+        &self,
+        sql: &str,
+        identity: &crate::control::security::identity::AuthenticatedIdentity,
+        database_id: crate::types::DatabaseId,
+        emitter: &ArcAuditEmitter,
+    ) -> PgWireResult<bool> {
+        let (sql_without_returning, _) =
+            match crate::control::server::pgwire::handler::returning::strip_returning(sql) {
+                Ok(parts) => parts,
+                Err(_) => return Ok(false),
+            };
+        let sql_for_planning = substitute_placeholders_with_null(&sql_without_returning);
+        let query_ctx =
+            crate::control::planner::context::QueryContext::for_state_with_lease(&self.state);
+        let auth_ctx = crate::control::server::session_auth::build_auth_context(identity);
+        let permission_cache = self.state.permission_cache.read().await;
+        let security = crate::control::planner::context::PlanSecurityContext {
+            identity,
+            auth: &auth_ctx,
+            rls_store: &self.state.rls,
+            permissions: &self.state.permissions,
+            roles: &self.state.roles,
+            permission_cache: Some(&*permission_cache),
+        };
+        let Ok((mut tasks, _)) = query_ctx
+            .plan_sql_with_rls(crate::control::planner::context::PlanSqlWithRlsParams {
+                sql: &sql_for_planning,
+                tenant_id: identity.tenant_id,
+                database_id,
+                sec: &security,
+            })
+            .await
+        else {
+            return Ok(false);
+        };
+        drop(permission_cache);
+
+        crate::control::planner::implicit_edges::append_implicit_edge_tasks(
+            &self.state,
+            &mut tasks,
+            identity.tenant_id,
+            database_id,
+            crate::types::TraceId::ZERO,
+        )
+        .await
+        .map_err(|error| {
+            PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "XX000".to_owned(),
+                error.to_string(),
+            )))
+        })?;
+        authorize_task_set(
+            identity,
+            &tasks,
+            &self.state.permissions,
+            &self.state.roles,
+            emitter,
+        )
+        .map_err(pgwire_authorization_error)?;
+        Ok(true)
     }
 
     /// Infer parameter and result types using nodedb-sql catalog, scoped to
@@ -72,11 +158,12 @@ impl NodeDbQueryParser {
         sql: &str,
         client_types: &[Option<Type>],
         tenant_id: u64,
+        database_id: crate::types::DatabaseId,
     ) -> (Vec<Option<Type>>, Vec<FieldInfo>) {
         let catalog = crate::control::planner::catalog_adapter::OriginCatalog::new(
             Arc::clone(&self.state.credentials),
             tenant_id,
-            crate::types::DatabaseId::DEFAULT,
+            database_id,
             Some(Arc::clone(&self.state.retention_policy_registry)),
         );
 
@@ -84,13 +171,7 @@ impl NodeDbQueryParser {
         // SQL string (e.g. `WHERE id = $1` where the planner needs bound
         // params to typecheck) still reports the right number of
         // parameter slots in Describe.
-        let param_count = count_placeholders(sql);
-        let mut param_types = vec![None; param_count.max(client_types.len())];
-        for (i, ct) in client_types.iter().enumerate() {
-            if let Some(t) = ct {
-                param_types[i] = Some(t.clone());
-            }
-        }
+        let param_types = Self::placeholder_types(sql, client_types);
 
         // Strip RETURNING from DML before passing to DataFusion. Retain the
         // parsed spec so we can build result fields for Describe.
@@ -132,7 +213,7 @@ impl NodeDbQueryParser {
             crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
                 &plans,
                 &catalog,
-                crate::types::DatabaseId::DEFAULT,
+                database_id,
             );
         let result_fields: Vec<FieldInfo> = output_schema
             .columns
@@ -165,10 +246,24 @@ impl QueryParser for NodeDbQueryParser {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let addr = client.socket_addr();
+        let identity = resolve_session_identity(
+            &self.state,
+            self.auth_mode.clone(),
+            &self.sessions,
+            client,
+            &addr,
+        )?;
+        let database_id = self
+            .sessions
+            .get_current_database(&addr)
+            .unwrap_or(crate::types::DatabaseId::DEFAULT);
+        let emitter = ArcAuditEmitter(Arc::clone(&self.state.audit));
+        authorize_database(&identity, database_id, &emitter).map_err(pgwire_authorization_error)?;
+
         // Wire-streaming COPY shapes for backup/restore: bypass nodedb-sql
-        // entirely. The Execute handler intercepts these via
-        // `control::backup::detect`. Returning early avoids a fruitless
-        // sqlparser pass on syntax it doesn't model.
+        // entirely. Authorization still precedes this early return so a denied
+        // Parse cannot create a statement that later reaches Execute.
         if crate::control::backup::detect(sql).is_some() {
             return Ok(ParsedStatement {
                 sql: sql.to_owned(),
@@ -178,28 +273,14 @@ impl QueryParser for NodeDbQueryParser {
             });
         }
 
-        // Resolve the connecting user's tenant from pgwire metadata so
-        // parse-time catalog lookups are scoped to the right tenant.
-        // Unknown users fall back to tenant 1 only during bootstrap
-        // (credential store empty) — otherwise parse-time inference
-        // returns empty field info, which is the safe default.
-        let tenant_id = client
-            .metadata()
-            .get("user")
-            .and_then(|u| {
-                self.state
-                    .credentials
-                    .to_identity(u, crate::control::security::identity::AuthMethod::Trust)
-                    .or_else(|| {
-                        self.state.credentials.to_identity(
-                            u,
-                            crate::control::security::identity::AuthMethod::ScramSha256,
-                        )
-                    })
-            })
-            .map(|id| id.tenant_id.as_u64())
-            .unwrap_or(1);
-        let (param_types, result_fields) = self.try_infer_types(sql, types, tenant_id);
+        let can_infer_schema = self
+            .authorize_plannable_sql(sql, &identity, database_id, &emitter)
+            .await?;
+        let (param_types, result_fields) = if can_infer_schema {
+            self.try_infer_types(sql, types, identity.tenant_id.as_u64(), database_id)
+        } else {
+            (Self::placeholder_types(sql, types), Vec::new())
+        };
 
         // If type inference produced no result fields and the SQL matches a
         // known DSL prefix, mark the statement as a DSL passthrough. The

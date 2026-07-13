@@ -16,8 +16,8 @@ use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
 
 use super::parse::{
-    dispatch_plan, extract_vector_fields, fields_to_insert_sql, parse_write_statement,
-    plan_and_dispatch, returning_response,
+    authorize_write_target, dispatch_plan, extract_vector_fields, fields_to_insert_sql,
+    parse_write_statement, plan_and_dispatch, returning_response,
 };
 use super::triggers::{fire_before_triggers, fire_instead_triggers, fire_sync_after_triggers};
 
@@ -29,10 +29,14 @@ pub async fn insert_document(
     sql: &str,
     txn_ctx: &DmlTxnCtx<'_>,
 ) -> Option<Result<Vec<DdlResult>, DdlError>> {
-    let parsed = match parse_write_statement(state, identity, sql, "INSERT INTO ")? {
+    let parsed = match parse_write_statement(state, identity, database_id, sql, "INSERT INTO ")? {
         Ok(p) => p,
         Err(e) => return Some(Err(e)),
     };
+
+    if let Err(error) = authorize_write_target(state, identity, database_id, &parsed.coll_name) {
+        return Some(Err(error));
+    }
 
     let tenant_id = identity.tenant_id;
 
@@ -265,7 +269,7 @@ pub async fn insert_document(
             provenance: None,
         });
 
-        if let Some(err) = dispatch_plan(state, tenant_id, vec_vshard, vec_plan).await {
+        if let Some(err) = dispatch_plan(state, identity, database_id, vec_vshard, vec_plan).await {
             return Some(err);
         }
     }

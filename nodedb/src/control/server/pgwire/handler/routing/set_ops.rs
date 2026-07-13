@@ -11,7 +11,7 @@ use nodedb_physical::physical_task::PostSetOp;
 use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::schema::OutputSchema;
 
-use super::super::plan::{PlanKind, payload_to_response};
+use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::shape_encode;
 
 /// Apply set operation merging to collected sub-query payloads, then shape and
@@ -34,7 +34,7 @@ pub(super) fn apply_set_ops(
     match compose::shape_payload_no_plan(&merged, PlanKind::MultiRow, projection) {
         ShapeOutcome::Rows(shaped) => shape_encode::shaped_query_response(shaped, result_formats),
         ShapeOutcome::Passthrough => {
-            let shaped = payload_to_response(&merged, PlanKind::MultiRow);
+            let shaped = multirow_payload_to_response(&merged);
             (shaped.response, shaped.notice)
         }
     }

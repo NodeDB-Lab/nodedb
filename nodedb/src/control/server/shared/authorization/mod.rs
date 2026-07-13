@@ -6,4 +6,4 @@ pub mod service;
 
 pub use error::AuthorizationError;
 pub use requirements::{AuthorizationRequirement, plan_requirements};
-pub use service::{authorize_database, authorize_task_set};
+pub use service::{authorize_collection, authorize_database, authorize_task_set};

@@ -18,19 +18,23 @@ use nodedb_physical::physical_plan::QueryOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::core::NodeDbPgHandler;
-use super::plan::{PlanKind, payload_to_response};
+use super::plan::multirow_payload_to_response;
 
 /// Execute `SELECT FACET_COUNTS(collection => '...', filter => '...', fields => [...])`.
 pub(super) async fn execute_facet_counts_sql(
     handler: &NodeDbPgHandler,
     identity: &AuthenticatedIdentity,
-    _addr: &std::net::SocketAddr,
+    addr: &std::net::SocketAddr,
     sql: &str,
 ) -> PgWireResult<Vec<Response>> {
     let parsed = parse_facet_counts_args(sql)?;
 
     let tenant_id = identity.tenant_id;
-    let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &parsed.collection);
+    let database_id = handler
+        .sessions
+        .get_current_database(addr)
+        .unwrap_or(DatabaseId::DEFAULT);
+    let vshard = VShardId::from_collection_in_database(database_id, &parsed.collection);
 
     // Convert filter text to ScanFilter predicates.
     let filter_bytes = if parsed.filter.is_empty() {
@@ -42,7 +46,7 @@ pub(super) async fn execute_facet_counts_sql(
     let task = PhysicalTask {
         tenant_id,
         vshard_id: vshard,
-        database_id: DatabaseId::DEFAULT,
+        database_id,
         plan: PhysicalPlan::Query(QueryOp::FacetCounts {
             collection: parsed.collection,
             filters: filter_bytes,
@@ -53,6 +57,7 @@ pub(super) async fn execute_facet_counts_sql(
         txn_id: None,
     };
 
+    handler.authorize_tasks(identity, std::slice::from_ref(&task))?;
     let resp = handler.dispatch_task(task, None, None).await.map_err(|e| {
         PgWireError::UserError(Box::new(ErrorInfo::new(
             "ERROR".to_owned(),
@@ -61,9 +66,7 @@ pub(super) async fn execute_facet_counts_sql(
         )))
     })?;
 
-    Ok(vec![
-        payload_to_response(&resp.payload, PlanKind::MultiRow).response,
-    ])
+    Ok(vec![multirow_payload_to_response(&resp.payload).response])
 }
 
 /// Execute `SELECT SEARCH_WITH_FACETS(query => '...', facets => [...])`.
@@ -88,7 +91,11 @@ pub(super) async fn execute_search_with_facets_sql(
     let (collection, filter_text) = extract_collection_and_filter(&parsed.query)?;
 
     let tenant_id = identity.tenant_id;
-    let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &collection);
+    let database_id = handler
+        .sessions
+        .get_current_database(addr)
+        .unwrap_or(DatabaseId::DEFAULT);
+    let vshard = VShardId::from_collection_in_database(database_id, &collection);
 
     let filter_bytes = if filter_text.is_empty() {
         Vec::new()
@@ -99,7 +106,7 @@ pub(super) async fn execute_search_with_facets_sql(
     let facet_task = PhysicalTask {
         tenant_id,
         vshard_id: vshard,
-        database_id: DatabaseId::DEFAULT,
+        database_id,
         plan: PhysicalPlan::Query(QueryOp::FacetCounts {
             collection,
             filters: filter_bytes,
@@ -110,6 +117,7 @@ pub(super) async fn execute_search_with_facets_sql(
         txn_id: None,
     };
 
+    handler.authorize_tasks(identity, std::slice::from_ref(&facet_task))?;
     let facet_resp = handler
         .dispatch_task(facet_task, None, None)
         .await
@@ -141,9 +149,7 @@ pub(super) async fn execute_search_with_facets_sql(
     });
 
     let payload = sonic_rs::to_vec(&combined).unwrap_or_default();
-    Ok(vec![
-        payload_to_response(&payload, PlanKind::MultiRow).response,
-    ])
+    Ok(vec![multirow_payload_to_response(&payload).response])
 }
 
 // ── Parsing helpers ───────────────────────────────────────────────────

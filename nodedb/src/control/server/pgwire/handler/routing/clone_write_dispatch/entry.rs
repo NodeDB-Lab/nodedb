@@ -8,6 +8,7 @@ use pgwire::error::PgWireResult;
 use nodedb_types::TenantId;
 
 use crate::bridge::envelope::Response;
+use crate::control::security::identity::AuthenticatedIdentity;
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -30,15 +31,18 @@ impl NodeDbPgHandler {
     pub(in crate::control::server::pgwire::handler::routing) async fn maybe_intercept_clone_write(
         &self,
         task: &PhysicalTask,
+        identity: &AuthenticatedIdentity,
         tenant_id: TenantId,
     ) -> PgWireResult<CloneWriteOutcome> {
         match &task.plan {
             PhysicalPlan::Document(DocumentOp::PointUpdate { .. })
             | PhysicalPlan::Document(DocumentOp::PointDelete { .. }) => {
-                self.intercept_doc_clone_write(task, tenant_id).await
+                self.intercept_doc_clone_write(task, identity, tenant_id)
+                    .await
             }
             PhysicalPlan::Kv(KvOp::FieldSet { .. }) | PhysicalPlan::Kv(KvOp::Delete { .. }) => {
-                self.intercept_kv_clone_write(task, tenant_id).await
+                self.intercept_kv_clone_write(task, identity, tenant_id)
+                    .await
             }
             _ => Ok(CloneWriteOutcome::Passthrough),
         }

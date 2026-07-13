@@ -12,30 +12,25 @@ use futures::SinkExt;
 use futures::sink::Sink;
 
 use pgwire::api::portal::Portal;
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::query::ExtendedQueryHandler;
 use pgwire::api::results::{DescribePortalResponse, DescribeStatementResponse, Response};
 use pgwire::api::stmt::StoredStatement;
 use pgwire::api::store::PortalStore;
 use pgwire::api::{ClientInfo, ClientPortalStore};
-use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 
-use crate::bridge::envelope::PhysicalPlan;
 use crate::config::auth::AuthMode;
 use crate::control::planner::context::QueryContext;
-use crate::control::security::audit::{
-    AuditEmitContext, AuditEmitter, AuditEvent, NoopAuditEmitter,
-};
-use crate::control::security::identity::{
-    AuthMethod, AuthenticatedIdentity, required_permission, role_grants_permission,
-};
+use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::RequestId;
 
 use super::super::types::notice_warning;
-use super::plan::extract_collection;
 use super::prepared::{NodeDbQueryParser, ParsedStatement};
-use crate::control::server::shared::session::{SessionStore, TransactionState};
+use crate::control::server::shared::session::SessionStore;
+
+mod simple_query;
 
 /// PostgreSQL wire protocol handler for NodeDB.
 ///
@@ -51,7 +46,7 @@ pub struct NodeDbPgHandler {
     query_parser: Arc<NodeDbQueryParser>,
     pub(super) auth_mode: AuthMode,
     /// Per-connection session state (transaction blocks, parameters).
-    pub(crate) sessions: SessionStore,
+    pub(crate) sessions: Arc<SessionStore>,
     /// Per-connection in-flight COPY IN restore accumulators.
     pub(crate) restore_state: Arc<crate::control::backup::RestoreState>,
 }
@@ -65,13 +60,18 @@ impl NodeDbPgHandler {
         // procedural DML) build their own no-lease `QueryContext`
         // via `for_state`.
         let query_ctx = QueryContext::for_state_with_lease(&state);
-        let query_parser = Arc::new(NodeDbQueryParser::new(Arc::clone(&state)));
+        let sessions = Arc::new(SessionStore::new());
+        let query_parser = Arc::new(NodeDbQueryParser::new(
+            Arc::clone(&state),
+            auth_mode.clone(),
+            Arc::clone(&sessions),
+        ));
         Self {
             state,
             query_ctx,
             query_parser,
             auth_mode,
-            sessions: SessionStore::new(),
+            sessions,
             restore_state: Arc::new(crate::control::backup::RestoreState::new()),
         }
     }
@@ -96,322 +96,13 @@ impl NodeDbPgHandler {
         client: &C,
         addr: &std::net::SocketAddr,
     ) -> PgWireResult<AuthenticatedIdentity> {
-        let username = client
-            .metadata()
-            .get("user")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let mut identity = match self.auth_mode {
-            AuthMode::Trust => {
-                // Strict resolution: `resolve_trust_user` has already ensured
-                // the user exists (either because it was already in the store
-                // or via the bootstrap auto-create path on an empty store),
-                // so any miss here is a genuine unknown user.
-                self.state
-                    .credentials
-                    .to_identity(&username, AuthMethod::Trust)
-                    .ok_or_else(|| {
-                        PgWireError::UserError(Box::new(ErrorInfo::new(
-                            "FATAL".to_owned(),
-                            "28000".to_owned(),
-                            format!("trust auth: user '{username}' does not exist"),
-                        )))
-                    })?
-            }
-            AuthMode::Password | AuthMode::Certificate => self
-                .state
-                .credentials
-                .to_identity(&username, AuthMethod::ScramSha256)
-                .ok_or_else(|| {
-                    PgWireError::UserError(Box::new(ErrorInfo::new(
-                        "FATAL".to_owned(),
-                        "28000".to_owned(),
-                        format!("authenticated user '{username}' not found in credential store"),
-                    )))
-                })?,
-        };
-
-        if let Some(effective) = self.sessions.get_effective_tenant_id(addr) {
-            // The SET handler guarantees the override only gets installed for
-            // superuser sessions. If somehow a non-superuser carries one
-            // (e.g. an ALTER USER demotion landed after the override was
-            // installed), treat the override as cleared — the identity-bound
-            // tenant is the safe fallback. Drop the override so future
-            // requests on this session don't keep paying the check.
-            if identity.is_superuser {
-                identity.tenant_id = effective;
-            } else {
-                self.sessions.set_effective_tenant_id(addr, None);
-            }
-        }
-
-        Ok(identity)
-    }
-
-    /// Enforce that the identity may access the session's current database.
-    ///
-    /// Called at session bind time (first query on this connection). If the
-    /// resolved `current_database` is not in `identity.accessible_databases`,
-    /// the connection is rejected with `ACCESS_DENIED` (SQLSTATE 42501) before
-    /// any query executes. Superusers bypass this check.
-    ///
-    /// This is the single enforcement point. Every query path goes through
-    /// `do_query` (simple) or `execute` (extended), both of which call this
-    /// immediately after identity resolution.
-    pub(super) fn enforce_database_access(
-        &self,
-        identity: &AuthenticatedIdentity,
-        addr: &std::net::SocketAddr,
-    ) -> PgWireResult<()> {
-        if identity.is_superuser {
-            return Ok(());
-        }
-        let db = self
-            .sessions
-            .get_current_database(addr)
-            .unwrap_or(crate::types::DatabaseId::DEFAULT);
-        if !identity.can_access_database(db) {
-            let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
-                &self.state.audit,
-            ));
-            emitter.emit(
-                AuditEvent::PermissionDenied,
-                &identity.username,
-                &format!("database access denied: db={}", db.as_u64()),
-                AuditEmitContext::new(
-                    Some(identity.tenant_id),
-                    &identity.user_id.to_string(),
-                    &identity.username,
-                ),
-            );
-            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "FATAL".to_owned(),
-                "42501".to_owned(),
-                format!(
-                    "permission denied for database: user '{}' does not have access",
-                    identity.username
-                ),
-            ))));
-        }
-        Ok(())
-    }
-
-    /// Check if the identity has permission for the given plan.
-    ///
-    /// Enforcement layers:
-    /// 1. Superuser → always allowed
-    /// 2. System catalog (`_system.*`) → superuser only
-    /// 3. Collection-level grants (PermissionStore::check with ownership + roles + grants)
-    /// 4. Built-in role fallback (role_grants_permission)
-    pub(super) fn check_permission(
-        &self,
-        identity: &AuthenticatedIdentity,
-        plan: &PhysicalPlan,
-    ) -> PgWireResult<()> {
-        if identity.is_superuser {
-            return Ok(());
-        }
-
-        let required = required_permission(plan);
-        let collection = extract_collection(plan);
-
-        // Block non-superuser access to system catalog collections.
-        if let Some(coll) = collection
-            && coll.starts_with("_system")
-        {
-            let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
-                &self.state.audit,
-            ));
-            emitter.emit(
-                AuditEvent::PermissionDenied,
-                &identity.username,
-                &format!("system catalog access denied: {coll}"),
-                AuditEmitContext::new(
-                    Some(identity.tenant_id),
-                    &identity.user_id.to_string(),
-                    &identity.username,
-                ),
-            );
-            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "42501".to_owned(),
-                "permission denied: system catalog access requires superuser".to_owned(),
-            ))));
-        }
-
-        // Check collection-level permissions (ownership + explicit grants + role grants).
-        // Noop emitter here — the role fallback below is the terminal decision point.
-        if let Some(coll) = collection
-            && self.state.permissions.check(
-                identity,
-                required,
-                coll,
-                &self.state.roles,
-                &NoopAuditEmitter,
-            )
-        {
-            return Ok(());
-        }
-
-        // Fall back to role-based check.
-        let has_permission = identity
-            .roles
-            .iter()
-            .any(|role| role_grants_permission(role, required));
-
-        if has_permission {
-            Ok(())
-        } else {
-            // Terminal denial — emit PermissionDenied audit row.
-            let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
-                &self.state.audit,
-            ));
-            emitter.emit(
-                AuditEvent::PermissionDenied,
-                &identity.username,
-                &format!(
-                    "permission {:?} denied{}",
-                    required,
-                    collection.map(|c| format!(" on '{c}'")).unwrap_or_default()
-                ),
-                AuditEmitContext::new(
-                    Some(identity.tenant_id),
-                    &identity.user_id.to_string(),
-                    &identity.username,
-                ),
-            );
-
-            Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "42501".to_owned(),
-                format!(
-                    "permission denied: user '{}' lacks {:?} permission{}",
-                    identity.username,
-                    required,
-                    collection.map(|c| format!(" on '{c}'")).unwrap_or_default()
-                ),
-            ))))
-        }
-    }
-}
-
-// ── SimpleQueryHandler ──────────────────────────────────────────────
-
-#[async_trait]
-impl SimpleQueryHandler for NodeDbPgHandler {
-    async fn do_query<C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
-    where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
-        C::Error: Debug,
-        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
-    {
-        let addr = client.socket_addr();
-        self.sessions.ensure_session(addr);
-
-        let identity = self.resolve_identity(client, &addr)?;
-        self.enforce_database_access(&identity, &addr)?;
-
-        // Emit db.id / db.name trace fields at session bind so that any
-        // downstream spans inherit the database context.
-        let current_db = self
-            .sessions
-            .get_current_database(&addr)
-            .unwrap_or(crate::types::DatabaseId::DEFAULT);
-        let db_name: String = self
-            .state
-            .credentials
-            .catalog()
-            .get_database(current_db)
-            .ok()
-            .flatten()
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| "default".to_string());
-        tracing::debug!(
-            db.id = current_db.as_u64(),
-            db.name = %db_name,
-            user = %identity.username,
-            "session query dispatch",
-        );
-
-        // Send notice if BEGIN is called (advisory transactions).
-        let upper = query.trim().to_uppercase();
-        if (upper == "BEGIN" || upper == "BEGIN TRANSACTION" || upper == "START TRANSACTION")
-            && self.sessions.transaction_state(&addr) == TransactionState::InBlock
-        {
-            let notice = notice_warning("there is already a transaction in progress");
-            let _ = client
-                .send(PgWireBackendMessage::NoticeResponse(notice))
-                .await;
-        }
-
-        if (upper == "COMMIT" || upper == "END")
-            && self.sessions.transaction_state(&addr) == TransactionState::Idle
-        {
-            let notice = notice_warning("there is no transaction in progress");
-            let _ = client
-                .send(PgWireBackendMessage::NoticeResponse(notice))
-                .await;
-        }
-
-        // J.4: install the DDL audit context for this statement. Any
-        // `propose_catalog_entry` call reached from `execute_sql`
-        // picks up the identity + raw SQL so the applier can emit a
-        // full audit record on every replica. The guard auto-clears
-        // on scope exit.
-        let _audit_scope = crate::control::server::shared::session::audit_context::AuditScope::new(
-            crate::control::server::shared::session::audit_context::AuditCtx {
-                auth_user_id: identity.user_id.to_string(),
-                auth_user_name: identity.username.clone(),
-                sql_text: query.to_string(),
-            },
-        );
-
-        let result = self.execute_sql(&identity, &addr, query).await;
-
-        // Drain queued NOTICE messages emitted by response shapers (e.g.
-        // `truncated_before_horizon` on array slices) and send them before
-        // the query result so the client associates the warning with the
-        // current statement.
-        for message in self.sessions.drain_notices(&addr) {
-            let notice = notice_warning(&message);
-            let _ = client
-                .send(PgWireBackendMessage::NoticeResponse(notice))
-                .await;
-        }
-
-        // Drain pending LIVE SELECT notifications and send as pgwire
-        // async NotificationResponse messages. This is the standard
-        // PostgreSQL notification delivery model: notifications are
-        // delivered between queries.
-        if self.sessions.has_live_subscriptions(&addr) {
-            let notifications = self.sessions.drain_live_notifications(&addr);
-            for (channel, payload) in notifications {
-                let notification = pgwire::messages::response::NotificationResponse::new(
-                    0, // backend PID (not meaningful for NodeDB)
-                    channel, payload,
-                );
-                let _ = client
-                    .send(PgWireBackendMessage::NotificationResponse(notification))
-                    .await;
-            }
-        }
-
-        // Drain pending LISTEN/NOTIFY notifications and deliver as pgwire
-        // NotificationResponse messages (between queries, per PG semantics).
-        if self.sessions.has_listen_subscriptions(&addr) {
-            let notifications = self.sessions.drain_listen_notifications(&addr);
-            for n in notifications {
-                let notification = pgwire::messages::response::NotificationResponse::new(
-                    n.pid, n.channel, n.payload,
-                );
-                let _ = client
-                    .send(PgWireBackendMessage::NotificationResponse(notification))
-                    .await;
-            }
-        }
-
-        result
+        super::auth::resolve_session_identity(
+            &self.state,
+            self.auth_mode.clone(),
+            &self.sessions,
+            client,
+            addr,
+        )
     }
 }
 

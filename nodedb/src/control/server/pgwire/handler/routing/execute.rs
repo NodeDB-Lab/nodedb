@@ -19,17 +19,9 @@ use super::super::core::NodeDbPgHandler;
 use super::super::plan::{describe_plan, payload_to_response};
 use super::super::shape_encode;
 use super::planning::consistency_for_tasks;
+use super::result_shaping::ResultShaping;
 use super::set_ops;
 use crate::control::server::response_shape::schema::OutputSchema;
-
-/// Result-shaping inputs for the prepared/extended execution path: the
-/// Describe-supplied output schema (when present) and the client's per-column
-/// result formats (empty = all text).
-#[derive(Clone, Copy)]
-pub(in crate::control::server::pgwire::handler) struct ResultShaping<'a> {
-    pub projection: Option<&'a OutputSchema>,
-    pub formats: &'a [FieldFormat],
-}
 
 impl NodeDbPgHandler {
     /// Plan and dispatch SQL after quota and DDL checks have passed.
@@ -51,10 +43,7 @@ impl NodeDbPgHandler {
         tenant_id: TenantId,
         addr: &std::net::SocketAddr,
     ) -> PgWireResult<Vec<Response>> {
-        // The planner's authoritative output schema is computed inside
-        // `execute_planned_sql_inner` and used to shape/project every SELECT-read
-        // producer's response via the neutral shaping core, so there is no
-        // post-hoc reproject seam here.
+        // Planner output shapes every SELECT-read response through the neutral core.
         // Simple query has no Bind message, so no client-requested result
         // formats: everything renders in text.
         self.execute_planned_sql_inner(
@@ -132,6 +121,10 @@ impl NodeDbPgHandler {
             )))
         })?;
 
+        // The final task set must be authorized before any clone interception,
+        // orchestration, staging, or dispatch path can observe it.
+        self.authorize_tasks(identity, &tasks)?;
+
         // Clone CoW read-path interception: for Shadowed/Materializing clones,
         // augment tasks with source-database reads and merge results.
         // Returns Some(responses) when clone dispatch is fully handled.
@@ -139,6 +132,7 @@ impl NodeDbPgHandler {
         if let Some(clone_responses) = self
             .maybe_dispatch_clone_reads(
                 tasks.clone(),
+                identity,
                 tenant_id,
                 addr,
                 effective_schema,
@@ -288,8 +282,6 @@ impl NodeDbPgHandler {
                     "tenant isolation violation: task targets wrong tenant".to_owned(),
                 ))));
             }
-
-            self.check_permission(identity, &task.plan)?;
 
             // ClusterArray plans are handled entirely on the Control Plane by the
             // ArrayCoordinator — they must never reach the SPSC bridge or
@@ -483,7 +475,7 @@ impl NodeDbPgHandler {
                         responses.push(response);
                     }
                     ShapeOutcome::Passthrough => {
-                        let shaped = payload_to_response(&resp.payload, plan_kind);
+                        let shaped = payload_to_response(&resp.payload, plan_kind)?;
                         if let Some(notice) = shaped.notice {
                             self.sessions.push_notice(addr, notice);
                         }

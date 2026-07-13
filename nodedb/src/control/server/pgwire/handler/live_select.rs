@@ -8,9 +8,12 @@ use std::sync::Arc;
 use pgwire::api::results::{DataRowEncoder, QueryResponse, Response};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
-use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::server::shared::authorization::authorize_collection;
 
 use super::super::types::text_field;
+use super::auth::pgwire_authorization_error;
 use super::core::NodeDbPgHandler;
 
 impl NodeDbPgHandler {
@@ -31,6 +34,22 @@ impl NodeDbPgHandler {
                         "syntax: LIVE SELECT [*|fields] FROM <collection> [WHERE ...]".to_owned(),
                     )))
                 })?;
+
+        let database_id = self
+            .sessions
+            .get_current_database(addr)
+            .unwrap_or(crate::types::DatabaseId::DEFAULT);
+        let emitter = ArcAuditEmitter(Arc::clone(&self.state.audit));
+        authorize_collection(
+            identity,
+            database_id,
+            &coll_name,
+            Permission::Read,
+            &self.state.permissions,
+            &self.state.roles,
+            &emitter,
+        )
+        .map_err(pgwire_authorization_error)?;
 
         let tenant_id = identity.tenant_id;
         let sub = self

@@ -124,13 +124,23 @@ impl TestServer {
         user: &str,
         password: &str,
     ) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), String> {
+        self.connect_as_database(user, password, "nodedb").await
+    }
+
+    /// Open a second pgwire connection under a user-selected database.
+    pub async fn connect_as_database(
+        &self,
+        user: &str,
+        password: &str,
+        database: &str,
+    ) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), String> {
         let conn_str = format!(
-            "host=127.0.0.1 port={} user={} password={} dbname=nodedb",
-            self.pg_port, user, password
+            "host=127.0.0.1 port={} user={} password={} dbname={}",
+            self.pg_port, user, password, database
         );
         let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
             .await
-            .map_err(|e| pg_error_detail(&e))?;
+            .map_err(|error| pg_error_detail(&error))?;
         let handle = tokio::spawn(async move {
             let _ = connection.await;
         });

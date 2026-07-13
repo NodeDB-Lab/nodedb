@@ -100,6 +100,8 @@ impl NodeDbPgHandler {
                 )))
             })?;
 
+        self.authorize_tasks(identity, &tasks)?;
+
         let schema = Arc::new(vec![text_field("QUERY PLAN")]);
         let mut rows = Vec::new();
         let mut encoder = DataRowEncoder::new(schema.clone());

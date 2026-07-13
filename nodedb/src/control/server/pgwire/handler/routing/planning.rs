@@ -387,7 +387,7 @@ pub(super) fn calvin_execution_response(
     tenant_id: TenantId,
     database_id: crate::types::DatabaseId,
     formats: &[pgwire::api::results::FieldFormat],
-) -> pgwire::api::results::Response {
+) -> pgwire::error::PgWireResult<pgwire::api::results::Response> {
     use super::super::plan::{calvin_tag_for_plan, is_calvin_foldable};
     use crate::control::server::response_shape::compose::{
         ShapeOutcome, shape_response_materialized,
@@ -409,7 +409,7 @@ pub(super) fn calvin_execution_response(
     {
         let (response, _notice) =
             super::super::shape_encode::shaped_query_response(shaped, formats);
-        return response;
+        return Ok(response);
     }
 
     // Plain (non-RETURNING) write with a deposited applied Response: surface its
@@ -419,17 +419,17 @@ pub(super) fn calvin_execution_response(
     if let Some(resp) = apply_resp
         && let PlanKind::DmlResult(_) = describe_plan(&task.plan)
     {
-        return super::super::plan::payload_to_response(
+        return Ok(super::super::plan::payload_to_response(
             resp.payload.as_bytes(),
             describe_plan(&task.plan),
-        )
-        .response;
+        )?
+        .response);
     }
 
     let tag = if is_calvin_foldable(&task.plan) {
-        calvin_tag_for_plan(&task.plan)
+        calvin_tag_for_plan(&task.plan)?
     } else {
         Tag::new("OK")
     };
-    pgwire::api::results::Response::Execution(tag)
+    Ok(pgwire::api::results::Response::Execution(tag))
 }

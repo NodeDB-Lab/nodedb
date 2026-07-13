@@ -77,7 +77,7 @@ impl NodeDbPgHandler {
                 Ok(response)
             }
             ShapeOutcome::Passthrough => {
-                let shaped = payload_to_response(&payload_bytes, cluster_plan_kind);
+                let shaped = payload_to_response(&payload_bytes, cluster_plan_kind)?;
                 if let Some(notice) = shaped.notice {
                     self.sessions.push_notice(addr, notice);
                 }

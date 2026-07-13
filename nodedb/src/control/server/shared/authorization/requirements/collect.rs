@@ -6,7 +6,7 @@ use super::AuthorizationRequirement;
 use super::order::requirement_order;
 use super::query::collect_query_requirements;
 
-/// Return every collection requirement for `plan`.
+/// Return every authorization requirement for `plan`.
 ///
 /// The general plan permission applies to ordinary single-resource plans. The
 /// multi-resource cases below intentionally override it so sources require
@@ -122,13 +122,11 @@ fn collect_requirements(plan: &PhysicalPlan, out: &mut Vec<AuthorizationRequirem
             | PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions { plans, .. })
             | PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic { plans, .. })
             | PhysicalPlan::Meta(MetaOp::CalvinExecuteActive { plans, .. }) => {
-                add_tenant_requirement(required_permission(plan), out);
                 for nested in plans {
                     pending.push(nested);
                 }
             }
             PhysicalPlan::Meta(MetaOp::StageWrite { plan: nested }) => {
-                add_tenant_requirement(required_permission(plan), out);
                 pending.push(nested);
             }
             PhysicalPlan::Kv(KvOp::Transfer { collection, .. }) => {
@@ -180,12 +178,42 @@ fn collect_requirements(plan: &PhysicalPlan, out: &mut Vec<AuthorizationRequirem
             | PhysicalPlan::ClusterArray(_) => add_general_requirements(plan, out),
         }
 
-        // A plan without a collection name is not public: it still needs the
-        // permission implied by its physical operation at tenant scope. This also
-        // covers provider-materialized and array-backed plans.
-        if out.len() == initial_len {
-            add_tenant_requirement(required_permission(plan), out);
+        // A wrapper delegates its resource boundary to its nested plans. Its
+        // own missing collection must not add a tenant-wide requirement when a
+        // descendant names the protected resource; a genuinely resource-less
+        // descendant still receives this fail-closed fallback when visited.
+        if out.len() == initial_len && requires_tenant_fallback(plan) {
+            out.push(AuthorizationRequirement::tenant(required_permission(plan)));
         }
+    }
+}
+
+fn requires_tenant_fallback(plan: &PhysicalPlan) -> bool {
+    use nodedb_physical::physical_plan::{MetaOp, QueryOp};
+
+    match plan {
+        PhysicalPlan::Query(QueryOp::Exchange(_))
+        | PhysicalPlan::Meta(MetaOp::StageWrite { .. }) => false,
+        PhysicalPlan::Meta(
+            MetaOp::TransactionBatch { plans, .. }
+            | MetaOp::ResolveTxn { plans, .. }
+            | MetaOp::RecordCalvinWriteVersions { plans, .. }
+            | MetaOp::CalvinExecuteStatic { plans, .. }
+            | MetaOp::CalvinExecuteActive { plans, .. },
+        ) => plans.is_empty(),
+        PhysicalPlan::Vector(_)
+        | PhysicalPlan::Graph(_)
+        | PhysicalPlan::Document(_)
+        | PhysicalPlan::Kv(_)
+        | PhysicalPlan::Text(_)
+        | PhysicalPlan::Columnar(_)
+        | PhysicalPlan::Timeseries(_)
+        | PhysicalPlan::Spatial(_)
+        | PhysicalPlan::Crdt(_)
+        | PhysicalPlan::Query(_)
+        | PhysicalPlan::Meta(_)
+        | PhysicalPlan::Array(_)
+        | PhysicalPlan::ClusterArray(_) => true,
     }
 }
 
@@ -207,13 +235,6 @@ pub(super) fn add_collection_requirement(
     if !collection.is_empty() {
         out.push(AuthorizationRequirement::collection(collection, permission));
     }
-}
-
-pub(super) fn add_tenant_requirement(
-    permission: Permission,
-    out: &mut Vec<AuthorizationRequirement>,
-) {
-    out.push(AuthorizationRequirement::tenant(permission));
 }
 
 pub(super) fn add_read(collection: &str, out: &mut Vec<AuthorizationRequirement>) {

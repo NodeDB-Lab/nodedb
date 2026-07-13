@@ -14,7 +14,9 @@ use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
 
-use super::parse::{fields_to_upsert_sql, parse_write_statement, plan_and_dispatch};
+use super::parse::{
+    authorize_write_target, fields_to_upsert_sql, parse_write_statement, plan_and_dispatch,
+};
 use super::triggers::{
     fire_before_triggers, fire_instead_triggers, fire_sync_after_triggers,
     fire_sync_after_update_triggers,
@@ -31,10 +33,14 @@ pub async fn upsert_document(
     sql: &str,
     txn_ctx: &DmlTxnCtx<'_>,
 ) -> Option<Result<Vec<DdlResult>, DdlError>> {
-    let parsed = match parse_write_statement(state, identity, sql, "UPSERT INTO ")? {
+    let parsed = match parse_write_statement(state, identity, database_id, sql, "UPSERT INTO ")? {
         Ok(p) => p,
         Err(e) => return Some(Err(e)),
     };
+
+    if let Err(error) = authorize_write_target(state, identity, database_id, &parsed.coll_name) {
+        return Some(Err(error));
+    }
 
     let tenant_id = identity.tenant_id;
 

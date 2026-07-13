@@ -57,6 +57,8 @@ impl NodeDbPgHandler {
                 )))
             })?;
 
+        self.authorize_tasks(identity, &tasks)?;
+
         let mut rows = Vec::new();
         for task in tasks {
             let resp = crate::control::server::dispatch_utils::dispatch_to_data_plane(

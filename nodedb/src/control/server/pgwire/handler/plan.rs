@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use futures::stream;
 use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -19,9 +20,6 @@ use crate::control::server::shared::sql::staging_predicates::{
 use super::super::types::text_field;
 
 pub(super) use crate::control::server::response_shape::types::{PlanKind, describe_plan};
-// Neutral plan classification lives in `shared`; re-exported here so existing
-// pgwire call sites keep naming it via `super::plan::extract_collection`.
-pub(super) use crate::control::server::shared::plan_util::extract_collection;
 
 /// Returns `true` when a plan can produce a deterministic pgwire tag without
 /// a round-trip to the Data Plane.
@@ -129,7 +127,7 @@ pub(super) fn tag_from_staged(kind: StagedTagKind, affected: usize) -> Tag {
 /// Caller invariant: `plan` must already have passed `is_calvin_foldable`.
 /// The match arms here are kept in lockstep with that predicate so a desync
 /// between the two is loud rather than silent.
-pub(super) fn calvin_tag_for_plan(plan: &PhysicalPlan) -> Tag {
+pub(super) fn calvin_tag_for_plan(plan: &PhysicalPlan) -> PgWireResult<Tag> {
     use nodedb_physical::physical_plan::KvOp;
 
     match plan {
@@ -137,21 +135,20 @@ pub(super) fn calvin_tag_for_plan(plan: &PhysicalPlan) -> Tag {
         | PhysicalPlan::Document(DocumentOp::PointInsert { .. })
         | PhysicalPlan::Kv(KvOp::Put { .. })
         | PhysicalPlan::Kv(KvOp::Insert { .. })
-        | PhysicalPlan::Kv(KvOp::InsertIfAbsent { .. }) => Tag::new("INSERT").with_rows(1),
+        | PhysicalPlan::Kv(KvOp::InsertIfAbsent { .. }) => Ok(Tag::new("INSERT").with_rows(1)),
 
         PhysicalPlan::Document(DocumentOp::PointUpdate {
             returning: None, ..
-        }) => Tag::new("UPDATE").with_rows(1),
+        }) => Ok(Tag::new("UPDATE").with_rows(1)),
 
         PhysicalPlan::Document(DocumentOp::PointDelete {
             returning: None, ..
         })
-        | PhysicalPlan::Kv(KvOp::Delete { .. }) => Tag::new("DELETE").with_rows(1),
+        | PhysicalPlan::Kv(KvOp::Delete { .. }) => Ok(Tag::new("DELETE").with_rows(1)),
 
-        other => unreachable!(
-            "calvin_tag_for_plan called on non-foldable plan; \
-             is_calvin_foldable invariant broken: {other:?}"
-        ),
+        other => Err(invalid_plan_shape(format!(
+            "calvin_tag_for_plan called on non-foldable plan: {other:?}"
+        ))),
     }
 }
 
@@ -174,9 +171,9 @@ impl From<Response> for ShapedResponse {
     }
 }
 
-pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> ShapedResponse {
+pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> PgWireResult<ShapedResponse> {
     match kind {
-        PlanKind::Execution => Response::Execution(Tag::new("OK")).into(),
+        PlanKind::Execution => Ok(Response::Execution(Tag::new("OK")).into()),
         PlanKind::DmlResult(tag) => {
             let count = if payload.is_empty() {
                 // Point operations with empty payload succeeded on exactly 1 row.
@@ -184,47 +181,93 @@ pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> ShapedRespo
             } else {
                 extract_affected_count(payload).unwrap_or(1) as usize
             };
-            Response::Execution(Tag::new(tag).with_rows(count)).into()
+            Ok(Response::Execution(Tag::new(tag).with_rows(count)).into())
         }
         PlanKind::ArraySlice | PlanKind::ReturningRows | PlanKind::SingleDocument => {
-            unreachable!(
-                "shaped via response_shape::compose; payload_to_response is only reached \
-                 for Execution/DmlResult tags and MultiRow (facet)"
-            )
+            Err(invalid_plan_shape(format!(
+                "payload_to_response cannot handle plan kind {kind:?}"
+            )))
         }
-        PlanKind::MultiRow => {
-            let schema = Arc::new(vec![text_field("result")]);
-            if payload.is_empty() {
-                return Response::Query(QueryResponse::new(schema, stream::empty())).into();
-            }
-            let text = decode_payload_to_json(payload);
+        PlanKind::MultiRow => Ok(multirow_payload_to_response(payload)),
+    }
+}
 
-            // For multi-row results, parse the JSON array and stream each
-            // element as a separate pgwire row. This avoids materializing
-            // a single giant row for large result sets.
-            if let Ok(serde_json::Value::Array(items)) =
-                sonic_rs::from_str::<serde_json::Value>(&text)
-            {
-                let row_schema = schema.clone();
-                let rows: Vec<_> = items
-                    .iter()
-                    .map(|item| {
-                        let mut encoder = DataRowEncoder::new(row_schema.clone());
-                        let _ = encoder.encode_field(&item.to_string());
-                        Ok(encoder.take_row())
-                    })
-                    .collect();
-                return Response::Query(QueryResponse::new(schema, stream::iter(rows))).into();
-            }
+pub(super) fn multirow_payload_to_response(payload: &[u8]) -> ShapedResponse {
+    let schema = Arc::new(vec![text_field("result")]);
+    if payload.is_empty() {
+        return Response::Query(QueryResponse::new(schema, stream::empty())).into();
+    }
+    let text = decode_payload_to_json(payload);
 
-            // Single document or non-array: send as one row.
-            let mut encoder = DataRowEncoder::new(schema.clone());
-            if let Err(e) = encoder.encode_field(&text) {
-                tracing::error!(error = %e, "failed to encode field");
-                return Response::Execution(Tag::new("ERROR")).into();
-            }
-            let row = encoder.take_row();
-            Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)]))).into()
-        }
+    // For multi-row results, parse the JSON array and stream each
+    // element as a separate pgwire row. This avoids materializing
+    // a single giant row for large result sets.
+    if let Ok(serde_json::Value::Array(items)) = sonic_rs::from_str::<serde_json::Value>(&text) {
+        let row_schema = schema.clone();
+        let rows: Vec<_> = items
+            .iter()
+            .map(|item| {
+                let mut encoder = DataRowEncoder::new(row_schema.clone());
+                let _ = encoder.encode_field(&item.to_string());
+                Ok(encoder.take_row())
+            })
+            .collect();
+        return Response::Query(QueryResponse::new(schema, stream::iter(rows))).into();
+    }
+
+    // Single document or non-array: send as one row.
+    let mut encoder = DataRowEncoder::new(schema.clone());
+    if let Err(error) = encoder.encode_field(&text) {
+        tracing::error!(%error, "failed to encode field");
+        return Response::Execution(Tag::new("ERROR")).into();
+    }
+    let row = encoder.take_row();
+    Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)]))).into()
+}
+
+fn invalid_plan_shape(message: String) -> PgWireError {
+    PgWireError::UserError(Box::new(ErrorInfo::new(
+        "ERROR".to_owned(),
+        "XX000".to_owned(),
+        message,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_physical::physical_plan::KvOp;
+
+    #[test]
+    fn calvin_tag_rejects_non_foldable_plan() {
+        let plan = PhysicalPlan::Kv(KvOp::Get {
+            collection: "items".into(),
+            key: Vec::new(),
+            rls_filters: Vec::new(),
+            surrogate_ceiling: None,
+        });
+        assert!(calvin_tag_for_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn passthrough_rejects_precomposed_shapes() {
+        assert!(payload_to_response(&[], PlanKind::ArraySlice).is_err());
+        assert!(payload_to_response(&[], PlanKind::ReturningRows).is_err());
+        assert!(payload_to_response(&[], PlanKind::SingleDocument).is_err());
+    }
+
+    #[test]
+    fn multirow_helper_remains_infallible() {
+        let shaped = multirow_payload_to_response(&[]);
+        assert!(matches!(shaped.response, Response::Query(_)));
+    }
+
+    #[test]
+    fn foldable_tag_still_matches_operation() {
+        let plan = PhysicalPlan::Kv(KvOp::Delete {
+            collection: "items".into(),
+            keys: Vec::new(),
+        });
+        assert!(calvin_tag_for_plan(&plan).is_ok());
     }
 }
