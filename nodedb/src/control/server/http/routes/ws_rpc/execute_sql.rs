@@ -2,9 +2,14 @@
 
 //! SQL execution via the SPSC gateway for WebSocket RPC.
 
+use std::sync::Arc;
+
 use crate::control::gateway::core::QueryContext;
+use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::authorization::{authorize_database, authorize_task_set};
 use crate::control::state::SharedState;
-use crate::types::{TenantId, TraceId};
+use crate::types::{DatabaseId, TraceId};
 
 /// Execute SQL and return result as JSON.
 ///
@@ -14,16 +19,55 @@ use crate::types::{TenantId, TraceId};
 pub async fn execute_sql(
     shared: &SharedState,
     query_ctx: &crate::control::planner::context::QueryContext,
-    tenant_id: TenantId,
+    identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
     trace_id: TraceId,
 ) -> crate::Result<serde_json::Value> {
+    let tenant_id = identity.tenant_id;
+    let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
+    authorize_database(identity, database_id, &emitter)?;
+
     // Quota enforcement — reject before planning or dispatch.
     shared.check_tenant_quota(tenant_id)?;
 
-    let (tasks, _output_schema) = query_ctx
-        .plan_sql(sql, tenant_id, crate::types::DatabaseId::DEFAULT)
+    let mut auth_ctx = crate::control::server::session_auth::build_auth_context(identity);
+    let clean_sql =
+        crate::control::server::session_auth::extract_and_apply_on_deny(sql, &mut auth_ctx);
+    let permission_cache = shared.permission_cache.read().await;
+    let security = crate::control::planner::context::PlanSecurityContext {
+        identity,
+        auth: &auth_ctx,
+        rls_store: &shared.rls,
+        permissions: &shared.permissions,
+        roles: &shared.roles,
+        permission_cache: Some(&*permission_cache),
+    };
+    let (mut tasks, _output_schema) = query_ctx
+        .plan_sql_with_rls(crate::control::planner::context::PlanSqlWithRlsParams {
+            sql: &clean_sql,
+            tenant_id,
+            database_id,
+            sec: &security,
+        })
         .await?;
+    drop(permission_cache);
+
+    crate::control::planner::implicit_edges::append_implicit_edge_tasks(
+        shared,
+        &mut tasks,
+        tenant_id,
+        database_id,
+        trace_id,
+    )
+    .await?;
+    authorize_task_set(
+        identity,
+        &tasks,
+        &shared.permissions,
+        &shared.roles,
+        &emitter,
+    )?;
 
     shared.tenant_request_start(tenant_id);
 
@@ -183,7 +227,7 @@ pub async fn execute_sql(
                 let gw_ctx = QueryContext {
                     tenant_id: task.tenant_id,
                     trace_id,
-                    database_id: nodedb_types::id::DatabaseId::DEFAULT,
+                    database_id: task.database_id,
                 };
                 gw.execute(&gw_ctx, task.plan).await
             }

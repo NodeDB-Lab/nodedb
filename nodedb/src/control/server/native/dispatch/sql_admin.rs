@@ -148,7 +148,31 @@ pub(super) async fn handle_explain(ctx: &DispatchCtx<'_>, seq: u64, sql: &str) -
         })
         .await
     {
-        Ok((tasks, _output_schema)) => {
+        Ok((mut tasks, _output_schema)) => {
+            drop(perm_cache);
+            if let Err(error) = crate::control::planner::implicit_edges::append_implicit_edge_tasks(
+                ctx.state,
+                &mut tasks,
+                ctx.tenant_id(),
+                database_id,
+                crate::types::TraceId::ZERO,
+            )
+            .await
+            {
+                return error_to_native(seq, &error);
+            }
+            let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
+                &ctx.state.audit,
+            ));
+            if let Err(error) = crate::control::server::shared::authorization::authorize_task_set(
+                ctx.identity,
+                &tasks,
+                &ctx.state.permissions,
+                &ctx.state.roles,
+                &emitter,
+            ) {
+                return error_to_native(seq, &crate::Error::from(error));
+            }
             let plan_text = tasks
                 .iter()
                 .map(|t| format!("{:?}", t.plan))

@@ -6,8 +6,11 @@ use sonic_rs;
 use tracing::debug;
 
 use crate::control::change_stream::LiveSubscriptionSet;
+use crate::control::security::audit::{ArcAuditEmitter, NoopAuditEmitter};
+use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::server::shared::authorization::authorize_collection;
 use crate::control::state::SharedState;
-use crate::types::{TenantId, TraceId};
+use crate::types::{DatabaseId, TraceId};
 
 use super::execute_sql::execute_sql;
 use super::format::{
@@ -24,19 +27,32 @@ pub fn extract_session_id(req: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
+pub(super) struct MessageContext<'a> {
+    pub(super) shared: &'a SharedState,
+    pub(super) query_ctx: &'a crate::control::planner::context::QueryContext,
+    pub(super) identity: &'a AuthenticatedIdentity,
+    pub(super) database_id: DatabaseId,
+    pub(super) trace_id: TraceId,
+    pub(super) live_tx: &'a tokio::sync::mpsc::Sender<String>,
+}
+
 /// Process a single JSON-RPC message.
 ///
 /// Returns `(response_json, Option<authenticated_session_id>)`.
 /// The session_id is `Some` only when an "auth" request succeeds.
-pub async fn process_message(
-    shared: &SharedState,
-    query_ctx: &crate::control::planner::context::QueryContext,
-    tenant_id: TenantId,
-    trace_id: TraceId,
+pub(super) async fn process_message(
+    context: MessageContext<'_>,
     text: &str,
-    live_tx: &tokio::sync::mpsc::Sender<String>,
     live_set: &mut LiveSubscriptionSet,
 ) -> (String, Option<String>) {
+    let MessageContext {
+        shared,
+        query_ctx,
+        identity,
+        database_id,
+        trace_id,
+        live_tx,
+    } = context;
     let req: serde_json::Value = match sonic_rs::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -82,7 +98,20 @@ pub async fn process_message(
             let missed = shared.change_stream.query_changes(None, 0, 10_000);
             let replay: Vec<_> = missed
                 .iter()
-                .filter(|e| e.lsn.as_u64() > effective_lsn)
+                .filter(|event| {
+                    event.lsn.as_u64() > effective_lsn
+                        && event.tenant_id == identity.tenant_id
+                        && authorize_collection(
+                            identity,
+                            database_id,
+                            &event.collection,
+                            Permission::Read,
+                            &shared.permissions,
+                            &shared.roles,
+                            &NoopAuditEmitter,
+                        )
+                        .is_ok()
+                })
                 .collect();
 
             for event in &replay {
@@ -120,10 +149,11 @@ pub async fn process_message(
                 return (error_response(id, "missing params.sql"), None);
             }
 
-            let response = match execute_sql(shared, query_ctx, tenant_id, sql, trace_id).await {
-                Ok(result) => serde_json::json!({"id": id, "result": result}).to_string(),
-                Err(e) => ws_error_from_gateway(&id, &e),
-            };
+            let response =
+                match execute_sql(shared, query_ctx, identity, database_id, sql, trace_id).await {
+                    Ok(result) => serde_json::json!({"id": id, "result": result}).to_string(),
+                    Err(e) => ws_error_from_gateway(&id, &e),
+                };
             (response, None)
         }
 
@@ -143,9 +173,25 @@ pub async fn process_message(
                 );
             }
 
+            let emitter = ArcAuditEmitter(std::sync::Arc::clone(&shared.audit));
+            if let Err(error) = authorize_collection(
+                identity,
+                database_id,
+                &collection,
+                Permission::Read,
+                &shared.permissions,
+                &shared.roles,
+                &emitter,
+            ) {
+                return (
+                    error_response(id, &crate::Error::from(error).to_string()),
+                    None,
+                );
+            }
+
             let mut sub = shared
                 .change_stream
-                .subscribe(Some(collection.clone()), Some(tenant_id));
+                .subscribe(Some(collection.clone()), Some(identity.tenant_id));
             let sub_id = sub.id;
             let live_tx = live_tx.clone();
 

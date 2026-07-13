@@ -29,11 +29,13 @@ use futures::{SinkExt, StreamExt};
 use tracing::debug;
 
 use crate::control::change_stream::LiveSubscriptionSet;
+use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::http::auth::{AppState, ResolvedIdentity};
+use crate::control::server::shared::authorization::authorize_database;
 use crate::control::state::SharedState;
-use crate::types::TenantId;
+use crate::types::DatabaseId;
 
-use super::process_message::process_message;
+use super::process_message::{MessageContext, process_message};
 
 /// WebSocket upgrade handler.
 ///
@@ -46,17 +48,36 @@ pub async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    let tenant_id = identity.tenant_id();
+) -> axum::response::Response {
+    let identity = identity.0;
+    let database_id = match super::super::query::resolve_database_id(
+        &headers,
+        &super::super::query::DatabaseQueryParam::default(),
+        &state,
+    ) {
+        Ok(database_id) => database_id,
+        Err(error) => return error.into_response(),
+    };
+    let emitter = ArcAuditEmitter(Arc::clone(&state.shared.audit));
+    if let Err(error) = authorize_database(&identity, database_id, &emitter) {
+        return crate::control::server::http::auth::ApiError::Forbidden(
+            crate::Error::from(error).to_string(),
+        )
+        .into_response();
+    }
     let trace_id = crate::control::trace_context::extract_from_headers(&headers);
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, tenant_id, trace_id))
+    ws.on_upgrade(move |socket| {
+        handle_ws_connection(socket, state, identity, database_id, trace_id)
+    })
+    .into_response()
 }
 
 /// Handle a single WebSocket connection.
 async fn handle_ws_connection(
     socket: WebSocket,
     state: AppState,
-    tenant_id: TenantId,
+    identity: crate::control::security::identity::AuthenticatedIdentity,
+    database_id: DatabaseId,
     trace_id: nodedb_types::TraceId,
 ) {
     let (mut sender, mut receiver) = socket.split();
@@ -91,16 +112,15 @@ async fn handle_ws_connection(
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(text) => {
-                let (response, auth_session) = process_message(
-                    &shared,
-                    &state.query_ctx,
-                    tenant_id,
+                let context = MessageContext {
+                    shared: &shared,
+                    query_ctx: &state.query_ctx,
+                    identity: &identity,
+                    database_id,
                     trace_id,
-                    &text,
-                    &live_tx,
-                    &mut live_set,
-                )
-                .await;
+                    live_tx: &live_tx,
+                };
+                let (response, auth_session) = process_message(context, &text, &mut live_set).await;
 
                 // Record session_id only after process_message confirms auth.
                 if let Some(sid) = auth_session {

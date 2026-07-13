@@ -6,9 +6,13 @@ use nodedb_types::TraceId;
 use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
+use std::sync::Arc;
+
 use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, classify_dispatch, dispatch_tasks_to_calvin,
 };
+use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::server::shared::authorization::{authorize_database, authorize_task_set};
 use crate::control::server::shared::session::TransactionState;
 
 use super::sql_admin::{handle_explain, handle_set_sql, handle_show_sql, is_session_show};
@@ -129,13 +133,20 @@ async fn handle_sql_inner(
         return resp(NativeResponse::status_row(seq, "DISCARD ALL"));
     }
 
+    // Every statement that can inspect or mutate database state must pass the
+    // selected-database gate before EXPLAIN, DDL, planning, or stream creation.
+    let database_id = ctx.database_id();
+    let emitter = ArcAuditEmitter(Arc::clone(&ctx.state.audit));
+    if let Err(error) = authorize_database(ctx.identity, database_id, &emitter) {
+        return resp(error_to_native(seq, &crate::Error::from(error)));
+    }
+
     // EXPLAIN.
     if upper.starts_with("EXPLAIN ") {
         return resp(handle_explain(ctx, seq, sql_trimmed).await);
     }
 
     // DDL: try DDL router first.
-    let database_id = ctx.database_id();
     let txn_ctx = crate::control::server::shared::session::DmlTxnCtx {
         sessions: ctx.sessions,
         addr: ctx.peer_addr,
@@ -246,6 +257,18 @@ async fn execute_planned(
         return resp(error_to_native(seq, &e));
     }
 
+    drop(perm_cache);
+    let emitter = ArcAuditEmitter(Arc::clone(&ctx.state.audit));
+    if let Err(error) = authorize_task_set(
+        ctx.identity,
+        &tasks,
+        &ctx.state.permissions,
+        &ctx.state.roles,
+        &emitter,
+    ) {
+        return resp(error_to_native(seq, &crate::Error::from(error)));
+    }
+
     // Implicit-edge DELETE/UPDATE routing gate (native-protocol parity with
     // pgwire). See `edge_recon_gate` for the full invariant and guard
     // documentation. Returns early when the gate fires, consuming `tasks`.
@@ -326,10 +349,8 @@ async fn execute_planned(
     }
 
     // Streaming fast path: an eligible autocommit, single-task, unordered
-    // multi-row SELECT streams its rows as multiple frames. The permission /
-    // tenant gate below is preserved for the materialized path; the streamable
-    // scan child is a plain user-collection read, and `plan_sql_with_rls`
-    // already applied RLS + permission planning, so it is safe to stream.
+    // multi-row SELECT streams its rows as multiple frames. The complete final
+    // task set was authorized above before this stream can be opened.
     if allow_stream {
         match try_open_sql_stream(ctx, seq, &tasks, database_id, Some(&output_schema)).await {
             Ok(Some(stream)) => return SqlOutcome::Stream(stream),

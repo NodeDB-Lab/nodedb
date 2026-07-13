@@ -134,7 +134,8 @@ async fn native_materialized_sql_rejects_write_without_permission_or_mutation() 
     server.shutdown().await;
 
     assert!(
-        observed.rows.as_ref().is_some_and(Vec::is_empty),
+        observed.rows.as_ref().is_none_or(Vec::is_empty)
+            && observed.rows_affected.unwrap_or_default() == 0,
         "an unauthorized native write must not mutate the collection: {observed:?}"
     );
     assert_eq!(
@@ -146,6 +147,34 @@ async fn native_materialized_sql_rejects_write_without_permission_or_mutation() 
         response.error.as_ref().map(|error| error.code.as_str()),
         Some("42501"),
         "native write denial must report insufficient privilege: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_explain_rejects_collection_before_plan_metadata() {
+    let server = NativeTestServer::start_authenticated().await;
+    seed_private_collection(&server, "native_explain_private").await;
+    let token = create_api_key(
+        &server.shared,
+        "native_explain_reader",
+        vec![Role::Custom("native_explain_role".into())],
+    );
+    let mut stream = authenticated_stream(&server, token).await;
+
+    let response = send_sql(
+        &mut stream,
+        2,
+        "EXPLAIN SELECT * FROM native_explain_private",
+    )
+    .await;
+    drop(stream);
+    server.shutdown().await;
+
+    assert_eq!(response.status, ResponseStatus::Error);
+    assert_eq!(
+        response.error.as_ref().map(|error| error.code.as_str()),
+        Some("42501"),
+        "native EXPLAIN must authorize before exposing plan metadata: {response:?}"
     );
 }
 
