@@ -32,7 +32,7 @@ use super::super::hash::{
     compute_scram_salted_password, generate_scram_salt, hash_password_argon2,
 };
 use super::super::record::UserRecord;
-use super::core::{CredentialStore, read_lock};
+use super::core::{CredentialStore, PasswordPrincipal, read_lock, validate_password_assignment};
 
 impl CredentialStore {
     /// Build a `StoredUser` ready for replication via
@@ -55,6 +55,7 @@ impl CredentialStore {
                 });
             }
         }
+        validate_password_assignment(password, PasswordPrincipal::New)?;
 
         let salt = generate_scram_salt();
         let scram_salted_password = compute_scram_salted_password(password, &salt);
@@ -104,6 +105,14 @@ impl CredentialStore {
             return Err(crate::Error::BadRequest {
                 detail: format!("user '{username}' is inactive"),
             });
+        }
+        if let Some(password) = new_password {
+            validate_password_assignment(
+                password,
+                PasswordPrincipal::Existing {
+                    is_service_account: existing.is_service_account,
+                },
+            )?;
         }
         let mut stored = existing.to_stored();
         drop(users);
@@ -246,5 +255,109 @@ impl CredentialStore {
         if let Some(record) = record {
             let _ = self.purge_user(&record);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::core::{assert_bad_request, assert_user_unchanged},
+        CredentialStore,
+    };
+    use crate::control::security::identity::Role;
+    use crate::types::TenantId;
+
+    #[test]
+    fn prepare_user_rejects_empty_password_without_id_allocation_or_proposal() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let next_user_id = *store.next_user_id.read().expect("next user ID lock");
+
+        let error = store
+            .prepare_user(
+                "replicated-empty",
+                "",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect_err("empty password must not produce a replicated user proposal");
+
+        assert_bad_request(error);
+        assert!(store.get_user("replicated-empty").is_none());
+        assert_eq!(
+            *store.next_user_id.read().expect("next user ID lock"),
+            next_user_id,
+            "rejected proposal preparation must not allocate a user ID"
+        );
+        assert!(
+            store
+                .catalog()
+                .get_user("replicated-empty")
+                .expect("read catalog")
+                .is_none(),
+            "proposal preparation must not write the catalog"
+        );
+    }
+
+    #[test]
+    fn prepare_user_update_rejects_empty_password_without_source_state_or_version_mutation() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "replicated-update",
+                "old-password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        store
+            .set_must_change_password("replicated-update", true)
+            .expect("set password policy");
+        let before = store
+            .get_user("replicated-update")
+            .expect("created user must exist");
+        let version = store.current_version(user_id);
+
+        let error = store
+            .prepare_user_update("replicated-update", Some(""), None)
+            .expect_err("empty password must not produce an update proposal");
+
+        assert_bad_request(error);
+        let after = store
+            .get_user("replicated-update")
+            .expect("source user must remain present");
+        assert_user_unchanged(&before, &after);
+        assert_eq!(store.current_version(user_id), version);
+    }
+
+    #[test]
+    fn prepare_user_update_rejects_service_account_password_without_proposal_or_source_mutation() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_service_account(
+                "replicated-api",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+                vec![],
+            )
+            .expect("create service account");
+        let before = store
+            .get_user("replicated-api")
+            .expect("created service account must exist");
+        let version = store.current_version(user_id);
+
+        let error = store
+            .prepare_user_update("replicated-api", Some("non-empty-password"), None)
+            .expect_err("service account password update must not produce a proposal");
+
+        assert_bad_request(error);
+        let after = store
+            .get_user("replicated-api")
+            .expect("source service account must remain present");
+        assert!(after.is_service_account);
+        assert!(after.password_hash.is_empty());
+        assert!(after.scram_salt.is_empty());
+        assert!(after.scram_salted_password.is_empty());
+        assert_user_unchanged(&before, &after);
+        assert_eq!(store.current_version(user_id), version);
     }
 }

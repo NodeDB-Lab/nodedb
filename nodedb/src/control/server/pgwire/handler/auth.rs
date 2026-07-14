@@ -37,15 +37,38 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
         .cloned()
         .unwrap_or_else(|| "unknown".to_string());
 
-    let mut identity = match auth_mode {
+    let authenticated_identity = match auth_mode {
         AuthMode::Trust => {
-            stored_user_identity(state, &username, AuthMethod::Trust).ok_or_else(|| {
+            let startup_identity = sessions.identity(addr).ok_or_else(|| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
                     "FATAL".to_owned(),
                     "28000".to_owned(),
-                    format!("trust auth: user '{username}' does not exist"),
+                    "trust auth: connection identity is missing".to_owned(),
                 )))
-            })?
+            })?;
+
+            // Empty-store Trust identities have no persisted user record and
+            // must stay bound to this connection. Persisted users, however,
+            // retain the prior per-request lookup so role changes and grants
+            // are applied before every simple, Parse, and Execute path. The
+            // user ID must still match the identity bound at startup: a DROP
+            // followed by same-name recreation must not inherit this socket.
+            if startup_identity.user_id == 0 {
+                startup_identity
+            } else {
+                stored_user_identity(state, &startup_identity.username, AuthMethod::Trust)
+                    .filter(|current_identity| current_identity.user_id == startup_identity.user_id)
+                    .ok_or_else(|| {
+                        PgWireError::UserError(Box::new(ErrorInfo::new(
+                            "FATAL".to_owned(),
+                            "28000".to_owned(),
+                            format!(
+                                "trust auth: user '{}' does not exist",
+                                startup_identity.username
+                            ),
+                        )))
+                    })?
+            }
         }
         AuthMode::Password | AuthMode::Certificate => {
             stored_user_identity(state, &username, AuthMethod::ScramSha256).ok_or_else(|| {
@@ -58,6 +81,7 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
         }
     };
 
+    let mut identity = authenticated_identity.clone();
     if let Some(effective) = sessions.get_effective_tenant_id(addr) {
         if identity.is_superuser {
             identity.tenant_id = effective;
@@ -67,7 +91,9 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
     }
 
     // Preserve the identity in force for connection teardown so an abandoned
-    // transaction can reclaim its Data-Plane staging overlays.
+    // transaction can reclaim its Data-Plane staging overlays. DISCARD ALL
+    // reconstructs Trust's base authenticated identity after it has released
+    // any overlays.
     sessions.set_identity(addr, identity.clone());
 
     Ok(identity)

@@ -24,7 +24,7 @@ use super::super::hash::{
     compute_scram_salted_password, generate_scram_salt, hash_password_argon2,
 };
 use super::super::lockout::LoginAttemptTracker;
-use super::super::record::UserRecord;
+use super::super::record::{UserRecord, validate_stored_user_credentials};
 
 /// Credential store with in-memory cache and redb persistence.
 ///
@@ -85,6 +85,35 @@ pub(in crate::control::security::credential) fn write_lock<T>(
     })
 }
 
+/// The principal receiving a password assignment.
+pub(in crate::control::security::credential) enum PasswordPrincipal {
+    New,
+    Existing { is_service_account: bool },
+}
+
+/// Reject password assignments that cannot produce a valid user credential.
+pub(in crate::control::security::credential) fn validate_password_assignment(
+    password: &str,
+    principal: PasswordPrincipal,
+) -> crate::Result<()> {
+    if password.is_empty() {
+        return Err(crate::Error::BadRequest {
+            detail: "password must not be empty".into(),
+        });
+    }
+    if matches!(
+        principal,
+        PasswordPrincipal::Existing {
+            is_service_account: true
+        }
+    ) {
+        return Err(crate::Error::BadRequest {
+            detail: "cannot assign a password to a service account".into(),
+        });
+    }
+    Ok(())
+}
+
 impl CredentialStore {
     /// Create an in-memory-only credential store backed by an in-memory
     /// system catalog (for tests and in-process fixtures).
@@ -114,9 +143,11 @@ impl CredentialStore {
 
         let stored_users = catalog.load_all_users()?;
         let next_id = catalog.load_next_user_id()?;
+        let argon2_config = Argon2Config::default();
 
         let mut users = HashMap::with_capacity(stored_users.len());
         for stored in stored_users {
+            validate_stored_user_credentials(&stored, &argon2_config)?;
             let record = UserRecord::from_stored(stored);
             users.insert(record.username.clone(), record);
         }
@@ -135,7 +166,7 @@ impl CredentialStore {
             lockout_duration: std::time::Duration::from_secs(300),
             password_expiry_secs: 0,
             password_expiry_grace_days: 0,
-            argon2_config: Argon2Config::default(),
+            argon2_config,
             versions: RwLock::new(HashMap::new()),
             si_bus: std::sync::OnceLock::new(),
             uc_bus: std::sync::OnceLock::new(),
@@ -333,13 +364,55 @@ impl CredentialStore {
     /// If the user already exists (loaded from catalog), updates
     /// the password.
     pub fn bootstrap_superuser(&self, username: &str, password: &str) -> crate::Result<()> {
+        let (observed_user_id, principal) = {
+            let users = read_lock(&self.users)?;
+            match users.get(username) {
+                Some(record) => (
+                    Some(record.user_id),
+                    PasswordPrincipal::Existing {
+                        is_service_account: record.is_service_account,
+                    },
+                ),
+                None => (None, PasswordPrincipal::New),
+            }
+        };
+        validate_password_assignment(password, principal)?;
+
         let salt = generate_scram_salt();
         let scram_salted_password = compute_scram_salted_password(password, &salt);
         let password_hash = hash_password_argon2(password, &self.argon2_config)?;
 
         let mut users = write_lock(&self.users)?;
 
+        if observed_user_id.is_some() && !users.contains_key(username) {
+            return Err(crate::Error::BadRequest {
+                detail: format!("user '{username}' changed while password was being prepared"),
+            });
+        }
+
+        if observed_user_id.is_none() && users.contains_key(username) {
+            return Err(crate::Error::BadRequest {
+                detail: format!("user '{username}' changed while password was being prepared"),
+            });
+        }
+
         if let Some(existing) = users.get_mut(username) {
+            if let Some(observed_user_id) = observed_user_id
+                && existing.user_id != observed_user_id
+            {
+                return Err(crate::Error::BadRequest {
+                    detail: format!("user '{username}' changed while password was being prepared"),
+                });
+            }
+            // The account may have changed since the lock-free snapshot used
+            // before Argon2. Re-check the live principal before mutation.
+            validate_password_assignment(
+                password,
+                PasswordPrincipal::Existing {
+                    is_service_account: existing.is_service_account,
+                },
+            )?;
+
             // User exists from catalog — update password and
             // ensure active + superuser.
             existing.password_hash = password_hash;
@@ -380,5 +453,295 @@ impl CredentialStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn assert_bad_request(error: crate::Error) {
+    match error {
+        crate::Error::BadRequest { .. } => {}
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn assert_user_unchanged(before: &UserRecord, after: &UserRecord) {
+    assert_eq!(after.user_id, before.user_id);
+    assert_eq!(after.username, before.username);
+    assert_eq!(after.tenant_id, before.tenant_id);
+    assert_eq!(after.password_hash, before.password_hash);
+    assert_eq!(after.scram_salt, before.scram_salt);
+    assert_eq!(after.scram_salted_password, before.scram_salted_password);
+    assert_eq!(after.roles, before.roles);
+    assert_eq!(after.is_superuser, before.is_superuser);
+    assert_eq!(after.is_active, before.is_active);
+    assert_eq!(after.is_service_account, before.is_service_account);
+    assert_eq!(after.created_at, before.created_at);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(after.password_expires_at, before.password_expires_at);
+    assert_eq!(after.must_change_password, before.must_change_password);
+    assert_eq!(after.password_changed_at, before.password_changed_at);
+    assert_eq!(after.default_database_id, before.default_database_id);
+    assert_eq!(after.accessible_databases, before.accessible_databases);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CredentialStore, assert_bad_request, assert_user_unchanged, compute_scram_salted_password,
+        generate_scram_salt, hash_password_argon2,
+    };
+    use crate::config::auth::Argon2Config;
+    use crate::control::security::catalog::{StoredUser, SystemCatalog};
+    use crate::control::security::identity::Role;
+    use crate::types::TenantId;
+
+    #[test]
+    fn bootstrap_superuser_rejects_empty_password_for_absent_user_without_allocation() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let next_user_id = *store.next_user_id.read().expect("next user ID lock");
+
+        let error = store
+            .bootstrap_superuser("empty-bootstrap", "")
+            .expect_err("empty bootstrap password must be rejected");
+
+        assert_bad_request(error);
+        assert!(store.get_user("empty-bootstrap").is_none());
+        assert_eq!(
+            *store.next_user_id.read().expect("next user ID lock"),
+            next_user_id,
+            "rejected bootstrap must not allocate a user ID"
+        );
+        assert!(
+            store
+                .catalog()
+                .get_user("empty-bootstrap")
+                .expect("read catalog")
+                .is_none(),
+            "rejected bootstrap must not write the catalog"
+        );
+    }
+
+    #[test]
+    fn bootstrap_superuser_rejects_empty_password_for_existing_user_without_mutation() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "regular-bootstrap",
+                "old-password",
+                TenantId::new(3),
+                vec![Role::ReadOnly],
+            )
+            .expect("create regular user");
+        let before = store
+            .get_user("regular-bootstrap")
+            .expect("created user must exist");
+        let next_user_id = *store.next_user_id.read().expect("next user ID lock");
+        let version = store.current_version(user_id);
+
+        let error = store
+            .bootstrap_superuser("regular-bootstrap", "")
+            .expect_err("empty bootstrap password must be rejected");
+
+        assert_bad_request(error);
+        let after = store
+            .get_user("regular-bootstrap")
+            .expect("user must remain present");
+        assert_user_unchanged(&before, &after);
+        assert_eq!(store.current_version(user_id), version);
+        assert_eq!(
+            *store.next_user_id.read().expect("next user ID lock"),
+            next_user_id
+        );
+    }
+
+    #[test]
+    fn bootstrap_superuser_rejects_service_account_without_credential_or_elevation_mutation() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_service_account(
+                "bootstrap-api",
+                TenantId::new(3),
+                vec![Role::ReadOnly],
+                vec![],
+            )
+            .expect("create service account");
+        let before = store
+            .get_user("bootstrap-api")
+            .expect("created service account must exist");
+        let version = store.current_version(user_id);
+
+        let error = store
+            .bootstrap_superuser("bootstrap-api", "non-empty-secret")
+            .expect_err("service accounts must not be bootstrapped with passwords");
+
+        assert_bad_request(error);
+        let after = store
+            .get_user("bootstrap-api")
+            .expect("service account must remain present");
+        assert!(after.is_service_account);
+        assert!(after.password_hash.is_empty());
+        assert!(after.scram_salt.is_empty());
+        assert!(after.scram_salted_password.is_empty());
+        assert_user_unchanged(&before, &after);
+        assert_eq!(store.current_version(user_id), version);
+    }
+
+    #[test]
+    fn open_rejects_persisted_regular_user_with_empty_derived_credentials() {
+        let dir = tempfile::tempdir().expect("temporary catalog directory");
+        let path = dir.path().join("system.redb");
+        let salt = generate_scram_salt();
+        let password_hash = hash_password_argon2("", &Argon2Config::default())
+            .expect("hash empty password for legacy persisted user");
+        let stored_hash = password_hash.clone();
+        let scram_salted_password = compute_scram_salted_password("", &salt);
+
+        // Direct seeding preserves a structurally valid legacy record for
+        // CredentialStore::open to validate.
+        let catalog = SystemCatalog::open(&path).expect("open persistent system catalog");
+        catalog
+            .put_user(&StoredUser {
+                user_id: 1,
+                username: "legacy-empty-password".to_string(),
+                tenant_id: 3,
+                password_hash,
+                scram_salt: salt,
+                scram_salted_password,
+                roles: vec![Role::ReadOnly.to_string()],
+                is_superuser: false,
+                is_active: true,
+                is_service_account: false,
+                created_at: 1,
+                updated_at: 1,
+                password_expires_at: 0,
+                must_change_password: false,
+                password_changed_at: 1,
+                default_database_id: 0,
+                accessible_databases: vec![],
+            })
+            .expect("seed persisted regular user");
+        drop(catalog);
+
+        let error = match CredentialStore::open(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("persisted empty-derived regular-user credentials must be rejected"),
+        };
+
+        match error {
+            crate::Error::BadRequest { detail } => {
+                assert_eq!(detail, "stored credential integrity check failed");
+                assert!(
+                    !detail.contains(&stored_hash),
+                    "integrity error must not expose the persisted password hash"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_rejects_persisted_regular_user_with_empty_password_hash() {
+        let dir = tempfile::tempdir().expect("temporary catalog directory");
+        let path = dir.path().join("system.redb");
+        let catalog = SystemCatalog::open(&path).expect("open persistent system catalog");
+        catalog
+            .put_user(&StoredUser {
+                user_id: 1,
+                username: "empty-password-hash".to_string(),
+                tenant_id: 3,
+                password_hash: String::new(),
+                scram_salt: Vec::new(),
+                scram_salted_password: Vec::new(),
+                roles: vec![Role::ReadOnly.to_string()],
+                is_superuser: false,
+                is_active: true,
+                is_service_account: false,
+                created_at: 1,
+                updated_at: 1,
+                password_expires_at: 0,
+                must_change_password: false,
+                password_changed_at: 1,
+                default_database_id: 0,
+                accessible_databases: vec![],
+            })
+            .expect("seed regular user with empty password hash");
+        drop(catalog);
+
+        let error = match CredentialStore::open(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("regular user with empty password hash must be rejected"),
+        };
+
+        assert_bad_request(error);
+    }
+
+    #[test]
+    fn open_allows_persisted_passwordless_service_account() {
+        let dir = tempfile::tempdir().expect("temporary catalog directory");
+        let path = dir.path().join("system.redb");
+        let catalog = SystemCatalog::open(&path).expect("open persistent system catalog");
+        catalog
+            .put_user(&StoredUser {
+                user_id: 1,
+                username: "passwordless-service".to_string(),
+                tenant_id: 3,
+                password_hash: String::new(),
+                scram_salt: Vec::new(),
+                scram_salted_password: Vec::new(),
+                roles: vec![Role::ReadOnly.to_string()],
+                is_superuser: false,
+                is_active: true,
+                is_service_account: true,
+                created_at: 1,
+                updated_at: 1,
+                password_expires_at: 0,
+                must_change_password: false,
+                password_changed_at: 1,
+                default_database_id: 0,
+                accessible_databases: vec![],
+            })
+            .expect("seed persisted service account");
+        drop(catalog);
+
+        let store = CredentialStore::open(&path)
+            .expect("passwordless persisted service account must be accepted");
+        let account = store
+            .get_user("passwordless-service")
+            .expect("load persisted service account");
+
+        assert!(account.is_service_account);
+        assert!(!account.is_superuser);
+        assert_eq!(account.roles, vec![Role::ReadOnly]);
+        assert!(account.password_hash.is_empty());
+        assert!(account.scram_salt.is_empty());
+        assert!(account.scram_salted_password.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_superuser_updates_existing_regular_user_with_non_empty_password() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        store
+            .create_user(
+                "bootstrap-regular",
+                "old-password",
+                TenantId::new(3),
+                vec![Role::ReadOnly],
+            )
+            .expect("create regular user");
+
+        store
+            .bootstrap_superuser("bootstrap-regular", "new-password")
+            .expect("non-empty bootstrap password must remain valid");
+
+        let user = store
+            .get_user("bootstrap-regular")
+            .expect("bootstrapped user must remain present");
+        assert!(store.verify_password("bootstrap-regular", "new-password"));
+        assert!(!store.verify_password("bootstrap-regular", "old-password"));
+        assert!(user.is_active);
+        assert!(user.is_superuser);
+        assert!(user.roles.contains(&Role::Superuser));
+        assert!(!user.is_service_account);
     }
 }

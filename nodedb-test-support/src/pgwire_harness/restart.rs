@@ -117,7 +117,16 @@ impl TestServer {
     /// `open_on_path()` on the saved dir.
     pub async fn open_on_path(dir: TestDataDir) -> (Self, TestDataDir) {
         let data_dir = TestDataDir(dir.0);
-        let server = Self::start_on_dir_ref(data_dir.path(), None).await;
+        let server = Self::start_on_dir_ref(data_dir.path(), None, AuthMode::Trust, true).await;
+        (server, data_dir)
+    }
+
+    /// Reopen an empty credential store in password mode without provisioning
+    /// the normal harness superuser. The returned server has no preconnected
+    /// harness client; callers must open the connection under test themselves.
+    pub async fn open_on_path_empty_store_password(dir: TestDataDir) -> (Self, TestDataDir) {
+        let data_dir = TestDataDir(dir.0);
+        let server = Self::start_on_dir_ref(data_dir.path(), None, AuthMode::Password, false).await;
         (server, data_dir)
     }
 
@@ -133,7 +142,13 @@ impl TestServer {
         flush_threshold: usize,
     ) -> (Self, TestDataDir) {
         let data_dir = TestDataDir(dir.0);
-        let server = Self::start_on_dir_ref(data_dir.path(), Some(flush_threshold)).await;
+        let server = Self::start_on_dir_ref(
+            data_dir.path(),
+            Some(flush_threshold),
+            AuthMode::Trust,
+            true,
+        )
+        .await;
         (server, data_dir)
     }
 
@@ -142,6 +157,8 @@ impl TestServer {
     async fn start_on_dir_ref(
         dir_path: &std::path::Path,
         columnar_flush_threshold: Option<usize>,
+        auth_mode: AuthMode,
+        provision_superuser: bool,
     ) -> Self {
         let wal_path = dir_path.join("test.wal");
         let wal = Arc::new(WalManager::open_for_testing(&wal_path).unwrap());
@@ -157,12 +174,14 @@ impl TestServer {
             nodedb::control::security::credential::store::CredentialStore::open(&catalog_path)
                 .unwrap(),
         );
-        let _ = credentials.create_user(
-            "nodedb",
-            "nodedb",
-            TenantId::new(1),
-            vec![nodedb::control::security::identity::Role::Superuser],
-        );
+        if provision_superuser {
+            let _ = credentials.create_user(
+                "nodedb",
+                "nodedb",
+                TenantId::new(1),
+                vec![nodedb::control::security::identity::Role::Superuser],
+            );
+        }
         let mut shared =
             SharedState::new_with_credentials(dispatcher, Arc::clone(&wal), credentials)
                 .expect("build shared state");
@@ -273,11 +292,12 @@ impl TestServer {
         let test_startup_gate = Arc::clone(&shared.startup);
         let bus_pg = shutdown_bus.clone();
         let pg_sem = Arc::clone(&conn_semaphore);
+        let listener_auth_mode = auth_mode.clone();
         let pg_handle = tokio::spawn(async move {
             pg_listener
                 .run(
                     shared_pg,
-                    AuthMode::Trust,
+                    listener_auth_mode,
                     None,
                     pg_sem,
                     test_startup_gate,
@@ -293,28 +313,38 @@ impl TestServer {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let conn_str = format!(
-            "host=127.0.0.1 port={} user=nodedb dbname=nodedb",
-            pg_addr.port()
-        );
-        let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
-            .await
-            .expect("pgwire connect failed");
-
-        let conn_handle = tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let (client, conn_handle) = if provision_superuser {
+            let conn_str = match auth_mode {
+                AuthMode::Password | AuthMode::Certificate => format!(
+                    "host=127.0.0.1 port={} user=nodedb password=nodedb dbname=nodedb",
+                    pg_addr.port()
+                ),
+                AuthMode::Trust => format!(
+                    "host=127.0.0.1 port={} user=nodedb dbname=nodedb",
+                    pg_addr.port()
+                ),
+            };
+            let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                .await
+                .expect("pgwire connect failed");
+            let conn_handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            (TestClient::new(client), Some(conn_handle))
+        } else {
+            (TestClient::empty(), None)
+        };
 
         // Use a new temp dir as the placeholder _dir (data is already open from dir_path).
         let placeholder_dir = tempfile::tempdir().unwrap();
 
         Self {
-            client: TestClient::new(client),
+            client,
             pg_port: pg_addr.port(),
             native_port,
             http_port,
             shared,
-            conn_handle: Some(conn_handle),
+            conn_handle,
             shutdown_bus: Some(shutdown_bus),
             poller_shutdown_tx: Some(poller_shutdown_tx),
             core_stop_txs: Some(core_stop_txs),

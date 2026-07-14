@@ -12,7 +12,8 @@ use std::sync::Arc;
 use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
-use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
+use crate::control::server::session_auth::identity::stored_user_identity;
 
 use super::super::types::text_field;
 use super::core::NodeDbPgHandler;
@@ -244,8 +245,38 @@ impl NodeDbPgHandler {
         }
 
         if upper == "DISCARD ALL" {
+            // Reset all mutable session state while retaining the identity
+            // established at authentication. First release any transaction
+            // staging overlays; dropping the session entry alone would lose
+            // their vShard/transaction identifiers and leak the overlays.
+            if self.sessions.transaction_state(addr) != TransactionState::Idle {
+                self.handle_rollback(identity, addr).await?;
+            }
+
+            // Trust connections cannot safely re-resolve an empty-store
+            // identity from the credential store on later statements, because
+            // that identity is intentionally ephemeral. Rebuild a Trust base
+            // identity only after overlay cleanup; while a transaction is
+            // active the session retains its effective identity so teardown
+            // targets the correct tenant's staging overlays.
+            let authenticated_identity =
+                if matches!(&self.auth_mode, crate::config::auth::AuthMode::Trust) {
+                    if identity.user_id == 0 {
+                        let mut base_identity = identity.clone();
+                        base_identity.tenant_id = crate::types::TenantId::new(1);
+                        Some(base_identity)
+                    } else {
+                        stored_user_identity(&self.state, &identity.username, AuthMethod::Trust)
+                            .filter(|current_identity| current_identity.user_id == identity.user_id)
+                    }
+                } else {
+                    None
+                };
             self.sessions.remove(addr);
             self.sessions.ensure_session(*addr);
+            if let Some(authenticated_identity) = authenticated_identity {
+                self.sessions.set_identity(addr, authenticated_identity);
+            }
             return Ok(vec![Response::Execution(Tag::new("DISCARD ALL"))]);
         }
 

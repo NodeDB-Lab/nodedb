@@ -21,6 +21,10 @@ use super::types::{TestClient, TestDataDir, TestServer};
 pub(super) struct StartConfig {
     /// pgwire authentication mode.
     pub auth_mode: AuthMode,
+    /// Whether to provision the normal `nodedb` harness superuser.
+    /// Empty-store authentication coverage disables this so no credentials
+    /// exist before its client connects.
+    pub provision_superuser: bool,
     /// When `Some((max_failed, lockout_secs))`, configures the credential
     /// store's lockout policy before it is shared. `None` leaves lockout
     /// disabled (`max_failed_logins = 0`).
@@ -49,6 +53,7 @@ impl Default for StartConfig {
     fn default() -> Self {
         Self {
             auth_mode: AuthMode::Trust,
+            provision_superuser: true,
             lockout: None,
             columnar_flush_threshold: None,
             routing: None,
@@ -63,6 +68,17 @@ impl TestServer {
     /// Spawn a single-core NodeDB server and connect via pgwire (trust mode).
     pub async fn start() -> Self {
         Self::start_with_config(StartConfig::default()).await
+    }
+
+    /// Spawn a single-core NodeDB server in Trust mode without provisioning
+    /// the normal harness superuser. This leaves the credential store empty
+    /// for authentication lifecycle coverage.
+    pub async fn start_empty_store_trust() -> Self {
+        Self::start_with_config(StartConfig {
+            provision_superuser: false,
+            ..Default::default()
+        })
+        .await
     }
 
     /// Spawn a single-core NodeDB server with a lowered
@@ -149,12 +165,14 @@ impl TestServer {
         // identity resolution accepts the default test connection. The
         // bootstrap exception in the handler only fires when the store
         // is empty, which would break as soon as any DDL creates a user.
-        let _ = credentials.create_user(
-            "nodedb",
-            "nodedb",
-            nodedb::types::TenantId::new(1),
-            vec![nodedb::control::security::identity::Role::Superuser],
-        );
+        if cfg.provision_superuser {
+            let _ = credentials.create_user(
+                "nodedb",
+                "nodedb",
+                nodedb::types::TenantId::new(1),
+                vec![nodedb::control::security::identity::Role::Superuser],
+            );
+        }
         // Ensure the built-in `default` database (id 0) is present in the
         // catalog so `USE DATABASE default` and `\c default` work in tests.
         // Idempotent: no-op if the descriptor is already there.
@@ -280,33 +298,37 @@ impl TestServer {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Connect client. Password / certificate mode supplies the harness
-        // user's credentials so the SCRAM handshake completes.
-        let conn_str = match cfg.auth_mode {
-            AuthMode::Password | AuthMode::Certificate => format!(
-                "host=127.0.0.1 port={} user=nodedb password=nodedb dbname=nodedb",
-                pg_addr.port()
-            ),
-            AuthMode::Trust => format!(
-                "host=127.0.0.1 port={} user=nodedb dbname=nodedb",
-                pg_addr.port()
-            ),
+        // Connect the normal harness client only when its superuser was
+        // provisioned. Empty-store coverage opens its own selected identity.
+        let (client, conn_handle) = if cfg.provision_superuser {
+            let conn_str = match cfg.auth_mode {
+                AuthMode::Password | AuthMode::Certificate => format!(
+                    "host=127.0.0.1 port={} user=nodedb password=nodedb dbname=nodedb",
+                    pg_addr.port()
+                ),
+                AuthMode::Trust => format!(
+                    "host=127.0.0.1 port={} user=nodedb dbname=nodedb",
+                    pg_addr.port()
+                ),
+            };
+            let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                .await
+                .expect("pgwire connect failed");
+            let conn_handle = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            (TestClient::new(client), Some(conn_handle))
+        } else {
+            (TestClient::empty(), None)
         };
-        let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
-            .await
-            .expect("pgwire connect failed");
-
-        let conn_handle = tokio::spawn(async move {
-            let _ = connection.await;
-        });
 
         Self {
-            client: TestClient::new(client),
+            client,
             pg_port: pg_addr.port(),
             native_port,
             http_port,
             shared,
-            conn_handle: Some(conn_handle),
+            conn_handle,
             shutdown_bus: Some(shutdown_bus),
             poller_shutdown_tx: Some(poller_shutdown_tx),
             core_stop_txs: Some(core_stop_txs),

@@ -11,7 +11,9 @@ use super::super::hash::{
     compute_scram_salted_password, generate_scram_salt, hash_password_argon2,
 };
 use super::super::record::UserRecord;
-use super::core::{CredentialStore, write_lock};
+use super::core::{
+    CredentialStore, PasswordPrincipal, read_lock, validate_password_assignment, write_lock,
+};
 
 impl CredentialStore {
     /// Create a new user. Returns the user_id.
@@ -22,16 +24,29 @@ impl CredentialStore {
         tenant_id: TenantId,
         roles: Vec<Role>,
     ) -> crate::Result<u64> {
+        // Preserve duplicate precedence without holding the users write lock
+        // during the intentionally expensive Argon2 computation.
+        {
+            let users = read_lock(&self.users)?;
+            if users.contains_key(username) {
+                return Err(crate::Error::BadRequest {
+                    detail: format!("user '{username}' already exists"),
+                });
+            }
+        }
+        validate_password_assignment(password, PasswordPrincipal::New)?;
+
+        let salt = generate_scram_salt();
+        let scram_salted_password = compute_scram_salted_password(password, &salt);
+        let password_hash = hash_password_argon2(password, &self.argon2_config)?;
+
         let mut users = write_lock(&self.users)?;
+        // Another writer can create the user while Argon2 runs.
         if users.contains_key(username) {
             return Err(crate::Error::BadRequest {
                 detail: format!("user '{username}' already exists"),
             });
         }
-
-        let salt = generate_scram_salt();
-        let scram_salted_password = compute_scram_salted_password(password, &salt);
-        let password_hash = hash_password_argon2(password, &self.argon2_config)?;
         let user_id = self.alloc_user_id()?;
 
         let is_superuser = roles.contains(&Role::Superuser);
@@ -135,21 +150,53 @@ impl CredentialStore {
     /// credentials.  Password change is a credential mutation but does not
     /// change role/access — no session invalidation reason.
     pub fn update_password(&self, username: &str, password: &str) -> crate::Result<()> {
+        let (observed_user_id, is_service_account) = {
+            let users = read_lock(&self.users)?;
+            let record = users
+                .get(username)
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: format!("user '{username}' not found"),
+                })?;
+            if !record.is_active {
+                return Err(crate::Error::BadRequest {
+                    detail: format!("user '{username}' is inactive"),
+                });
+            }
+            (record.user_id, record.is_service_account)
+        };
+        validate_password_assignment(password, PasswordPrincipal::Existing { is_service_account })?;
+
+        let salt = generate_scram_salt();
+        let scram_salted_password = compute_scram_salted_password(password, &salt);
+        let password_hash = hash_password_argon2(password, &self.argon2_config)?;
+
         let mut users = write_lock(&self.users)?;
         let record = users
             .get_mut(username)
             .ok_or_else(|| crate::Error::BadRequest {
                 detail: format!("user '{username}' not found"),
             })?;
+        if record.user_id != observed_user_id {
+            return Err(crate::Error::BadRequest {
+                detail: format!("user '{username}' changed while password was being prepared"),
+            });
+        }
         if !record.is_active {
             return Err(crate::Error::BadRequest {
                 detail: format!("user '{username}' is inactive"),
             });
         }
-        let salt = generate_scram_salt();
-        record.scram_salted_password = compute_scram_salted_password(password, &salt);
+        // The account can change while Argon2 runs; validate the live record
+        // before assigning any password material.
+        validate_password_assignment(
+            password,
+            PasswordPrincipal::Existing {
+                is_service_account: record.is_service_account,
+            },
+        )?;
+        record.scram_salted_password = scram_salted_password;
         record.scram_salt = salt;
-        record.password_hash = hash_password_argon2(password, &self.argon2_config)?;
+        record.password_hash = password_hash;
         record.password_expires_at = self.compute_expiry();
         record.must_change_password = false;
         record.password_changed_at = now_secs();
@@ -286,5 +333,104 @@ impl CredentialStore {
         }
         self.commit_user_mutation(record, Some(SessionInvalidationReason::RoleRevoked))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::core::{assert_bad_request, assert_user_unchanged},
+        CredentialStore,
+    };
+    use crate::control::security::identity::Role;
+    use crate::types::TenantId;
+
+    #[test]
+    fn create_user_rejects_empty_password_without_mutation() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let next_user_id = *store.next_user_id.read().expect("next user ID lock");
+
+        let error = store
+            .create_user(
+                "empty-password",
+                "",
+                TenantId::new(7),
+                vec![Role::ReadWrite],
+            )
+            .expect_err("empty passwords must be rejected");
+
+        assert_bad_request(error);
+        assert!(store.get_user("empty-password").is_none());
+        assert_eq!(
+            *store.next_user_id.read().expect("next user ID lock"),
+            next_user_id,
+            "rejected create must not allocate a user ID"
+        );
+        assert!(
+            store
+                .catalog()
+                .get_user("empty-password")
+                .expect("read catalog")
+                .is_none(),
+            "rejected create must not write the catalog"
+        );
+    }
+
+    #[test]
+    fn update_password_rejects_empty_password_without_mutating_credential_or_policy() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "password-user",
+                "old-password",
+                TenantId::new(7),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        store
+            .set_must_change_password("password-user", true)
+            .expect("set password policy");
+        let before = store
+            .get_user("password-user")
+            .expect("created user must exist");
+        let version = store.current_version(user_id);
+
+        let error = store
+            .update_password("password-user", "")
+            .expect_err("empty passwords must be rejected");
+
+        assert_bad_request(error);
+        let after = store
+            .get_user("password-user")
+            .expect("user must remain present");
+        assert_user_unchanged(&before, &after);
+        assert_eq!(store.current_version(user_id), version);
+    }
+
+    #[test]
+    fn update_password_rejects_service_account_without_password_material_or_state_change() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_service_account("api-only", TenantId::new(7), vec![Role::ReadWrite], vec![])
+            .expect("create service account");
+        let before = store
+            .get_user("api-only")
+            .expect("created service account must exist");
+        let version = store.current_version(user_id);
+
+        let error = store
+            .update_password("api-only", "not-allowed")
+            .expect_err("service accounts must not accept passwords");
+
+        assert_bad_request(error);
+        let after = store
+            .get_user("api-only")
+            .expect("service account must remain present");
+        assert!(after.is_service_account);
+        assert!(after.password_hash.is_empty());
+        assert!(after.scram_salt.is_empty());
+        assert!(after.scram_salted_password.is_empty());
+        assert_user_unchanged(&before, &after);
+        assert_eq!(store.current_version(user_id), version);
     }
 }

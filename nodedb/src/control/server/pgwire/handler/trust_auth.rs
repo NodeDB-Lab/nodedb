@@ -9,59 +9,38 @@
 use pgwire::api::ClientInfo;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
-use crate::config::auth::AuthMode;
 use crate::control::security::audit::AuditEvent;
-use crate::control::security::identity::{AuthMethod, Role};
-use crate::types::TenantId;
+use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
+use crate::control::server::session_auth::identity::{stored_user_identity, trust_identity};
 
 use super::core::NodeDbPgHandler;
 
 impl NodeDbPgHandler {
-    /// Trust-mode username resolution: skips password verification but still
-    /// resolves the connecting username against the credential store, matching
-    /// PostgreSQL's `trust` method semantics. Unknown users are rejected before
-    /// the server sends ReadyForQuery.
+    /// Trust-mode username resolution. A known username receives its stored
+    /// identity with the Trust auth method. With an empty credential store,
+    /// the startup username instead receives an ephemeral tenant-1 superuser
+    /// identity that exists only in this connection's session entry.
     ///
-    /// Runs on the trust startup path (see the pgwire factory) after the
-    /// startup parameters are saved to the client metadata and before
+    /// Runs after startup parameters are saved to client metadata and before
     /// AuthenticationOk is announced, so an unknown user never reaches
     /// ReadyForQuery. Only reads `client.metadata()` / `client.socket_addr()`,
     /// so `C: ClientInfo` is sufficient.
-    pub(crate) async fn resolve_trust_user<C>(&self, client: &C) -> PgWireResult<()>
+    pub(crate) fn resolve_trust_user<C>(&self, client: &C) -> PgWireResult<AuthenticatedIdentity>
     where
         C: ClientInfo,
     {
-        if !matches!(self.auth_mode, AuthMode::Trust) {
-            return Ok(());
-        }
-
         let username = client
             .metadata()
             .get("user")
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        if self
-            .state
-            .credentials
-            .to_identity(&username, AuthMethod::Trust)
-            .is_some()
-        {
-            return Ok(());
+        if let Some(identity) = stored_user_identity(&self.state, &username, AuthMethod::Trust) {
+            return Ok(identity);
         }
 
-        // Bootstrap: an empty credential store admits the first connecting
-        // user as a tenant-1 superuser and persists them so subsequent
-        // queries on the same connection (and any reconnect) resolve
-        // through the normal strict path.
         if self.state.credentials.is_empty() {
-            let _ = self.state.credentials.create_user(
-                &username,
-                "",
-                TenantId::new(1),
-                vec![Role::Superuser],
-            );
-            return Ok(());
+            return Ok(trust_identity(&self.state, &username));
         }
 
         let source = client.socket_addr().to_string();

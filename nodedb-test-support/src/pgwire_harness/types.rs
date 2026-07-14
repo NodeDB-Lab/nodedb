@@ -16,6 +16,10 @@ impl TestClient {
         Self(Some(client))
     }
 
+    pub(super) fn empty() -> Self {
+        Self(None)
+    }
+
     pub(super) fn take(&mut self) -> Option<tokio_postgres::Client> {
         self.0.take()
     }
@@ -33,7 +37,9 @@ impl std::ops::Deref for TestClient {
     }
 }
 
-/// A running test server with a connected pgwire client.
+/// A running test server, normally with a connected pgwire harness client.
+/// Empty-credential-store authentication fixtures intentionally leave `client`
+/// disconnected so tests can choose the identity to connect as.
 pub struct TestServer {
     pub client: TestClient,
     pub pg_port: u16,

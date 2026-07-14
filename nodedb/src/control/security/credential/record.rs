@@ -2,10 +2,40 @@
 
 use nodedb_types::id::DatabaseId;
 
+use crate::config::auth::Argon2Config;
 use crate::types::TenantId;
 
 use super::super::catalog::StoredUser;
 use super::super::identity::Role;
+use super::hash::{VerifyOutcome, verify_argon2_with_rehash};
+
+const CREDENTIAL_INTEGRITY_DETAIL: &str = "stored credential integrity check failed";
+
+/// Validate persisted password credentials before they enter the in-memory cache.
+///
+/// Service accounts intentionally authenticate without a password, so their
+/// password material is not subject to this check.
+pub(in crate::control::security::credential) fn validate_stored_user_credentials(
+    stored: &StoredUser,
+    argon2_config: &Argon2Config,
+) -> crate::Result<()> {
+    if stored.is_service_account {
+        return Ok(());
+    }
+
+    if stored.password_hash.is_empty()
+        || matches!(
+            verify_argon2_with_rehash(&stored.password_hash, "", argon2_config),
+            VerifyOutcome::Ok { rehash: _ }
+        )
+    {
+        return Err(crate::Error::BadRequest {
+            detail: CREDENTIAL_INTEGRITY_DETAIL.into(),
+        });
+    }
+
+    Ok(())
+}
 
 /// A stored user record (in-memory cache).
 #[derive(Debug, Clone)]
