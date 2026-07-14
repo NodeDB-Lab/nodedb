@@ -101,6 +101,10 @@ impl From<Error> for NodeDbError {
                 collection,
                 document_id,
             } => NodeDbError::write_conflict(collection, document_id),
+            Error::CalvinSerializationConflict => NodeDbError::write_conflict(
+                "cross-shard",
+                "global OCC verdict was abort (read-set validation failed)",
+            ),
             Error::SourceFrozen { database_id } => NodeDbError::write_conflict(
                 format!("database:{database_id}"),
                 "source database is frozen for clone materialization; retry shortly".to_owned(),

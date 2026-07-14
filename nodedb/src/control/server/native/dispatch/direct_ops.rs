@@ -8,7 +8,8 @@ use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
 use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext as GatewayQueryContext;
 use crate::control::planner::calvin::{
-    CrossShardTxnMode, DispatchClass, classify_dispatch, dispatch_tasks_to_calvin,
+    CrossShardTxnMode, DispatchClass, TxnDispatchPosition, classify_dispatch,
+    dispatch_tasks_to_calvin,
 };
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::types::describe_plan;
@@ -232,7 +233,8 @@ pub(crate) async fn handle_direct_op(
                 &tasks,
                 tenant_id,
                 CrossShardTxnMode::Strict,
-                false,
+                TxnDispatchPosition::Autocommit,
+                &[],
             )
             .await
             {

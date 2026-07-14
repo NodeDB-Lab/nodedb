@@ -224,6 +224,27 @@ impl NodeDbPgHandlerFactory {
             state,
         }
     }
+
+    /// Reclaim an abandoned transaction's overlays and drop the shared session
+    /// entry when a pgwire connection ends. Idempotent — a no-op when the
+    /// connection had no open transaction.
+    pub async fn on_connection_end(&self, addr: &std::net::SocketAddr) {
+        self.handler.reclaim_open_txn(addr).await;
+        self.handler.sessions.remove(addr);
+    }
+
+    /// Whether the connection at `addr` is eligible for idle timeout right now:
+    /// its session has zero statements in flight and has been silent for at
+    /// least `idle_ms`. Used by the pgwire listener watchdog, which owns the
+    /// per-connection task but cannot see inside pgwire's `process_socket`
+    /// loop. Returns `false` when the session is missing (nothing to time out).
+    pub fn session_idle_eligible(&self, addr: &std::net::SocketAddr, idle_ms: u64) -> bool {
+        self.handler.sessions.idle_eligible(
+            addr,
+            idle_ms,
+            crate::control::server::shared::session::now_unix_ms(),
+        )
+    }
 }
 
 impl PgWireServerHandlers for NodeDbPgHandlerFactory {

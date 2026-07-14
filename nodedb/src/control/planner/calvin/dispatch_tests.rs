@@ -9,7 +9,8 @@ use crate::Error;
 use crate::control::planner::calvin::cross_shard_mode::CrossShardTxnMode;
 use crate::control::planner::calvin::types::{DispatchClass, DispatchOutcome};
 use crate::control::server::shared::session::TransactionState;
-use crate::types::{TenantId, VShardId};
+use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadSetEntry};
+use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use nodedb_physical::physical_plan::{ColumnarOp, CrdtOp, DocumentOp, PhysicalPlan};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
@@ -239,6 +240,83 @@ fn classify_dispatch_read_widened_multi_shard() {
             assert_eq!(v, vec![5, 8], "read shard 8 must union with write shard 5");
         }
         other => panic!("expected MultiShard{{5,8}} for write-5 + read-8, got {other:?}"),
+    }
+}
+
+/// Find two collection names whose `DatabaseId::DEFAULT`-scoped vShard ids
+/// differ, so a write homed to one and a read homed to the other genuinely span
+/// two vShards. Mirrors the same-named helper the cross-node cluster tests use.
+fn two_distinct_vshard_collections() -> (String, String) {
+    let mut first: Option<(String, u32)> = None;
+    for i in 0u32..512 {
+        let name = format!("dispatch_home_{i}");
+        let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &name).as_u32();
+        match first {
+            Some((ref fname, fv)) if fv != vshard => return (fname.clone(), name),
+            None => first = Some((name, vshard)),
+            _ => {}
+        }
+    }
+    panic!("could not find two distinct-vshard collections in 512 tries");
+}
+
+#[test]
+fn read_entry_on_foreign_collection_widens_class_to_multishard() {
+    // Regression pin for the cross-node "silent-pass" serializability hole.
+    //
+    // A transaction that BUFFERS a write on collection A's vShard and READS a
+    // DIFFERENT collection B must classify `MultiShard`, because the read-set
+    // entry for B homes (via `read_vshards_of`) to B's own vShard and widens the
+    // participant set. This exercises the real routing seam: `read_vshards_of`
+    // homing + `classify_dispatch` union, exactly as interactive COMMIT invokes
+    // them (`session::commit::run_commit`).
+    //
+    // WHY this must stay `MultiShard`: only the `MultiShard` branch of COMMIT
+    // flushes through the Calvin barrier (`run_commit_calvin`), which validates
+    // B's read slice on B's OWNING node using the real per-shard `read_lsn`. If a
+    // foreign read failed to widen the class, COMMIT would take the `SingleShard`
+    // branch and run only the local-WAL `si_conflict_abort`, which never sees a
+    // stale read on the remote owner — silently committing a non-serializable
+    // cross-node transaction. This test guarantees a future refactor of
+    // `read_vshards_of` / `classify_dispatch` cannot reopen that hole.
+    let (write_coll, read_coll) = two_distinct_vshard_collections();
+    let write_vshard =
+        VShardId::from_collection_in_database(DatabaseId::DEFAULT, &write_coll).as_u32();
+    let read_vshard =
+        VShardId::from_collection_in_database(DatabaseId::DEFAULT, &read_coll).as_u32();
+
+    let tasks = vec![doc_insert_task(write_vshard)];
+
+    let read_entry = ReadSetEntry {
+        engine: EngineTag::Document,
+        database_id: DatabaseId::DEFAULT,
+        tenant_id: TenantId::new(1),
+        collection: read_coll.clone(),
+        key: ReadKey::Predicate,
+        read_lsn: Lsn::new(1),
+    };
+
+    // The homing step under test: a foreign-collection read must home to a
+    // vShard distinct from the write's, contributing a new participant.
+    let read_vshards = read_vshards_of(std::slice::from_ref(&read_entry));
+    assert!(
+        read_vshards.contains(&read_vshard) && !read_vshards.contains(&write_vshard),
+        "read entry for `{read_coll}` must home to vShard {read_vshard}, not the write's {write_vshard}"
+    );
+
+    match classify_dispatch(&tasks, &read_vshards) {
+        DispatchClass::MultiShard { vshards } => {
+            assert!(
+                vshards.contains(&write_vshard) && vshards.contains(&read_vshard),
+                "cross-collection read must widen the class to include both the write \
+                 vShard {write_vshard} and the read vShard {read_vshard}, got {vshards:?}"
+            );
+        }
+        other => panic!(
+            "expected MultiShard for write-on-{write_vshard} + foreign-read-on-{read_vshard}, \
+             got {other:?} (a SingleShard here would route COMMIT to local-WAL \
+             si_conflict_abort and reopen the cross-node serializability hole)"
+        ),
     }
 }
 

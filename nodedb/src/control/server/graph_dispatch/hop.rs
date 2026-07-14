@@ -343,7 +343,9 @@ async fn expand_remote(
     for result in results {
         // A remote dispatch error is fatal: a dropped owner means a partial
         // reachable set, exactly the silent-degradation bug this path fixes.
-        let payloads = result?;
+        // Graph hop traversal consumes payloads only; per-shard watermarks are
+        // not part of the neighbor-triple decode.
+        let payloads = result?.payloads;
         for payload in payloads {
             triples.extend(decode_neighbor_triples_bytes(&payload));
         }

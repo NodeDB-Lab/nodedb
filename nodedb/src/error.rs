@@ -50,6 +50,16 @@ pub enum Error {
         document_id: String,
     },
 
+    /// A cross-shard Calvin transaction's global OCC verdict was ABORT: a
+    /// participant's read-set validation failed at the cross-shard commit
+    /// barrier, so the writes were dropped. A serialization failure — the
+    /// client should retry the whole transaction. Maps to SQLSTATE `40001`
+    /// (serialization_failure) on both the pgwire and native transports.
+    #[error(
+        "cross-shard transaction aborted: serialization conflict (read-set validation failed); retry"
+    )]
+    CalvinSerializationConflict,
+
     #[error("CRDT delta pre-validation rejected: {constraint} — {reason}")]
     RejectedPrevalidation { constraint: String, reason: String },
 

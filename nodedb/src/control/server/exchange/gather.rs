@@ -378,8 +378,8 @@ pub async fn gather_all_vshards(
     // terminates at runtime (the plan is Exchange-free, so the re-entrant
     // resolve is a no-op), but the future must be heap-indirected so its size
     // is finite.
-    let payloads: Vec<Vec<u8>> =
-        Box::pin(gateway.execute(&ctx, plan))
+    let (payloads, shard_watermarks): (Vec<Vec<u8>>, Vec<(VShardId, Lsn)>) =
+        Box::pin(gateway.execute_with_watermarks(&ctx, plan))
             .await
             .map_err(|e| crate::Error::Dispatch {
                 detail: format!("cross-node gather via gateway: {e}"),
@@ -394,19 +394,20 @@ pub async fn gather_all_vshards(
 
     let merged_array = encode_msgpack_array(&all_elements);
 
+    // Fold the per-shard watermarks into a scalar fence the same way the local
+    // `gather_all_cores` path does — max across participating shards — while
+    // keeping the per-shard entries for the transaction read-set.
+    let watermark_lsn = shard_watermarks
+        .iter()
+        .map(|(_, lsn)| *lsn)
+        .max()
+        .unwrap_or(Lsn::ZERO);
+
     Ok(GatherOutcome {
         raw,
         merged_array,
-        // KNOWN LIMITATION: cross-node gather does not yet thread per-shard
-        // watermark LSNs back through the gateway response, so Strong-consistency
-        // LSN fencing degrades to pass-through on this path.  This is consistent
-        // with existing gateway behavior (gateway.execute returns no LSN metadata).
-        // The cross-node per-shard watermark folds into the gateway wire change
-        // (co-located with cross-shard `txn_id`/`database_id` threading), so no
-        // per-shard watermarks are surfaced here yet — a ZERO read version is
-        // over-conservative (never unsafe) and nothing validates it until then.
-        watermark_lsn: Lsn::ZERO,
-        shard_watermarks: Vec::new(),
+        watermark_lsn,
+        shard_watermarks,
     })
 }
 

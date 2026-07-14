@@ -27,6 +27,7 @@ use crate::control::state::SharedState;
 use crate::types::RequestId;
 
 use super::super::types::notice_warning;
+use super::in_flight::InFlightGuard;
 use super::prepared::{NodeDbQueryParser, ParsedStatement};
 use crate::control::server::shared::session::SessionStore;
 
@@ -129,10 +130,13 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        let addr = client.socket_addr();
+        // Keep long-running prepared statements ineligible for idle teardown.
+        let _in_flight = InFlightGuard::new(&self.sessions, addr);
+
         let result = self.execute_prepared(client, portal, max_rows).await;
         // Mirror the simple-query path: surface any queued NOTICE messages
         // (e.g. `truncated_before_horizon`) before returning.
-        let addr = client.socket_addr();
         for message in self.sessions.drain_notices(&addr) {
             let notice = notice_warning(&message);
             let _ = client

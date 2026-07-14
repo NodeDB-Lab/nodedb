@@ -200,14 +200,11 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::NotFound);
         };
 
-        self.txn_overlays
-            .entry(cx.txn_id)
-            .or_default()
-            .insert_tombstone(
-                source_ctx.coll_key.clone(),
-                source_ctx.surrogate.0,
-                &source_ctx.document_id,
-            );
+        self.txn_overlay_mut(cx.txn_id).insert_tombstone(
+            source_ctx.coll_key.clone(),
+            source_ctx.surrogate.0,
+            &source_ctx.document_id,
+        );
 
         let dest_ctx = self.kv_atomic_stage_ctx(task, cx.tid, cx.txn_id, dest_collection, dest_key);
         if let Err(e) = self.stage_put_capped(&dest_ctx, item_bytes) {

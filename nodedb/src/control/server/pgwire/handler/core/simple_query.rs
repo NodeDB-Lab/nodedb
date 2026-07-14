@@ -12,6 +12,7 @@ use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 
 use super::NodeDbPgHandler;
+use crate::control::server::pgwire::handler::in_flight::InFlightGuard;
 use crate::control::server::shared::session::TransactionState;
 
 // ── SimpleQueryHandler ──────────────────────────────────────────────
@@ -26,6 +27,10 @@ impl SimpleQueryHandler for NodeDbPgHandler {
     {
         let addr = client.socket_addr();
         self.sessions.ensure_session(addr);
+
+        // Keep this statement ineligible for idle teardown until every exit
+        // path completes and the guard stamps the session's last activity.
+        let _in_flight = InFlightGuard::new(&self.sessions, addr);
 
         let identity = self.resolve_identity(client, &addr)?;
         self.authorize_session_database(&identity, &addr)?;

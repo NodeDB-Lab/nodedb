@@ -66,10 +66,13 @@ impl CoreLoop {
                     return self.response_error(task, e);
                 }
                 let coll_key = graph_coll_key(task, tid, collection);
-                self.graph_txn_overlays
-                    .entry(txn_id)
-                    .or_default()
-                    .stage_edge_put(coll_key, src_id, label, dst_id, properties.clone());
+                self.graph_txn_overlay_mut(txn_id).stage_edge_put(
+                    coll_key,
+                    src_id,
+                    label,
+                    dst_id,
+                    properties.clone(),
+                );
                 self.stage_count_response(task, 1)
             }
 
@@ -81,9 +84,7 @@ impl CoreLoop {
                 ..
             } => {
                 let coll_key = graph_coll_key(task, tid, collection);
-                self.graph_txn_overlays
-                    .entry(txn_id)
-                    .or_default()
+                self.graph_txn_overlay_mut(txn_id)
                     .stage_edge_delete(coll_key, src_id, label, dst_id);
                 self.stage_count_response(task, 1)
             }
@@ -95,18 +96,14 @@ impl CoreLoop {
 
             GraphOp::SetNodeLabels { node_id, labels } => {
                 let coll_key = graph_coll_key(task, tid, GRAPH_LABEL_COLL_KEY);
-                self.graph_txn_overlays
-                    .entry(txn_id)
-                    .or_default()
+                self.graph_txn_overlay_mut(txn_id)
                     .stage_node_labels_set(coll_key, node_id, labels);
                 self.stage_count_response(task, labels.len())
             }
 
             GraphOp::RemoveNodeLabels { node_id, labels } => {
                 let coll_key = graph_coll_key(task, tid, GRAPH_LABEL_COLL_KEY);
-                self.graph_txn_overlays
-                    .entry(txn_id)
-                    .or_default()
+                self.graph_txn_overlay_mut(txn_id)
                     .stage_node_labels_remove(coll_key, node_id, labels);
                 self.stage_count_response(task, labels.len())
             }
@@ -143,7 +140,7 @@ impl CoreLoop {
         if let Err(e) = self.stage_graph_capped(incoming_bytes) {
             return self.response_error(task, e);
         }
-        let overlay: &mut GraphTxnOverlay = self.graph_txn_overlays.entry(txn_id).or_default();
+        let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
         for edge in edges {
             let coll_key = graph_coll_key(task, tid, &edge.collection);
             overlay.stage_edge_put(
@@ -164,7 +161,7 @@ impl CoreLoop {
         txn_id: TxnId,
         edges: &[BatchEdge],
     ) -> Response {
-        let overlay: &mut GraphTxnOverlay = self.graph_txn_overlays.entry(txn_id).or_default();
+        let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
         for edge in edges {
             let coll_key = graph_coll_key(task, tid, &edge.collection);
             overlay.stage_edge_delete(coll_key, &edge.src_id, &edge.label, &edge.dst_id);

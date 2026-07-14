@@ -66,6 +66,10 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
         }
     }
 
+    // Preserve the identity in force for connection teardown so an abandoned
+    // transaction can reclaim its Data-Plane staging overlays.
+    sessions.set_identity(addr, identity.clone());
+
     Ok(identity)
 }
 

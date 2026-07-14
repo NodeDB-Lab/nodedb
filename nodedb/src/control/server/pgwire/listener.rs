@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -60,6 +60,13 @@ impl PgListener {
         bus: crate::control::shutdown::ShutdownBus,
     ) -> crate::Result<()> {
         let conn_state = Arc::clone(&state);
+        // Session-timeout policy, read once at listener startup (config is fixed
+        // for the process lifetime). `idle` closes a connection that has been
+        // silent between statements for this many seconds — including an
+        // idle-in-transaction connection holding a staged-write overlay.
+        // `absolute` caps total connection lifetime. `0` disables either.
+        let idle_timeout_secs = conn_state.idle_timeout_secs();
+        let absolute_timeout_secs = conn_state.session_absolute_timeout_secs();
         let factory = Arc::new(NodeDbPgHandlerFactory::new(state, auth_mode));
 
         // Register with the shutdown bus so the sequencer waits for us to drain
@@ -122,10 +129,28 @@ impl PgListener {
                             info!(%peer_addr, "new pgwire connection");
                             let factory = Arc::clone(&factory);
                             let tls = tls_acceptor.clone();
+                            let idle = idle_timeout_secs;
+                            let absolute = absolute_timeout_secs;
                             connections.spawn(async move {
-                                if let Err(e) = process_socket(stream, tls, factory).await {
-                                    warn!(%peer_addr, error = %e, "pgwire session error");
+                                if idle == 0 && absolute == 0 {
+                                    // No session timeouts configured: run the
+                                    // plain socket loop with no watchdog wakeups.
+                                    if let Err(e) =
+                                        process_socket(stream, tls, Arc::clone(&factory)).await
+                                    {
+                                        warn!(%peer_addr, error = %e, "pgwire session error");
+                                    }
+                                } else {
+                                    run_with_watchdog(
+                                        stream, tls, &factory, peer_addr, idle, absolute,
+                                    )
+                                    .await;
                                 }
+                                // Reclaim any abandoned-transaction Data-Plane
+                                // overlays and drop the shared session entry now
+                                // that the connection has ended (whether it ended
+                                // on its own or was force-closed by the watchdog).
+                                factory.on_connection_end(&peer_addr).await;
                                 drop(permit);
                                 peer_addr
                             });
@@ -184,4 +209,58 @@ impl PgListener {
         drain_guard.report_drained();
         Ok(())
     }
+}
+
+/// Run `process_socket` under an idle + absolute session-timeout watchdog.
+///
+/// pgwire's `process_socket` owns the connection loop and is hard-typed to a
+/// `TcpStream`, so timeouts cannot be enforced inside it. Instead we race the
+/// socket future against a bounded re-check tick: on each wake, close the
+/// connection — by dropping the future, which drops the socket — if the
+/// absolute lifetime is exceeded or the connection is idle-eligible (zero
+/// in-flight statements AND silent past the idle window). A statement in
+/// flight keeps the connection non-idle, so a legitimately long-running query
+/// is never idle-killed. The caller runs `on_connection_end` afterwards to
+/// reclaim any staged overlay and drop the session entry.
+///
+/// Only invoked when at least one of `idle`/`absolute` is non-zero; the
+/// all-disabled path skips the watchdog entirely (no wakeups).
+async fn run_with_watchdog(
+    stream: tokio::net::TcpStream,
+    tls: Option<pgwire::tokio::TlsAcceptor>,
+    factory: &Arc<NodeDbPgHandlerFactory>,
+    peer_addr: SocketAddr,
+    idle: u64,
+    absolute: u64,
+) {
+    let started = Instant::now();
+    let mut fut = std::pin::pin!(process_socket(stream, tls, Arc::clone(factory)));
+    // Bounded re-check tick — never a busy loop. Activity may advance the idle
+    // deadline between wakes, which is recomputed via `session_idle_eligible`.
+    let tick = Duration::from_secs(1);
+    loop {
+        tokio::select! {
+            r = &mut fut => {
+                if let Err(e) = r {
+                    warn!(%peer_addr, error = %e, "pgwire session error");
+                }
+                break;
+            }
+            _ = tokio::time::sleep(tick) => {
+                if absolute > 0 && started.elapsed().as_secs() >= absolute {
+                    info!(%peer_addr, absolute, "pgwire absolute session timeout, closing");
+                    break;
+                }
+                if idle > 0
+                    && factory.session_idle_eligible(&peer_addr, idle.saturating_mul(1000))
+                {
+                    info!(%peer_addr, idle, "pgwire idle session timeout, closing");
+                    break;
+                }
+            }
+        }
+    }
+    // On a timeout break the loop exits with `fut` still pending; it is dropped
+    // here at scope end, which closes the socket. The caller then runs the
+    // connection-end teardown hook.
 }

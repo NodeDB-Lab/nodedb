@@ -3,7 +3,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 
-use nodedb_cluster::calvin::SequencerStateMachine;
+use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine};
 use nodedb_cluster::distributed_array::{ArrayLocalExecutor, handle_array_shard_rpc};
 use nodedb_cluster::vshard_handler::{DispatchTarget, dispatch_by_type};
 use nodedb_cluster::wire::VShardEnvelope;
@@ -101,6 +101,7 @@ struct ReconcileSchedulersParams<'a> {
     raft_loop_handle: &'a Arc<Mutex<nodedb_cluster::multi_raft::MultiRaft>>,
     sequencer_state_machine: &'a Arc<Mutex<SequencerStateMachine>>,
     calvin_read_result_senders: &'a ReadResultSenders,
+    calvin_completion_registry: &'a Arc<CalvinCompletionRegistry>,
     scheduler_config: &'a SchedulerConfig,
 }
 
@@ -124,6 +125,7 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
         raft_loop_handle,
         sequencer_state_machine,
         calvin_read_result_senders,
+        calvin_completion_registry,
         scheduler_config,
     } = params;
 
@@ -180,6 +182,16 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             .unwrap_or_else(|p| p.into_inner())
             .insert(vshard_id, promotion_tx);
 
+        // Verdict-push channel: `note_verdict` (on this node's completion
+        // registry) broadcasts a `VerdictSignal` to every registered per-vShard
+        // scheduler the instant a cross-shard verdict becomes durable, so a txn
+        // parked on the commit barrier resumes with low latency. Bounded like the
+        // other scheduler channels; a dropped push is backstopped by the
+        // scheduler's probe-on-park and stall re-probe sweep.
+        let (verdict_tx, verdict_rx) =
+            tokio::sync::mpsc::channel(scheduler_config.channel_capacity);
+        calvin_completion_registry.register_verdict_signal_sender(vshard_id, verdict_tx);
+
         let scheduler = Scheduler::new(SchedulerParams {
             vshard_id,
             receiver: sequenced_rx,
@@ -193,6 +205,8 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             read_result_rx,
             lock_manager,
             promotion_rx,
+            registry: Arc::clone(calvin_completion_registry),
+            verdict_rx,
         });
         // Route through `spawn_loop_no_abort` so `LoopRegistry::shutdown_all`
         // waits for the scheduler to exit (dropping its captured
@@ -228,6 +242,7 @@ pub(super) struct SpawnVshardSchedulersParams<'a> {
     pub(super) raft_loop_handle: Arc<Mutex<nodedb_cluster::multi_raft::MultiRaft>>,
     pub(super) sequencer_state_machine: &'a Arc<Mutex<SequencerStateMachine>>,
     pub(super) calvin_read_result_senders: &'a ReadResultSenders,
+    pub(super) calvin_completion_registry: &'a Arc<CalvinCompletionRegistry>,
     pub(super) scheduler_config: &'a SchedulerConfig,
 }
 
@@ -255,6 +270,7 @@ pub(super) fn spawn_vshard_schedulers(
         raft_loop_handle,
         sequencer_state_machine,
         calvin_read_result_senders,
+        calvin_completion_registry,
         scheduler_config,
     } = params;
 
@@ -269,6 +285,7 @@ pub(super) fn spawn_vshard_schedulers(
         raft_loop_handle: &raft_loop_handle,
         sequencer_state_machine,
         calvin_read_result_senders,
+        calvin_completion_registry,
         scheduler_config,
     })?;
 
@@ -280,6 +297,7 @@ pub(super) fn spawn_vshard_schedulers(
     let shared_task = Arc::clone(shared);
     let sm_task = Arc::clone(sequencer_state_machine);
     let rr_task = Arc::clone(calvin_read_result_senders);
+    let registry_task = Arc::clone(calvin_completion_registry);
     let cfg_task = scheduler_config.clone();
     crate::control::shutdown::spawn_loop(
         &shared.loop_registry,
@@ -300,6 +318,7 @@ pub(super) fn spawn_vshard_schedulers(
                             raft_loop_handle: &raft_loop_handle,
                             sequencer_state_machine: &sm_task,
                             calvin_read_result_senders: &rr_task,
+                            calvin_completion_registry: &registry_task,
                             scheduler_config: &cfg_task,
                         }) {
                             tracing::warn!(node_id, error = %e, "calvin scheduler reconcile pass failed");

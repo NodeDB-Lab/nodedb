@@ -10,7 +10,8 @@ use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::planner::calvin::{
-    dispatch_dependent_edge_recon, dispatch_tasks_to_calvin, is_dependent_predicate,
+    TxnDispatchPosition, dispatch_dependent_edge_recon, dispatch_tasks_to_calvin,
+    is_dependent_predicate,
 };
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::TransactionState;
@@ -90,13 +91,22 @@ impl NodeDbPgHandler {
             // the SINGLE submit-and-await to the sequencer leader. On success we
             // synthesise one command tag per task. This is a pure extraction —
             // behaviour is identical to the inlined static branch.
-            let in_txn_block = tx_state == TransactionState::InBlock;
+            // A cross-shard span in a single statement executed mid-block cannot
+            // be buffered atomically, so it rejects; an autocommit statement
+            // proceeds. (The COMMIT flush of a buffered block routes through the
+            // neutral commit orchestrator, not this per-statement path.)
+            let position = if tx_state == TransactionState::InBlock {
+                TxnDispatchPosition::MidBlockStatement
+            } else {
+                TxnDispatchPosition::Autocommit
+            };
             let apply_resp = dispatch_tasks_to_calvin(
                 &self.state,
                 &tasks,
                 tenant_id,
                 cross_shard_mode,
-                in_txn_block,
+                position,
+                &[],
             )
             .await
             .map_err(|e| {

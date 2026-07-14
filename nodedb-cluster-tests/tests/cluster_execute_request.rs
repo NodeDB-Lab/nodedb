@@ -21,7 +21,7 @@ use nodedb_cluster::rpc_codec::{
     DescriptorVersionEntry, ExecuteRequest, RaftRpc, TypedClusterError,
 };
 use nodedb_physical::physical_plan::wire as plan_wire;
-use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
 
 /// Build an `ExecuteRequest` wrapping a trivial `KvOp::Put`.
 fn make_kv_put_request(
@@ -98,6 +98,81 @@ async fn execute_request_deadline_exceeded_immediate() {
         Some(TypedClusterError::DeadlineExceeded { .. }) => {}
         other => panic!("expected DeadlineExceeded, got {other:?}"),
     }
+
+    node1.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn execute_request_read_carries_watermark_lsn() {
+    // Single-node: create a document_schemaless collection, commit a write, then
+    // ship a Document `Scan` via `ExecuteRequest` and assert the response body
+    // carries a non-zero read watermark LSN. Before the wire gained
+    // `ExecuteResponse.watermark_lsn`, the non-streaming read path implicitly
+    // reported 0 (the cross-node gather hardcoded `Lsn::ZERO`); this proves the
+    // producer captures the executing core's real committed LSN and it
+    // roundtrips over the wire.
+    let node1 = common::cluster_harness::TestClusterNode::spawn(1, vec![])
+        .await
+        .expect("spawn node 1");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    node1
+        .exec("CREATE COLLECTION watermark_scan_test WITH (engine='document_schemaless')")
+        .await
+        .expect("create collection");
+
+    // Commit a write so the leader's WAL LSN advances past zero.
+    node1
+        .exec("INSERT INTO watermark_scan_test (id, body) VALUES ('d1', 'hello')")
+        .await
+        .expect("insert document");
+
+    // Let the metadata + write commit and the Data Plane register the collection.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let transport = node1
+        .shared
+        .cluster_transport
+        .as_ref()
+        .expect("cluster_transport");
+
+    // Empty descriptor_versions → no descriptor-version validation on the
+    // receiver, so the scan reaches the local executor unconditionally.
+    let scan = PhysicalPlan::Document(DocumentOp::Scan {
+        collection: "watermark_scan_test".into(),
+        limit: 100,
+        offset: 0,
+        sort_keys: vec![],
+        filters: vec![],
+        distinct: false,
+        projection: vec![],
+        computed_columns: vec![],
+        window_functions: vec![],
+        system_time: nodedb_types::SystemTimeScope::Current,
+        valid_at_ms: None,
+        prefilter: None,
+    });
+    let req = ExecuteRequest {
+        plan_bytes: plan_wire::encode(&scan).expect("encode scan plan"),
+        tenant_id: 0,
+        database_id: 0,
+        deadline_remaining_ms: 5000,
+        trace_id: [0u8; 16],
+        descriptor_versions: vec![],
+    };
+
+    let resp = send_execute_request(transport, node1.listen_addr, req).await;
+
+    assert!(
+        resp.success,
+        "scan should succeed, got error: {:?}",
+        resp.error
+    );
+    assert!(
+        resp.watermark_lsn > 0,
+        "read response must carry the executing core's real committed LSN, got {}",
+        resp.watermark_lsn
+    );
 
     node1.shutdown().await;
 }

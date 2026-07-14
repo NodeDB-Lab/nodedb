@@ -47,15 +47,14 @@ pub async fn run_commit(
     let written_collections =
         sessions.buffered_collections(addr, |plan| extract_collection(plan).map(String::from));
     // Peek the buffered write tasks WITHOUT draining them or leaving the block.
-    // The session stays `InBlock` through classification and dispatch so a
-    // cross-shard write's `MultiShard` classification still sees `InBlock` and
-    // fires the `CrossShardInExplicitTransaction` reject inside `run_commit_calvin`.
+    // The session stays `InBlock` through classification and dispatch; the
+    // buffered batch is flushed to Calvin as the COMMIT finalization (see
+    // `run_commit_calvin`), then `sessions.commit` below drains the buffer.
     let buffered = sessions.buffered_tasks(addr);
     let tenant_id = identity.tenant_id;
     // The interactive-COMMIT read-set widens dispatch classification: a txn that
     // writes shard X but read shard Y participates in {X, Y} and must route
-    // through Calvin (which then rejects it as a cross-shard write inside an
-    // explicit block). Autocommit has no session read-set.
+    // through Calvin with Y as a participant. Autocommit has no session read-set.
     let read_vshards = read_vshards_of(&read_set);
 
     // In-transaction `MERGE`, `UPDATE ... FROM <source>`, and `INSERT ... SELECT`
@@ -78,11 +77,14 @@ pub async fn run_commit(
     } else {
         match classify_dispatch(&buffered, &read_vshards) {
             DispatchClass::MultiShard { .. } => {
-                // The session is STILL `InBlock` here, so `run_commit_calvin`'s
-                // `InBlock` gate fires `CrossShardInExplicitTransaction`. SI is a
-                // single-shard validation and is intentionally NOT run here.
+                // Flush the buffered cross-shard batch through Calvin's durable
+                // Vote/Verdict barrier (`run_commit_calvin`), leader-routed. SI is
+                // a single-shard validation and is intentionally NOT run here —
+                // Calvin performs its own cross-shard OCC over `versioned_reads`
+                // and returns a serialization abort (SQLSTATE 40001) on an ABORT
+                // verdict.
                 if let Some(reason) = super::commit_calvin::run_commit_calvin(
-                    sessions, addr, state, dp, &buffered, tenant_id, &read_set,
+                    sessions, addr, state, &buffered, tenant_id, &read_set,
                 )
                 .await
                 {

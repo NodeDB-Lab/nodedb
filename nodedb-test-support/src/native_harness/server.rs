@@ -17,6 +17,8 @@ use nodedb::wal::WalManager;
 /// A running native-protocol test server.
 pub struct NativeTestServer {
     pub addr: std::net::SocketAddr,
+    /// Shared Control-Plane state, exposed so tests can inspect the same
+    /// metrics and authorization stores used by the running server.
     pub shared: Arc<SharedState>,
     pub(super) shutdown_bus: nodedb::control::shutdown::ShutdownBus,
     pub(super) poller_shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -155,7 +157,7 @@ impl NativeTestServer {
 
         Self {
             addr,
-            shared,
+            shared: Arc::clone(&shared),
             shutdown_bus,
             poller_shutdown_tx,
             core_stop_tx,

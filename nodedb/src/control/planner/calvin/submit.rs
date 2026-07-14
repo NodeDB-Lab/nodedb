@@ -135,6 +135,16 @@ pub async fn submit_and_await_calvin_with_timeout(
             detail: format!("calvin transaction routing failed: {detail}"),
         });
     }
+    // Terminal, NON-retryable: the global cross-shard OCC verdict was ABORT
+    // (read-set validation failed) and the writes were dropped. This is a
+    // fall-through chain, NOT a match — without this explicit check `Aborted`
+    // would fall through to the RETURNING drain below and silently return
+    // `Ok(None)`, reporting COMMIT SUCCESS for a transaction that never applied.
+    // Surface it as a serialization failure (SQLSTATE 40001) so the client
+    // retries the whole transaction.
+    if outcome == AttemptOutcome::Aborted {
+        return Err(Error::CalvinSerializationConflict);
+    }
     // The static (non-dependent) Calvin path never produces an OLLP mismatch —
     // `note_ollp_mismatch` only fires on the dependent-predicate retry path — so
     // this branch is unreachable at runtime today. It is kept as a typed error
@@ -159,7 +169,7 @@ pub async fn submit_and_await_calvin_with_timeout(
         .unwrap_or_else(|p| p.into_inner())
         .remove(&TxnId::new(epoch, position));
     match drained {
-        Some(CalvinApplyResult::Single(response)) => Ok(Some(response)),
+        Some(CalvinApplyResult::Single { response, .. }) => Ok(Some(response)),
         Some(CalvinApplyResult::Conflict) => Err(Error::Internal {
             detail: "multi-participant cross-shard RETURNING not supported".to_owned(),
         }),

@@ -24,6 +24,7 @@ pub mod topic;
 pub mod trigger;
 pub mod types;
 pub mod wal_replay;
+pub mod wal_replay_parse;
 pub mod watermark;
 pub mod watermark_tracker;
 pub mod webhook;

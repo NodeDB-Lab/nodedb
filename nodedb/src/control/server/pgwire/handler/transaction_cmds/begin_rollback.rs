@@ -9,7 +9,7 @@ use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::session::lifecycle;
+use crate::control::server::shared::session::{TransactionState, lifecycle};
 
 use super::super::core::NodeDbPgHandler;
 use super::commit::PgwireTxnDp;
@@ -45,5 +45,27 @@ impl NodeDbPgHandler {
         let dp = PgwireTxnDp { handler: self };
         lifecycle::run_rollback(&self.sessions, addr, identity, &self.state, &dp).await;
         Ok(vec![Response::Execution(Tag::new("ROLLBACK"))])
+    }
+
+    /// Reclaim an abandoned transaction's Data-Plane staging overlays when a
+    /// pgwire connection ends without COMMIT/ROLLBACK.
+    ///
+    /// A no-op when the connection had no open transaction (the common case).
+    /// Otherwise drives the same neutral `run_rollback` path as an explicit
+    /// ROLLBACK, using the identity stashed by `resolve_identity` on the last
+    /// query — without it the overlays (keyed by `txn_id` per staged vShard)
+    /// would leak for the process lifetime.
+    pub(in crate::control::server::pgwire) async fn reclaim_open_txn(
+        &self,
+        addr: &std::net::SocketAddr,
+    ) {
+        if self.sessions.transaction_state(addr) == TransactionState::Idle {
+            return;
+        }
+        let Some(identity) = self.sessions.identity(addr) else {
+            return;
+        };
+        let dp = PgwireTxnDp { handler: self };
+        lifecycle::run_rollback(&self.sessions, addr, &identity, &self.state, &dp).await;
     }
 }

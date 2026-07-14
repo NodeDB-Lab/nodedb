@@ -3,6 +3,7 @@
 pub mod cache_miss;
 pub mod colocation_guard;
 pub mod core;
+pub mod dispatch_remote;
 pub mod dispatcher;
 pub mod error_map;
 pub mod fuser;

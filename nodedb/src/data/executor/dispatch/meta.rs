@@ -282,8 +282,14 @@ impl CoreLoop {
             // memtable) before this dispatches, so the empty-check fails and
             // the engine correctly stays registered with its committed rows.
             MetaOp::DropTxnOverlay { txn_id } => {
-                self.txn_overlays.remove(txn_id);
-                self.graph_txn_overlays.remove(txn_id);
+                let removed = u64::from(self.txn_overlays.remove(txn_id).is_some())
+                    + u64::from(self.graph_txn_overlays.remove(txn_id).is_some());
+                if removed > 0
+                    && let Some(m) = &self.metrics
+                {
+                    m.active_txn_overlays
+                        .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
+                }
                 if let Some(created) = self.txn_created_columnar_engines.remove(txn_id) {
                     for engine_key in created {
                         let still_empty = self
@@ -594,6 +600,45 @@ mod txn_created_columnar_engine_tests {
         assert!(
             core.columnar_engines.contains_key(&key),
             "rolling back a staged insert into a pre-existing engine must not drop it"
+        );
+    }
+
+    #[test]
+    fn active_txn_overlays_gauge_tracks_overlay_lifecycle() {
+        let (mut core, _dir) = make_core();
+        let metrics = std::sync::Arc::new(crate::control::metrics::SystemMetrics::new());
+        core.metrics = Some(metrics.clone());
+        let txn_id = TxnId::new(99);
+
+        let gauge = || {
+            metrics
+                .active_txn_overlays
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        // Idle: nothing staged, gauge sits at zero.
+        assert_eq!(gauge(), 0, "gauge must start at zero");
+
+        // First materialization of the value/TTL overlay bumps the gauge to 1.
+        let _ = core.txn_overlay_mut(txn_id);
+        assert_eq!(gauge(), 1, "first overlay creation must bump the gauge");
+
+        // A second access to the SAME transaction's overlay must NOT double-count.
+        let _ = core.txn_overlay_mut(txn_id);
+        assert_eq!(gauge(), 1, "re-accessing an existing overlay must not bump");
+
+        // The parallel GRAPH overlay for the same txn is a distinct entry: 2.
+        let _ = core.graph_txn_overlay_mut(txn_id);
+        assert_eq!(gauge(), 2, "the graph overlay is a distinct tracked entry");
+
+        // DropTxnOverlay removes both entries and decrements by the exact count.
+        let task = make_task();
+        let resp = core.dispatch_meta(&task, TID, &MetaOp::DropTxnOverlay { txn_id });
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(
+            gauge(),
+            0,
+            "dropping both overlays must return the gauge to zero"
         );
     }
 }

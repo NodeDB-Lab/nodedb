@@ -119,7 +119,8 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
             &tasks,
             tenant_id,
             crate::control::planner::calvin::CrossShardTxnMode::Strict,
-            false,
+            crate::control::planner::calvin::TxnDispatchPosition::Autocommit,
+            &[],
         )
         .await
         .map_err(|error| ddl_err("XX000", error.to_string()))?;

@@ -271,7 +271,8 @@ impl LocalPlanExecutor {
             )
             .await
             {
-                Ok(payload) => ExecuteResponse::ok(vec![payload]),
+                // Replicated writes carry no read watermark → 0.
+                Ok(payload) => ExecuteResponse::ok(vec![payload], 0),
                 Err(e) => ExecuteResponse::err(TypedClusterError::Internal {
                     code: PLAN_DECODE_FAILED,
                     message: e.to_string(),
@@ -285,7 +286,9 @@ impl LocalPlanExecutor {
         )
         .await
         {
-            Ok(Ok(result)) => ExecuteResponse::ok(vec![result.payload]),
+            Ok(Ok(result)) => {
+                ExecuteResponse::ok(vec![result.payload], result.watermark_lsn.as_u64())
+            }
             Ok(Err(e)) => ExecuteResponse::err(TypedClusterError::Internal {
                 code: PLAN_DECODE_FAILED,
                 message: e.to_string(),

@@ -86,7 +86,7 @@ impl CoreLoop {
         predicted_sorted.sort_unstable();
         let doc_ids = ollp_predicted_doc_ids(predicted);
 
-        let overlay = self.txn_overlays.entry(txn_id).or_default();
+        let overlay = self.txn_overlay_mut(txn_id);
         for (surrogate, doc_id) in predicted_sorted.into_iter().zip(doc_ids) {
             overlay.insert_tombstone(coll_key.clone(), surrogate, &doc_id);
         }

@@ -58,6 +58,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::ConflictRetry { .. } => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }
+        // A cross-shard Calvin OCC abort is a serialization failure — the client
+        // should retry the whole transaction.
+        crate::Error::CalvinSerializationConflict => {
+            ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
+        }
         crate::Error::SourceFrozen { .. } => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }

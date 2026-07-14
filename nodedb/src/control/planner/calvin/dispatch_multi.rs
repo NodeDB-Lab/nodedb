@@ -4,14 +4,16 @@
 //!
 //! This is the session-UNAWARE core extracted from the pgwire
 //! `dispatch_calvin_multishard` static (non-OLLP) branch: classify the task
-//! set, reject cross-shard writes inside an explicit transaction block, build
-//! the static `TxClass`, and route the single submit-and-await to the
-//! sequencer-group leader via `submit_calvin_routed`.
+//! set, reject a cross-shard span that is a mid-block single statement (it
+//! cannot be buffered atomically), build the static `TxClass`, and route the
+//! single submit-and-await to the sequencer-group leader via
+//! `submit_calvin_routed`.
 //!
-//! It takes the two session-derived inputs the core needs — the cross-shard
-//! transaction mode and whether the caller is inside an explicit transaction
-//! block — as plain parameters, so both the pgwire and native protocol paths
-//! can supply them and share one implementation. The function returns a raw
+//! It takes the session-derived inputs the core needs — the cross-shard
+//! transaction mode, the dispatch's position in the transaction lifecycle
+//! (autocommit / mid-block statement / COMMIT flush), and the session read-set —
+//! as plain parameters, so both the pgwire and native protocol paths can supply
+//! them and share one implementation. The function returns a raw
 //! `crate::Result<()>`: Calvin's static path produces no Data-Plane payload —
 //! its success is the durable, replicated commit acknowledged by
 //! `submit_calvin_routed` — so the per-task command tags are synthesised by
@@ -25,9 +27,10 @@
 
 use crate::bridge::envelope::Response;
 use crate::control::planner::calvin::{
-    CrossShardTxnMode, DispatchClass, build_static_tx_class, classify_dispatch,
-    submit_calvin_routed,
+    CrossShardTxnMode, DispatchClass, TxnDispatchPosition, build_static_tx_class,
+    classify_dispatch, read_vshards_of, submit_calvin_routed,
 };
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
@@ -37,9 +40,15 @@ use nodedb_physical::physical_task::PhysicalTask;
 /// - `cross_shard_mode`: the session's effective cross-shard transaction mode.
 ///   Only [`CrossShardTxnMode::Strict`] routes through Calvin here; callers are
 ///   expected to have already gated on this, but it is re-checked defensively.
-/// - `in_txn_block`: `true` if the caller is inside an explicit transaction
-///   block. Cross-shard writes in an explicit block are rejected with
-///   [`crate::Error::CrossShardInExplicitTransaction`], matching pgwire.
+/// - `position`: where this dispatch sits in the transaction lifecycle. Only a
+///   [`TxnDispatchPosition::MidBlockStatement`] cross-shard span is rejected with
+///   [`crate::Error::CrossShardInExplicitTransaction`] (it cannot be buffered
+///   atomically); [`TxnDispatchPosition::Autocommit`] and the COMMIT
+///   [`TxnDispatchPosition::CommitFlush`] both proceed.
+/// - `reads`: the session read-set. It widens the dispatch classification and
+///   the `TxClass` participants/OCC set in lockstep — a txn that writes shard A
+///   but reads shard B enumerates B as a participant. Autocommit callers pass an
+///   empty slice.
 ///
 /// On success the Calvin transaction has been submitted and acknowledged by the
 /// sequencer leader. Returns the applied Data-Plane [`Response`] when the write
@@ -50,13 +59,20 @@ pub async fn dispatch_tasks_to_calvin(
     tasks: &[PhysicalTask],
     tenant_id: TenantId,
     cross_shard_mode: CrossShardTxnMode,
-    in_txn_block: bool,
+    position: TxnDispatchPosition,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<Option<Response>> {
-    // Autocommit cross-shard dispatch: no session read-set (that is captured
-    // only inside an explicit transaction block), so classify by writes alone.
-    match classify_dispatch(tasks, &std::collections::BTreeSet::new()) {
+    // The read-set widens classification exactly as it widens the TxClass
+    // participants below: an empty slice (autocommit) preserves write-only
+    // classification.
+    let read_vshards = read_vshards_of(reads);
+    match classify_dispatch(tasks, &read_vshards) {
         DispatchClass::MultiShard { .. } => {
-            if in_txn_block {
+            // A mid-block single statement cannot be buffered atomically, so a
+            // cross-shard span there is rejected. The COMMIT flush of a buffered
+            // block is NOT a mid-block statement — its whole batch commits
+            // atomically — so it proceeds.
+            if position == TxnDispatchPosition::MidBlockStatement {
                 return Err(crate::Error::CrossShardInExplicitTransaction);
             }
             match cross_shard_mode {
@@ -67,8 +83,9 @@ pub async fn dispatch_tasks_to_calvin(
                     if state.sequencer_inbox.get().is_none() {
                         return Err(crate::Error::SequencerUnavailable);
                     }
-                    // Autocommit cross-shard write: no session read-set yet.
-                    let tx_class = build_static_tx_class(tasks, tenant_id, &[])?;
+                    // Thread the session read-set into the TxClass so read shards
+                    // are enumerated as Calvin participants and validated by OCC.
+                    let tx_class = build_static_tx_class(tasks, tenant_id, reads)?;
                     submit_calvin_routed(state, tx_class).await
                 }
                 CrossShardTxnMode::BestEffortNonAtomic => {

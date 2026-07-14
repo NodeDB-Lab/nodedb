@@ -8,6 +8,7 @@ mod cursor_cmds;
 mod cursor_query;
 mod dispatch;
 mod facet;
+mod in_flight;
 pub mod listen_notify;
 mod listen_notify_exec;
 mod live_select;

@@ -106,6 +106,14 @@ where
             // Return the completed txn's id so the caller can drain the applied
             // Response (RETURNING rows) the scheduler deposited before the ack.
             AttemptOutcome::Completed => return Ok(txn_id),
+            // Terminal, NON-retryable: the global cross-shard OCC verdict was
+            // ABORT (read-set validation failed). A serialization failure is a
+            // terminal verdict, not OLLP predicate drift — a fresh reconnaissance
+            // cannot change a committed verdict, so surface it to the client as
+            // SQLSTATE 40001 immediately instead of burning retries.
+            AttemptOutcome::Aborted => {
+                return Err(Error::CalvinSerializationConflict);
+            }
             // Terminal, NON-retryable: the scheduler rejected the transaction's
             // local plan routing and broadcast `TxnRoutingFailed`. A fresh
             // reconnaissance can never fix a routing rejection, so surface it

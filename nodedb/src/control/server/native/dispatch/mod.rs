@@ -27,4 +27,4 @@ pub(crate) use direct_ops::{handle_direct_op, handle_graph_match};
 pub(crate) use session_ops::{handle_reset, handle_set, handle_show};
 pub(crate) use sql::{handle_sql, handle_sql_streaming};
 pub(crate) use streaming::{SqlOutcome, SqlStream};
-pub(crate) use transaction::{handle_begin, handle_commit, handle_rollback};
+pub(crate) use transaction::{NativeTxnDp, handle_begin, handle_commit, handle_rollback};

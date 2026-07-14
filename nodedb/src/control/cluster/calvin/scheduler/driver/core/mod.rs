@@ -10,6 +10,8 @@
 //! Sub-modules (one concern per file):
 //!
 //! - [`scheduler`] — `Scheduler` struct, ctor, run loop.
+//! - [`completion_route`] — routes each executor response (disconnect, OLLP
+//!   mismatch, staged commit-resolution state, or direct apply) to its handler.
 //! - [`process`] — new-txn processing, dependent-read barrier setup,
 //!   txn-completion bookkeeping.
 //! - [`dispatch`] — static / active dispatch to the Data Plane executor.
@@ -41,6 +43,7 @@
 
 pub mod commit_redo;
 pub mod commit_resolve;
+pub mod completion_route;
 pub mod dispatch;
 pub mod process;
 pub mod propose;

@@ -333,7 +333,7 @@ impl CoreLoop {
                 limit: MAX_TXN_OVERLAY_BYTES,
             });
         }
-        self.txn_overlays.entry(ctx.txn_id).or_default().insert_put(
+        self.txn_overlay_mut(ctx.txn_id).insert_put(
             ctx.coll_key.clone(),
             ctx.surrogate.0,
             &ctx.document_id,

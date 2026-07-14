@@ -394,9 +394,7 @@ impl CoreLoop {
                 continue;
             }
 
-            self.txn_overlays
-                .entry(txn_id)
-                .or_default()
+            self.txn_overlay_mut(txn_id)
                 .insert_tombstone(coll_key, surrogate.0, &doc_id);
             deleted += 1;
         }

@@ -10,11 +10,13 @@ use tracing::info;
 
 use nodedb_cluster::MultiRaft;
 use nodedb_cluster::calvin::types::SequencedTxn;
-use nodedb_cluster::calvin::{SEQUENCER_GROUP_ID, SequencerEntry};
+use nodedb_cluster::calvin::{
+    CalvinCompletionRegistry, SEQUENCER_GROUP_ID, SequencerEntry, VerdictSignal,
+};
 
 use super::super::barrier::{PendingDependentBarrier, ReadResultEvent};
 use super::super::config::SchedulerConfig;
-use super::super::types::{BlockedTxn, CommitState, PendingTxn};
+use super::super::types::{BlockedTxn, PendingTxn};
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::AppliedGate;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
@@ -107,6 +109,21 @@ pub struct Scheduler {
     /// [`WriteAdmissionGuard`]: crate::control::server::shared::write_admission::WriteAdmissionGuard
     pub(in crate::control::cluster::calvin::scheduler::driver::core) promotion_rx:
         mpsc::UnboundedReceiver<Vec<TxnId>>,
+    /// Shared cross-node completion registry. The scheduler PROBES it
+    /// (`registry.verdict(txn)`) when parking a staged txn on the cross-shard
+    /// commit barrier and again on each stall sweep — the durable, replicated
+    /// source of truth for the global commit/abort verdict. `Send + Sync`; it is
+    /// the same registry the sequencer state machine and completion waiters
+    /// share, so holding an `Arc` here crosses no plane boundary.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) registry:
+        Arc<CalvinCompletionRegistry>,
+    /// Push channel for durable verdicts. `note_verdict` (on this node's
+    /// registry) broadcasts a [`VerdictSignal`] here the instant a verdict is
+    /// stored; the `select!` loop resumes the matching parked txn with low
+    /// latency. The probe-on-park and stall re-probe sweep backstop any dropped
+    /// push, so a full/closed channel is never a correctness hazard.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) verdict_rx:
+        mpsc::Receiver<VerdictSignal>,
 }
 
 /// Parameters for [`Scheduler::new`].
@@ -132,6 +149,12 @@ pub struct SchedulerParams {
     /// `SharedState.calvin_promotion_senders` for this same vShard so a fast-path
     /// guard drop can hand promoted waiters back to this scheduler.
     pub promotion_rx: mpsc::UnboundedReceiver<Vec<TxnId>>,
+    /// Shared completion registry for verdict probes on the commit barrier.
+    pub registry: Arc<CalvinCompletionRegistry>,
+    /// Verdict-push receiver. Constructed by `reconcile_vshard_schedulers`; its
+    /// `Sender` is registered on `registry` for this same vShard so a stored
+    /// verdict is pushed here immediately.
+    pub verdict_rx: mpsc::Receiver<VerdictSignal>,
 }
 
 impl Scheduler {
@@ -150,6 +173,8 @@ impl Scheduler {
             read_result_rx,
             lock_manager,
             promotion_rx,
+            registry,
+            verdict_rx,
         } = params;
 
         // Capacity: at most one completion per inflight txn. Use the incoming
@@ -174,6 +199,8 @@ impl Scheduler {
             completion_rx,
             completion_tx,
             promotion_rx,
+            registry,
+            verdict_rx,
         }
     }
 
@@ -229,8 +256,17 @@ impl Scheduler {
             "calvin scheduler starting"
         );
 
+        // Low-frequency liveness timer so the top-of-loop stall/barrier sweeps
+        // run even on an otherwise-idle vShard. Without it, a dropped verdict
+        // push plus zero further events for this vShard would leave a parked txn
+        // never re-probing the durable verdict. A fraction of the stall-warn
+        // window re-probes well within it.
+        let mut stall_tick = tokio::time::interval(self.config.verdict_stall_warn() / 4);
+        stall_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             self.check_dependent_barrier_timeouts();
+            self.check_awaiting_verdict_stalls();
 
             tokio::select! {
                 biased;
@@ -243,6 +279,14 @@ impl Scheduler {
                 maybe_completion = self.completion_rx.recv() => {
                     if let Some((txn_id, request_id, resp_opt)) = maybe_completion {
                         self.handle_completion(txn_id, request_id, resp_opt);
+                    }
+                }
+
+                maybe_verdict = self.verdict_rx.recv() => {
+                    if let Some(signal) = maybe_verdict {
+                        // A durable global verdict landed: resume the matching
+                        // parked txn into its flush (commit) or drop (abort).
+                        self.handle_verdict_signal(signal);
                     }
                 }
 
@@ -275,154 +319,15 @@ impl Scheduler {
                         }
                     }
                 }
+
+                _ = stall_tick.tick() => {
+                    // Empty body on purpose: the top-of-loop
+                    // check_awaiting_verdict_stalls / check_dependent_barrier_timeouts
+                    // do the work on every wake. This arm only guarantees the loop
+                    // wakes to run them when no other event arrives.
+                }
             }
         }
-    }
-
-    /// Process a completed executor response (or disconnected channel).
-    ///
-    /// Called from the `completion_rx` arm of the main `select!` loop.
-    fn handle_completion(
-        &mut self,
-        txn_id: TxnId,
-        request_id: RequestId,
-        resp_opt: Option<Response>,
-    ) {
-        let response = match resp_opt {
-            Some(r) => r,
-            None => {
-                // Bridge task observed a closed channel before any response.
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    request_id = request_id.as_u64(),
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    "calvin: executor response channel disconnected"
-                );
-                self.metrics.record_executor_error();
-                self.metrics.record_infra_abort(
-                    crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason::IO_ERROR,
-                );
-                self.metrics.record_completed();
-                self.on_txn_complete(txn_id);
-                return;
-            }
-        };
-
-        let elapsed_ms = self
-            .pending
-            .get(&txn_id)
-            .map(|p| p.dispatch_time.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        self.metrics.record_executor_txn_duration_ms(elapsed_ms);
-
-        // OLLP mismatch: the active executor detected predicate drift and returned
-        // OllpRetryRequired without writing. The retry loop is now COORDINATOR-owned
-        // (`run_dependent_with_retry`): the scheduler must NOT re-submit a stale
-        // prediction. Instead it (1) releases the aborted attempt's locks and
-        // (2) signals the coordinator's completion waiter via the registry so it
-        // can run a FRESH reconnaissance and resubmit.
-        if response.status == crate::bridge::envelope::Status::Error
-            && response.error_code == Some(crate::bridge::envelope::ErrorCode::OllpRetryRequired)
-        {
-            // A mismatch is a normal OLLP retry signal, not a failure: the executor
-            // correctly detected predicate drift and declined to write. Count it as
-            // a received executor response, but NOT as an executor error or infra
-            // abort — those would inflate failure metrics on every routine retry.
-            self.metrics.record_completed();
-            // (1) Release the aborted attempt's locks and clean up pending state.
-            // This fixes the lock-leak: the old `schedule_ollp_retry` re-submitted
-            // without ever releasing the aborted attempt's locks.
-            self.on_txn_complete(txn_id);
-            // OLLP mismatch broadcast is LEADER-ONLY. The optimistic-lock
-            // verification runs only on the data-group leader (the data plane
-            // skips it on followers — see the `ollp_is_group_leader` gate in the
-            // bulk-DML handlers), so by construction only a leader's executor can
-            // return `OllpRetryRequired`. This guard is defense-in-depth: a
-            // non-leader scheduler must never broadcast a mismatch — a lagging
-            // follower could otherwise poison an attempt the leader already
-            // completed, exhausting retries on a static dataset. A non-leader
-            // simply releases locks (done above) and returns; the leader owns the
-            // single mismatch signal that the completion registry observes.
-            if !self.is_group_leader() {
-                tracing::debug!(
-                    vshard_id = self.vshard_id,
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    "calvin: OllpRetryRequired observed on non-leader; NOT broadcasting mismatch \
-                     (leader owns the verification decision)"
-                );
-                return;
-            }
-            // (2) Broadcast the mismatch signal via the sequencer-group Raft so that
-            // the coordinator's CalvinCompletionRegistry fires on EVERY replica,
-            // including remote nodes. The SequencerStateMachine::apply() arm for
-            // OllpMismatch calls note_ollp_mismatch, waking the coordinator's
-            // retry-loop waiter wherever it is — mirrors how CompletionAck is
-            // delivered to remote coordinators.
-            self.propose_sequencer_entry(
-                SequencerEntry::OllpMismatch {
-                    epoch: txn_id.epoch,
-                    position: txn_id.position,
-                },
-                txn_id,
-                "OLLP mismatch signal",
-            );
-            return;
-        }
-
-        // Staged static Calvin apply: a STAGED response carries the local commit
-        // vote; drive the flush-or-drop and let the resolve response run the
-        // commit tail. Dependent / active txns carry no `commit_state` and apply
-        // directly below.
-        let commit_state = self.pending.get(&txn_id).and_then(|p| p.commit_state);
-        match commit_state {
-            Some(CommitState::Staged) => {
-                self.resolve_staged_commit(txn_id, &response);
-                return;
-            }
-            Some(CommitState::AwaitingRedoResolve) => {
-                self.finish_redo_resolve(txn_id, response);
-                return;
-            }
-            Some(CommitState::AwaitingResolve {
-                committed,
-                redo_lsn,
-            }) => {
-                self.finish_resolved_commit(txn_id, response, committed, redo_lsn);
-                return;
-            }
-            None => {}
-        }
-
-        if response.status == crate::bridge::envelope::Status::Ok {
-            // Observe whether the applying participant reported its slice of the
-            // transaction's reads as no longer current against the local write
-            // versions. Direct-apply (dependent/active) observation only: the
-            // staged path folds this into its commit vote instead. `None` means
-            // no read-set was checked.
-            if response.read_set_valid == Some(false) {
-                self.shared
-                    .calvin_counters
-                    .read_set_validation_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            self.commit_apply_tail(txn_id, response, None);
-        } else {
-            tracing::warn!(
-                vshard_id = self.vshard_id,
-                epoch = txn_id.epoch,
-                position = txn_id.position,
-                "calvin: executor response was not Ok; locks NOT released (shard degraded)"
-            );
-            self.metrics.record_executor_error();
-            self.metrics.record_infra_abort(
-                crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason::IO_ERROR,
-            );
-        }
-
-        self.metrics.record_completed();
-        self.on_txn_complete(txn_id);
     }
 
     /// Encode `entry` as MessagePack and propose it to the sequencer Raft group.

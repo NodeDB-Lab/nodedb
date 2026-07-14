@@ -47,6 +47,10 @@ pub struct ExecuteResponse {
     /// Raw Data Plane response payloads, one per result set.
     pub payloads: Vec<Vec<u8>>,
     pub error: Option<TypedClusterError>,
+    /// Max read watermark LSN observed by the executing node's cores; 0 for
+    /// writes/errors. Mirrors [`ExecuteStreamChunk::watermark_lsn`]: raw `u64`
+    /// on the wire, converted to `Lsn` at the coordinator via `Lsn::new`.
+    pub watermark_lsn: u64,
 }
 
 /// Typed error returned by the remote executor.
@@ -97,11 +101,12 @@ pub struct ExecuteStreamEnd {
 }
 
 impl ExecuteResponse {
-    pub fn ok(payloads: Vec<Vec<u8>>) -> Self {
+    pub fn ok(payloads: Vec<Vec<u8>>, watermark_lsn: u64) -> Self {
         Self {
             success: true,
             payloads,
             error: None,
+            watermark_lsn,
         }
     }
     pub fn err(error: TypedClusterError) -> Self {
@@ -109,6 +114,7 @@ impl ExecuteResponse {
             success: false,
             payloads: vec![],
             error: Some(error),
+            watermark_lsn: 0,
         }
     }
 }
@@ -268,12 +274,16 @@ mod tests {
 
     #[test]
     fn roundtrip_execute_response_success() {
-        let resp = ExecuteResponse::ok(vec![b"row1".to_vec(), b"row2".to_vec()]);
+        let resp = ExecuteResponse::ok(vec![b"row1".to_vec(), b"row2".to_vec()], 0xCAFE_1234);
         let decoded = roundtrip_resp(resp);
         assert!(decoded.success);
         assert_eq!(decoded.payloads.len(), 2);
         assert_eq!(decoded.payloads[0], b"row1");
         assert!(decoded.error.is_none());
+        assert_eq!(
+            decoded.watermark_lsn, 0xCAFE_1234,
+            "read watermark roundtrips on the response body"
+        );
     }
 
     #[test]
@@ -286,6 +296,10 @@ mod tests {
         });
         let decoded = roundtrip_resp(resp);
         assert!(!decoded.success);
+        assert_eq!(
+            decoded.watermark_lsn, 0,
+            "error responses carry no watermark"
+        );
         match decoded.error {
             Some(TypedClusterError::NotLeader {
                 group_id,

@@ -20,6 +20,15 @@ pub struct SchedulerConfig {
     /// `Instant::now()` is used for barrier timeouts (observability / off-WAL
     /// path only; never influences WAL bytes).
     pub dependent_read_passive_timeout_ms: u64,
+    /// Stall deadline for a staged txn parked awaiting the durable global
+    /// verdict. On expiry the scheduler re-probes the registry and, if the
+    /// verdict is still unknown, emits a stall warning + metric and KEEPS
+    /// WAITING (holding locks, never aborting) — a unilateral abort could tear a
+    /// cross-shard commit. This is purely a liveness/observability knob: it
+    /// controls how often the stall is surfaced, never whether the txn aborts.
+    ///
+    /// Default: `epoch_duration_ms * 250` milliseconds.
+    pub verdict_stall_warn_ms: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -30,6 +39,7 @@ impl Default for SchedulerConfig {
             txn_deadline_multiplier: 3,
             epoch_duration_ms,
             dependent_read_passive_timeout_ms: epoch_duration_ms * 3,
+            verdict_stall_warn_ms: epoch_duration_ms * 250,
         }
     }
 }
@@ -38,5 +48,10 @@ impl SchedulerConfig {
     /// Passive timeout as a `Duration`.
     pub fn passive_timeout(&self) -> Duration {
         Duration::from_millis(self.dependent_read_passive_timeout_ms)
+    }
+
+    /// Verdict-wait stall warning interval as a `Duration`.
+    pub fn verdict_stall_warn(&self) -> Duration {
+        Duration::from_millis(self.verdict_stall_warn_ms)
     }
 }

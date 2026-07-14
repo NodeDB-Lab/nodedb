@@ -185,6 +185,12 @@ impl SystemMetrics {
             "Per-core arena memory bytes",
             self.arena_memory_bytes.load(Ordering::Relaxed),
         );
+        gauge(
+            out,
+            "nodedb_active_txn_overlays",
+            "Live per-transaction staging overlays across all Data-Plane cores",
+            self.active_txn_overlays.load(Ordering::Relaxed),
+        );
 
         // ── Contention ──
         counter(

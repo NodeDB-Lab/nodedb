@@ -15,9 +15,45 @@ use super::dispatch;
 use super::{NativeSession, chunk_large_response};
 
 impl NativeSession {
+    /// Run the session: drives the frame loop, then reclaims any
+    /// still-open transaction's Data-Plane overlays on every exit path
+    /// (clean EOF, idle/absolute timeout, or abrupt disconnect/error).
+    pub async fn run(mut self) -> crate::Result<()> {
+        let result = self.run_loop().await;
+        self.reclaim_open_txn().await;
+        result
+    }
+
+    /// Reclaim a still-open transaction's Data-Plane overlays if the
+    /// connection ended mid-transaction (no COMMIT/ROLLBACK). Idempotent:
+    /// a no-op when the session is idle, so a graceful end does not
+    /// double-drop.
+    async fn reclaim_open_txn(&self) {
+        use crate::control::server::native::dispatch::NativeTxnDp;
+        use crate::control::server::shared::session::{TransactionState, lifecycle};
+
+        let Some(identity) = self.identity.as_ref() else {
+            return;
+        };
+        if self.sessions.transaction_state(&self.peer_addr) == TransactionState::Idle {
+            return;
+        }
+        let dp = NativeTxnDp {
+            state: self.state.as_ref(),
+        };
+        lifecycle::run_rollback(
+            &self.sessions,
+            &self.peer_addr,
+            identity,
+            self.state.as_ref(),
+            &dp,
+        )
+        .await;
+    }
+
     /// Run the session loop: read frames, route by opcode, write responses.
     #[instrument(skip(self), fields(peer = %self.peer_addr))]
-    pub async fn run(mut self) -> crate::Result<()> {
+    async fn run_loop(&mut self) -> crate::Result<()> {
         // Perform the version-negotiation handshake before any frame exchange.
         let limits = self.state.limits.clone();
         self.proto_ver =

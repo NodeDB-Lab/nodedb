@@ -57,7 +57,7 @@ impl CoreLoop {
         let coll_key = ctx.coll_key.clone();
         let document_id = ctx.document_id.clone();
         let surrogate: Surrogate = ctx.surrogate;
-        self.txn_overlays.entry(txn_id).or_default().set_ttl(
+        self.txn_overlay_mut(txn_id).set_ttl(
             coll_key,
             surrogate.0,
             &document_id,
@@ -84,7 +84,7 @@ impl CoreLoop {
         let coll_key = ctx.coll_key.clone();
         let document_id = ctx.document_id.clone();
         let surrogate: Surrogate = ctx.surrogate;
-        self.txn_overlays.entry(txn_id).or_default().set_ttl(
+        self.txn_overlay_mut(txn_id).set_ttl(
             coll_key,
             surrogate.0,
             &document_id,

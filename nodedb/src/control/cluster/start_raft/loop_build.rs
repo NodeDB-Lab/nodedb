@@ -143,6 +143,7 @@ pub(super) fn build_raft_loop(
         raft_loop_handle: raft_loop_handle.clone(),
         sequencer_state_machine: &sequencer_state_machine,
         calvin_read_result_senders: &calvin_read_result_senders,
+        calvin_completion_registry: &calvin_completion_registry,
         scheduler_config: &scheduler_config,
     })?;
 

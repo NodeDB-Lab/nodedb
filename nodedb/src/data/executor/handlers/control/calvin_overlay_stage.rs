@@ -176,6 +176,12 @@ impl CoreLoop {
     /// Idempotent: a missing key (already removed, or the id derivation
     /// itself failing) is a silent no-op — the same shape as the
     /// `commit_pending` removal it accompanies.
+    ///
+    /// Mirrors `MetaOp::DropTxnOverlay`'s gauge accounting exactly: both maps
+    /// were populated (if at all) via the `txn_overlay_mut` /
+    /// `graph_txn_overlay_mut` choke points, which bump `active_txn_overlays`
+    /// on first creation, so removal here must decrement by the same count
+    /// or the gauge drifts upward forever on every Calvin-staged transaction.
     pub(in crate::data::executor) fn drop_calvin_synthetic_overlay(
         &mut self,
         epoch: u64,
@@ -183,8 +189,14 @@ impl CoreLoop {
         vshard: u32,
     ) {
         if let Ok(synthetic_txn_id) = calvin_synthetic_txn_id(epoch, position, vshard) {
-            self.txn_overlays.remove(&synthetic_txn_id);
-            self.graph_txn_overlays.remove(&synthetic_txn_id);
+            let removed = u64::from(self.txn_overlays.remove(&synthetic_txn_id).is_some())
+                + u64::from(self.graph_txn_overlays.remove(&synthetic_txn_id).is_some());
+            if removed > 0
+                && let Some(m) = &self.metrics
+            {
+                m.active_txn_overlays
+                    .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 }

@@ -31,6 +31,13 @@ pub(super) struct PendingTxn {
     /// cleanup participants that dual-home alongside it carry no primary write and
     /// so never clobber the entry the coordinator drains.
     pub has_primary_write: bool,
+    /// Whether this vShard's slice carries a RETURNING-bearing write (a plan
+    /// whose applied response is DATA-ROWs, not a bare affected-count). Used at
+    /// the commit tail to detect a genuine cross-shard RETURNING union: two
+    /// returning-bearing participants for one txn are unsupported, whereas
+    /// multiple plain-write participants (a multi-collection cross-shard COMMIT)
+    /// coalesce without conflict.
+    pub has_returning: bool,
     /// Commit-resolution state for a static-set Calvin txn.
     ///
     /// `Some(CommitState::Staged)` for a static txn dispatched via the
@@ -38,6 +45,17 @@ pub(super) struct PendingTxn {
     /// commit vote and drives a flush-or-drop before the commit tail runs.
     /// `None` for dependent/active txns, which apply directly.
     pub commit_state: Option<CommitState>,
+    /// Stall deadline for a txn parked in [`CommitState::AwaitingVerdict`].
+    ///
+    /// `Some(instant)` only while parked: if the deadline passes with the
+    /// durable global verdict still unknown, the scheduler emits a stall
+    /// warning and re-arms this deadline — it NEVER releases locks and NEVER
+    /// aborts (a unilateral abort while a peer may have already flushed a commit
+    /// would tear the transaction). `None` in every other state.
+    ///
+    /// `Instant::now()` is used for this deadline (observability / liveness
+    /// only; never influences WAL bytes).
+    pub verdict_deadline: Option<Instant>,
 }
 
 /// Commit-resolution state of a staged static Calvin transaction.
@@ -46,6 +64,17 @@ pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
     /// Awaiting the validate-and-stage response, whose `read_set_valid` carries
     /// the local commit vote that drives the flush-or-drop decision.
     Staged,
+    /// The staged txn has cast its local vote and PARKED, awaiting the durable
+    /// authoritative GLOBAL verdict aggregated across all participant vShards.
+    ///
+    /// The scheduler holds this txn's locks and its staged Data-Plane buffer
+    /// intact while parked; it resumes into a flush (verdict = commit) or a drop
+    /// (verdict = abort) only once `registry.verdict(txn)` is known — via the
+    /// verdict push, the probe on park, or the stall re-probe sweep. This is the
+    /// cross-shard commit barrier: no participant self-decides on its local
+    /// vote, so a torn commit (one shard flushes while a peer drops) is
+    /// impossible.
+    AwaitingVerdict,
     /// The txn committed and a `MetaOp::CalvinResolve` has been dispatched to
     /// resolve its staged post-images into a replayable `RedoRecord`; awaiting
     /// that response before the redo is WAL-appended and the flush dispatched.

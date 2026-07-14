@@ -13,8 +13,9 @@
 //! drop.
 
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
-use nodedb_cluster::calvin::SequencerEntry;
+use nodedb_cluster::calvin::{SequencerEntry, VerdictSignal};
 
 use super::super::types::CommitState;
 use super::scheduler::Scheduler;
@@ -25,19 +26,26 @@ use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
 impl Scheduler {
-    /// Resolve a staged transaction's local commit vote into a redo-resolve
-    /// (commit) or a drop (abort).
+    /// Cast this participant's local commit vote for a staged transaction, then
+    /// PARK it on the cross-shard commit barrier awaiting the durable GLOBAL
+    /// verdict — it does NOT self-decide flush-or-drop on its local vote.
     ///
     /// The staged executor response is validate-only: its `read_set_valid` is
-    /// the local commit vote (`Some(true)` => commit, `Some(false)` => abort; a
-    /// defensive `None` is treated as commit). On commit, dispatches
-    /// `MetaOp::CalvinResolve` and moves the txn to
-    /// [`CommitState::AwaitingRedoResolve`] — [`Self::finish_redo_resolve`]
-    /// WAL-appends the resolved redo and dispatches the flush from there. On
-    /// abort, dispatches the drop directly and moves the txn to
-    /// [`CommitState::AwaitingResolve`]. Bumps the flushed / dropped counter.
-    /// The commit tail runs later, in [`Self::finish_resolved_commit`], once
-    /// the flush/drop response arrives.
+    /// this shard's local commit vote (`Some(true)` => commit, `Some(false)` =>
+    /// abort; a `None` from the active/dependent path is treated as commit). The
+    /// leader proposes that vote via the sequencer Raft group; the sequencer
+    /// aggregates all participants' votes into a single authoritative
+    /// `SequencerEntry::Verdict`, applied on every replica.
+    ///
+    /// This method moves the txn to [`CommitState::AwaitingVerdict`] WITHOUT
+    /// dispatching a resolve or drop, then immediately probes
+    /// `registry.verdict(txn)`: if the verdict is already durable (replay, or a
+    /// push we raced) it resumes at once via [`Self::resume_on_verdict`];
+    /// otherwise it stays parked, holding locks and its staged buffer, until the
+    /// verdict push, a later probe, or the stall re-probe sweep delivers the
+    /// verdict. Resuming (in `resume_on_verdict`) is where the flush/drop is
+    /// dispatched and the flushed/dropped counters bump — using the GLOBAL
+    /// verdict, never the local vote.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn resolve_staged_commit(
         &mut self,
         txn_id: TxnId,
@@ -48,10 +56,8 @@ impl Scheduler {
         // Durably propose this participant's commit vote via the sequencer
         // Raft group, leader-guarded like `OllpMismatch`: only the data-group
         // leader ran read-set validation, so only a leader's vote is
-        // authoritative. Currently observed-only — the registry tallies the
-        // vote (`CalvinCompletionRegistry::note_vote`) but nothing yet reads
-        // the tally to change flush/drop behavior; the local `committed`
-        // decision below still drives the resolve path unchanged.
+        // authoritative. The sequencer aggregates every participant's vote into
+        // the single `SequencerEntry::Verdict` this txn parks on below.
         if self.is_group_leader() {
             self.propose_sequencer_entry(
                 SequencerEntry::Vote {
@@ -72,6 +78,61 @@ impl Scheduler {
                 .calvin_counters
                 .read_set_validation_failures
                 .fetch_add(1, Ordering::Relaxed);
+        }
+
+        // PARK on the barrier: transition to `AwaitingVerdict` and arm the stall
+        // deadline. Do NOT dispatch resolve/drop here — the GLOBAL verdict, not
+        // this local vote, decides. If the txn already vanished (torn down
+        // elsewhere), there is nothing to park.
+        match self.pending.get_mut(&txn_id) {
+            Some(pending) => {
+                pending.commit_state = Some(CommitState::AwaitingVerdict);
+                pending.verdict_deadline = Some(Instant::now() + self.config.verdict_stall_warn());
+            }
+            None => return,
+        }
+
+        // PROBE on park (correctness backstop): the verdict may already be
+        // durable — on replay, or a push that raced ahead of this park. Resume
+        // immediately if so; the double-resume guard in `resume_on_verdict`
+        // makes a later duplicate push/probe a no-op.
+        if let Some(verdict) = self.registry.verdict(nodedb_cluster::calvin::TxnId::new(
+            txn_id.epoch,
+            txn_id.position,
+        )) {
+            self.resume_on_verdict(txn_id, verdict);
+        }
+    }
+
+    /// Resume a txn parked in [`CommitState::AwaitingVerdict`] once the durable
+    /// GLOBAL verdict is known: dispatch its flush (commit) or drop (abort).
+    ///
+    /// `committed` is the authoritative cross-shard verdict — NOT this shard's
+    /// local vote. On commit, dispatches `MetaOp::CalvinResolve` and moves the
+    /// txn to [`CommitState::AwaitingRedoResolve`] (the resolved redo is
+    /// WAL-appended and the flush dispatched from [`Self::finish_redo_resolve`]).
+    /// On abort, dispatches the drop directly and moves the txn to
+    /// [`CommitState::AwaitingResolve`]. Bumps the flushed / dropped counter. The
+    /// commit tail runs later in [`Self::finish_resolved_commit`], once the
+    /// flush/drop response arrives.
+    ///
+    /// Double-resume guard: the verdict push and the probe-on-park (and the
+    /// stall re-probe sweep) can all fire for one txn, so this first confirms the
+    /// txn is still `Some(AwaitingVerdict)` — if it already transitioned out
+    /// (resolve/drop dispatched, or completed), this is a no-op. This guarantees
+    /// the flush/drop is dispatched exactly once.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn resume_on_verdict(
+        &mut self,
+        txn_id: TxnId,
+        committed: bool,
+    ) {
+        // Guard: only a still-parked txn resumes. Mirrors `handle_completion`'s
+        // state-match so a duplicate push/probe/timeout is idempotent.
+        if !matches!(
+            self.pending.get(&txn_id).and_then(|p| p.commit_state),
+            Some(CommitState::AwaitingVerdict)
+        ) {
+            return;
         }
 
         let dispatched = if committed {
@@ -104,6 +165,8 @@ impl Scheduler {
                     redo_lsn: None,
                 }
             });
+            // No longer parked: clear the stall deadline.
+            pending.verdict_deadline = None;
         }
 
         if committed {
@@ -116,6 +179,68 @@ impl Scheduler {
                 .calvin_counters
                 .commits_dropped
                 .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Handle a pushed [`VerdictSignal`] from this node's completion registry.
+    ///
+    /// Matches the signal to the parked txn by `(epoch, position)` and resumes
+    /// it. A signal for a txn this scheduler does not host, or one that already
+    /// resumed, is a harmless no-op (the double-resume guard covers the latter).
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn handle_verdict_signal(
+        &mut self,
+        signal: VerdictSignal,
+    ) {
+        let txn_id = TxnId::new(signal.epoch, signal.position);
+        self.resume_on_verdict(txn_id, signal.commit);
+    }
+
+    /// Sweep parked `AwaitingVerdict` txns whose stall deadline has passed.
+    ///
+    /// For each stalled txn, RE-PROBE the durable verdict: if it is now known,
+    /// resume (a push we dropped on a full channel, or a verdict that landed
+    /// after the last probe). If it is STILL unknown, KEEP WAITING — hold locks,
+    /// emit a stall metric + warning, and re-arm the deadline so the warning is
+    /// rate-limited rather than per-iteration. It NEVER releases locks and NEVER
+    /// unilaterally aborts: a participant cannot know whether a peer already
+    /// flushed a COMMIT, so aborting one side while a peer committed would tear
+    /// the transaction. The verdict is guaranteed to arrive eventually — a
+    /// post-failover leader re-aggregates the replicated votes (seeded on every
+    /// replica) into the same verdict — so waiting is always the safe action.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn check_awaiting_verdict_stalls(
+        &mut self,
+    ) {
+        let now = Instant::now();
+        let stalled: Vec<TxnId> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| matches!(p.commit_state, Some(CommitState::AwaitingVerdict)))
+            .filter(|(_, p)| p.verdict_deadline.is_some_and(|d| now >= d))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for txn_id in stalled {
+            if let Some(verdict) = self.registry.verdict(nodedb_cluster::calvin::TxnId::new(
+                txn_id.epoch,
+                txn_id.position,
+            )) {
+                self.resume_on_verdict(txn_id, verdict);
+                continue;
+            }
+
+            // Verdict still unknown: keep waiting, hold locks, never abort.
+            self.metrics.record_verdict_stall();
+            tracing::warn!(
+                vshard_id = self.vshard_id,
+                epoch = txn_id.epoch,
+                position = txn_id.position,
+                "calvin: staged txn still awaiting the cross-shard verdict past its stall \
+                 deadline; HOLDING locks and waiting (never aborting — a peer may have already \
+                 flushed a commit). The verdict is guaranteed to arrive."
+            );
+            if let Some(pending) = self.pending.get_mut(&txn_id) {
+                pending.verdict_deadline = Some(now + self.config.verdict_stall_warn());
+            }
         }
     }
 
@@ -191,19 +316,22 @@ impl Scheduler {
         // present by the time the coordinator drains it — no lost result, no
         // race.
         //
-        // Gated on the PRIMARY-WRITE participant: the sole participant whose
-        // slice carries the user's non-edge DML (Document/KV/Vector/etc.), as
-        // opposed to the implicit graph-edge cleanup that dual-homes alongside
-        // it. Exactly one participant carries the primary write for a
-        // single-collection user DML (+ its edges), so the edge participants
-        // never clobber the entry; the `CalvinApplyResult::{Single,Conflict}`
-        // guard stays as belt-and-suspenders. Results travel via this in-process
-        // sidecar only — never the sequencer Raft log.
-        let has_primary_write = self
+        // Gated on the PRIMARY-WRITE participant: any participant whose slice
+        // carries the user's non-edge DML (Document/KV/Vector/etc.), as opposed
+        // to the implicit graph-edge cleanup that dual-homes alongside it. A
+        // multi-collection cross-shard COMMIT has MANY primary-write
+        // participants — each a plain affected-count write — and they coalesce:
+        // the first applied response stands for the coordinator (which discards
+        // it for a COMMIT tag anyway), and the plain-write siblings do not
+        // conflict. Only a genuine cross-shard RETURNING union — two
+        // participants each carrying RETURNING rows — records `Conflict`.
+        // Results travel via this in-process sidecar only — never the sequencer
+        // Raft log.
+        let (has_primary_write, has_returning) = self
             .pending
             .get(&txn_id)
-            .map(|p| p.has_primary_write)
-            .unwrap_or(false);
+            .map(|p| (p.has_primary_write, p.has_returning))
+            .unwrap_or((false, false));
         if has_primary_write {
             use std::collections::hash_map::Entry;
 
@@ -217,22 +345,51 @@ impl Scheduler {
                 .unwrap_or_else(|p| p.into_inner());
             match results.entry(key) {
                 Entry::Vacant(slot) => {
-                    slot.insert(CalvinApplyResult::Single(response));
+                    slot.insert(CalvinApplyResult::Single {
+                        response,
+                        has_returning,
+                    });
                 }
                 Entry::Occupied(mut slot) => {
-                    // A second RETURNING-bearing participant for one Calvin txn
-                    // means a cross-shard RETURNING union, which is unsupported.
-                    // Record Conflict so the coordinator fails the statement
-                    // loudly rather than returning one shard's rows. Unreachable
-                    // under collection-level sharding today.
-                    tracing::error!(
-                        epoch = txn_id.epoch,
-                        position = txn_id.position,
-                        vshard = self.vshard_id,
-                        "multiple RETURNING participants for one Calvin txn — cross-shard \
-                         RETURNING union unsupported"
+                    // Derive both facts from the existing entry BEFORE any
+                    // insert, so the immutable borrow does not outlive the
+                    // mutable one.
+                    let existing_returning = matches!(
+                        slot.get(),
+                        CalvinApplyResult::Single {
+                            has_returning: true,
+                            ..
+                        }
                     );
-                    slot.insert(CalvinApplyResult::Conflict);
+                    let already_conflict = matches!(slot.get(), CalvinApplyResult::Conflict);
+
+                    if already_conflict {
+                        // A RETURNING union was already recorded; stays Conflict.
+                    } else if has_returning && existing_returning {
+                        // Two RETURNING-bearing participants for one Calvin txn:
+                        // a cross-shard RETURNING union, which is unsupported.
+                        // Record Conflict so the coordinator fails the statement
+                        // loudly rather than returning one shard's partial rows.
+                        tracing::error!(
+                            epoch = txn_id.epoch,
+                            position = txn_id.position,
+                            vshard = self.vshard_id,
+                            "two RETURNING-bearing participants for one Calvin txn — cross-shard \
+                             RETURNING union unsupported"
+                        );
+                        slot.insert(CalvinApplyResult::Conflict);
+                    } else if has_returning {
+                        // The incoming participant carries the rows; the existing
+                        // entry was a plain affected-count sibling. Rows win.
+                        slot.insert(CalvinApplyResult::Single {
+                            response,
+                            has_returning: true,
+                        });
+                    } else {
+                        // Incoming is a plain write; keep the existing entry — a
+                        // multi-collection cross-shard COMMIT coalesces (the
+                        // coordinator discards it for a COMMIT tag anyway).
+                    }
                 }
             }
         }

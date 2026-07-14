@@ -9,7 +9,8 @@ use nodedb_types::value::Value;
 use std::sync::Arc;
 
 use crate::control::planner::calvin::{
-    CrossShardTxnMode, DispatchClass, classify_dispatch, dispatch_tasks_to_calvin,
+    CrossShardTxnMode, DispatchClass, TxnDispatchPosition, classify_dispatch,
+    dispatch_tasks_to_calvin,
 };
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::shared::authorization::{authorize_database, authorize_task_set};
@@ -312,7 +313,8 @@ async fn execute_planned(
                     &tasks,
                     ctx.tenant_id(),
                     cross_shard_mode,
-                    false,
+                    TxnDispatchPosition::Autocommit,
+                    &[],
                 )
                 .await
                 {

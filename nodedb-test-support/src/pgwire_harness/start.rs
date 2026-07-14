@@ -35,6 +35,14 @@ pub(super) struct StartConfig {
     /// Raft snapshot builder requires a routing table to resolve a group's
     /// vShards, so round-trip tests inject one here.
     pub routing: Option<nodedb_cluster::RoutingTable>,
+    /// Idle session timeout in seconds applied to the node's `SharedState`
+    /// before it is shared. `0` (the default) leaves the idle watchdog
+    /// disabled; a small value (e.g. `1`) lets tests exercise the pgwire
+    /// listener's idle-timeout force-close and overlay reclamation.
+    pub idle_timeout_secs: u64,
+    /// Absolute session lifetime in seconds applied to `SharedState` before it
+    /// is shared. `0` (the default) disables the absolute cap.
+    pub session_absolute_timeout_secs: u64,
 }
 
 impl Default for StartConfig {
@@ -44,6 +52,8 @@ impl Default for StartConfig {
             lockout: None,
             columnar_flush_threshold: None,
             routing: None,
+            idle_timeout_secs: 0,
+            session_absolute_timeout_secs: 0,
         }
     }
 }
@@ -79,6 +89,20 @@ impl TestServer {
         Self::start_with_config(StartConfig {
             auth_mode: AuthMode::Password,
             lockout: Some((5, 300)),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Spawn a single-core NodeDB server with a short idle session timeout so
+    /// tests can exercise the pgwire listener's idle-timeout watchdog: an
+    /// idle-in-transaction connection is force-closed after `idle_secs`,
+    /// triggering `on_connection_end` overlay reclamation. All other settings
+    /// stay at their defaults (trust-mode auth, lockout disabled, no absolute
+    /// cap).
+    pub async fn start_with_idle_timeout(idle_secs: u64) -> Self {
+        Self::start_with_config(StartConfig {
+            idle_timeout_secs: idle_secs,
             ..Default::default()
         })
         .await
@@ -146,6 +170,10 @@ impl TestServer {
             if let Some(routing) = cfg.routing {
                 s.cluster_routing = Some(std::sync::Arc::new(std::sync::RwLock::new(routing)));
             }
+            s.set_session_timeouts_for_test(
+                cfg.idle_timeout_secs,
+                cfg.session_absolute_timeout_secs,
+            );
         }
         let shared = shared;
 
@@ -166,7 +194,9 @@ impl TestServer {
                     core_dir: dir.path().to_path_buf(),
                     core_array_catalog: shared.array_catalog.clone(),
                     event_producer,
-                    core_metrics: None,
+                    // Share the Control-Plane `SystemMetrics` so the Data-Plane
+                    // core updates the same `active_txn_overlays` gauge tests read.
+                    core_metrics: shared.system_metrics.clone(),
                     governor: shared.governor.clone(),
                     replay: None,
                     graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),

@@ -36,8 +36,9 @@ impl Gateway {
     /// retry-vs-stream contract — once a route's stream is live, its errors are
     /// terminal.
     ///
-    /// `execute` / `execute_with_version_set` are intentionally left unchanged;
-    /// their many callers depend on the collected `Vec<Vec<u8>>` shape.
+    /// The streaming path does not go through `execute` /
+    /// `execute_with_version_set` (which collect a materialized `Vec<Vec<u8>>`);
+    /// it frames rows incrementally instead.
     pub async fn execute_stream(
         &self,
         ctx: &QueryContext,

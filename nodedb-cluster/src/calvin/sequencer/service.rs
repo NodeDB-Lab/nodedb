@@ -178,6 +178,15 @@ impl SequencerService {
             return;
         }
 
+        // Re-propose any complete-but-unstored cross-shard verdict. This must run
+        // on EVERY leader tick — including the empty-inbox / all-rejected ticks
+        // that return early below — so a verdict orphaned by a mid-commit
+        // sequencer failover (participant votes committed, but the aggregated
+        // `Verdict` entry never did before the old leader died) is always
+        // re-driven to durability. It is safe to skip only when not leader, which
+        // the gate above already guarantees.
+        self.redrive_unproposed_verdicts();
+
         // Snapshot inbox depth before drain so the gauge reflects the queue
         // depth at the start of this epoch.
         self.metrics
@@ -275,6 +284,41 @@ impl SequencerService {
             }
         }
         self.current_epoch += 1;
+    }
+
+    /// Re-propose every complete-but-unstored cross-shard verdict.
+    ///
+    /// Closes a failover deadlock: a follower that applied the committed `Vote`
+    /// entries reached the local vote-completeness transition, which set the
+    /// per-`PendingCompletion` `verdict_proposed` flag and emitted a signal the
+    /// non-leader service dropped. That flag is in-memory, non-durable, and never
+    /// reset, so after the follower promotes the normal emit path stays deduped
+    /// and never re-fires. If the prior leader died after the votes committed but
+    /// before the `Verdict` entry committed, no node would ever propose the
+    /// verdict and parked participants would stall in `AwaitingVerdict` forever.
+    ///
+    /// This leader-driven rescan re-proposes each such verdict on every tick,
+    /// using the same propose path as the emit-signal arm. It self-heals: a
+    /// re-proposed `Verdict` that already committed applies idempotently
+    /// (`note_verdict` dedups a same-value verdict), and once the verdict is
+    /// stored the registry stops returning that txn — so this cannot loop or
+    /// double-commit. Runs only on the leader; the caller gates on `is_leader`.
+    fn redrive_unproposed_verdicts(&self) {
+        for (txn, commit) in self.completion_registry.drain_unproposed_verdicts() {
+            if let Err(e) = self.propose_entry(&SequencerEntry::Verdict {
+                epoch: txn.epoch,
+                position: txn.position,
+                commit,
+            }) {
+                warn!(
+                    epoch = txn.epoch,
+                    position = txn.position,
+                    error = %e,
+                    "sequencer failover verdict re-propose failed; the next tick will \
+                     retry while this node stays leader"
+                );
+            }
+        }
     }
 
     fn is_leader(&self) -> bool {

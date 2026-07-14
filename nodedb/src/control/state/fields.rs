@@ -376,22 +376,24 @@ pub struct SharedState {
     /// read-set validation failures, commits flushed/dropped).
     pub calvin_counters: CalvinCounters,
     /// Local, in-process sidecar carrying the applied Data-Plane [`Response`]
-    /// (including RETURNING rows) of a completed Calvin transaction, keyed by
-    /// its sequencer-assigned `TxnId`.
+    /// (affected-count and any RETURNING rows) of a completed Calvin
+    /// transaction, keyed by its sequencer-assigned `TxnId`.
     ///
     /// RETURNING rows are a QUERY RESULT, not replicated state, so they MUST NOT
     /// ride the sequencer Raft log. The per-vShard scheduler deposits the applied
     /// `Response` here BEFORE proposing the replicated `CompletionAck`; the
     /// coordinator's completion path (static: `submit_and_await_calvin`;
     /// dependent: `dispatch_dependent_edge_recon`) drains it once completion
-    /// fires. Only the RETURNING-bearing participant deposits, so the entry is
-    /// never clobbered by a sibling participant's row-less ack. Cross-node, the
-    /// rows travel via the non-Raft routed-submit RPC response instead.
+    /// fires. Every primary-write participant deposits (not RETURNING-only) — a
+    /// multi-collection cross-shard COMMIT can have several plain-write
+    /// participants, and those coalesce without conflict. Cross-node, the rows
+    /// travel via the non-Raft routed-submit RPC response instead.
     ///
-    /// Value is [`CalvinApplyResult`](super::CalvinApplyResult): `Single` for the
-    /// one RETURNING-bearing participant, or `Conflict` if two ever deposit for
-    /// the same `TxnId` (drained as a loud error, never a silent partial).
-    /// [`Response`](crate::bridge::envelope::Response) is Control-Plane
+    /// Value is [`CalvinApplyResult`](super::CalvinApplyResult): `Single` for a
+    /// deposited (possibly coalesced) participant, or `Conflict` only when two
+    /// RETURNING-bearing participants deposit for the same `TxnId` — a
+    /// cross-shard RETURNING union, drained as a loud error, never a silent
+    /// partial. [`Response`](crate::bridge::envelope::Response) is Control-Plane
     /// `Send + Sync`; it never touches Raft.
     pub calvin_apply_results: Arc<
         Mutex<std::collections::HashMap<nodedb_cluster::calvin::TxnId, super::CalvinApplyResult>>,

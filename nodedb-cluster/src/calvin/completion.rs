@@ -25,19 +25,28 @@ impl TxnId {
 /// Terminal outcome of a single Calvin transaction attempt.
 ///
 /// Exactly one of these fires per attempt on the unified completion channel:
-/// all expected vshards acked (`Completed`), the executor reported an OLLP
-/// prediction mismatch that forces a retry (`Mismatch`), or the scheduler
-/// rejected the transaction's routing as terminally broken (`Failed`) — this
-/// last case is NEVER retried, unlike `Mismatch`.
+/// all expected vshards acked AND the global verdict was commit (`Completed`),
+/// all expected vshards acked but the global cross-shard verdict was ABORT
+/// (`Aborted`), the executor reported an OLLP prediction mismatch that forces a
+/// retry (`Mismatch`), or the scheduler rejected the transaction's routing as
+/// terminally broken (`Failed`). `Aborted` and `Failed` are NEVER retried,
+/// unlike `Mismatch`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttemptOutcome {
     Completed,
+    /// The global cross-shard verdict was ABORT (read-set/OCC validation failed).
+    /// A serialization failure — surfaced to the client as SQLSTATE 40001, never retried.
+    Aborted,
     Mismatch,
-    Failed { detail: String },
+    Failed {
+        detail: String,
+    },
 }
 
-struct PendingCompletion {
-    expected_participants: usize,
+pub(crate) struct PendingCompletion {
+    /// `pub(crate)`: also read/written by the vote/verdict-tally methods in
+    /// `completion_verdict.rs` (a sibling module in the same crate).
+    pub(crate) expected_participants: usize,
     acked_vshards: BTreeSet<u32>,
     completion_tx: Option<oneshot::Sender<AttemptOutcome>>,
     /// Set when an OLLP mismatch is observed before the coordinator registers
@@ -49,24 +58,45 @@ struct PendingCompletion {
     /// `mismatched` and completion: a routing failure is never retried and never
     /// falsely reported as success.
     routing_failed: Option<String>,
-    /// Durable per-participant commit votes tallied from `SequencerEntry::Vote`.
-    /// Keyed by vshard so a re-proposed vote (retry) overwrites deterministically
-    /// rather than double-counting. Currently observed-only: nothing reads this
-    /// tally to change flush/drop behavior yet (that is a follow-up); the
-    /// leader's local decision still drives.
-    votes: BTreeMap<u32, bool>,
-    /// The authoritative commit/abort verdict once applied from a replicated
-    /// `SequencerEntry::Verdict`. `None` until the leader's verdict is applied.
-    /// Currently observed-only: nothing reads this to change flush/drop yet.
-    verdict: Option<bool>,
-    /// Dedup guard: set the first time the vote tally becomes complete so the
-    /// verdict signal is emitted exactly once, even if a retry re-proposes a
-    /// vote and re-tallies afterwards.
-    verdict_proposed: bool,
+    /// Durable per-participant commit votes tallied from `SequencerEntry::Vote`,
+    /// keyed by vshard so a re-proposed vote (retry) overwrites deterministically.
+    /// Once complete, the leader aggregates the tally into the global `verdict`
+    /// that gates each participant's flush/drop at the cross-shard commit barrier.
+    pub(crate) votes: BTreeMap<u32, bool>,
+    /// The authoritative commit/abort verdict, applied from a replicated
+    /// `SequencerEntry::Verdict`; `None` until applied. This is the durable
+    /// barrier gate: a participant parked in `AwaitingVerdict` resumes into its
+    /// flush (commit) or drop (abort) once it is set. It is also the ONLY
+    /// authority for "already decided" — a post-failover leader re-proposes from
+    /// `votes` until it is stored (see `drain_unproposed_verdicts`).
+    pub(crate) verdict: Option<bool>,
+    /// Dedup guard for the LOCAL emit path: set the first time the tally becomes
+    /// complete so the verdict signal is emitted exactly once across vote
+    /// re-proposals. Per-node, non-durable, never reset on failover — so it is
+    /// NOT consulted by `drain_unproposed_verdicts` (which trusts only the
+    /// durable `verdict`, letting a promoted leader re-propose a still-unstored one).
+    pub(crate) verdict_proposed: bool,
+}
+
+/// Choose the terminal outcome for a COMPLETED entry (all expected vshards
+/// acked) by consulting the durable global verdict.
+///
+/// The verdict is applied from a replicated `SequencerEntry::Verdict` that is
+/// strictly ordered BEFORE the abort's `CompletionAck` in the sequencer Raft
+/// log, so an ABORT verdict is always stored (`verdict == Some(false)`) by the
+/// time this entry's completion fires. `Some(false)` is a serialization abort
+/// (`Aborted`); `None` (single-shard / no-verdict paths) and `Some(true)` are
+/// `Completed`. We deliberately do NOT gate on `verdict.is_some()` — that would
+/// stall the no-verdict completion paths.
+fn outcome_for(entry: &PendingCompletion) -> AttemptOutcome {
+    match entry.verdict {
+        Some(false) => AttemptOutcome::Aborted,
+        _ => AttemptOutcome::Completed,
+    }
 }
 
 impl PendingCompletion {
-    fn new(expected_participants: usize) -> Self {
+    pub(crate) fn new(expected_participants: usize) -> Self {
         Self {
             expected_participants,
             acked_vshards: BTreeSet::new(),
@@ -90,19 +120,32 @@ impl PendingCompletion {
     }
 }
 
+/// `pub(crate)`: also read by the vote/verdict-tally methods in
+/// `completion_verdict.rs` (a sibling module in the same crate).
 #[derive(Default)]
-struct Inner {
+pub(crate) struct Inner {
     assignments: BTreeMap<u64, oneshot::Sender<(u64, u32, usize)>>,
-    completions: BTreeMap<TxnId, PendingCompletion>,
+    pub(crate) completions: BTreeMap<TxnId, PendingCompletion>,
+    /// Per-vShard senders for the verdict push, keyed by vShard id. Each local
+    /// Calvin scheduler registers its receiver's sender here at construction;
+    /// `note_verdict` broadcasts a [`super::completion_verdict::VerdictSignal`]
+    /// to all of them under this same mutex, so a stored verdict and its push
+    /// notification never disagree.
+    pub(crate) verdict_signal_senders:
+        BTreeMap<u32, mpsc::Sender<super::completion_verdict::VerdictSignal>>,
 }
 
 pub struct CalvinCompletionRegistry {
-    inner: Mutex<Inner>,
+    /// `pub(crate)`: also locked by the vote/verdict-tally methods in
+    /// `completion_verdict.rs` (a sibling module in the same crate); never
+    /// exposed beyond the crate.
+    pub(crate) inner: Mutex<Inner>,
     /// Emits `(txn, commit)` exactly once when a staged cross-shard txn's vote
     /// tally becomes complete (all expected participants voted). The paired
     /// receiver lives in the `SequencerService`, whose leader-guarded arm turns
-    /// the signal into a `SequencerEntry::Verdict` proposal.
-    verdict_tx: mpsc::Sender<(TxnId, bool)>,
+    /// the signal into a `SequencerEntry::Verdict` proposal. `pub(crate)`: also
+    /// used by `note_vote` in `completion_verdict.rs`.
+    pub(crate) verdict_tx: mpsc::Sender<(TxnId, bool)>,
 }
 
 impl CalvinCompletionRegistry {
@@ -198,8 +241,12 @@ impl CalvinCompletionRegistry {
                 );
             }
         } else if entry.is_complete() {
+            // Acks raced ahead of waiter registration: consult the stored
+            // verdict so an already-complete ABORT surfaces as `Aborted`, not a
+            // false `Completed`.
+            let outcome = outcome_for(entry);
             inner.completions.remove(&txn);
-            if tx.send(AttemptOutcome::Completed).is_err() {
+            if tx.send(outcome).is_err() {
                 tracing::warn!(
                     epoch = txn.epoch,
                     position = txn.position,
@@ -221,18 +268,31 @@ impl CalvinCompletionRegistry {
             .or_insert_with(|| PendingCompletion::new(0));
         entry.acked_vshards.insert(vshard_id);
         if entry.is_complete() {
-            let tx = entry.completion_tx.take();
-            inner.completions.remove(&txn);
-            if let Some(tx) = tx
-                && tx.send(AttemptOutcome::Completed).is_err()
-            {
-                tracing::warn!(
-                    epoch = txn.epoch,
-                    position = txn.position,
-                    vshard_id,
-                    "calvin completion receiver dropped before final ack; \
-                     client likely timed out on completion wait"
-                );
+            // Consult the stored global verdict: `Verdict` is applied strictly
+            // before this abort's `CompletionAck` in the sequencer Raft log, so
+            // an ABORT is `Some(false)` here and must surface as `Aborted`
+            // rather than a silent `Completed` (which would drop the writes and
+            // report COMMIT SUCCESS to the client).
+            //
+            // Only fire + evict when the coordinator's waiter is registered. If
+            // the final ack races AHEAD of registration, LEAVE the entry — its
+            // `acked_vshards` (and the stored verdict) persist, so
+            // `register_completion`'s `is_complete()` branch fires the outcome.
+            // Evicting here would strand that branch (a fresh entry created by
+            // the later `register_completion` never re-completes). Mirrors how
+            // `mismatched`/`routing_failed` persist across the same race.
+            if let Some(tx) = entry.completion_tx.take() {
+                let outcome = outcome_for(entry);
+                inner.completions.remove(&txn);
+                if tx.send(outcome).is_err() {
+                    tracing::warn!(
+                        epoch = txn.epoch,
+                        position = txn.position,
+                        vshard_id,
+                        "calvin completion receiver dropped before final ack; \
+                         client likely timed out on completion wait"
+                    );
+                }
             }
         }
     }
@@ -292,120 +352,6 @@ impl CalvinCompletionRegistry {
                 );
             }
         }
-    }
-
-    /// Seed the expected participant count for `txn` deterministically from the
-    /// replicated `SequencerEntry::EpochBatch` — this runs on every replica (not
-    /// just the epoch's originating leader), so vote-completeness becomes
-    /// detectable even on a replica that later becomes leader via failover and
-    /// never observed the original `note_assigned` seeding.
-    ///
-    /// Idempotent: takes the max with any existing seed, so ordering against
-    /// `note_assigned` / `register_completion` (which also seed this field) is
-    /// safe regardless of which one runs first. `expected == 0` is a harmless
-    /// no-op (max with the existing value).
-    pub fn seed_expected(&self, txn: TxnId, expected: usize) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(0));
-        entry.expected_participants = entry.expected_participants.max(expected);
-    }
-
-    /// Record one participant vshard's durable commit vote for `txn`, tallied
-    /// from a replicated `SequencerEntry::Vote`.
-    ///
-    /// This is observed-only: it accumulates the vote per `vshard` (last write
-    /// wins, deterministic across re-proposals from retries) but does NOT
-    /// compute a verdict or wake any waiter — the local flush/drop decision
-    /// still drives. A follow-up aggregates the tally into the commit
-    /// verdict.
-    pub fn note_vote(&self, txn_id: TxnId, vshard: u32, commit: bool) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn_id)
-            .or_insert_with(|| PendingCompletion::new(0));
-        entry.votes.insert(vshard, commit);
-
-        // On the transition to a complete tally, emit the aggregated verdict
-        // exactly once. `expected_participants` is seeded deterministically on
-        // every replica from the `EpochBatch` apply arm (see `seed_expected`),
-        // as well as opportunistically by `note_assigned` / `register_completion`
-        // on the leader/coordinator — so completeness is detectable here on any
-        // replica, including one that becomes leader via failover after the
-        // epoch was originally applied elsewhere. Only the leader's
-        // `SequencerService` actually proposes the verdict from this signal
-        // (leader-gated at the propose site); a follower computing and sending
-        // the signal here is harmless. The `verdict_proposed` guard dedups a
-        // re-tally caused by a re-proposed vote on retry.
-        if entry.expected_participants > 0
-            && entry.votes.len() == entry.expected_participants
-            && !entry.verdict_proposed
-        {
-            let commit_all = entry.votes.values().all(|&v| v);
-            entry.verdict_proposed = true;
-            // Non-blocking: a full channel drops the signal, mirroring how the
-            // apply fan-out drops on backpressure. A dropped signal is a missed
-            // proposal (the leader re-drives on the next tally that isn't
-            // deduped), never lost state — the verdict is stored separately via
-            // `note_verdict` when the leader's proposal is applied.
-            let _ = self.verdict_tx.try_send((txn_id, commit_all));
-        }
-    }
-
-    /// Store the authoritative commit/abort verdict for `txn`, applied from a
-    /// replicated `SequencerEntry::Verdict` on every replica.
-    ///
-    /// Idempotent: re-applying the same verdict is a no-op. A verdict that
-    /// differs from a previously stored one is a determinism bug (the tally is
-    /// computed deterministically from replicated votes) — it is logged at
-    /// `warn` and the latest value is stored. Currently observed-only: nothing
-    /// reads the stored verdict to change flush/drop behavior yet.
-    pub fn note_verdict(&self, txn: TxnId, commit: bool) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(0));
-        match entry.verdict {
-            Some(existing) if existing != commit => {
-                tracing::warn!(
-                    epoch = txn.epoch,
-                    position = txn.position,
-                    existing,
-                    proposed = commit,
-                    "calvin verdict differs from a previously applied one; \
-                     determinism bug — overwriting with the latest"
-                );
-                entry.verdict = Some(commit);
-            }
-            Some(_) => {}
-            None => entry.verdict = Some(commit),
-        }
-    }
-
-    /// Test/inspection accessor: returns the stored commit/abort verdict for
-    /// `txn_id`, or `None` if no verdict has been applied yet.
-    pub fn verdict(&self, txn_id: TxnId) -> Option<bool> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .completions
-            .get(&txn_id)
-            .and_then(|entry| entry.verdict)
-    }
-
-    /// Test/inspection accessor: returns the current per-vshard vote tally for
-    /// `txn_id`, or `None` if no entry (and therefore no votes) exist yet.
-    pub fn vote_tally(&self, txn_id: TxnId) -> Option<BTreeMap<u32, bool>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .completions
-            .get(&txn_id)
-            .map(|entry| entry.votes.clone())
     }
 
     /// Test-only: returns the number of pending completion entries.
@@ -619,120 +565,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_vote_tallies_one_vote_per_vshard() {
+    async fn abort_verdict_makes_completion_report_aborted() {
+        // An ABORT verdict is stored (Raft-ordered) before the acks that complete
+        // the tally. Completion must consult it and report `Aborted`, never a
+        // silent `Completed` that would drop the writes and report COMMIT success.
         let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(30, 0);
-        reg.note_vote(txn, 1, true);
-        reg.note_vote(txn, 2, false);
-        let tally = reg.vote_tally(txn).expect("entry created by note_vote");
-        assert_eq!(tally.len(), 2);
-        assert_eq!(tally.get(&1), Some(&true));
-        assert_eq!(tally.get(&2), Some(&false));
-    }
-
-    #[tokio::test]
-    async fn complete_all_true_tally_emits_commit_verdict_once() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let reg = CalvinCompletionRegistry::new(tx);
-        let txn = TxnId::new(30, 1);
-        // Seed the expected participant count the way the leader does.
-        reg.note_assigned(1, txn, 2);
-
-        reg.note_vote(txn, 1, true);
-        // First vote: tally incomplete (1 of 2), nothing emitted yet.
-        assert!(rx.try_recv().is_err());
-
-        reg.note_vote(txn, 2, true);
-        // Second vote completes the tally → commit verdict emitted exactly once.
-        assert_eq!(rx.try_recv().expect("verdict emitted"), (txn, true));
-
-        // A re-proposed vote re-tallies but must NOT emit again (dedup).
-        reg.note_vote(txn, 2, true);
-        assert!(
-            rx.try_recv().is_err(),
-            "dedup: verdict must emit only on the first complete tally"
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_tally_with_one_abort_emits_abort_verdict() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let reg = CalvinCompletionRegistry::new(tx);
         let txn = TxnId::new(31, 0);
         reg.note_assigned(1, txn, 2);
-
-        reg.note_vote(txn, 1, true);
-        reg.note_vote(txn, 2, false);
-        // Any abort vote makes the aggregated verdict false.
-        assert_eq!(rx.try_recv().expect("verdict emitted"), (txn, false));
-        assert!(rx.try_recv().is_err());
+        reg.note_verdict(txn, false);
+        let rx = reg.register_completion(txn, 2);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(txn, 20);
+        let outcome = rx.await.expect("completion fires");
+        assert_eq!(
+            outcome,
+            AttemptOutcome::Aborted,
+            "a stored ABORT verdict must surface as Aborted, not Completed"
+        );
+        assert_eq!(reg.pending_completions_len(), 0);
     }
 
     #[tokio::test]
-    async fn seed_expected_is_idempotent_max_and_enables_verdict_without_note_assigned() {
-        // Mirrors complete_all_true_tally_emits_commit_verdict_once, but seeds
-        // expected_participants via seed_expected (the EpochBatch apply-arm path
-        // that runs on every replica) instead of the leader-only note_assigned.
-        let (tx, mut rx) = mpsc::channel(8);
-        let reg = CalvinCompletionRegistry::new(tx);
-        let txn = TxnId::new(40, 0);
-
-        // Seeding a smaller value after a larger one must not shrink the count.
-        reg.seed_expected(txn, 2);
-        reg.seed_expected(txn, 1);
-
-        reg.note_vote(txn, 1, true);
-        assert!(
-            rx.try_recv().is_err(),
-            "only 1 of 2 expected votes in; must not emit yet"
-        );
-
-        reg.note_vote(txn, 2, true);
-        assert_eq!(
-            rx.try_recv().expect("verdict emitted"),
-            (txn, true),
-            "seed_expected alone (no note_assigned) must make completeness detectable"
-        );
+    async fn abort_verdict_reports_aborted_when_register_arrives_after_acks() {
+        // Acks (and the verdict) race ahead of waiter registration: the
+        // already-complete branch in `register_completion` must also consult the
+        // stored verdict and report `Aborted`.
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(32, 1);
+        reg.note_assigned(1, txn, 2);
+        reg.note_verdict(txn, false);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(txn, 20);
+        let rx = reg.register_completion(txn, 2);
+        let outcome = rx.await.expect("completion fires");
+        assert_eq!(outcome, AttemptOutcome::Aborted);
+        assert_eq!(reg.pending_completions_len(), 0);
     }
 
     #[tokio::test]
-    async fn seed_expected_and_note_assigned_take_the_max_regardless_of_order() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let reg = CalvinCompletionRegistry::new(tx);
+    async fn commit_verdict_reports_completed() {
+        // A COMMIT verdict (Some(true)) must still report `Completed`.
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(33, 2);
+        reg.note_assigned(1, txn, 2);
+        reg.note_verdict(txn, true);
+        let rx = reg.register_completion(txn, 2);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(txn, 20);
+        let outcome = rx.await.expect("completion fires");
+        assert_eq!(outcome, AttemptOutcome::Completed);
+        assert_eq!(reg.pending_completions_len(), 0);
+    }
 
-        // seed_expected first (larger), then note_assigned with a smaller count:
-        // the max (3) must win, so 2 votes must NOT be enough to emit a verdict.
-        let txn_a = TxnId::new(41, 0);
-        reg.seed_expected(txn_a, 3);
-        reg.note_assigned(1, txn_a, 1);
-        reg.note_vote(txn_a, 1, true);
-        reg.note_vote(txn_a, 2, true);
-        assert!(
-            rx.try_recv().is_err(),
-            "expected_participants must be max(3, 1) = 3; 2 votes is not complete"
-        );
-        reg.note_vote(txn_a, 3, true);
-        assert_eq!(
-            rx.try_recv().expect("verdict emitted at the 3rd vote"),
-            (txn_a, true)
-        );
-
-        // note_assigned first (smaller), then seed_expected with a larger count:
-        // same invariant, opposite call order.
-        let txn_b = TxnId::new(41, 1);
-        reg.note_assigned(2, txn_b, 1);
-        reg.seed_expected(txn_b, 3);
-        reg.note_vote(txn_b, 1, true);
-        reg.note_vote(txn_b, 2, true);
-        assert!(
-            rx.try_recv().is_err(),
-            "expected_participants must be max(1, 3) = 3, not the smaller seed"
-        );
-        reg.note_vote(txn_b, 3, true);
-        assert_eq!(
-            rx.try_recv().expect("verdict emitted at the 3rd vote"),
-            (txn_b, true)
-        );
+    #[tokio::test]
+    async fn no_verdict_reports_completed_unchanged() {
+        // Single-shard / no-verdict paths (`verdict == None`) must report
+        // `Completed` unchanged — the fix must not stall them.
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(34, 3);
+        reg.note_assigned(1, txn, 2);
+        let rx = reg.register_completion(txn, 2);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(txn, 20);
+        let outcome = rx.await.expect("completion fires");
+        assert_eq!(outcome, AttemptOutcome::Completed);
+        assert_eq!(reg.pending_completions_len(), 0);
     }
 
     #[tokio::test]

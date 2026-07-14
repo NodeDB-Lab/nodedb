@@ -3,6 +3,17 @@
 //! Per-connection session state types.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Milliseconds since the Unix epoch. Falls back to `0` instead of panicking
+/// if the system clock is set before the epoch (`duration_since` errors).
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 use crate::types::{DatabaseId, Lsn, TenantId, TxnId, VShardId};
 use nodedb_physical::physical_task::PhysicalTask;
@@ -72,6 +83,15 @@ pub struct ConnSession {
     /// with `42501` before this field is written), so the identity-bound
     /// invariant continues to hold for tenant-scoped users.
     pub effective_tenant_id: Option<TenantId>,
+    /// Authenticated identity resolved for queries on this connection.
+    ///
+    /// Stashed by `resolve_identity` (the per-query auth chokepoint) so that a
+    /// connection torn down mid-transaction can reclaim its Data-Plane staging
+    /// overlays without a live query in flight — `run_rollback` requires the
+    /// identity (tenant + username) to dispatch `MetaOp::DropTxnOverlay` and to
+    /// audit any GAP_FREE reservation rollback. `None` until the first query
+    /// resolves an identity on this connection.
+    pub identity: Option<crate::control::security::identity::AuthenticatedIdentity>,
     /// Session parameters set via SET commands.
     pub parameters: HashMap<String, String>,
     /// Buffered write tasks accumulated between BEGIN and COMMIT.
@@ -141,6 +161,15 @@ pub struct ConnSession {
     /// GAP_FREE sequence reservations pending commit/rollback.
     /// On COMMIT: each reservation is finalized. On ROLLBACK: counter decremented.
     pub pending_sequence_reservations: Vec<crate::control::sequence::gap_free::ReservationHandle>,
+    /// Millis-since-epoch of the last statement COMPLETION on this connection
+    /// (also set to "now" at connection start). Read by the pgwire listener
+    /// watchdog to decide idle eligibility: a connection is idle only when it
+    /// has been silent (no statement completing) for the idle window.
+    pub last_activity_ms: AtomicU64,
+    /// Count of currently-executing statements on this connection. A connection
+    /// is idle-eligible only when this is zero — a legitimately long-running
+    /// statement (in flight) must never be idle-killed.
+    pub in_flight: AtomicU32,
 }
 
 impl ConnSession {
@@ -171,6 +200,7 @@ impl ConnSession {
             tx_state: TransactionState::Idle,
             current_database: None,
             effective_tenant_id: None,
+            identity: None,
             parameters,
             tx_buffer: Vec::new(),
             tx_snapshot_lsn: None,
@@ -189,6 +219,8 @@ impl ConnSession {
             temp_tables: super::temp_tables::TempTableRegistry::new(),
             plan_cache: crate::control::server::shared::session::plan_cache::PlanCache::new(128),
             pending_sequence_reservations: Vec::new(),
+            last_activity_ms: AtomicU64::new(now_unix_ms()),
+            in_flight: AtomicU32::new(0),
         }
     }
 }

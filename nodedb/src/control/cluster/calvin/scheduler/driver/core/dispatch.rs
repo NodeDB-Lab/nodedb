@@ -36,6 +36,17 @@ pub(crate) fn plans_have_primary_write(plans: &[PhysicalPlan]) -> bool {
     })
 }
 
+/// Whether this vShard's slice carries a RETURNING-bearing write — a plan whose
+/// applied response is DATA-ROWs rather than a bare affected-count. Uses the
+/// SAME `describe_plan` classification the coordinator's response-shaping uses,
+/// so the two never disagree about which participant owns the returned rows.
+pub(crate) fn plans_have_returning(plans: &[PhysicalPlan]) -> bool {
+    use crate::control::server::response_shape::types::{PlanKind, describe_plan};
+    plans
+        .iter()
+        .any(|plan| matches!(describe_plan(plan), PlanKind::ReturningRows))
+}
+
 impl Scheduler {
     /// Whether THIS node is currently the leader of the data-group owning this
     /// scheduler's vshard.
@@ -183,6 +194,7 @@ impl Scheduler {
             }
         };
         let has_primary_write = plans_have_primary_write(&plans);
+        let has_returning = plans_have_returning(&plans);
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
             epoch,
             position,
@@ -234,10 +246,13 @@ impl Scheduler {
                 // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
                 dispatch_time: dispatch_instant,
                 has_primary_write,
+                has_returning,
                 // This dispatch STAGED the txn (validate + buffer, no apply);
                 // its response carries the local commit vote that drives the
                 // subsequent flush-or-drop.
                 commit_state: Some(super::super::types::CommitState::Staged),
+                // Set only once the txn parks in `AwaitingVerdict`.
+                verdict_deadline: None,
             },
         );
     }
@@ -287,6 +302,7 @@ impl Scheduler {
             }
         };
         let has_primary_write = plans_have_primary_write(&plans);
+        let has_returning = plans_have_returning(&plans);
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteActive {
             epoch,
             position,
@@ -335,12 +351,15 @@ impl Scheduler {
                 // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
                 dispatch_time: dispatch_instant,
                 has_primary_write,
+                has_returning,
                 // The dependent-read active path now STAGES (leader-verify OLLP
                 // + buffer, no base apply); its response drives the same
                 // resolve → redo → flush as the static path, restoring
                 // WAL-only-restart durability. `resolve_staged_commit` reads the
                 // `read_set_valid: None` the active handler returns as "commit".
                 commit_state: Some(super::super::types::CommitState::Staged),
+                // Set only once the txn parks in `AwaitingVerdict`.
+                verdict_deadline: None,
             },
         );
     }

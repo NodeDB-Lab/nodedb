@@ -115,7 +115,8 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             deadline_ms,
             version_set,
         )
-        .await?;
+        .await?
+        .payloads;
         payloads
             .into_iter()
             .next()

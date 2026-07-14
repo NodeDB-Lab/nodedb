@@ -276,7 +276,7 @@ impl CoreLoop {
             .epoch_system_ms
             .map(|ms| ms as u64)
             .unwrap_or_else(current_ms);
-        self.txn_overlays.entry(ctx.txn_id).or_default().set_ttl(
+        self.txn_overlay_mut(ctx.txn_id).set_ttl(
             ctx.coll_key.clone(),
             ctx.surrogate.0,
             &ctx.document_id,

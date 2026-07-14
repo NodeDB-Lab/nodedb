@@ -33,4 +33,4 @@ pub use tx_class::{
     build_dependent_tx_class, build_single_vshard_dependent_tx_class, build_single_vshard_tx_class,
     build_static_tx_class,
 };
-pub use types::{DispatchClass, DispatchOutcome};
+pub use types::{DispatchClass, DispatchOutcome, TxnDispatchPosition};

@@ -1,42 +1,24 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Multi-shard Calvin commits survive a WAL-only restart.
-//!
-//! Before the `TransactionRedo` WAL record, a committed multi-shard (Calvin)
-//! transaction journalled only a non-replayable `CalvinApplied` marker. On a
-//! WAL-only restart (no snapshot/checkpoint) that marker carried nothing to
-//! replay, so a Calvin-committed write did not come back at all — neither its
-//! base row nor any in-memory-only secondary index built on top of it. The
-//! production change makes a committed Calvin transaction journal a
-//! replayable `TransactionRedo` record instead, so its writes (base KV row,
-//! vector-indexed document row) rebuild on restart exactly like a
-//! single-shard transaction's already do (see `vector_index_txn_restart.rs`).
-//!
-//! This test proves the multi-shard case end to end:
+//! An interactive `BEGIN; <cross-shard KV + vector writes>; COMMIT` block
+//! COMMITS through the Calvin sequencer, and the committed writes survive a
+//! WAL-only restart via the replayable `TransactionRedo` WAL record (see
+//! `vector_index_txn_restart.rs` for the single-shard analogue).
 //!
 //! 1. Two collections — a KV collection and a vector-indexed document
-//!    collection — are created on DIFFERENT vShards (`two_distinct_vshard_
+//!    collection — are created on DIFFERENT vShards (`distinct_vshard_
 //!    collections`, same technique as `calvin_cluster_pgwire_e2e.rs`).
 //! 2. `BEGIN; INSERT INTO <kv>; INSERT INTO <vecdocs>; COMMIT` is sent as ONE
 //!    `simple_query` call. tokio-postgres ships this as a single wire
 //!    message; the server buffers the two INSERTs during the transaction and,
-//!    on COMMIT, `classify_dispatch` sees writes on two vShards → MultiShard
-//!    → submits the whole batch atomically to the Calvin sequencer. This is
-//!    the exact mechanism `calvin_cluster_pgwire_e2e.rs` uses to force
-//!    Calvin routing for a plain (non-graph) multi-collection transaction —
-//!    sending BEGIN/INSERT/INSERT/COMMIT as three SEPARATE `simple_query`
-//!    calls instead does NOT work here: the per-statement dispatch path
-//!    rejects a cross-shard write inside an explicit transaction block with
-//!    `CrossShardInExplicitTransaction` (only `GRAPH INSERT EDGE`'s dual-home
-//!    staging is exempt from that rejection).
-//! 3. The node shuts down via `graceful_shutdown_wal_only` (flushes the WAL,
-//!    awaits every background task, triggers NO checkpoint) and a second node
-//!    reopens the SAME data directory — a pure WAL-only restart.
-//! 4. Post-restart: the KV row's value survives (base-row durability), AND a
-//!    vector search near the inserted embedding returns the document's id —
-//!    THE key signal, since it proves the in-memory HNSW graph was rebuilt
-//!    from the replayed `TransactionRedo` record's engine-native sub-records,
-//!    not merely that the underlying redb row survived.
+//!    on COMMIT, `classify_dispatch` sees writes on two vShards → MultiShard.
+//!    The neutral commit orchestrator flushes the whole batch through the
+//!    leader-routed Calvin submit-and-await, which commits it durably.
+//! 3. A WAL-only restart (no vector checkpoint) reopens the same data
+//!    directory. The base KV row and the document row survive via redb; the
+//!    in-memory HNSW vector graph has no other durable backing and is rebuilt
+//!    by replaying the committed transaction's engine-native redo records — so
+//!    a post-restart vector search must still return the inserted document.
 
 mod common;
 
@@ -92,53 +74,53 @@ fn distinct_vshard_collections() -> (String, String) {
     );
 }
 
-/// The first `v` column value from `SELECT v FROM <kv> WHERE id = '<id>'`, if
-/// the row exists.
-async fn kv_value(client: &tokio_postgres::Client, kv: &str, id: &str) -> Option<String> {
+/// Single-row `col` value for `id` in a KV/document collection, or `None` if
+/// not visible.
+async fn value_of(
+    client: &tokio_postgres::Client,
+    coll: &str,
+    col: &str,
+    id: &str,
+) -> Option<String> {
     let msgs = client
-        .simple_query(&format!("SELECT v FROM {kv} WHERE id = '{id}'"))
+        .simple_query(&format!("SELECT {col} FROM {coll} WHERE id = '{id}'"))
         .await
-        .expect("SELECT v FROM kv");
+        .expect("SELECT by id");
     msgs.iter().find_map(|m| match m {
-        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+        SimpleQueryMessage::Row(r) => r.get(col).map(str::to_owned),
         _ => None,
     })
 }
 
-/// Nearest-neighbour `id` on `<vecdocs>`'s vector index to `axis`, or `None`
-/// when the index has no reachable rows.
-async fn nearest_doc(
-    client: &tokio_postgres::Client,
-    vecdocs: &str,
-    axis: [f32; 3],
-) -> Option<String> {
+/// Nearest-neighbour `id` to `axis` on the collection's vector index (`None`
+/// when the index has no reachable rows).
+async fn nearest_id(client: &tokio_postgres::Client, coll: &str, axis: [f32; 3]) -> Option<String> {
     let msgs = client
         .simple_query(&format!(
-            "SELECT id FROM {vecdocs} ORDER BY vector_distance(embedding, ARRAY[{},{},{}]) LIMIT 1",
+            "SELECT id FROM {coll} \
+             ORDER BY vector_distance(embedding, ARRAY[{},{},{}]) LIMIT 1",
             axis[0], axis[1], axis[2]
         ))
         .await
-        .expect("SELECT id ... ORDER BY vector_distance");
+        .expect("vector search");
     msgs.iter().find_map(|m| match m {
-        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+        SimpleQueryMessage::Row(r) => r.get("id").map(str::to_owned),
         _ => None,
     })
 }
 
-/// A committed multi-shard Calvin transaction writing a KV base row AND a
-/// vector-indexed document row survives a WAL-only restart — the base row via
-/// redb, the vector row's presence in the HNSW via the replayed
-/// `TransactionRedo` record.
+/// A multi-shard write (KV row + vector-indexed document row) buffered inside
+/// an explicit `BEGIN ... COMMIT` block COMMITS through Calvin, and both the KV
+/// base row and the vector-indexed document row (plus its HNSW entry) survive a
+/// WAL-only restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn calvin_multi_shard_kv_and_vector_write_survives_wal_only_restart() {
-    // The node's own data directory. Kept alive across BOTH spawns so the
-    // second `spawn_single_node_calvin_on_path` call reopens the exact same
-    // WAL / redb stores the first node wrote.
+async fn calvin_multi_shard_write_in_explicit_block_commits_and_survives_restart() {
+    // The node's own data directory (kept alive across both bring-ups).
     let data_dir = tempfile::tempdir().expect("tempdir");
     let data_dir_path = data_dir.path().to_path_buf();
 
     // 4 Data-Plane cores so distinct vShards land on distinct cores — a
-    // genuine cross-core, cross-shard commit.
+    // genuine cross-core, cross-shard write.
     let node = TestClusterNode::spawn_single_node_calvin_on_path(4, data_dir_path.clone())
         .await
         .expect("spawn standalone single-node-calvin server on path");
@@ -186,11 +168,10 @@ async fn calvin_multi_shard_kv_and_vector_write_survives_wal_only_restart() {
 
     let admitted_before = admitted_total(&node);
 
-    // ONE `simple_query` call carrying the whole transaction. Sending BEGIN,
-    // the two INSERTs, and COMMIT as separate `simple_query` calls instead
-    // would hit the per-statement `CrossShardInExplicitTransaction` rejection
-    // (see module doc) — the server must see all statements together so it
-    // can buffer them and classify the COMMIT-time task set as MultiShard.
+    // ONE `simple_query` call carrying the whole transaction: the two INSERTs
+    // are buffered during the block, and on COMMIT `classify_dispatch` sees the
+    // full task set spanning two vShards → MultiShard → leader-routed Calvin
+    // flush.
     let txn_sql = format!(
         "BEGIN; \
          INSERT INTO {kv} (id, v) VALUES ('k1', 42); \
@@ -200,74 +181,71 @@ async fn calvin_multi_shard_kv_and_vector_write_survives_wal_only_restart() {
     node.client
         .simple_query(&txn_sql)
         .await
-        .expect("multi-shard Calvin transaction (KV + vector-indexed write) must commit");
+        .expect("interactive cross-shard COMMIT must succeed through the Calvin barrier");
 
-    // Proof it traversed the sequencer (genuinely Calvin, not a fast path
-    // that never touches the sequencer): the batch was admitted to an epoch.
+    // The batch reached the sequencer inbox — admitted advanced past baseline.
     wait_for(
-        "multi-shard transaction admitted to a Calvin epoch",
+        "calvin admitted the committed cross-shard transaction",
         Duration::from_secs(10),
         Duration::from_millis(25),
         || admitted_total(&node) > admitted_before,
     )
     .await;
 
-    // Pre-restart sanity: both writes are visible through the live node.
-    assert_eq!(
-        kv_value(&node.client, &kv, "k1").await.as_deref(),
-        Some("42"),
-        "PRE-RESTART: kv row 'k1' must read back v=42"
-    );
-    assert_eq!(
-        nearest_doc(&node.client, &vecdocs, [0.1, 0.2, 0.3])
-            .await
-            .as_deref(),
-        Some("d1"),
-        "PRE-RESTART: vector search near the inserted embedding must return 'd1'"
-    );
+    // Pre-restart: both rows are visible and the vector is in the live HNSW.
+    // The Calvin flush lands asynchronously after the completion ack, so poll.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let kv_v = value_of(&node.client, &kv, "v", "k1").await;
+        let near = nearest_id(&node.client, &vecdocs, [0.1, 0.2, 0.3]).await;
+        if kv_v.as_deref() == Some("42") && near.as_deref() == Some("d1") {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("pre-restart committed rows not visible within 10s: kv={kv_v:?} vec={near:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
-    // WAL-only restart: flush + await every background task (no checkpoint),
-    // then reopen the SAME data directory.
+    // WAL-only restart: shut down cleanly (flushing the WAL, releasing every
+    // redb handle) and reopen against the SAME directory — no vector
+    // checkpoint, so the HNSW must be rebuilt purely from the committed
+    // transaction's replayed redo records.
     node.graceful_shutdown_wal_only().await;
-
-    let node2 = TestClusterNode::spawn_single_node_calvin_on_path(4, data_dir_path.clone())
+    let node = TestClusterNode::spawn_single_node_calvin_on_path(4, data_dir_path.clone())
         .await
         .expect("reopen standalone single-node-calvin server on the same path");
-
     wait_for(
-        "single-node sequencer leader re-elected after restart",
+        "both collections visible after WAL-only restart",
         Duration::from_secs(10),
         Duration::from_millis(50),
-        || sequencer_leader(&node2) == node2.node_id,
-    )
-    .await;
-    wait_for(
-        "both collections visible again after restart",
-        Duration::from_secs(10),
-        Duration::from_millis(50),
-        || node2.cached_collection_count() >= 2,
+        || node.cached_collection_count() >= 2,
     )
     .await;
 
-    // (a) The KV base row survived (redb durability).
-    assert_eq!(
-        kv_value(&node2.client, &kv, "k1").await.as_deref(),
-        Some("42"),
-        "POST-RESTART: kv row 'k1' must still read back v=42"
-    );
+    // Post-restart: the KV base row survives (redb), the document row survives
+    // (redb), and a vector search near the inserted embedding still returns it
+    // — proving the in-memory HNSW was rebuilt from the committed cross-shard
+    // transaction's redo records on replay.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let kv_v = value_of(&node.client, &kv, "v", "k1").await;
+        let doc_v = value_of(&node.client, &vecdocs, "body", "d1").await;
+        let near = nearest_id(&node.client, &vecdocs, [0.1, 0.2, 0.3]).await;
+        if kv_v.as_deref() == Some("42")
+            && doc_v.as_deref() == Some("hello")
+            && near.as_deref() == Some("d1")
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "post-restart survival check failed within 10s: \
+                 kv={kv_v:?} doc={doc_v:?} vec={near:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
-    // (b) THE CRUX: a vector search still returns the document — the HNSW
-    // was rebuilt from the replayed `TransactionRedo` record. Before the
-    // redo switch this would return `None`: the old non-replayable
-    // `CalvinApplied` marker carried nothing to rebuild the index from.
-    assert_eq!(
-        nearest_doc(&node2.client, &vecdocs, [0.1, 0.2, 0.3])
-            .await
-            .as_deref(),
-        Some("d1"),
-        "POST-RESTART: vector search near the inserted embedding must return 'd1' — \
-         the HNSW must be rebuilt from the multi-shard commit's TransactionRedo record"
-    );
-
-    node2.shutdown().await;
+    node.shutdown().await;
 }

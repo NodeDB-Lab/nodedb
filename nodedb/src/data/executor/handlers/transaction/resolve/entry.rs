@@ -670,7 +670,7 @@ mod tests {
         // non-zero TTL leaves in the overlay: value + `ExpireAt`).
         let expire_at = 1_700_000_000_000u64;
         {
-            let overlay = core.txn_overlays.entry(txn).or_default();
+            let overlay = core.txn_overlay_mut(txn);
             overlay.insert_put(coll_key("sessions"), 7, &hex_key(b"s1"), b"v1".to_vec());
             overlay.set_ttl(
                 coll_key("sessions"),
@@ -699,12 +699,8 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(3);
 
-        core.txn_overlays.entry(txn).or_default().insert_put(
-            coll_key("kvc"),
-            9,
-            &hex_key(b"k9"),
-            b"body".to_vec(),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_put(coll_key("kvc"), 9, &hex_key(b"k9"), b"body".to_vec());
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
         let redo = decode_redo(&resp);
@@ -732,11 +728,8 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(4);
 
-        core.txn_overlays.entry(txn).or_default().insert_tombstone(
-            coll_key("kvc"),
-            11,
-            &hex_key(b"gone"),
-        );
+        core.txn_overlay_mut(txn)
+            .insert_tombstone(coll_key("kvc"), 11, &hex_key(b"gone"));
 
         let resp = core.execute_resolve_txn(
             &task,
@@ -782,7 +775,7 @@ mod tests {
             .get(DatabaseId::DEFAULT.as_u64(), TID, "kvc", b"k", now);
         assert_eq!(before.as_deref(), Some(b"base".as_slice()));
 
-        core.txn_overlays.entry(txn).or_default().insert_put(
+        core.txn_overlay_mut(txn).insert_put(
             coll_key("kvc"),
             1,
             &hex_key(b"k"),
@@ -811,11 +804,8 @@ mod tests {
         // instead of raising the old typed error. (The RETURNING projection is a
         // response-shape concern the Control Plane already discards inside a
         // transaction; it leaves no separate post-image to preserve.)
-        core.txn_overlays.entry(txn).or_default().insert_tombstone(
-            coll_key("notes"),
-            surrogate,
-            "gone",
-        );
+        core.txn_overlay_mut(txn)
+            .insert_tombstone(coll_key("notes"), surrogate, "gone");
 
         let doc_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "notes".to_string(),
@@ -1028,7 +1018,7 @@ mod tests {
         // Two rows staged per-surrogate exactly as the bulk-update staging path
         // leaves them; a RETURNING clause does not change the overlay contents.
         {
-            let overlay = src.txn_overlays.entry(txn).or_default();
+            let overlay = src.txn_overlay_mut(txn);
             overlay.insert_put(coll_key("notes"), 1, "u1", schemaless_body("bob"));
             overlay.insert_put(coll_key("notes"), 2, "u2", schemaless_body("bob"));
         }
@@ -1216,7 +1206,7 @@ mod tests {
         let surrogate = 7u32;
         let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
 
-        src.txn_overlays.entry(txn).or_default().insert_put(
+        src.txn_overlay_mut(txn).insert_put(
             coll_key("sdocs"),
             surrogate,
             "row1",
@@ -1266,12 +1256,8 @@ mod tests {
         let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
         let body = schemaless_body("alice");
 
-        src.txn_overlays.entry(txn).or_default().insert_put(
-            coll_key("notes"),
-            surrogate,
-            "userpk",
-            body.clone(),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(coll_key("notes"), surrogate, "userpk", body.clone());
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("notes")]);
         let redo = decode_redo(&resp);
@@ -1301,11 +1287,8 @@ mod tests {
         let surrogate = 11u32;
         let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
 
-        src.txn_overlays.entry(txn).or_default().insert_tombstone(
-            coll_key("notes"),
-            surrogate,
-            "gone",
-        );
+        src.txn_overlay_mut(txn)
+            .insert_tombstone(coll_key("notes"), surrogate, "gone");
 
         let delete_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: "notes".to_string(),
@@ -1424,7 +1407,7 @@ mod tests {
             .expect("get");
         assert_eq!(before.as_deref(), Some(schemaless_body("base").as_slice()));
 
-        core.txn_overlays.entry(txn).or_default().insert_put(
+        core.txn_overlay_mut(txn).insert_put(
             coll_key("notes"),
             surrogate,
             "userpk",
@@ -1455,7 +1438,7 @@ mod tests {
         let doc_row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
 
         {
-            let overlay = src.txn_overlays.entry(txn).or_default();
+            let overlay = src.txn_overlay_mut(txn);
             overlay.insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
             overlay.insert_put(
                 coll_key("notes"),
@@ -1512,7 +1495,7 @@ mod tests {
 
         let expire_at = crate::engine::kv::current_ms() + 3_600_000;
         {
-            let overlay = src.txn_overlays.entry(txn).or_default();
+            let overlay = src.txn_overlay_mut(txn);
             overlay.insert_put(coll_key("kvc"), 1, &hex_key(b"live"), b"V".to_vec());
             overlay.set_ttl(
                 coll_key("kvc"),
@@ -1861,7 +1844,7 @@ mod tests {
         let doc_row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
 
         {
-            let overlay = src.txn_overlays.entry(txn).or_default();
+            let overlay = src.txn_overlay_mut(txn);
             overlay.insert_put(
                 coll_key("notes"),
                 doc_surrogate,
@@ -1966,7 +1949,7 @@ mod tests {
         let txn = TxnId::new(38);
 
         {
-            let overlay = src.graph_txn_overlays.entry(txn).or_default();
+            let overlay = src.graph_txn_overlay_mut(txn);
             overlay.stage_edge_put(coll_key("g"), "c", "l", "z", vec![]);
             overlay.stage_edge_put(coll_key("g"), "a", "l", "x", vec![]);
             overlay.stage_edge_put(coll_key("g"), "b", "l", "y", vec![]);
@@ -2349,12 +2332,8 @@ mod tests {
         let txn = TxnId::new(47);
 
         // Stage the KV write into the overlay (overlay-driven serializer).
-        src.txn_overlays.entry(txn).or_default().insert_put(
-            coll_key("kvc"),
-            1,
-            &hex_key(b"k"),
-            b"V".to_vec(),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
 
         let mut row = std::collections::HashMap::new();
         row.insert("a".to_string(), nodedb_types::Value::Integer(7));
@@ -2698,12 +2677,8 @@ mod tests {
         let txn = TxnId::new(44);
         let surrogate = 13u32;
 
-        src.txn_overlays.entry(txn).or_default().insert_put(
-            coll_key("kvc"),
-            1,
-            &hex_key(b"k"),
-            b"V".to_vec(),
-        );
+        src.txn_overlay_mut(txn)
+            .insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
 
         let plans = [
             kv_write_plan("kvc"),

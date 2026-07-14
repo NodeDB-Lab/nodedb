@@ -107,10 +107,11 @@ impl CoreLoop {
     ) -> Response {
         let doc_id = surrogate_to_doc_id(surrogate);
         let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
-        self.txn_overlays
-            .entry(ctx.txn_id)
-            .or_default()
-            .insert_tombstone(ctx.coll_key.clone(), ctx.surrogate.0, &ctx.document_id);
+        self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
+            ctx.coll_key.clone(),
+            ctx.surrogate.0,
+            &ctx.document_id,
+        );
         self.stage_count_response(task, 1)
     }
 }

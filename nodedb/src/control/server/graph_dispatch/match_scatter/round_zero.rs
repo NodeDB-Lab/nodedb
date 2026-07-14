@@ -87,7 +87,8 @@ pub(super) async fn scatter_round_zero(
                 deadline_ms,
                 &version_set,
             )
-            .await?;
+            .await?
+            .payloads;
             collect_remote_envelopes(node_id, payloads)
         })
     });

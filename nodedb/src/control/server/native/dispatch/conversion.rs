@@ -22,6 +22,12 @@ pub(crate) fn error_to_native(seq: u64, e: &crate::Error) -> NativeResponse {
         crate::Error::CollectionNotFound { collection, .. } => {
             ("42P01", format!("collection '{collection}' not found"))
         }
+        // A cross-shard Calvin OCC abort is a serialization failure (40001) —
+        // the client should retry the whole transaction.
+        crate::Error::CalvinSerializationConflict => (
+            nodedb_types::error::sqlstate::SERIALIZATION_FAILURE,
+            format!("{e}"),
+        ),
         other => ("XX000", format!("{other}")),
     };
     NativeResponse::error(seq, code, message)

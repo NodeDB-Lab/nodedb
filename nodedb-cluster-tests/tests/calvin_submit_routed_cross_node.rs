@@ -62,18 +62,13 @@ fn sequencer_leader(node: &common::cluster_harness::TestClusterNode) -> u64 {
         .unwrap_or(0)
 }
 
-// NOTE: This exercises a cross-shard *document* write inside an explicit
-// `BEGIN; … ; COMMIT` block. That flush path does not yet route its
-// submit-and-await to the sequencer-group leader (the explicit-transaction /
-// OLLP dispatch still submits to the local inbox), so on a non-leader
-// coordinator it times out at the completion phase. Sequencer-leader routing of
-// the explicit-block / OLLP document path is a separate, declared follow-up. The
-// proven Cv1 (sequencer-leader-routed submit) + dh-2 (edge dual-home) path is
-// covered end-to-end by `graph_traverse_reverse_cross_node`; this test is kept
-// (ignored) as the executable marker for the document-path follow-up.
-#[ignore = "document cross-shard write in an explicit transaction block is not yet \
-            sequencer-leader-routed (declared follow-up); Cv1+dh-2 proven by \
-            graph_traverse_reverse_cross_node"]
+// This exercises a cross-shard *document* write inside an explicit
+// `BEGIN; … ; COMMIT` block from a NON-sequencer-leader coordinator. The COMMIT
+// flush routes its submit-and-await to the sequencer-group leader via
+// `dispatch_tasks_to_calvin` → `submit_calvin_routed` — the same routed
+// primitive the autocommit cross-shard path uses — so it completes instead of
+// timing out at the completion phase on a non-leader coordinator. This is the
+// H1 acceptance test for interactive cross-shard COMMIT under leader routing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn cross_shard_write_from_non_sequencer_leader_completes() {
     let cluster = TestCluster::spawn_three().await.expect("3-node cluster");

@@ -5,12 +5,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::RwLock;
+use std::sync::atomic::Ordering::Relaxed;
 
 use nodedb_types::DatabaseId;
 
 use crate::types::TenantId;
 
-use super::state::{ConnSession, TransactionState};
+use super::state::{ConnSession, TransactionState, now_unix_ms};
 
 /// Concurrent session store — keyed by socket address.
 pub struct SessionStore {
@@ -147,6 +148,81 @@ impl SessionStore {
             session.effective_tenant_id = tenant;
             session.plan_cache.clear();
             session.prepared_stmts.clear();
+        }
+    }
+
+    /// Read the identity resolved for queries on this connection, if any.
+    /// Returns `None` when no query has resolved an identity yet (the session
+    /// never issued a statement past auth) or the session does not exist.
+    pub fn identity(
+        &self,
+        addr: &SocketAddr,
+    ) -> Option<crate::control::security::identity::AuthenticatedIdentity> {
+        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
+        sessions.get(addr).and_then(|s| s.identity.clone())
+    }
+
+    /// Stash the identity resolved for queries on this connection. Called from
+    /// the per-query auth chokepoint (`resolve_identity`) so a connection torn
+    /// down mid-transaction can reclaim its Data-Plane overlays without a live
+    /// query. Overwrites any prior value — the identity in force for the most
+    /// recent query is the one teardown must use. Creates the session entry if
+    /// absent so the extended-query path (which resolves identity before
+    /// `ensure_session`) still records it.
+    pub fn set_identity(
+        &self,
+        addr: &SocketAddr,
+        identity: crate::control::security::identity::AuthenticatedIdentity,
+    ) {
+        let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
+        sessions
+            .entry(*addr)
+            .or_insert_with(ConnSession::new)
+            .identity = Some(identity);
+    }
+
+    /// Record the start of a statement executing on this connection. Bumps the
+    /// in-flight counter so the idle watchdog never closes a connection with a
+    /// statement in progress. Creates the session entry if absent (mirrors
+    /// `set_identity`) so the extended-query path — which can begin execution
+    /// before `ensure_session` runs — still has its in-flight state tracked.
+    pub fn begin_request(&self, addr: &SocketAddr) {
+        let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
+        sessions
+            .entry(*addr)
+            .or_insert_with(ConnSession::new)
+            .in_flight
+            .fetch_add(1, Relaxed);
+    }
+
+    /// Record the completion of a statement on this connection: decrement the
+    /// in-flight counter (saturating — never underflows if the session was
+    /// already removed by a concurrent teardown) and stamp last-activity to
+    /// "now" so the idle window restarts from statement completion.
+    pub fn end_request(&self, addr: &SocketAddr) {
+        let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(session) = sessions.get_mut(addr) {
+            // Exclusive write lock held: no concurrent mutator, so a
+            // load-check-store is a safe saturating decrement.
+            if session.in_flight.load(Relaxed) > 0 {
+                session.in_flight.fetch_sub(1, Relaxed);
+            }
+            session.last_activity_ms.store(now_unix_ms(), Relaxed);
+        }
+    }
+
+    /// Whether the connection at `addr` is eligible for idle timeout: the
+    /// session exists, has zero statements in flight, and its last activity is
+    /// at least `idle_ms` in the past relative to `now_ms`. Returns `false`
+    /// when the session is missing — nothing to time out.
+    pub fn idle_eligible(&self, addr: &SocketAddr, idle_ms: u64, now_ms: u64) -> bool {
+        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
+        match sessions.get(addr) {
+            Some(session) => {
+                session.in_flight.load(Relaxed) == 0
+                    && now_ms.saturating_sub(session.last_activity_ms.load(Relaxed)) >= idle_ms
+            }
+            None => false,
         }
     }
 

@@ -105,9 +105,7 @@ impl CoreLoop {
         let affected = affected_rows.len();
         for (surrogate, _row) in affected_rows {
             let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
-            self.txn_overlays
-                .entry(txn_id)
-                .or_default()
+            self.txn_overlay_mut(txn_id)
                 .insert_tombstone(coll_key.clone(), surrogate, &doc_id);
         }
 

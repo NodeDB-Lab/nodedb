@@ -27,7 +27,7 @@ use tracing::{Instrument, debug, info_span};
 use crate::Error;
 use crate::control::state::SharedState;
 use crate::control::trace_export::EmitSpanParams;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, Lsn, TenantId, TraceId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 use super::dispatcher::{default_deadline_ms, dispatch_route};
@@ -106,11 +106,33 @@ impl Gateway {
     ///
     /// Returns one `Vec<u8>` payload per vShard result. For point operations
     /// the returned Vec has exactly one element.
+    ///
+    /// Thin wrapper over [`Gateway::execute_with_watermarks`] that discards the
+    /// per-shard read watermarks — for the ~5 existing callers that only need
+    /// payloads.
     pub async fn execute(
         &self,
         ctx: &QueryContext,
         plan: PhysicalPlan,
     ) -> Result<Vec<Vec<u8>>, Error> {
+        self.execute_with_watermarks(ctx, plan)
+            .await
+            .map(|(payloads, _watermarks)| payloads)
+    }
+
+    /// Execute a pre-planned `PhysicalPlan`, returning both the raw payloads and
+    /// the per-shard read watermarks observed across every dispatched route.
+    ///
+    /// Each `(vshard, watermark_lsn)` entry is one participating shard's real
+    /// committed LSN (local SPSC response watermark or the remote's
+    /// `ExecuteResponse.watermark_lsn`). The cross-node gather consumer folds
+    /// these into the transaction read-set so a remote-homed read records the
+    /// remote's actual LSN instead of the former hardcoded `Lsn::ZERO`.
+    pub async fn execute_with_watermarks(
+        &self,
+        ctx: &QueryContext,
+        plan: PhysicalPlan,
+    ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>), Error> {
         let shared = self.shared()?;
         let span = info_span!(
             "gateway.execute",
@@ -201,7 +223,8 @@ impl Gateway {
                     debug!(sql = %sql, "gateway: plan cache hit (two-phase)");
                     return self
                         .execute_with_version_set(ctx, (*cached_plan).clone(), stored_vs)
-                        .await;
+                        .await
+                        .map(|(payloads, _watermarks)| payloads);
                 }
             }
             // Stored version set is stale or plan was evicted — fall through
@@ -225,16 +248,22 @@ impl Gateway {
             .insert_version_set(sql_key, actual_vs.clone());
         self.plan_cache.insert(actual_key, Arc::new(plan.clone()));
 
-        self.execute_with_version_set(ctx, plan, actual_vs).await
+        self.execute_with_version_set(ctx, plan, actual_vs)
+            .await
+            .map(|(payloads, _watermarks)| payloads)
     }
 
     /// Core execution path: route → dispatch with retry → fuse.
+    ///
+    /// Returns the fused/collected payloads alongside every route's per-shard
+    /// read watermarks (one `(vshard, watermark_lsn)` per participating shard,
+    /// accumulated across routes — never collapsed).
     async fn execute_with_version_set(
         &self,
         ctx: &QueryContext,
         plan: PhysicalPlan,
         version_set: GatewayVersionSet,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>), Error> {
         let shared = self.shared()?;
         let routes = self.compute_routes(plan, ctx)?;
 
@@ -245,6 +274,7 @@ impl Gateway {
         // N × cap across routes.
         let max_total_bytes = shared.tuning.network.max_query_result_bytes as usize;
         let mut all_payloads: Vec<Vec<u8>> = Vec::new();
+        let mut all_shard_watermarks: Vec<(VShardId, Lsn)> = Vec::new();
         let mut accumulated_bytes: usize = 0;
 
         for route in routes {
@@ -258,7 +288,7 @@ impl Gateway {
             let retry_counter = Arc::clone(&self.not_leader_retry_count);
             let version_set_for_route = version_set.clone();
             let shared_for_route = Arc::clone(&shared);
-            let payloads = retry_not_leader(routing_ref, move |attempt| {
+            let outcome = retry_not_leader(routing_ref, move |attempt| {
                 if attempt > 0 {
                     retry_counter.fetch_add(1, Ordering::Relaxed);
                 }
@@ -324,7 +354,12 @@ impl Gateway {
                 e
             })?;
 
-            for p in payloads {
+            // Accumulate this route's per-shard watermarks — one entry per
+            // participating shard, never collapsed to a scalar, so a multi-route
+            // read produces one read-set entry per shard.
+            all_shard_watermarks.extend(outcome.shard_watermarks);
+
+            for p in outcome.payloads {
                 accumulated_bytes = accumulated_bytes.saturating_add(p.len());
                 if accumulated_bytes > max_total_bytes {
                     return Err(Error::ExecutionLimitExceeded {
@@ -338,12 +373,14 @@ impl Gateway {
             }
         }
 
-        // For broadcast scans, fuse all shard payloads into one.
+        // For broadcast scans, fuse all shard payloads into one. The per-shard
+        // watermarks are NOT fused — each participating shard keeps its own
+        // read-set entry.
         if all_payloads.len() > 1 {
             let fused = fuse_payloads(all_payloads)?;
-            Ok(vec![fused.payload])
+            Ok((vec![fused.payload], all_shard_watermarks))
         } else {
-            Ok(all_payloads)
+            Ok((all_payloads, all_shard_watermarks))
         }
     }
 

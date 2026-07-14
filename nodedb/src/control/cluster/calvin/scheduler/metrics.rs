@@ -38,6 +38,13 @@ pub struct SchedulerMetrics {
     /// Reasons (indexes): 0=wal_crc_error, 1=io_error, 2=oom, 3=disk_full,
     /// 4=corruption_detected, 5=passive_participant_timeout.
     pub infra_abort_counts: [AtomicU64; 6],
+    /// Times a staged txn parked in `AwaitingVerdict` passed its stall deadline
+    /// with the durable global verdict still unknown. This is NOT an abort: the
+    /// scheduler keeps waiting and holding locks (a unilateral abort while a
+    /// peer may already have flushed a commit would tear the transaction). A
+    /// non-zero, growing value flags a stuck sequencer / partitioned verdict
+    /// path that needs operator attention, never a correctness action here.
+    pub verdict_stall_count: AtomicU64,
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -96,6 +103,13 @@ impl SchedulerMetrics {
         if let Some(counter) = self.infra_abort_counts.get(reason) {
             counter.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Record that a parked `AwaitingVerdict` txn passed its stall deadline
+    /// without a durable verdict. Observability only — the scheduler keeps
+    /// waiting; it never aborts on a stall.
+    pub fn record_verdict_stall(&self) {
+        self.verdict_stall_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record the end-to-end executor txn duration (dispatch → response).
@@ -213,6 +227,18 @@ impl SchedulerMetrics {
             );
         }
 
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_verdict_stall_total \
+             Times a staged txn's verdict wait passed its stall deadline (no abort)."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_verdict_stall_total counter");
+        let _ = writeln!(
+            out,
+            "nodedb_calvin_verdict_stall_total{{{label}}} {}",
+            self.verdict_stall_count.load(Ordering::Relaxed)
+        );
+
         out
     }
 }
@@ -229,6 +255,7 @@ impl Default for SchedulerMetrics {
             executor_txn_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             executor_txn_duration_sum_ms: AtomicU64::new(0),
             infra_abort_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            verdict_stall_count: AtomicU64::new(0),
         }
     }
 }

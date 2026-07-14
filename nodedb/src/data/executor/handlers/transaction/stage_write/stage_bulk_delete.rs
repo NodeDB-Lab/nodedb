@@ -89,9 +89,7 @@ impl CoreLoop {
             let Ok(surrogate) = u32::from_str_radix(row_key, 16) else {
                 continue;
             };
-            self.txn_overlays
-                .entry(txn_id)
-                .or_default()
+            self.txn_overlay_mut(txn_id)
                 .insert_tombstone(coll_key.clone(), surrogate, row_key);
             affected += 1;
         }

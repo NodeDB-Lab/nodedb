@@ -40,6 +40,7 @@ pub use self::staging_gate::{
     DetachedTxnScope, DmlTxnCtx, InTxnRoute, StagedTagKind, StagedWriteOutcome, StagingGateError,
     route_in_tx_write,
 };
+pub(crate) use self::state::now_unix_ms;
 pub use self::state::{ConnSession, CursorState, TransactionState};
 pub use self::store::SessionStore;
 pub use self::temp_tables::TempTableEntry;

@@ -87,10 +87,11 @@ impl CoreLoop {
     }
 
     pub(in crate::data::executor) fn stage_point_delete(&mut self, ctx: &StageCtx<'_>) -> Response {
-        self.txn_overlays
-            .entry(ctx.txn_id)
-            .or_default()
-            .insert_tombstone(ctx.coll_key.clone(), ctx.surrogate.0, &ctx.document_id);
+        self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
+            ctx.coll_key.clone(),
+            ctx.surrogate.0,
+            &ctx.document_id,
+        );
         self.stage_count_response(ctx.task, 1)
     }
 

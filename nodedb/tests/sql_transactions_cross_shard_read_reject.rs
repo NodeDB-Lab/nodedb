@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! An interactive transaction that writes one vShard and reads a DIFFERENT
-//! vShard must be rejected as a cross-shard write inside an explicit
-//! transaction block, even though the buffered write batch itself is
-//! single-shard.
+//! vShard is a cross-shard transaction at COMMIT time — even though the
+//! buffered write batch itself is single-shard — and on a non-cluster
+//! (embedded/local) node it is rejected because cross-shard commit needs the
+//! Calvin sequencer, which embedded mode does not stand up.
 //!
 //! The interactive-COMMIT orchestrator (`run_commit`, in
 //! `control/server/shared/session/commit.rs`) widens `classify_dispatch`'s
@@ -11,10 +12,12 @@
 //! (`read_vshards_of(&read_set)`) before classifying the buffered write
 //! batch. A transaction that only ever wrote collection A (one vShard) but
 //! also read collection B (a DIFFERENT vShard) therefore classifies as
-//! `DispatchClass::MultiShard { vshards: {A, B} }` at COMMIT time, and
-//! `dispatch_calvin_or_fast` rejects any `MultiShard` classification inside
-//! an explicit `BEGIN` block with `Error::CrossShardInExplicitTransaction`
-//! (`control/planner/calvin/dispatch.rs`). Previously the buffered batch
+//! `DispatchClass::MultiShard { vshards: {A, B} }` at COMMIT time. On a real
+//! cluster this whole batch commits atomically through the Calvin barrier;
+//! but this test runs against a standalone (non-cluster) `TestServer` with no
+//! sequencer wired, so the strict cross-shard COMMIT path surfaces
+//! `Error::SequencerUnavailable` ("cross-shard transactions require a cluster
+//! deployment with the Calvin sequencer"). Previously the buffered batch
 //! alone (containing only the write to A) classified as `SingleShard` and
 //! committed on the fast path without ever considering the read of B.
 
@@ -85,15 +88,18 @@ async fn write_one_shard_read_another_rejected_at_commit_in_explicit_txn() {
     assert_eq!(read_rows, vec!["b1".to_string()]);
 
     // COMMIT: the write-shard (col_a) union read-shard (col_b) read set now
-    // spans 2 vShards, so classify_dispatch reports MultiShard, and Calvin
-    // rejects it as a cross-shard write inside an explicit transaction block.
+    // spans 2 vShards, so classify_dispatch reports MultiShard. On this
+    // standalone (non-cluster) server there is no Calvin sequencer, so the
+    // strict cross-shard COMMIT path is rejected with SequencerUnavailable.
     let err = server
         .exec("COMMIT")
         .await
         .expect_err("COMMIT must be rejected: write to col_a + read of col_b span 2 vShards");
     assert!(
-        err.contains("cross-shard write inside explicit transaction block is not supported"),
-        "expected CrossShardInExplicitTransaction error text, got: {err}"
+        err.contains(
+            "cross-shard transactions require a cluster deployment with the Calvin sequencer"
+        ),
+        "expected SequencerUnavailable (embedded/local) error text, got: {err}"
     );
 
     // The rejected transaction must not have persisted the buffered write.

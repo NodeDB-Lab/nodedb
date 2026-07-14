@@ -494,7 +494,7 @@ pub async fn dispatch_dependent_edge_recon(
         .unwrap_or_else(|p| p.into_inner())
         .remove(&completed_txn);
     let apply_result = match drained {
-        Some(CalvinApplyResult::Single(response)) => Some(response),
+        Some(CalvinApplyResult::Single { response, .. }) => Some(response),
         Some(CalvinApplyResult::Conflict) => {
             return Err(Error::Internal {
                 detail: "multi-participant cross-shard RETURNING not supported".to_owned(),

@@ -358,9 +358,9 @@ impl SequencerStateMachine {
                     .note_routing_failed(crate::calvin::TxnId::new(epoch, position), detail);
             }
             // Durable per-participant commit vote for a staged cross-shard txn.
-            // Currently observed-only: the registry tallies votes but nothing
-            // yet reads the tally to change flush/drop behavior (that is a
-            // follow-up); the leader's local decision still drives.
+            // The registry tallies votes per vshard; once every participant has
+            // voted the leader aggregates them into the global verdict that gates
+            // the cross-shard commit barrier (flush on commit, drop on abort).
             SequencerEntry::Vote {
                 epoch,
                 position,
@@ -375,10 +375,9 @@ impl SequencerStateMachine {
             }
             // Authoritative commit/abort verdict for a staged cross-shard txn,
             // proposed by the leader once every participant voted. Applied on
-            // ALL replicas to store the decision. Currently observed-only:
-            // nothing yet reads the stored verdict to change flush/drop
-            // behavior (that is a follow-up); the leader's local decision still
-            // drives.
+            // ALL replicas to store the durable decision, which releases every
+            // participant parked at the cross-shard commit barrier into its
+            // flush (commit) or drop (abort).
             SequencerEntry::Verdict {
                 epoch,
                 position,

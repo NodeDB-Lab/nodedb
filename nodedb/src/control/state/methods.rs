@@ -265,6 +265,15 @@ impl SharedState {
         self.session_absolute_timeout_secs
     }
 
+    /// Override the idle and absolute session-timeout fields. Intended for
+    /// tests, which build `SharedState` with both set to `0` (disabled) and
+    /// need a short idle window to exercise the listener watchdog. Requires
+    /// `&mut`, so it must be called before the state is wrapped in an `Arc`.
+    pub fn set_session_timeouts_for_test(&mut self, idle_secs: u64, absolute_secs: u64) {
+        self.idle_timeout_secs = idle_secs;
+        self.session_absolute_timeout_secs = absolute_secs;
+    }
+
     /// Access to timeseries partition registries.
     pub fn timeseries_registries(
         &self,

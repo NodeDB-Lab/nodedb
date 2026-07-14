@@ -105,6 +105,12 @@ pub struct SystemMetrics {
     pub io_uring_completions: AtomicU64,
     pub tpc_utilization_ratio: AtomicU64,
     pub arena_memory_bytes: AtomicU64,
+    /// Current number of live per-transaction staging overlays across all
+    /// Data-Plane cores (txn_overlays + graph_txn_overlays entries). A gauge:
+    /// rises on first staged write of a transaction, falls when the overlay is
+    /// dropped on COMMIT/ROLLBACK/teardown. A persistently non-zero idle value
+    /// indicates leaked abandoned-transaction overlays.
+    pub active_txn_overlays: AtomicU64,
 
     // ── Contention ──
     pub mmap_major_faults: AtomicU64,

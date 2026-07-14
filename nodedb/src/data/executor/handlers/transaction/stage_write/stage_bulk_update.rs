@@ -191,12 +191,8 @@ impl CoreLoop {
                 limit: MAX_TXN_OVERLAY_BYTES,
             });
         }
-        self.txn_overlays.entry(txn_id).or_default().insert_put(
-            coll_key.clone(),
-            surrogate,
-            doc_id,
-            body,
-        );
+        self.txn_overlay_mut(txn_id)
+            .insert_put(coll_key.clone(), surrogate, doc_id, body);
         Ok(())
     }
 }

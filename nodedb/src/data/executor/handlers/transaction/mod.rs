@@ -2,6 +2,7 @@
 
 mod batch;
 pub mod overlay;
+mod overlay_gauge;
 mod resolve;
 pub(in crate::data::executor) mod stage_write;
 mod sub_plan;
