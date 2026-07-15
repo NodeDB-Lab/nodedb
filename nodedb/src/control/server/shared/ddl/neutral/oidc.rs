@@ -70,6 +70,21 @@ fn has_ambiguous_issuer_route(existing_audience: Option<&str>, audience: Option<
     }
 }
 
+fn validate_claim_mapping_roles(claim_mappings: &[OidcClaimMappingClause]) -> Result<(), DdlError> {
+    if claim_mappings
+        .iter()
+        .flat_map(|mapping| mapping.add_roles.iter())
+        .any(|role| role == "superuser")
+    {
+        return Err(DdlError {
+            sqlstate: "22023".to_string(),
+            message: "OIDC claim mappings cannot grant the database-owned superuser role"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Borrowed fields for a `CREATE OIDC PROVIDER` operation.
 pub struct CreateOidcProviderParams<'a> {
     pub name: &'a str,
@@ -108,6 +123,7 @@ pub fn create_oidc_provider(
             message: "JWKS_URI must not be empty".to_string(),
         });
     }
+    validate_claim_mapping_roles(claim_mappings)?;
 
     let catalog = state.credentials.catalog();
 
@@ -232,6 +248,7 @@ pub fn alter_oidc_provider_claim_mapping(
             sqlstate: "42704".to_string(),
             message: format!("OIDC provider '{name}' does not exist"),
         })?;
+    validate_claim_mapping_roles(claim_mappings)?;
 
     let stored_mappings: Vec<StoredClaimMappingRule> = claim_mappings
         .iter()

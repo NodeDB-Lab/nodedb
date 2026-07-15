@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::control::security::util::base64_url_decode;
 use crate::types::TenantId;
 
-use super::identity::{AuthMethod, AuthenticatedIdentity, Role};
+use super::identity::{AuthMethod, AuthenticatedIdentity, Role, roles_from_external_claims};
 
 /// JWT validation configuration.
 #[derive(Debug, Clone)]
@@ -88,7 +88,10 @@ pub struct JwtClaims {
     /// User ID (NodeDB-specific claim).
     #[serde(default)]
     pub user_id: u64,
-    /// Whether this is a superuser token.
+    /// Legacy external superuser assertion.
+    ///
+    /// Parsed for compatibility and security telemetry, but never grants
+    /// NodeDB superuser authority.
     #[serde(default)]
     pub is_superuser: bool,
     /// Extended claims not covered by the standard fields above.
@@ -191,12 +194,9 @@ impl JwtValidator {
             return Err(JwtError::InvalidAudience);
         }
 
-        // Map roles.
-        let roles: Vec<Role> = claims
-            .roles
-            .iter()
-            .map(|r| r.parse::<Role>().unwrap_or(Role::Custom(r.clone())))
-            .collect();
+        // External tokens may supply ordinary roles, but NodeDB owns the
+        // non-assertable superuser privilege boundary.
+        let roles: Vec<Role> = roles_from_external_claims(&claims.roles, claims.is_superuser);
 
         let username = if claims.sub.is_empty() {
             format!("jwt_user_{}", claims.user_id)
@@ -217,9 +217,9 @@ impl JwtValidator {
             tenant_id: TenantId::new(claims.tenant_id),
             auth_method: AuthMethod::OidcBearer,
             roles,
-            is_superuser: claims.is_superuser,
+            is_superuser: false,
             default_database: None,
-            accessible_databases: AuthenticatedIdentity::default_database_set(claims.is_superuser),
+            accessible_databases: AuthenticatedIdentity::default_database_set(false),
         })
     }
 
@@ -350,6 +350,56 @@ mod tests {
     /// test runtime. RSA-1024 keygen is ~10x faster than RSA-2048
     /// without changing what these tests actually exercise.
     const TEST_RSA_BITS: usize = 1024;
+
+    fn validate_rs256_payload(payload_json: &str) -> AuthenticatedIdentity {
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::signature::{SignatureEncoding, Signer};
+
+        let mut rng = rsa::rand_core::OsRng;
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, TEST_RSA_BITS).unwrap();
+        let public_key = rsa::RsaPublicKey::from(&private_key);
+        let pub_der = {
+            use rsa::pkcs8::EncodePublicKey;
+            public_key.to_public_key_der().unwrap().as_ref().to_vec()
+        };
+        let header = base64_url_encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = base64_url_encode(payload_json.as_bytes());
+        let signing_input = format!("{header}.{payload}");
+        let signing_key = SigningKey::<sha2::Sha256>::new(private_key);
+        let signature: rsa::pkcs1v15::Signature = signing_key.sign(signing_input.as_bytes());
+        let token = format!(
+            "{signing_input}.{}",
+            base64_url_encode(&signature.to_bytes())
+        );
+        let validator = JwtValidator::new(JwtConfig {
+            rsa_public_key_der: pub_der,
+            ..Default::default()
+        });
+        validator.validate(&token).unwrap()
+    }
+
+    #[test]
+    fn externally_asserted_superuser_flag_does_not_grant_superuser() {
+        let identity = validate_rs256_payload(
+            r#"{"sub":"alice","tenant_id":2,"roles":["readwrite"],"is_superuser":true,"exp":9999999999,"user_id":99}"#,
+        );
+
+        assert!(!identity.is_superuser);
+        assert!(!identity.roles.contains(&Role::Superuser));
+        assert!(identity.roles.contains(&Role::ReadWrite));
+        assert!(!identity.can_access_database(nodedb_types::id::DatabaseId::new(9_999)));
+    }
+
+    #[test]
+    fn externally_asserted_superuser_role_does_not_grant_superuser() {
+        let identity = validate_rs256_payload(
+            r#"{"sub":"alice","tenant_id":2,"roles":["superuser","readonly"],"is_superuser":false,"exp":9999999999,"user_id":99}"#,
+        );
+
+        assert!(!identity.is_superuser);
+        assert!(!identity.roles.contains(&Role::Superuser));
+        assert!(identity.roles.contains(&Role::ReadOnly));
+    }
 
     #[test]
     fn rs256_roundtrip() {

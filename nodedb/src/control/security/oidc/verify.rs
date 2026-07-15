@@ -15,7 +15,9 @@ use tracing::debug;
 
 use crate::control::security::catalog::StoredOidcProvider;
 use crate::control::security::identity::database_set::DatabaseSet;
-use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, Role};
+use crate::control::security::identity::{
+    AuthMethod, AuthenticatedIdentity, Role, roles_from_external_claims,
+};
 use crate::control::security::jwt::JwtError;
 use crate::control::security::util::base64_url_decode;
 use crate::control::state::SharedState;
@@ -113,17 +115,9 @@ pub async fn verify_bearer_token(
         }
     }
 
-    // Map role strings to Role enum values. `Role::from_str` is infallible
-    // (unknown names land in `Role::Custom`), so destructure the Result
-    // without a phantom fallback that the type system says cannot fire.
-    let roles: Vec<Role> = mapping
-        .roles
-        .iter()
-        .map(|r| match r.parse::<Role>() {
-            Ok(role) => role,
-            Err(never) => match never {},
-        })
-        .collect();
+    // Claim-mapping conditions depend on external assertions, so their
+    // resulting roles remain below NodeDB's database-owned superuser ceiling.
+    let roles: Vec<Role> = roles_from_external_claims(&mapping.roles, false);
 
     let username = if verified_claims.sub.is_empty() {
         format!("oidc_{}", verified_claims.user_id)

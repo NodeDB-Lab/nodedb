@@ -129,6 +129,8 @@ Supported algorithms: ES256, ES384, RS256. Built-in JWKS cache with disk fallbac
 
 **Note:** The OIDC provider mechanism (above) is the recommended approach for modern SSO; this `nodedb.toml` method is supported for backward compatibility. Every static provider requires an explicit `tenant_id`; startup fails closed when it is omitted. Providers may share an issuer only when each has a distinct, non-empty audience.
 
+JWTs may assert ordinary built-in and custom roles, but they cannot assert NodeDB superuser authority. NodeDB ignores both the `is_superuser` claim and the `"superuser"` role string on every external JWT path. Superuser must be granted through NodeDB credential administration.
+
 ## mTLS (Mutual TLS)
 
 For zero-trust environments. Both client and server present certificates.

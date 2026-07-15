@@ -16,7 +16,7 @@ use nodedb_types::DatabaseId;
 
 use crate::types::TenantId;
 
-use super::identity::{AuthMethod, AuthenticatedIdentity};
+use super::identity::{AuthMethod, AuthenticatedIdentity, roles_from_external_claims};
 use super::jwt::JwtClaims;
 
 /// Account status for access-control decisions.
@@ -181,7 +181,10 @@ impl AuthContext {
             tenant_id: TenantId::new(claims.tenant_id),
             org_id,
             org_ids,
-            roles: claims.roles.clone(),
+            roles: roles_from_external_claims(&claims.roles, claims.is_superuser)
+                .into_iter()
+                .map(|role| role.to_string())
+                .collect(),
             groups,
             permissions,
             status,
@@ -582,6 +585,28 @@ mod tests {
         assert_eq!(first.username, identity.username);
         assert_eq!(first.roles, vec!["readwrite"]);
         assert_eq!(first.auth_method, AuthMethod::OidcBearer);
+    }
+
+    #[test]
+    fn from_jwt_removes_externally_asserted_superuser_authority() {
+        let claims = JwtClaims {
+            sub: "alice".into(),
+            tenant_id: 1,
+            roles: vec!["superuser".into(), "readwrite".into()],
+            exp: 9_999_999_999,
+            nbf: 0,
+            iat: 0,
+            iss: "nodedb-auth".into(),
+            aud: "nodedb".into(),
+            user_id: 42,
+            is_superuser: true,
+            extra: HashMap::new(),
+        };
+
+        let context = AuthContext::from_jwt(&claims, "s_jwt_roles".into());
+
+        assert!(!context.is_superuser());
+        assert_eq!(context.roles, vec!["readwrite"]);
     }
 
     #[test]

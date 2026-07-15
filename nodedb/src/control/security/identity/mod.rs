@@ -19,12 +19,14 @@
 
 pub mod authenticated;
 pub mod database_set;
+pub mod external_authority;
 pub mod permission;
 pub mod plan_permission;
 pub mod role;
 
 pub use authenticated::{AuthMethod, AuthenticatedIdentity};
 pub use database_set::DatabaseSet;
+pub use external_authority::roles_from_external_claims;
 pub use permission::{Permission, PermissionTarget, role_grants_permission};
 pub use plan_permission::required_permission;
 pub use role::Role;

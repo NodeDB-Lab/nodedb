@@ -17,7 +17,9 @@ use cache_identity::{catalog_cache_identity, static_cache_identity};
 use tracing::{debug, warn};
 
 use crate::config::auth::{JwtAuthConfig, JwtProviderConfig};
-use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, Role};
+use crate::control::security::identity::{
+    AuthMethod, AuthenticatedIdentity, roles_from_external_claims,
+};
 use crate::control::security::jwt::{JwtClaims, JwtError};
 use crate::control::security::util::base64_url_decode;
 use crate::types::TenantId;
@@ -445,11 +447,7 @@ fn validate_provider_claims(
 /// [`crate::control::security::oidc`] instead, which applies stored
 /// claim-mapping rules.
 fn build_identity(claims: &JwtClaims, tenant_id: u64) -> AuthenticatedIdentity {
-    let roles: Vec<Role> = claims
-        .roles
-        .iter()
-        .map(|r| parse_role_infallible(r))
-        .collect();
+    let roles = roles_from_external_claims(&claims.roles, claims.is_superuser);
     let username = if claims.sub.is_empty() {
         format!("jwt_user_{}", claims.user_id)
     } else {
@@ -461,19 +459,9 @@ fn build_identity(claims: &JwtClaims, tenant_id: u64) -> AuthenticatedIdentity {
         tenant_id: TenantId::new(tenant_id),
         auth_method: AuthMethod::OidcBearer,
         roles,
-        is_superuser: claims.is_superuser,
+        is_superuser: false,
         default_database: None,
-        accessible_databases: AuthenticatedIdentity::default_database_set(claims.is_superuser),
-    }
-}
-
-/// Parse a role string. `Role::from_str` is infallible — unknown names land
-/// in `Role::Custom` — so this destructures the `Result` without `unwrap`
-/// and without a phantom fallback that the type system says cannot fire.
-fn parse_role_infallible(s: &str) -> Role {
-    match s.parse::<Role>() {
-        Ok(role) => role,
-        Err(never) => match never {},
+        accessible_databases: AuthenticatedIdentity::default_database_set(false),
     }
 }
 

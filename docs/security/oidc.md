@@ -58,7 +58,8 @@ CLAIM MAPPING WHEN <claim> = '<value>' [SET DEFAULT_DATABASE = <db_id>] [ADD DAT
 - If JWT contains `<claim>` with value matching `<value>`, apply the corresponding actions
 - `SET DEFAULT_DATABASE` sets the user's default database for the session (numeric database ID)
 - `ADD DATABASES` adds the databases to the user's accessible set (numeric IDs in brackets)
-- `ADD ROLES` adds roles to the authenticated identity (quoted role names in array)
+- `ADD ROLES` adds non-superuser roles to the authenticated identity (quoted role names in array)
+- `superuser` is database-owned authority and cannot be granted by an OIDC claim mapping; CREATE and ALTER reject mappings that request it
 - Multiple rules are OR-combined: if any rule matches, its actions apply
 - Claim values support wildcards (`*`) for matching any value of a claim
 
@@ -70,6 +71,8 @@ CREATE OIDC PROVIDER okta ISSUER '...' JWKS_URI '...' TENANT 42
 ```
 
 All users with a `department` claim get access to the database with ID 5.
+
+Externally authenticated identities cannot assert NodeDB superuser authority. The JWT `is_superuser` field and a raw `"superuser"` role are ignored. Legacy or corrupted stored mappings that contain `superuser` are sanitized during authentication, while their permitted roles and database access remain intact; NodeDB emits a bounded operator warning when it encounters such an assertion.
 
 ## Updating Provider Configuration
 
