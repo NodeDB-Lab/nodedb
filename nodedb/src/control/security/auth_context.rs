@@ -198,6 +198,28 @@ impl AuthContext {
         }
     }
 
+    /// Build `AuthContext` from an already-verified JWT and its bound identity.
+    ///
+    /// JWT claims retain non-authoritative session detail such as organization,
+    /// group, permission, and metadata fields. Identity fields that control
+    /// authorization are taken from the verified identity, whose tenant and
+    /// roles may be provider-bound rather than token-claim-derived.
+    pub fn from_verified_jwt(
+        claims: &JwtClaims,
+        identity: &AuthenticatedIdentity,
+        session_id: String,
+    ) -> Self {
+        let mut context = Self::from_jwt(claims, session_id);
+        if identity.user_id != 0 {
+            context.id = identity.user_id.to_string();
+        }
+        context.username = identity.username.clone();
+        context.tenant_id = identity.tenant_id;
+        context.roles = identity.roles.iter().map(ToString::to_string).collect();
+        context.auth_method = identity.auth_method.clone();
+        context
+    }
+
     /// Build `AuthContext` from a DB-authenticated identity (SCRAM, password, API key).
     ///
     /// This is the fallback path when no JWT is presented. The context is
@@ -489,6 +511,77 @@ mod tests {
         let rest = id.strip_prefix("s_").unwrap();
         assert_eq!(rest.len(), 32, "expected 128-bit (32 hex char) payload");
         assert!(rest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn from_verified_jwt_uses_identity_for_authorization_fields() {
+        let claims = JwtClaims {
+            sub: "claim-user".into(),
+            tenant_id: 999,
+            roles: vec!["readonly".into()],
+            exp: 9_999_999_999,
+            nbf: 0,
+            iat: 1_700_000_000,
+            iss: "provider".into(),
+            aud: "nodedb".into(),
+            user_id: 7,
+            is_superuser: false,
+            extra: HashMap::from([
+                ("groups".into(), serde_json::json!(["engineering"])),
+                ("metadata".into(), serde_json::json!({"region": "us-west"})),
+            ]),
+        };
+        let mut identity = test_identity();
+        identity.user_id = 42;
+        identity.username = "provider-user".into();
+        identity.tenant_id = TenantId::new(1);
+        identity.auth_method = AuthMethod::OidcBearer;
+        identity.roles = vec![Role::TenantAdmin];
+
+        let ctx = AuthContext::from_verified_jwt(&claims, &identity, "s_jwt_bound".into());
+
+        assert_eq!(ctx.id, "42");
+        assert_eq!(ctx.username, "provider-user");
+        assert_eq!(ctx.tenant_id, TenantId::new(1));
+        assert_eq!(ctx.roles, vec!["tenant_admin"]);
+        assert_eq!(ctx.auth_method, AuthMethod::OidcBearer);
+        assert_eq!(ctx.groups, vec!["engineering"]);
+        assert_eq!(ctx.metadata.get("region"), Some(&"us-west".into()));
+    }
+
+    #[test]
+    fn from_verified_jwt_uses_distinct_subject_ids_when_identity_id_is_zero() {
+        let first_claims = JwtClaims {
+            sub: "oidc-subject-alice".into(),
+            tenant_id: 999,
+            roles: vec!["readonly".into()],
+            exp: 9_999_999_999,
+            nbf: 0,
+            iat: 1_700_000_000,
+            iss: "https://issuer.example".into(),
+            aud: "nodedb".into(),
+            user_id: 0,
+            is_superuser: false,
+            extra: HashMap::new(),
+        };
+        let mut second_claims = first_claims.clone();
+        second_claims.sub = "oidc-subject-bob".into();
+
+        let mut identity = test_identity();
+        identity.user_id = 0;
+        identity.auth_method = AuthMethod::OidcBearer;
+
+        let first = AuthContext::from_verified_jwt(&first_claims, &identity, "s_oidc_1".into());
+        let second = AuthContext::from_verified_jwt(&second_claims, &identity, "s_oidc_2".into());
+
+        assert_eq!(first.id, first_claims.sub);
+        assert_eq!(second.id, second_claims.sub);
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.id, "0");
+        assert_eq!(first.tenant_id, identity.tenant_id);
+        assert_eq!(first.username, identity.username);
+        assert_eq!(first.roles, vec!["readwrite"]);
+        assert_eq!(first.auth_method, AuthMethod::OidcBearer);
     }
 
     #[test]

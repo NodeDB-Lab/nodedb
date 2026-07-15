@@ -9,8 +9,11 @@
 //! only in how the verification key is resolved. The shared pipeline lives
 //! in [`Self::decode_unverified`] and [`Self::verify_signature_and_time`].
 
+mod cache_identity;
+
 use std::sync::Arc;
 
+use cache_identity::{catalog_cache_identity, static_cache_identity};
 use tracing::{debug, warn};
 
 use crate::config::auth::{JwtAuthConfig, JwtProviderConfig};
@@ -52,28 +55,45 @@ impl JwksRegistry {
     ///
     /// Fetches JWKS from all providers on startup, loads disk cache as fallback,
     /// and spawns the periodic refresh task.
-    pub async fn init(config: JwtAuthConfig) -> Self {
+    pub async fn init(config: JwtAuthConfig) -> crate::Result<Self> {
+        // Registry construction is also a public entry point, so it must not
+        // rely on the server-config loader to reject unsafe static providers.
+        // Validate before creating cache state, fetching remote keys, or
+        // spawning a refresh task.
+        config.validate()?;
+        let policy = Arc::new(config.jwks_policy().map_err(|e| crate::Error::Config {
+            detail: format!("auth.jwt allow-list is invalid: {e}"),
+        })?);
         let cache = Arc::new(JwksCache::new(config.jwks_cache_path.clone()));
-        // Policy construction is infallible here because ServerConfig
-        // validation already ran at startup; fall back to strict on the
-        // unlikely internal error path so runtime never opens up.
-        let policy = Arc::new(config.jwks_policy().unwrap_or_default());
 
         // Load disk cache first (offline fallback).
         cache.load_from_disk();
 
         // Fetch from all providers (best-effort — failures use disk cache).
         for provider in &config.providers {
-            super::fetch::fetch_and_cache(&provider.name, &provider.jwks_url, &cache, &policy)
-                .await;
+            let cache_identity = static_cache_identity(&provider.name);
+            super::fetch::fetch_and_cache(
+                &cache_identity,
+                &provider.name,
+                &provider.jwks_url,
+                &cache,
+                &policy,
+            )
+            .await;
         }
 
         // Spawn periodic refresh.
         let refresh_handle = if !config.providers.is_empty() {
-            let pairs: Vec<(String, String)> = config
+            let pairs: Vec<(String, String, String)> = config
                 .providers
                 .iter()
-                .map(|p| (p.name.clone(), p.jwks_url.clone()))
+                .map(|p| {
+                    (
+                        static_cache_identity(&p.name),
+                        p.name.clone(),
+                        p.jwks_url.clone(),
+                    )
+                })
                 .collect();
             Some(super::fetch::spawn_refresh_task(
                 pairs,
@@ -85,46 +105,38 @@ impl JwksRegistry {
             None
         };
 
-        Self {
+        Ok(Self {
             providers: config.providers.clone(),
             cache,
             config,
             policy,
             _refresh_handle: refresh_handle,
-        }
+        })
     }
 
-    /// Validate a JWT token using JWKS, routing by the `iss` claim.
+    /// Validate a JWT token using JWKS, routing by the `iss` and `aud` claims.
     ///
     /// Flow:
     /// 1. Decode header + payload (no signature) via [`Self::decode_unverified`].
-    /// 2. Match `iss` to a configured provider via [`Self::find_provider`].
+    /// 2. Match `iss` and `aud` to a configured provider via [`Self::find_provider`].
     /// 3. Resolve the verification key (cache lookup + on-demand re-fetch).
     /// 4. Verify signature, `exp`, `nbf` via [`Self::verify_signature_and_time`].
     /// 5. Validate `iss`, `aud` against the matched provider.
-    /// 6. Build and return an `AuthenticatedIdentity`.
+    /// 6. Build and return an `AuthenticatedIdentity` bound to that provider's tenant.
     pub async fn validate(&self, token: &str) -> Result<AuthenticatedIdentity, JwtError> {
         let decoded = self.decode_unverified(token)?;
-        let provider = self.find_provider(&decoded.claims.iss)?;
+        let provider = self.find_provider(&decoded.claims.iss, &decoded.claims.aud)?;
         let key = self.resolve_key(provider, &decoded).await?;
         self.verify_signature_and_time(&decoded, &key, &provider.name)?;
-
-        // Validate issuer.
-        if !provider.issuer.is_empty() && decoded.claims.iss != provider.issuer {
-            return Err(JwtError::InvalidIssuer);
-        }
-        // Validate audience.
-        if !provider.audience.is_empty() && decoded.claims.aud != provider.audience {
-            return Err(JwtError::InvalidAudience);
-        }
+        validate_provider_claims(provider, &decoded.claims)?;
 
         let claims = decoded.claims;
         let kid = decoded.header.kid.as_deref().unwrap_or("");
-        let identity = build_identity(&claims);
+        let identity = build_identity(&claims, provider.tenant_id);
 
         debug!(
             username = %identity.username,
-            tenant_id = claims.tenant_id,
+            tenant_id = provider.tenant_id,
             provider = %provider.name,
             kid = %kid,
             "JWKS JWT validated"
@@ -151,6 +163,7 @@ impl JwksRegistry {
             .ok_or(JwtError::InvalidIssuer)?;
         let key = self.resolve_key(provider, &decoded).await?;
         self.verify_signature_and_time(&decoded, &key, provider_name)?;
+        validate_provider_claims(provider, &decoded.claims)?;
 
         debug!(
             provider = %provider_name,
@@ -164,8 +177,9 @@ impl JwksRegistry {
     /// Validate a JWT using a named catalog provider whose JWKS endpoint is
     /// provided dynamically (catalog OIDC providers not in the static config).
     ///
-    /// The provider name is used as the cache key. The `jwks_uri` is used for
-    /// on-demand fetching when the key is not already cached.
+    /// Catalog keysets use a separate cache identity bound to their endpoint,
+    /// so they cannot reuse a static provider's keys or a prior endpoint's
+    /// keys after a catalog provider is recreated.
     pub async fn validate_with_catalog_provider(
         &self,
         provider_name: &str,
@@ -174,10 +188,11 @@ impl JwksRegistry {
     ) -> Result<JwtClaims, JwtError> {
         let decoded = self.decode_unverified(token)?;
         let kid = decoded.header.kid.as_deref().unwrap_or("");
-        let key = match self.cache.get(provider_name, kid) {
+        let cache_identity = catalog_cache_identity(provider_name, jwks_uri);
+        let key = match self.cache.get(&cache_identity, kid) {
             Some(k) => k,
             None => {
-                self.refetch_catalog_key(provider_name, jwks_uri, kid)
+                self.refetch_catalog_key(provider_name, jwks_uri, &cache_identity, kid)
                     .await?
             }
         };
@@ -295,38 +310,61 @@ impl JwksRegistry {
         decoded: &DecodedToken<'_>,
     ) -> Result<VerificationKey, JwtError> {
         let kid = decoded.header.kid.as_deref().unwrap_or("");
-        match self.cache.get(&provider.name, kid) {
+        let cache_identity = static_cache_identity(&provider.name);
+        match self.cache.get(&cache_identity, kid) {
             Some(k) => Ok(k),
-            None => self.refetch_for_unknown_kid(provider, kid).await,
+            None => {
+                self.refetch_for_unknown_kid(provider, &cache_identity, kid)
+                    .await
+            }
         }
     }
 
-    /// Find the provider matching a token's issuer.
+    /// Find the provider matching a token's issuer and audience.
     ///
-    /// Strict match only — a non-empty configured `issuer` must equal the
-    /// token's `iss`. There is **no** single-provider fallback: a token
-    /// whose issuer is empty or does not match any configured provider is
-    /// rejected, even when only one provider is configured. Accepting a
-    /// lone provider by count is how the cross-tenant-JWKS bypass worked.
-    fn find_provider(&self, issuer: &str) -> Result<&JwtProviderConfig, JwtError> {
+    /// Static configuration validation ensures a route is unique. A provider
+    /// with an empty audience is a wildcard only when it is the sole provider
+    /// for its issuer; validation forbids it from sharing that issuer. There
+    /// is no single-provider fallback for a token whose issuer is empty or
+    /// does not match a configured provider. For a known issuer with a
+    /// mismatched audience, return `InvalidAudience` rather than accepting
+    /// the first provider.
+    fn find_provider(&self, issuer: &str, audience: &str) -> Result<&JwtProviderConfig, JwtError> {
         if issuer.is_empty() {
             return Err(JwtError::InvalidIssuer);
         }
-        self.providers
-            .iter()
-            .find(|p| !p.issuer.is_empty() && p.issuer == issuer)
-            .ok_or(JwtError::InvalidIssuer)
+
+        let mut issuer_matched = false;
+        let mut wildcard_provider = None;
+        for provider in &self.providers {
+            if provider.issuer == issuer {
+                issuer_matched = true;
+                if provider.audience == audience {
+                    return Ok(provider);
+                }
+                if provider.audience.is_empty() {
+                    wildcard_provider = Some(provider);
+                }
+            }
+        }
+
+        match (issuer_matched, wildcard_provider) {
+            (_, Some(provider)) => Ok(provider),
+            (true, None) => Err(JwtError::InvalidAudience),
+            (false, None) => Err(JwtError::InvalidIssuer),
+        }
     }
 
     /// On-demand re-fetch for unknown `kid` against a static-config provider.
     async fn refetch_for_unknown_kid(
         &self,
         provider: &JwtProviderConfig,
+        cache_identity: &str,
         kid: &str,
     ) -> Result<VerificationKey, JwtError> {
         if !self
             .cache
-            .can_refetch(&provider.name, self.config.jwks_min_refetch_secs)
+            .can_refetch(cache_identity, self.config.jwks_min_refetch_secs)
         {
             warn!(
                 provider = %provider.name,
@@ -336,8 +374,9 @@ impl JwksRegistry {
             return Err(JwtError::InvalidSignature);
         }
 
-        self.cache.mark_refetch_attempted(&provider.name);
+        self.cache.mark_refetch_attempted(cache_identity);
         super::fetch::fetch_and_cache(
+            cache_identity,
             &provider.name,
             &provider.jwks_url,
             &self.cache,
@@ -346,7 +385,7 @@ impl JwksRegistry {
         .await;
 
         self.cache
-            .get(&provider.name, kid)
+            .get(cache_identity, kid)
             .ok_or(JwtError::InvalidSignature)
     }
 
@@ -356,11 +395,12 @@ impl JwksRegistry {
         &self,
         provider_name: &str,
         jwks_uri: &str,
+        cache_identity: &str,
         kid: &str,
     ) -> Result<VerificationKey, JwtError> {
         if !self
             .cache
-            .can_refetch(provider_name, self.config.jwks_min_refetch_secs)
+            .can_refetch(cache_identity, self.config.jwks_min_refetch_secs)
         {
             warn!(
                 provider = %provider_name,
@@ -369,21 +409,42 @@ impl JwksRegistry {
             );
             return Err(JwtError::InvalidSignature);
         }
-        self.cache.mark_refetch_attempted(provider_name);
-        super::fetch::fetch_and_cache(provider_name, jwks_uri, &self.cache, &self.policy).await;
+        self.cache.mark_refetch_attempted(cache_identity);
+        super::fetch::fetch_and_cache(
+            cache_identity,
+            provider_name,
+            jwks_uri,
+            &self.cache,
+            &self.policy,
+        )
+        .await;
         self.cache
-            .get(provider_name, kid)
+            .get(cache_identity, kid)
             .ok_or(JwtError::InvalidSignature)
     }
 }
 
+/// Validate the issuer and audience constraints of a selected static provider.
+fn validate_provider_claims(
+    provider: &JwtProviderConfig,
+    claims: &JwtClaims,
+) -> Result<(), JwtError> {
+    if claims.iss != provider.issuer {
+        return Err(JwtError::InvalidIssuer);
+    }
+    if !provider.audience.is_empty() && claims.aud != provider.audience {
+        return Err(JwtError::InvalidAudience);
+    }
+    Ok(())
+}
+
 /// Build an `AuthenticatedIdentity` from a verified static-provider JWT.
 ///
-/// Static-provider tokens carry a `tenant_id` numeric claim and a `roles`
-/// list parsed by [`Role::from_str`]. The catalog-provider path uses
+/// Static-provider roles are parsed by [`Role::from_str`]. Tenant ownership comes
+/// from the provider's server-side binding, never the JWT. The catalog path uses
 /// [`crate::control::security::oidc`] instead, which applies stored
 /// claim-mapping rules.
-fn build_identity(claims: &JwtClaims) -> AuthenticatedIdentity {
+fn build_identity(claims: &JwtClaims, tenant_id: u64) -> AuthenticatedIdentity {
     let roles: Vec<Role> = claims
         .roles
         .iter()
@@ -397,7 +458,7 @@ fn build_identity(claims: &JwtClaims) -> AuthenticatedIdentity {
     AuthenticatedIdentity {
         user_id: claims.user_id,
         username,
-        tenant_id: TenantId::new(claims.tenant_id),
+        tenant_id: TenantId::new(tenant_id),
         auth_method: AuthMethod::OidcBearer,
         roles,
         is_superuser: claims.is_superuser,

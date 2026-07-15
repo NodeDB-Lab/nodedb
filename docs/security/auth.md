@@ -90,11 +90,11 @@ Authenticate via external identity providers (Auth0, Okta, Keycloak) using JWT b
 
 ```sql
 -- Admin registers provider
-CREATE OIDC PROVIDER auth0 WITH (
-    issuer = 'https://your-domain.auth0.com/',
-    jwks_url = 'https://your-domain.auth0.com/.well-known/jwks.json',
-    audience = 'nodedb-api'
-);
+CREATE OIDC PROVIDER auth0
+    ISSUER 'https://your-domain.auth0.com/'
+    JWKS_URI 'https://your-domain.auth0.com/.well-known/jwks.json'
+    TENANT 42
+    AUDIENCE 'nodedb-api';
 ```
 
 **Supported on:** Native protocol and HTTP. **Not on pgwire** — the Postgres wire protocol has no standard bearer-token framing; pgwire stays SCRAM-SHA-256 only.
@@ -109,8 +109,11 @@ Configure in `nodedb.toml`:
 
 ```toml
 [[auth.jwt.providers]]
+name = "auth0"
+jwks_url = "https://your-domain.auth0.com/.well-known/jwks.json"
 issuer = "https://your-domain.auth0.com/"
 audience = "your-api"
+tenant_id = 42
 ```
 
 JWT claims map to `$auth.*` session variables:
@@ -124,7 +127,7 @@ JWT claims map to `$auth.*` session variables:
 
 Supported algorithms: ES256, ES384, RS256. Built-in JWKS cache with disk fallback and circuit breaker for provider outages.
 
-**Note:** The OIDC provider mechanism (above) is the recommended approach for modern SSO; this `nodedb.toml` method is supported for backward compatibility.
+**Note:** The OIDC provider mechanism (above) is the recommended approach for modern SSO; this `nodedb.toml` method is supported for backward compatibility. Every static provider requires an explicit `tenant_id`; startup fails closed when it is omitted. Providers may share an issuer only when each has a distinct, non-empty audience.
 
 ## mTLS (Mutual TLS)
 

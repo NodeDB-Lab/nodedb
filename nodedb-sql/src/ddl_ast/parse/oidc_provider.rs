@@ -8,6 +8,7 @@
 //! CREATE OIDC PROVIDER <name>
 //!     ISSUER '<iss>'
 //!     JWKS_URI '<uri>'
+//!     TENANT <u64>
 //!     [AUDIENCE '<aud>']
 //!     [CLAIM MAPPING WHEN <claim_name> = '<value>'
 //!         [SET DEFAULT_DATABASE = <id>]
@@ -31,18 +32,21 @@ use crate::ddl_ast::statement::{AuthStmt, NodedbStatement, OidcClaimMappingClaus
 use crate::error::SqlError;
 
 pub(super) fn try_parse(
-    upper: &str,
-    parts: &[&str],
+    _upper: &str,
+    _parts: &[&str],
     trimmed: &str,
 ) -> Option<Result<NodedbStatement, SqlError>> {
+    let statement = strip_trailing_terminator(trimmed);
+    let upper = statement.to_uppercase();
+    let parts: Vec<&str> = statement.split_whitespace().collect();
     if upper.starts_with("CREATE OIDC PROVIDER ") {
-        return Some(parse_create(parts, trimmed));
+        return Some(parse_create(&parts, statement));
     }
     if upper.starts_with("ALTER OIDC PROVIDER ") {
-        return Some(parse_alter(parts, trimmed));
+        return Some(parse_alter(&parts, statement));
     }
     if upper.starts_with("DROP OIDC PROVIDER ") {
-        return Some(parse_drop(parts));
+        return Some(parse_drop(&parts));
     }
     if upper == "SHOW OIDC PROVIDERS" {
         return Some(Ok(NodedbStatement::Auth(AuthStmt::ShowOidcProviders)));
@@ -53,7 +57,8 @@ pub(super) fn try_parse(
 // ── CREATE ─────────────────────────────────────────────────────────────────
 
 fn parse_create(parts: &[&str], trimmed: &str) -> Result<NodedbStatement, SqlError> {
-    // parts: CREATE OIDC PROVIDER <name> ISSUER '<iss>' JWKS_URI '<uri>' ...
+    let trimmed = strip_trailing_terminator(trimmed);
+    // parts: CREATE OIDC PROVIDER <name> ISSUER '<iss>' JWKS_URI '<uri>' TENANT <u64> ...
     let name = parts
         .get(3)
         .ok_or_else(|| SqlError::Parse {
@@ -62,22 +67,32 @@ fn parse_create(parts: &[&str], trimmed: &str) -> Result<NodedbStatement, SqlErr
         })?
         .to_string();
 
-    let issuer = extract_keyword_value(trimmed, "ISSUER").ok_or_else(|| SqlError::Parse {
-        detail: "CREATE OIDC PROVIDER: ISSUER '<url>' is required".to_string(),
-    })?;
+    // Provider clauses end at CLAIM MAPPING, so claim names cannot satisfy or
+    // overwrite the provider's top-level configuration.
+    let clause_start = after_token(trimmed, 4);
+    let mappings_start = claim_mapping_start(trimmed, clause_start);
+    let provider_clauses = &trimmed[clause_start..mappings_start];
+    let issuer =
+        extract_keyword_value(provider_clauses, "ISSUER")?.ok_or_else(|| SqlError::Parse {
+            detail: "CREATE OIDC PROVIDER: ISSUER '<url>' is required".to_string(),
+        })?;
 
-    let jwks_uri = extract_keyword_value(trimmed, "JWKS_URI").ok_or_else(|| SqlError::Parse {
-        detail: "CREATE OIDC PROVIDER: JWKS_URI '<url>' is required".to_string(),
-    })?;
+    let jwks_uri =
+        extract_keyword_value(provider_clauses, "JWKS_URI")?.ok_or_else(|| SqlError::Parse {
+            detail: "CREATE OIDC PROVIDER: JWKS_URI '<url>' is required".to_string(),
+        })?;
 
-    let audience = extract_keyword_value(trimmed, "AUDIENCE");
+    let tenant_id = parse_required_u64_keyword(provider_clauses, "TENANT", "CREATE OIDC PROVIDER")?;
 
-    let claim_mappings = parse_claim_mappings(trimmed)?;
+    let audience = extract_keyword_value(provider_clauses, "AUDIENCE")?;
+
+    let claim_mappings = parse_claim_mappings(&trimmed[mappings_start..])?;
 
     Ok(NodedbStatement::Auth(AuthStmt::CreateOidcProvider {
         name,
         issuer,
         jwks_uri,
+        tenant_id,
         audience,
         claim_mappings,
     }))
@@ -94,7 +109,8 @@ fn parse_alter(parts: &[&str], trimmed: &str) -> Result<NodedbStatement, SqlErro
         })?
         .to_string();
 
-    let claim_mappings = parse_claim_mappings(trimmed)?;
+    let mappings_start = claim_mapping_start(trimmed, after_token(trimmed, 4));
+    let claim_mappings = parse_claim_mappings(&trimmed[mappings_start..])?;
 
     Ok(NodedbStatement::Auth(
         AuthStmt::AlterOidcProviderClaimMapping {
@@ -160,30 +176,38 @@ fn parse_claim_mappings(trimmed: &str) -> Result<Vec<OidcClaimMappingClause>, Sq
 /// Parse a single `WHEN <claim_name> = '<value>' [SET DEFAULT_DATABASE = <id>]
 /// [ADD DATABASES [...]] [ADD ROLES [...]]` segment.
 fn parse_when_clause(segment: &str) -> Result<OidcClaimMappingClause, SqlError> {
-    let parts: Vec<&str> = segment.split_whitespace().collect();
-    // parts[0] = WHEN, parts[1] = <claim_name>, parts[2] = =, parts[3] = '<value>'
-    let claim_name = parts
-        .get(1)
+    let after_when = segment["WHEN".len()..].trim_start();
+    let claim_name_end = after_when
+        .find(char::is_whitespace)
         .ok_or_else(|| SqlError::Parse {
             detail: "CLAIM MAPPING: missing claim name after WHEN".to_string(),
+        })?;
+    let claim_name = after_when[..claim_name_end].to_lowercase();
+    let after_claim_name = after_when[claim_name_end..].trim_start();
+    let after_equals = after_claim_name
+        .strip_prefix('=')
+        .ok_or_else(|| SqlError::Parse {
+            detail: "CLAIM MAPPING: syntax is WHEN <claim> = '<value>'".to_string(),
         })?
-        .to_lowercase();
+        .trim_start();
+    let claim_value = parse_quoted_value(
+        after_equals,
+        "CLAIM MAPPING: syntax is WHEN <claim> = '<value>'",
+    )?;
 
-    let raw_value = parts.get(3).ok_or_else(|| SqlError::Parse {
-        detail: "CLAIM MAPPING: syntax is WHEN <claim> = '<value>'".to_string(),
-    })?;
-    let claim_value = raw_value.trim_matches('\'').trim_matches('"').to_string();
-
-    let seg_upper = segment.to_uppercase();
-
-    // SET DEFAULT_DATABASE = <id>
-    let default_database = extract_u64_after_eq(&seg_upper, segment, "DEFAULT_DATABASE");
-
-    // ADD DATABASES [<id>, ...]
-    let add_databases = extract_u64_list(&seg_upper, segment, "DATABASES")?;
-
-    // ADD ROLES ['<role>', ...]
-    let add_roles = extract_string_list(segment, "ROLES")?;
+    // Action sequences are found outside quoted claim values and only when
+    // every keyword is a complete word. This prevents claim names and values
+    // such as `roles` or `'ADD DATABASES'` from being mistaken for actions.
+    let default_database = find_action_end(segment, &["SET", "DEFAULT_DATABASE"])
+        .and_then(|end| extract_u64_after_eq(&segment[end..]));
+    let add_databases = find_action_end(segment, &["ADD", "DATABASES"])
+        .map(|end| extract_u64_list(&segment[end..], "DATABASES"))
+        .transpose()?
+        .unwrap_or_default();
+    let add_roles = find_action_end(segment, &["ADD", "ROLES"])
+        .map(|end| extract_string_list(&segment[end..], "ROLES"))
+        .transpose()?
+        .unwrap_or_default();
 
     Ok(OidcClaimMappingClause {
         claim_name,
@@ -196,44 +220,146 @@ fn parse_when_clause(segment: &str) -> Result<OidcClaimMappingClause, SqlError> 
 
 // ── Token extraction helpers ────────────────────────────────────────────────
 
-/// Extract the quoted string value that follows `KEYWORD` in the SQL text.
+/// Extract the quoted string value that follows `KEYWORD` in provider clauses.
 ///
-/// Handles both single-quote and double-quote delimiters.
-/// E.g. `ISSUER 'https://...'` → `"https://..."`.
-fn extract_keyword_value(trimmed: &str, keyword: &str) -> Option<String> {
+/// Both single- and double-quoted strings are accepted, but bare tokens and
+/// malformed strings are rejected.
+fn extract_keyword_value(trimmed: &str, keyword: &str) -> Result<Option<String>, SqlError> {
     let upper = trimmed.to_uppercase();
-    let kw_upper = keyword.to_uppercase();
-    let pos = upper.find(&kw_upper)?;
-    let after = &trimmed[pos + kw_upper.len()..].trim_start();
-    // The value is either 'quoted' or "double-quoted" or bare token.
-    let tok = after.split_whitespace().next()?;
-    let val = tok.trim_matches('\'').trim_matches('"').to_string();
-    if val.is_empty() { None } else { Some(val) }
-}
-
-/// Extract a `u64` value following `KEYWORD = <id>`.
-fn extract_u64_after_eq(seg_upper: &str, original: &str, keyword: &str) -> Option<u64> {
-    let pos = seg_upper.find(keyword)?;
-    let after_kw = &seg_upper[pos + keyword.len()..].trim_start();
-    if !after_kw.starts_with('=') {
-        return None;
-    }
-    let after_eq = &original[pos + keyword.len()..];
-    let tok = after_eq
-        .trim_start()
-        .trim_start_matches('=')
-        .split_whitespace()
-        .next()?;
-    tok.trim().parse::<u64>().ok()
-}
-
-/// Extract `[<id>, <id>, ...]` following `KEYWORD` (e.g. `DATABASES [1, 2, 3]`).
-fn extract_u64_list(seg_upper: &str, original: &str, keyword: &str) -> Result<Vec<u64>, SqlError> {
-    let pos = match seg_upper.find(keyword) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
+    let Some(pos) = find_keyword(&upper, keyword, 0) else {
+        return Ok(None);
     };
-    let after = &original[pos + keyword.len()..].trim_start();
+    let detail = format!("CREATE OIDC PROVIDER: {keyword} must be a quoted string");
+    parse_quoted_value(trimmed[pos + keyword.len()..].trim_start(), &detail).map(Some)
+}
+
+/// Parse one SQL-style single- or double-quoted string with doubled delimiters.
+///
+/// The value must end before whitespace or input end so tokens cannot be
+/// silently accepted after its closing quote.
+fn parse_quoted_value(input: &str, detail: &str) -> Result<String, SqlError> {
+    let Some(quote) = input.chars().next().filter(|ch| matches!(ch, '\'' | '"')) else {
+        return Err(SqlError::Parse {
+            detail: detail.to_string(),
+        });
+    };
+
+    let value = &input[quote.len_utf8()..];
+    let mut parsed = String::new();
+    let mut index = 0;
+    while index < value.len() {
+        let Some(ch) = value[index..].chars().next() else {
+            break;
+        };
+        if ch != quote {
+            parsed.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let after_quote = index + quote.len_utf8();
+        if value[after_quote..].starts_with(quote) {
+            parsed.push(quote);
+            index = after_quote + quote.len_utf8();
+            continue;
+        }
+        if value[after_quote..]
+            .chars()
+            .next()
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            return Err(SqlError::Parse {
+                detail: detail.to_string(),
+            });
+        }
+        return Ok(parsed);
+    }
+
+    Err(SqlError::Parse {
+        detail: detail.to_string(),
+    })
+}
+
+/// Remove one optional statement terminator from the end of an OIDC statement.
+fn strip_trailing_terminator(input: &str) -> &str {
+    input.strip_suffix(';').unwrap_or(input)
+}
+
+/// Extract the required unsigned integer immediately following `KEYWORD`.
+fn parse_required_u64_keyword(
+    original: &str,
+    keyword: &str,
+    statement: &str,
+) -> Result<u64, SqlError> {
+    let upper = original.to_uppercase();
+    let Some(pos) = find_keyword(&upper, keyword, 0) else {
+        return Err(SqlError::Parse {
+            detail: format!("{statement}: {keyword} <u64> is required"),
+        });
+    };
+    let raw_value = original[pos + keyword.len()..]
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| SqlError::Parse {
+            detail: format!("{statement}: {keyword} must be a u64"),
+        })?;
+    if !raw_value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(SqlError::Parse {
+            detail: format!("{statement}: {keyword} must be a u64"),
+        });
+    }
+    raw_value.parse::<u64>().map_err(|_| SqlError::Parse {
+        detail: format!("{statement}: {keyword} must be a u64"),
+    })
+}
+
+/// Return the start of the first top-level `CLAIM MAPPING` clause, or input end.
+fn claim_mapping_start(input: &str, search_from: usize) -> usize {
+    let upper = input.to_uppercase();
+    let mut search_from = search_from;
+    while let Some(pos) = find_keyword(&upper, "CLAIM", search_from) {
+        let after_claim = &upper[pos + "CLAIM".len()..];
+        let whitespace = after_claim.len() - after_claim.trim_start().len();
+        let mapping_start = pos + "CLAIM".len() + whitespace;
+        if find_keyword(&upper, "MAPPING", mapping_start) == Some(mapping_start) {
+            return pos;
+        }
+        search_from = pos + "CLAIM".len();
+    }
+    input.len()
+}
+
+/// Return the byte offset immediately after the first `token_count`
+/// whitespace-delimited tokens.
+fn after_token(input: &str, token_count: usize) -> usize {
+    let mut tokens_seen = 0;
+    let mut in_token = false;
+    for (index, ch) in input.char_indices() {
+        if ch.is_whitespace() {
+            if in_token {
+                tokens_seen += 1;
+                if tokens_seen == token_count {
+                    return index;
+                }
+                in_token = false;
+            }
+        } else {
+            in_token = true;
+        }
+    }
+    input.len()
+}
+
+/// Extract a `u64` value following an action's `=`, if present.
+fn extract_u64_after_eq(after_action: &str) -> Option<u64> {
+    let after_eq = after_action.trim_start().strip_prefix('=')?.trim_start();
+    let tok = after_eq.split_whitespace().next()?;
+    tok.parse::<u64>().ok()
+}
+
+/// Extract `[<id>, <id>, ...]` immediately following an `ADD DATABASES` action.
+fn extract_u64_list(after_action: &str, keyword: &str) -> Result<Vec<u64>, SqlError> {
+    let after = after_action.trim_start();
     if !after.starts_with('[') {
         // Possibly `ADD DATABASES` without a list — treat as empty.
         return Ok(Vec::new());
@@ -254,14 +380,9 @@ fn extract_u64_list(seg_upper: &str, original: &str, keyword: &str) -> Result<Ve
         .collect()
 }
 
-/// Extract `['<role>', ...]` following `KEYWORD` (e.g. `ROLES ['admin', 'reader']`).
-fn extract_string_list(original: &str, keyword: &str) -> Result<Vec<String>, SqlError> {
-    let upper = original.to_uppercase();
-    let pos = match upper.find(keyword) {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
-    let after = &original[pos + keyword.len()..].trim_start();
+/// Extract `['<role>', ...]` immediately following an `ADD ROLES` action.
+fn extract_string_list(after_action: &str, keyword: &str) -> Result<Vec<String>, SqlError> {
+    let after = after_action.trim_start();
     if !after.starts_with('[') {
         return Ok(Vec::new());
     }
@@ -279,30 +400,73 @@ fn extract_string_list(original: &str, keyword: &str) -> Result<Vec<String>, Sql
 /// Find the byte offset of a whole-word keyword match (case-insensitive via
 /// pre-uppercased `haystack`). The keyword must be uppercase.
 fn find_keyword(haystack: &str, keyword: &str, from: usize) -> Option<usize> {
-    let haystack = &haystack[from..];
-    let klen = keyword.len();
-    let mut search = 0;
-    while let Some(pos) = haystack[search..].find(keyword) {
-        let abs = search + pos;
-        // Check word boundary: character before must not be alpha/digit.
-        let before_ok = abs == 0
-            || !haystack
-                .as_bytes()
-                .get(abs - 1)
-                .copied()
-                .map(|b| b.is_ascii_alphanumeric() || b == b'_')
-                .unwrap_or(false);
-        let after_ok = haystack
-            .as_bytes()
-            .get(abs + klen)
-            .map(|&b| !b.is_ascii_alphanumeric() && b != b'_')
-            .unwrap_or(true);
-        if before_ok && after_ok {
-            return Some(from + abs);
+    let bytes = haystack.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut index = from;
+    let mut quote = None;
+    while index + keyword.len() <= bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == delimiter {
+                if bytes.get(index + 1) == Some(&delimiter) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
         }
-        search = abs + 1;
+        if matches!(bytes[index], b'\'' | b'"') {
+            quote = Some(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
+        let after = index + keyword.len();
+        let after_ok = after == bytes.len() || !is_word_byte(bytes[after]);
+        if before_ok && after_ok && bytes[index..].starts_with(keyword) {
+            return Some(index);
+        }
+        index += 1;
     }
     None
+}
+
+/// Find the end of an exact, quote-aware, whitespace-delimited action sequence.
+fn find_action_end(input: &str, words: &[&str]) -> Option<usize> {
+    let upper = input.to_uppercase();
+    let mut search_from = 0;
+    while let Some(start) = find_keyword(&upper, words[0], search_from) {
+        let mut end = start + words[0].len();
+        let mut matched = true;
+        for word in &words[1..] {
+            let whitespace = input[end..].len() - input[end..].trim_start().len();
+            if whitespace == 0 {
+                matched = false;
+                break;
+            }
+            end += whitespace;
+            if !upper[end..].starts_with(word)
+                || upper
+                    .as_bytes()
+                    .get(end + word.len())
+                    .is_some_and(|byte| is_word_byte(*byte))
+            {
+                matched = false;
+                break;
+            }
+            end += word.len();
+        }
+        if matched {
+            return Some(end);
+        }
+        search_from = start + words[0].len();
+    }
+    None
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 #[cfg(test)]
@@ -324,6 +488,32 @@ mod tests {
             ok("SHOW OIDC PROVIDERS"),
             NodedbStatement::Auth(AuthStmt::ShowOidcProviders)
         );
+    }
+
+    #[test]
+    fn oidc_statements_accept_one_trailing_terminator() {
+        assert_eq!(
+            ok("SHOW OIDC PROVIDERS;"),
+            NodedbStatement::Auth(AuthStmt::ShowOidcProviders)
+        );
+        assert_eq!(
+            ok("DROP OIDC PROVIDER IF EXISTS myidp;"),
+            NodedbStatement::Auth(AuthStmt::DropOidcProvider {
+                name: "myidp".to_string(),
+                if_exists: true,
+            })
+        );
+        match ok(
+            "ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1;",
+        ) {
+            NodedbStatement::Auth(AuthStmt::AlterOidcProviderClaimMapping {
+                claim_mappings,
+                ..
+            }) => {
+                assert_eq!(claim_mappings[0].default_database, Some(1));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
@@ -351,8 +541,26 @@ mod tests {
     }
 
     #[test]
-    fn create_oidc_provider_minimal() {
-        let sql = "CREATE OIDC PROVIDER auth0 ISSUER 'https://auth0.example.com' JWKS_URI 'https://auth0.example.com/.well-known/jwks.json'";
+    fn create_oidc_provider_requires_numeric_tenant() {
+        for sql in [
+            "CREATE OIDC PROVIDER auth0 ISSUER 'https://auth0.example.com' JWKS_URI 'https://auth0.example.com/jwks'",
+            "CREATE OIDC PROVIDER auth0 ISSUER 'https://auth0.example.com' JWKS_URI 'https://auth0.example.com/jwks' TENANT acme",
+        ] {
+            let upper = sql.to_uppercase();
+            let parts: Vec<&str> = sql.split_whitespace().collect();
+            assert!(
+                matches!(
+                    try_parse(&upper, &parts, sql),
+                    Some(Err(SqlError::Parse { .. }))
+                ),
+                "CREATE OIDC PROVIDER must require a numeric TENANT: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_oidc_provider_with_tenant_terminator() {
+        let sql = "CREATE OIDC PROVIDER auth0 ISSUER 'https://auth0.example.com' JWKS_URI 'https://auth0.example.com/.well-known/jwks.json' TENANT 42;";
         let stmt = ok(sql);
         assert_eq!(
             stmt,
@@ -360,16 +568,54 @@ mod tests {
                 name: "auth0".to_string(),
                 issuer: "https://auth0.example.com".to_string(),
                 jwks_uri: "https://auth0.example.com/.well-known/jwks.json".to_string(),
+                tenant_id: 42,
                 audience: None,
                 claim_mappings: vec![],
             })
         );
+        assert!(
+            format!("{stmt:?}").contains("tenant_id: 42"),
+            "the parsed provider must retain its tenant binding: {stmt:?}"
+        );
     }
 
     #[test]
-    fn create_oidc_provider_with_audience() {
-        let sql = "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' JWKS_URI 'https://idp.example.com/jwks' AUDIENCE 'nodedb-api'";
+    fn provider_name_clause_keywords_do_not_supply_clauses() {
+        for name in ["ISSUER", "JWKS_URI", "TENANT", "AUDIENCE"] {
+            let stmt = ok(&format!(
+                "CREATE OIDC PROVIDER {name} ISSUER 'https://idp.example.com' \
+                 JWKS_URI 'https://idp.example.com/jwks' AUDIENCE 'nodedb-api' TENANT 42 \
+                 CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+            ));
+            match stmt {
+                NodedbStatement::Auth(AuthStmt::CreateOidcProvider {
+                    name: parsed_name,
+                    issuer,
+                    jwks_uri,
+                    tenant_id,
+                    audience,
+                    claim_mappings,
+                }) => {
+                    assert_eq!(parsed_name, name);
+                    assert_eq!(issuer, "https://idp.example.com");
+                    assert_eq!(jwks_uri, "https://idp.example.com/jwks");
+                    assert_eq!(tenant_id, 42);
+                    assert_eq!(audience.as_deref(), Some("nodedb-api"));
+                    assert_eq!(claim_mappings.len(), 1);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn create_oidc_provider_with_audience_terminator() {
+        let sql = "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' JWKS_URI 'https://idp.example.com/jwks' TENANT 42 AUDIENCE 'nodedb-api';";
         let stmt = ok(sql);
+        assert!(
+            format!("{stmt:?}").contains("tenant_id: 42"),
+            "the parsed provider must retain its tenant binding: {stmt:?}"
+        );
         match stmt {
             NodedbStatement::Auth(AuthStmt::CreateOidcProvider { audience, .. }) => {
                 assert_eq!(audience, Some("nodedb-api".to_string()));
@@ -379,11 +625,65 @@ mod tests {
     }
 
     #[test]
+    fn claim_mappings_cannot_supply_provider_clauses() {
+        let missing_issuer = "CREATE OIDC PROVIDER auth0 JWKS_URI 'https://idp.example.com/jwks' TENANT 42 \
+            CLAIM MAPPING WHEN issuer = 'https://idp.example.com'";
+        let missing_jwks = "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' TENANT 42 \
+            CLAIM MAPPING WHEN jwks_uri = 'https://idp.example.com/jwks'";
+        let missing_tenant = "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' \
+            JWKS_URI 'https://idp.example.com/jwks' CLAIM MAPPING WHEN tenant = '42'";
+        for sql in [missing_issuer, missing_jwks, missing_tenant] {
+            let upper = sql.to_uppercase();
+            let parts: Vec<&str> = sql.split_whitespace().collect();
+            assert!(matches!(
+                try_parse(&upper, &parts, sql),
+                Some(Err(SqlError::Parse { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn claim_audience_does_not_set_provider_audience() {
+        let stmt = ok(
+            "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' \
+             JWKS_URI 'https://idp.example.com/jwks' TENANT 42 \
+             CLAIM MAPPING WHEN audience = 'nodedb-api'",
+        );
+        match stmt {
+            NodedbStatement::Auth(AuthStmt::CreateOidcProvider { audience, .. }) => {
+                assert_eq!(audience, None);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_oidc_provider_requires_quoted_provider_strings() {
+        for sql in [
+            "CREATE OIDC PROVIDER auth0 ISSUER = 'https://idp.example.com' JWKS_URI 'https://idp.example.com/jwks' TENANT 42",
+            "CREATE OIDC PROVIDER auth0 ISSUER https://idp.example.com JWKS_URI 'https://idp.example.com/jwks' TENANT 42",
+            "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' JWKS_URI = 'https://idp.example.com/jwks' TENANT 42",
+            "CREATE OIDC PROVIDER auth0 ISSUER 'https://idp.example.com' JWKS_URI 'https://idp.example.com/jwks' AUDIENCE = 'nodedb-api' TENANT 42",
+        ] {
+            let upper = sql.to_uppercase();
+            let parts: Vec<&str> = sql.split_whitespace().collect();
+            assert!(matches!(
+                try_parse(&upper, &parts, sql),
+                Some(Err(SqlError::Parse { .. }))
+            ));
+        }
+    }
+
+    #[test]
     fn create_oidc_provider_with_claim_mapping() {
         let sql = "CREATE OIDC PROVIDER corp ISSUER 'https://sso.corp.com' JWKS_URI 'https://sso.corp.com/jwks' \
-             AUDIENCE 'nodedb' \
-             CLAIM MAPPING WHEN org_id = 'acme' SET DEFAULT_DATABASE = 42 ADD DATABASES [43, 44] ADD ROLES ['readwrite']";
+             AUDIENCE 'nodedb' TENANT 42 \
+             CLAIM MAPPING WHEN org_id = 'acme' SET DEFAULT_DATABASE = 42 ADD DATABASES [43, 44] ADD ROLES ['readwrite'];";
         let stmt = ok(sql);
+        assert!(
+            format!("{stmt:?}").contains("tenant_id: 42"),
+            "the parsed provider must retain its tenant binding: {stmt:?}"
+        );
         match stmt {
             NodedbStatement::Auth(AuthStmt::CreateOidcProvider {
                 name,
@@ -418,6 +718,82 @@ mod tests {
                 assert_eq!(claim_mappings[0].add_roles, vec!["admin"]);
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_mapping_values_preserve_spaces_and_doubled_quotes() {
+        let single_quoted = ok(
+            "ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN department = 'platform engineering' \
+             ADD ROLES ['reader']",
+        );
+        let double_quoted = ok(
+            "ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN title = \"Director of \"\"Data\"\"\" \
+             SET DEFAULT_DATABASE = 7",
+        );
+
+        let NodedbStatement::Auth(AuthStmt::AlterOidcProviderClaimMapping {
+            claim_mappings, ..
+        }) = single_quoted
+        else {
+            panic!("expected ALTER OIDC PROVIDER claim mapping");
+        };
+        assert_eq!(claim_mappings[0].claim_value, "platform engineering");
+        assert_eq!(claim_mappings[0].add_roles, vec!["reader"]);
+
+        let NodedbStatement::Auth(AuthStmt::AlterOidcProviderClaimMapping {
+            claim_mappings, ..
+        }) = double_quoted
+        else {
+            panic!("expected ALTER OIDC PROVIDER claim mapping");
+        };
+        assert_eq!(claim_mappings[0].claim_value, "Director of \"Data\"");
+        assert_eq!(claim_mappings[0].default_database, Some(7));
+    }
+
+    #[test]
+    fn claim_mapping_rejects_unquoted_and_malformed_values() {
+        for sql in [
+            "ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN department = engineering",
+            "ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN department = 'platform engineering",
+            "ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN department = 'engineering'junk",
+        ] {
+            let upper = sql.to_uppercase();
+            let parts: Vec<&str> = sql.split_whitespace().collect();
+            assert!(matches!(
+                try_parse(&upper, &parts, sql),
+                Some(Err(SqlError::Parse { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn claim_mapping_actions_ignore_keyword_like_claim_names_and_values() {
+        let absent = ok("ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN roles = \
+             'SET DEFAULT_DATABASE ADD DATABASES ADD ROLES'");
+        let actual = ok("ALTER OIDC PROVIDER auth0 SET CLAIM MAPPING WHEN add = \
+             'DEFAULT_DATABASE DATABASES ROLES SET ADD it''s ADD ROLES' \
+             SET DEFAULT_DATABASE = 7 ADD DATABASES [8, 9] ADD ROLES ['reader']");
+
+        for statement in [absent, actual] {
+            let NodedbStatement::Auth(AuthStmt::AlterOidcProviderClaimMapping {
+                claim_mappings,
+                ..
+            }) = statement
+            else {
+                panic!("expected ALTER OIDC PROVIDER claim mapping");
+            };
+            let mapping = &claim_mappings[0];
+            if mapping.claim_name == "roles" {
+                assert_eq!(mapping.default_database, None);
+                assert!(mapping.add_databases.is_empty());
+                assert!(mapping.add_roles.is_empty());
+            } else {
+                assert_eq!(mapping.claim_name, "add");
+                assert_eq!(mapping.default_database, Some(7));
+                assert_eq!(mapping.add_databases, vec![8, 9]);
+                assert_eq!(mapping.add_roles, vec!["reader"]);
+            }
         }
     }
 }

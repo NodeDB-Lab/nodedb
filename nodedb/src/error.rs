@@ -367,11 +367,14 @@ pub enum Error {
     #[error("session closed: user account was dropped")]
     SessionUserDropped,
 
-    /// OIDC bearer token presented but no matching provider is configured.
-    #[error(
-        "OIDC token rejected: unknown provider — no configured provider matches 'iss' claim '{iss}'"
-    )]
-    OidcUnknownProvider { iss: String },
+    /// OIDC bearer token rejected because the authenticated provider has no tenant binding.
+    #[error("OIDC token rejected: authenticated provider has no tenant binding")]
+    OidcProviderTenantUnbound,
+
+    /// OIDC bearer token rejected because its authenticated provider references
+    /// a tenant that was deleted or cannot be read from the catalog.
+    #[error("OIDC token rejected: authenticated provider tenant is unavailable")]
+    OidcProviderTenantUnavailable { tenant_id: u64 },
 
     /// OIDC bearer token rejected: claim mapping produced no default database.
     #[error("OIDC token rejected: claim mapping produced no default database for subject '{sub}'")]

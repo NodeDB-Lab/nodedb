@@ -12,6 +12,8 @@
 //! through every site that constructs an `argon2::Argon2` instance —
 //! a wide ripple, not a field on the descriptor.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::session::SessionHandleConfig;
@@ -99,6 +101,7 @@ pub enum AuthMode {
 /// jwks_url = "https://auth.example.com/.well-known/jwks.json"
 /// issuer = "https://auth.example.com"
 /// audience = "nodedb"
+/// tenant_id = 42
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtAuthConfig {
@@ -192,6 +195,12 @@ pub struct JwtProviderConfig {
     /// Expected `aud` claim. Empty = don't validate audience for this provider.
     #[serde(default)]
     pub audience: String,
+
+    /// Tenant assigned to identities authenticated through this provider.
+    ///
+    /// This is deliberately required: it is a server-side binding, never a
+    /// tenant selection supplied by untrusted JWT claims.
+    pub tenant_id: u64,
 }
 
 impl JwtProviderConfig {
@@ -240,14 +249,50 @@ impl JwtAuthConfig {
         )
     }
 
-    /// Validate all providers. Called from the server-config loader so
-    /// misconfiguration fails startup rather than silently bypassing auth.
+    /// Validate all providers. Called by the server-config loader and JWKS
+    /// registry construction so misconfiguration fails before authentication.
     pub fn validate(&self) -> crate::Result<()> {
         let policy = self.jwks_policy().map_err(|e| crate::Error::Config {
             detail: format!("auth.jwt allow-list is invalid: {e}"),
         })?;
-        for p in &self.providers {
-            p.validate(&policy)?;
+        let mut provider_names = HashSet::with_capacity(self.providers.len());
+        for provider in &self.providers {
+            provider.validate(&policy)?;
+            if !provider_names.insert(provider.name.as_str()) {
+                return Err(crate::Error::Config {
+                    detail: format!(
+                        "auth.jwt providers contain duplicate static provider name {:?}",
+                        provider.name
+                    ),
+                });
+            }
+        }
+
+        for (index, provider) in self.providers.iter().enumerate() {
+            for other in self.providers.iter().skip(index + 1) {
+                if provider.issuer != other.issuer {
+                    continue;
+                }
+
+                if provider.audience.is_empty() || other.audience.is_empty() {
+                    return Err(crate::Error::Config {
+                        detail: format!(
+                            "auth.jwt providers '{}' and '{}' share issuer '{}' but \
+                             every shared-issuer route must use a distinct non-empty audience",
+                            provider.name, other.name, provider.issuer
+                        ),
+                    });
+                }
+                if provider.audience == other.audience {
+                    return Err(crate::Error::Config {
+                        detail: format!(
+                            "auth.jwt providers '{}' and '{}' duplicate the issuer/audience \
+                             route ({:?}, {:?})",
+                            provider.name, other.name, provider.issuer, provider.audience
+                        ),
+                    });
+                }
+            }
         }
         Ok(())
     }

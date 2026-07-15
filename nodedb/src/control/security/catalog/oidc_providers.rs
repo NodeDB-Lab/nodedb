@@ -56,6 +56,11 @@ pub struct StoredOidcProvider {
     /// Expected `aud` claim value. `None` = skip audience validation.
     #[msgpack(default)]
     pub audience: Option<String>,
+    /// Tenant bound to this provider. `None` preserves compatibility with
+    /// records written before tenant binding was introduced.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub tenant_id: Option<u64>,
     /// Ordered claim-mapping rules evaluated at login to derive databases and roles.
     #[msgpack(default)]
     pub claim_mapping: Vec<StoredClaimMappingRule>,

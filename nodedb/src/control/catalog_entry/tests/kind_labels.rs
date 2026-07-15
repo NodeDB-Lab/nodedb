@@ -38,6 +38,7 @@ fn kind_label_is_stable() {
         issuer: "https://example.com".into(),
         jwks_uri: "https://example.com/.well-known/jwks.json".into(),
         audience: None,
+        tenant_id: None,
         claim_mapping: vec![],
         created_at_lsn: 0,
     };

@@ -18,7 +18,7 @@ OIDC is a delegated authentication protocol where:
 Create a provider configuration:
 
 ```sql
-CREATE OIDC PROVIDER okta ISSUER 'https://dev-12345.okta.com/' JWKS_URI 'https://dev-12345.okta.com/.well-known/jwks.json' AUDIENCE 'api://nodedb';
+CREATE OIDC PROVIDER okta ISSUER 'https://dev-12345.okta.com/' JWKS_URI 'https://dev-12345.okta.com/.well-known/jwks.json' TENANT 42 AUDIENCE 'api://nodedb';
 ```
 
 **Parameters:**
@@ -27,18 +27,21 @@ CREATE OIDC PROVIDER okta ISSUER 'https://dev-12345.okta.com/' JWKS_URI 'https:/
 | ----------- | -------- | ------------------------------------------------------------------------------------------------- |
 | `ISSUER`    | Yes      | Provider's issuer URL (e.g. `https://accounts.google.com`, `https://your-domain.auth0.com/`)      |
 | `JWKS_URI`  | Yes      | JWKS endpoint for signature validation (e.g. `https://accounts.google.com/.well-known/jwks.json`) |
-| `AUDIENCE`  | Optional | Expected `aud` claim in the JWT (matches your app's audience with the provider)                   |
+| `TENANT`    | Yes      | Numeric NodeDB tenant ID bound to identities authenticated through this provider                  |
+| `AUDIENCE`  | Optional | Expected `aud` claim. Required when the same issuer is registered for more than one tenant         |
 
-**Permissions:** `CREATE OIDC PROVIDER` requires Superuser or ClusterAdmin role.
+**Permissions:** `CREATE OIDC PROVIDER` requires the Superuser role.
 
-**Persistence:** Provider config is stored in `_system.oidc_providers` and replicated via Raft.
+**Persistence:** Provider config is stored in `_system.oidc_providers` and replicated via Raft. The session tenant is always derived from this stored binding; a token's `tenant_id` claim is never authoritative. Existing provider records without a tenant binding are rejected until recreated with `TENANT`.
+
+A shared corporate issuer may serve multiple NodeDB tenants by registering one provider per tenant with a distinct, non-empty audience. Duplicate or ambiguous issuer/audience routes are rejected.
 
 ## Claim Mapping
 
 Map JWT claims to NodeDB identity attributes. Define rules using the `CLAIM MAPPING WHEN` clause:
 
 ```sql
-CREATE OIDC PROVIDER okta ISSUER 'https://dev-12345.okta.com/' JWKS_URI 'https://dev-12345.okta.com/.well-known/jwks.json'
+CREATE OIDC PROVIDER okta ISSUER 'https://dev-12345.okta.com/' JWKS_URI 'https://dev-12345.okta.com/.well-known/jwks.json' TENANT 42
   CLAIM MAPPING WHEN email = 'alice@company.com' SET DEFAULT_DATABASE = 1 ADD DATABASES [1, 2] ADD ROLES ['readwrite']
   CLAIM MAPPING WHEN email = 'bob@company.com' SET DEFAULT_DATABASE = 2 ADD DATABASES [2]
   CLAIM MAPPING WHEN department = 'engineering' ADD DATABASES [1, 2, 3] ADD ROLES ['cluster_admin'];
@@ -62,7 +65,7 @@ CLAIM MAPPING WHEN <claim> = '<value>' [SET DEFAULT_DATABASE = <db_id>] [ADD DAT
 **Example: wildcard for department**
 
 ```sql
-CREATE OIDC PROVIDER okta ISSUER '...' JWKS_URI '...'
+CREATE OIDC PROVIDER okta ISSUER '...' JWKS_URI '...' TENANT 42
   CLAIM MAPPING WHEN department = '*' ADD DATABASES [5];
 ```
 
@@ -88,14 +91,14 @@ SHOW OIDC PROVIDERS;
 
 **Output columns:**
 
-| Column                | Type      | Description             |
-| --------------------- | --------- | ----------------------- |
-| `provider_name`       | String    | Name (e.g. 'okta')      |
-| `issuer`              | String    | Issuer URL              |
-| `jwks_url`            | String    | JWKS endpoint           |
-| `audience`            | String    | Expected audience claim |
-| `claim_mapping_count` | i32       | Number of claim rules   |
-| `created_at`          | Timestamp | Registration date       |
+| Column                | Type   | Description             |
+| --------------------- | ------ | ----------------------- |
+| `name`                | String | Name (e.g. 'okta')      |
+| `issuer`              | String | Issuer URL              |
+| `jwks_uri`            | String | JWKS endpoint           |
+| `tenant_id`           | String | Bound NodeDB tenant ID  |
+| `audience`            | String | Expected audience claim |
+| `claim_mapping_rules` | String | Number of claim rules   |
 
 ## Removing a Provider
 
@@ -103,7 +106,7 @@ SHOW OIDC PROVIDERS;
 DROP OIDC PROVIDER okta;
 ```
 
-**Permissions:** Superuser or ClusterAdmin.
+**Permissions:** Superuser.
 
 **Effect:** Existing sessions tied to this provider are revoked at their next request boundary. New OIDC logins via this provider are rejected.
 
@@ -121,19 +124,19 @@ NodeDB caches JWKS locally to avoid repeated network roundtrips:
 ## JWT Verification Sequence
 
 1. Decode JWT header (check `alg`, `kid`)
-2. Look up provider by `iss` claim
-3. Fetch/cache JWKS from provider's `jwks_url`
+2. Look up one unambiguous provider route by the `iss` and `aud` claims
+3. Fetch/cache JWKS from provider's `jwks_uri`
 4. Validate signature using the key with matching `kid`
 5. Check `aud` claim matches provider's configured audience
 6. Check `exp` (expiry) not in the past
 7. Apply claim mapping rules
-8. Build ephemeral `AuthenticatedIdentity`
+8. Build an ephemeral `AuthenticatedIdentity` using the provider's stored tenant binding
 
-**Failure mode:** Any step failure returns `INVALID_CREDENTIALS` (no detail leak).
+**Failure mode:** Any unauthenticated failure returns the same generic authentication rejection, without issuer, audience, provider, key, or signature details.
 
 ## Required Role
 
-Claim-mapping operations require Superuser or ClusterAdmin. Regular users cannot list or modify OIDC providers.
+OIDC provider and claim-mapping operations require Superuser. Regular users cannot list or modify OIDC providers.
 
 ```sql
 -- Regular user attempt
@@ -146,7 +149,7 @@ ALTER OIDC PROVIDER okta SET claim_mapping = [...];
 **1. Provider registration (admin)**
 
 ```sql
-CREATE OIDC PROVIDER auth0 ISSUER 'https://your-domain.auth0.com/' JWKS_URI 'https://your-domain.auth0.com/.well-known/jwks.json' AUDIENCE 'nodedb-api';
+CREATE OIDC PROVIDER auth0 ISSUER 'https://your-domain.auth0.com/' JWKS_URI 'https://your-domain.auth0.com/.well-known/jwks.json' TENANT 42 AUDIENCE 'nodedb-api';
 ```
 
 **2. Get token from provider**

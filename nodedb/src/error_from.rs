@@ -292,9 +292,12 @@ impl From<Error> for NodeDbError {
             Error::SessionUserDropped => {
                 NodeDbError::bad_request("session terminated: user account dropped".to_owned())
             }
-            Error::OidcUnknownProvider { iss } => {
-                NodeDbError::bad_request(format!("OIDC: no provider registered for issuer '{iss}'"))
-            }
+            Error::OidcProviderTenantUnbound => NodeDbError::bad_request(
+                "OIDC: authenticated provider has no tenant binding".to_owned(),
+            ),
+            Error::OidcProviderTenantUnavailable { .. } => NodeDbError::bad_request(
+                "OIDC: authenticated provider tenant is unavailable".to_owned(),
+            ),
             Error::OidcNoDefaultDatabase { sub } => NodeDbError::bad_request(format!(
                 "OIDC: no default database resolved for sub '{sub}'"
             )),

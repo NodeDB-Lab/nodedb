@@ -60,16 +60,40 @@ fn require_superuser(
     }
 }
 
+/// Whether two providers would make the issuer route ambiguous.
+fn has_ambiguous_issuer_route(existing_audience: Option<&str>, audience: Option<&str>) -> bool {
+    let existing_audience = existing_audience.filter(|value| !value.is_empty());
+    let audience = audience.filter(|value| !value.is_empty());
+    match (existing_audience, audience) {
+        (Some(existing), Some(candidate)) => existing == candidate,
+        _ => true,
+    }
+}
+
+/// Borrowed fields for a `CREATE OIDC PROVIDER` operation.
+pub struct CreateOidcProviderParams<'a> {
+    pub name: &'a str,
+    pub issuer: &'a str,
+    pub jwks_uri: &'a str,
+    pub tenant_id: u64,
+    pub audience: Option<&'a str>,
+    pub claim_mappings: &'a [OidcClaimMappingClause],
+}
+
 /// Handle `CREATE OIDC PROVIDER <name> ISSUER '<iss>' JWKS_URI '<uri>' ...`.
 pub fn create_oidc_provider(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
-    name: &str,
-    issuer: &str,
-    jwks_uri: &str,
-    audience: Option<&str>,
-    claim_mappings: &[OidcClaimMappingClause],
+    params: CreateOidcProviderParams<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    let CreateOidcProviderParams {
+        name,
+        issuer,
+        jwks_uri,
+        tenant_id,
+        audience,
+        claim_mappings,
+    } = params;
     require_superuser(state, identity, "create OIDC providers")?;
 
     if issuer.is_empty() {
@@ -86,6 +110,21 @@ pub fn create_oidc_provider(
     }
 
     let catalog = state.credentials.catalog();
+
+    let tenant_exists = catalog
+        .load_all_tenants()
+        .map_err(|e| DdlError {
+            sqlstate: "XX000".to_string(),
+            message: format!("tenant lookup: {e}"),
+        })?
+        .iter()
+        .any(|tenant| tenant.tenant_id == tenant_id);
+    if !tenant_exists {
+        return Err(DdlError {
+            sqlstate: "42704".to_string(),
+            message: format!("tenant '{tenant_id}' does not exist"),
+        });
+    }
 
     // Check for duplicate by provider name.
     match catalog.get_oidc_provider(name) {
@@ -104,13 +143,18 @@ pub fn create_oidc_provider(
         }
     }
 
-    // Check for duplicate issuer (one issuer → one provider).
+    // A route is `(issuer, audience)`. An absent or empty audience makes an
+    // issuer route ambiguous, while distinct non-empty audiences may share it.
     match catalog.list_oidc_providers() {
         Ok(providers) => {
-            if providers.iter().any(|p| p.issuer == issuer) {
+            if providers.iter().any(|p| {
+                p.issuer == issuer && has_ambiguous_issuer_route(p.audience.as_deref(), audience)
+            }) {
                 return Err(DdlError {
                     sqlstate: "42710".to_string(),
-                    message: format!("OIDC provider with issuer '{issuer}' already exists"),
+                    message: format!(
+                        "OIDC provider issuer/audience route for issuer '{issuer}' is ambiguous or already exists"
+                    ),
                 });
             }
         }
@@ -138,6 +182,7 @@ pub fn create_oidc_provider(
         issuer: issuer.to_string(),
         jwks_uri: jwks_uri.to_string(),
         audience: audience.map(str::to_string),
+        tenant_id: Some(tenant_id),
         claim_mapping: stored_mappings,
         created_at_lsn: 0,
     };
@@ -296,6 +341,7 @@ pub fn show_oidc_providers(
         "name".to_string(),
         "issuer".to_string(),
         "jwks_uri".to_string(),
+        "tenant_id".to_string(),
         "audience".to_string(),
         "claim_mapping_rules".to_string(),
     ];
@@ -311,6 +357,10 @@ pub fn show_oidc_providers(
         row.insert(
             "jwks_uri".to_string(),
             JsonValue::String(p.jwks_uri.clone()),
+        );
+        row.insert(
+            "tenant_id".to_string(),
+            JsonValue::String(p.tenant_id.map(|id| id.to_string()).unwrap_or_default()),
         );
         let aud = p.audience.as_deref().unwrap_or("");
         row.insert("audience".to_string(), JsonValue::String(aud.to_string()));

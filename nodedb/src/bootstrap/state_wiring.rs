@@ -76,7 +76,7 @@ pub fn wire_state(
     {
         let registry = tokio::runtime::Handle::current().block_on(
             crate::control::security::jwks::registry::JwksRegistry::init(jwt_config.clone()),
-        );
+        )?;
         state.jwks_registry = Some(Arc::new(registry));
         info!(
             "JWKS registry initialised with {} providers",

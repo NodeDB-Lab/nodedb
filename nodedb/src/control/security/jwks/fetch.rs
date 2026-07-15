@@ -23,9 +23,13 @@ const MAX_REDIRECTS: usize = 3;
 
 /// Fetch JWKS from a provider's endpoint and update the cache.
 ///
+/// `cache_identity` is an internal generated cache key; `provider_name` is
+/// retained for operator-facing log fields.
+///
 /// Returns the number of keys successfully parsed.
 /// On HTTP or parse failure, logs a warning and returns 0 (cache unchanged).
 pub async fn fetch_and_cache(
+    cache_identity: &str,
     provider_name: &str,
     jwks_url: &str,
     cache: &JwksCache,
@@ -41,7 +45,7 @@ pub async fn fetch_and_cache(
                     keys = count,
                     "JWKS fetched successfully"
                 );
-                cache.update_provider(provider_name, keys);
+                cache.update_provider(cache_identity, keys);
             } else {
                 warn!(
                     provider = %provider_name,
@@ -215,7 +219,7 @@ impl JwksFetchError {
 /// Spawns a Tokio task that refreshes JWKS keys for all providers
 /// at the configured interval. Runs on the Control Plane.
 pub fn spawn_refresh_task(
-    providers: Vec<(String, String)>, // (name, jwks_url) pairs
+    providers: Vec<(String, String, String)>, // (cache identity, name, jwks_url) triples
     cache: std::sync::Arc<JwksCache>,
     refresh_interval_secs: u64,
     policy: std::sync::Arc<JwksPolicy>,
@@ -228,8 +232,8 @@ pub fn spawn_refresh_task(
 
         loop {
             interval.tick().await;
-            for (name, url) in &providers {
-                fetch_and_cache(name, url, &cache, &policy).await;
+            for (cache_identity, name, url) in &providers {
+                fetch_and_cache(cache_identity, name, url, &cache, &policy).await;
             }
         }
     })

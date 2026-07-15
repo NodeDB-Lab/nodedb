@@ -104,16 +104,20 @@ pub(super) async fn try_typed(
             name,
             issuer,
             jwks_uri,
+            tenant_id,
             audience,
             claim_mappings,
         }) => Some(oidc::create_oidc_provider(
             state,
             identity,
-            name,
-            issuer,
-            jwks_uri,
-            audience.as_deref(),
-            claim_mappings,
+            oidc::CreateOidcProviderParams {
+                name,
+                issuer,
+                jwks_uri,
+                tenant_id: *tenant_id,
+                audience: audience.as_deref(),
+                claim_mappings,
+            },
         )),
 
         NodedbStatement::Auth(AuthStmt::AlterOidcProviderClaimMapping {

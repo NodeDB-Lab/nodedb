@@ -87,8 +87,9 @@ pub fn resolve_identity(
 
 /// Resolve both authenticated identity and auth context from HTTP headers.
 ///
-/// Uses `AuthContext::from_jwt()` when JWT claims are available (richer context),
-/// falls back to `build_auth_context()` for API key / password auth.
+/// Uses `AuthContext::from_verified_jwt()` for JWTs so rich claims are retained
+/// while authorization fields remain bound to the verified identity. Falls back
+/// to `build_auth_context()` for API key / password auth.
 pub fn resolve_auth(
     headers: &HeaderMap,
     state: &AppState,
@@ -112,7 +113,7 @@ pub fn resolve_auth(
             let auth_ctx = if let Some(ref registry) = state.shared.jwks_registry
                 && let Ok(claims) = registry.decode_claims(token)
             {
-                AuthContext::from_jwt(&claims, generate_session_id())
+                AuthContext::from_verified_jwt(&claims, &identity, generate_session_id())
             } else {
                 tracing::trace!("JWT claims decode unavailable, using basic auth context");
                 session_auth::build_auth_context(&identity)

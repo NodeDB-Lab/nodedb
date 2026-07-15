@@ -87,13 +87,14 @@ pub enum AuthStmt {
     },
 
     // ── OIDC providers ───────────────────────────────────────────
-    /// `CREATE OIDC PROVIDER <name> ISSUER '<iss>' JWKS_URI '<uri>'
+    /// `CREATE OIDC PROVIDER <name> ISSUER '<iss>' JWKS_URI '<uri>' TENANT <u64>
     ///  [AUDIENCE '<aud>'] [CLAIM MAPPING WHEN <claim_name> = '<value>'
     ///  SET DEFAULT_DATABASE = <id>, ADD DATABASES [<ids>], ADD ROLES ['<role>', ...]]`
     CreateOidcProvider {
         name: String,
         issuer: String,
         jwks_uri: String,
+        tenant_id: u64,
         audience: Option<String>,
         /// `(claim_name, claim_value, default_database, add_databases, add_roles)` tuples.
         claim_mappings: Vec<OidcClaimMappingClause>,
