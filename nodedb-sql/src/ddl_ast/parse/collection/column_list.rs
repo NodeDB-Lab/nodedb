@@ -3,6 +3,7 @@
 //! Parse the parenthesised column list in CREATE COLLECTION / CREATE TABLE.
 
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 /// Find the byte offset of the closing paren that matches the first `(` in
 /// `body` (depth-aware, so nested parens like `VECTOR(128)` are handled).
@@ -306,13 +307,24 @@ fn parse_col_token(token: &str) -> Result<Option<(String, String)>, SqlError> {
 
     // When GENERATED ALWAYS AS was found, append the remainder of the original
     // token text verbatim so that downstream builders can parse the expression.
-    if hit_generated {
-        let upper_token = token.to_uppercase();
-        if let Some(gen_pos) = upper_token.find("GENERATED") {
-            type_str.push(' ');
-            type_str.push_str(token[gen_pos..].trim());
-        }
+    if hit_generated && let Some(gen_pos) = find_ascii_case_insensitive(token, "GENERATED") {
+        type_str.push(' ');
+        type_str.push_str(token[gen_pos..].trim());
     }
 
     Ok(Some((name, type_str)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_clause_after_unicode_type_preserves_original_offsets() {
+        let parsed = parse_col_token("slug CUSTOMﬀﬀ GENERATED ALWAYS AS (lower(name))")
+            .expect("column should parse")
+            .expect("column definition should be present");
+        assert_eq!(parsed.0, "slug");
+        assert_eq!(parsed.1, "CUSTOMﬀﬀ GENERATED ALWAYS AS (lower(name))");
+    }
 }

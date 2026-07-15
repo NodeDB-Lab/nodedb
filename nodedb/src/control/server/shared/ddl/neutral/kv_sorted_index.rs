@@ -13,6 +13,7 @@
 //!   SELECT * FROM RANGE(index_name, score_min, score_max)
 //!   SELECT COUNT(index_name)  -- when index_name is a sorted index
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -42,8 +43,7 @@ pub async fn create_sorted_index(
         .to_lowercase();
 
     // Extract collection name after ON.
-    let on_pos = upper
-        .find(" ON ")
+    let on_pos = find_ascii_case_insensitive(sql, " ON ")
         .ok_or_else(|| ddl_err("42601", "missing ON clause"))?;
     let after_on = sql[on_pos + 4..].trim();
     let collection = after_on

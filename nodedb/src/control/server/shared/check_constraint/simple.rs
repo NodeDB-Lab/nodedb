@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::control::security::catalog::types::CheckConstraintDef;
 use crate::control::server::shared::ddl::result::DdlError;
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive_from;
 
 use super::enforce::ddl_err;
 
@@ -155,12 +156,23 @@ fn replace_remaining_new_refs(text: &str) -> String {
 
 /// Replace all occurrences of `pattern` in `text` case-insensitively.
 fn replace_case_insensitive(text: &str, pattern: &str, replacement: &str) -> String {
-    let upper_text = text.to_uppercase();
-    let upper_pattern = pattern.to_uppercase();
-    let mut result = String::with_capacity(text.len());
-    let mut last_end = 0;
+    if pattern.is_empty() {
+        return text.to_string();
+    }
 
-    for (start, _) in upper_text.match_indices(&upper_pattern) {
+    let mut result = String::with_capacity(text.len());
+    let mut search_from = 0;
+    let mut copied_until = 0;
+    while let Some(start) = if pattern.is_ascii() {
+        find_ascii_case_insensitive_from(text, pattern, search_from)
+    } else {
+        text[search_from..]
+            .find(pattern)
+            .map(|position| search_from + position)
+    } {
+        let end = start + pattern.len();
+        search_from = end;
+
         // Verify word boundary: the char before must not be alphanumeric/underscore.
         if start > 0 {
             let prev = text.as_bytes()[start - 1];
@@ -169,7 +181,6 @@ fn replace_case_insensitive(text: &str, pattern: &str, replacement: &str) -> Str
             }
         }
         // The char after must not be alphanumeric/underscore.
-        let end = start + pattern.len();
         if end < text.len() {
             let next = text.as_bytes()[end];
             if next.is_ascii_alphanumeric() || next == b'_' {
@@ -177,11 +188,11 @@ fn replace_case_insensitive(text: &str, pattern: &str, replacement: &str) -> Str
             }
         }
 
-        result.push_str(&text[last_end..start]);
+        result.push_str(&text[copied_until..start]);
         result.push_str(replacement);
-        last_end = end;
+        copied_until = end;
     }
-    result.push_str(&text[last_end..]);
+    result.push_str(&text[copied_until..]);
     result
 }
 
@@ -220,6 +231,15 @@ mod tests {
         let sql = "NEW.email LIKE '%@%.%' AND NEW.age >= 18";
         let result = substitute_new_refs(sql, &fields);
         assert_eq!(result, "'alice@example.com' LIKE '%@%.%' AND 25 >= 18");
+    }
+
+    #[test]
+    fn substitute_new_refs_after_expanding_unicode_preserves_original_offsets() {
+        let mut fields = HashMap::new();
+        fields.insert("id".to_string(), nodedb_types::Value::Integer(7));
+
+        let result = substitute_new_refs("'ﬀﬀ' = 'ﬀﬀ' AND NEW.id = 7", &fields);
+        assert_eq!(result, "'ﬀﬀ' = 'ﬀﬀ' AND 7 = 7");
     }
 
     #[test]

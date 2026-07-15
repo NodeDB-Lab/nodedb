@@ -13,6 +13,7 @@ use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
 use nodedb_types::kv_parsing;
 
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 /// Build a `CollectionType` from the pre-parsed DDL fields.
 ///
@@ -142,7 +143,7 @@ pub(crate) fn build_strict_schema(
             None
         };
         if let Some(kw) = gen_kw {
-            let gen_pos = upper_type.find(kw).expect(
+            let gen_pos = find_ascii_case_insensitive(type_str, kw).expect(
                 "invariant: kw was found via upper_type.contains(kw) in the enclosing if-let",
             );
             let after_gen = type_str[gen_pos + kw.len()..].trim();
@@ -303,7 +304,7 @@ pub fn parse_column_type_str_full(type_str: &str) -> (String, bool, bool, Option
 
     // Extract the DEFAULT clause from the type_str.
     // type_str may look like: "TEXT DEFAULT upper('x')" or "INT NOT NULL DEFAULT 1 + 2".
-    let default_expr = if let Some(def_pos) = upper.find("DEFAULT") {
+    let default_expr = if let Some(def_pos) = find_ascii_case_insensitive(type_str, "DEFAULT") {
         let after = type_str[def_pos + "DEFAULT".len()..].trim();
         if after.is_empty() {
             None
@@ -431,6 +432,16 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn default_after_unicode_type_text_preserves_original_offsets() {
+        let (bare_type, is_pk, is_not_null, default_expr) =
+            parse_column_type_str_full("CUSTOMﬀﬀ DEFAULT 42");
+        assert_eq!(bare_type, "CUSTOMﬀﬀ");
+        assert!(!is_pk);
+        assert!(!is_not_null);
+        assert_eq!(default_expr.as_deref(), Some("42"));
     }
 
     // ── engine name → CollectionType variant ─────────────────────────────

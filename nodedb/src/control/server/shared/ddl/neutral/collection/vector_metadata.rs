@@ -15,6 +15,7 @@
 //! SQLSTATE codes / messages, and the `ALTER COLLECTION` command tag are
 //! unchanged.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use nodedb_types::DatabaseId;
 use serde_json::{Map, Value as JsonValue};
 
@@ -51,11 +52,8 @@ pub fn handle_set_vector_metadata(
     }
 
     let collection = parts[2].to_lowercase();
-    let upper = sql.to_uppercase();
-
     // Find column name after " ON " (the second ON after "METADATA ON").
-    let metadata_on_pos = upper
-        .find("METADATA ON ")
+    let metadata_on_pos = find_ascii_case_insensitive(sql, "METADATA ON ")
         .ok_or_else(|| err("42601", "expected METADATA ON <column>"))?;
     let after_on = sql[metadata_on_pos + "METADATA ON ".len()..].trim();
     let column = after_on

@@ -6,6 +6,9 @@ use super::column_list::{extract_column_pairs, find_column_list_paren_end};
 use super::engine_suffix::extract_engine_suffix;
 use super::with_clause::{extract_balanced_raw, extract_with_options};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::{
+    find_ascii_case_insensitive, keyword_position_outside_literals,
+};
 
 /// Parsed body of a `CREATE COLLECTION` / `CREATE TABLE` statement.
 ///
@@ -28,14 +31,51 @@ pub(super) type CollectionBody = (
 );
 
 pub(super) fn parse_collection_body(trimmed: &str, name: &str) -> Result<CollectionBody, SqlError> {
-    // Skip past the name to find the body.
-    let lower = trimmed.to_lowercase();
-    let name_lower = name.to_lowercase();
-    let body = if let Some(pos) = lower.find(&name_lower) {
-        trimmed[pos + name.len()..].trim()
-    } else {
+    // Locate the source identifier structurally. `name` is normalized by the
+    // dispatcher, so searching for it in the original SQL is not reliable for
+    // Unicode identifiers whose lowercase representation differs in bytes.
+    let keyword = ["COLLECTION", "TABLE"]
+        .into_iter()
+        .filter_map(|candidate| {
+            keyword_position_outside_literals(trimmed, candidate)
+                .map(|position| (position, candidate))
+        })
+        .min_by_key(|(position, _)| *position);
+    let Some((keyword_position, keyword)) = keyword else {
         return Ok((None, Vec::new(), Vec::new(), Vec::new(), None));
     };
+    let after_keyword = &trimmed[keyword_position + keyword.len()..];
+    let mut name_source = after_keyword.trim_start();
+    if find_ascii_case_insensitive(name_source, "IF NOT EXISTS") == Some(0) {
+        name_source = name_source["IF NOT EXISTS".len()..].trim_start();
+    }
+    let name_end = if let Some(quote) = name_source
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '`'))
+    {
+        name_source[quote.len_utf8()..]
+            .find(quote)
+            .map(|position| quote.len_utf8() + position + quote.len_utf8())
+    } else {
+        Some(
+            name_source
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace() || *character == '(')
+                .map_or(name_source.len(), |(position, _)| position),
+        )
+    };
+    let Some(name_end) = name_end else {
+        return Ok((None, Vec::new(), Vec::new(), Vec::new(), None));
+    };
+    if name_source[..name_end]
+        .trim_matches(['"', '`'])
+        .to_lowercase()
+        != name
+    {
+        return Ok((None, Vec::new(), Vec::new(), Vec::new(), None));
+    }
+    let body = name_source[name_end..].trim();
 
     let upper_body = body.to_uppercase();
 
@@ -79,7 +119,7 @@ pub(super) fn parse_collection_body(trimmed: &str, name: &str) -> Result<Collect
         flags.push("BITEMPORAL".to_string());
     }
 
-    let balanced_raw = extract_balanced_raw(&upper_body, body);
+    let balanced_raw = extract_balanced_raw(body);
 
     Ok((engine, columns, options, flags, balanced_raw))
 }
@@ -87,6 +127,26 @@ pub(super) fn parse_collection_body(trimmed: &str, name: &str) -> Result<Collect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collection_body_after_unicode_comment_preserves_original_offsets() {
+        let (engine, columns, ..) = parse_collection_body(
+            "CREATE /*İ*/ COLLECTION items (id INT) WITH (engine='kv')",
+            "items",
+        )
+        .expect("collection body should parse");
+        assert_eq!(engine, Some("kv".to_string()));
+        assert_eq!(columns, vec![("id".to_string(), "INT".to_string())]);
+    }
+
+    #[test]
+    fn normalized_unicode_collection_name_preserves_body_boundary() {
+        let (engine, columns, ..) =
+            parse_collection_body("CREATE COLLECTION Åx (id INT) WITH (engine='kv')", "åx")
+                .expect("collection body should parse");
+        assert_eq!(engine, Some("kv".to_string()));
+        assert_eq!(columns, vec![("id".to_string(), "INT".to_string())]);
+    }
 
     #[test]
     fn engine_suffix_matches_with_clause_result() {

@@ -11,6 +11,7 @@
 
 use crate::ddl_ast::statement::{NodedbStatement, PolicyStmt};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 /// Try to parse custom type DDL statements.
 pub(super) fn try_parse(
@@ -128,10 +129,8 @@ fn parse_alter(parts: &[&str], trimmed: &str) -> Result<NodedbStatement, SqlErro
     }
 
     // Extract the label: everything after ADD VALUE, trimmed, possibly quoted.
-    let orig_upper = trimmed.to_uppercase();
-    let add_value_pos = orig_upper
-        .find(" ADD VALUE ")
-        .ok_or_else(|| SqlError::Parse {
+    let add_value_pos =
+        find_ascii_case_insensitive(trimmed, " ADD VALUE ").ok_or_else(|| SqlError::Parse {
             detail: "ALTER TYPE: could not locate ADD VALUE in statement".to_string(),
         })?;
     let after_add_value = trimmed[add_value_pos + " ADD VALUE ".len()..].trim();
@@ -150,20 +149,19 @@ fn parse_alter(parts: &[&str], trimmed: &str) -> Result<NodedbStatement, SqlErro
 
 /// Extract `('label1', 'label2', ...)` after the ENUM keyword.
 fn parse_label_list(original: &str) -> Result<Vec<String>, SqlError> {
-    let orig_upper = original.to_uppercase();
     // Find the opening paren after ENUM.
-    let enum_pos = orig_upper.find(" AS ENUM").ok_or_else(|| SqlError::Parse {
-        detail: "CREATE TYPE … AS ENUM: cannot locate AS ENUM".to_string(),
-    })?;
+    let enum_pos =
+        find_ascii_case_insensitive(original, " AS ENUM").ok_or_else(|| SqlError::Parse {
+            detail: "CREATE TYPE … AS ENUM: cannot locate AS ENUM".to_string(),
+        })?;
     let s = original[enum_pos + " AS ENUM".len()..].trim_start();
     extract_quoted_list(s, "CREATE TYPE … AS ENUM")
 }
 
 /// Extract `(<field> <type>, ...)` after the AS keyword for composite types.
 fn parse_composite_fields(original: &str) -> Result<Vec<(String, String)>, SqlError> {
-    let orig_upper = original.to_uppercase();
     // Find " AS (" — skip over "AS ENUM" by checking the next non-ws char.
-    let as_pos = orig_upper.find(" AS ").ok_or_else(|| SqlError::Parse {
+    let as_pos = find_ascii_case_insensitive(original, " AS ").ok_or_else(|| SqlError::Parse {
         detail: "CREATE TYPE: missing AS keyword".to_string(),
     })?;
     let after_as = original[as_pos + 4..].trim_start();
@@ -277,6 +275,18 @@ mod tests {
     }
 
     #[test]
+    fn create_enum_with_unicode_name_preserves_original_offsets() {
+        let stmt = ok("CREATE TYPE statusﬀﬀ AS ENUM ('active', 'inactive')");
+        match stmt {
+            NodedbStatement::Policy(PolicyStmt::CreateEnumType { name, labels }) => {
+                assert_eq!(name, "statusﬀﬀ");
+                assert_eq!(labels, vec!["active", "inactive"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn create_enum_basic() {
         let stmt = ok("CREATE TYPE status AS ENUM ('active', 'inactive', 'pending')");
         match stmt {
@@ -310,6 +320,18 @@ mod tests {
         let e = err("CREATE TYPE mood AS ENUM ('happy', 'happy', 'sad')");
         assert!(matches!(e, SqlError::Parse { .. }));
         assert!(e.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn create_composite_with_unicode_name_preserves_original_offsets() {
+        let stmt = ok("CREATE TYPE addressﬀﬀ AS (street TEXT, city TEXT)");
+        match stmt {
+            NodedbStatement::Policy(PolicyStmt::CreateCompositeType { name, fields }) => {
+                assert_eq!(name, "addressﬀﬀ");
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -347,6 +369,18 @@ mod tests {
             NodedbStatement::Policy(PolicyStmt::DropType {
                 name: "status".to_string(),
                 if_exists: true,
+            })
+        );
+    }
+
+    #[test]
+    fn alter_unicode_type_add_value_preserves_original_offsets() {
+        let stmt = ok("ALTER TYPE statusﬀﬀ ADD VALUE 'archived'");
+        assert_eq!(
+            stmt,
+            NodedbStatement::Policy(PolicyStmt::AlterTypeAddValue {
+                type_name: "statusﬀﬀ".to_string(),
+                label: "archived".to_string(),
             })
         );
     }

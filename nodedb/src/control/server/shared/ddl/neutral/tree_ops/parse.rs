@@ -2,6 +2,8 @@
 
 //! Parsing helpers shared across the tree-ops DDL entry points.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use super::super::super::result::DdlError;
 use super::support::ddl_err;
 
@@ -47,12 +49,11 @@ pub(super) fn parse_edge_columns(sql: &str) -> Result<(String, String), DdlError
 
 /// Extract function arguments from `FUNC_NAME(arg1, arg2, arg3)`.
 pub(super) fn extract_function_args<'a>(
-    upper: &str,
+    _upper: &str,
     original: &'a str,
     func_name: &str,
 ) -> Result<Vec<&'a str>, DdlError> {
-    let pos = upper
-        .find(func_name)
+    let pos = find_ascii_case_insensitive(original, func_name)
         .ok_or_else(|| ddl_err("42601", format!("missing {func_name}")))?;
     let after = &original[pos + func_name.len()..];
     let paren_start = after

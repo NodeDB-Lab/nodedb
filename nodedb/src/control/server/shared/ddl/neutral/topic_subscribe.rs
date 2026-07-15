@@ -17,6 +17,7 @@
 //! from pgwire `Response` / `PgWireError` to the protocol-neutral
 //! [`DdlResult`] / [`DdlError`]; the SQLSTATE codes are unchanged.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -40,16 +41,13 @@ pub fn subscribe_to(
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
     let topic_name = parts.get(2).unwrap_or(&"").to_lowercase();
-    let upper = sql.to_uppercase();
-    let since_seq: u64 = upper
-        .find(" SINCE ")
+    let since_seq: u64 = find_ascii_case_insensitive(sql, " SINCE ")
         .and_then(|pos| sql[pos + 7..].split_whitespace().next())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
     // Check for GROUP clause: SUBSCRIBE TO topic GROUP group_name [SINCE seq]
-    let group_name = upper
-        .find(" GROUP ")
+    let group_name = find_ascii_case_insensitive(sql, " GROUP ")
         .map(|pos| sql[pos + 7..].split_whitespace().next().unwrap_or(""))
         .filter(|g| !g.is_empty())
         .map(|g| g.to_lowercase());

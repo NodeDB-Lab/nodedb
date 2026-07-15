@@ -5,6 +5,7 @@
 
 use crate::ddl_ast::statement::{CopyFormat, CopyToSource, MiscStmt, NodedbStatement};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 use super::copy_from::{
     detect_format_from_path, extract_quoted_string, parse_with_clause, strip_quotes,
@@ -62,8 +63,7 @@ fn parse_copy_to(trimmed: &str, after_copy: &str) -> Result<NodedbStatement, Sql
 
 /// `COPY <collection> TO '<path>' [WITH (...)]`
 fn parse_table_form(trimmed: &str) -> Result<NodedbStatement, SqlError> {
-    let upper = trimmed.to_uppercase();
-    let to_pos = upper.find(" TO ").ok_or_else(|| SqlError::Parse {
+    let to_pos = find_ascii_case_insensitive(trimmed, " TO ").ok_or_else(|| SqlError::Parse {
         detail: "COPY: missing TO keyword".to_string(),
     })?;
 
@@ -185,6 +185,18 @@ mod tests {
         parse(sql)
             .expect("expected Some")
             .expect_err("expected Err")
+    }
+
+    #[test]
+    fn unicode_collection_before_to_preserves_original_offsets() {
+        let stmt = ok("COPY usersﬀﬀ TO '/tmp/out.ndjson'");
+        match stmt {
+            NodedbStatement::Misc(MiscStmt::CopyToFile { source, path, .. }) => {
+                assert_eq!(source, CopyToSource::Collection("usersﬀﬀ".to_string()));
+                assert_eq!(path, "/tmp/out.ndjson");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

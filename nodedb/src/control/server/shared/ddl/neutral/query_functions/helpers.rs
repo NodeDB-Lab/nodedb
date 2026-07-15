@@ -8,6 +8,7 @@
 //! single-column `result` output builds a [`DdlResult::Rows`] directly instead
 //! of a pgwire `QueryResponse`. SQLSTATE codes and messages are unchanged.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::server::response_shape::types::ShapedRows;
@@ -23,9 +24,7 @@ pub fn err(sqlstate: &str, message: &str) -> DdlError {
 }
 
 pub fn extract_function_args<'a>(sql: &'a str, func_name: &str) -> Result<Vec<&'a str>, DdlError> {
-    let upper = sql.to_uppercase();
-    let pos = upper
-        .find(func_name)
+    let pos = find_ascii_case_insensitive(sql, func_name)
         .ok_or_else(|| err("42601", &format!("missing {func_name}")))?;
     let after = &sql[pos + func_name.len()..];
     let paren_start = after

@@ -2,13 +2,16 @@
 
 //! Parse the `WITH (...)` clause and `BALANCED ON (...)` clause in CREATE COLLECTION.
 
+use crate::parser::preprocess::lex::{
+    find_ascii_case_insensitive, keyword_position_outside_literals,
+};
+
 /// Extract engine name and other key-value options from the `WITH (...)` clause.
 ///
 /// Returns `(engine, other_options)` where `engine` is the value of the
 /// `engine=` key (lowercased) and `other_options` is all other k=v pairs.
 pub(super) fn extract_with_options(body: &str) -> (Option<String>, Vec<(String, String)>) {
-    let upper = body.to_uppercase();
-    let with_pos = match upper.find(" WITH ").or_else(|| upper.find("WITH (")) {
+    let with_pos = match keyword_position_outside_literals(body, "WITH") {
         Some(p) => p,
         None => return (None, Vec::new()),
     };
@@ -119,8 +122,8 @@ fn parse_kv_token(token: &str) -> Option<(String, String)> {
 ///
 /// Returns `None` when the clause is absent. The handler calls
 /// `parse_balanced_clause_from_raw` with this string.
-pub(super) fn extract_balanced_raw(upper_body: &str, body: &str) -> Option<String> {
-    let bal_pos = upper_body.find("BALANCED ON")?;
+pub(super) fn extract_balanced_raw(body: &str) -> Option<String> {
+    let bal_pos = find_ascii_case_insensitive(body, "BALANCED ON")?;
     let after = body[bal_pos + "BALANCED ON".len()..].trim_start();
     if !after.starts_with('(') {
         return None;
@@ -142,4 +145,25 @@ pub(super) fn extract_balanced_raw(upper_body: &str, body: &str) -> Option<Strin
     }
     let end = end?;
     Some(after[1..end].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_clause_after_unicode_text_preserves_original_offsets() {
+        let (engine, options) = extract_with_options("(name ﬀﬀ) WITH (engine = 'kv', ttl = 60)");
+        assert_eq!(engine.as_deref(), Some("kv"));
+        assert_eq!(options, vec![("ttl".to_string(), "60".to_string())]);
+    }
+
+    #[test]
+    fn balanced_clause_after_unicode_text_preserves_original_offsets() {
+        let body = "(name ﬀﬀ) BALANCED ON (group_key = tenant_id)";
+        assert_eq!(
+            extract_balanced_raw(body),
+            Some("group_key = tenant_id".to_string())
+        );
+    }
 }

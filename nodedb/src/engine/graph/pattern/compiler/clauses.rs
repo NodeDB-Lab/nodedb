@@ -5,6 +5,7 @@
 use super::super::ast::*;
 use super::helpers::{split_by_and, split_top_level_commas};
 use super::parse_match_clauses;
+use nodedb_sql::parser::preprocess::lex::rfind_ascii_case_insensitive;
 
 /// Parse WHERE predicates.
 pub(super) fn parse_where(text: &str) -> crate::Result<Vec<WherePredicate>> {
@@ -117,8 +118,7 @@ pub(super) fn parse_return(text: &str) -> (Vec<ReturnColumn>, bool) {
         .into_iter()
         .map(|col| {
             let col = col.trim();
-            let upper = col.to_uppercase();
-            if let Some(as_pos) = upper.rfind(" AS ") {
+            if let Some(as_pos) = rfind_ascii_case_insensitive(col, " AS ") {
                 let expr = col[..as_pos].trim().to_string();
                 let alias = col[as_pos + 4..].trim().to_string();
                 ReturnColumn {

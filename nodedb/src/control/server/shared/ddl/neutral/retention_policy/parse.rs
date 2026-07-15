@@ -10,6 +10,9 @@ use crate::engine::timeseries::continuous_agg::{AggFunction, AggregateExpr};
 use crate::engine::timeseries::retention_policy::types::{
     ArchiveTarget, RetentionPolicyDef, TierDef,
 };
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
 
 use super::super::super::result::DdlError;
 
@@ -46,11 +49,9 @@ pub(super) fn parse_create_retention_policy(sql: &str) -> Result<ParsedRetention
         .to_lowercase();
 
     // Extract collection: "... ON <collection> (...)"
-    let upper_after = upper[prefix.len()..].to_string();
-    let on_pos = upper_after
-        .find(" ON ")
+    let on_pos = find_ascii_case_insensitive_from(trimmed, " ON ", prefix.len())
         .ok_or_else(|| err("42601", "expected ON <collection>".to_string()))?;
-    let after_on = after_prefix[on_pos + 4..].trim_start();
+    let after_on = trimmed[on_pos + 4..].trim_start();
     let collection = after_on
         .split(|c: char| c.is_whitespace() || c == '(')
         .next()
@@ -187,9 +188,7 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 
 /// Extract RETAIN '<duration>' → milliseconds.
 fn extract_retain(clause: &str) -> Result<u64, DdlError> {
-    let upper = clause.to_uppercase();
-    let pos = upper
-        .find("RETAIN")
+    let pos = find_ascii_case_insensitive(clause, "RETAIN")
         .ok_or_else(|| err("42601", "missing RETAIN clause".to_string()))?;
     let after = clause[pos + 6..].trim_start();
     let val = extract_quoted_string(after)?;
@@ -204,9 +203,7 @@ fn extract_retain(clause: &str) -> Result<u64, DdlError> {
 
 /// Extract DOWNSAMPLE TO '<interval>' → milliseconds.
 fn extract_downsample_interval(clause: &str) -> Result<u64, DdlError> {
-    let upper = clause.to_uppercase();
-    let pos = upper
-        .find("TO")
+    let pos = find_ascii_case_insensitive(clause, "TO")
         .ok_or_else(|| err("42601", "expected DOWNSAMPLE TO '<interval>'".to_string()))?;
     let after = clause[pos + 2..].trim_start();
     let val = extract_quoted_string(after)?;
@@ -217,9 +214,7 @@ fn extract_downsample_interval(clause: &str) -> Result<u64, DdlError> {
 
 /// Extract ARCHIVE TO '<url>'.
 fn extract_archive_url(clause: &str) -> Result<String, DdlError> {
-    let upper = clause.to_uppercase();
-    let pos = upper
-        .find("TO")
+    let pos = find_ascii_case_insensitive(clause, "TO")
         .ok_or_else(|| err("42601", "expected ARCHIVE TO '<url>'".to_string()))?;
     let after = clause[pos + 2..].trim_start();
     extract_quoted_string(after)
@@ -227,8 +222,7 @@ fn extract_archive_url(clause: &str) -> Result<String, DdlError> {
 
 /// Extract aggregate expressions from AGGREGATE (...) in a tier clause.
 fn extract_tier_aggregates(clause: &str) -> Result<Vec<AggregateExpr>, DdlError> {
-    let upper = clause.to_uppercase();
-    let agg_pos = match upper.find("AGGREGATE") {
+    let agg_pos = match find_ascii_case_insensitive(clause, "AGGREGATE") {
         Some(p) => p,
         None => return Ok(Vec::new()),
     };
@@ -283,9 +277,7 @@ fn find_matching_paren(s: &str, open: usize) -> Option<usize> {
 
 /// Parse a single aggregate expression: `func(col)` or `func(col) AS alias`.
 pub(super) fn parse_agg_expr(s: &str) -> Result<AggregateExpr, DdlError> {
-    let upper = s.to_uppercase();
-
-    let (func_part, alias) = if let Some(as_pos) = upper.find(" AS ") {
+    let (func_part, alias) = if let Some(as_pos) = find_ascii_case_insensitive(s, " AS ") {
         (&s[..as_pos], Some(s[as_pos + 4..].trim().to_lowercase()))
     } else {
         (s, None)
@@ -345,8 +337,7 @@ fn extract_quoted_string(s: &str) -> Result<String, DdlError> {
 /// Parse optional WITH (EVAL_INTERVAL = '<duration>') after closing ')'.
 fn parse_with_clause(sql: &str, body_end: usize) -> u64 {
     let after_body = &sql[body_end + 1..];
-    let upper = after_body.to_uppercase();
-    let with_pos = match upper.find("WITH") {
+    let with_pos = match find_ascii_case_insensitive(after_body, "WITH") {
         Some(p) => p,
         None => return RetentionPolicyDef::DEFAULT_EVAL_INTERVAL_MS,
     };
@@ -412,6 +403,16 @@ mod tests {
             parsed.eval_interval_ms,
             RetentionPolicyDef::DEFAULT_EVAL_INTERVAL_MS
         );
+    }
+
+    #[test]
+    fn collection_after_unicode_policy_name_preserves_original_offsets() {
+        let parsed = parse_create_retention_policy(
+            "CREATE RETENTION POLICY rpﬀﬀ ON metrics (RAW RETAIN '30 days')",
+        )
+        .expect("retention policy should parse");
+        assert_eq!(parsed.name, "rpﬀﬀ");
+        assert_eq!(parsed.collection, "metrics");
     }
 
     #[test]

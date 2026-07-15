@@ -27,6 +27,25 @@ async fn prepare_execute_deallocate_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sql_prepare_unicode_name_preserves_connection() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("PREPARE qﬀﬀ AS SELECT 1")
+        .await
+        .expect("Unicode prepared-statement name should parse");
+    server
+        .exec("DEALLOCATE qﬀﬀ")
+        .await
+        .expect("prepared statement should remain addressable");
+    let rows = server
+        .query_text("SELECT 1")
+        .await
+        .expect("connection must remain usable");
+    assert_eq!(rows, vec!["1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn prepared_search_vector_dsl() {
     let server = TestServer::start().await;
 

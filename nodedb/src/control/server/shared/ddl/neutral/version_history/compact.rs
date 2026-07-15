@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::sync_dispatch::dispatch_async;
@@ -85,17 +87,13 @@ fn parse_compact(sql: &str) -> Result<(String, String, String), DdlError> {
     let rest = sql["COMPACT HISTORY ON ".len()..].trim();
 
     // Collection: before WHERE.
-    let where_pos = rest
-        .to_uppercase()
-        .find("WHERE")
+    let where_pos = find_ascii_case_insensitive(rest, "WHERE")
         .ok_or_else(|| err("42601", "expected WHERE".to_string()))?;
     let collection = rest[..where_pos].trim().to_lowercase();
     let after_where = rest[where_pos + 5..].trim();
 
     // id = 'doc-id' BEFORE 'checkpoint'
-    let before_pos = after_where
-        .to_uppercase()
-        .find("BEFORE")
+    let before_pos = find_ascii_case_insensitive(after_where, "BEFORE")
         .ok_or_else(|| err("42601", "expected BEFORE '<checkpoint>'".to_string()))?;
     let id_clause = after_where[..before_pos].trim();
     let checkpoint_part = after_where[before_pos + 6..]

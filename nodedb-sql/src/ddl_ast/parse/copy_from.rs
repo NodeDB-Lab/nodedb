@@ -9,6 +9,7 @@
 
 use crate::ddl_ast::statement::{CopyFormat, MiscStmt, NodedbStatement};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 /// Try to parse a COPY statement.
 ///
@@ -34,7 +35,11 @@ pub(super) fn try_parse(
     // Fall through for COPY ... TO — handled by copy_to parser.
     let has_from = upper.contains(" FROM ");
     let has_to = upper.contains(" TO ");
-    if has_to && (!has_from || upper.find(" TO ") < upper.find(" FROM ")) {
+    if has_to
+        && (!has_from
+            || find_ascii_case_insensitive(trimmed, " TO ")
+                < find_ascii_case_insensitive(trimmed, " FROM "))
+    {
         return None;
     }
 
@@ -47,16 +52,17 @@ pub(super) fn try_parse(
         return None;
     }
 
-    Some(parse_copy_from(trimmed, upper))
+    Some(parse_copy_from(trimmed))
 }
 
-fn parse_copy_from(trimmed: &str, upper: &str) -> Result<NodedbStatement, SqlError> {
+fn parse_copy_from(trimmed: &str) -> Result<NodedbStatement, SqlError> {
     // Grammar: COPY <name> FROM '<path>' [WITH (...)]
 
     // Extract collection name (first word before FROM).
-    let from_pos = upper.find(" FROM ").ok_or_else(|| SqlError::Parse {
-        detail: "COPY: missing FROM keyword".to_string(),
-    })?;
+    let from_pos =
+        find_ascii_case_insensitive(trimmed, " FROM ").ok_or_else(|| SqlError::Parse {
+            detail: "COPY: missing FROM keyword".to_string(),
+        })?;
 
     // The collection name is between "COPY " and " FROM ".
     let coll_raw = trimmed["COPY ".len()..from_pos].trim();
@@ -309,6 +315,20 @@ mod tests {
         parse(sql)
             .expect("expected Some")
             .expect_err("expected Err")
+    }
+
+    #[test]
+    fn unicode_collection_before_from_preserves_original_offsets() {
+        let stmt = ok("COPY usersﬀﬀ FROM '/tmp/users.ndjson'");
+        match stmt {
+            NodedbStatement::Misc(MiscStmt::CopyFromFile {
+                collection, path, ..
+            }) => {
+                assert_eq!(collection, "usersﬀﬀ");
+                assert_eq!(path, "/tmp/users.ndjson");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

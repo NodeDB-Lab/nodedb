@@ -4,6 +4,7 @@
 //! dispatch path. Split out of `sql.rs` to keep that file under the
 //! file-size limit; behavior is unchanged.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
@@ -26,7 +27,7 @@ pub(super) fn handle_set_sql(ctx: &DispatchCtx<'_>, seq: u64, sql: &str) -> Nati
                 .trim_matches('\'')
                 .to_string(),
         )
-    } else if let Some(to_pos) = after_set.to_uppercase().find(" TO ") {
+    } else if let Some(to_pos) = find_ascii_case_insensitive(after_set, " TO ") {
         (
             after_set[..to_pos].trim().to_lowercase(),
             after_set[to_pos + 4..]

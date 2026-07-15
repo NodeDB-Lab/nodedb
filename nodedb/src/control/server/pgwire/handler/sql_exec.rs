@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
@@ -116,7 +117,7 @@ impl NodeDbPgHandler {
             let with_hold = upper.contains(" WITH HOLD ");
             let parts: Vec<&str> = sql_trimmed.split_whitespace().collect();
             let cursor_name = parts.get(1).unwrap_or(&"default").to_string();
-            if let Some(for_pos) = upper.find(" FOR ") {
+            if let Some(for_pos) = find_ascii_case_insensitive(sql_trimmed, " FOR ") {
                 let inner_sql = sql_trimmed[for_pos + 5..].trim();
                 match self
                     .execute_query_for_cursor(addr, inner_sql, identity)

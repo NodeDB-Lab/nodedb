@@ -7,6 +7,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
 use nodedb_physical::physical_plan::TextOp;
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::support::ddl_err;
@@ -26,16 +27,14 @@ pub async fn create_search_index(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let upper = sql.to_uppercase();
-
-    let on_pos = upper.find(" ON ").ok_or_else(|| {
+    let on_pos = find_ascii_case_insensitive(sql, " ON ").ok_or_else(|| {
         ddl_err(
             "42601",
             "syntax: CREATE SEARCH INDEX ON <collection> FIELDS <field> [ANALYZER 'name'] [FUZZY true]",
         )
     })?;
     let after_on = sql[on_pos + 4..].trim_start();
-    let fields_pos = upper.find(" FIELDS ").ok_or_else(|| {
+    let fields_pos = find_ascii_case_insensitive(sql, " FIELDS ").ok_or_else(|| {
         ddl_err(
             "42601",
             "syntax: CREATE SEARCH INDEX ON <collection> FIELDS <field> [ANALYZER 'name'] [FUZZY true]",
@@ -48,9 +47,9 @@ pub async fn create_search_index(
     }
 
     let after_fields = &sql[fields_pos + 8..];
-    let analyzer_pos = upper[fields_pos + 8..].find(" ANALYZER ");
+    let analyzer_pos = find_ascii_case_insensitive(after_fields, " ANALYZER ");
     let fields_end = analyzer_pos
-        .or_else(|| upper[fields_pos + 8..].find(" FUZZY "))
+        .or_else(|| find_ascii_case_insensitive(after_fields, " FUZZY "))
         .unwrap_or(after_fields.len());
     let fields_str = after_fields[..fields_end].trim();
     let fields: Vec<&str> = fields_str.split(',').map(|s| s.trim()).collect();

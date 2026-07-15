@@ -7,6 +7,7 @@
 //! per chunk. The handler builds [`DdlResult`] directly and carries no pgwire
 //! types.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
@@ -19,9 +20,7 @@ use super::super::result::{DdlError, DdlResult};
 /// delegates to `nodedb_query::chunk_text`, and returns a shaped result set.
 pub fn execute_chunk_text(sql: &str) -> Result<Vec<DdlResult>, DdlError> {
     // Extract the parenthesized args from NDB_CHUNK_TEXT(...).
-    let upper = sql.to_uppercase();
-    let fn_pos = upper
-        .find("NDB_CHUNK_TEXT(")
+    let fn_pos = find_ascii_case_insensitive(sql, "NDB_CHUNK_TEXT(")
         .ok_or_else(|| err("42601", "expected NDB_CHUNK_TEXT(...)"))?;
     let paren_start = fn_pos
         + sql[fn_pos..]

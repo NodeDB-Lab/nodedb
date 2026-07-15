@@ -25,6 +25,7 @@ use clauses::{parse_order_by, parse_return, parse_where};
 use helpers::{
     find_in_clause, find_next_match_keyword, find_top_level_keyword, split_top_level_commas,
 };
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive_from;
 
 /// Parse a MATCH query string into a `MatchQuery` AST.
 ///
@@ -38,15 +39,13 @@ pub fn parse(sql: &str) -> crate::Result<MatchQuery> {
     let mut collection = None;
 
     let trimmed = sql.trim();
-    let upper = trimmed.to_uppercase();
-
-    let where_pos = find_top_level_keyword(&upper, "WHERE");
-    let return_pos = find_top_level_keyword(&upper, "RETURN");
-    let limit_pos = find_top_level_keyword(&upper, "LIMIT");
-    let order_pos = find_top_level_keyword(&upper, "ORDER BY");
+    let where_pos = find_top_level_keyword(trimmed, "WHERE");
+    let return_pos = find_top_level_keyword(trimmed, "RETURN");
+    let limit_pos = find_top_level_keyword(trimmed, "LIMIT");
+    let order_pos = find_top_level_keyword(trimmed, "ORDER BY");
     // `IN 'collection'` clause: appears after the last closing `)` and before RETURN/WHERE.
     // Use a boundary-aware scan that accepts `)` before `IN`.
-    let in_pos = find_in_clause(&upper);
+    let in_pos = find_in_clause(trimmed);
 
     // Extract collection name from `IN 'collection'` if present.
     if let Some(ip) = in_pos {
@@ -121,26 +120,27 @@ pub fn parse(sql: &str) -> crate::Result<MatchQuery> {
 /// Parse MATCH and OPTIONAL MATCH clauses from the pattern section.
 pub(super) fn parse_match_clauses(section: &str) -> crate::Result<Vec<MatchClause>> {
     let mut clauses = Vec::new();
-    let upper = section.to_uppercase();
-
     let mut pos = 0;
     while pos < section.len() {
-        let remaining_upper = &upper[pos..];
         let remaining = &section[pos..];
+        let whitespace = remaining.len() - remaining.trim_start().len();
+        let keyword_start = pos + whitespace;
 
-        let (optional, match_start) = if remaining_upper.trim_start().starts_with("OPTIONAL MATCH")
-        {
-            let ws = remaining.len() - remaining.trim_start().len();
-            (true, pos + ws + 14)
-        } else if remaining_upper.trim_start().starts_with("MATCH") {
-            let ws = remaining.len() - remaining.trim_start().len();
-            (false, pos + ws + 5)
-        } else {
-            break;
-        };
+        let (optional, match_start) =
+            if find_ascii_case_insensitive_from(section, "OPTIONAL MATCH", keyword_start)
+                == Some(keyword_start)
+            {
+                (true, keyword_start + 14)
+            } else if find_ascii_case_insensitive_from(section, "MATCH", keyword_start)
+                == Some(keyword_start)
+            {
+                (false, keyword_start + 5)
+            } else {
+                break;
+            };
 
-        let rest_upper = &upper[match_start..];
-        let next_match = find_next_match_keyword(rest_upper)
+        let rest = &section[match_start..];
+        let next_match = find_next_match_keyword(rest)
             .map(|offset| match_start + offset)
             .unwrap_or(section.len());
 
@@ -247,6 +247,37 @@ mod tests {
         assert_eq!(edge.min_hops, 1);
         assert_eq!(edge.max_hops, 3);
         assert!(edge.is_variable_length());
+    }
+
+    #[test]
+    fn optional_match_after_unicode_binding_preserves_original_offsets() {
+        let q =
+            parse("MATCH (ﬀﬀ:Person)-[:KNOWS]->(b) OPTIONAL MATCH (b)-[:LIKES]->(c) RETURN b, c")
+                .expect("graph pattern should parse");
+        assert_eq!(q.clauses.len(), 2);
+        assert!(q.clauses[1].optional);
+    }
+
+    #[test]
+    fn in_and_predicates_after_unicode_binding_preserve_original_offsets() {
+        let q = parse(
+            "MATCH (ﬀﬀ:Person)-[:KNOWS]->(b) IN 'people' \
+             WHERE ﬀﬀ.name = 'a' AND ﬀﬀ.age > 1 RETURN ﬀﬀ",
+        )
+        .expect("graph IN and WHERE predicates should parse");
+        assert_eq!(q.collection.as_deref(), Some("people"));
+        assert_eq!(q.where_predicates.len(), 2);
+        assert_eq!(q.return_columns.len(), 1);
+        assert_eq!(q.return_columns[0].expr, "ﬀﬀ");
+    }
+
+    #[test]
+    fn return_alias_after_unicode_expression_preserves_original_offsets() {
+        let q = parse("MATCH (a:Person)-[:KNOWS]->(b) RETURN ﬀﬀ AS alias")
+            .expect("graph RETURN alias should parse");
+        assert_eq!(q.return_columns.len(), 1);
+        assert_eq!(q.return_columns[0].expr, "ﬀﬀ");
+        assert_eq!(q.return_columns[0].alias.as_deref(), Some("alias"));
     }
 
     #[test]

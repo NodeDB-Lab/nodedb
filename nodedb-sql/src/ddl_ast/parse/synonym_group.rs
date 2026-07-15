@@ -9,6 +9,7 @@
 
 use crate::ddl_ast::statement::{NodedbStatement, PolicyStmt};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_keyword;
 
 /// Try to parse synonym group DDL statements.
 pub(super) fn try_parse(
@@ -97,15 +98,11 @@ fn parse_drop(parts: &[&str]) -> Result<NodedbStatement, SqlError> {
 fn parse_term_list(_fragment: &str, original: &str) -> Result<Vec<String>, SqlError> {
     // Find the AS keyword in the original to get the parenthesised region.
     // We use a simple scan: find '(' and matching ')'.
-    let orig_upper = original.to_uppercase();
-    let as_pos = orig_upper
-        .find(" AS ")
-        .or_else(|| orig_upper.find(" AS\t"))
-        .ok_or_else(|| SqlError::Parse {
-            detail: "CREATE SYNONYM GROUP: missing AS keyword".to_string(),
-        })?;
+    let as_pos = find_ascii_keyword(original, "AS").ok_or_else(|| SqlError::Parse {
+        detail: "CREATE SYNONYM GROUP: missing AS keyword".to_string(),
+    })?;
 
-    let s = original[as_pos + 4..].trim_start();
+    let s = original[as_pos + "AS".len()..].trim_start();
 
     let open = s.find('(').ok_or_else(|| SqlError::Parse {
         detail: "CREATE SYNONYM GROUP: term list must start with '('".to_string(),
@@ -174,6 +171,18 @@ mod tests {
         parse(sql)
             .expect("expected Some")
             .expect_err("expected Err")
+    }
+
+    #[test]
+    fn create_unicode_group_name_preserves_original_offsets() {
+        let stmt = ok("CREATE SYNONYM GROUP termsﬀﬀ AS ('database', 'db')");
+        match stmt {
+            NodedbStatement::Policy(PolicyStmt::CreateSynonymGroup { name, terms }) => {
+                assert_eq!(name, "termsﬀﬀ");
+                assert_eq!(terms, vec!["database", "db"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

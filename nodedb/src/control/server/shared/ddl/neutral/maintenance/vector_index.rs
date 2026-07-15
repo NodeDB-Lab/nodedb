@@ -14,6 +14,7 @@
 //! dispatch paths (`dispatch_to_data_plane`, plan construction, ordering) are
 //! preserved verbatim.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -206,8 +207,7 @@ pub async fn handle_alter_vector_index_set(
     let (collection, field_name) = parse_collection_column(sql, " ON ")?;
 
     // Parse SET (...) parameters.
-    let upper = sql.to_uppercase();
-    let set_pos = upper.find(" SET ").ok_or_else(|| {
+    let set_pos = find_ascii_case_insensitive(sql, " SET ").ok_or_else(|| {
         ddl_err(
             "42601",
             "ALTER VECTOR INDEX ... SET (...) requires SET clause",
@@ -380,9 +380,7 @@ pub async fn handle_alter_vector_index_set(
 ///
 /// Returns `(collection, field_name)`. If no dot, field_name is empty (default field).
 fn parse_collection_column(sql: &str, keyword: &str) -> Result<(String, String), DdlError> {
-    let upper = sql.to_uppercase();
-    let pos = upper
-        .find(keyword)
+    let pos = find_ascii_case_insensitive(sql, keyword)
         .ok_or_else(|| ddl_err("42601", format!("expected '{keyword}' in statement")))?;
 
     let after = sql[pos + keyword.len()..].trim();

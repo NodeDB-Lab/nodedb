@@ -2,6 +2,8 @@
 
 //! Shared helpers for the DDL router clusters.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -29,8 +31,7 @@ pub(super) fn collection_exists(
 /// so the parse behaviour stays byte-identical.
 pub(super) fn extract_last_values_arg(sql: &str) -> Option<String> {
     let prefix = "LAST_VALUES(";
-    let upper = sql.to_uppercase();
-    let pos = upper.find(prefix)?;
+    let pos = find_ascii_case_insensitive(sql, prefix)?;
     let after = &sql[pos + prefix.len()..];
     let start = after.find('\'')?;
     let end = after[start + 1..].find('\'')?;
@@ -41,8 +42,7 @@ pub(super) fn extract_last_values_arg(sql: &str) -> Option<String> {
 ///
 /// Mirrors the pgwire router's `extract_lv_args` exactly.
 pub(super) fn extract_last_value_args(sql: &str) -> Option<(String, u64)> {
-    let upper = sql.to_uppercase();
-    let pos = upper.find("LAST_VALUE(")?;
+    let pos = find_ascii_case_insensitive(sql, "LAST_VALUE(")?;
     let after = &sql[pos + 11..];
     let close = after.find(')')?;
     let inner = &after[..close];

@@ -2,6 +2,10 @@
 
 //! SQL parsing helpers shared across DDL handlers.
 
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
+
 /// Split VALUES content respecting quoted strings and brackets.
 ///
 /// `'hello', 42, 'it''s'` → `["'hello'", "42", "'it''s'"]`
@@ -156,13 +160,13 @@ fn sql_value_to_ndb_value(v: nodedb_sql::types::SqlValue) -> nodedb_types::Value
 ///
 /// `all_keywords` lists every keyword that can terminate the value.
 pub(crate) fn extract_clause(
-    upper: &str,
+    _upper: &str,
     original: &str,
     keyword: &str,
     all_keywords: &[&str],
 ) -> Option<String> {
     let kw_with_space = format!("{keyword} ");
-    let start = upper.find(&kw_with_space)?;
+    let start = find_ascii_case_insensitive(original, &kw_with_space)?;
     let value_start = start + kw_with_space.len();
 
     let end = all_keywords
@@ -170,9 +174,7 @@ pub(crate) fn extract_clause(
         .filter(|&&k| !k.eq_ignore_ascii_case(keyword))
         .filter_map(|k| {
             let needle = format!("{k} ");
-            upper[value_start..]
-                .find(&needle)
-                .map(|pos| value_start + pos)
+            find_ascii_case_insensitive_from(original, &needle, value_start)
         })
         .min()
         .unwrap_or(original.len());
@@ -187,8 +189,7 @@ pub(crate) fn extract_clause(
 /// returns `Some("users")`. Returns `None` if the marker is missing or
 /// the collection name is empty.
 pub(crate) fn extract_collection_after(sql: &str, marker: &str) -> Option<String> {
-    let upper = sql.to_uppercase();
-    let pos = upper.find(marker)?;
+    let pos = find_ascii_case_insensitive(sql, marker)?;
     let after = sql[pos + marker.len()..].trim();
     let name = after.split_whitespace().next()?.to_lowercase();
     if name.is_empty() { None } else { Some(name) }
@@ -229,7 +230,7 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_sql_value;
+    use super::{extract_clause, parse_sql_value};
 
     #[test]
     fn parse_sql_value_decodes_numeric_array_literals() {
@@ -258,6 +259,16 @@ mod tests {
                     nodedb_types::Value::Integer(2),
                 ]),
             ])
+        );
+    }
+
+    #[test]
+    fn extract_clause_with_unicode_value_preserves_original_offsets() {
+        let original = "TYPE ﬀﬀ DEFAULT 0 ASSERT $value > 0";
+        let upper = original.to_uppercase();
+        assert_eq!(
+            extract_clause(&upper, original, "TYPE", &["TYPE", "DEFAULT", "ASSERT"]),
+            Some("ﬀﬀ".to_string())
         );
     }
 }

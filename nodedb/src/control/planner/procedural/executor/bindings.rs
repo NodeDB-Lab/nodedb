@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive_from;
 use nodedb_types::Value;
 
 /// Row bindings available during trigger/procedure body execution.
@@ -283,13 +284,16 @@ fn replace_case_insensitive(input: &str, pattern: &str, replacement: &str) -> St
     if pattern.is_empty() {
         return input.to_string();
     }
-    let lower_input = input.to_lowercase();
-    let lower_pattern = pattern.to_lowercase();
     let mut result = String::with_capacity(input.len());
     let mut search_from = 0;
 
-    while let Some(pos) = lower_input[search_from..].find(&lower_pattern) {
-        let abs_pos = search_from + pos;
+    while let Some(abs_pos) = if pattern.is_ascii() {
+        find_ascii_case_insensitive_from(input, pattern, search_from)
+    } else {
+        input[search_from..]
+            .find(pattern)
+            .map(|position| search_from + position)
+    } {
         result.push_str(&input[search_from..abs_pos]);
         result.push_str(replacement);
         search_from = abs_pos + pattern.len();
@@ -301,6 +305,14 @@ fn replace_case_insensitive(input: &str, pattern: &str, replacement: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_after_expanding_unicode_preserves_original_offsets() {
+        assert_eq!(
+            replace_case_insensitive("SELECT 'ﬀﬀ', NEW.id, new.ID", "NEW.id", "42"),
+            "SELECT 'ﬀﬀ', 42, 42"
+        );
+    }
 
     #[test]
     fn substitute_new_fields() {

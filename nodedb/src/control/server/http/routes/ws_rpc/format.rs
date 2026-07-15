@@ -2,6 +2,8 @@
 
 //! Formatting helpers for WebSocket RPC responses and notifications.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::control::change_stream::ChangeEvent;
 use crate::control::gateway::GatewayErrorMap;
 
@@ -33,9 +35,7 @@ pub fn ws_error_from_gateway(id: &serde_json::Value, err: &crate::Error) -> Stri
 
 /// Extract collection name from SQL (first word after FROM, case-insensitive).
 pub fn extract_collection_from_sql(sql: &str) -> String {
-    let upper = sql.to_uppercase();
-    upper
-        .find(" FROM ")
+    find_ascii_case_insensitive(sql, " FROM ")
         .and_then(|pos| sql.get(pos + 6..))
         .and_then(|after| after.split_whitespace().next())
         .map(|s| s.to_lowercase())

@@ -4,6 +4,8 @@
 
 use std::net::SocketAddr;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use super::store::SessionStore;
 
 impl SessionStore {
@@ -61,8 +63,7 @@ pub fn parse_set_command(sql: &str) -> Option<(String, String)> {
         (k, v)
     } else {
         // Try TO separator.
-        let upper_rest = rest.to_uppercase();
-        let to_pos = upper_rest.find(" TO ")?;
+        let to_pos = find_ascii_case_insensitive(rest, " TO ")?;
         let k = rest[..to_pos].trim();
         let v = rest[to_pos + 4..].trim();
         (k, v)
@@ -251,6 +252,13 @@ mod tests {
         let (k, v) = parse_set_command("SET search_path TO public").unwrap();
         assert_eq!(k, "search_path");
         assert_eq!(v, "public");
+    }
+
+    #[test]
+    fn parse_set_to_after_unicode_key_preserves_original_offsets() {
+        let (k, v) = parse_set_command("SET custom.ﬀﬀ TO enabled").unwrap();
+        assert_eq!(k, "custom.ﬀﬀ");
+        assert_eq!(v, "enabled");
     }
 
     #[test]

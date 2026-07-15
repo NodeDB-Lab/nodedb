@@ -9,6 +9,9 @@
 use nodedb_types::DatabaseId;
 use std::collections::HashMap;
 
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::types::TenantId;
@@ -161,10 +164,10 @@ impl NodeDbPgHandler {
 
 /// Extract column/value pairs from `INSERT INTO x (col1, col2) VALUES (val1, val2)`.
 fn extract_insert_fields(sql: &str) -> Result<HashMap<String, nodedb_types::Value>, String> {
-    let upper = sql.to_uppercase();
-    let cols_start = sql
-        .find('(')
-        .ok_or_else(|| format!("missing '(' in INSERT: {}", &sql[..sql.len().min(60)]))?;
+    let cols_start = sql.find('(').ok_or_else(|| {
+        let preview: String = sql.chars().take(60).collect();
+        format!("missing '(' in INSERT: {preview}")
+    })?;
     let cols_end = sql[cols_start + 1..]
         .find(')')
         .map(|p| cols_start + 1 + p)
@@ -174,8 +177,7 @@ fn extract_insert_fields(sql: &str) -> Result<HashMap<String, nodedb_types::Valu
         .map(|s| s.trim())
         .collect();
 
-    let values_pos = upper
-        .find("VALUES")
+    let values_pos = find_ascii_case_insensitive(sql, "VALUES")
         .ok_or_else(|| "missing VALUES keyword in INSERT".to_string())?
         + 6;
     let vals_start = sql[values_pos..]
@@ -217,17 +219,11 @@ fn extract_insert_fields(sql: &str) -> Result<HashMap<String, nodedb_types::Valu
 
 /// Extract column/value pairs from `UPDATE x SET col1 = val1, col2 = val2 WHERE ...`.
 fn extract_update_fields(sql: &str) -> Result<HashMap<String, nodedb_types::Value>, String> {
-    let upper = sql.to_uppercase();
-
-    let set_pos = upper
-        .find(" SET ")
+    let set_pos = find_ascii_case_insensitive(sql, " SET ")
         .ok_or_else(|| "missing SET keyword in UPDATE".to_string())?
         + 5;
 
-    let where_pos = upper[set_pos..]
-        .find(" WHERE ")
-        .map(|p| set_pos + p)
-        .unwrap_or(sql.len());
+    let where_pos = find_ascii_case_insensitive_from(sql, " WHERE ", set_pos).unwrap_or(sql.len());
     let assignments_str = &sql[set_pos..where_pos];
 
     let mut fields = HashMap::new();
@@ -252,16 +248,12 @@ fn extract_update_fields(sql: &str) -> Result<HashMap<String, nodedb_types::Valu
 ///
 /// Only matches standalone `id` with word boundaries — `userid`, `order_id` etc. won't match.
 fn extract_where_id(sql: &str) -> Option<String> {
-    let upper = sql.to_uppercase();
-    let where_pos = upper.find(" WHERE ")?;
+    let where_pos = find_ascii_case_insensitive(sql, " WHERE ")?;
     let after = &sql[where_pos + 7..];
-    let upper_after = after.to_uppercase();
-
     // Find standalone "ID" with word boundary checks.
     let mut search_start = 0;
     loop {
-        let id_pos = upper_after[search_start..].find("ID")?;
-        let abs_pos = search_start + id_pos;
+        let abs_pos = find_ascii_case_insensitive_from(after, "ID", search_start)?;
 
         // Check word boundary before: must be start or non-alphanumeric/underscore.
         if abs_pos > 0 {
@@ -387,6 +379,12 @@ mod tests {
     }
 
     #[test]
+    fn extract_where_id_after_unicode_value_preserves_original_offsets() {
+        let sql = "UPDATE orders SET note = 'ǰ' WHERE id = 'o1'";
+        assert_eq!(extract_where_id(sql), Some("o1".to_string()));
+    }
+
+    #[test]
     fn extract_insert_fields_basic() {
         let fields = extract_insert_fields("INSERT INTO t (a, b) VALUES ('hello', 42)").unwrap();
         assert_eq!(
@@ -403,6 +401,19 @@ mod tests {
     }
 
     #[test]
+    fn extract_insert_fields_with_unicode_before_values_preserves_original_offsets() {
+        let fields = extract_insert_fields("INSERT INTO tﬀﬀ (a) VALUES (42)").unwrap();
+        assert_eq!(fields.get("a"), Some(&nodedb_types::Value::Integer(42)));
+    }
+
+    #[test]
+    fn malformed_insert_preview_respects_utf8_boundaries() {
+        let sql = format!("INSERT INTO {}é no_parens", "a".repeat(47));
+        assert_eq!(sql.find('é'), Some(59));
+        assert!(extract_insert_fields(&sql).is_err());
+    }
+
+    #[test]
     fn extract_update_fields_basic() {
         let fields = extract_update_fields("UPDATE t SET x = 10, y = 'hi' WHERE id = '1'").unwrap();
         assert_eq!(fields.get("x"), Some(&nodedb_types::Value::Integer(10)));
@@ -410,5 +421,11 @@ mod tests {
             fields.get("y"),
             Some(&nodedb_types::Value::String("hi".into()))
         );
+    }
+
+    #[test]
+    fn extract_update_fields_with_unicode_before_set_preserves_original_offsets() {
+        let fields = extract_update_fields("UPDATE tǰ SET x = 10 WHERE id = '1'").unwrap();
+        assert_eq!(fields.get("x"), Some(&nodedb_types::Value::Integer(10)));
     }
 }

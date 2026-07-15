@@ -12,6 +12,7 @@
 pub(super) use nodedb_physical::physical_plan::{ReturningColumns, ReturningItem, ReturningSpec};
 
 use crate::Error;
+use nodedb_sql::parser::preprocess::lex::{find_ascii_keyword, keyword_position_outside_literals};
 
 const RETURNING_KEYWORD: &str = "RETURNING";
 
@@ -33,7 +34,7 @@ pub(super) fn strip_returning(sql: &str) -> Result<(String, Option<ReturningSpec
         return Ok((sql.to_string(), None));
     }
 
-    if let Some(pos) = find_returning_keyword(&upper) {
+    if let Some(pos) = keyword_position_outside_literals(sql, RETURNING_KEYWORD) {
         let cleaned = sql[..pos].trim_end().to_string();
         let columns_str = sql[pos + RETURNING_KEYWORD.len()..].trim();
         let spec = parse_returning_columns(columns_str)?;
@@ -77,8 +78,7 @@ fn parse_returning_columns(columns_str: &str) -> Result<ReturningSpec, Error> {
         }
 
         // Parse `name [AS alias]` — case-insensitive AS.
-        let upper_item = item.to_uppercase();
-        if let Some(as_pos) = find_word_boundary(&upper_item, "AS") {
+        if let Some(as_pos) = find_ascii_keyword(item, "AS") {
             let name = item[..as_pos].trim().to_string();
             let alias = item[as_pos + 2..].trim().to_string();
             if name.is_empty() || alias.is_empty() {
@@ -153,77 +153,6 @@ fn is_valid_column_name(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-}
-
-/// Whether `b` can appear inside a SQL identifier (letter, digit, or `_`).
-///
-/// Underscore is an identifier character, so a keyword match must NOT treat a
-/// neighbouring `_` as a word boundary — otherwise `RETURNING` is falsely found
-/// inside an identifier such as `orders_returning`, splitting the statement at
-/// the wrong place.
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Find the byte offset of `word` in `upper_text` respecting word boundaries.
-fn find_word_boundary(upper_text: &str, word: &str) -> Option<usize> {
-    let bytes = upper_text.as_bytes();
-    let wbytes = word.as_bytes();
-    let wlen = wbytes.len();
-
-    let mut i = 0;
-    while i + wlen <= bytes.len() {
-        if &bytes[i..i + wlen] == wbytes {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + wlen >= bytes.len() || !is_ident_byte(bytes[i + wlen]);
-            if before_ok && after_ok {
-                return Some(i);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Find the byte offset of the RETURNING keyword in uppercased SQL.
-///
-/// Skips occurrences inside string literals (single-quoted).
-fn find_returning_keyword(upper: &str) -> Option<usize> {
-    let bytes = upper.as_bytes();
-    let keyword = RETURNING_KEYWORD.as_bytes();
-    let kw_len = keyword.len();
-
-    if bytes.len() < kw_len {
-        return None;
-    }
-
-    let mut in_string = false;
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            in_string = !in_string;
-            i += 1;
-            continue;
-        }
-
-        if in_string {
-            i += 1;
-            continue;
-        }
-
-        if i + kw_len <= bytes.len()
-            && &bytes[i..i + kw_len] == keyword
-            && (i == 0 || !is_ident_byte(bytes[i - 1]))
-            && (i + kw_len >= bytes.len() || !is_ident_byte(bytes[i + kw_len]))
-        {
-            return Some(i);
-        }
-
-        i += 1;
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -338,6 +267,25 @@ mod tests {
             ReturningColumns::Named(vec![ReturningItem {
                 name: "id".into(),
                 alias: None
+            }])
+        );
+    }
+
+    #[test]
+    fn unicode_identifier_before_returning_preserves_original_offsets() {
+        let (sql, spec) = strip_returning("DELETE FROM tﬀﬀ RETURNING *").unwrap();
+        assert_eq!(sql, "DELETE FROM tﬀﬀ");
+        assert_eq!(spec.unwrap().columns, ReturningColumns::Star);
+    }
+
+    #[test]
+    fn unicode_returning_column_before_alias_preserves_original_offsets() {
+        let (_, spec) = strip_returning("UPDATE t SET x = 1 RETURNING ﬀﬀ AS alias").unwrap();
+        assert_eq!(
+            spec.unwrap().columns,
+            ReturningColumns::Named(vec![ReturningItem {
+                name: "ﬀﬀ".into(),
+                alias: Some("alias".into()),
             }])
         );
     }

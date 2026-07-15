@@ -36,7 +36,10 @@
 //! Any other expression form is rejected with a typed `TemporalParseError`
 //! naming the unsupported form.
 
-use super::lex::keyword_position_outside_literals;
+use super::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+    keyword_position_outside_literals,
+};
 use crate::temporal::{TemporalScope, ValidTime};
 use nodedb_types::SystemTimeScope;
 
@@ -152,8 +155,7 @@ fn strip_system_time_as_of(sql: &str) -> Result<Option<(String, i64)>, TemporalP
 /// stable; the planner ignores the synthetic column because the temporal
 /// scope is carried out-of-band.
 fn strip_system_as_of_function(sql: &str) -> Result<Option<(String, i64)>, TemporalParseError> {
-    let upper = sql.to_uppercase();
-    let Some(start) = upper.find("__SYSTEM_AS_OF__(") else {
+    let Some(start) = find_ascii_case_insensitive(sql, "__SYSTEM_AS_OF__(") else {
         return Ok(None);
     };
     let after_open = start + "__SYSTEM_AS_OF__(".len();
@@ -392,20 +394,18 @@ fn parse_as_of_expr(
         "OFFSET",
         ";",
     ];
-    let upper_trimmed = trimmed.to_uppercase();
     let mut end_rel = trimmed.len();
     for stop in &stop_tokens {
         // Only match at a word boundary (preceded by whitespace or start).
         let mut search_from = 0;
-        while let Some(pos) = upper_trimmed[search_from..].find(stop) {
-            let abs_pos = search_from + pos;
-            let at_boundary = abs_pos == 0
-                || upper_trimmed[..abs_pos].ends_with(|c: char| c.is_ascii_whitespace());
+        while let Some(abs_pos) = find_ascii_case_insensitive_from(trimmed, stop, search_from) {
+            let at_boundary =
+                abs_pos == 0 || trimmed[..abs_pos].ends_with(|c: char| c.is_ascii_whitespace());
             if at_boundary {
                 end_rel = end_rel.min(abs_pos);
                 break;
             }
-            search_from = abs_pos + 1;
+            search_from = abs_pos + stop.len();
         }
     }
     // Trim trailing whitespace from the extracted token.
@@ -439,6 +439,16 @@ fn parse_trailing_i64(sql: &str, offset: usize) -> Result<(i64, usize), Temporal
         .last()
         .ok_or_else(|| TemporalParseError(format!("expected integer at offset {offset}")))?;
     let num_str = &trimmed[..end_rel];
+    if trimmed[end_rel..]
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_ascii_whitespace() && !matches!(c, ';' | ',' | ')'))
+    {
+        return Err(TemporalParseError(format!(
+            "invalid character after integer temporal expression at offset {}",
+            offset + leading + end_rel
+        )));
+    }
     let v: i64 = num_str
         .parse()
         .map_err(|_| TemporalParseError(format!("not an i64: {num_str}")))?;
@@ -452,6 +462,12 @@ mod tests {
     #[test]
     fn passthrough_no_temporal() {
         assert!(extract("SELECT * FROM t WHERE x = 1").unwrap().is_none());
+    }
+
+    #[test]
+    fn unicode_in_invalid_as_of_expression_returns_error_without_panicking() {
+        let result = extract("SELECT * FROM t FOR SYSTEM_TIME AS OF 100ﬀﬀ LIMIT 1");
+        assert!(result.is_err());
     }
 
     #[test]

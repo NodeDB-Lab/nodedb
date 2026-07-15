@@ -19,6 +19,7 @@
 //! side effects are preserved verbatim; only the result construction changed
 //! from pgwire `Response` / `Tag` to the protocol-neutral [`DdlResult`].
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use nodedb_types::DatabaseId;
 
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -50,12 +51,9 @@ pub async fn set_permission_tree(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let upper = sql.to_uppercase();
-
     // Extract collection name: between "ALTER COLLECTION " and " SET PERMISSION_TREE".
     let start = "ALTER COLLECTION ".len();
-    let end = upper
-        .find(" SET PERMISSION_TREE")
+    let end = find_ascii_case_insensitive(sql, " SET PERMISSION_TREE")
         .ok_or_else(|| err("42601", "expected SET PERMISSION_TREE"))?;
     let collection = sql[start..end].trim().to_lowercase();
 
@@ -128,11 +126,8 @@ pub async fn drop_permission_tree(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let upper = sql.to_uppercase();
-
     let start = "ALTER COLLECTION ".len();
-    let end = upper
-        .find(" DROP PERMISSION_TREE")
+    let end = find_ascii_case_insensitive(sql, " DROP PERMISSION_TREE")
         .ok_or_else(|| err("42601", "expected DROP PERMISSION_TREE"))?;
     let collection = sql[start..end].trim().to_lowercase();
 

@@ -3,6 +3,8 @@
 //! `AuthContext` construction, scope enrichment, and per-query `ON DENY`
 //! extraction.
 
+use nodedb_sql::parser::preprocess::lex::rfind_ascii_case_insensitive;
+
 use crate::control::security::auth_context::{AuthContext, generate_session_id};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::util::base64_url_decode;
@@ -112,16 +114,19 @@ pub fn extract_and_apply_on_deny(
     sql: &str,
     auth_ctx: &mut crate::control::security::auth_context::AuthContext,
 ) -> String {
-    // Use lowercase for case-insensitive search to avoid byte-length mismatches
-    // with non-ASCII characters under Unicode case folding.
-    let lower = sql.to_lowercase();
-    let Some(idx) = lower.rfind("on deny ") else {
+    let Some(idx) = rfind_ascii_case_insensitive(sql, "on deny ") else {
         return sql.to_string();
     };
 
     // Only strip ON DENY from SELECT/WITH queries (not CREATE RLS POLICY).
-    let trimmed = lower.trim_start();
-    if !trimmed.starts_with("select") && !trimmed.starts_with("with") {
+    let trimmed = sql.trim_start();
+    if !trimmed
+        .get(.."select".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
+        && !trimmed
+            .get(.."with".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("with"))
+    {
         return sql.to_string();
     }
 

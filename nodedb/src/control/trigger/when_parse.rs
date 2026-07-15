@@ -17,6 +17,7 @@
 //! - Same with `OLD.` prefix
 
 use nodedb_query::scan_filter::{FilterOp, ScanFilter};
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive_from;
 use nodedb_types::Value;
 
 /// Which row side the WHEN condition targets.
@@ -56,12 +57,11 @@ pub fn try_parse_when_to_filters(condition: &str) -> Option<(WhenTarget, Vec<Sca
 
 /// Split a string on case-insensitive ` AND ` boundaries.
 fn split_and(s: &str) -> Vec<&str> {
-    let upper = s.to_uppercase();
     let mut parts = Vec::new();
     let mut start = 0;
-    while let Some(pos) = upper[start..].find(" AND ") {
-        parts.push(s[start..start + pos].trim());
-        start += pos + 5; // " AND " is 5 chars
+    while let Some(position) = find_ascii_case_insensitive_from(s, " AND ", start) {
+        parts.push(s[start..position].trim());
+        start = position + 5; // " AND " is 5 ASCII bytes
     }
     parts.push(s[start..].trim());
     parts.retain(|p| !p.is_empty());
@@ -417,6 +417,15 @@ mod tests {
         assert_eq!(filters[0].value, Value::String("active".into()));
         assert_eq!(filters[1].field, "type");
         assert_eq!(filters[1].value, Value::String("order".into()));
+    }
+
+    #[test]
+    fn and_after_unicode_literal_preserves_original_offsets() {
+        let (target, filters) = parse_multi("NEW.status = 'ﬀﬀ' AND NEW.type = 'order'").unwrap();
+        assert_eq!(target, WhenTarget::New);
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].value, Value::String("ﬀﬀ".into()));
+        assert_eq!(filters[1].field, "type");
     }
 
     #[test]

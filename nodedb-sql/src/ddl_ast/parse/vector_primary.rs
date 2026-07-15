@@ -13,6 +13,10 @@ use nodedb_types::vector_ann::VectorQuantization;
 use nodedb_types::vector_distance::DistanceMetric;
 use nodedb_types::vector_dtype::VectorStorageDtype;
 
+use crate::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from, find_ascii_keyword,
+};
+
 /// Known quantization codec names accepted in DDL.
 const VALID_QUANTIZATIONS: &[&str] = &[
     "none", "sq8", "pq", "rabitq", "bbq", "binary", "ternary", "opq",
@@ -296,8 +300,7 @@ pub fn parse_vector_primary_options_from_kvs(
 /// Find the substring inside the outermost `WITH (...)` clause, if any.
 /// Falls back to the whole SQL when no WITH clause is present.
 fn with_clause(sql: &str) -> &str {
-    let upper = sql.to_uppercase();
-    let Some(pos) = upper.find("WITH") else {
+    let Some(pos) = find_ascii_keyword(sql, "WITH") else {
         return sql;
     };
     // Whole-word check on WITH.
@@ -321,15 +324,11 @@ fn with_clause(sql: &str) -> &str {
 /// Extract a `key = 'value'` or `key = "value"` string from SQL WITH options.
 fn extract_with_str(sql: &str, key: &str) -> Option<String> {
     let scope = with_clause(sql);
-    let upper = scope.to_uppercase();
-    let key_upper = key.to_uppercase();
-
     // Find a whole-word, '='-followed occurrence; skip false matches like
     // "m" inside "metric" or inside "dim".
     let mut start = 0usize;
     let pos = loop {
-        let rel = upper[start..].find(&key_upper)?;
-        let abs = start + rel;
+        let abs = find_ascii_case_insensitive_from(scope, key, start)?;
         let before_ok = abs == 0 || {
             let b = scope.as_bytes()[abs - 1];
             !(b.is_ascii_alphanumeric() || b == b'_')
@@ -381,8 +380,7 @@ fn extract_with_u32(sql: &str, key: &str) -> Option<u32> {
 /// Returns an empty `Vec` if the key is absent.
 fn extract_payload_indexes(sql: &str) -> Vec<String> {
     let scope = with_clause(sql);
-    let upper = scope.to_uppercase();
-    let pos = match upper.find("PAYLOAD_INDEXES") {
+    let pos = match find_ascii_case_insensitive(scope, "PAYLOAD_INDEXES") {
         Some(p) => p,
         None => return Vec::new(),
     };
@@ -473,6 +471,30 @@ fn parse_metric(m: &str) -> Result<DistanceMetric, NodeDbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_clause_after_unicode_schema_preserves_original_offsets() {
+        assert_eq!(
+            with_clause("CREATE COLLECTION v (name ﬀﬀ) WITH (primary='vector')"),
+            "primary='vector'"
+        );
+    }
+
+    #[test]
+    fn option_after_unicode_value_preserves_original_offsets() {
+        assert_eq!(
+            extract_with_str("WITH (note='ﬀﬀ', metric='cosine')", "metric"),
+            Some("cosine".to_string())
+        );
+    }
+
+    #[test]
+    fn payload_indexes_after_unicode_value_preserve_original_offsets() {
+        assert_eq!(
+            extract_payload_indexes("WITH (note='ﬀﬀ', payload_indexes=['category'])"),
+            vec!["category"]
+        );
+    }
 
     // ── Happy path ────────────────────────────────────────────────────────
 

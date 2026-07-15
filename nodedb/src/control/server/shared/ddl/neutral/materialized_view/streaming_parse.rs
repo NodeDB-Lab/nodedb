@@ -11,6 +11,9 @@
 //! failures surface as protocol-neutral [`DdlError`] with SQLSTATE `42601`.
 
 use crate::event::streaming_mv::types::{AggDef, AggFunction};
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, rfind_ascii_case_insensitive,
+};
 
 use super::super::super::result::DdlError;
 
@@ -44,8 +47,7 @@ pub fn parse_streaming_mv(query_sql: &str) -> Result<ParsedStreamingMv, DdlError
     let query_upper = query.to_uppercase();
 
     // Extract FROM <stream>.
-    let from_pos = query_upper
-        .find(" FROM ")
+    let from_pos = find_ascii_case_insensitive(query, " FROM ")
         .ok_or_else(|| parse_err("expected FROM clause"))?;
     let after_from = query[from_pos + 6..].trim();
     let source_stream = after_from
@@ -55,7 +57,7 @@ pub fn parse_streaming_mv(query_sql: &str) -> Result<ParsedStreamingMv, DdlError
         .to_lowercase();
 
     // Extract GROUP BY columns.
-    let group_by_columns = if let Some(gb_pos) = query_upper.find(" GROUP BY ") {
+    let group_by_columns = if let Some(gb_pos) = find_ascii_case_insensitive(query, " GROUP BY ") {
         let gb_str = query[gb_pos + 10..].trim();
         gb_str
             .split(',')
@@ -67,8 +69,8 @@ pub fn parse_streaming_mv(query_sql: &str) -> Result<ParsedStreamingMv, DdlError
     };
 
     // Extract WHERE filter (between FROM <stream> and GROUP BY).
-    let filter_expr = if let Some(where_pos) = query_upper.find(" WHERE ") {
-        let end = query_upper.find(" GROUP BY ").unwrap_or(query.len());
+    let filter_expr = if let Some(where_pos) = find_ascii_case_insensitive(query, " WHERE ") {
+        let end = find_ascii_case_insensitive(query, " GROUP BY ").unwrap_or(query.len());
         if where_pos < end {
             Some(query[where_pos + 7..end].trim().to_string())
         } else {
@@ -115,7 +117,7 @@ fn parse_select_aggregates(select_list: &str) -> Vec<AggDef> {
         }
 
         // Split on AS to get alias.
-        let (expr_part, alias) = if let Some(as_pos) = item.to_uppercase().rfind(" AS ") {
+        let (expr_part, alias) = if let Some(as_pos) = rfind_ascii_case_insensitive(item, " AS ") {
             (
                 item[..as_pos].trim(),
                 item[as_pos + 4..].trim().to_lowercase(),
@@ -194,6 +196,16 @@ mod tests {
         assert_eq!(parsed.aggregates.len(), 2);
         assert_eq!(parsed.aggregates[1].function, AggFunction::Sum);
         assert_eq!(parsed.aggregates[1].input_expr, "total");
+    }
+
+    #[test]
+    fn aggregate_alias_after_unicode_expression_preserves_original_offsets() {
+        let parsed =
+            parse_streaming_mv("SELECT sum(ﬀﬀ) AS total FROM orders_stream GROUP BY event_type")
+                .expect("streaming aggregate should parse");
+        assert_eq!(parsed.aggregates.len(), 1);
+        assert_eq!(parsed.aggregates[0].input_expr, "ﬀﬀ");
+        assert_eq!(parsed.aggregates[0].output_name, "total");
     }
 
     #[test]

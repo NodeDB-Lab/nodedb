@@ -28,6 +28,27 @@ async fn declare_fetch_close() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unicode_cursor_name_before_for_preserves_query_boundary() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION data").await.unwrap();
+    server
+        .exec("INSERT INTO data (id) VALUES ('d1')")
+        .await
+        .unwrap();
+
+    server.exec("BEGIN").await.unwrap();
+    server
+        .exec("DECLARE cﬀﬀ CURSOR FOR SELECT * FROM data")
+        .await
+        .unwrap();
+    let rows = server.query_text("FETCH ALL FROM cﬀﬀ").await.unwrap();
+    assert!(!rows.is_empty(), "Unicode cursor should return data");
+    server.exec("CLOSE cﬀﬀ").await.unwrap();
+    server.exec("COMMIT").await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fetch_all_returns_data() {
     let server = TestServer::start().await;
 

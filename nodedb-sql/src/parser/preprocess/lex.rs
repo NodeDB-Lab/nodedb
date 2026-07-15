@@ -255,6 +255,89 @@ pub fn has_brace_outside_literals(sql: &str) -> bool {
     has_operator_outside_literals(sql, "{")
 }
 
+/// Find an ASCII `needle` in `text` without allocating a case-transformed
+/// copy. The returned byte offset always belongs to `text`.
+pub fn find_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
+    find_ascii_case_insensitive_from(text, needle, 0)
+}
+
+/// Find the last ASCII `needle` in `text` without allocating a transformed
+/// copy. The returned byte offset always belongs to `text`.
+pub fn rfind_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(text.len());
+    }
+    if !needle.is_ascii() || needle.len() > text.len() {
+        return None;
+    }
+
+    let haystack = text.as_bytes();
+    let needle = needle.as_bytes();
+    (0..=haystack.len() - needle.len()).rev().find(|&position| {
+        haystack[position..position + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+/// Find an ASCII `needle` at or after byte offset `start` in `text`.
+///
+/// `start` need not be a UTF-8 character boundary because matching is performed
+/// on bytes. A successful position is always a boundary: an ASCII needle can
+/// only begin on an ASCII byte in the original string.
+pub fn find_ascii_case_insensitive_from(text: &str, needle: &str, start: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return (start <= text.len()).then_some(start);
+    }
+    if !needle.is_ascii() || start > text.len() || needle.len() > text.len() - start {
+        return None;
+    }
+
+    let haystack = text.as_bytes();
+    let needle = needle.as_bytes();
+    (start..=haystack.len() - needle.len()).find(|&position| {
+        haystack[position..position + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn has_word_boundaries(text: &str, position: usize, length: usize) -> bool {
+    let before_ok = position == 0
+        || !text[..position]
+            .chars()
+            .next_back()
+            .map(is_identifier_char)
+            .unwrap_or(false);
+    let after = position + length;
+    let after_ok = after >= text.len()
+        || !text[after..]
+            .chars()
+            .next()
+            .map(is_identifier_char)
+            .unwrap_or(false);
+    before_ok && after_ok
+}
+
+/// Find a whole ASCII keyword in `text`, comparing case-insensitively while
+/// returning an offset into the unchanged input.
+pub fn find_ascii_keyword(text: &str, keyword: &str) -> Option<usize> {
+    let mut start = 0;
+    while let Some(position) = find_ascii_case_insensitive_from(text, keyword, start) {
+        if has_word_boundaries(text, position, keyword.len()) {
+            return Some(position);
+        }
+        start = position + keyword.len().max(1);
+    }
+    None
+}
+
 /// Return the byte position (relative to `sql`) of the first case-insensitive
 /// occurrence of the keyword `kw` that falls inside a `Text` segment. Returns
 /// `None` if not found.
@@ -263,36 +346,12 @@ pub fn has_brace_outside_literals(sql: &str) -> bool {
 /// match (if any) must not be alphanumeric or `_`, and the character
 /// immediately after the match (if any) must not be alphanumeric or `_`.
 pub fn keyword_position_outside_literals(sql: &str, kw: &str) -> Option<usize> {
-    let kw_upper = kw.to_uppercase();
     for seg in segments(sql) {
-        if let SqlSegment::Text(t) = seg {
-            let base = t.as_ptr() as usize - sql.as_ptr() as usize;
-            let upper = t.to_uppercase();
-            let mut search_from = 0;
-            while search_from < upper.len() {
-                let Some(rel) = upper[search_from..].find(&kw_upper) else {
-                    break;
-                };
-                let abs_rel = search_from + rel;
-                // word-boundary check
-                let before_ok = abs_rel == 0
-                    || !t[..abs_rel]
-                        .chars()
-                        .next_back()
-                        .map(|c| c.is_alphanumeric() || c == '_')
-                        .unwrap_or(false);
-                let after_start = abs_rel + kw.len();
-                let after_ok = after_start >= t.len()
-                    || !t[after_start..]
-                        .chars()
-                        .next()
-                        .map(|c| c.is_alphanumeric() || c == '_')
-                        .unwrap_or(false);
-                if before_ok && after_ok {
-                    return Some(base + abs_rel);
-                }
-                search_from = abs_rel + 1;
-            }
+        if let SqlSegment::Text(text) = seg
+            && let Some(position) = find_ascii_keyword(text, kw)
+        {
+            let base = text.as_ptr() as usize - sql.as_ptr() as usize;
+            return Some(base + position);
         }
     }
     None
@@ -509,5 +568,12 @@ mod tests {
         // verify the slice at that position matches the keyword (case-insensitively)
         let found = &sql[pos..pos + "FOR SYSTEM_TIME".len()];
         assert_eq!(found.to_uppercase(), "FOR SYSTEM_TIME");
+    }
+
+    #[test]
+    fn keyword_position_after_unicode_text_indexes_original_sql() {
+        let sql = "SELECT ﬀﬀ FROM records";
+        let pos = keyword_position_outside_literals(sql, "FROM").unwrap();
+        assert_eq!(&sql[pos..pos + "FROM".len()], "FROM");
     }
 }

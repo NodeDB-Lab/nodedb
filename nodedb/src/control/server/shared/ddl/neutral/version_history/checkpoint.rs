@@ -9,6 +9,8 @@
 
 use std::time::Duration;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::catalog::types::CheckpointRecord;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -147,9 +149,7 @@ fn parse_checkpoint_sql(sql: &str, prefix: &str) -> Result<(String, String, Stri
     }
     let after_on = after_name[3..].trim();
 
-    let where_pos = after_on
-        .to_uppercase()
-        .find("WHERE")
+    let where_pos = find_ascii_case_insensitive(after_on, "WHERE")
         .ok_or_else(|| err("42601", "expected WHERE id = '<doc_id>'".to_string()))?;
     let collection = after_on[..where_pos].trim().to_lowercase();
     let where_clause = after_on[where_pos + 5..].trim();

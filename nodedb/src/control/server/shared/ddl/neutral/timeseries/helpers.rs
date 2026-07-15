@@ -2,6 +2,8 @@
 
 //! Internal helpers for the protocol-neutral timeseries DDL handlers.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_keyword;
+
 use super::super::super::result::DdlError;
 
 /// Build a [`DdlError`] from an ANSI SQLSTATE code and a message.
@@ -17,8 +19,7 @@ pub(super) fn ddl_err(sqlstate: &str, message: impl Into<String>) -> DdlError {
 /// Returns `None` if no WITH clause is present or if the clause is empty.
 pub(super) fn parse_with_clause(parts: &[&str]) -> Option<String> {
     let sql = parts.join(" ");
-    let upper = sql.to_uppercase();
-    let with_pos = upper.find("WITH")?;
+    let with_pos = find_ascii_keyword(&sql, "WITH")?;
     let after_with = sql[with_pos + 4..].trim();
 
     let open = after_with.find('(')?;
@@ -54,11 +55,9 @@ pub(super) fn parse_with_clause(parts: &[&str]) -> Option<String> {
 /// Supported types: TIMESTAMP, FLOAT, FLOAT8, INT, INTEGER, VARCHAR, TEXT, BOOLEAN.
 pub(super) fn parse_column_defs(parts: &[&str]) -> Option<Vec<(String, String)>> {
     let sql = parts.join(" ");
-    let upper = sql.to_uppercase();
-
     // Column defs start after name (index 2 in parts) and before WITH.
     // Find the first `(` that is NOT part of a WITH clause.
-    let with_pos = upper.find("WITH").unwrap_or(sql.len());
+    let with_pos = find_ascii_keyword(&sql, "WITH").unwrap_or(sql.len());
     let before_with = &sql[..with_pos];
 
     let open = before_with.find('(')?;

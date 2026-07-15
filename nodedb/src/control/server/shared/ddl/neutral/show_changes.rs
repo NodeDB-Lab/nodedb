@@ -9,6 +9,7 @@
 //!
 //! The handler builds [`DdlResult`] directly and carries no pgwire types.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
@@ -18,12 +19,10 @@ use super::super::result::{DdlError, DdlResult};
 
 /// Execute `SHOW CHANGES FOR <collection> [SINCE <timestamp>] [LIMIT <n>]`.
 pub fn show_changes(state: &SharedState, sql: &str) -> Result<Vec<DdlResult>, DdlError> {
-    let upper = sql.to_uppercase();
-
     if let Some(coll_name) =
         crate::control::server::shared::ddl::sql_parse::extract_collection_after(sql, " FOR ")
     {
-        let since_ms: u64 = if let Some(since_pos) = upper.find(" SINCE ") {
+        let since_ms: u64 = if let Some(since_pos) = find_ascii_case_insensitive(sql, " SINCE ") {
             let since_str = sql[since_pos + 7..]
                 .split_whitespace()
                 .next()
@@ -46,8 +45,7 @@ pub fn show_changes(state: &SharedState, sql: &str) -> Result<Vec<DdlResult>, Dd
             now_ms.saturating_sub(86_400 * 1000)
         };
 
-        let limit = upper
-            .find(" LIMIT ")
+        let limit = find_ascii_case_insensitive(sql, " LIMIT ")
             .and_then(|pos| sql[pos + 7..].split_whitespace().next())
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1000);

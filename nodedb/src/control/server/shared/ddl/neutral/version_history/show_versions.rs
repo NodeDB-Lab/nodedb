@@ -2,6 +2,7 @@
 
 //! SHOW VERSIONS OF collection WHERE id = 'doc-id' [LIMIT N]
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -84,15 +85,13 @@ pub fn show_versions(
 fn parse_show_versions(sql: &str) -> Result<(String, String, usize), DdlError> {
     let rest = sql["SHOW VERSIONS OF ".len()..].trim();
 
-    let where_pos = rest
-        .to_uppercase()
-        .find("WHERE")
+    let where_pos = find_ascii_case_insensitive(rest, "WHERE")
         .ok_or_else(|| err("42601", "expected WHERE id = '<doc_id>'".to_string()))?;
     let collection = rest[..where_pos].trim().to_lowercase();
     let after_where = rest[where_pos + 5..].trim();
 
     // Parse "id = 'doc-id'" potentially followed by "LIMIT N"
-    let limit_pos = after_where.to_uppercase().find("LIMIT");
+    let limit_pos = find_ascii_case_insensitive(after_where, "LIMIT");
     let (id_clause, limit) = if let Some(lp) = limit_pos {
         let id_part = &after_where[..lp];
         let limit_part = after_where[lp + 5..].trim().trim_end_matches(';').trim();

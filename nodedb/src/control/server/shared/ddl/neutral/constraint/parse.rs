@@ -5,6 +5,10 @@
 //! Ported verbatim from the pgwire `ddl::constraint::parse`; only the error type
 //! changed from pgwire `PgWireError` to the protocol-neutral [`DdlError`].
 
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
+
 use crate::control::security::catalog::types::TransitionRule;
 use crate::control::server::shared::ddl::result::DdlError;
 
@@ -101,9 +105,7 @@ pub(super) fn extract_parenthesized_predicate(sql: &str) -> Result<String, DdlEr
 /// Finds `keyword` in `sql`, then extracts the content between the next `(` and
 /// its matching `)`, respecting nesting.
 pub(super) fn extract_check_body(sql: &str, keyword: &str) -> Result<String, DdlError> {
-    let upper = sql.to_uppercase();
-    let kw_pos = upper
-        .find(keyword)
+    let kw_pos = find_ascii_case_insensitive(sql, keyword)
         .ok_or_else(|| err("42601", &format!("missing {keyword} keyword")))?;
     let after = &sql[kw_pos + keyword.len()..];
 
@@ -270,21 +272,16 @@ fn parse_value_ref(s: &str) -> Result<crate::bridge::expr_eval::SqlExpr, DdlErro
 
 /// Split a string at the top-level occurrence of `sep` (respecting parentheses).
 fn split_top_level<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
-    let upper = s.to_uppercase();
     let mut depth = 0i32;
-    let sep_upper = sep.to_uppercase();
-    let mut i = 0;
-    while i < upper.len() {
-        let ch = upper.as_bytes()[i];
+    for (i, ch) in s.char_indices() {
         match ch {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+            '(' => depth += 1,
+            ')' => depth -= 1,
             _ => {}
         }
-        if depth == 0 && upper[i..].starts_with(&sep_upper) {
+        if depth == 0 && find_ascii_case_insensitive_from(s, sep, i) == Some(i) {
             return Some((&s[..i], &s[i + sep.len()..]));
         }
-        i += 1;
     }
     None
 }
@@ -315,4 +312,29 @@ fn split_on_operator<'a>(s: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
         return Some((&s[..abs_pos], &s[abs_pos + op.len()..]));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::expr_eval::{BinaryOp, SqlExpr};
+
+    #[test]
+    fn logical_separator_after_expanding_unicode_preserves_original_offsets() {
+        let expr = parse_transition_predicate("OLD.ﬀﬀ = TRUE AND OLD.x = TRUE")
+            .expect("transition predicate should parse");
+        assert!(matches!(
+            expr,
+            SqlExpr::BinaryOp {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_ascii_predicate_does_not_index_inside_utf8() {
+        parse_transition_predicate("OLD.é = TRUE")
+            .expect("non-ASCII transition predicate should parse");
+    }
 }

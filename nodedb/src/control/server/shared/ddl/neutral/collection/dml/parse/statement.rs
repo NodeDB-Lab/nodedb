@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::result::DdlError;
 use crate::control::server::shared::ddl::sql_parse::{parse_sql_value, split_values};
@@ -21,8 +23,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
     sql: &str,
     keyword: &str,
 ) -> Option<Result<ParsedInsert, DdlError>> {
-    let upper = sql.to_uppercase();
-    let kw_pos = upper.find(keyword)?;
+    let kw_pos = find_ascii_case_insensitive(sql, keyword)?;
     let after_into = sql[kw_pos + keyword.len()..].trim_start();
     let coll_name_str = after_into.split_whitespace().next()?;
     let coll_name = coll_name_str.to_lowercase();
@@ -53,15 +54,8 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
     if after_coll_name.starts_with('{') || after_coll_name.starts_with('[') {
         if let Ok(Some(preprocessed)) = nodedb_sql::parser::preprocess::preprocess(sql) {
             let rewritten = preprocessed.sql;
-            let rewritten_upper = rewritten.to_uppercase();
             // The preprocessed SQL is always INSERT INTO regardless of original keyword.
-            return parse_values_form(
-                &rewritten,
-                &rewritten_upper,
-                "INSERT INTO ",
-                &coll_name,
-                coll_type,
-            );
+            return parse_values_form(&rewritten, "INSERT INTO ", &coll_name, coll_type);
         }
         return Some(Err(ddl_err(
             "42601",
@@ -69,13 +63,12 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
         )));
     }
 
-    parse_values_form(sql, &upper, keyword, &coll_name, coll_type)
+    parse_values_form(sql, keyword, &coll_name, coll_type)
 }
 
 /// Parse the `(cols) VALUES (vals)` form.
 fn parse_values_form(
     sql: &str,
-    upper: &str,
     keyword: &str,
     coll_name: &str,
     coll_type: Option<nodedb_types::CollectionType>,
@@ -89,7 +82,7 @@ fn parse_values_form(
             )));
         }
     };
-    let values_kw = match upper.find("VALUES") {
+    let values_kw = match find_ascii_case_insensitive(sql, "VALUES") {
         Some(p) => p,
         None => return Some(Err(ddl_err("42601", "missing VALUES clause"))),
     };
@@ -147,7 +140,24 @@ fn parse_values_form(
         coll_name: coll_name.to_string(),
         doc_id,
         fields,
-        has_returning: upper.contains("RETURNING"),
+        has_returning: find_ascii_case_insensitive(sql, "RETURNING").is_some(),
         collection_type: coll_type,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn values_keyword_after_unicode_identifier_preserves_original_offsets() {
+        let sql = "INSERT INTO tﬀﬀ (a) VALUES (42)";
+        let parsed = parse_values_form(sql, "INSERT INTO ", "tﬀﬀ", None)
+            .expect("statement should be recognized")
+            .expect("statement should parse");
+        assert_eq!(
+            parsed.fields.get("a"),
+            Some(&nodedb_types::Value::Integer(42))
+        );
+    }
 }

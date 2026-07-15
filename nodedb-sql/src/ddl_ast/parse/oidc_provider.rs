@@ -30,6 +30,7 @@
 
 use crate::ddl_ast::statement::{AuthStmt, NodedbStatement, OidcClaimMappingClause};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive_from;
 
 pub(super) fn try_parse(
     _upper: &str,
@@ -152,13 +153,12 @@ fn parse_drop(parts: &[&str]) -> Result<NodedbStatement, SqlError> {
 /// Each clause is delimited by the next `WHEN` (case-insensitive) or end-of-input.
 fn parse_claim_mappings(trimmed: &str) -> Result<Vec<OidcClaimMappingClause>, SqlError> {
     // Find all WHEN keyword positions (case-insensitive, whole-word).
-    let upper = trimmed.to_uppercase();
     let mut clauses = Vec::new();
 
     // Split the input into segments starting at each "WHEN".
     let mut positions: Vec<usize> = Vec::new();
     let mut search_from = 0;
-    while let Some(pos) = find_keyword(&upper, "WHEN", search_from) {
+    while let Some(pos) = find_keyword(trimmed, "WHEN", search_from) {
         positions.push(pos);
         search_from = pos + 4;
     }
@@ -225,8 +225,7 @@ fn parse_when_clause(segment: &str) -> Result<OidcClaimMappingClause, SqlError> 
 /// Both single- and double-quoted strings are accepted, but bare tokens and
 /// malformed strings are rejected.
 fn extract_keyword_value(trimmed: &str, keyword: &str) -> Result<Option<String>, SqlError> {
-    let upper = trimmed.to_uppercase();
-    let Some(pos) = find_keyword(&upper, keyword, 0) else {
+    let Some(pos) = find_keyword(trimmed, keyword, 0) else {
         return Ok(None);
     };
     let detail = format!("CREATE OIDC PROVIDER: {keyword} must be a quoted string");
@@ -291,8 +290,7 @@ fn parse_required_u64_keyword(
     keyword: &str,
     statement: &str,
 ) -> Result<u64, SqlError> {
-    let upper = original.to_uppercase();
-    let Some(pos) = find_keyword(&upper, keyword, 0) else {
+    let Some(pos) = find_keyword(original, keyword, 0) else {
         return Err(SqlError::Parse {
             detail: format!("{statement}: {keyword} <u64> is required"),
         });
@@ -315,13 +313,12 @@ fn parse_required_u64_keyword(
 
 /// Return the start of the first top-level `CLAIM MAPPING` clause, or input end.
 fn claim_mapping_start(input: &str, search_from: usize) -> usize {
-    let upper = input.to_uppercase();
     let mut search_from = search_from;
-    while let Some(pos) = find_keyword(&upper, "CLAIM", search_from) {
-        let after_claim = &upper[pos + "CLAIM".len()..];
+    while let Some(pos) = find_keyword(input, "CLAIM", search_from) {
+        let after_claim = &input[pos + "CLAIM".len()..];
         let whitespace = after_claim.len() - after_claim.trim_start().len();
         let mapping_start = pos + "CLAIM".len() + whitespace;
-        if find_keyword(&upper, "MAPPING", mapping_start) == Some(mapping_start) {
+        if find_keyword(input, "MAPPING", mapping_start) == Some(mapping_start) {
             return pos;
         }
         search_from = pos + "CLAIM".len();
@@ -397,14 +394,13 @@ fn extract_string_list(after_action: &str, keyword: &str) -> Result<Vec<String>,
         .collect())
 }
 
-/// Find the byte offset of a whole-word keyword match (case-insensitive via
-/// pre-uppercased `haystack`). The keyword must be uppercase.
+/// Find the byte offset of a quote-aware whole-word ASCII keyword match.
 fn find_keyword(haystack: &str, keyword: &str, from: usize) -> Option<usize> {
     let bytes = haystack.as_bytes();
-    let keyword = keyword.as_bytes();
+    let keyword_len = keyword.len();
     let mut index = from;
     let mut quote = None;
-    while index + keyword.len() <= bytes.len() {
+    while index + keyword_len <= bytes.len() {
         if let Some(delimiter) = quote {
             if bytes[index] == delimiter {
                 if bytes.get(index + 1) == Some(&delimiter) {
@@ -422,9 +418,12 @@ fn find_keyword(haystack: &str, keyword: &str, from: usize) -> Option<usize> {
             continue;
         }
         let before_ok = index == 0 || !is_word_byte(bytes[index - 1]);
-        let after = index + keyword.len();
+        let after = index + keyword_len;
         let after_ok = after == bytes.len() || !is_word_byte(bytes[after]);
-        if before_ok && after_ok && bytes[index..].starts_with(keyword) {
+        if before_ok
+            && after_ok
+            && find_ascii_case_insensitive_from(haystack, keyword, index) == Some(index)
+        {
             return Some(index);
         }
         index += 1;
@@ -434,9 +433,8 @@ fn find_keyword(haystack: &str, keyword: &str, from: usize) -> Option<usize> {
 
 /// Find the end of an exact, quote-aware, whitespace-delimited action sequence.
 fn find_action_end(input: &str, words: &[&str]) -> Option<usize> {
-    let upper = input.to_uppercase();
     let mut search_from = 0;
-    while let Some(start) = find_keyword(&upper, words[0], search_from) {
+    while let Some(start) = find_keyword(input, words[0], search_from) {
         let mut end = start + words[0].len();
         let mut matched = true;
         for word in &words[1..] {
@@ -446,8 +444,8 @@ fn find_action_end(input: &str, words: &[&str]) -> Option<usize> {
                 break;
             }
             end += whitespace;
-            if !upper[end..].starts_with(word)
-                || upper
+            if find_ascii_case_insensitive_from(input, word, end) != Some(end)
+                || input
                     .as_bytes()
                     .get(end + word.len())
                     .is_some_and(|byte| is_word_byte(*byte))
@@ -480,6 +478,33 @@ mod tests {
         try_parse(&upper, &parts, sql)
             .expect("expected Some")
             .expect("expected Ok")
+    }
+
+    #[test]
+    fn quoted_provider_value_after_unicode_text_preserves_original_offsets() {
+        assert_eq!(
+            extract_keyword_value("prefixﬀﬀ ISSUER 'https://idp.example'", "ISSUER").unwrap(),
+            Some("https://idp.example".to_string())
+        );
+    }
+
+    #[test]
+    fn required_numeric_value_after_unicode_text_preserves_original_offsets() {
+        assert_eq!(
+            parse_required_u64_keyword("prefixﬀﬀ TENANT 42", "TENANT", "provider").unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn claim_mapping_boundaries_after_unicode_values_preserve_original_offsets() {
+        let mappings = parse_claim_mappings(
+            "WHEN sub = 'ﬀﬀ' ADD ROLES ['readonly'] WHEN aud = 'api' ADD DATABASES [7]",
+        )
+        .unwrap();
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].add_roles, vec!["readonly"]);
+        assert_eq!(mappings[1].add_databases, vec![7]);
     }
 
     #[test]

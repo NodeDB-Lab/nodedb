@@ -7,6 +7,7 @@
 //! arguments, builds a `QueryOp::FacetCounts` physical plan, dispatches to
 //! the Data Plane, and formats the response.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use sonic_rs;
@@ -202,9 +203,8 @@ fn parse_search_with_facets_args(sql: &str) -> PgWireResult<SearchWithFacetsArgs
 
 /// Extract a named string argument: `name => 'value'` or `name => ''value with quotes''`.
 fn extract_named_string_arg(sql: &str, name: &str) -> Option<String> {
-    let lower = sql.to_lowercase();
     let pattern = format!("{name} =>");
-    let pos = lower.find(&pattern)?;
+    let pos = find_ascii_case_insensitive(sql, &pattern)?;
     let after = sql[pos + pattern.len()..].trim_start();
 
     // Handle both single-quoted (with SQL escaping) values.
@@ -231,9 +231,8 @@ fn extract_named_string_arg(sql: &str, name: &str) -> Option<String> {
 
 /// Extract a named array argument: `name => ['val1', 'val2']`.
 fn extract_named_array_arg(sql: &str, name: &str) -> Option<Vec<String>> {
-    let lower = sql.to_lowercase();
     let pattern = format!("{name} =>");
-    let pos = lower.find(&pattern)?;
+    let pos = find_ascii_case_insensitive(sql, &pattern)?;
     let after = sql[pos + pattern.len()..].trim_start();
 
     let open = after.find('[')?;
@@ -254,9 +253,8 @@ fn extract_named_array_arg(sql: &str, name: &str) -> Option<Vec<String>> {
 
 /// Extract a named integer argument: `name => 10`.
 fn extract_named_int_arg(sql: &str, name: &str) -> Option<usize> {
-    let lower = sql.to_lowercase();
     let pattern = format!("{name} =>");
-    let pos = lower.find(&pattern)?;
+    let pos = find_ascii_case_insensitive(sql, &pattern)?;
     let after = sql[pos + pattern.len()..].trim_start();
     // Take digits until non-digit.
     let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -265,10 +263,7 @@ fn extract_named_int_arg(sql: &str, name: &str) -> Option<usize> {
 
 /// Extract collection name and WHERE clause from a SELECT query.
 fn extract_collection_and_filter(query: &str) -> PgWireResult<(String, String)> {
-    let upper = query.to_uppercase();
-
-    let from_pos = upper
-        .find(" FROM ")
+    let from_pos = find_ascii_case_insensitive(query, " FROM ")
         .ok_or_else(|| syntax_error("SEARCH_WITH_FACETS query must contain FROM clause"))?;
 
     let after_from = query[from_pos + 6..].trim_start();
@@ -280,12 +275,12 @@ fn extract_collection_and_filter(query: &str) -> PgWireResult<(String, String)> 
         .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')
         .to_string();
 
-    let filter = if let Some(where_pos) = upper.find(" WHERE ") {
+    let filter = if let Some(where_pos) = find_ascii_case_insensitive(query, " WHERE ") {
         // Extract everything between WHERE and ORDER BY / LIMIT / end.
         let after_where = &query[where_pos + 7..];
         let end = ["ORDER BY", "LIMIT", "GROUP BY"]
             .iter()
-            .filter_map(|kw| after_where.to_uppercase().find(kw))
+            .filter_map(|kw| find_ascii_case_insensitive(after_where, kw))
             .min()
             .unwrap_or(after_where.len());
         after_where[..end].trim().to_string()
@@ -317,4 +312,27 @@ fn syntax_error(msg: &str) -> PgWireError {
         "42601".to_owned(),
         msg.to_owned(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_argument_after_unicode_text_preserves_original_offsets() {
+        let sql = "SELECT SEARCH_WITH_FACETS(note => 'İ', query => 'SELECT * FROM items', facets => ['kind'])";
+        assert_eq!(
+            extract_named_string_arg(sql, "query"),
+            Some("SELECT * FROM items".to_string())
+        );
+    }
+
+    #[test]
+    fn inner_query_keywords_after_unicode_text_preserve_original_offsets() {
+        let (collection, filter) =
+            extract_collection_and_filter("SELECT ﬀﬀ FROM items WHERE kind = 'book' ORDER BY id")
+                .unwrap();
+        assert_eq!(collection, "items");
+        assert_eq!(filter, "kind = 'book'");
+    }
 }

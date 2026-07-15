@@ -244,6 +244,24 @@ async fn extended_query_update_returning_star() {
 }
 
 // ---------------------------------------------------------------------------
+// UTF-8 statement boundaries
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unicode_identifier_before_returning_preserves_connection() {
+    let server = TestServer::start().await;
+
+    server
+        .expect_error("DELETE FROM missingﬀﬀ RETURNING *", "not found")
+        .await;
+    let rows = server
+        .query_text("SELECT 1")
+        .await
+        .expect("connection must remain usable after the statement error");
+    assert_eq!(rows, vec!["1"]);
+}
+
+// ---------------------------------------------------------------------------
 // Arithmetic expression in RETURNING — error path
 // ---------------------------------------------------------------------------
 

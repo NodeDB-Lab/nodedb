@@ -11,6 +11,7 @@
 //!   DEALLOCATE name
 //!   DEALLOCATE ALL
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
@@ -144,8 +145,7 @@ fn parse_prepare_statement(sql: &str) -> PgWireResult<(String, Vec<String>, Stri
     let rest = trimmed[8..].trim(); // skip "PREPARE "
 
     // Find the AS keyword (case-insensitive).
-    let upper_rest = rest.to_uppercase();
-    let as_pos = upper_rest.find(" AS ").ok_or_else(|| {
+    let as_pos = find_ascii_case_insensitive(rest, " AS ").ok_or_else(|| {
         PgWireError::UserError(Box::new(ErrorInfo::new(
             "ERROR".to_owned(),
             "42601".to_owned(),
@@ -329,6 +329,14 @@ mod tests {
         assert_eq!(name, "get_user");
         assert_eq!(types, vec!["BIGINT", "TEXT"]);
         assert_eq!(body, "SELECT * FROM users WHERE id = $1 AND name = $2");
+    }
+
+    #[test]
+    fn parse_prepare_with_unicode_name_preserves_original_offsets() {
+        let (name, types, body) = parse_prepare_statement("PREPARE nﬀﬀ AS SELECT 1").unwrap();
+        assert_eq!(name, "nﬀﬀ");
+        assert!(types.is_empty());
+        assert_eq!(body, "SELECT 1");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 use super::helpers::{extract_after_keyword, extract_name_after_if_exists};
 use crate::ddl_ast::statement::{AutomationStmt, NodedbStatement};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::{find_ascii_case_insensitive_from, find_ascii_keyword};
 
 pub(super) fn try_parse(
     upper: &str,
@@ -70,7 +71,7 @@ pub(super) fn try_parse(
 fn parse_create_trigger(upper: &str, trimmed: &str) -> NodedbStatement {
     let (or_replace, execution_mode, rest_original) = strip_create_trigger_prefix(upper, trimmed);
 
-    let (header_original, header_upper, body_sql) = split_header_and_body(rest_original);
+    let (header_original, body_sql) = split_header_and_body(rest_original);
 
     let tokens_orig: Vec<&str> = header_original.split_whitespace().collect();
     let tokens_upper: Vec<String> = tokens_orig.iter().map(|t| t.to_uppercase()).collect();
@@ -95,8 +96,7 @@ fn parse_create_trigger(upper: &str, trimmed: &str) -> NodedbStatement {
     i += 1;
 
     let granularity = parse_granularity_tokens(&tokens_upper, &mut i);
-    let when_condition =
-        extract_when_condition(&header_upper, &header_original, &tokens_upper, &mut i);
+    let when_condition = extract_when_condition(&header_original, &tokens_upper, &mut i);
     let priority = parse_priority_token(&tokens_orig, &tokens_upper, &mut i);
     let security = parse_security_token(&tokens_upper, &mut i);
 
@@ -137,19 +137,16 @@ fn strip_create_trigger_prefix<'a>(upper: &str, original: &'a str) -> (bool, Str
     (false, "ASYNC".to_string(), original)
 }
 
-/// Split trigger SQL into (header_original, header_upper, body_sql).
+/// Split trigger SQL into `(header_original, body_sql)`.
 /// Handles both `$$ ... $$` and `BEGIN ... END` body forms.
-fn split_header_and_body(rest: &str) -> (String, String, String) {
-    let upper = rest.to_uppercase();
-
+fn split_header_and_body(rest: &str) -> (String, String) {
     // Try $$ ... $$ first
     if let Some(first) = rest.find("$$") {
         let inner_start = first + 2;
         if let Some(second) = rest[inner_start..].find("$$") {
             let header = rest[..first].trim().to_string();
             let body = rest[inner_start..inner_start + second].trim().to_string();
-            let header_upper = header.to_uppercase();
-            return (header, header_upper, body);
+            return (header, body);
         }
     }
 
@@ -171,7 +168,7 @@ fn split_header_and_body(rest: &str) -> (String, String, String) {
             }
             continue;
         }
-        if i + 5 <= upper.len() && &upper[i..i + 5] == "BEGIN" {
+        if find_ascii_case_insensitive_from(rest, "BEGIN", i) == Some(i) {
             let before_ok =
                 i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
             let after_ok = i + 5 >= bytes.len()
@@ -179,13 +176,12 @@ fn split_header_and_body(rest: &str) -> (String, String, String) {
             if before_ok && after_ok {
                 let header = rest[..i].trim().to_string();
                 let body = rest[i..].trim().to_string();
-                let header_upper = header.to_uppercase();
-                return (header, header_upper, body);
+                return (header, body);
             }
         }
         i += 1;
     }
-    (rest.to_string(), upper, String::new())
+    (rest.to_string(), String::new())
 }
 
 fn parse_timing_token(tokens: &[String], i: &mut usize) -> String {
@@ -252,7 +248,6 @@ fn parse_granularity_tokens(tokens: &[String], i: &mut usize) -> String {
 }
 
 fn extract_when_condition(
-    header_upper: &str,
     header_original: &str,
     tokens_upper: &[String],
     i: &mut usize,
@@ -262,7 +257,7 @@ fn extract_when_condition(
     }
     *i += 1;
 
-    let when_pos = header_upper.find("WHEN")?;
+    let when_pos = find_ascii_keyword(header_original, "WHEN")?;
     let after_when = header_original[when_pos + 4..].trim_start();
     if !after_when.starts_with('(') {
         return None;
@@ -325,6 +320,31 @@ mod tests {
     fn create(sql: &str) -> NodedbStatement {
         let upper = sql.to_uppercase();
         parse_create_trigger(&upper, sql)
+    }
+
+    #[test]
+    fn unicode_trigger_name_before_when_preserves_original_offsets() {
+        let sql = "CREATE TRIGGER tﬀﬀ AFTER INSERT ON orders FOR EACH ROW WHEN (NEW.status = 'active') BEGIN RETURN; END";
+        if let NodedbStatement::Automation(AutomationStmt::CreateTrigger {
+            name,
+            when_condition,
+            ..
+        }) = create(sql)
+        {
+            assert_eq!(name, "tﬀﬀ");
+            assert_eq!(when_condition.as_deref(), Some("NEW.status = 'active'"));
+        } else {
+            panic!("expected CreateTrigger");
+        }
+    }
+
+    #[test]
+    fn unicode_text_before_begin_preserves_body_boundary() {
+        let (header, body) = split_header_and_body(
+            "t AFTER INSERT ON orders WHEN (NEW.note = 'ﬀﬀ') BEGIN RETURN; END",
+        );
+        assert_eq!(header, "t AFTER INSERT ON orders WHEN (NEW.note = 'ﬀﬀ')");
+        assert_eq!(body, "BEGIN RETURN; END");
     }
 
     #[test]

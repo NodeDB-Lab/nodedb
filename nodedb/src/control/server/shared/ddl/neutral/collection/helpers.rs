@@ -5,6 +5,9 @@
 //! Relocated verbatim from the pgwire `ddl::collection::helpers` module (now
 //! deleted): its sole external caller was already `neutral::collection::alter::add_column`.
 
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
 use sonic_rs;
 
 /// Parse a single column definition: `name TYPE [NOT NULL] [PRIMARY KEY] [DEFAULT expr]`
@@ -31,13 +34,13 @@ pub(crate) fn parse_origin_column_def(s: &str) -> crate::Result<nodedb_types::co
         " TIME_KEY",
         " SPATIAL_INDEX",
     ];
+    let type_start = tokens[0].len();
     let type_end = keywords
         .iter()
-        .filter_map(|kw| upper[name.len()..].find(kw))
+        .filter_map(|kw| find_ascii_case_insensitive_from(s, kw, type_start))
         .min()
-        .map(|p| p + name.len())
         .unwrap_or(s.len());
-    let type_str = s[name.len()..type_end].trim();
+    let type_str = s[type_start..type_end].trim();
 
     let column_type: ColumnType =
         type_str
@@ -52,11 +55,11 @@ pub(crate) fn parse_origin_column_def(s: &str) -> crate::Result<nodedb_types::co
     let is_pk = upper.contains("PRIMARY KEY");
     let nullable = !is_not_null && !is_pk;
 
-    let default = if let Some(pos) = upper.find("DEFAULT ") {
+    let default = if let Some(pos) = find_ascii_case_insensitive(s, "DEFAULT ") {
         let after_default = s[pos + 8..].trim();
         let end = keywords
             .iter()
-            .filter_map(|kw| after_default.to_uppercase().find(kw))
+            .filter_map(|kw| find_ascii_case_insensitive(after_default, kw))
             .min()
             .unwrap_or(after_default.len());
         let expr = after_default[..end].trim();
@@ -88,7 +91,7 @@ pub(crate) fn parse_origin_column_def(s: &str) -> crate::Result<nodedb_types::co
         } else {
             "GENERATED AS"
         };
-        if let Some(gen_pos) = upper.find(gen_kw) {
+        if let Some(gen_pos) = find_ascii_case_insensitive(s, gen_kw) {
             let after_gen = s[gen_pos + gen_kw.len()..].trim();
             // Extract parenthesized expression.
             if after_gen.starts_with('(') {

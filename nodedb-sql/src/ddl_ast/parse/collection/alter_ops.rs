@@ -3,6 +3,7 @@
 //! Parse ALTER COLLECTION sub-operations.
 
 use crate::ddl_ast::statement::AlterCollectionOp;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 pub(super) fn parse_alter_operation(
     upper: &str,
@@ -23,7 +24,7 @@ pub(super) fn parse_alter_operation(
 
     // MATERIALIZED_SUM takes priority over ADD COLUMN.
     if upper.contains("MATERIALIZED_SUM") {
-        return parse_materialized_sum(upper, parts, trimmed, collection_name);
+        return parse_materialized_sum(parts, trimmed, collection_name);
     }
 
     if upper.contains("ADD COLUMN") || (upper.contains(" ADD ") && !upper.contains("MATERIALIZED"))
@@ -73,7 +74,6 @@ pub(super) fn parse_alter_operation(
 /// Returns `None` if any required keyword is absent — the router will surface a
 /// parse error to the client.
 fn parse_materialized_sum(
-    upper: &str,
     parts: &[&str],
     trimmed: &str,
     collection_name: &str,
@@ -92,12 +92,12 @@ fn parse_materialized_sum(
     let source_collection = parts.get(source_idx + 1)?.to_lowercase();
 
     // Join column: extract from ON clause `source.col = target.id`.
-    let on_pos = upper.find(" ON ")?;
+    let on_pos = find_ascii_case_insensitive(trimmed, " ON ")?;
     let after_on = &trimmed[on_pos + 4..];
     let join_column = extract_join_column(after_on, &source_collection)?;
 
     // Value expression: token(s) after VALUE keyword.
-    let value_pos = upper.find(" VALUE ")?;
+    let value_pos = find_ascii_case_insensitive(trimmed, " VALUE ")?;
     let value_expr_raw = trimmed[value_pos + 7..].trim().trim_end_matches(';');
     let value_expr = extract_value_expr(value_expr_raw, &source_collection)?;
 
@@ -250,4 +250,30 @@ fn extract_tag_value(upper: &str) -> Option<String> {
         return None;
     }
     Some(value[..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materialized_sum_keywords_after_unicode_name_preserve_original_offsets() {
+        let sql = "ALTER COLLECTION totalsﬀﬀ ADD COLUMN total INT MATERIALIZED_SUM SOURCE orders ON orders.customer_id = totalsﬀﬀ.id VALUE orders.amount";
+        let parts: Vec<&str> = sql.split_whitespace().collect();
+        let op =
+            parse_materialized_sum(&parts, sql, "totalsﬀﬀ").expect("materialized sum should parse");
+        assert!(matches!(
+            op,
+            AlterCollectionOp::AddMaterializedSum {
+                target_collection,
+                source_collection,
+                join_column,
+                value_expr,
+                ..
+            } if target_collection == "totalsﬀﬀ"
+                && source_collection == "orders"
+                && join_column == "customer_id"
+                && value_expr == "amount"
+        ));
+    }
 }

@@ -16,6 +16,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::event::cdc::stream_def::RetentionConfig;
 use crate::event::topic::TopicDef;
+use nodedb_sql::parser::preprocess::lex::{find_ascii_case_insensitive, find_ascii_keyword};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::auth_support::{require_tenant_admin, status};
@@ -52,24 +53,21 @@ pub fn create_topic(
         max_age_secs: 3_600, // 1 hour default for topics.
     };
 
-    let upper = sql.to_uppercase();
-    if let Some(with_pos) = upper.find("WITH") {
+    if let Some(with_pos) = find_ascii_keyword(sql, "WITH") {
         let with_section = sql[with_pos + 4..].trim();
         if let Some(inner) = with_section
             .strip_prefix('(')
             .and_then(|s| s.split_once(')'))
             .map(|(inner, _)| inner)
+            && let Some(ret_pos) = find_ascii_case_insensitive(inner, "RETENTION")
         {
-            let inner_upper = inner.to_uppercase();
-            if let Some(ret_pos) = inner_upper.find("RETENTION") {
-                let after = inner[ret_pos + 9..].trim().trim_start_matches('=').trim();
-                let val = after
-                    .trim_start_matches('\'')
-                    .split('\'')
-                    .next()
-                    .unwrap_or("");
-                retention.max_age_secs = parse_duration_secs(val);
-            }
+            let after = inner[ret_pos + 9..].trim().trim_start_matches('=').trim();
+            let val = after
+                .trim_start_matches('\'')
+                .split('\'')
+                .next()
+                .unwrap_or("");
+            retention.max_age_secs = parse_duration_secs(val);
         }
     }
 

@@ -29,6 +29,7 @@
 //! SHOW TYPEGUARDS;
 //! ```
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use nodedb_types::DatabaseId;
 
 use serde_json::{Map, Value as JsonValue};
@@ -116,12 +117,9 @@ pub fn alter_typeguard_add(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let upper = sql.to_uppercase();
-
     let coll_name = extract_collection_name(sql)?;
 
-    let add_pos = upper
-        .find(" ADD ")
+    let add_pos = find_ascii_case_insensitive(sql, " ADD ")
         .ok_or_else(|| err("42601", "ALTER TYPEGUARD requires ADD <field> <type>"))?;
     let after_add = sql[add_pos + 5..].trim();
 
@@ -170,12 +168,9 @@ pub fn alter_typeguard_drop(
     identity: &AuthenticatedIdentity,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let upper = sql.to_uppercase();
-
     let coll_name = extract_collection_name(sql)?;
 
-    let drop_pos = upper
-        .find(" DROP ")
+    let drop_pos = find_ascii_case_insensitive(sql, " DROP ")
         .ok_or_else(|| err("42601", "ALTER TYPEGUARD requires DROP <field>"))?;
     let field_name = sql[drop_pos + 6..].trim().to_lowercase();
 

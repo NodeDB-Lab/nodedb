@@ -5,6 +5,7 @@
 use super::helpers::extract_name_after_if_exists;
 use crate::ddl_ast::statement::{NodedbStatement, StreamViewStmt};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 pub(super) fn try_parse(
     upper: &str,
@@ -88,7 +89,7 @@ pub(super) fn try_parse(
 ///
 /// Extracts name, collection, and the raw WITH clause inner text.
 /// The handler converts the raw WITH pairs to OpFilter, StreamFormat, etc.
-fn parse_create_change_stream(upper: &str, trimmed: &str) -> NodedbStatement {
+fn parse_create_change_stream(_upper: &str, trimmed: &str) -> NodedbStatement {
     let prefix = "CREATE CHANGE STREAM ";
     let rest = &trimmed[prefix.len()..];
     let tokens: Vec<&str> = rest.split_whitespace().collect();
@@ -110,8 +111,7 @@ fn parse_create_change_stream(upper: &str, trimmed: &str) -> NodedbStatement {
         .unwrap_or_default();
 
     // Extract WITH clause inner text (everything inside outer parens after WITH).
-    let with_clause_raw = upper
-        .find("WITH")
+    let with_clause_raw = find_ascii_case_insensitive(trimmed, "WITH")
         .and_then(|pos| {
             let after = &trimmed[pos + 4..].trim_start();
             after

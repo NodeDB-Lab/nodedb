@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -99,24 +100,18 @@ pub(super) fn resolve_checkpoint_vv(
 
 /// Parse: SELECT * FROM collection AT VERSION 'checkpoint' WHERE id = 'doc-id'
 fn parse_at_version(sql: &str) -> Result<(String, String, String), DdlError> {
-    let upper = sql.to_uppercase();
-
     // Find "AT VERSION"
-    let at_pos = upper
-        .find("AT VERSION")
+    let at_pos = find_ascii_case_insensitive(sql, "AT VERSION")
         .ok_or_else(|| err("42601", "expected AT VERSION".to_string()))?;
 
     // Collection: between "FROM " and " AT VERSION"
-    let from_pos = upper
-        .find("FROM ")
+    let from_pos = find_ascii_case_insensitive(sql, "FROM ")
         .ok_or_else(|| err("42601", "expected FROM <collection>".to_string()))?;
     let collection = sql[from_pos + 5..at_pos].trim().to_lowercase();
 
     // Checkpoint name: after "AT VERSION " until "WHERE"
     let after_at = sql[at_pos + 10..].trim();
-    let where_pos = after_at
-        .to_uppercase()
-        .find("WHERE")
+    let where_pos = find_ascii_case_insensitive(after_at, "WHERE")
         .ok_or_else(|| err("42601", "expected WHERE id = '<doc_id>'".to_string()))?;
     let checkpoint_part = after_at[..where_pos].trim();
     let checkpoint = checkpoint_part

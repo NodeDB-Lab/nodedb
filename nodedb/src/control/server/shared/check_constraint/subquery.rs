@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::control::security::catalog::types::CheckConstraintDef;
 use crate::control::server::shared::ddl::result::DdlError;
 use crate::control::state::SharedState;
@@ -140,16 +142,15 @@ struct RestructuredCheck {
 /// - `'val' IN (SELECT col FROM tbl ...)` → COUNT > 0 means pass
 /// - `'val' NOT IN (SELECT col FROM tbl ...)` → COUNT = 0 means pass
 fn restructure_subquery_check(expr: &str) -> RestructuredCheck {
-    let upper = expr.to_uppercase();
-
     // Detect NOT IN vs IN.
-    let (in_pos, negate) = if let Some(pos) = upper.find(" NOT IN (SELECT ") {
+    let (in_pos, negate) = if let Some(pos) = find_ascii_case_insensitive(expr, " NOT IN (SELECT ")
+    {
         (pos, true)
-    } else if let Some(pos) = upper.find(" NOT IN(SELECT ") {
+    } else if let Some(pos) = find_ascii_case_insensitive(expr, " NOT IN(SELECT ") {
         (pos, true)
-    } else if let Some(pos) = upper.find(" IN (SELECT ") {
+    } else if let Some(pos) = find_ascii_case_insensitive(expr, " IN (SELECT ") {
         (pos, false)
-    } else if let Some(pos) = upper.find(" IN(SELECT ") {
+    } else if let Some(pos) = find_ascii_case_insensitive(expr, " IN(SELECT ") {
         (pos, false)
     } else {
         // Should not reach here — validated at DDL time.
@@ -164,14 +165,15 @@ fn restructure_subquery_check(expr: &str) -> RestructuredCheck {
     let select_part = &expr[in_pos + keyword_len.len()..];
     let inner = select_part.trim().trim_end_matches(')').trim();
 
-    if let Some(from_pos) = inner.to_uppercase().find(" FROM ") {
+    if let Some(from_pos) = find_ascii_case_insensitive(inner, " FROM ") {
         let col = inner["SELECT ".len()..from_pos].trim();
         let after_from = &inner[from_pos + 6..];
-        let (table, existing_where) = if let Some(w) = after_from.to_uppercase().find(" WHERE ") {
-            (&after_from[..w], Some(&after_from[w + 7..]))
-        } else {
-            (after_from.trim(), None)
-        };
+        let (table, existing_where) =
+            if let Some(w) = find_ascii_case_insensitive(after_from, " WHERE ") {
+                (&after_from[..w], Some(&after_from[w + 7..]))
+            } else {
+                (after_from.trim(), None)
+            };
 
         let sql = if let Some(where_clause) = existing_where {
             format!(

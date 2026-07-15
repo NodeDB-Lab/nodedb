@@ -12,6 +12,7 @@
 //! self-contained.
 
 use arrow::datatypes::DataType;
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 
 use crate::control::security::catalog::FunctionParam;
 
@@ -193,7 +194,7 @@ pub(super) fn parse_function_header(
     let after_returns_upper = after_returns.to_uppercase();
     let mut earliest = after_returns.len();
     for term in terminators {
-        if let Some(pos) = after_returns_upper.find(term) {
+        if let Some(pos) = find_ascii_case_insensitive(after_returns, term) {
             earliest = earliest.min(pos);
         }
         // Handle keyword at end of string (no trailing space).

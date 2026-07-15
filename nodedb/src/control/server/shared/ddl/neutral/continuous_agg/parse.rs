@@ -7,6 +7,10 @@
 //! preserved verbatim; only the error type changed from pgwire
 //! `PgWireError` (via `sqlstate_error`) to the protocol-neutral [`DdlError`].
 
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from, rfind_ascii_case_insensitive,
+};
+
 use crate::engine::timeseries::continuous_agg::{
     AggFunction, AggregateExpr, ContinuousAggregateDef, RefreshPolicy,
 };
@@ -41,8 +45,7 @@ pub(super) fn parse_create_sql(sql: &str) -> Result<ContinuousAggregateDef, DdlE
     let upper = sql.to_uppercase();
 
     // Extract name: word after "CONTINUOUS AGGREGATE"
-    let ca_pos = upper
-        .find(KW_CONTINUOUS_AGGREGATE)
+    let ca_pos = find_ascii_case_insensitive(sql, KW_CONTINUOUS_AGGREGATE)
         .ok_or_else(|| err("42601", "expected CONTINUOUS AGGREGATE keyword".to_string()))?;
     let after_ca_start = ca_pos + KW_CONTINUOUS_AGGREGATE.len();
     let after_ca = sql[after_ca_start..].trim_start();
@@ -53,10 +56,9 @@ pub(super) fn parse_create_sql(sql: &str) -> Result<ContinuousAggregateDef, DdlE
         .to_lowercase();
 
     // Extract source: word after "ON"
-    let on_pos = upper[after_ca_start..]
-        .find(KW_ON)
+    let on_pos = find_ascii_case_insensitive_from(sql, KW_ON, after_ca_start)
         .ok_or_else(|| err("42601", "expected ON <source> clause".to_string()))?;
-    let after_on_start = after_ca_start + on_pos + KW_ON.len();
+    let after_on_start = on_pos + KW_ON.len();
     let after_on = sql[after_on_start..].trim_start();
     let source = after_on
         .split_whitespace()
@@ -105,8 +107,8 @@ pub(super) fn parse_create_sql(sql: &str) -> Result<ContinuousAggregateDef, DdlE
 }
 
 /// Extract a quoted value after a keyword: `KEYWORD 'value'`.
-pub(super) fn extract_quoted_value(upper: &str, sql: &str, keyword: &str) -> Option<String> {
-    let pos = upper.find(keyword)?;
+pub(super) fn extract_quoted_value(_upper: &str, sql: &str, keyword: &str) -> Option<String> {
+    let pos = find_ascii_case_insensitive(sql, keyword)?;
     let after = sql[pos + keyword.len()..].trim_start();
     let start = after.find('\'')?;
     let end = after[start + 1..].find('\'')?;
@@ -116,24 +118,24 @@ pub(super) fn extract_quoted_value(upper: &str, sql: &str, keyword: &str) -> Opt
 /// Extract aggregate expressions from AGGREGATE clause.
 ///
 /// Parses: `AGGREGATE sum(value) AS value_sum, count(*) AS row_count, avg(cpu)`
-fn extract_aggregates(upper: &str, sql: &str) -> Result<Vec<AggregateExpr>, DdlError> {
+fn extract_aggregates(_upper: &str, sql: &str) -> Result<Vec<AggregateExpr>, DdlError> {
     // Find standalone AGGREGATE keyword. Skip past "CONTINUOUS AGGREGATE" by
     // searching after the BUCKET clause (which always precedes AGGREGATE).
-    let search_start = upper.find(KW_BUCKET).unwrap_or(0);
-    let agg_pos = match upper[search_start..].find(KW_AGGREGATE) {
-        Some(p) => search_start + p,
+    let search_start = find_ascii_case_insensitive(sql, KW_BUCKET).unwrap_or(0);
+    let agg_pos = match find_ascii_case_insensitive_from(sql, KW_AGGREGATE, search_start) {
+        Some(position) => position,
         None => return Ok(Vec::new()),
     };
-    let after_agg = &sql[agg_pos + KW_AGGREGATE.len()..];
+    let after_agg_start = agg_pos + KW_AGGREGATE.len();
 
     // Find end: GROUP BY, WITH, or end of string.
     let end_pos = [KW_GROUP_BY, "WITH (", "WITH("]
         .iter()
-        .filter_map(|kw| upper[agg_pos + KW_AGGREGATE.len()..].find(kw))
+        .filter_map(|kw| find_ascii_case_insensitive_from(sql, kw, after_agg_start))
         .min()
-        .unwrap_or(after_agg.len());
+        .unwrap_or(sql.len());
 
-    let agg_str = after_agg[..end_pos].trim().trim_end_matches(',');
+    let agg_str = sql[after_agg_start..end_pos].trim().trim_end_matches(',');
     let mut exprs = Vec::new();
 
     for part in agg_str.split(',') {
@@ -150,10 +152,8 @@ fn extract_aggregates(upper: &str, sql: &str) -> Result<Vec<AggregateExpr>, DdlE
 
 /// Parse a single aggregate expression: `func(col) [AS alias]`.
 fn parse_single_aggregate(s: &str) -> Result<AggregateExpr, DdlError> {
-    let upper = s.to_uppercase();
-
     // Split on AS for alias.
-    let (func_part, alias) = if let Some(as_pos) = upper.find(KW_AS) {
+    let (func_part, alias) = if let Some(as_pos) = find_ascii_case_insensitive(s, KW_AS) {
         (
             &s[..as_pos],
             Some(s[as_pos + KW_AS.len()..].trim().to_lowercase()),
@@ -204,21 +204,21 @@ fn parse_single_aggregate(s: &str) -> Result<AggregateExpr, DdlError> {
 }
 
 /// Extract GROUP BY columns.
-fn extract_group_by(upper: &str, sql: &str) -> Vec<String> {
-    let gb_pos = match upper.find(KW_GROUP_BY) {
+fn extract_group_by(_upper: &str, sql: &str) -> Vec<String> {
+    let gb_pos = match find_ascii_case_insensitive(sql, KW_GROUP_BY) {
         Some(p) => p,
         None => return Vec::new(),
     };
-    let after_gb = &sql[gb_pos + KW_GROUP_BY.len()..];
+    let after_gb_start = gb_pos + KW_GROUP_BY.len();
 
     // Find end: WITH or end of string.
     let end_pos = ["WITH (", "WITH("]
         .iter()
-        .filter_map(|kw| upper[gb_pos + KW_GROUP_BY.len()..].find(kw))
+        .filter_map(|kw| find_ascii_case_insensitive_from(sql, kw, after_gb_start))
         .min()
-        .unwrap_or(after_gb.len());
+        .unwrap_or(sql.len());
 
-    after_gb[..end_pos]
+    sql[after_gb_start..end_pos]
         .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
@@ -226,11 +226,11 @@ fn extract_group_by(upper: &str, sql: &str) -> Vec<String> {
 }
 
 /// Extract WITH options: refresh_policy and retention.
-pub(super) fn extract_with_options(upper: &str, sql: &str) -> (RefreshPolicy, u64) {
+pub(super) fn extract_with_options(_upper: &str, sql: &str) -> (RefreshPolicy, u64) {
     let mut refresh = RefreshPolicy::OnFlush;
     let mut retention_ms = 0u64;
 
-    let with_pos = match upper.rfind("WITH") {
+    let with_pos = match rfind_ascii_case_insensitive(sql, "WITH") {
         Some(p) => p,
         None => return (refresh, retention_ms),
     };

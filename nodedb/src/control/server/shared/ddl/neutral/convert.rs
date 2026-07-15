@@ -15,6 +15,9 @@
 //! `Response` / `PgWireError` to the protocol-neutral [`DdlResult`] /
 //! [`DdlError`].
 
+use nodedb_sql::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
 use nodedb_types::DatabaseId;
 use std::time::Duration;
 
@@ -184,11 +187,8 @@ fn parse_convert_sql(
     ),
     DdlError,
 > {
-    let upper = sql.to_uppercase();
-
     // Extract collection name: CONVERT COLLECTION <name> TO ...
-    let coll_pos = upper
-        .find("COLLECTION ")
+    let coll_pos = find_ascii_case_insensitive(sql, "COLLECTION ")
         .ok_or_else(|| err("42601", "expected COLLECTION keyword"))?;
     let after_coll = sql[coll_pos + 11..].trim_start();
     let collection = after_coll
@@ -198,10 +198,9 @@ fn parse_convert_sql(
         .to_lowercase();
 
     // Extract target type: TO <type>
-    let to_pos = upper[coll_pos + 11..]
-        .find(" TO ")
+    let to_pos = find_ascii_case_insensitive_from(sql, " TO ", coll_pos + 11)
         .ok_or_else(|| err("42601", "expected TO <type> clause"))?;
-    let after_to = sql[coll_pos + 11 + to_pos + 4..].trim_start();
+    let after_to = sql[to_pos + 4..].trim_start();
     let target_type = after_to
         .split_whitespace()
         .next()

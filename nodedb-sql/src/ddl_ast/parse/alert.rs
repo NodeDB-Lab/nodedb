@@ -5,6 +5,9 @@
 use super::helpers::extract_name_after_if_exists;
 use crate::ddl_ast::statement::{AutomationStmt, NodedbStatement};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::{
+    find_ascii_case_insensitive, find_ascii_case_insensitive_from,
+};
 
 pub(super) fn try_parse(
     upper: &str,
@@ -61,8 +64,6 @@ pub(super) fn try_parse(
 fn parse_create_alert(upper: &str, trimmed: &str) -> NodedbStatement {
     let prefix = "CREATE ALERT ";
     let after_prefix = &trimmed[prefix.len()..];
-    let upper_after = &upper[prefix.len()..];
-
     // name = first whitespace token
     let name = after_prefix
         .split_whitespace()
@@ -71,8 +72,7 @@ fn parse_create_alert(upper: &str, trimmed: &str) -> NodedbStatement {
         .to_lowercase();
 
     // collection = token after " ON "
-    let collection = upper_after
-        .find(" ON ")
+    let collection = find_ascii_case_insensitive(after_prefix, " ON ")
         .map(|pos| {
             after_prefix[pos + 4..]
                 .split_whitespace()
@@ -83,11 +83,10 @@ fn parse_create_alert(upper: &str, trimmed: &str) -> NodedbStatement {
         .unwrap_or_default();
 
     // WHERE filter = text between "WHERE " and "CONDITION "
-    let where_filter = extract_between(upper, trimmed, "WHERE ", "CONDITION ");
+    let where_filter = extract_between(trimmed, "WHERE ", "CONDITION ");
 
     // condition_raw = text after "CONDITION " up to next major clause boundary
     let condition_raw = extract_clause_text(
-        upper,
         trimmed,
         "CONDITION ",
         &[
@@ -102,10 +101,10 @@ fn parse_create_alert(upper: &str, trimmed: &str) -> NodedbStatement {
     .unwrap_or_default();
 
     // GROUP BY columns
-    let group_by = extract_group_by(upper, trimmed);
+    let group_by = extract_group_by(trimmed);
 
     // WINDOW duration string (contents of first single-quoted token after WINDOW)
-    let window_raw = extract_quoted_after(upper, trimmed, "WINDOW ").unwrap_or_default();
+    let window_raw = extract_quoted_after(trimmed, "WINDOW ").unwrap_or_default();
 
     // FOR 'N consecutive windows'
     let fire_after = extract_consecutive_count(upper, "FOR ").unwrap_or(1).max(1);
@@ -117,11 +116,10 @@ fn parse_create_alert(upper: &str, trimmed: &str) -> NodedbStatement {
 
     // SEVERITY '<level>'
     let severity =
-        extract_quoted_after(upper, trimmed, "SEVERITY ").unwrap_or_else(|| "warning".to_string());
+        extract_quoted_after(trimmed, "SEVERITY ").unwrap_or_else(|| "warning".to_string());
 
     // Raw NOTIFY section (everything after NOTIFY keyword)
-    let notify_targets_raw = upper
-        .find("NOTIFY")
+    let notify_targets_raw = find_ascii_case_insensitive(trimmed, "NOTIFY")
         .map(|pos| {
             trimmed[pos + 6..]
                 .trim()
@@ -146,11 +144,11 @@ fn parse_create_alert(upper: &str, trimmed: &str) -> NodedbStatement {
 }
 
 /// Extract text between two keyword boundaries (case-insensitive search, original-case result).
-fn extract_between(upper: &str, sql: &str, start_kw: &str, end_kw: &str) -> Option<String> {
-    let start = upper.find(start_kw)?;
+fn extract_between(sql: &str, start_kw: &str, end_kw: &str) -> Option<String> {
+    let start = find_ascii_case_insensitive(sql, start_kw)?;
     let after_start = start + start_kw.len();
-    let end = upper[after_start..].find(end_kw)?;
-    let text = sql[after_start..after_start + end].trim();
+    let end = find_ascii_case_insensitive_from(sql, end_kw, after_start)?;
+    let text = sql[after_start..end].trim();
     if text.is_empty() {
         None
     } else {
@@ -159,15 +157,15 @@ fn extract_between(upper: &str, sql: &str, start_kw: &str, end_kw: &str) -> Opti
 }
 
 /// Extract text after `start_kw` up to the nearest of the `end_kws` boundaries.
-fn extract_clause_text(upper: &str, sql: &str, start_kw: &str, end_kws: &[&str]) -> Option<String> {
-    let start = upper.find(start_kw)?;
+fn extract_clause_text(sql: &str, start_kw: &str, end_kws: &[&str]) -> Option<String> {
+    let start = find_ascii_case_insensitive(sql, start_kw)?;
     let after = start + start_kw.len();
     let end = end_kws
         .iter()
-        .filter_map(|kw| upper[after..].find(kw))
+        .filter_map(|kw| find_ascii_case_insensitive_from(sql, kw, after))
         .min()
-        .unwrap_or(upper.len() - after);
-    let text = sql[after..after + end].trim();
+        .unwrap_or(sql.len());
+    let text = sql[after..end].trim();
     if text.is_empty() {
         None
     } else {
@@ -176,21 +174,21 @@ fn extract_clause_text(upper: &str, sql: &str, start_kw: &str, end_kws: &[&str])
 }
 
 /// Extract GROUP BY column list (lowercased).
-fn extract_group_by(upper: &str, sql: &str) -> Vec<String> {
+fn extract_group_by(sql: &str) -> Vec<String> {
     let kw = "GROUP BY ";
-    let pos = match upper.find(kw) {
+    let pos = match find_ascii_case_insensitive(sql, kw) {
         Some(p) => p,
         None => return Vec::new(),
     };
-    let after = &sql[pos + kw.len()..];
     // End at next major keyword
     let end_kws = ["WINDOW ", "FOR ", "RECOVER ", "SEVERITY ", "NOTIFY"];
+    let after_start = pos + kw.len();
     let end = end_kws
         .iter()
-        .filter_map(|kw| upper[pos + 9..].find(kw))
+        .filter_map(|kw| find_ascii_case_insensitive_from(sql, kw, after_start))
         .min()
-        .unwrap_or(after.len());
-    after[..end]
+        .unwrap_or(sql.len());
+    sql[after_start..end]
         .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
@@ -198,8 +196,8 @@ fn extract_group_by(upper: &str, sql: &str) -> Vec<String> {
 }
 
 /// Extract a single-quoted value after a keyword.
-fn extract_quoted_after(upper: &str, sql: &str, keyword: &str) -> Option<String> {
-    let pos = upper.find(keyword)?;
+fn extract_quoted_after(sql: &str, keyword: &str) -> Option<String> {
+    let pos = find_ascii_case_insensitive(sql, keyword)?;
     let after = &sql[pos + keyword.len()..];
     let start = after.find('\'')?;
     let end = after[start + 1..].find('\'')?;
@@ -222,6 +220,29 @@ fn extract_consecutive_count(upper: &str, keyword: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_alert_unicode_name_preserves_original_offsets() {
+        let sql = "CREATE ALERT highﬀﬀ ON sensors CONDITION AVG(temp) > 90 WINDOW '5 minutes' SEVERITY 'critical'";
+        let upper = sql.to_uppercase();
+        if let NodedbStatement::Automation(AutomationStmt::CreateAlert {
+            name,
+            collection,
+            condition_raw,
+            window_raw,
+            severity,
+            ..
+        }) = parse_create_alert(&upper, sql)
+        {
+            assert_eq!(name, "highﬀﬀ");
+            assert_eq!(collection, "sensors");
+            assert_eq!(condition_raw, "AVG(temp) > 90");
+            assert_eq!(window_raw, "5 minutes");
+            assert_eq!(severity, "critical");
+        } else {
+            panic!("expected CreateAlert");
+        }
+    }
 
     #[test]
     fn parse_create_alert_full() {

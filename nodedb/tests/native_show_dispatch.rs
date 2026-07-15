@@ -37,6 +37,28 @@ fn is_session_param_fallback(response: &nodedb_types::protocol::NativeResponse) 
 }
 
 #[tokio::test]
+async fn native_set_to_after_unicode_key_preserves_original_offsets() {
+    let server = NativeTestServer::start().await;
+    let (mut stream, _ack) = do_handshake(server.addr, &HelloFrame::current())
+        .await
+        .expect("handshake");
+
+    let set = send_sql(&mut stream, 1, "SET custom.ﬀﬀ TO enabled").await;
+    assert_eq!(set.status, ResponseStatus::Ok, "Unicode SET must succeed");
+    let show = send_sql(&mut stream, 2, "SHOW custom.ﬀﬀ").await;
+    server.shutdown().await;
+
+    assert_eq!(show.status, ResponseStatus::Ok, "Unicode SHOW must succeed");
+    assert!(
+        matches!(
+            show.rows.as_deref(),
+            Some([row]) if matches!(row.as_slice(), [nodedb_types::value::Value::String(value)] if value == "enabled")
+        ),
+        "SHOW must return the value stored by SET, got {show:?}"
+    );
+}
+
+#[tokio::test]
 async fn native_show_stats_not_session_fallback() {
     let server = NativeTestServer::start().await;
     let (mut stream, _ack) = do_handshake(server.addr, &HelloFrame::current())

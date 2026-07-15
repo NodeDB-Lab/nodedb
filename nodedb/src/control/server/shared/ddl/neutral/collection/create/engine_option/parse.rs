@@ -8,6 +8,8 @@
 //! exactly as it was on the pgwire side; only the error envelope changed from
 //! `PgWireResult` to `Result<_, DdlError>`.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use super::super::super::super::super::result::DdlError;
 use super::validate::canonical_list;
 
@@ -171,9 +173,7 @@ pub fn parse_engine_option(sql: &str, upper: &str) -> Result<Option<&'static str
 ///
 /// Duplicated from `collection::helpers` to avoid `pub(super)` visibility reach.
 fn extract_with_value(sql: &str, key: &str) -> Option<String> {
-    let upper = sql.to_uppercase();
-    let key_upper = key.to_uppercase();
-    let pos = upper.find(&key_upper)?;
+    let pos = find_ascii_case_insensitive(sql, key)?;
     let after = sql[pos + key.len()..].trim_start();
     let after = after.strip_prefix('=')?;
     let after = after.trim_start();

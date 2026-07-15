@@ -5,13 +5,12 @@
 use super::helpers::extract_name_after_if_exists;
 use crate::ddl_ast::statement::{NodedbStatement, PolicyStmt};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::find_ascii_case_insensitive;
 
 /// Extract the value for a SET key from the SQL string.
 /// Returns a quoted string's inner content or an unquoted token.
 fn extract_set_value(sql: &str, key: &str) -> Option<String> {
-    let upper = sql.to_uppercase();
-    let key_upper = key.to_uppercase();
-    let pos = upper.find(&key_upper)?;
+    let pos = find_ascii_case_insensitive(sql, key)?;
     let after = sql[pos + key.len()..].trim_start();
     let after = after.strip_prefix('=').unwrap_or(after).trim_start();
     if let Some(inner) = after.strip_prefix('\'') {
@@ -92,16 +91,13 @@ pub(super) fn try_parse(
 /// Extracts name, collection, raw body (between outer parens), and
 /// optional EVAL_INTERVAL string. The handler converts the body to
 /// RetentionPolicyDef.
-fn parse_create_retention_policy(upper: &str, trimmed: &str) -> NodedbStatement {
+fn parse_create_retention_policy(_upper: &str, trimmed: &str) -> NodedbStatement {
     // Syntax: CREATE RETENTION POLICY <name> ON <collection> ( <body> ) [WITH (EVAL_INTERVAL = '<val>')]
     let prefix = "CREATE RETENTION POLICY ";
     let rest = &trimmed[prefix.len()..];
-    let rest_upper = &upper[prefix.len()..];
-
     let name = rest.split_whitespace().next().unwrap_or("").to_lowercase();
 
-    let collection = rest_upper
-        .find(" ON ")
+    let collection = find_ascii_case_insensitive(rest, " ON ")
         .map(|pos| {
             rest[pos + 4..]
                 .split_whitespace()
@@ -115,7 +111,7 @@ fn parse_create_retention_policy(upper: &str, trimmed: &str) -> NodedbStatement 
     let body_raw = extract_outer_parens(trimmed).unwrap_or_default();
 
     // EVAL_INTERVAL from trailing WITH clause
-    let eval_interval_raw = extract_eval_interval(upper, trimmed);
+    let eval_interval_raw = extract_eval_interval(trimmed);
 
     NodedbStatement::Policy(PolicyStmt::CreateRetentionPolicy {
         name,
@@ -150,7 +146,7 @@ fn extract_outer_parens(s: &str) -> Option<String> {
 }
 
 /// Extract EVAL_INTERVAL value from WITH clause (if present).
-fn extract_eval_interval(upper: &str, trimmed: &str) -> Option<String> {
+fn extract_eval_interval(trimmed: &str) -> Option<String> {
     // Find trailing WITH ( after the main body parens.
     // The main body is the first outer-paren group; WITH comes after.
     let body_end = {
@@ -173,8 +169,8 @@ fn extract_eval_interval(upper: &str, trimmed: &str) -> Option<String> {
         end
     };
 
-    let after_body = &upper[body_end..];
-    let with_pos = after_body.find("WITH")?;
+    let after_body = &trimmed[body_end..];
+    let with_pos = find_ascii_case_insensitive(after_body, "WITH")?;
     let after_with = &trimmed[body_end + with_pos + 4..].trim_start();
     let inner = after_with
         .strip_prefix('(')
@@ -194,6 +190,36 @@ fn extract_eval_interval(upper: &str, trimmed: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_retention_name_preserves_original_offsets() {
+        let sql = "CREATE RETENTION POLICY rpﬀﬀ ON metrics (RAW RETAIN '7d')";
+        let upper = sql.to_uppercase();
+        if let NodedbStatement::Policy(PolicyStmt::CreateRetentionPolicy {
+            name,
+            collection,
+            body_raw,
+            ..
+        }) = parse_create_retention_policy(&upper, sql)
+        {
+            assert_eq!(name, "rpﬀﬀ");
+            assert_eq!(collection, "metrics");
+            assert_eq!(body_raw, "RAW RETAIN '7d'");
+        } else {
+            panic!("expected CreateRetentionPolicy");
+        }
+    }
+
+    #[test]
+    fn set_value_after_unicode_text_preserves_original_offsets() {
+        assert_eq!(
+            extract_set_value(
+                "ALTER RETENTION POLICY rpﬀﬀ SET INTERVAL = '1h'",
+                "INTERVAL"
+            ),
+            Some("1h".to_string())
+        );
+    }
 
     #[test]
     fn parse_basic_retention_policy() {

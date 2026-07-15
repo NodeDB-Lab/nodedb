@@ -12,6 +12,7 @@ use crate::control::state::SharedState;
 use crate::control::wal_replication::{propose_replicated_entry, to_replicated_entry};
 use crate::types::{DatabaseId, TenantId, VShardId};
 use nodedb_physical::physical_plan::CrdtOp;
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use nodedb_types::Surrogate;
 
 use super::super::super::result::{DdlError, DdlResult};
@@ -183,9 +184,7 @@ fn parse_restore(sql: &str) -> Result<(String, String, String), DdlError> {
     let rest = sql["RESTORE ".len()..].trim();
 
     // Collection: before "SET VERSION"
-    let set_pos = rest
-        .to_uppercase()
-        .find("SET VERSION")
+    let set_pos = find_ascii_case_insensitive(rest, "SET VERSION")
         .ok_or_else(|| err("42601", "expected SET VERSION".to_string()))?;
     let collection = rest[..set_pos].trim().to_lowercase();
 
@@ -196,9 +195,7 @@ fn parse_restore(sql: &str) -> Result<(String, String, String), DdlError> {
         .ok_or_else(|| err("42601", "expected '=' after SET VERSION".to_string()))?;
     let after_eq = after_set[eq_pos + 1..].trim();
 
-    let where_pos = after_eq
-        .to_uppercase()
-        .find("WHERE")
+    let where_pos = find_ascii_case_insensitive(after_eq, "WHERE")
         .ok_or_else(|| err("42601", "expected WHERE id = '<doc_id>'".to_string()))?;
     let checkpoint = after_eq[..where_pos]
         .trim()
@@ -228,6 +225,16 @@ mod tests {
     use super::*;
     use crate::bridge::dispatch::Dispatcher;
     use crate::wal::WalManager;
+
+    #[test]
+    fn restore_keywords_after_unicode_values_preserve_original_offsets() {
+        let (collection, checkpoint, doc_id) =
+            parse_restore("RESTORE recordsﬀﬀ SET VERSION = 'versionﬀﬀ' WHERE id = 'doc-1'")
+                .expect("restore statement should parse");
+        assert_eq!(collection, "recordsﬀﬀ");
+        assert_eq!(checkpoint, "versionﬀﬀ");
+        assert_eq!(doc_id, "doc-1");
+    }
 
     /// Build a `SharedState` with a real single-node `WalManager` and no Raft
     /// proposer configured, so `persist_restore_delta` takes the WAL-append

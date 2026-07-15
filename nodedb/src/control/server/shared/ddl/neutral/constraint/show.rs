@@ -7,6 +7,7 @@
 //! `QueryResponse` (4 text columns via `DataRowEncoder`) to a protocol-neutral
 //! [`DdlResult::Rows`] carrying the same four text columns.
 
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use nodedb_types::DatabaseId;
 use serde_json::{Map, Value as JsonValue};
 
@@ -128,9 +129,7 @@ fn constraint_row(name: &str, kind: &str, field: &str, detail: &str) -> Map<Stri
 
 /// Extract collection name from `SHOW CONSTRAINTS ON <collection>`.
 fn extract_collection_after_on(sql: &str) -> Result<String, DdlError> {
-    let upper = sql.to_uppercase();
-    let on_pos = upper
-        .find(" ON ")
+    let on_pos = find_ascii_case_insensitive(sql, " ON ")
         .ok_or_else(|| err("42601", "SHOW CONSTRAINTS requires ON <collection>"))?;
     let after = sql[on_pos + 4..].trim();
     let end = after

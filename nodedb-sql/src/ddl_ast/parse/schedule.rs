@@ -5,12 +5,12 @@
 use super::helpers::extract_name_after_if_exists;
 use crate::ddl_ast::statement::{AutomationStmt, NodedbStatement};
 use crate::error::SqlError;
+use crate::parser::preprocess::lex::{find_ascii_case_insensitive, rfind_ascii_case_insensitive};
 
 /// Extract the content between the first pair of single quotes after
 /// "CRON" in the SQL string.
 fn extract_quoted_cron(sql: &str) -> Option<String> {
-    let upper = sql.to_uppercase();
-    let cron_idx = upper.find("CRON")?;
+    let cron_idx = find_ascii_case_insensitive(sql, "CRON")?;
     let rest = &sql[cron_idx + 4..];
     let start = rest.find('\'')?;
     let inner = &rest[start + 1..];
@@ -112,7 +112,7 @@ fn parse_create_schedule(upper: &str, trimmed: &str) -> NodedbStatement {
     let mut allow_overlap = true;
     let mut missed_policy = "SKIP".to_string();
 
-    if let Some(with_pos) = upper.find(" WITH ") {
+    if let Some(with_pos) = find_ascii_case_insensitive(trimmed, " WITH ") {
         let after_with = &trimmed[with_pos + 6..];
         if let Some(inner) = after_with
             .trim()
@@ -140,8 +140,7 @@ fn parse_create_schedule(upper: &str, trimmed: &str) -> NodedbStatement {
     }
 
     // Body SQL: everything after the last " AS " keyword.
-    let body_sql = upper
-        .rfind(" AS ")
+    let body_sql = rfind_ascii_case_insensitive(trimmed, " AS ")
         .map(|pos| trimmed[pos + 4..].trim().to_string())
         .unwrap_or_default();
 
@@ -157,8 +156,7 @@ fn parse_create_schedule(upper: &str, trimmed: &str) -> NodedbStatement {
 
 /// Extract cron expression from rest (after "CREATE SCHEDULE <name> ").
 fn extract_cron_expr_str(rest: &str) -> Option<String> {
-    let rest_upper = rest.to_uppercase();
-    let cron_pos = rest_upper.find("CRON")?;
+    let cron_pos = find_ascii_case_insensitive(rest, "CRON")?;
     let after_cron = rest[cron_pos + 4..].trim_start();
 
     // Quoted form: 'expr'
@@ -187,6 +185,24 @@ mod tests {
     fn create(sql: &str) -> NodedbStatement {
         let upper = sql.to_uppercase();
         parse_create_schedule(&upper, sql)
+    }
+
+    #[test]
+    fn unicode_schedule_name_preserves_original_offsets() {
+        let sql = "CREATE SCHEDULE cleanupﬀﬀ CRON '0 0 * * *' AS BEGIN DELETE FROM old; END";
+        if let NodedbStatement::Automation(AutomationStmt::CreateSchedule {
+            name,
+            cron_expr,
+            body_sql,
+            ..
+        }) = create(sql)
+        {
+            assert_eq!(name, "cleanupﬀﬀ");
+            assert_eq!(cron_expr, "0 0 * * *");
+            assert_eq!(body_sql, "BEGIN DELETE FROM old; END");
+        } else {
+            panic!("expected CreateSchedule");
+        }
     }
 
     #[test]

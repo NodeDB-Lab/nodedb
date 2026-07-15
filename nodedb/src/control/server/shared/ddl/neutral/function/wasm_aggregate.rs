@@ -12,6 +12,8 @@
 use crate::control::planner::wasm;
 use crate::control::security::catalog::FunctionParam;
 use crate::control::security::catalog::function_types::*;
+use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
@@ -169,10 +171,8 @@ fn parse_aggregate_create(sql: &str) -> Result<ParsedAggregateCreate, DdlError> 
     }
     let after_returns = rest["RETURNS ".len()..].trim();
 
-    let lang_pos = after_returns
-        .to_uppercase()
-        .find("LANGUAGE")
-        .ok_or_else(|| DdlError {
+    let lang_pos =
+        find_ascii_case_insensitive(after_returns, "LANGUAGE").ok_or_else(|| DdlError {
             sqlstate: "42601".to_string(),
             message: "expected LANGUAGE WASM".to_string(),
         })?;
