@@ -53,6 +53,7 @@ impl TxnDataPlane for NativeTxnDp<'_> {
                         tenant_id: task.tenant_id,
                         trace_id: TraceId::generate(),
                         database_id: task.database_id,
+                        txn_id: task.txn_id,
                     };
                     let payloads = gw.execute(&gw_ctx, task.plan).await?;
                     Ok(Response {
@@ -93,6 +94,11 @@ impl TxnDataPlane for NativeTxnDp<'_> {
 }
 
 pub(crate) fn handle_begin(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResponse {
+    // OpCode::Begin can arrive before any SQL statement has created the
+    // session. `SessionStore::begin` no-ops when the peer has no entry, so
+    // ensure the session exists first (SQL "BEGIN" already does this in
+    // `sql.rs` before calling here).
+    ctx.sessions.ensure_session(*ctx.peer_addr);
     match lifecycle::run_begin(ctx.sessions, ctx.peer_addr, ctx.state) {
         Ok(()) => NativeResponse::status_row(seq, "BEGIN"),
         Err(e) => {
