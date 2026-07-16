@@ -161,6 +161,7 @@ pub async fn query_ndjson(
                     tenant_id: task.tenant_id,
                     trace_id,
                     database_id,
+                    txn_id: None,
                 };
                 gw.execute(&gw_ctx, task.plan).await
             }

@@ -39,6 +39,9 @@ pub(super) async fn dispatch_task_via_gateway(
                 tenant_id,
                 trace_id: TraceId::generate(),
                 database_id,
+                // Propagate the in-block transaction id so gateway local
+                // dispatch resolves the per-txn staging overlay.
+                txn_id,
             };
             gw.execute(&gw_ctx, plan)
                 .await

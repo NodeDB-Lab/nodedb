@@ -27,7 +27,7 @@ use tracing::{Instrument, debug, info_span};
 use crate::Error;
 use crate::control::state::SharedState;
 use crate::control::trace_export::EmitSpanParams;
-use crate::types::{DatabaseId, Lsn, TenantId, TraceId, VShardId};
+use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 use super::dispatcher::{DispatchRouteParams, default_deadline_ms, dispatch_route};
@@ -48,6 +48,11 @@ pub struct QueryContext {
     /// catalog lookups. Single-database deployments pass
     /// [`DatabaseId::DEFAULT`].
     pub database_id: DatabaseId,
+    /// Session-transaction id for resolving the per-transaction staging
+    /// overlay (read-your-own-writes) on local SPSC dispatch and for
+    /// forwarding on remote `ExecuteRequest`. `None` for autocommit and
+    /// non-interactive callers.
+    pub txn_id: Option<TxnId>,
 }
 
 /// The gateway: routes, dispatches, retries, and caches physical plans.
@@ -309,6 +314,7 @@ impl Gateway {
                 let tenant_id = ctx.tenant_id;
                 let database_id = ctx.database_id;
                 let trace_id = ctx.trace_id;
+                let txn_id = ctx.txn_id;
                 let version_set = version_set_for_route.clone();
                 async move {
                     let decision = {
@@ -351,10 +357,7 @@ impl Gateway {
                         trace_id,
                         deadline_ms,
                         version_set: &version_set,
-                        // The gateway does not yet carry session-transaction
-                        // context across this boundary (known cross-node
-                        // in-transaction read gap), so `None`.
-                        txn_id: None,
+                        txn_id,
                     })
                     .await
                 }

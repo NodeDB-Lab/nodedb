@@ -21,7 +21,7 @@ use std::time::Duration;
 use nodedb_cluster::rpc_codec::TypedClusterError;
 
 use crate::Error;
-use crate::control::server::dispatch_utils::dispatch_to_data_plane;
+use crate::control::server::dispatch_utils::dispatch_to_data_plane_with_txn;
 use crate::control::server::result_stream::ResultStream;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
@@ -57,8 +57,9 @@ pub struct DispatchOutcome {
 /// `trace_id` — distributed trace ID propagated from the client request.
 /// `deadline_ms` — remaining deadline in milliseconds.
 /// `version_set` — descriptor versions for the collections touched by the plan.
-/// `txn_id` — session-transaction context to forward to the remote executor, or
-///   `None` for non-transactional dispatch (the common case).
+/// `txn_id` — session-transaction context for local overlay resolution and
+///   remote `ExecuteRequest` forwarding, or `None` for non-transactional
+///   dispatch (the common case).
 pub struct DispatchRouteParams<'a> {
     pub route: TaskRoute,
     pub shared: &'a Arc<SharedState>,
@@ -84,7 +85,7 @@ pub async fn dispatch_route(params: DispatchRouteParams<'_>) -> Result<DispatchO
     } = params;
     match route.decision {
         RouteDecision::Local => {
-            dispatch_local(route, shared, tenant_id, database_id, trace_id).await
+            dispatch_local(route, shared, tenant_id, database_id, trace_id, txn_id).await
         }
         RouteDecision::Remote { node_id, vshard_id } => {
             dispatch_remote(RemoteDispatchArgs {
@@ -197,21 +198,26 @@ pub async fn dispatch_route_stream(
 }
 
 /// Local dispatch via SPSC bridge.
+///
+/// Carries `txn_id` so the Data Plane can resolve this session transaction's
+/// staging overlay (read-your-own-writes) for in-block SQL and direct ops.
 async fn dispatch_local(
     route: TaskRoute,
     shared: &Arc<SharedState>,
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
+    txn_id: Option<TxnId>,
 ) -> Result<DispatchOutcome, Error> {
     let vshard_id = VShardId::new(route.vshard_id);
-    let resp = dispatch_to_data_plane(
+    let resp = dispatch_to_data_plane_with_txn(
         shared,
         tenant_id,
         database_id,
         vshard_id,
         route.plan,
         trace_id,
+        txn_id,
     )
     .await?;
     Ok(DispatchOutcome {

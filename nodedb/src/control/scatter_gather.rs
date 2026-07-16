@@ -345,6 +345,7 @@ pub async fn coordinate_cross_shard_hop(
                     tenant_id: crate::types::TenantId::new(tenant_id_u64),
                     trace_id: TraceId::generate(),
                     database_id,
+                    txn_id: None,
                 };
 
                 // Build a fresh QueryContext per traversal using cloned inputs

@@ -385,6 +385,7 @@ pub async fn gather_all_vshards(
         tenant_id,
         trace_id,
         database_id,
+        txn_id,
     };
 
     // `Box::pin` breaks an async-fn recursion cycle: the gateway dispatches the

@@ -103,6 +103,7 @@ impl NodeDbPgHandler {
             tenant_id,
             trace_id: TraceId::generate(),
             database_id,
+            txn_id: None,
         };
 
         let mut responses: Vec<Response> = Vec::with_capacity(tasks.len());

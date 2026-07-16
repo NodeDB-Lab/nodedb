@@ -106,6 +106,7 @@ pub(crate) async fn try_open_sql_stream(
             tenant_id: task.tenant_id,
             trace_id: crate::types::TraceId::ZERO,
             database_id,
+            txn_id: task.txn_id,
         };
         gw.execute_stream(&gw_ctx, child_plan).await?
     } else {

@@ -162,6 +162,7 @@ pub async fn publish_remote(
         tenant_id: crate::types::TenantId::new(tenant_id),
         trace_id: nodedb_types::TraceId::generate(),
         database_id: nodedb_types::id::DatabaseId::DEFAULT,
+        txn_id: None,
     };
 
     let query_ctx = crate::control::planner::context::QueryContext::for_state(state);

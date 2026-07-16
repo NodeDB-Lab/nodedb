@@ -169,6 +169,7 @@ async fn resolve_exchange(
                         tenant_id,
                         trace_id,
                         database_id,
+                        txn_id: None,
                     };
                     // NOTE: cluster mode does not yet thread `txn_id` through
                     // `gateway.execute_stream` — cross-node in-transaction

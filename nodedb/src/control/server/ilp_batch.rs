@@ -151,6 +151,7 @@ async fn flush_ilp_batch_inner(
                     tenant_id,
                     trace_id: TraceId::generate(),
                     database_id: nodedb_types::id::DatabaseId::DEFAULT,
+                    txn_id: None,
                 };
                 gw.execute(&gw_ctx, plan)
                     .await
