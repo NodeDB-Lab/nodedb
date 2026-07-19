@@ -196,36 +196,59 @@ pub struct ConnSession {
     pub own_write_versions: HashMap<(DatabaseId, TenantId, String), Lsn>,
 }
 
+pub(super) fn default_parameters() -> HashMap<String, String> {
+    let mut parameters = HashMap::new();
+    // Default session parameters (PostgreSQL compatibility).
+    parameters.insert("application_name".into(), String::new());
+    parameters.insert("client_encoding".into(), "UTF8".into());
+    parameters.insert("client_min_messages".into(), "notice".into());
+    parameters.insert("server_encoding".into(), "UTF8".into());
+    parameters.insert("DateStyle".into(), "ISO, MDY".into());
+    parameters.insert("TimeZone".into(), "UTC".into());
+    parameters.insert(
+        "default_transaction_isolation".into(),
+        "read committed".into(),
+    );
+    parameters.insert("default_transaction_read_only".into(), "off".into());
+    parameters.insert("extra_float_digits".into(), "1".into());
+    parameters.insert("IntervalStyle".into(), "postgres".into());
+    parameters.insert("lc_collate".into(), "C".into());
+    parameters.insert("lc_ctype".into(), "C".into());
+    parameters.insert("lc_messages".into(), "C".into());
+    parameters.insert("lc_monetary".into(), "C".into());
+    parameters.insert("lc_numeric".into(), "C".into());
+    parameters.insert("lc_time".into(), "C".into());
+    parameters.insert("standard_conforming_strings".into(), "on".into());
+    parameters.insert("integer_datetimes".into(), "on".into());
+    parameters.insert("search_path".into(), "public".into());
+    parameters.insert("statement_timeout".into(), "0".into());
+    parameters.insert("transaction_isolation".into(), "read committed".into());
+    parameters.insert("transaction_read_only".into(), "off".into());
+    // Version info (PostgreSQL compatibility — tools like psql check this).
+    parameters.insert(
+        "server_version".into(),
+        nodedb_types::pg_compat::server_version_string(crate::version::VERSION),
+    );
+    parameters.insert(
+        "server_version_num".into(),
+        nodedb_types::pg_compat::PG_COMPAT_VERSION_NUM.into(),
+    );
+    // NodeDB-specific defaults.
+    parameters.insert("nodedb.consistency".into(), "strong".into());
+    parameters.insert("default_read_consistency".into(), "strong".into());
+    parameters.insert("cross_shard_txn".into(), "strict".into());
+    parameters.insert("rounding_mode".into(), "HALF_EVEN".into());
+    parameters
+}
+
 impl ConnSession {
     pub(super) fn new() -> Self {
-        let mut parameters = HashMap::new();
-        // Default session parameters (PostgreSQL compatibility).
-        parameters.insert("client_encoding".into(), "UTF8".into());
-        parameters.insert("server_encoding".into(), "UTF8".into());
-        parameters.insert("DateStyle".into(), "ISO, MDY".into());
-        parameters.insert("TimeZone".into(), "UTC".into());
-        parameters.insert("standard_conforming_strings".into(), "on".into());
-        parameters.insert("integer_datetimes".into(), "on".into());
-        parameters.insert("search_path".into(), "public".into());
-        parameters.insert("transaction_isolation".into(), "read committed".into());
-        // Version info (PostgreSQL compatibility — tools like psql check this).
-        parameters.insert(
-            "server_version".into(),
-            format!("NodeDB {}", crate::version::VERSION),
-        );
-        parameters.insert(
-            "server_version_num".into(),
-            nodedb_types::pg_compat::PG_COMPAT_VERSION_NUM.into(),
-        );
-        // NodeDB-specific defaults.
-        parameters.insert("nodedb.consistency".into(), "strong".into());
-        parameters.insert("rounding_mode".into(), "HALF_EVEN".into());
         Self {
+            parameters: default_parameters(),
             tx_state: TransactionState::Idle,
             current_database: None,
             effective_tenant_id: None,
             identity: None,
-            parameters,
             tx_buffer: Vec::new(),
             tx_snapshot_lsn: None,
             tx_snapshot_epoch: None,

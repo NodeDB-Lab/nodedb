@@ -1050,7 +1050,9 @@ RESET nodedb.consistency;
 
 -- Server version (PostgreSQL-compatible)
 SELECT version();                              -- 'PostgreSQL 15 ... NodeDB ...'
-SHOW server_version_num;
+SHOW server_version;                           -- '15.0 (NodeDB <version>)'
+SELECT current_setting('server_version');
+SHOW server_version_num;                       -- '150000'
 SELECT current_setting('server_version_num');
 SELECT current_setting('nodedb.foo', true);    -- missing_ok: NULL if unset
 

@@ -238,10 +238,25 @@ impl NodeDbPgHandler {
             // clear the session's effective_tenant_id override (not just an
             // entry in the parameter bag). All policy checks (superuser,
             // no-active-txn) live in handle_reset_tenant.
-            if param == "tenant" {
+            if param == "tenant" || param == "nodedb.tenant_id" {
                 return self.handle_reset_tenant(identity, addr);
             }
-            self.sessions.set_parameter(addr, param, String::new());
+            if param == "all" {
+                if self.sessions.get_effective_tenant_id(addr).is_some() {
+                    self.handle_reset_tenant(identity, addr)?;
+                }
+                self.sessions.reset_all_parameters(addr);
+                return Ok(vec![Response::Execution(Tag::new("RESET"))]);
+            }
+            if !crate::control::server::shared::session::is_known_settable_runtime_parameter(&param)
+            {
+                return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "42704".to_owned(),
+                    format!("unrecognized configuration parameter \"{param}\""),
+                ))));
+            }
+            self.sessions.reset_parameter(addr, &param);
             return Ok(vec![Response::Execution(Tag::new("RESET"))]);
         }
 

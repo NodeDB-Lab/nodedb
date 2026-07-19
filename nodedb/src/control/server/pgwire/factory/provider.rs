@@ -8,8 +8,9 @@ use pgwire::api::auth::DefaultServerParameterProvider;
 /// of parameters and has no `server_version_num`) and augments it with
 /// `server_version_num` so PostgreSQL clients that inspect the numeric server
 /// version at connect time (e.g. drivers gating feature use on it) receive it
-/// in the startup `ParameterStatus` burst. `server_version` is overridden to
-/// NodeDB's own version string.
+/// in the startup `ParameterStatus` burst. `server_version` starts with the
+/// compatible PostgreSQL version so libpq can parse it, followed by NodeDB's
+/// build identity.
 #[derive(Debug)]
 pub(super) struct NodeDbParameterProvider {
     inner: DefaultServerParameterProvider,
@@ -18,7 +19,8 @@ pub(super) struct NodeDbParameterProvider {
 impl NodeDbParameterProvider {
     fn new() -> Self {
         let mut inner = DefaultServerParameterProvider::default();
-        inner.server_version = format!("NodeDB {}", crate::version::VERSION);
+        inner.server_version =
+            nodedb_types::pg_compat::server_version_string(crate::version::VERSION);
         Self { inner }
     }
 }
@@ -48,8 +50,9 @@ mod tests {
     use pgwire::api::auth::ServerParameterProvider;
 
     /// The custom provider used by BOTH startup paths must emit NodeDB's own
-    /// `server_version` and the PG-compat `server_version_num` in the startup
-    /// parameter set, on top of pgwire's default fixed parameters.
+    /// a libpq-parseable `server_version` and the PG-compat
+    /// `server_version_num` in the startup parameter set, on top of pgwire's
+    /// default fixed parameters.
     #[test]
     fn parameter_provider_advertises_server_version_num_and_nodedb_version() {
         let addr = "127.0.0.1:5432"
@@ -69,8 +72,10 @@ mod tests {
         );
         assert_eq!(
             params.get("server_version").cloned(),
-            Some(format!("NodeDB {}", crate::version::VERSION)),
-            "startup params must advertise NodeDB server_version, got {params:?}"
+            Some(nodedb_types::pg_compat::server_version_string(
+                crate::version::VERSION,
+            )),
+            "startup params must advertise a libpq-parseable server_version, got {params:?}"
         );
     }
 }

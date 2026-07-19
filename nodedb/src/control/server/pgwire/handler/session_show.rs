@@ -104,7 +104,9 @@ impl NodeDbPgHandler {
         use pgwire::error::ErrorInfo;
 
         let builtin = match param {
-            "server_version" => Some(format!("NodeDB {}", crate::version::VERSION)),
+            "server_version" => Some(nodedb_types::pg_compat::server_version_string(
+                crate::version::VERSION,
+            )),
             "server_version_num" => Some(nodedb_types::pg_compat::PG_COMPAT_VERSION_NUM.to_owned()),
             "server_encoding" => Some("UTF8".into()),
             _ => None,
@@ -138,9 +140,15 @@ impl NodeDbPgHandler {
         let mut rows = Vec::with_capacity(params.len());
         let mut encoder = DataRowEncoder::new(schema.clone());
 
-        for (key, value) in &params {
+        for (key, session_value) in &params {
+            let value = match key.as_str() {
+                "server_version" | "server_version_num" | "server_encoding" => {
+                    self.resolve_guc(addr, key)?
+                }
+                _ => session_value.clone(),
+            };
             encoder.encode_field(key)?;
-            encoder.encode_field(value)?;
+            encoder.encode_field(&value)?;
             rows.push(Ok(encoder.take_row()));
         }
 

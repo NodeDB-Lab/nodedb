@@ -16,9 +16,41 @@ impl SessionStore {
         });
     }
 
+    /// Reset one mutable session parameter to its connection default.
+    pub fn reset_parameter(&self, addr: &SocketAddr, key: &str) {
+        let defaults = super::state::default_parameters();
+        let default = defaults
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key));
+        self.write_session(addr, |session| {
+            session
+                .parameters
+                .retain(|name, _| !name.eq_ignore_ascii_case(key));
+            if let Some((name, value)) = default {
+                session.parameters.insert(name, value);
+            }
+        });
+    }
+
+    /// Reset every mutable session parameter and tenant override.
+    pub fn reset_all_parameters(&self, addr: &SocketAddr) {
+        self.write_session(addr, |session| {
+            session.parameters = super::state::default_parameters();
+            session.effective_tenant_id = None;
+        });
+    }
+
     /// Get a session parameter.
     pub fn get_parameter(&self, addr: &SocketAddr, key: &str) -> Option<String> {
-        self.read_session(addr, |s| s.parameters.get(key).cloned())?
+        self.read_session(addr, |session| {
+            session.parameters.get(key).cloned().or_else(|| {
+                session
+                    .parameters
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                    .map(|(_, value)| value.clone())
+            })
+        })?
     }
 
     /// Get all session parameters.
@@ -95,7 +127,9 @@ pub const KNOWN_PG_RUNTIME_PARAMETERS: &[&str] = &[
     "application_name",
     "client_encoding",
     "client_min_messages",
+    "cross_shard_txn",
     "datestyle",
+    "default_read_consistency",
     "default_transaction_isolation",
     "default_transaction_read_only",
     "extra_float_digits",
@@ -170,8 +204,8 @@ pub const SETTABLE_RUNTIME_PARAMETERS: &[&str] = &[
     "session_authorization",
     // NodeDB-specific session knobs settable via SET.
     "nodedb.consistency",
-    "nodedb.read_consistency",
-    "nodedb.cross_shard_mode",
+    "default_read_consistency",
+    "cross_shard_txn",
     "nodedb.tenant_id",
     "nodedb.auth_session",
     // Distributed shuffle-join override (permanent operator hint; the automatic
@@ -239,6 +273,58 @@ pub fn parse_show_command(sql: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_parameter_restores_canonical_defaults() {
+        let store = SessionStore::new();
+        let addr = "127.0.0.1:5000".parse().expect("socket address");
+        store.ensure_session(addr);
+
+        store.set_parameter(&addr, "datestyle".into(), "SQL, DMY".into());
+        store.reset_parameter(&addr, "datestyle");
+        assert_eq!(
+            store.get_parameter(&addr, "datestyle"),
+            Some("ISO, MDY".into())
+        );
+
+        store.set_parameter(&addr, "default_read_consistency".into(), "eventual".into());
+        store.reset_parameter(&addr, "default_read_consistency");
+        assert_eq!(
+            store.get_parameter(&addr, "default_read_consistency"),
+            Some("strong".into())
+        );
+
+        store.set_parameter(
+            &addr,
+            "cross_shard_txn".into(),
+            "best_effort_non_atomic".into(),
+        );
+        store.reset_parameter(&addr, "cross_shard_txn");
+        assert_eq!(
+            store.get_parameter(&addr, "cross_shard_txn"),
+            Some("strict".into())
+        );
+    }
+
+    #[test]
+    fn reset_all_parameters_restores_defaults() {
+        let store = SessionStore::new();
+        let addr = "127.0.0.1:5000".parse().expect("socket address");
+        store.ensure_session(addr);
+        store.set_parameter(&addr, "application_name".into(), "worker".into());
+        store.set_parameter(&addr, "nodedb.consistency".into(), "eventual".into());
+
+        store.reset_all_parameters(&addr);
+
+        assert_eq!(
+            store.get_parameter(&addr, "application_name"),
+            Some(String::new())
+        );
+        assert_eq!(
+            store.get_parameter(&addr, "nodedb.consistency"),
+            Some("strong".into())
+        );
+    }
 
     #[test]
     fn parse_set_equals() {
