@@ -38,7 +38,7 @@ impl QueryContext {
         OutputSchema,
     )> {
         self.plan_with_nodedb_sql(sql, tenant_id, database_id)
-            .map(|(t, schema, _)| (t, schema))
+            .map(|(t, schema, _, _)| (t, schema))
     }
 
     /// Core planning via nodedb-sql: parse → plan → optimize → convert.
@@ -58,6 +58,7 @@ impl QueryContext {
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
         crate::control::planner::descriptor_set::DescriptorVersionSet,
+        nodedb_sql::types::PlanCacheEligibility,
     )> {
         let inputs = match &self.catalog_inputs {
             Some(i) => i,
@@ -146,8 +147,16 @@ impl QueryContext {
                 &catalog,
                 database_id,
             );
+        let cache_eligibility = if plans
+            .iter()
+            .all(|plan| plan.cache_eligibility().is_cacheable())
+        {
+            nodedb_sql::types::PlanCacheEligibility::Cacheable
+        } else {
+            nodedb_sql::types::PlanCacheEligibility::DataDependent
+        };
         let tasks = crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
-        Ok((tasks, output_schema, version_set))
+        Ok((tasks, output_schema, version_set, cache_eligibility))
     }
 
     /// Parse SQL, inject RLS predicates, convert to physical plan.
@@ -184,7 +193,7 @@ impl QueryContext {
     )> {
         self.plan_sql_with_rls_and_versions(sql, tenant_id, database_id, sec, returning)
             .await
-            .map(|(tasks, schema, _)| (tasks, schema))
+            .map(|(tasks, schema, _, _)| (tasks, schema))
     }
 
     /// Variant of [`plan_sql_with_rls_returning`] that also
@@ -204,8 +213,9 @@ impl QueryContext {
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
         crate::control::planner::descriptor_set::DescriptorVersionSet,
+        nodedb_sql::types::PlanCacheEligibility,
     )> {
-        let (mut tasks, output_schema, version_set) =
+        let (mut tasks, output_schema, version_set, cache_eligibility) =
             self.plan_with_nodedb_sql(sql, tenant_id, database_id)?;
 
         // Inject RLS predicates.
@@ -218,7 +228,7 @@ impl QueryContext {
             )?;
         }
 
-        Ok((tasks, output_schema, version_set))
+        Ok((tasks, output_schema, version_set, cache_eligibility))
     }
 
     /// Plan SQL with bound parameters and RLS injection.

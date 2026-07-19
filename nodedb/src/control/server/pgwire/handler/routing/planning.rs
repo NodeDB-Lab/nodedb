@@ -171,7 +171,7 @@ impl NodeDbPgHandler {
             let scope = self.state.acquire_plan_lease_scope(&versions);
             (tasks, output_schema, scope)
         } else {
-            let (planned, output_schema, versions) =
+            let (planned, output_schema, versions, cache_eligibility) =
                 super::super::retry::retry_on_schema_change(|| async {
                     let perm_cache = self.state.permission_cache.read().await;
                     let sec = crate::control::planner::context::PlanSecurityContext {
@@ -203,11 +203,12 @@ impl NodeDbPgHandler {
                 })?;
 
             let scope = self.state.acquire_plan_lease_scope(&versions);
-            // Do not cache a plan built under a strategy-knob override (force
-            // shuffle, or a non-default broadcast threshold) — the cache key
-            // does not encode the session knob, so caching it would leak a
-            // strategy-specific plan into later default queries on this session.
-            if !bypass_cache {
+            // Strategy overrides and data-dependent identity lowering are not
+            // represented by the cache key. Document point plans resolve a
+            // mutable PK→surrogate binding while lowering, so caching either a
+            // sentinel miss or a partially resolved target set would preserve
+            // stale row identity across later writes.
+            if !bypass_cache && cache_eligibility.is_cacheable() {
                 self.sessions.put_cached_plan(
                     addr,
                     &clean_sql,
