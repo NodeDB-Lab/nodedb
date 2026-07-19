@@ -49,6 +49,8 @@ SELECT * FROM users WHERE role IN ('admin', 'editor');
 SELECT * FROM users WHERE deleted_at IS NULL;
 ```
 
+Timestamp-valued strings compare by instant, not bytes: a stored ISO-8601 value (`'2026-07-02T13:00:00.000000Z'`) matches a SQL-style literal (`'2026-07-02 13:00:00'`) in `=` and range predicates when both sides parse as datetimes. Non-datetime strings keep lexicographic comparison.
+
 ### Aggregates
 
 ```sql
@@ -722,6 +724,21 @@ WHERE category = 'machine-learning'
   );
 ```
 
+### Sparse Vector Search
+
+```sql
+-- Dimensionless sparse-vector column; values are '{dimension: weight}' literals
+CREATE TABLE sparse_docs (id TEXT PRIMARY KEY, terms SPARSEVECTOR);
+INSERT INTO sparse_docs (id, terms) VALUES ('a', '{3: 1.0, 7: 1.0}');
+
+-- Dot-product top-k ranking; LIMIT sets k
+SELECT id FROM sparse_docs
+ORDER BY sparse_score(terms, '{3: 1.0, 7: 0.5}') DESC
+LIMIT 3;
+```
+
+The inverted index is maintained automatically on document writes (insert, update, delete). Documents sharing no dimension with the query are never scanned. `sparse_score` is a standalone surface — it is not fused into `rrf_score` hybrid ranking.
+
 ### Full-Text Search
 
 ```sql
@@ -856,12 +873,17 @@ SELECT * FROM events WHERE doc_array_contains(payload, '$.tags', 'important');
 ### CRDT
 
 ```sql
--- Read CRDT state
-SELECT crdt_state('collab_docs', 'doc123');
+-- Declare a document collection CRDT-backed: plain DML converges via LWW
+CREATE COLLECTION notes (id TEXT PRIMARY KEY, title TEXT, body TEXT) WITH (crdt=true);
+UPDATE notes SET title = 't2' WHERE id = 'a';   -- per-field LWW merge
+DELETE FROM notes WHERE id = 'a' RETURNING id;  -- tombstone
 
--- Apply delta
+-- Low-level delta path
+SELECT crdt_state('collab_docs', 'doc123');
 SELECT crdt_apply('collab_docs', 'doc123', '<delta_bytes>');
 ```
+
+`WITH (crdt=true)` is document-collection-only. Non-PK-targeted UPDATE/DELETE, non-literal SET values, and `ON CONFLICT DO UPDATE` are rejected on CRDT collections (no representable CRDT operation). See [Documents — CRDT Document Collections](documents.md#crdt-document-collections).
 
 ### Array (NDArray)
 
@@ -966,6 +988,10 @@ COMMIT;
 ```
 
 Isolation level: **Snapshot Isolation (SI)**. Reads see a consistent snapshot from `BEGIN` time. Write conflicts detected at `COMMIT` and surfaced as SQLSTATE `40001` (`could not serialize access due to concurrent update`).
+
+### Cross-Shard Transactions
+
+An interactive `BEGIN ... COMMIT` block whose statements span multiple vShards or nodes commits **atomically** by default — the whole block flushes through the Calvin sequencer's durable vote/verdict barrier at COMMIT. Reads taken during the transaction (point reads, predicate scans, index probes, both sides of distributed JOINs) are OCC-validated at COMMIT; a stale read aborts with `40001` (retry the transaction). `SET cross_shard_txn = 'best_effort_non_atomic'` opts bulk loads out of cross-shard atomicity. Single-node deployments run the same path by default (`single_node_calvin = true`), so transactions spanning cores commit atomically too. See [Architecture — Cross-Shard Transactions](architecture.md#cross-shard-transactions).
 
 ### Read-Your-Own-Writes
 

@@ -78,6 +78,24 @@ LIMIT 10;
 
 Set `target_recall` and let the planner do the rest unless you need a hard latency ceiling.
 
+## Sparse Vectors
+
+For learned sparse representations (SPLADE, uniCOIL, BM25-style term weights), declare a dimensionless `SPARSEVECTOR` column. An inverted index over the non-zero dimensions is maintained automatically on every document write.
+
+```sql
+CREATE TABLE sparse_docs (id TEXT PRIMARY KEY, terms SPARSEVECTOR);
+
+-- Values are '{dimension: weight}' string literals
+INSERT INTO sparse_docs (id, terms) VALUES ('a', '{3: 1.0, 7: 1.0}');
+
+-- Dot-product top-k; LIMIT sets k
+SELECT id FROM sparse_docs
+ORDER BY sparse_score(terms, '{3: 1.0, 7: 0.5}') DESC
+LIMIT 3;
+```
+
+`SPARSEVECTOR` carries no fixed dimensionality — only non-zero `(dimension, weight)` pairs are stored and indexed. Documents sharing no dimension with the query are excluded by the inverted index rather than scored at zero. `sparse_score` ranks by descending dot product; it is a standalone surface, separate from the dense `vector_distance` path and the RRF hybrid fusion.
+
 ## Vector-Primary Collections
 
 By default, vectors are an _index_ attached to a column on a normal collection — the document store is the source of truth. For pure-vector workloads (RAG corpora, recommendation memory, embedding stores) flip a collection into vector-primary mode where the vector index is the primary access path and the document store is a metadata sidecar:

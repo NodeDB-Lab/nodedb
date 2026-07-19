@@ -142,17 +142,29 @@ Each kind has independent leader election. A sequencer leader failure does not a
 
 Write transactions that touch multiple vShards go through the **Calvin sequencer** rather than two-phase commit. The sequencer Raft group produces a globally-ordered log of transaction batches (epochs, default 20 ms). Within each epoch, the scheduler derives a deterministic lock order and the executor runs all writes concurrently without cross-shard coordination.
 
+**Interactive transactions are atomic across shards.** A `BEGIN ... COMMIT` block whose statements span multiple vShards (or nodes) flushes at COMMIT as one Calvin transaction bound by a durable **Vote/Verdict barrier**: each participant replicates a commit/abort vote through the sequencer log; when the tally completes, a replicated verdict commits or drops every participant's staged writes together. Expected-participant counts are seeded from the replicated epoch batch, so the barrier survives sequencer failover. Read-only participants count too — a transaction that wrote shard X but read shard Y validates and votes on both.
+
+**Serializable OCC.** Reads recorded during the transaction (point reads, predicate scans, index equality/range probes, both sides of gathered cross-node JOINs) are validated at COMMIT against per-key, per-collection, and per-index-value write LSNs. A stale read aborts the transaction with SQLSTATE `40001` (retryable) instead of committing silently.
+
+**Durability.** A committed transaction's writes are persisted as a single atomically-replayable `TransactionRedo` WAL record appended before the commit is acknowledged. WAL-only recovery replays it in LSN order, rebuilding even in-memory secondary indexes (vector HNSW, FTS postings) that base storage cannot reconstruct alone.
+
 For value-dependent predicates (e.g., `WHERE balance > 0`), the executor uses **OLLP** (Optimistic Lock Location Prediction): optimistically proceed, then re-validate and retry on mismatch. A circuit breaker opens when the retry ratio exceeds 50% for a predicate class.
 
 ```sql
 -- Require atomic cross-shard writes (default)
 SET cross_shard_txn = 'strict';
 
--- Opt out of atomicity for bulk loads (each shard commits independently)
+-- Opt out of atomicity for bulk loads: writes are grouped per vShard and each
+-- group commits as an independent single-vShard transaction; a failure does NOT
+-- roll back vShards that already committed
 SET cross_shard_txn = 'best_effort_non_atomic';
 ```
 
-Single-shard writes bypass the sequencer entirely and go directly through the relevant data-group Raft.
+(Bare `best_effort` is deliberately rejected; invalid values return SQLSTATE `22023`.)
+
+**Single-node deployments run Calvin by default** (`[server] single_node_calvin = true`): a standalone node synthesizes a one-node sequencer group so transactions spanning multiple cores (vShards) commit atomically instead of being rejected. Set it `false` to force the legacy fast path. Uncontended single-shard point writes bypass the sequencer entirely and go directly through the relevant data-group Raft; contended or predicate/bulk writes route through the deterministic scheduler.
+
+**Overlay hygiene.** Per-transaction staging overlays are kept alive by every staged write/read; overlays orphaned by vanished clients are reaped after a 6-hour lease. The `nodedb_active_txn_overlays` Prometheus gauge tracks live overlays. Data-Plane resource rejection surfaces as SQLSTATE `53200` (backpressure — retry when pressure subsides).
 
 ## Distributed Query Execution
 

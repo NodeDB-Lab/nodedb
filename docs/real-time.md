@@ -71,6 +71,13 @@ SHOW TRIGGERS;
 | `SYNC`            | Same transaction (ACID)   | Trigger time added | Yes                 |
 | `DEFERRED`        | Same transaction, batched | At COMMIT time     | Yes                 |
 
+**Graph mutations emit events.** Graph edge and node-label writes publish `WriteEvent`s like any other mutation, so triggers, change streams, and streaming MVs can react to graph changes:
+
+- **Edges** — published on the edge's collection with a stable `row_id` composed from the `(src, label, dst)` triple. Insert/put carries the edge properties in `new_value`; delete carries no payload.
+- **Node labels** — published tenant-wide on the dedicated stream `__graph_node_labels__`. `SET` labels → `Insert` with the added labels in `new_value` (`{ "labels": [...] }`); `REMOVE` → `Delete` with the removed labels in `old_value`. `row_id` is the node id.
+
+Implicit edges (a document insert carrying `_from`/`_to`) are not double-published — the underlying document write already emits its event. WAL replay reconstructs graph events byte-identically and dedups on LSN.
+
 **UPSERT and `ON CONFLICT` firing semantics.** The `WriteOp` tag emitted to the Event Plane is derived from storage prior-bytes, not from the surface SQL verb. An `UPSERT` or `INSERT ... ON CONFLICT (pk) DO UPDATE` that finds an existing row fires `AFTER UPDATE`; the same statement against a non-existent key fires `AFTER INSERT`. `ON CONFLICT DO NOTHING` on a conflict emits no event at all.
 
 ## CDC Change Streams

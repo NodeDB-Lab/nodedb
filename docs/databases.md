@@ -337,6 +337,8 @@ ALTER DATABASE analytics SET IDLE_TIMEOUT 0;     -- disabled
 
 Sessions idle longer than the configured time are automatically closed with `SESSION_IDLE_TIMEOUT`. Tracks are monitored per-database; timeout is checked at request boundaries.
 
+Separately, a process-global pgwire listener watchdog force-closes idle connections after `auth.idle_timeout_secs` (default 3600s; `auth.session_absolute_timeout_secs` caps total session age, default disabled). The watchdog never kills a connection mid-statement — the idle window starts when a statement completes — and its teardown reclaims any idle-in-transaction staging overlay. The per-database `SET IDLE_TIMEOUT` and the global watchdog are independent mechanisms; the stricter one wins.
+
 ### View and Kill Sessions
 
 ```sql

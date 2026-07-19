@@ -137,6 +137,43 @@ FROM orders
 GROUP BY status;
 ```
 
+## CRDT Document Collections
+
+Declare a document collection CRDT-backed at creation time and plain SQL DML converges via last-writer-wins instead of overwriting:
+
+```sql
+CREATE COLLECTION crdt_notes (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    body TEXT
+) WITH (crdt=true);
+
+-- Full-replace write (untouched keys pruned)
+INSERT INTO crdt_notes (id, title, body) VALUES ('a', 'v1', 'text');
+UPSERT INTO crdt_notes (id, title) VALUES ('a', 't2');
+
+-- PK-targeted UPDATE is a per-field LWW merge: only the provided
+-- fields are written; untouched fields survive concurrent writers
+UPDATE crdt_notes SET title = 't3' WHERE id = 'a';
+
+-- PK-targeted DELETE writes a tombstone
+DELETE FROM crdt_notes WHERE id = 'a';
+
+-- RETURNING works on CRDT UPDATE/DELETE
+UPDATE crdt_notes SET title = 't4' WHERE id = 'a' RETURNING id, title;
+DELETE FROM crdt_notes WHERE id = 'a' RETURNING id;
+```
+
+`crdt=true` is only valid on document collections. DML on a CRDT collection routes through the CRDT engine — there is no silent fallthrough to the plain document path (that would bypass convergence). Statement shapes that cannot be expressed as a CRDT operation are rejected with a typed error rather than downgraded:
+
+- Predicate (non-primary-key) `UPDATE` / `DELETE`
+- `UPDATE` with a non-literal right-hand side (`SET count = count + 1`)
+- `INSERT ... ON CONFLICT DO UPDATE`
+
+The `crdt` flag is part of the collection descriptor: it replicates across the cluster and travels in sync `CollectionSchema` announcements, so Lite/WASM peers see the same convergence semantics.
+
+**Movable lists (SDK).** The client SDK exposes CRDT movable-list operations on documents: `list_insert(collection, doc_id, list_path, index, fields)`, `list_delete(...)`, and `list_move(collection, doc_id, list_path, from_index, to_index)` — dispatched as native opcodes and merged conflict-free across devices.
+
 ## Choosing Between Modes
 
 |               | Schemaless                            | Strict                               |
