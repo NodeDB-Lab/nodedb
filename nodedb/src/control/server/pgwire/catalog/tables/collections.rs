@@ -51,23 +51,54 @@ pub fn has_secondary_index(coll: &StoredCollection) -> bool {
 }
 
 pub fn field_type_to_oid(field_type: &str) -> i64 {
-    if let Ok(ct) = field_type.parse::<ColumnType>() {
-        return ct.to_pg_oid() as i64;
+    let normalized = field_type.trim().to_ascii_lowercase();
+    let starts_with_type = |name: &str| {
+        normalized == name
+            || normalized.strip_prefix(name).is_some_and(|rest| {
+                rest.starts_with('(') || rest.chars().next().is_some_and(char::is_whitespace)
+            })
+    };
+
+    if starts_with_type("timestamp with time zone") || starts_with_type("timestamptz") {
+        1184
+    } else if starts_with_type("timestamp without time zone") || starts_with_type("timestamp") {
+        1114
+    } else if starts_with_type("time without time zone") || starts_with_type("time") {
+        1083
+    } else if starts_with_type("character varying") || starts_with_type("varchar") {
+        1043
+    } else if starts_with_type("double precision")
+        || starts_with_type("double")
+        || starts_with_type("float8")
+    {
+        701
+    } else if starts_with_type("integer") || starts_with_type("int4") || starts_with_type("int") {
+        23
+    } else if starts_with_type("smallint") || starts_with_type("int2") {
+        21
+    } else if starts_with_type("bigint") || starts_with_type("int8") {
+        20
+    } else if starts_with_type("float") || starts_with_type("float4") || starts_with_type("real") {
+        700
+    } else if starts_with_type("bool") || starts_with_type("boolean") {
+        16
+    } else if starts_with_type("text") {
+        25
+    } else if starts_with_type("date") {
+        1082
+    } else if starts_with_type("uuid") {
+        2950
+    } else if starts_with_type("jsonb") {
+        3802
+    } else if starts_with_type("json") {
+        114
+    } else {
+        field_type
+            .parse::<ColumnType>()
+            .map_or(25, |column_type| column_type.to_pg_oid() as i64)
     }
-    match field_type.to_lowercase().as_str() {
-        "int" | "integer" | "int4" => 23,
-        "smallint" | "int2" => 21,
-        "bigint" | "int8" => 20,
-        "float" | "float4" | "real" => 700,
-        "double" | "float8" => 701,
-        "bool" | "boolean" => 16,
-        "varchar" => 1043,
-        "date" => 1082,
-        "timestamp" => 1114,
-        "timestamptz" => 1184,
-        "uuid" => 2950,
-        "json" => 114,
-        "jsonb" => 3802,
-        _ => 25,
-    }
+}
+
+pub fn type_oid_is_collatable(oid: i64) -> bool {
+    matches!(oid, 18 | 19 | 25 | 1042 | 1043)
 }

@@ -99,3 +99,39 @@ pub fn encode_batch(plans: &Vec<PhysicalPlan>) -> Result<Vec<u8>, WireError> {
 pub fn decode_batch(bytes: &[u8]) -> Result<Vec<PhysicalPlan>, WireError> {
     zerompk::from_msgpack(bytes).map_err(|e| WireError::Codec(format!("batch decode: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physical_plan::JoinProjection;
+
+    #[test]
+    fn hash_join_tail_semantics_roundtrip() {
+        let plan = PhysicalPlan::Query(QueryOp::HashJoin {
+            left_collection: "left".into(),
+            right_collection: "right".into(),
+            left_alias: Some("l".into()),
+            right_alias: Some("r".into()),
+            on: vec![("id".into(), "id".into())],
+            join_type: "left".into(),
+            limit: 10,
+            post_group_by: Vec::new(),
+            post_aggregates: Vec::new(),
+            projection: vec![JoinProjection {
+                source: "l.id".into(),
+                output: "id".into(),
+            }],
+            computed_projection: vec![1, 2],
+            join_filters: vec![3, 4],
+            post_filters: vec![5, 6],
+            left_input: None,
+            right_input: None,
+            left_bitmap: None,
+            right_bitmap: None,
+        });
+
+        let encoded = encode(&plan).expect("hash join encodes");
+        let decoded = decode(&encoded).expect("hash join decodes");
+        assert_eq!(decoded, plan);
+    }
+}

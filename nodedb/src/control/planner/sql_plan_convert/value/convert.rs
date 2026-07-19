@@ -32,12 +32,32 @@ pub(crate) fn sql_value_to_string(v: &SqlValue) -> String {
         SqlValue::Bool(b) => b.to_string(),
         SqlValue::Timestamp(dt) | SqlValue::Timestamptz(dt) => dt.to_iso8601(),
         SqlValue::Bytes(b) => format!("\\x{}", hex_encode(b)),
-        SqlValue::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(sql_value_to_string).collect();
-            format!("[{}]", parts.join(","))
-        }
+        SqlValue::Array(arr) => format_pg_array(arr),
         SqlValue::Null => String::new(),
     }
+}
+
+fn format_pg_array(values: &[SqlValue]) -> String {
+    let elements = values
+        .iter()
+        .map(|value| match value {
+            SqlValue::Null => "NULL".to_string(),
+            SqlValue::String(s) if pg_array_string_needs_quotes(s) => {
+                format!("\"{}\"", s.replace('\\', "\\\\").replace('\"', "\\\""))
+            }
+            SqlValue::String(s) => s.clone(),
+            other => sql_value_to_string(other),
+        })
+        .collect::<Vec<_>>();
+    format!("{{{}}}", elements.join(","))
+}
+
+fn pg_array_string_needs_quotes(value: &str) -> bool {
+    value.is_empty()
+        || value.eq_ignore_ascii_case("null")
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, ',' | '{' | '}' | '"' | '\\'))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -76,6 +96,19 @@ mod tests {
     /// scalar type — otherwise a captured `IndexEq` value would never match the
     /// index key a write records. This parity is the load-bearing guarantee the
     /// per-value comparison (a later change) will rest on.
+    #[test]
+    fn arrays_use_postgresql_text_syntax() {
+        assert_eq!(
+            sql_value_to_string(&SqlValue::Array(vec![
+                SqlValue::String("public".into()),
+                SqlValue::String("two words".into()),
+                SqlValue::String("NULL".into()),
+                SqlValue::Null,
+            ])),
+            "{public,\"two words\",\"NULL\",NULL}"
+        );
+    }
+
     #[test]
     fn read_and_write_scalar_stringifiers_agree() {
         let cases = [

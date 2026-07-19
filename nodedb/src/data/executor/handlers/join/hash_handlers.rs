@@ -47,6 +47,22 @@ impl CoreLoop {
         // workload. The post-materialisation byte-budget guards below are the
         // authoritative overflow check; this ceiling is only a pre-fetch hint.
         let budget = self.query_tuning.max_scan_result_bytes;
+        let join_filters: Vec<crate::bridge::scan_filter::ScanFilter> =
+            if join.join_filter_bytes.is_empty() {
+                Vec::new()
+            } else {
+                match zerompk::from_msgpack(join.join_filter_bytes) {
+                    Ok(filters) => filters,
+                    Err(e) => {
+                        return self.response_error(
+                            join.task,
+                            ErrorCode::Internal {
+                                detail: format!("decode join ON filters: {e}"),
+                            },
+                        );
+                    }
+                }
+            };
         let scan_limit =
             crate::data::executor::handlers::scan_budget::fetch_limit_for(usize::MAX, 0, budget);
 
@@ -64,7 +80,8 @@ impl CoreLoop {
         let both_sides_local = left_input.is_none()
             && right_input.is_none()
             && left_bitmap.is_none()
-            && right_bitmap.is_none();
+            && right_bitmap.is_none()
+            && join_filters.is_empty();
 
         // Evaluate bitmap sub-plans first. These prefilter the local scan for
         // each side, pushing surrogate exclusion into the document engine before
@@ -340,6 +357,7 @@ impl CoreLoop {
             limit: probe_limit,
             probe_collection: left_prefix,
             index_collection: right_prefix,
+            join_filters: &join_filters,
             emit_unmatched_right: true,
         });
 

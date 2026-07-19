@@ -29,10 +29,55 @@ pub(super) fn serialize_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {
     if scan_filters.is_empty() {
         return Ok(Vec::new());
     }
-    zerompk::to_msgpack_vec(&scan_filters).map_err(|e| crate::Error::Serialization {
+    encode_scan_filters(&scan_filters)
+}
+
+/// Serialize post-join WHERE filters, preserving table qualifiers inside full
+/// expression predicates so they resolve against alias-prefixed merged rows.
+pub(super) fn serialize_join_post_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {
+    if filters.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scan_filters = filters
+        .iter()
+        .flat_map(|filter| filter_to_join_scan_filters(&filter.expr))
+        .collect::<Vec<_>>();
+    encode_scan_filters(&scan_filters)
+}
+
+fn encode_scan_filters(
+    filters: &Vec<nodedb_query::scan_filter::ScanFilter>,
+) -> crate::Result<Vec<u8>> {
+    if filters.is_empty() {
+        return Ok(Vec::new());
+    }
+    zerompk::to_msgpack_vec(filters).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("filter serialization: {e}"),
     })
+}
+
+fn filter_to_join_scan_filters(expr: &FilterExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
+    use nodedb_query::scan_filter::{FilterOp, ScanFilter};
+
+    match expr {
+        FilterExpr::And(filters) => filters
+            .iter()
+            .flat_map(|filter| filter_to_join_scan_filters(&filter.expr))
+            .collect(),
+        FilterExpr::Or(filters) => vec![ScanFilter {
+            field: String::new(),
+            op: FilterOp::Or,
+            value: nodedb_types::Value::Null,
+            clauses: filters
+                .iter()
+                .map(|filter| filter_to_join_scan_filters(&filter.expr))
+                .collect(),
+            expr: None,
+        }],
+        FilterExpr::Expr(sql_expr) => sql_expr_to_join_scan_filters(sql_expr),
+        _ => filter_to_scan_filters(expr),
+    }
 }
 
 fn filter_to_scan_filters(expr: &FilterExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
@@ -144,6 +189,44 @@ pub(super) fn expr_filter_qualified(expr: &SqlExpr) -> nodedb_query::scan_filter
 /// use its fast pre-filtered path. Anything that doesn't fit — scalar
 /// functions on the LHS, arithmetic, NOT, non-literal bounds — is shipped
 /// as a single `FilterOp::Expr` carrying the whole expression tree.
+fn sql_expr_to_join_scan_filters(root: &SqlExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
+    use nodedb_query::scan_filter::{FilterOp, ScanFilter};
+
+    match root {
+        SqlExpr::BinaryOp {
+            left,
+            op: nodedb_sql::types::BinaryOp::And,
+            right,
+        } => {
+            let mut filters = sql_expr_to_join_scan_filters(left);
+            filters.extend(sql_expr_to_join_scan_filters(right));
+            filters
+        }
+        SqlExpr::BinaryOp {
+            left,
+            op: nodedb_sql::types::BinaryOp::Or,
+            right,
+        } => vec![ScanFilter {
+            field: String::new(),
+            op: FilterOp::Or,
+            value: nodedb_types::Value::Null,
+            clauses: vec![
+                sql_expr_to_join_scan_filters(left),
+                sql_expr_to_join_scan_filters(right),
+            ],
+            expr: None,
+        }],
+        _ => {
+            let filters = sql_expr_to_scan_filters(root);
+            if filters.len() == 1 && filters[0].op == FilterOp::Expr {
+                vec![expr_filter_qualified(root)]
+            } else {
+                filters
+            }
+        }
+    }
+}
+
 fn sql_expr_to_scan_filters(root: &SqlExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
     use nodedb_query::scan_filter::{FilterOp, ScanFilter};
 

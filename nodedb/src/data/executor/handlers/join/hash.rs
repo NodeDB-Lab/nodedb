@@ -4,7 +4,7 @@
 
 use nodedb_query::msgpack_scan;
 
-use super::merge_join_docs_binary;
+use super::{binary_row_matches_filters, merge_join_docs_binary};
 
 /// Hash a join key from raw msgpack bytes — zero String allocation.
 ///
@@ -104,6 +104,9 @@ pub(super) struct ProbeParams<'a> {
     pub(super) limit: usize,
     pub(super) probe_collection: &'a str,
     pub(super) index_collection: &'a str,
+    /// Residual ON predicates. Candidates that fail these predicates do not
+    /// count as matches for outer-join null extension.
+    pub(super) join_filters: &'a [crate::bridge::scan_filter::ScanFilter],
     /// For broadcast RIGHT/FULL joins: only the designated core should emit
     /// unmatched right-side rows. Other cores set this to `false` to avoid
     /// N× duplication of unmatched rows across cores.
@@ -133,12 +136,16 @@ pub(super) fn probe_hash_index(p: &ProbeParams<'_>) -> Vec<Vec<u8>> {
                 if results.len() >= p.limit {
                     return results;
                 }
-                results.push(merge_join_docs_binary(
+                let merged = merge_join_docs_binary(
                     left_val,
                     Some(right_val),
                     p.probe_collection,
                     p.index_collection,
-                ));
+                );
+                if p.join_filters.is_empty() || binary_row_matches_filters(&merged, p.join_filters)
+                {
+                    results.push(merged);
+                }
             }
         }
         return results;
@@ -199,6 +206,21 @@ pub(super) fn probe_rows_into(
             break;
         }
         let (_, _, matched_indices) = p.index.probe(value, p.probe_keys, p.index_docs);
+        let matched_indices = matched_indices
+            .into_iter()
+            .filter(|&index| {
+                if p.join_filters.is_empty() {
+                    return true;
+                }
+                let merged = merge_join_docs_binary(
+                    value,
+                    Some(&p.index_docs[index].1),
+                    p.probe_collection,
+                    p.index_collection,
+                );
+                binary_row_matches_filters(&merged, p.join_filters)
+            })
+            .collect::<Vec<_>>();
 
         if !matched_indices.is_empty() {
             if is_semi {

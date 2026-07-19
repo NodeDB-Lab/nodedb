@@ -35,7 +35,10 @@ pub async fn catalog_rows(
         Some("pg_type") => tables::pg_type(),
         Some("pg_class") => tables::pg_class(state, identity),
         Some("pg_attribute") => tables::pg_attribute(state, identity),
+        Some("pg_attrdef") => tables::pg_attrdef(state, identity),
+        Some("pg_collation") => tables::pg_collation(),
         Some("pg_index") => tables::pg_index(state, identity),
+        Some("pg_range") => tables::pg_range(),
         Some("pg_authid") => tables::pg_authid(state, identity),
         Some("_system.audit_log") => audit_log::audit_log(state, identity),
         Some("_system.dropped_collections") => {

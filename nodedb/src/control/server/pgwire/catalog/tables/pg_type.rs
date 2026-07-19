@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use nodedb_types::Value;
 
-use super::collections::encode_row;
+use super::collections::{encode_row, type_oid_is_collatable};
 
 /// One built-in PostgreSQL type row.
 struct PgTypeRow {
@@ -114,6 +114,23 @@ pub fn pg_type() -> crate::Result<Vec<Vec<u8>>> {
         m.insert("typelem".into(), Value::Integer(r.elem));
         m.insert("typarray".into(), Value::Integer(r.array));
         m.insert("typnotnull".into(), Value::Bool(false));
+        m.insert(
+            "typinput".into(),
+            Value::String(if r.elem == 0 {
+                format!("{}in", r.name)
+            } else {
+                "array_in".into()
+            }),
+        );
+        m.insert("typbasetype".into(), Value::Integer(0));
+        m.insert(
+            "typcollation".into(),
+            Value::Integer(if type_oid_is_collatable(r.oid) {
+                100
+            } else {
+                0
+            }),
+        );
         rows.push(encode_row(m)?);
     }
     Ok(rows)

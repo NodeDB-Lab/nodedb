@@ -431,6 +431,8 @@ mod tests {
             join_type: "inner",
             limit: usize::MAX,
             projection: &[],
+            computed_projection_bytes: &[],
+            join_filter_bytes: &[],
             post_filter_bytes: &[],
         };
         let inputs = ShuffleJoinInputs {

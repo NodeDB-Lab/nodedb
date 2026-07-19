@@ -267,6 +267,8 @@ pub static REPLACE_ARGS: &[ArgTypeSpec] =
 
 pub static MAKE_ARRAY_ARGS: &[ArgTypeSpec] = &[any_variadic("expr")];
 
+pub static PG_CATALOG_2_ARGS: &[ArgTypeSpec] = &[any("value"), any("context")];
+
 // ── PostgreSQL JSON operators ─────────────────────────────────────────────────
 
 pub static PG_JSON_2_ARGS: &[ArgTypeSpec] = &[any("json_col"), any("key")];

@@ -306,10 +306,11 @@ pub fn parse_column_type_str_full(type_str: &str) -> (String, bool, bool, Option
     // type_str may look like: "TEXT DEFAULT upper('x')" or "INT NOT NULL DEFAULT 1 + 2".
     let default_expr = if let Some(def_pos) = find_ascii_case_insensitive(type_str, "DEFAULT") {
         let after = type_str[def_pos + "DEFAULT".len()..].trim();
-        if after.is_empty() {
+        let expression = &after[..default_expression_end(after)];
+        if expression.trim().is_empty() {
             None
         } else {
-            Some(after.to_string())
+            Some(expression.trim().to_string())
         }
     } else {
         None
@@ -323,6 +324,62 @@ pub fn parse_column_type_str_full(type_str: &str) -> (String, bool, bool, Option
         .trim_end_matches(',');
 
     (bare.to_string(), is_pk, is_not_null, default_expr)
+}
+
+/// Return the byte offset where a trailing column constraint begins. Constraint
+/// keywords inside quoted strings or parenthesized expressions belong to the
+/// default expression and are intentionally ignored.
+fn default_expression_end(input: &str) -> usize {
+    const CONSTRAINTS: &[&str] = &[
+        "NOT NULL",
+        "PRIMARY KEY",
+        "UNIQUE",
+        "CHECK",
+        "REFERENCES",
+        "COLLATE",
+        "GENERATED",
+        "CONSTRAINT",
+    ];
+
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quoted_by) = quote {
+            if byte == quoted_by {
+                if index + 1 < bytes.len() && bytes[index + 1] == quoted_by {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && (index == 0 || bytes[index - 1].is_ascii_whitespace()) => {
+                let tail = &input[index..];
+                if CONSTRAINTS.iter().any(|keyword| {
+                    tail.get(..keyword.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                        && tail
+                            .as_bytes()
+                            .get(keyword.len())
+                            .is_none_or(|next| next.is_ascii_whitespace() || *next == b'(')
+                }) {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    input.len()
 }
 
 /// Parse TTL from the options list.
@@ -442,6 +499,18 @@ mod tests {
         assert!(!is_pk);
         assert!(!is_not_null);
         assert_eq!(default_expr.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn default_expression_excludes_trailing_constraints() {
+        let (_, _, is_not_null, default_expr) = parse_column_type_str_full(
+            "TEXT DEFAULT concat('NOT NULL', upper('(CHECK)')) NOT NULL UNIQUE",
+        );
+        assert!(is_not_null);
+        assert_eq!(
+            default_expr.as_deref(),
+            Some("concat('NOT NULL', upper('(CHECK)'))")
+        );
     }
 
     // ── engine name → CollectionType variant ─────────────────────────────

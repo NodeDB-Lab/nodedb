@@ -14,6 +14,8 @@ pub(crate) struct JoinParams<'a> {
     pub join_type: &'a str,
     pub limit: usize,
     pub projection: &'a [JoinProjection],
+    pub computed_projection_bytes: &'a [u8],
+    pub join_filter_bytes: &'a [u8],
     pub post_filter_bytes: &'a [u8],
 }
 
@@ -149,7 +151,22 @@ impl JoinParams<'_> {
             }
         }
 
-        if !self.projection.is_empty() {
+        if !self.computed_projection_bytes.is_empty() {
+            let computed: Vec<crate::bridge::expr_eval::ComputedColumn> =
+                zerompk::from_msgpack(self.computed_projection_bytes).map_err(|e| {
+                    crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!("decode join computed projection: {e}"),
+                    }
+                })?;
+            for row in results.iter_mut() {
+                *row = crate::data::executor::handlers::document::read::projection::apply_projection_msgpack(
+                    row,
+                    &computed,
+                    &[],
+                );
+            }
+        } else if !self.projection.is_empty() {
             for row in results.iter_mut() {
                 *row = super::binary_row_project(row, self.projection);
             }
@@ -198,6 +215,8 @@ mod tests {
             join_type: "inner",
             limit: usize::MAX,
             projection: &[],
+            computed_projection_bytes: &[],
+            join_filter_bytes: &[],
             post_filter_bytes: &[],
         };
         let mut results = vec![vec![1u8, 2, 3], vec![4u8, 5, 6]];
@@ -218,6 +237,8 @@ mod tests {
             join_type: "inner",
             limit: usize::MAX,
             projection: &[],
+            computed_projection_bytes: &[],
+            join_filter_bytes: &[],
             post_filter_bytes: corrupt,
         };
         let mut results = vec![vec![0u8; 8]]; // would be "leaked" under the old code
@@ -246,6 +267,8 @@ mod tests {
             join_type: "inner",
             limit: usize::MAX,
             projection: &[],
+            computed_projection_bytes: &[],
+            join_filter_bytes: &[],
             post_filter_bytes: &filter_bytes,
         };
         let mut results = vec![

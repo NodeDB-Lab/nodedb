@@ -123,6 +123,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
                 post_group_by: group_strs,
                 post_aggregates: agg_pairs,
                 projection: Vec::new(),
+                computed_projection: Vec::new(),
+                join_filters: Vec::new(),
                 post_filters: Vec::new(),
                 left_input,
                 right_input,

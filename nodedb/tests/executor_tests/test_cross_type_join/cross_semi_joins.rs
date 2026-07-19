@@ -68,6 +68,8 @@ fn cross_join_uses_inline_right_scalar_aggregate_for_post_filter() {
                 source: "name".into(),
                 output: "name".into(),
             }],
+            computed_projection: Vec::new(),
+            join_filters: Vec::new(),
             post_filters,
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::Aggregate {
@@ -166,6 +168,8 @@ fn cross_join_uses_unaliased_scalar_aggregate_key_for_post_filter() {
                 source: "id".into(),
                 output: "id".into(),
             }],
+            computed_projection: Vec::new(),
+            join_filters: Vec::new(),
             post_filters,
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::Aggregate {
@@ -284,6 +288,8 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
             post_group_by: Vec::new(),
             post_aggregates: Vec::new(),
             projection: Vec::new(),
+            computed_projection: Vec::new(),
+            join_filters: Vec::new(),
             post_filters: Vec::new(),
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::HashJoin {
@@ -300,6 +306,8 @@ fn semi_join_uses_nested_scalar_subquery_result_as_inline_right() {
                     source: "user_id".into(),
                     output: "user_id".into(),
                 }],
+                computed_projection: Vec::new(),
+                join_filters: Vec::new(),
                 post_filters: inner_post_filters,
                 left_input: None,
                 right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::Aggregate {

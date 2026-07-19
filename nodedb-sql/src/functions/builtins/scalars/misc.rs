@@ -56,5 +56,32 @@ pub(super) fn misc_functions() -> Vec<FunctionMeta> {
             Some(ColumnType::String),
             arg_types::NO_ARGS,
         ),
+        m(
+            "format_type",
+            Scalar,
+            2,
+            2,
+            no_trigger(),
+            Some(ColumnType::String),
+            arg_types::PG_CATALOG_2_ARGS,
+        ),
+        m(
+            "pg_get_expr",
+            Scalar,
+            2,
+            2,
+            no_trigger(),
+            Some(ColumnType::String),
+            arg_types::PG_CATALOG_2_ARGS,
+        ),
+        m(
+            "col_description",
+            Scalar,
+            2,
+            2,
+            no_trigger(),
+            Some(ColumnType::String),
+            arg_types::PG_CATALOG_2_ARGS,
+        ),
     ]
 }

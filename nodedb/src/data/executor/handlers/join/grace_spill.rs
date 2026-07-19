@@ -336,6 +336,7 @@ impl PartitionedSpiller {
                     limit: usize::MAX,
                     probe_collection: &probe_collection,
                     index_collection: &index_collection,
+                    join_filters: &[],
                     emit_unmatched_right,
                 });
                 results.append(&mut part);

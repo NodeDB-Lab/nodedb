@@ -47,6 +47,11 @@ pub fn fold_constant_default(expr: &SqlExpr) -> Option<SqlValue> {
 pub fn fold_constant(expr: &SqlExpr, registry: &FunctionRegistry) -> Option<SqlValue> {
     match expr {
         SqlExpr::Literal(v) => Some(v.clone()),
+        SqlExpr::ArrayLiteral(items) => items
+            .iter()
+            .map(|item| fold_constant(item, registry))
+            .collect::<Option<Vec<_>>>()
+            .map(SqlValue::Array),
         SqlExpr::UnaryOp {
             op: UnaryOp::Neg,
             expr,
@@ -333,6 +338,22 @@ mod tests {
             distinct: false,
         };
         assert!(fold_constant(&expr, &registry).is_none());
+    }
+
+    #[test]
+    fn fold_array_literal_recursively() {
+        let registry = FunctionRegistry::new();
+        let expr = SqlExpr::ArrayLiteral(vec![
+            SqlExpr::Literal(SqlValue::String("public".into())),
+            SqlExpr::Literal(SqlValue::Int(42)),
+        ]);
+        assert_eq!(
+            fold_constant(&expr, &registry),
+            Some(SqlValue::Array(vec![
+                SqlValue::String("public".into()),
+                SqlValue::Int(42),
+            ]))
+        );
     }
 
     #[test]

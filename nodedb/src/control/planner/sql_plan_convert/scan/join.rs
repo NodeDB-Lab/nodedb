@@ -4,52 +4,49 @@
 //! synthesis it depends on.
 
 use nodedb_sql::planner::bitmap_emit::predicate::BitmapHint;
-use nodedb_sql::types::{Filter, SqlPlan};
+use nodedb_sql::types::SqlPlan;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{DatabaseId, VShardId};
 use nodedb_physical::physical_plan::*;
 
-use super::super::aggregate::{extract_join_projection_specs, extract_scan_alias};
+use super::super::aggregate::{
+    extract_join_projection_specs, extract_scan_alias, serialize_join_computed_projection,
+};
 use super::super::convert::convert_one;
-use super::super::filter::{expr_filter_qualified, serialize_filters};
+use super::super::filter::{expr_filter_qualified, serialize_join_post_filters};
 use super::super::scan_params::JoinPlanParams;
 use super::super::value::sql_value_to_string;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
-/// Serialize WHERE filters + non-equi join condition into a single `Vec<u8>`.
-///
-/// The non-equi condition (from the ON clause) is appended as a
-/// `FilterOp::Expr` ScanFilter so the join executor evaluates it on
-/// merged rows alongside any post-join WHERE filters.
-fn serialize_join_filters(
-    filters: &[Filter],
+/// Serialize a residual `ON` predicate separately from post-join `WHERE`
+/// filters. Outer joins must decide whether a candidate matched using the ON
+/// predicate before emitting a null-extended row; applying it as a WHERE
+/// predicate would incorrectly discard that row.
+fn serialize_join_condition(
     condition: &Option<nodedb_sql::types::SqlExpr>,
 ) -> crate::Result<Vec<u8>> {
-    match condition {
-        None => serialize_filters(filters),
-        Some(cond) => {
-            let mut scan_filters: Vec<nodedb_query::scan_filter::ScanFilter> =
-                if !filters.is_empty() {
-                    let base = serialize_filters(filters)?;
-                    if base.is_empty() {
-                        Vec::new()
-                    } else {
-                        zerompk::from_msgpack(&base).map_err(|e| crate::Error::Serialization {
-                            format: "msgpack".into(),
-                            detail: format!("join filter deserialize: {e}"),
-                        })?
-                    }
-                } else {
-                    Vec::new()
-                };
-            scan_filters.push(expr_filter_qualified(cond));
-            zerompk::to_msgpack_vec(&scan_filters).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("join filter serialization: {e}"),
-            })
+    let Some(condition) = condition else {
+        return Ok(Vec::new());
+    };
+    zerompk::to_msgpack_vec(&vec![expr_filter_qualified(condition)]).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("join condition serialization: {e}"),
         }
-    }
+    })
+}
+
+fn shuffle_supports_join_tail(
+    projection: &[JoinProjection],
+    computed_projection: &[u8],
+    join_filters: &[u8],
+    post_filters: &[u8],
+) -> bool {
+    projection.is_empty()
+        && computed_projection.is_empty()
+        && join_filters.is_empty()
+        && post_filters.is_empty()
 }
 
 /// Build a `PhysicalPlan` bitmap-producer sub-plan from a `BitmapHint`.
@@ -102,7 +99,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     let mut left_alias = extract_scan_alias(left);
     let mut right_alias = extract_scan_alias(right);
     let join_projection = extract_join_projection_specs(projection);
-    let filter_bytes = serialize_join_filters(filters, condition)?;
+    let computed_projection = serialize_join_computed_projection(projection)?;
+    let join_filter_bytes = serialize_join_condition(condition)?;
+    let filter_bytes = serialize_join_post_filters(filters)?;
 
     // Check if the left side is a nested join (multi-way join).
     // If so, convert the inner join to a physical plan and pass it
@@ -181,7 +180,16 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     let structurally_shufflable = p.ctx.cluster_enabled
         && !on_keys.is_empty()
         && left_input.is_none()
-        && right_input.is_none();
+        && right_input.is_none()
+        // Shuffle consumers currently execute only the bare equi-join. Keep
+        // joins with coordinator-side semantics on the broadcast/local path
+        // until the shuffle protocol carries and reapplies the full tail.
+        && shuffle_supports_join_tail(
+            &join_projection,
+            &computed_projection,
+            &join_filter_bytes,
+            &filter_bytes,
+        );
     let shuffle_eligible = structurally_shufflable
         && (p.ctx.force_shuffle_join
             || super::join_cost::cost_model_picks_shuffle(p.ctx, &left_raw, &right_raw));
@@ -206,6 +214,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
         post_group_by: Vec::new(),
         post_aggregates: Vec::new(),
         projection: join_projection,
+        computed_projection,
+        join_filters: join_filter_bytes,
         post_filters: filter_bytes,
         left_input,
         right_input,
@@ -238,4 +248,26 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
         post_set_op: PostSetOp::None,
         txn_id: None,
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shuffle_rejects_join_tail_semantics() {
+        assert!(shuffle_supports_join_tail(&[], &[], &[], &[]));
+        assert!(!shuffle_supports_join_tail(
+            &[JoinProjection {
+                source: "left.id".into(),
+                output: "id".into(),
+            }],
+            &[],
+            &[],
+            &[],
+        ));
+        assert!(!shuffle_supports_join_tail(&[], &[1], &[], &[]));
+        assert!(!shuffle_supports_join_tail(&[], &[], &[1], &[]));
+        assert!(!shuffle_supports_join_tail(&[], &[], &[], &[1]));
+    }
 }

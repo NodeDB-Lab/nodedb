@@ -186,6 +186,12 @@ pub enum QueryOp {
         post_aggregates: Vec<(String, String)>,
         /// Post-join projection: column names to keep (empty = all).
         projection: Vec<JoinProjection>,
+        /// MessagePack-encoded computed projection expressions. When present,
+        /// these represent the complete SELECT list in output order.
+        computed_projection: Vec<u8>,
+        /// Residual `ON` predicates evaluated for each equi-key candidate
+        /// before outer-join match accounting (MessagePack).
+        join_filters: Vec<u8>,
         /// Post-join WHERE filter predicates (MessagePack).
         post_filters: Vec<u8>,
         /// Resolved child plan for the left side. An Exchange child during

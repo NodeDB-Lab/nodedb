@@ -89,6 +89,8 @@ impl CoreLoop {
                 join_type,
                 limit,
                 projection,
+                computed_projection,
+                join_filters,
                 post_filters,
                 left_input,
                 right_input,
@@ -102,6 +104,8 @@ impl CoreLoop {
                     join_type,
                     limit: *limit,
                     projection,
+                    computed_projection_bytes: computed_projection,
+                    join_filter_bytes: join_filters,
                     post_filter_bytes: post_filters,
                 },
                 tid,
@@ -137,6 +141,8 @@ impl CoreLoop {
                     join_type,
                     limit: *limit,
                     projection: &[],
+                    computed_projection_bytes: &[],
+                    join_filter_bytes: &[],
                     post_filter_bytes: &[],
                 };
                 let inputs = ShuffleJoinInputs {

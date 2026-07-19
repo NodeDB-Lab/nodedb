@@ -169,7 +169,79 @@ async fn pg_attribute_attisdropped_column_projects() {
     );
 }
 
+/// Multi-word SQL type declarations must retain their PostgreSQL OIDs, and
+/// collatable text columns must reference the default `pg_collation` row.
+#[tokio::test]
+async fn pg_attribute_preserves_multiword_types_and_collation() {
+    let srv = TestServer::start().await;
+    srv.exec(
+        "CREATE COLLECTION reflect_type_names (\
+             id INTEGER PRIMARY KEY, \
+             happened_at TIMESTAMP WITH TIME ZONE, \
+             label CHARACTER VARYING)",
+    )
+    .await
+    .expect("create collection with multi-word types");
+
+    assert_eq!(
+        srv.query_text(
+            "SELECT atttypid FROM pg_attribute \
+             WHERE attrelid = 'reflect_type_names'::regclass \
+               AND attname = 'happened_at'",
+        )
+        .await
+        .expect("timestamp type OID projects"),
+        vec!["1184".to_string()]
+    );
+    assert_eq!(
+        srv.query_text(
+            "SELECT atttypid FROM pg_attribute \
+             WHERE attrelid = 'reflect_type_names'::regclass \
+               AND attname = 'label'",
+        )
+        .await
+        .expect("varchar type OID projects"),
+        vec!["1043".to_string()]
+    );
+    assert_eq!(
+        srv.query_text(
+            "SELECT c.collname FROM pg_attribute a \
+             JOIN pg_collation c ON a.attcollation = c.oid \
+             WHERE a.attrelid = 'reflect_type_names'::regclass \
+               AND a.attname = 'label'",
+        )
+        .await
+        .expect("default collation joins"),
+        vec!["default".to_string()]
+    );
+}
+
 // ──────────────────────────── ANY(<array>) predicates ───────────────────────
+
+#[tokio::test]
+async fn current_schemas_scalar_returns_text_array() {
+    let srv = TestServer::start().await;
+
+    let rows = srv
+        .query_text("SELECT current_schemas(false)")
+        .await
+        .expect("current_schemas(false) scalar select evaluates");
+    assert_eq!(
+        rows,
+        vec!["{public}".to_string()],
+        "current_schemas(false) must return a PostgreSQL TEXT[] value"
+    );
+
+    let with_implicit = srv
+        .query_text("SELECT current_schemas(true)")
+        .await
+        .expect("current_schemas(true) scalar select evaluates");
+    assert_eq!(
+        with_implicit,
+        vec!["{pg_catalog,public}".to_string()],
+        "current_schemas(true) must include the implicit pg_catalog schema"
+    );
+}
 
 /// `ANY(current_schemas(true))` must treat `current_schemas(true)` as a
 /// `TEXT[]` including implicit schemas (`pg_catalog`) and evaluate the
@@ -240,6 +312,186 @@ async fn any_over_array_literal_matches_each_element() {
         rows.iter().any(|s| s == "reflect_set_b"),
         "ANY(ARRAY[...]) must match the second element: {rows:?}"
     );
+}
+
+// ───────────────────── ActiveRecord catalog bootstrap queries ─────────────────────
+
+/// ActiveRecord's type-map bootstrap always LEFT JOINs `pg_range`, even when
+/// none of the requested types are ranges. The real query must resolve every
+/// projected catalog column and preserve the requested `pg_type` rows.
+#[tokio::test]
+async fn active_record_type_map_query_joins_pg_range() {
+    let srv = TestServer::start().await;
+
+    let rows = srv
+        .query_rows(
+            "SELECT t.oid, t.typname, t.typelem, t.typdelim, t.typinput, \
+                    r.rngsubtype, t.typtype, t.typbasetype \
+             FROM pg_type AS t \
+             LEFT JOIN pg_range AS r ON t.oid = r.rngtypid \
+             WHERE t.oid IN (23, 25) \
+             ORDER BY t.oid",
+        )
+        .await
+        .expect("ActiveRecord type-map catalog query evaluates");
+
+    assert_eq!(rows.len(), 2, "expected int4 and text type rows: {rows:?}");
+    assert!(
+        rows.iter().all(|row| row.len() == 8),
+        "ActiveRecord expects all eight type-map columns: {rows:?}"
+    );
+    assert_eq!(rows[0][0], "23");
+    assert_eq!(rows[0][1], "int4");
+    assert_eq!(rows[1][0], "25");
+    assert_eq!(rows[1][1], "text");
+}
+
+/// ActiveRecord's column introspection query requires `pg_attrdef` and
+/// `pg_collation` to participate in LEFT JOINs, plus the PostgreSQL metadata
+/// scalar functions used in its projection.
+#[tokio::test]
+async fn active_record_column_definitions_query_resolves() {
+    let srv = TestServer::start().await;
+    srv.exec(
+        "CREATE COLLECTION reflect_ar_columns (\
+             id INTEGER PRIMARY KEY, \
+             title TEXT DEFAULT 'untitled' NOT NULL, \
+             enabled BOOLEAN NOT NULL)",
+    )
+    .await
+    .expect("create collection with introspectable columns");
+
+    let base_rows = srv
+        .query_rows(
+            "SELECT a.attname FROM pg_attribute a \
+             WHERE a.attrelid = 'reflect_ar_columns'::regclass \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+        )
+        .await
+        .expect("base pg_attribute query evaluates");
+    assert_eq!(
+        base_rows.len(),
+        3,
+        "the collection must expose three live pg_attribute rows: {base_rows:?}"
+    );
+
+    let defaults = srv
+        .query_rows("SELECT adbin FROM pg_attrdef")
+        .await
+        .expect("pg_attrdef defaults project");
+    assert_eq!(
+        defaults,
+        vec![vec!["'untitled'".to_string()]],
+        "pg_attrdef must expose the declared default expression"
+    );
+
+    let attrdef_rows = srv
+        .query_rows(
+            "SELECT a.attname, d.adbin FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d \
+               ON a.attrelid = d.adrelid AND a.attnum = d.adnum",
+        )
+        .await
+        .expect("pg_attrdef LEFT JOIN evaluates");
+    assert_eq!(
+        attrdef_rows.len(),
+        3,
+        "pg_attrdef LEFT JOIN must preserve columns without defaults: {attrdef_rows:?}"
+    );
+    let title_default = attrdef_rows
+        .iter()
+        .find(|row| row.first().is_some_and(|name| name == "title"))
+        .expect("title attribute row");
+    assert_eq!(title_default[1], "'untitled'");
+
+    let typed_rows = srv
+        .query_rows(
+            "SELECT a.attname FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d \
+               ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             LEFT JOIN pg_type t ON a.atttypid = t.oid",
+        )
+        .await
+        .expect("pg_type LEFT JOIN evaluates after pg_attrdef");
+    assert_eq!(
+        typed_rows.len(),
+        3,
+        "pg_type LEFT JOIN must preserve every attribute: {typed_rows:?}"
+    );
+
+    let joined_rows = srv
+        .query_rows(
+            "SELECT a.attname FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d \
+               ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             LEFT JOIN pg_type t ON a.atttypid = t.oid \
+             LEFT JOIN pg_collation c \
+               ON a.attcollation = c.oid AND a.attcollation <> t.typcollation",
+        )
+        .await
+        .expect("all ActiveRecord LEFT JOINs evaluate");
+    assert_eq!(
+        joined_rows.len(),
+        3,
+        "ActiveRecord LEFT JOIN chain must preserve all attributes: {joined_rows:?}"
+    );
+
+    let filtered_rows = srv
+        .query_rows(
+            "SELECT a.attname FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d \
+               ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             LEFT JOIN pg_type t ON a.atttypid = t.oid \
+             LEFT JOIN pg_collation c \
+               ON a.attcollation = c.oid AND a.attcollation <> t.typcollation \
+             WHERE a.attrelid = 'reflect_ar_columns'::regclass \
+               AND a.attnum > 0 \
+             ORDER BY a.attnum",
+        )
+        .await
+        .expect("ActiveRecord predicates evaluate after LEFT JOINs");
+    assert_eq!(
+        filtered_rows.len(),
+        3,
+        "ActiveRecord predicates must retain all live columns: {filtered_rows:?}"
+    );
+
+    let rows = srv
+        .query_rows(
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), \
+                    pg_get_expr(d.adbin, d.adrelid), a.attnotnull, \
+                    a.atttypid, a.atttypmod, c.collname, \
+                    col_description(a.attrelid, a.attnum) AS comment, \
+                    a.attidentity, a.attgenerated \
+             FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d \
+               ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+             LEFT JOIN pg_type t ON a.atttypid = t.oid \
+             LEFT JOIN pg_collation c \
+               ON a.attcollation = c.oid AND a.attcollation <> t.typcollation \
+             WHERE a.attrelid = 'reflect_ar_columns'::regclass \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+        )
+        .await
+        .expect("ActiveRecord column-definitions catalog query evaluates");
+
+    assert_eq!(rows.len(), 3, "expected one row per live column: {rows:?}");
+    assert!(
+        rows.iter().all(|row| row.len() == 10),
+        "ActiveRecord expects all ten column-definition fields: {rows:?}"
+    );
+    assert_eq!(rows[0][0], "id");
+    assert_eq!(rows[0][1], "integer");
+    assert_eq!(rows[0][3], "t");
+    assert_eq!(rows[1][0], "title");
+    assert_eq!(rows[1][1], "text");
+    assert_eq!(rows[1][2], "'untitled'");
+    assert_eq!(rows[1][3], "t");
+    assert_eq!(rows[2][0], "enabled");
+    assert_eq!(rows[2][1], "boolean");
+    assert_eq!(rows[2][3], "t");
 }
 
 // ───────────────────────────── cross-vtable JOINs ───────────────────────────

@@ -101,6 +101,8 @@ fn multi_core_broadcast_inner_join() {
             post_group_by: Vec::new(),
             post_aggregates: Vec::new(),
             projection: Vec::new(),
+            computed_projection: Vec::new(),
+            join_filters: Vec::new(),
             post_filters: Vec::new(),
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
@@ -222,6 +224,8 @@ fn multi_core_broadcast_left_join() {
             post_group_by: Vec::new(),
             post_aggregates: Vec::new(),
             projection: Vec::new(),
+            computed_projection: Vec::new(),
+            join_filters: Vec::new(),
             post_filters: Vec::new(),
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
@@ -372,6 +376,8 @@ fn multi_core_broadcast_merge_simulation() {
             post_group_by: Vec::new(),
             post_aggregates: Vec::new(),
             projection: Vec::new(),
+            computed_projection: Vec::new(),
+            join_filters: Vec::new(),
             post_filters: Vec::new(),
             left_input: None,
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {

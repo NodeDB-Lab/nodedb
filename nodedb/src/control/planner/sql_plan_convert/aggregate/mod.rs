@@ -18,7 +18,7 @@ pub(in crate::control::planner::sql_plan_convert) use plan::{
 };
 pub(in crate::control::planner::sql_plan_convert) use projection::{
     extract_computed_columns, extract_join_projection_specs, extract_projection_names,
-    serialize_window_functions,
+    serialize_join_computed_projection, serialize_window_functions,
 };
 pub(in crate::control::planner::sql_plan_convert) use spec::{
     agg_expr_to_pair, extract_collection_name, extract_scan_alias, inline_join_side,

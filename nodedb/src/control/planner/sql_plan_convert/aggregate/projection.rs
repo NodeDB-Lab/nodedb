@@ -6,7 +6,7 @@ use nodedb_sql::types::{Projection, SqlExpr, WindowSpec};
 
 use nodedb_physical::physical_plan::JoinProjection;
 
-use super::super::expr::sql_expr_to_bridge_expr;
+use super::super::expr::{sql_expr_to_bridge_expr, sql_expr_to_bridge_expr_qualified};
 
 pub(in crate::control::planner::sql_plan_convert) fn extract_projection_names(
     proj: &[Projection],
@@ -46,6 +46,53 @@ pub(in crate::control::planner::sql_plan_convert) fn extract_join_projection_spe
             _ => None,
         })
         .collect()
+}
+
+pub(in crate::control::planner::sql_plan_convert) fn serialize_join_computed_projection(
+    proj: &[Projection],
+) -> crate::Result<Vec<u8>> {
+    let has_expression = proj.iter().any(|item| {
+        matches!(
+            item,
+            Projection::Computed { expr, .. }
+                if !matches!(expr, SqlExpr::Column { .. })
+        )
+    });
+    if !has_expression {
+        return Ok(Vec::new());
+    }
+    if proj
+        .iter()
+        .any(|item| matches!(item, Projection::Star | Projection::QualifiedStar(_)))
+    {
+        return Err(crate::Error::BadRequest {
+            detail: "join projections cannot combine a wildcard with a computed expression; list the projected columns explicitly".into(),
+        });
+    }
+
+    let computed = proj
+        .iter()
+        .map(|item| match item {
+            Projection::Column(name) => Some(crate::bridge::expr_eval::ComputedColumn {
+                alias: name.clone(),
+                expr: crate::bridge::expr_eval::SqlExpr::Column(name.clone()),
+            }),
+            Projection::Computed { expr, alias } => {
+                Some(crate::bridge::expr_eval::ComputedColumn {
+                    alias: alias.clone(),
+                    expr: sql_expr_to_bridge_expr_qualified(expr),
+                })
+            }
+            Projection::Star | Projection::QualifiedStar(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: "wildcard join projection reached computed-expression lowering".into(),
+        })?;
+    zerompk::to_msgpack_vec(&computed).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("join computed projection: {e}"),
+    })
 }
 
 pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
@@ -98,4 +145,25 @@ pub(in crate::control::planner::sql_plan_convert) fn serialize_window_functions(
     zerompk::to_msgpack_vec(&bridge_specs).map_err(|e| crate::Error::Internal {
         detail: format!("serialize window functions: {e}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_sql::types::SqlValue;
+
+    #[test]
+    fn computed_join_projection_rejects_mixed_wildcards() {
+        let projection = vec![
+            Projection::Star,
+            Projection::Computed {
+                expr: SqlExpr::Literal(SqlValue::Int(1)),
+                alias: "one".into(),
+            },
+        ];
+        assert!(matches!(
+            serialize_join_computed_projection(&projection),
+            Err(crate::Error::BadRequest { .. })
+        ));
+    }
 }
