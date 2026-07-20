@@ -190,6 +190,7 @@ pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
         ),
         E::DeleteContinuousAggregate { name, .. } => (name.clone(), 0, String::new()),
         E::PutTenant(t) => (t.name.clone(), 0, String::new()),
+        E::PutTenantWithAdmin { tenant, admin } => (tenant.name.clone(), 0, admin.username.clone()),
         E::DeleteTenant { tenant_id, .. } => (tenant_id.to_string(), 0, String::new()),
         E::PutRlsPolicy(p) => (p.name.clone(), 0, String::new()),
         E::DeleteRlsPolicy { name, .. } => (name.clone(), 0, String::new()),

@@ -4,7 +4,9 @@
 
 use tracing::warn;
 
-use crate::control::security::catalog::{StoredCollection, StoredTenant, SystemCatalog};
+use crate::control::security::catalog::{
+    StoredCollection, StoredTenant, StoredUser, SystemCatalog,
+};
 use crate::types::DatabaseId;
 
 pub fn put(stored: &StoredTenant, catalog: &SystemCatalog) {
@@ -15,6 +17,22 @@ pub fn put(stored: &StoredTenant, catalog: &SystemCatalog) {
             error = %e,
             "catalog_entry: put_tenant failed"
         );
+    }
+}
+
+pub fn put_with_admin(tenant: &StoredTenant, admin: &StoredUser, catalog: &SystemCatalog) -> bool {
+    match catalog.put_tenant_with_admin(tenant, admin) {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                tenant = tenant.tenant_id,
+                name = %tenant.name,
+                admin = %admin.username,
+                %error,
+                "catalog_entry: put_tenant_with_admin failed"
+            );
+            false
+        }
     }
 }
 

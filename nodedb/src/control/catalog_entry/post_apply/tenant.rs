@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::control::security::catalog::{StoredCollection, StoredTenant};
+use crate::control::security::catalog::{StoredCollection, StoredTenant, StoredUser};
 use crate::control::security::tenant::TenantQuota;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
@@ -33,6 +33,11 @@ pub fn put(stored: StoredTenant, shared: Arc<SharedState>) {
         name = %stored.name,
         "post_apply: tenant identity replicated"
     );
+}
+
+pub fn put_with_admin(tenant: StoredTenant, admin: StoredUser, shared: Arc<SharedState>) {
+    shared.credentials.install_replicated_user(&admin, None);
+    put(tenant, shared);
 }
 
 pub fn delete(tenant_id: u64, shared: Arc<SharedState>) {

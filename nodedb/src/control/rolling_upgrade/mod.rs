@@ -23,6 +23,6 @@ pub mod view;
 
 pub use versions::{
     DESCRIPTOR_DRAIN_VERSION, DESCRIPTOR_VERSIONING_VERSION, DISTRIBUTED_CATALOG_VERSION,
-    accept_message, should_compat_mode,
+    TENANT_ADMIN_ATOMIC_VERSION, accept_message, should_compat_mode,
 };
 pub use view::{ClusterVersionView, compute_from_topology};

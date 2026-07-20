@@ -27,13 +27,10 @@
 //! and an owner row whose `object_type` maps to no known kind is a hard
 //! `DROP USER` error rather than a silently-skipped dangling reference.
 
-use nodedb_types::DatabaseId;
-
 use crate::control::catalog_entry::CatalogEntry;
 use crate::control::metadata_proposer::propose_catalog_entry;
 use crate::control::security::catalog::auth_types::object_type;
 use crate::control::security::catalog::{StoredOwner, SystemCatalog};
-use crate::control::security::permission::format_permission;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
@@ -93,21 +90,35 @@ impl OwnerKind {
     }
 }
 
-/// Reassign every object owned by `username` (within `user_tenant`) to
-/// `admin_name`, then revoke every grant made to `username`. Runs to
-/// completion before the caller removes the user row; any failure
-/// aborts the whole drop (fail-closed).
+/// Reassign every object owned by `username` (within `user_tenant`) to the
+/// tenant's validated ownership fallback, then revoke every grant made to the
+/// user. A fallback is required only when owned objects exist, allowing tenant
+/// teardown to remove an object-free final admin. Returns the selected target.
 pub(super) fn reassign_owned_and_sweep_grants(
     state: &SharedState,
     username: &str,
     user_tenant: TenantId,
-    admin_name: &str,
-) -> Result<(), DdlError> {
+) -> Result<Option<String>, DdlError> {
     let catalog = state.credentials.catalog();
 
     let owned = catalog
         .owners_for_user(username, user_tenant.as_u64())
         .map_err(|e| ddl_err(format!("load owner rows: {e}")))?;
+    if owned.is_empty() {
+        sweep_grants(state, catalog, username)?;
+        return Ok(None);
+    }
+    let admin_name = catalog
+        .resolve_ownership_fallback(user_tenant.as_u64(), username)
+        .map_err(|e| ddl_err(format!("resolve ownership fallback: {e}")))?
+        .ok_or_else(|| DdlError {
+            sqlstate: "55000".to_string(),
+            message: format!(
+                "cannot drop user '{username}': tenant {} has no active administrative \
+                 principal available for ownership reassignment",
+                user_tenant.as_u64()
+            ),
+        })?;
     for owner in &owned {
         let kind = OwnerKind::from_object_type(&owner.object_type).ok_or_else(|| {
             ddl_err(format!(
@@ -122,12 +133,12 @@ pub(super) fn reassign_owned_and_sweep_grants(
             kind,
             user_tenant,
             &owner.object_name,
-            admin_name,
+            &admin_name,
         )?;
     }
 
     sweep_grants(state, catalog, username)?;
-    Ok(())
+    Ok(Some(admin_name))
 }
 
 /// Reassign a single owned object to `admin_name`. Re-proposes the
@@ -147,16 +158,27 @@ fn reassign_one(
     let object_type = kind.as_object_type();
     match kind {
         OwnerKind::Collection => {
-            let mut s = catalog
-                .get_collection(DatabaseId::DEFAULT, tenant_id, name)
+            let matches: Vec<_> = catalog
+                .load_all_collections_across_databases()
                 .map_err(|e| ddl_err(format!("get collection '{name}': {e}")))?
-                .ok_or_else(|| missing(object_type, name))?;
-            s.owner = admin_name.to_string();
-            let entry = CatalogEntry::PutCollection(Box::new(s.clone()));
-            if propose(state, &entry)? == 0 {
-                catalog
-                    .put_collection(s.database_id, &s)
-                    .map_err(|e| ddl_err(format!("put collection '{name}': {e}")))?;
+                .into_iter()
+                .filter(|stored| stored.tenant_id == tenant_id && stored.name == name)
+                .collect();
+            if matches.is_empty() {
+                return Err(missing(object_type, name));
+            }
+            let mut applied_locally = false;
+            for mut stored in matches {
+                stored.owner = admin_name.to_string();
+                let entry = CatalogEntry::PutCollection(Box::new(stored.clone()));
+                if propose(state, &entry)? == 0 {
+                    catalog
+                        .put_collection(stored.database_id, &stored)
+                        .map_err(|e| ddl_err(format!("put collection '{name}': {e}")))?;
+                    applied_locally = true;
+                }
+            }
+            if applied_locally {
                 persist_owner_local(state, catalog, object_type, tenant_id, name, admin_name)?;
             }
         }
@@ -262,16 +284,27 @@ fn reassign_one(
             }
         }
         OwnerKind::ContinuousAggregate => {
-            let mut s = catalog
-                .get_continuous_aggregate(DatabaseId::DEFAULT.as_u64(), tenant_id, name)
+            let matches: Vec<_> = catalog
+                .load_all_continuous_aggregates()
                 .map_err(|e| ddl_err(format!("get continuous_aggregate '{name}': {e}")))?
-                .ok_or_else(|| missing(object_type, name))?;
-            s.owner = admin_name.to_string();
-            let entry = CatalogEntry::PutContinuousAggregate(Box::new(s.clone()));
-            if propose(state, &entry)? == 0 {
-                catalog
-                    .put_continuous_aggregate(&s)
-                    .map_err(|e| ddl_err(format!("put continuous_aggregate '{name}': {e}")))?;
+                .into_iter()
+                .filter(|stored| stored.tenant_id == tenant_id && stored.name == name)
+                .collect();
+            if matches.is_empty() {
+                return Err(missing(object_type, name));
+            }
+            let mut applied_locally = false;
+            for mut stored in matches {
+                stored.owner = admin_name.to_string();
+                let entry = CatalogEntry::PutContinuousAggregate(Box::new(stored.clone()));
+                if propose(state, &entry)? == 0 {
+                    catalog
+                        .put_continuous_aggregate(&stored)
+                        .map_err(|e| ddl_err(format!("put continuous_aggregate '{name}': {e}")))?;
+                    applied_locally = true;
+                }
+            }
+            if applied_locally {
                 persist_owner_local(state, catalog, object_type, tenant_id, name, admin_name)?;
             }
         }
@@ -286,10 +319,7 @@ fn reassign_one(
             };
             let entry = CatalogEntry::PutOwner(Box::new(stored.clone()));
             if propose(state, &entry)? == 0 {
-                catalog
-                    .put_owner(&stored)
-                    .map_err(|e| ddl_err(format!("put owner '{name}': {e}")))?;
-                state.permissions.install_replicated_owner(&stored);
+                persist_owner_local(state, catalog, object_type, tenant_id, name, admin_name)?;
             }
         }
     }
@@ -304,20 +334,22 @@ fn sweep_grants(
     username: &str,
 ) -> Result<(), DdlError> {
     let grantee = format!("user:{username}");
-    for grant in state.permissions.grants_for(&grantee) {
-        let perm_str = format_permission(grant.permission);
+    let grants = catalog
+        .load_all_permissions()
+        .map_err(|e| ddl_err(format!("load permissions: {e}")))?;
+    for grant in grants.into_iter().filter(|grant| grant.grantee == grantee) {
         let entry = CatalogEntry::DeletePermission {
             target: grant.target.clone(),
             grantee: grantee.clone(),
-            permission: perm_str.clone(),
+            permission: grant.permission.clone(),
         };
         if propose(state, &entry)? == 0 {
             catalog
-                .delete_permission(&grant.target, &grantee, &perm_str)
+                .delete_permission(&grant.target, &grantee, &grant.permission)
                 .map_err(|e| ddl_err(format!("delete permission on '{}': {e}", grant.target)))?;
             state
                 .permissions
-                .install_replicated_revoke(&grant.target, &grantee, &perm_str);
+                .install_replicated_revoke(&grant.target, &grantee, &grant.permission);
         }
     }
     Ok(())
@@ -334,16 +366,15 @@ fn persist_owner_local(
     name: &str,
     admin_name: &str,
 ) -> Result<(), DdlError> {
-    let stored = StoredOwner {
+    catalog
+        .rewrite_object_owner(object_type, tenant_id, name, admin_name)
+        .map_err(|e| ddl_err(format!("rewrite owner for {object_type} '{name}': {e}")))?;
+    state.permissions.install_replicated_owner(&StoredOwner {
         object_type: object_type.to_string(),
         object_name: name.to_string(),
         tenant_id,
         owner_username: admin_name.to_string(),
-    };
-    catalog
-        .put_owner(&stored)
-        .map_err(|e| ddl_err(format!("put owner for {object_type} '{name}': {e}")))?;
-    state.permissions.install_replicated_owner(&stored);
+    });
     Ok(())
 }
 

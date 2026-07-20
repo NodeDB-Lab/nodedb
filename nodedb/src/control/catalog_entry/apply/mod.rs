@@ -46,8 +46,19 @@ use crate::control::security::catalog::SystemCatalog;
 /// developer runs instead of deferring to the next restart, so
 /// reviewers don't need to rely on a user report to surface
 /// half-finished sync work. Release builds skip the check.
-pub fn apply_to(entry: &CatalogEntry, catalog: &SystemCatalog) {
-    apply_to_inner(entry, catalog);
+pub fn apply_to(entry: &CatalogEntry, catalog: &SystemCatalog) -> bool {
+    let applied = match entry {
+        CatalogEntry::PutTenantWithAdmin { tenant, admin } => {
+            tenant::put_with_admin(tenant, admin, catalog)
+        }
+        _ => {
+            apply_to_inner(entry, catalog);
+            true
+        }
+    };
+    if !applied {
+        return false;
+    }
     #[cfg(debug_assertions)]
     {
         // Narrow to OrphanRow — the "half-finished sync" class this
@@ -72,6 +83,7 @@ pub fn apply_to(entry: &CatalogEntry, catalog: &SystemCatalog) {
             orphans,
         );
     }
+    true
 }
 
 fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) {
@@ -139,6 +151,8 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) {
             name,
         } => continuous_aggregate::delete(*database_id, *tenant_id, name, catalog),
         CatalogEntry::PutTenant(stored) => tenant::put(stored, catalog),
+        // Applied by `apply_to` so its commit outcome can suppress post-apply.
+        CatalogEntry::PutTenantWithAdmin { .. } => {}
         CatalogEntry::DeleteTenant { tenant_id } => tenant::delete(*tenant_id, catalog),
         CatalogEntry::PutRlsPolicy(stored) => rls::put(stored, catalog),
         CatalogEntry::DeleteRlsPolicy {

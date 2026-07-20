@@ -157,6 +157,7 @@ pub fn spawn_post_apply_async_side_effects(
         // PutContinuousAggregate / DeleteContinuousAggregate have their
         // own async branches above; they do not appear here.
         | CatalogEntry::PutTenant(_)
+        | CatalogEntry::PutTenantWithAdmin { .. }
         | CatalogEntry::DeleteTenant { .. }
         | CatalogEntry::PutRlsPolicy(_)
         | CatalogEntry::DeleteRlsPolicy { .. }

@@ -1,31 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Self-heal pass for `OrphanRow` integrity violations.
+//! Catalog-local repair for recoverable referential-integrity violations.
 //!
-//! The startup catalog sanity check used to treat every orphan row
-//! as fatal — a single CREATE DDL that landed the primary row
-//! without its companion `StoredOwner` (the original
-//! single-node bypass bug) would brick boot at the
-//! `CatalogSanityCheck` phase with no operator recourse short of
-//! wiping `system.redb`.
-//!
-//! Every parent-replicated `Stored<T>` carries the creator's
-//! username in-band (`StoredCollection.owner`,
-//! `StoredFunction.owner`, etc. — kept in sync by every applier
-//! including `DeactivateCollection`). That is total reconstruction
-//! information for the missing `StoredOwner` row, so an orphan is
-//! always recoverable without operator action.
-//!
-//! [`heal_orphan_rows`] runs after `verify_redb_integrity` and
-//! before the report is assembled. For every `OrphanRow` whose
-//! parent kind is `owner`, it reads the surviving primary row, lifts
-//! its `owner` field, and writes the missing `StoredOwner` back to
-//! the `OWNERS` table. Healed divergences are dropped from the
-//! returned list; anything we can't repair (the primary row really
-//! is gone, or the catalog write fails) stays in
-//! `integrity_violations` and still aborts startup.
+//! Missing owner rows are reconstructed from primary records. Owner rows that
+//! reference a missing user are reassigned through the tenant's authoritative
+//! ownership fallback, updating the primary record and `StoredOwner` together.
+//! Grants to missing users are revoked rather than transferred. Any violation
+//! that cannot be repaired deterministically remains fatal to startup.
 
-use nodedb_types::DatabaseId;
 use tracing::{info, warn};
 
 use crate::control::security::catalog::SystemCatalog;
@@ -33,83 +15,187 @@ use crate::control::security::catalog::auth_types::{StoredOwner, object_type};
 
 use super::divergence::{Divergence, DivergenceKind};
 
-/// Heal every `OrphanRow { expected_parent_kind: "owner", .. }`
-/// violation in `violations` by reconstructing the missing
-/// `StoredOwner` row from the primary row's in-band `owner` field.
+/// Attempt every deterministic repair represented by `violations`.
 ///
-/// Returns `(remaining, healed)`. `remaining` contains every
-/// divergence we did not repair (different kinds, primary row
-/// missing, write failure); `healed` is the count of orphan rows
-/// successfully repaired — surfaced in the `VerifyReport` so the
-/// `CatalogSanityCheck` log line shows `repaired=N` instead of the
-/// pre-fix `repaired=0`.
+/// Returns `(remaining, healed)`. Registry caches are intentionally not
+/// mutated here; the caller reloads divergent registries from the repaired
+/// catalog before startup proceeds.
 pub fn heal_orphan_rows(
     catalog: &SystemCatalog,
     violations: Vec<Divergence>,
 ) -> (Vec<Divergence>, usize) {
     let mut remaining = Vec::with_capacity(violations.len());
     let mut healed = 0usize;
-    for d in violations {
-        if let DivergenceKind::OrphanRow {
-            kind,
-            key,
-            expected_parent_kind: "owner",
-        } = &d.kind
-            && let Some((tenant_id, name)) = parse_key(key)
-            && let Some(owner_username) = primary_row_owner(catalog, kind, tenant_id, &name)
-        {
-            let stored = StoredOwner {
-                object_type: (*kind).to_string(),
-                object_name: name.clone(),
-                tenant_id,
-                owner_username: owner_username.clone(),
-            };
-            match catalog.put_owner(&stored) {
-                Ok(()) => {
-                    info!(
-                        kind,
-                        tenant_id,
-                        object = %name,
-                        owner = %owner_username,
-                        "catalog sanity check: healed orphan row by \
-                         reconstructing StoredOwner from primary row's \
-                         in-band owner field"
-                    );
-                    healed += 1;
-                    continue;
-                }
-                Err(e) => warn!(
-                    kind,
-                    tenant_id,
-                    object = %name,
-                    error = %e,
-                    "catalog sanity check: could not heal orphan row — \
-                     leaving divergence in integrity_violations"
-                ),
-            }
+
+    for divergence in violations {
+        let repaired = match &divergence.kind {
+            DivergenceKind::OrphanRow {
+                kind,
+                key,
+                expected_parent_kind: "owner",
+            } => repair_missing_owner(catalog, kind, key),
+            DivergenceKind::DanglingReference {
+                from_kind: "owner",
+                from_key,
+                to_kind: "user",
+                to_key,
+            } => repair_dangling_owner(catalog, from_key, to_key),
+            DivergenceKind::DanglingReference {
+                from_kind: "permission",
+                from_key,
+                to_kind: "user",
+                to_key,
+            } => revoke_dangling_grant(catalog, from_key, to_key),
+            _ => false,
+        };
+
+        if repaired {
+            healed += 1;
+        } else {
+            remaining.push(divergence);
         }
-        remaining.push(d);
     }
+
     (remaining, healed)
 }
 
-/// Parse the `OrphanRow.key` format `"{tenant_id}:{name}"` written
-/// by `verify_redb_integrity`. Returns `None` if the key isn't in
-/// that shape (e.g. a future divergence kind reuses the field with
-/// different semantics) — the caller then leaves the divergence
-/// unrepaired rather than guessing.
-fn parse_key(key: &str) -> Option<(u64, String)> {
-    let (tenant, name) = key.split_once(':')?;
-    let tenant_id = tenant.parse().ok()?;
-    Some((tenant_id, name.to_string()))
+fn repair_missing_owner(catalog: &SystemCatalog, kind: &str, key: &str) -> bool {
+    let Some((tenant_id, name)) = parse_object_key(key) else {
+        return false;
+    };
+    let Some(owner_username) = primary_row_owner(catalog, kind, tenant_id, &name) else {
+        return false;
+    };
+    let stored = StoredOwner {
+        object_type: kind.to_string(),
+        object_name: name.clone(),
+        tenant_id,
+        owner_username: owner_username.clone(),
+    };
+    match catalog.put_owner(&stored) {
+        Ok(()) => {
+            info!(kind, tenant_id, object = %name, owner = %owner_username,
+                "catalog sanity check: reconstructed missing owner row");
+            true
+        }
+        Err(error) => {
+            warn!(kind, tenant_id, object = %name, %error,
+                "catalog sanity check: could not reconstruct missing owner row");
+            false
+        }
+    }
 }
 
-/// Look up the surviving primary row for a parent-replicated DDL
-/// object and return its in-band `owner` field. `None` means the
-/// primary row is genuinely missing — at which point the orphan
-/// cannot be auto-repaired and startup should still abort, because
-/// `verify_redb_integrity` should not have flagged this divergence
-/// in the first place if the primary were gone.
+fn repair_dangling_owner(catalog: &SystemCatalog, from_key: &str, missing_user: &str) -> bool {
+    let Some((kind, tenant_id, name)) = parse_owner_reference(from_key) else {
+        return false;
+    };
+    if kind != object_type::INDEX
+        && let Some(primary_owner) = primary_row_owner(catalog, kind, tenant_id, &name)
+        && user_exists_in_tenant(catalog, tenant_id, &primary_owner)
+    {
+        let owner = StoredOwner {
+            object_type: kind.to_string(),
+            object_name: name.clone(),
+            tenant_id,
+            owner_username: primary_owner.clone(),
+        };
+        return match catalog.put_owner(&owner) {
+            Ok(()) => {
+                info!(kind, tenant_id, object = %name, owner = %primary_owner,
+                    "catalog sanity check: restored owner row from canonical primary owner");
+                true
+            }
+            Err(error) => {
+                warn!(kind, tenant_id, object = %name, owner = %primary_owner, %error,
+                    "catalog sanity check: could not restore canonical owner row");
+                false
+            }
+        };
+    }
+
+    let replacement = match catalog.resolve_ownership_fallback(tenant_id, missing_user) {
+        Ok(Some(username)) => username,
+        Ok(None) => return false,
+        Err(error) => {
+            warn!(tenant_id, owner = missing_user, %error,
+                "catalog sanity check: could not resolve ownership fallback");
+            return false;
+        }
+    };
+
+    match catalog.rewrite_object_owner(kind, tenant_id, &name, &replacement) {
+        Ok(()) => {
+            info!(kind, tenant_id, object = %name, owner = %replacement,
+                "catalog sanity check: reassigned dangling owner reference");
+            true
+        }
+        Err(error) => {
+            warn!(kind, tenant_id, object = %name, owner = %replacement, %error,
+                "catalog sanity check: could not reassign dangling owner reference");
+            false
+        }
+    }
+}
+
+fn user_exists_in_tenant(catalog: &SystemCatalog, tenant_id: u64, username: &str) -> bool {
+    match catalog.load_all_users() {
+        Ok(users) => users
+            .into_iter()
+            .any(|user| user.tenant_id == tenant_id && user.username == username),
+        Err(error) => {
+            warn!(tenant_id, user = username, %error,
+                "catalog sanity check: could not validate canonical owner");
+            false
+        }
+    }
+}
+
+fn revoke_dangling_grant(catalog: &SystemCatalog, from_key: &str, missing_user: &str) -> bool {
+    let grantee = format!("user:{missing_user}");
+    let grants = match catalog.load_all_permissions() {
+        Ok(grants) => grants,
+        Err(error) => {
+            warn!(user = missing_user, %error,
+                "catalog sanity check: could not load dangling grants");
+            return false;
+        }
+    };
+    let Some(grant) = grants.into_iter().find(|grant| {
+        grant.grantee == grantee && format!("{}:{}", grant.target, grant.grantee) == from_key
+    }) else {
+        return false;
+    };
+
+    match catalog.delete_permission(&grant.target, &grant.grantee, &grant.permission) {
+        Ok(()) => {
+            info!(target = %grant.target, grantee = %grant.grantee,
+                permission = %grant.permission,
+                "catalog sanity check: revoked grant to missing user");
+            true
+        }
+        Err(error) => {
+            warn!(target = %grant.target, grantee = %grant.grantee,
+                permission = %grant.permission, %error,
+                "catalog sanity check: could not revoke grant to missing user");
+            false
+        }
+    }
+}
+
+fn parse_object_key(key: &str) -> Option<(u64, String)> {
+    let (tenant, name) = key.split_once(':')?;
+    Some((tenant.parse().ok()?, name.to_string()))
+}
+
+fn parse_owner_reference(key: &str) -> Option<(&str, u64, String)> {
+    let mut parts = key.splitn(3, ':');
+    let kind = parts.next()?;
+    let tenant_id = parts.next()?.parse().ok()?;
+    let name = parts.next()?.to_string();
+    Some((kind, tenant_id, name))
+}
+
 fn primary_row_owner(
     catalog: &SystemCatalog,
     kind: &str,
@@ -118,60 +204,53 @@ fn primary_row_owner(
 ) -> Option<String> {
     match kind {
         object_type::COLLECTION => catalog
-            .get_collection(DatabaseId::DEFAULT, tenant_id, name)
-            .ok()
-            .flatten()
-            .map(|c| c.owner),
+            .load_all_collections_across_databases()
+            .ok()?
+            .into_iter()
+            .find(|stored| stored.tenant_id == tenant_id && stored.name == name)
+            .map(|stored| stored.owner),
         object_type::FUNCTION => catalog
             .get_function(tenant_id, name)
             .ok()
             .flatten()
-            .map(|f| f.owner),
+            .map(|stored| stored.owner),
         object_type::PROCEDURE => catalog
             .get_procedure(tenant_id, name)
             .ok()
             .flatten()
-            .map(|p| p.owner),
+            .map(|stored| stored.owner),
         object_type::TRIGGER => catalog
             .get_trigger(tenant_id, name)
             .ok()
             .flatten()
-            .map(|t| t.owner),
+            .map(|stored| stored.owner),
         object_type::MATERIALIZED_VIEW => catalog
             .get_materialized_view(tenant_id, name)
             .ok()
             .flatten()
-            .map(|m| m.owner),
+            .map(|stored| stored.owner),
         object_type::SEQUENCE => catalog
             .get_sequence(tenant_id, name)
             .ok()
             .flatten()
-            .map(|s| s.owner),
+            .map(|stored| stored.owner),
         object_type::SCHEDULE => catalog
             .load_all_schedules()
-            .ok()
-            .and_then(|all| {
-                all.into_iter()
-                    .find(|s| s.tenant_id == tenant_id && s.name == name)
-            })
-            .map(|s| s.owner),
+            .ok()?
+            .into_iter()
+            .find(|stored| stored.tenant_id == tenant_id && stored.name == name)
+            .map(|stored| stored.owner),
         object_type::CHANGE_STREAM => catalog
             .get_change_stream(tenant_id, name)
             .ok()
             .flatten()
-            .map(|c| c.owner),
+            .map(|stored| stored.owner),
         object_type::CONTINUOUS_AGGREGATE => catalog
-            // This recovery-repair owner lookup is keyed only by
-            // (tenant_id, name); like the COLLECTION arm above it resolves
-            // within the default database. Cross-database owner repair is a
-            // separate verifier initiative.
-            .get_continuous_aggregate(DatabaseId::DEFAULT.as_u64(), tenant_id, name)
-            .ok()
-            .flatten()
-            .map(|c| c.owner),
-        // Unknown kinds shouldn't appear in OrphanRow today (the
-        // verifier only flags the parent-replicated types) but
-        // surface here as "couldn't repair" rather than crashing.
+            .load_all_continuous_aggregates()
+            .ok()?
+            .into_iter()
+            .find(|stored| stored.tenant_id == tenant_id && stored.name == name)
+            .map(|stored| stored.owner),
         _ => None,
     }
 }

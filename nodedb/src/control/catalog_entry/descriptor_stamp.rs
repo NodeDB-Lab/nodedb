@@ -194,6 +194,7 @@ pub fn stamp(entry: CatalogEntry, clock: &HlcClock, catalog: &SystemCatalog) -> 
         | CatalogEntry::PutApiKey(_)
         | CatalogEntry::RevokeApiKey { .. }
         | CatalogEntry::PutTenant(_)
+        | CatalogEntry::PutTenantWithAdmin { .. }
         | CatalogEntry::DeleteTenant { .. }
         | CatalogEntry::PutRlsPolicy(_)
         | CatalogEntry::DeleteRlsPolicy { .. }

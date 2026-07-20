@@ -67,7 +67,9 @@ impl MetadataCommitApplier {
         catalog_entry::descriptor_stamp::validate(&stamped, catalog)?;
 
         debug!(kind = stamped.kind(), "catalog_entry: applying to redb");
-        catalog_entry::apply::apply_to(&stamped, catalog);
+        if !catalog_entry::apply::apply_to(&stamped, catalog) {
+            return Ok(());
+        }
         // Implicit drain clear: if the entry is a `Put*` for one
         // of the six stamped descriptor types, the DDL that was
         // waiting on drain has now committed — remove the drain

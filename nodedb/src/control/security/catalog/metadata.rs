@@ -5,7 +5,9 @@
 use redb::ReadableTable;
 
 use super::tenant_id_hwm::{HWM_KEY, TENANT_ID_HWM};
-use super::types::{METADATA, StoredTenant, SystemCatalog, TENANTS, catalog_err};
+use super::types::{
+    METADATA, StoredTenant, StoredUser, SystemCatalog, TENANTS, USERS, catalog_err,
+};
 
 impl SystemCatalog {
     /// Load the next_user_id counter.
@@ -87,6 +89,150 @@ impl SystemCatalog {
                 .map(|v| v.value())
                 .unwrap_or(0);
             if tenant.tenant_id > cur {
+                hwm.insert(HWM_KEY, tenant.tenant_id)
+                    .map_err(|e| catalog_err("insert tenant_id_hwm", e))?;
+            }
+        }
+        write_txn.commit().map_err(|e| catalog_err("commit", e))
+    }
+
+    /// Atomically persist a tenant and its authoritative administrator.
+    pub fn put_tenant_with_admin(
+        &self,
+        tenant: &StoredTenant,
+        admin: &StoredUser,
+    ) -> crate::Result<()> {
+        if tenant.tenant_id != admin.tenant_id || tenant.admin_username != admin.username {
+            return Err(catalog_err(
+                "validate tenant administrator",
+                "tenant and administrator identities do not match",
+            ));
+        }
+        let tenant_key = tenant.tenant_id.to_string();
+        let tenant_bytes =
+            zerompk::to_msgpack_vec(tenant).map_err(|e| catalog_err("serialize tenant", e))?;
+        let admin_bytes =
+            zerompk::to_msgpack_vec(admin).map_err(|e| catalog_err("serialize admin", e))?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| catalog_err("write txn", e))?;
+        let admin_exists = {
+            let users = write_txn
+                .open_table(USERS)
+                .map_err(|e| catalog_err("open users", e))?;
+            match users
+                .get(admin.username.as_str())
+                .map_err(|e| catalog_err("get admin", e))?
+            {
+                Some(existing) if existing.value() == admin_bytes.as_slice() => true,
+                Some(_) => {
+                    return Err(catalog_err(
+                        "insert admin",
+                        format!("user '{}' already exists", admin.username),
+                    ));
+                }
+                None => false,
+            }
+        };
+        let tenant_exists = {
+            let tenants = write_txn
+                .open_table(TENANTS)
+                .map_err(|e| catalog_err("open tenants", e))?;
+            let existing_id = tenants
+                .get(tenant_key.as_str())
+                .map_err(|e| catalog_err("get tenant", e))?;
+            let exact_id = match existing_id {
+                Some(existing) if existing.value() == tenant_bytes.as_slice() => true,
+                Some(_) => {
+                    return Err(catalog_err(
+                        "insert tenant",
+                        format!("tenant id '{}' already exists", tenant.tenant_id),
+                    ));
+                }
+                None => false,
+            };
+            for row in tenants
+                .iter()
+                .map_err(|e| catalog_err("iterate tenants", e))?
+            {
+                let (_, value) = row.map_err(|e| catalog_err("read tenant", e))?;
+                let existing: StoredTenant = zerompk::from_msgpack(value.value())
+                    .map_err(|e| catalog_err("decode tenant", e))?;
+                if existing.name == tenant.name && existing.tenant_id != tenant.tenant_id {
+                    return Err(catalog_err(
+                        "insert tenant",
+                        format!("tenant name '{}' already exists", tenant.name),
+                    ));
+                }
+            }
+            exact_id
+        };
+        match (tenant_exists, admin_exists) {
+            (true, true) => return Ok(()),
+            (true, false) => {
+                return Err(catalog_err(
+                    "insert tenant admin",
+                    "tenant exists without its atomic administrator",
+                ));
+            }
+            (false, true) => {
+                return Err(catalog_err(
+                    "insert tenant admin",
+                    "administrator exists without its atomic tenant",
+                ));
+            }
+            (false, false) => {}
+        }
+        {
+            let mut users = write_txn
+                .open_table(USERS)
+                .map_err(|e| catalog_err("open users", e))?;
+            users
+                .insert(admin.username.as_str(), admin_bytes.as_slice())
+                .map_err(|e| catalog_err("insert admin", e))?;
+        }
+        {
+            let mut metadata = write_txn
+                .open_table(METADATA)
+                .map_err(|e| catalog_err("open metadata", e))?;
+            let current = metadata
+                .get("next_user_id")
+                .map_err(|e| catalog_err("get next_user_id", e))?
+                .and_then(|value| {
+                    let bytes = value.value();
+                    (bytes.len() == 8).then(|| {
+                        let mut array = [0u8; 8];
+                        array.copy_from_slice(bytes);
+                        u64::from_le_bytes(array)
+                    })
+                })
+                .unwrap_or(1);
+            let next = admin.user_id.saturating_add(1);
+            if next > current {
+                metadata
+                    .insert("next_user_id", next.to_le_bytes().as_slice())
+                    .map_err(|e| catalog_err("insert next_user_id", e))?;
+            }
+        }
+        {
+            let mut tenants = write_txn
+                .open_table(TENANTS)
+                .map_err(|e| catalog_err("open tenants", e))?;
+            tenants
+                .insert(tenant_key.as_str(), tenant_bytes.as_slice())
+                .map_err(|e| catalog_err("insert tenant", e))?;
+        }
+        {
+            let mut hwm = write_txn
+                .open_table(TENANT_ID_HWM)
+                .map_err(|e| catalog_err("open tenant_id_hwm", e))?;
+            let current = hwm
+                .get(HWM_KEY)
+                .map_err(|e| catalog_err("get tenant_id_hwm", e))?
+                .map(|value| value.value())
+                .unwrap_or(0);
+            if tenant.tenant_id > current {
                 hwm.insert(HWM_KEY, tenant.tenant_id)
                     .map_err(|e| catalog_err("insert tenant_id_hwm", e))?;
             }

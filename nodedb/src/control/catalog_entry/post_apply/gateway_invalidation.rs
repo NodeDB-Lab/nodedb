@@ -164,7 +164,7 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         }
 
         // ── Tenant: identity does not affect plan shape ───────────────────────
-        CatalogEntry::PutTenant(_) => {
+        CatalogEntry::PutTenant(_) | CatalogEntry::PutTenantWithAdmin { .. } => {
             // no-op: tenant identity used for quota enforcement at exec time.
         }
         CatalogEntry::DeleteTenant { .. } => {

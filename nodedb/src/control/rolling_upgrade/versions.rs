@@ -43,6 +43,11 @@ pub const DESCRIPTOR_VERSIONING_VERSION: u16 = 3;
 /// compat-mode fallback in `drain_for_ddl`.
 pub const DESCRIPTOR_DRAIN_VERSION: u16 = 4;
 
+/// Wire version that introduced the atomic `PutTenantWithAdmin` catalog entry.
+/// Older appliers cannot decode this enum variant, so tenant creation must be
+/// rejected rather than sent or downgraded while any node is below this gate.
+pub const TENANT_ADMIN_ATOMIC_VERSION: u16 = 8;
+
 /// Check if a message from a remote node should be accepted.
 ///
 /// Accepts only messages with the exact current wire format version.
@@ -79,5 +84,16 @@ mod tests {
         if WIRE_FORMAT_VERSION > 0 {
             assert!(accept_message(WIRE_FORMAT_VERSION - 1).is_err());
         }
+    }
+
+    #[test]
+    fn atomic_tenant_admin_requires_the_current_cluster_version() {
+        assert_eq!(TENANT_ADMIN_ATOMIC_VERSION, WIRE_FORMAT_VERSION);
+        let mut mixed = ClusterVersionView::single_node();
+        mixed.min_version = WIRE_FORMAT_VERSION - 1;
+        assert!(!mixed.can_activate_feature(TENANT_ADMIN_ATOMIC_VERSION));
+        assert!(
+            ClusterVersionView::single_node().can_activate_feature(TENANT_ADMIN_ATOMIC_VERSION)
+        );
     }
 }

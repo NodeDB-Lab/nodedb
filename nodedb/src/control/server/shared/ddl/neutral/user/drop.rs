@@ -24,6 +24,24 @@ pub fn drop_user(
     identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
+    drop_user_inner(state, identity, parts, false)
+}
+
+/// Remove the lifecycle administrator while its tenant is being dropped.
+pub(in crate::control::server::shared::ddl::neutral) fn drop_tenant_admin(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    parts: &[&str],
+) -> Result<Vec<DdlResult>, DdlError> {
+    drop_user_inner(state, identity, parts, true)
+}
+
+fn drop_user_inner(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    parts: &[&str],
+    tenant_teardown: bool,
+) -> Result<Vec<DdlResult>, DdlError> {
     require_tenant_admin(identity, "drop users")?;
 
     let (if_exists, parts) = strip_if_exists(parts, 2);
@@ -65,13 +83,29 @@ pub fn drop_user(
         });
     }
 
+    let authoritative_admin = state
+        .credentials
+        .catalog()
+        .authoritative_tenant_admin(user_tenant.as_u64())
+        .map_err(|e| DdlError {
+            sqlstate: "XX000".to_string(),
+            message: format!("load tenant administrator: {e}"),
+        })?;
+    if !tenant_teardown && authoritative_admin.as_deref() == Some(username) {
+        return Err(DdlError {
+            sqlstate: "55006".to_string(),
+            message: format!(
+                "cannot drop user '{username}': it is the authoritative tenant administrator"
+            ),
+        });
+    }
+
     // Reassign every object owned by the user (all owner-bearing
     // kinds) to the tenant admin, and revoke every grant made to the
     // user, BEFORE removing the user row. Fail-closed: any error here
     // aborts the drop, because a partially-reassigned-then-deleted user
     // is exactly the dangling-reference bug this guards against.
-    let admin_name = format!("{}_admin", user_tenant.as_u64());
-    reassign_owned_and_sweep_grants(state, username, user_tenant, &admin_name)?;
+    let admin_name = reassign_owned_and_sweep_grants(state, username, user_tenant)?;
 
     // `DropUser` fully removes the identity record on every node —
     // in-memory cache and redb catalog — so the username is freed
@@ -105,11 +139,17 @@ pub fn drop_user(
     };
 
     if dropped {
+        let detail = match admin_name {
+            Some(admin_name) => {
+                format!("dropped user '{username}' (ownership reassigned to '{admin_name}')")
+            }
+            None => format!("dropped user '{username}' (no owned objects required reassignment)"),
+        };
         state.audit_record(
             AuditEvent::PrivilegeChange,
             Some(identity.tenant_id),
             &identity.username,
-            &format!("dropped user '{username}' (ownership reassigned to '{admin_name}')"),
+            &detail,
         );
         Ok(status("DROP USER"))
     } else {

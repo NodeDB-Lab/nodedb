@@ -223,7 +223,7 @@ impl CredentialStore {
         stored: &StoredUser,
         invalidation: Option<super::super::super::buses::SessionInvalidationReason>,
     ) {
-        let mut record = UserRecord::from_stored(stored.clone());
+        let record = UserRecord::from_stored(stored.clone());
 
         // Bump next_user_id to stay ahead of replicated ids.
         {
@@ -233,9 +233,21 @@ impl CredentialStore {
             }
         }
 
-        // Persist + version bump + bus publishes (errors are swallowed so
-        // that a single bad write doesn't stall Raft).
-        let _ = self.commit_user_mutation(&mut record, invalidation);
+        // Redb was committed by the catalog applier (or the single-node
+        // caller) before this cache installation. Do not write it again: a
+        // second write would mutate `updated_at` and could overwrite a
+        // conditional catalog-apply failure. Only update local versions and
+        // publish the same cache-invalidation signals.
+        let user_id = record.user_id;
+        let _ = self.bump_version(user_id);
+        if let Some(bus) = self.uc_bus.get() {
+            bus.publish(super::super::super::buses::UserChanged { user_id });
+        }
+        if let Some(reason) = invalidation
+            && let Some(bus) = self.si_bus.get()
+        {
+            bus.publish(super::super::super::buses::SessionInvalidated { user_id, reason });
+        }
 
         let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
         users.insert(stored.username.clone(), record);

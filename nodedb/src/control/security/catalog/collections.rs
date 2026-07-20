@@ -98,6 +98,29 @@ impl SystemCatalog {
         self.scan_collections_filtered(database_id, |_| true)
     }
 
+    /// Load every collection in every database.
+    pub fn load_all_collections_across_databases(&self) -> crate::Result<Vec<StoredCollection>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("read txn", e))?;
+        let table = read_txn
+            .open_table(COLLECTIONS)
+            .map_err(|e| catalog_err("open collections", e))?;
+        let mut collections = Vec::new();
+        for entry in table
+            .iter()
+            .map_err(|e| catalog_err("iterate collections", e))?
+        {
+            let (_, value) = entry.map_err(|e| catalog_err("read collection", e))?;
+            collections.push(
+                zerompk::from_msgpack(value.value())
+                    .map_err(|e| catalog_err("deser collection", e))?,
+            );
+        }
+        Ok(collections)
+    }
+
     fn scan_collections_filtered(
         &self,
         database_id: DatabaseId,

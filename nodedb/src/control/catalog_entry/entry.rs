@@ -195,6 +195,11 @@ pub enum CatalogEntry {
     /// default quota on every node so reads work immediately after
     /// creation.
     PutTenant(Box<StoredTenant>),
+    /// Atomically create a tenant and its authoritative administrator.
+    PutTenantWithAdmin {
+        tenant: Box<StoredTenant>,
+        admin: Box<StoredUser>,
+    },
     /// Hard-delete a tenant identity record. Tenant data is not
     /// purged — that is a separate `PURGE TENANT CONFIRM` Data
     /// Plane meta op.
@@ -364,6 +369,7 @@ impl CatalogEntry {
             Self::PutContinuousAggregate(_) => "put_continuous_aggregate",
             Self::DeleteContinuousAggregate { .. } => "delete_continuous_aggregate",
             Self::PutTenant(_) => "put_tenant",
+            Self::PutTenantWithAdmin { .. } => "put_tenant_with_admin",
             Self::DeleteTenant { .. } => "delete_tenant",
             Self::PutRlsPolicy(_) => "put_rls_policy",
             Self::DeleteRlsPolicy { .. } => "delete_rls_policy",

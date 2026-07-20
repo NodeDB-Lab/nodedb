@@ -133,6 +133,14 @@ async fn create_tenant_if_not_exists_admin_uses_tenant_name() {
     let su = superuser();
     ddl_ok(&state, &su, "CREATE TENANT IF NOT EXISTS acme").await;
 
+    let tenant = state
+        .credentials
+        .catalog()
+        .find_tenant_by_name("acme")
+        .unwrap()
+        .expect("persisted tenant");
+    assert_eq!(tenant.admin_username, "acme_admin");
+
     let log = state.audit.lock().unwrap();
     let events = log.query_by_event(&AuditEvent::TenantCreated);
     let detail = &events.last().expect("tenant created").detail;
@@ -195,6 +203,14 @@ async fn create_tenant_with_admin_uses_named_admin() {
     let su = superuser();
     ddl_ok(&state, &su, "CREATE TENANT acme WITH ADMIN bootstrap_admin").await;
 
+    let tenant = state
+        .credentials
+        .catalog()
+        .find_tenant_by_name("acme")
+        .unwrap()
+        .expect("persisted tenant");
+    assert_eq!(tenant.admin_username, "bootstrap_admin");
+
     let log = state.audit.lock().unwrap();
     let events = log.query_by_event(&AuditEvent::TenantCreated);
     let detail = &events.last().expect("tenant created").detail;
@@ -202,6 +218,81 @@ async fn create_tenant_with_admin_uses_named_admin() {
     assert!(
         detail.contains("with admin 'bootstrap_admin'"),
         "WITH ADMIN clause ignored: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn create_tenant_rejects_an_existing_admin_identity_atomically() {
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(
+        &state,
+        &su,
+        "CREATE USER bootstrap_admin PASSWORD 'existing-secret'",
+    )
+    .await;
+
+    let err = ddl_err(&state, &su, "CREATE TENANT acme WITH ADMIN bootstrap_admin").await;
+
+    assert!(err.contains("already exists"), "{err}");
+    assert!(
+        state
+            .credentials
+            .catalog()
+            .find_tenant_by_name("acme")
+            .unwrap()
+            .is_none(),
+        "failed administrator provisioning must not leave a tenant row"
+    );
+}
+
+#[tokio::test]
+async fn authoritative_tenant_admin_cannot_be_dropped_independently() {
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(&state, &su, "CREATE TENANT acme WITH ADMIN bootstrap_admin").await;
+
+    let err = ddl_err(&state, &su, "DROP USER bootstrap_admin").await;
+
+    assert!(err.contains("authoritative tenant administrator"), "{err}");
+    assert!(state.credentials.get_user("bootstrap_admin").is_some());
+}
+
+#[tokio::test]
+async fn legacy_tenant_admin_cannot_be_dropped_independently() {
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(&state, &su, "CREATE TENANT legacy").await;
+    let catalog = state.credentials.catalog();
+    let mut tenant = catalog
+        .find_tenant_by_name("legacy")
+        .unwrap()
+        .expect("persisted tenant");
+    tenant.admin_username.clear();
+    catalog.put_tenant(&tenant).unwrap();
+
+    let err = ddl_err(&state, &su, "DROP USER legacy_admin").await;
+
+    assert!(err.contains("authoritative tenant administrator"), "{err}");
+    assert!(state.credentials.get_user("legacy_admin").is_some());
+}
+
+#[tokio::test]
+async fn drop_tenant_removes_its_explicit_lifecycle_admin() {
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(&state, &su, "CREATE TENANT acme WITH ADMIN bootstrap_admin").await;
+
+    ddl_ok(&state, &su, "DROP TENANT acme").await;
+
+    assert!(state.credentials.get_user("bootstrap_admin").is_none());
+    assert!(
+        state
+            .credentials
+            .catalog()
+            .find_tenant_by_name("acme")
+            .unwrap()
+            .is_none()
     );
 }
 

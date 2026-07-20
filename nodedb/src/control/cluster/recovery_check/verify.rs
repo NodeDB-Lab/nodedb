@@ -7,11 +7,10 @@
 //!
 //! 1. Applied-index gate — local `MetadataCache.applied_index`
 //!    against the current `AppliedIndexWatcher` watermark.
-//! 2. Registry ⇔ redb verifier — re-load every in-memory
-//!    registry and swap in fresh on any divergence.
-//! 3. redb cross-table integrity check — referential
-//!    invariants inside redb. Unrepairable — any violation
-//!    fails the sanity check.
+//! 2. redb cross-table integrity repair — deterministically heals missing or
+//!    dangling user references and leaves unknown violations fatal.
+//! 3. Registry ⇔ redb verifier — re-load every in-memory registry made stale
+//!    by catalog repair.
 //!
 //! Returns a [`VerifyReport`] with per-phase outcomes. The
 //! caller (main.rs) checks `report.is_acceptable()` and
@@ -29,8 +28,8 @@ use super::repair_integrity::heal_orphan_rows;
 use super::report::VerifyReport;
 
 /// Run the full catalog sanity check pipeline against the
-/// shared state. Never panics, never writes to redb.
-/// Repairs in-memory registries in place.
+/// shared state. Never panics. Repairs recoverable redb integrity violations,
+/// then refreshes divergent in-memory registries.
 pub async fn verify_and_repair(shared: &SharedState) -> crate::Result<VerifyReport> {
     let start = Instant::now();
 
@@ -45,34 +44,35 @@ pub async fn verify_and_repair(shared: &SharedState) -> crate::Result<VerifyRepo
         );
     }
 
-    // ── 2. Registry ⇔ redb verification + repair ───────
+    // ── 2. redb integrity repair, then registry verification ──
     //
-    // Single-node / no-catalog mode: `credentials.catalog()`
-    // returns `None` because the `SystemCatalog` is
-    // in-memory only. Nothing to verify against — skip both
-    // the registry verifier AND the integrity walker.
+    // Integrity repair writes catalog rows directly, so registry verification
+    // runs afterwards and reloads any cache made stale by those repairs. The
+    // loop reaches a fixed point because reconstructing a missing owner row can
+    // expose a second-order dangling-user reference on the next verification.
     let (registry_outcome, integrity, integrity_healed) = {
         let catalog = shared.credentials.catalog();
+        let mut integrity = verify_redb_integrity(catalog);
+        let mut total_healed = 0usize;
 
-        let reg = verify_registries(shared, catalog)?;
-        let raw = verify_redb_integrity(catalog);
-        // Self-heal the orphan-row class: reconstruct every
-        // missing `StoredOwner` from the primary row's in-band
-        // `owner` field. Anything still in `remaining` is a real
-        // integrity bug (primary row gone, catalog write failed,
-        // or a future divergence kind we don't know how to
-        // repair) and must still fail the startup gate.
-        let (remaining, healed) = heal_orphan_rows(catalog, raw);
-        if healed > 0 {
+        loop {
+            let (_, healed) = heal_orphan_rows(catalog, integrity);
+            total_healed += healed;
+            integrity = verify_redb_integrity(catalog);
+            if healed == 0 {
+                break;
+            }
+        }
+
+        if total_healed > 0 {
             tracing::info!(
-                healed,
-                remaining = remaining.len(),
-                "catalog sanity check: integrity self-heal pass repaired \
-                     orphan rows by reconstructing StoredOwner entries from \
-                     primary rows' in-band owner fields"
+                healed = total_healed,
+                remaining = integrity.len(),
+                "catalog sanity check: integrity self-heal pass completed"
             );
         }
-        (Some(reg), remaining, healed)
+        let reg = verify_registries(shared, catalog)?;
+        (Some(reg), integrity, total_healed)
     };
 
     // ── 3. Assemble report ─────────────────────────────

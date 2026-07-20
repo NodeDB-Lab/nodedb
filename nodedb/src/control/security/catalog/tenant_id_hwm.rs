@@ -84,7 +84,7 @@ impl SystemCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::security::catalog::StoredTenant;
+    use crate::control::security::catalog::{StoredTenant, StoredUser};
 
     fn open() -> (tempfile::TempDir, SystemCatalog) {
         let dir = tempfile::tempdir().unwrap();
@@ -118,6 +118,7 @@ mod tests {
                 name: "t".into(),
                 created_at: 0,
                 is_active: true,
+                admin_username: String::new(),
             })
             .unwrap();
         catalog.delete_tenant(id).unwrap();
@@ -136,6 +137,7 @@ mod tests {
             name: "legacy".into(),
             created_at: 0,
             is_active: true,
+            admin_username: String::new(),
         })
         .unwrap();
         let txn = catalog.db.begin_write().unwrap();
@@ -145,6 +147,72 @@ mod tests {
         }
         txn.commit().unwrap();
         assert!(catalog.allocate_tenant_id().unwrap() > 500);
+    }
+
+    #[test]
+    fn atomic_tenant_admin_write_advances_user_id_hwm() {
+        let (_dir, catalog) = open();
+        let tenant = StoredTenant {
+            tenant_id: 10,
+            name: "atomic".into(),
+            created_at: 0,
+            is_active: true,
+            admin_username: "atomic_admin".into(),
+        };
+        let admin = StoredUser {
+            user_id: 41,
+            username: "atomic_admin".into(),
+            tenant_id: 10,
+            password_hash: String::new(),
+            scram_salt: Vec::new(),
+            scram_salted_password: Vec::new(),
+            roles: vec!["tenant_admin".into()],
+            is_superuser: false,
+            is_active: true,
+            is_service_account: false,
+            created_at: 0,
+            updated_at: 0,
+            password_expires_at: 0,
+            must_change_password: false,
+            password_changed_at: 0,
+            default_database_id: 0,
+            accessible_databases: Vec::new(),
+        };
+        let mut mismatched_admin = admin.clone();
+        mismatched_admin.tenant_id = 11;
+        assert!(
+            catalog
+                .put_tenant_with_admin(&tenant, &mismatched_admin)
+                .is_err()
+        );
+
+        catalog.put_tenant_with_admin(&tenant, &admin).unwrap();
+        catalog.put_tenant_with_admin(&tenant, &admin).unwrap();
+
+        let mut conflicting_tenant = tenant.clone();
+        conflicting_tenant.tenant_id = 11;
+        conflicting_tenant.name = "conflict".into();
+        let mut conflicting_admin = admin.clone();
+        conflicting_admin.user_id = 42;
+        conflicting_admin.tenant_id = 11;
+        assert!(
+            catalog
+                .put_tenant_with_admin(&conflicting_tenant, &conflicting_admin)
+                .is_err()
+        );
+
+        assert_eq!(catalog.load_next_user_id().unwrap(), 42);
+        assert_eq!(
+            catalog.get_user("atomic_admin").unwrap().unwrap().tenant_id,
+            10
+        );
+        assert!(
+            catalog
+                .load_all_tenants()
+                .unwrap()
+                .into_iter()
+                .all(|stored| stored.tenant_id != 11)
+        );
     }
 
     #[test]
@@ -158,6 +226,7 @@ mod tests {
                 name: "explicit".into(),
                 created_at: 0,
                 is_active: true,
+                admin_username: String::new(),
             })
             .unwrap();
         assert_eq!(catalog.allocate_tenant_id().unwrap(), 11);

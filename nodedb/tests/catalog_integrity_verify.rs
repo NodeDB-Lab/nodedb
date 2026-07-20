@@ -197,6 +197,7 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         CatalogEntry::PutPermission(_) => VariantClass::Exempt,
         CatalogEntry::DeletePermission { .. } => VariantClass::Exempt,
         CatalogEntry::PutTenant(_) => VariantClass::Exempt,
+        CatalogEntry::PutTenantWithAdmin { .. } => VariantClass::Exempt,
         CatalogEntry::DeleteTenant { .. } => VariantClass::Exempt,
         CatalogEntry::PutRlsPolicy(_) => VariantClass::Exempt,
         CatalogEntry::DeleteRlsPolicy { .. } => VariantClass::Exempt,

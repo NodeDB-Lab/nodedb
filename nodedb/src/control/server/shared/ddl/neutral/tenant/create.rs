@@ -132,40 +132,18 @@ pub fn create_tenant(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let admin_name = opts
+        .admin_override
+        .map(str::to_string)
+        .unwrap_or_else(|| default_admin_username(name));
     let stored = StoredTenant {
         tenant_id: tenant_id.as_u64(),
         name: name.to_string(),
         created_at: now,
         is_active: true,
+        admin_username: admin_name.clone(),
     };
 
-    let entry = CatalogEntry::PutTenant(Box::new(stored.clone()));
-    let log_index = propose_catalog_entry(state, &entry)
-        .map_err(|e| ddl_err("XX000", format!("metadata propose: {e}")))?;
-    if log_index == 0 {
-        // Single-node fallback: write redb + seed in-memory quota
-        // ourselves since post_apply only runs on the raft path.
-        {
-            let catalog = state.credentials.catalog();
-            catalog
-                .put_tenant(&stored)
-                .map_err(|e| ddl_err("XX000", format!("catalog write: {e}")))?;
-        }
-        let mut tenants = match state.tenants.lock() {
-            Ok(t) => t,
-            Err(p) => p.into_inner(),
-        };
-        if !tenants.has_quota(tenant_id) {
-            tenants.set_quota(tenant_id, TenantQuota::default());
-        }
-    }
-
-    // Auto-create a tenant_admin user for the new tenant. `WITH ADMIN
-    // <user>` names it explicitly; otherwise it defaults to `<name>_admin`.
-    let admin_name = opts
-        .admin_override
-        .map(str::to_string)
-        .unwrap_or_else(|| default_admin_username(name));
     let admin_password = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -182,19 +160,55 @@ pub fn create_tenant(
         let hex: String = hash.iter().take(12).map(|b| format!("{b:02x}")).collect();
         format!("ndb_{hex}")
     };
-    match state.credentials.create_user(
-        &admin_name,
-        &admin_password,
-        tenant_id,
-        vec![Role::TenantAdmin],
-    ) {
-        Ok(_) => {
-            tracing::info!(tenant = %name, admin = %admin_name, "auto-created tenant admin");
-        }
-        Err(e) => {
-            tracing::warn!(tenant = %name, error = %e, "failed to auto-create tenant admin");
+    let admin = state
+        .credentials
+        .prepare_user(
+            &admin_name,
+            &admin_password,
+            tenant_id,
+            vec![Role::TenantAdmin],
+        )
+        .map_err(|e| ddl_err("42710", format!("create tenant admin: {e}")))?;
+
+    let entry = CatalogEntry::PutTenantWithAdmin {
+        tenant: Box::new(stored.clone()),
+        admin: Box::new(admin.clone()),
+    };
+    let log_index = propose_catalog_entry(state, &entry)
+        .map_err(|e| ddl_err("XX000", format!("metadata propose: {e}")))?;
+    if log_index == 0 {
+        state
+            .credentials
+            .catalog()
+            .put_tenant_with_admin(&stored, &admin)
+            .map_err(|e| ddl_err("XX000", format!("catalog write: {e}")))?;
+        state.credentials.install_replicated_user(&admin, None);
+        let mut tenants = match state.tenants.lock() {
+            Ok(t) => t,
+            Err(p) => p.into_inner(),
+        };
+        if !tenants.has_quota(tenant_id) {
+            tenants.set_quota(tenant_id, TenantQuota::default());
         }
     }
+
+    let catalog = state.credentials.catalog();
+    let tenant_applied = catalog
+        .load_all_tenants()
+        .map_err(|e| ddl_err("XX000", format!("catalog read: {e}")))?
+        .into_iter()
+        .any(|persisted| persisted == stored);
+    let admin_applied = catalog
+        .get_user(&admin_name)
+        .map_err(|e| ddl_err("XX000", format!("catalog read: {e}")))?
+        .is_some_and(|persisted| persisted == admin);
+    if !tenant_applied || !admin_applied {
+        return Err(ddl_err(
+            "42710",
+            "tenant or administrator identity already exists",
+        ));
+    }
+    tracing::info!(tenant = %name, admin = %admin_name, "auto-created tenant admin");
 
     state.audit_record(
         AuditEvent::TenantCreated,

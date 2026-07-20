@@ -37,6 +37,8 @@ pub mod mirror;
 pub mod move_tenant_journal;
 pub mod oidc_providers;
 pub mod orgs;
+pub mod owner_rewrite;
+pub mod ownership_fallback;
 pub mod pending_reclaim;
 pub mod procedure_types;
 pub mod procedures;

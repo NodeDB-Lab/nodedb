@@ -20,7 +20,6 @@ use crate::types::TenantId;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::auth_support::strip_if_exists;
-use super::create::default_admin_username;
 use super::support::{ddl_err, resolve_tenant_ref, status, tenant_exists};
 
 pub fn drop_tenant(
@@ -127,8 +126,8 @@ pub fn drop_tenant(
 /// `SHOW TENANTS` (which unions catalog tenants with every user's
 /// `tenant_id`).
 ///
-/// The lifecycle-owned `<name>_admin` auto-provisioned by
-/// `CREATE TENANT` is hard-dropped through the canonical `DROP USER`
+/// The lifecycle-owned administrator persisted by `CREATE TENANT` is
+/// hard-dropped through the canonical `DROP USER`
 /// path. Any other user is operator-owned: the drop is refused with
 /// `42501` and the remaining users are named, so no real account is
 /// ever silently hard-deleted by a tenant drop.
@@ -137,25 +136,14 @@ fn reconcile_tenant_users(
     identity: &AuthenticatedIdentity,
     tenant_id: TenantId,
 ) -> Result<(), DdlError> {
-    // Tenant identity — its name, hence the `<name>_admin` of the
-    // lifecycle-owned admin — lives only in the catalog. Without a
-    // catalog there is no persisted `StoredTenant` to surface as a
-    // ghost in `SHOW TENANTS`' catalog union, and no name to
-    // reconstruct the admin from, so there is nothing to reconcile.
-    let Some(tenant_name) = state
+    let Some(admin_username) = state
         .credentials
         .catalog()
-        .load_all_tenants()
-        .ok()
-        .and_then(|all| {
-            all.into_iter()
-                .find(|t| t.tenant_id == tenant_id.as_u64())
-                .map(|t| t.name)
-        })
+        .authoritative_tenant_admin(tenant_id.as_u64())
+        .map_err(|error| ddl_err("XX000", format!("load tenant administrator: {error}")))?
     else {
         return Ok(());
     };
-    let admin_username = default_admin_username(&tenant_name);
 
     // The same active-user set `SHOW TENANTS` unions over — reconciling
     // exactly this set is what clears the ghost.
@@ -196,7 +184,7 @@ fn reconcile_tenant_users(
     // all run — the same guarantees `DROP USER` gives directly.
     if let Some(admin) = lifecycle_admin {
         let parts = ["DROP", "USER", admin.as_str()];
-        super::super::user::drop_user(state, identity, &parts)?;
+        super::super::user::drop_tenant_admin(state, identity, &parts)?;
     }
 
     Ok(())

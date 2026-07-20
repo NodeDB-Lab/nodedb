@@ -16,7 +16,7 @@
 
 /// Cluster-wide wire format version. Stamped on every `NodeInfo` and
 /// returned by `nodedb::version::WIRE_FORMAT_VERSION` (a re-export).
-pub const WIRE_FORMAT_VERSION: u16 = 7;
+pub const WIRE_FORMAT_VERSION: u16 = 8;
 
 /// Minimum wire format version this build can read. Equal to
 /// `WIRE_FORMAT_VERSION`: floor == ceiling, no backward compat window.

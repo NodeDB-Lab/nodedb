@@ -147,6 +147,9 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         CatalogEntry::PutTenant(stored) => {
             tenant::put((**stored).clone(), Arc::clone(shared));
         }
+        CatalogEntry::PutTenantWithAdmin { tenant, admin } => {
+            tenant::put_with_admin((**tenant).clone(), (**admin).clone(), Arc::clone(shared));
+        }
         CatalogEntry::DeleteTenant { tenant_id } => {
             tenant::delete(*tenant_id, Arc::clone(shared));
         }

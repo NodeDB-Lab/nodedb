@@ -30,7 +30,6 @@
 //! every violation and the sanity-check wrapper aborts
 //! startup on any non-empty violation list.
 
-use nodedb_types::DatabaseId;
 use std::collections::HashSet;
 
 use crate::control::security::catalog::SystemCatalog;
@@ -71,7 +70,7 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
 
     let collections = load_table!(
         "collections",
-        catalog.load_all_collections(DatabaseId::DEFAULT)
+        catalog.load_all_collections_across_databases()
     );
     let owners = load_table!("owners", catalog.load_all_owners());
     let users = load_table!("users", catalog.load_all_users());
