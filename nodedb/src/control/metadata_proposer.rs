@@ -139,20 +139,6 @@ pub fn propose_catalog_entry_with_timeout(
         return Ok(0);
     };
 
-    if matches!(entry, CatalogEntry::PutTenantWithAdmin { .. }) {
-        let versions = shared.cluster_version_view();
-        let required = crate::control::rolling_upgrade::TENANT_ADMIN_ATOMIC_VERSION;
-        if !versions.can_activate_feature(required) {
-            return Err(Error::VersionCompat {
-                detail: format!(
-                    "CREATE TENANT requires every cluster node at wire version {required} or \
-                     newer (minimum observed {})",
-                    versions.min_version
-                ),
-            });
-        }
-    }
-
     // Rolling-upgrade gate: until every node in the cluster reports
     // at least `DISTRIBUTED_CATALOG_VERSION`, fall back to the legacy
     // direct-write path on the originating node. Mixing the

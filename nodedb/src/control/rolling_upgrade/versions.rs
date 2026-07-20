@@ -9,6 +9,25 @@ use super::view::ClusterVersionView;
 #[cfg(test)]
 use crate::version::WIRE_FORMAT_VERSION;
 
+// PRE-1.0: every gate below is pinned to 1, the value of
+// `WIRE_FORMAT_VERSION`, so each feature is unconditionally active.
+//
+// `MIN_WIRE_FORMAT_VERSION == WIRE_FORMAT_VERSION` (floor == ceiling), so a
+// node rejects any peer whose version differs and a mixed-version cluster can
+// never form. Inside a cluster that exists, every node is therefore on this
+// exact version, which makes `min_version >= V` constant-true for any
+// `V <= WIRE_FORMAT_VERSION` and constant-false above it. These gates cannot
+// discriminate, so a value above 1 does not protect a rolling upgrade — it just
+// switches the feature OFF permanently and silently routes to a legacy
+// fallback.
+//
+// Do NOT raise these while `WIRE_FORMAT_VERSION` is 1 (see
+// `nodedb_types::wire_version` for why it stays there until 1.0). The gate
+// machinery is kept, not deleted, because it becomes meaningful the moment a
+// real support window (`MIN_WIRE_FORMAT_VERSION < WIRE_FORMAT_VERSION`) is
+// introduced post-1.0 — at which point these regain their original meanings,
+// recorded below.
+
 /// Wire-format version that introduced the replicated catalog DDL
 /// path (`CatalogEntry` proposed via the metadata raft group).
 ///
@@ -20,7 +39,7 @@ use crate::version::WIRE_FORMAT_VERSION;
 /// [`ClusterVersionView::can_activate_feature`] and falls back to
 /// the legacy direct-write path until every node in the cluster
 /// has caught up.
-pub const DISTRIBUTED_CATALOG_VERSION: u16 = 2;
+pub const DISTRIBUTED_CATALOG_VERSION: u16 = 1;
 
 /// Wire-format version that introduced monotonic descriptor
 /// versioning (`descriptor_version: u64` + `modification_hlc: Hlc`
@@ -35,18 +54,13 @@ pub const DISTRIBUTED_CATALOG_VERSION: u16 = 2;
 /// `descriptor_version == 0` as "unknown, always re-fetch". Once
 /// every node reports `wire_version >= 3`, the applier transitions
 /// to stamping.
-pub const DESCRIPTOR_VERSIONING_VERSION: u16 = 3;
+pub const DESCRIPTOR_VERSIONING_VERSION: u16 = 1;
 
 /// Wire version that introduced the replicated
 /// `DescriptorDrainStart` / `DescriptorDrainEnd` metadata entries.
 /// Mixed-version clusters below this version skip drain via the
 /// compat-mode fallback in `drain_for_ddl`.
-pub const DESCRIPTOR_DRAIN_VERSION: u16 = 4;
-
-/// Wire version that introduced the atomic `PutTenantWithAdmin` catalog entry.
-/// Older appliers cannot decode this enum variant, so tenant creation must be
-/// rejected rather than sent or downgraded while any node is below this gate.
-pub const TENANT_ADMIN_ATOMIC_VERSION: u16 = 8;
+pub const DESCRIPTOR_DRAIN_VERSION: u16 = 1;
 
 /// Check if a message from a remote node should be accepted.
 ///
@@ -84,16 +98,5 @@ mod tests {
         if WIRE_FORMAT_VERSION > 0 {
             assert!(accept_message(WIRE_FORMAT_VERSION - 1).is_err());
         }
-    }
-
-    #[test]
-    fn atomic_tenant_admin_requires_the_current_cluster_version() {
-        assert_eq!(TENANT_ADMIN_ATOMIC_VERSION, WIRE_FORMAT_VERSION);
-        let mut mixed = ClusterVersionView::single_node();
-        mixed.min_version = WIRE_FORMAT_VERSION - 1;
-        assert!(!mixed.can_activate_feature(TENANT_ADMIN_ATOMIC_VERSION));
-        assert!(
-            ClusterVersionView::single_node().can_activate_feature(TENANT_ADMIN_ATOMIC_VERSION)
-        );
     }
 }
