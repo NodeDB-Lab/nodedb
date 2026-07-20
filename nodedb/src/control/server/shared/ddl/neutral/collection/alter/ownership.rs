@@ -29,13 +29,19 @@ use super::support::{err, status};
 pub(super) fn alter_collection_owner(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     collection: &str,
     new_owner: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    // Check authorization: current owner or admin.
-    let current_owner = state
-        .permissions
-        .get_owner("collection", identity.tenant_id, collection);
+    // Check authorization: current owner or admin. Owner rows are keyed by
+    // database, so a collection outside the default database is only found
+    // when the lookup carries the same `database_id` the row was written with.
+    let current_owner = state.permissions.get_owner_in_database(
+        "collection",
+        database_id.as_u64(),
+        identity.tenant_id,
+        collection,
+    );
 
     let is_current_owner = current_owner
         .as_ref()
@@ -65,27 +71,24 @@ pub(super) fn alter_collection_owner(
     // the parent record. A separate `PutOwner` would be silently
     // overwritten the next time anyone re-proposed the collection.
     let catalog = state.credentials.catalog();
-    let mut stored = match catalog.get_collection(
-        DatabaseId::DEFAULT,
-        identity.tenant_id.as_u64(),
-        collection,
-    ) {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            return Err(err(
-                "42P01",
-                format!("collection '{collection}' does not exist"),
-            ));
-        }
-        Err(e) => return Err(err("XX000", format!("catalog read: {e}"))),
-    };
+    let mut stored =
+        match catalog.get_collection(database_id, identity.tenant_id.as_u64(), collection) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return Err(err(
+                    "42P01",
+                    format!("collection '{collection}' does not exist"),
+                ));
+            }
+            Err(e) => return Err(err("XX000", format!("catalog read: {e}"))),
+        };
     stored.owner = new_owner.to_string();
     let entry = CatalogEntry::PutCollection(Box::new(stored.clone()));
     let log_index = propose_catalog_entry(state, &entry)
         .map_err(|e| err("XX000", format!("metadata propose: {e}")))?;
     if log_index == 0 {
         catalog
-            .put_collection(DatabaseId::DEFAULT, &stored)
+            .put_collection(database_id, &stored)
             .map_err(|e| err("XX000", format!("catalog write: {e}")))?;
         state.permissions.install_replicated_owner(
             &crate::control::security::catalog::StoredOwner {

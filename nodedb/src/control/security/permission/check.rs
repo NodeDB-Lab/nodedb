@@ -9,10 +9,10 @@ use crate::control::security::audit::{AuditEmitContext, AuditEmitter, AuditEvent
 use crate::control::security::identity::{self, AuthenticatedIdentity, Permission};
 use crate::control::security::role::RoleStore;
 
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
 
 use super::store::PermissionStore;
-use super::types::{Grant, collection_target, function_target, tenant_target};
+use super::types::{Grant, collection_target, function_target, owner_key, tenant_target};
 
 impl PermissionStore {
     /// Does any grant on `target` confer `permission` to this identity —
@@ -83,6 +83,7 @@ impl PermissionStore {
         &self,
         identity: &AuthenticatedIdentity,
         permission: Permission,
+        database_id: DatabaseId,
         collection: &str,
         role_store: &RoleStore,
         emitter: &dyn AuditEmitter,
@@ -91,10 +92,17 @@ impl PermissionStore {
             return true;
         }
 
-        let target = collection_target(identity.tenant_id, collection);
-        if self.is_owner(&target, &identity.username) {
+        if self.is_owner(
+            "collection",
+            database_id,
+            identity.tenant_id,
+            collection,
+            &identity.username,
+        ) {
             return true;
         }
+
+        let target = collection_target(identity.tenant_id, collection);
 
         for role in &identity.roles {
             if identity::role_grants_permission(role, permission) {
@@ -139,6 +147,7 @@ impl PermissionStore {
     pub fn check_function(
         &self,
         identity: &AuthenticatedIdentity,
+        database_id: DatabaseId,
         function_name: &str,
         role_store: &RoleStore,
         emitter: &dyn AuditEmitter,
@@ -147,11 +156,17 @@ impl PermissionStore {
             return true;
         }
 
-        let target = function_target(identity.tenant_id, function_name);
-
-        if self.is_owner(&target, &identity.username) {
+        if self.is_owner(
+            "function",
+            database_id,
+            identity.tenant_id,
+            function_name,
+            &identity.username,
+        ) {
             return true;
         }
+
+        let target = function_target(identity.tenant_id, function_name);
 
         for role in &identity.roles {
             if identity::role_grants_permission(role, Permission::Execute) {
@@ -227,8 +242,28 @@ impl PermissionStore {
         false
     }
 
-    /// Lookup helper: is `username` recorded as the owner of `target`?
-    pub(super) fn is_owner(&self, target: &str, username: &str) -> bool {
+    /// Lookup helper: is `username` recorded as the owner of the object?
+    ///
+    /// The owners map is keyed by [`owner_key`] —
+    /// `{object_type}:{database_id}:{tenant_id}:{object_name}` — which is a
+    /// different shape from the `{object_type}:{tenant_id}:{object_name}`
+    /// target strings used for *grants*. The two must not be interchanged:
+    /// passing a grant target here silently never matches, which reads as
+    /// "nobody owns anything" rather than as an error.
+    pub(super) fn is_owner(
+        &self,
+        object_type: &str,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        object_name: &str,
+        username: &str,
+    ) -> bool {
+        let key = owner_key(
+            object_type,
+            database_id.as_u64(),
+            tenant_id.as_u64(),
+            object_name,
+        );
         let owners = match self.owners.read() {
             Ok(o) => o,
             Err(p) => {
@@ -236,7 +271,7 @@ impl PermissionStore {
                 p.into_inner()
             }
         };
-        owners.get(target).is_some_and(|o| o == username)
+        owners.get(&key).is_some_and(|o| o == username)
     }
 }
 
@@ -272,7 +307,14 @@ mod tests {
         let store = PermissionStore::new();
         let roles = RoleStore::new();
         let id = identity("admin", vec![], true);
-        assert!(store.check(&id, Permission::Write, "secret", &roles, NOOP));
+        assert!(store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "secret",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]
@@ -284,9 +326,68 @@ mod tests {
             .unwrap();
 
         let id = identity("alice", vec![], false);
-        assert!(store.check(&id, Permission::Read, "users", &roles, NOOP));
-        assert!(store.check(&id, Permission::Write, "users", &roles, NOOP));
-        assert!(store.check(&id, Permission::Drop, "users", &roles, NOOP));
+        assert!(store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "users",
+            &roles,
+            NOOP
+        ));
+        assert!(store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "users",
+            &roles,
+            NOOP
+        ));
+        assert!(store.check(
+            &id,
+            Permission::Drop,
+            DatabaseId::DEFAULT,
+            "users",
+            &roles,
+            NOOP
+        ));
+    }
+
+    /// Owner rows are keyed by database. A check against the database the
+    /// row was written to must recognise the owner, and a check against any
+    /// other database must not — a same-named collection elsewhere belongs
+    /// to whoever owns it there, not to this user.
+    #[test]
+    fn ownership_is_scoped_to_its_database() {
+        let store = PermissionStore::new();
+        let roles = RoleStore::new();
+        let db = DatabaseId::new(7);
+        store
+            .set_owner_in_database(
+                "collection",
+                db.as_u64(),
+                TenantId::new(1),
+                "users",
+                "alice",
+                None,
+            )
+            .unwrap();
+
+        let id = identity("alice", vec![], false);
+        assert!(
+            store.check(&id, Permission::Read, db, "users", &roles, NOOP),
+            "owner must hold implicit permissions in their own database"
+        );
+        assert!(
+            !store.check(
+                &id,
+                Permission::Read,
+                DatabaseId::DEFAULT,
+                "users",
+                &roles,
+                NOOP
+            ),
+            "ownership must not leak into a same-named collection in another database"
+        );
     }
 
     #[test]
@@ -298,7 +399,14 @@ mod tests {
             .unwrap();
 
         let id = identity("bob", vec![], false);
-        assert!(!store.check(&id, Permission::Write, "users", &roles, NOOP));
+        assert!(!store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "users",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]
@@ -311,8 +419,22 @@ mod tests {
             .unwrap();
 
         let id = identity("bob", vec![], false);
-        assert!(store.check(&id, Permission::Read, "orders", &roles, NOOP));
-        assert!(!store.check(&id, Permission::Write, "orders", &roles, NOOP));
+        assert!(store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "orders",
+            &roles,
+            NOOP
+        ));
+        assert!(!store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "orders",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]
@@ -325,7 +447,14 @@ mod tests {
             .unwrap();
 
         let id = identity("viewer", vec![Role::Custom("readonly".into())], false);
-        assert!(store.check(&id, Permission::Read, "reports", &roles, NOOP));
+        assert!(store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "reports",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]
@@ -342,7 +471,14 @@ mod tests {
             .unwrap();
 
         let id = identity("alice", vec![Role::Custom("analyst".into())], false);
-        assert!(perm_store.check(&id, Permission::Read, "data", &role_store, NOOP));
+        assert!(perm_store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "data",
+            &role_store,
+            NOOP
+        ));
     }
 
     #[test]
@@ -360,7 +496,14 @@ mod tests {
 
         let roles = RoleStore::new();
         let id = identity("bob", vec![], false);
-        assert!(!store.check(&id, Permission::Read, "users", &roles, NOOP));
+        assert!(!store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "users",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]
@@ -368,9 +511,30 @@ mod tests {
         let store = PermissionStore::new();
         let roles = RoleStore::new();
         let id = identity("writer", vec![Role::ReadWrite], false);
-        assert!(store.check(&id, Permission::Read, "anything", &roles, NOOP));
-        assert!(store.check(&id, Permission::Write, "anything", &roles, NOOP));
-        assert!(!store.check(&id, Permission::Drop, "anything", &roles, NOOP));
+        assert!(store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "anything",
+            &roles,
+            NOOP
+        ));
+        assert!(store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "anything",
+            &roles,
+            NOOP
+        ));
+        assert!(!store.check(
+            &id,
+            Permission::Drop,
+            DatabaseId::DEFAULT,
+            "anything",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]
@@ -382,7 +546,14 @@ mod tests {
         let emitter = CapturingEmitter::new();
         let id = identity("eve", vec![], false);
 
-        let allowed = store.check(&id, Permission::Write, "secrets", &roles, &emitter);
+        let allowed = store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "secrets",
+            &roles,
+            &emitter,
+        );
         assert!(!allowed);
 
         let recorded = emitter.recorded();
@@ -399,7 +570,14 @@ mod tests {
         let emitter = CapturingEmitter::new();
         let id = identity("admin", vec![], true);
 
-        let allowed = store.check(&id, Permission::Write, "anything", &roles, &emitter);
+        let allowed = store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "anything",
+            &roles,
+            &emitter,
+        );
         assert!(allowed);
         assert!(emitter.recorded().is_empty());
     }
@@ -417,10 +595,31 @@ mod tests {
         let id = identity("bob", vec![], false);
         // A tenant-wide grant confers the permission on any collection in
         // the tenant, with no per-collection grant.
-        assert!(store.check(&id, Permission::Read, "orders", &roles, NOOP));
-        assert!(store.check(&id, Permission::Read, "invoices", &roles, NOOP));
+        assert!(store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "orders",
+            &roles,
+            NOOP
+        ));
+        assert!(store.check(
+            &id,
+            Permission::Read,
+            DatabaseId::DEFAULT,
+            "invoices",
+            &roles,
+            NOOP
+        ));
         // It does not widen to permissions that were not granted.
-        assert!(!store.check(&id, Permission::Write, "orders", &roles, NOOP));
+        assert!(!store.check(
+            &id,
+            Permission::Write,
+            DatabaseId::DEFAULT,
+            "orders",
+            &roles,
+            NOOP
+        ));
     }
 
     #[test]

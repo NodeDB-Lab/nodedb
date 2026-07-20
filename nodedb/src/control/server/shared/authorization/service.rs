@@ -158,6 +158,7 @@ fn authorize_collection_requirement(
     if permissions.check(
         &scoped_identity,
         permission,
+        database_id,
         &grant_name,
         roles,
         &NoopAuditEmitter,

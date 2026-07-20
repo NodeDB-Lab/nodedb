@@ -69,7 +69,7 @@ pub async fn dispatch_alter_collection(
         }
 
         AlterCollectionOp::OwnerTo { new_owner } => {
-            super::ownership::alter_collection_owner(state, identity, name, new_owner)
+            super::ownership::alter_collection_owner(state, identity, database_id, name, new_owner)
         }
 
         AlterCollectionOp::SetRetention { value } => {

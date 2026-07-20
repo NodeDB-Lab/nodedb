@@ -13,6 +13,7 @@ use serde_json::{Map, Value as JsonValue};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
 use crate::control::state::SharedState;
+use crate::types::DatabaseId;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::support::ddl_err;
@@ -82,6 +83,7 @@ pub fn show_grants(
 pub fn show_permissions(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     on_collection: Option<&str>,
     for_grantee: Option<&str>,
 ) -> Result<Vec<DdlResult>, DdlError> {
@@ -117,10 +119,12 @@ pub fn show_permissions(
 
         // Show owner row (only when collection is specified).
         if for_grantee.is_none()
-            && let Some(owner) =
-                state
-                    .permissions
-                    .get_owner("collection", identity.tenant_id, collection)
+            && let Some(owner) = state.permissions.get_owner_in_database(
+                "collection",
+                database_id.as_u64(),
+                identity.tenant_id,
+                collection,
+            )
         {
             let mut row = Map::new();
             row.insert("grantee".to_string(), JsonValue::String(owner));

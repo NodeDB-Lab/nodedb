@@ -20,7 +20,7 @@ pub(super) async fn try_typed(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     _sql: &str,
-    _database_id: DatabaseId,
+    database_id: DatabaseId,
     stmt: &NodedbStatement,
 ) -> Option<Result<Vec<DdlResult>, DdlError>> {
     match stmt {
@@ -148,6 +148,7 @@ pub(super) async fn try_typed(
         }) => Some(inspect::show_permissions(
             state,
             identity,
+            database_id,
             on_collection.as_deref(),
             for_grantee.as_deref(),
         )),

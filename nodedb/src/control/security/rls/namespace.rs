@@ -10,11 +10,13 @@ use crate::control::security::audit::NoopAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
 use crate::control::security::permission::PermissionStore;
 use crate::control::security::role::RoleStore;
+use crate::types::DatabaseId;
 
 /// Check tenant + namespace authorization for a collection.
 /// Order: direct collection grant → namespace prefix grants → wildcard.
 pub fn check_namespace_authz(
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     collection: &str,
     required_permission: Permission,
     permission_store: &PermissionStore,
@@ -27,6 +29,7 @@ pub fn check_namespace_authz(
     if permission_store.check(
         identity,
         required_permission,
+        database_id,
         collection,
         role_store,
         &NoopAuditEmitter,
@@ -41,6 +44,7 @@ pub fn check_namespace_authz(
             && permission_store.check(
                 identity,
                 required_permission,
+                database_id,
                 &namespace,
                 role_store,
                 &NoopAuditEmitter,
@@ -53,6 +57,7 @@ pub fn check_namespace_authz(
     permission_store.check(
         identity,
         required_permission,
+        database_id,
         "*",
         role_store,
         &NoopAuditEmitter,

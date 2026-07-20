@@ -293,6 +293,7 @@ async fn query_honors_explicit_collection_grant_for_custom_role() {
         srv.shared.permissions.check(
             &identity,
             Permission::Read,
+            DatabaseId::DEFAULT,
             "granted_rows",
             &srv.shared.roles,
             &NoopAuditEmitter,

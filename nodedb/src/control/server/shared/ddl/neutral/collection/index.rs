@@ -312,7 +312,7 @@ pub async fn drop_index(
     // Check ownership or admin.
     let is_owner = state
         .permissions
-        .get_owner("index", tenant_id, &index_name)
+        .get_owner_in_database("index", database_id.as_u64(), tenant_id, &index_name)
         .as_deref()
         == Some(&identity.username);
 
