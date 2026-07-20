@@ -156,7 +156,35 @@ pub struct TenantDataSnapshot {
     /// pre-fix (fail-safe, over-rejecting) behavior rather than a hard error.
     #[msgpack(default)]
     #[serde(default)]
-    pub crdt_constraints: Vec<(u64, u64, String, u64, Vec<Vec<u8>>)>,
+    pub crdt_constraints: Vec<CrdtConstraintEntry>,
+}
+
+/// One collection's CRDT constraint set plus its installed version, carried
+/// through a snapshot so `restore_crdt_constraints` can reconstruct the
+/// validator and the version together.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+    Default,
+)]
+pub struct CrdtConstraintEntry {
+    /// Database owning the collection.
+    pub database_id: u64,
+    /// Tenant owning the collection.
+    pub tenant_id: u64,
+    /// Collection the constraint set applies to.
+    pub collection: String,
+    /// Installed constraint version. The write gate rejects peer deltas whose
+    /// `constraint_version_required` exceeds this.
+    pub version: u64,
+    /// Encoded constraint definitions.
+    pub constraints: Vec<Vec<u8>>,
 }
 
 /// A single PK → surrogate identity binding carried in a snapshot/backup.
@@ -529,13 +557,13 @@ mod tests {
         let not_null_bytes = zerompk::to_msgpack_vec(&not_null).expect("encode NotNull constraint");
 
         let snap = TenantDataSnapshot {
-            crdt_constraints: vec![(
-                0,
-                7,
-                "users".to_string(),
-                3,
-                vec![unique_bytes, not_null_bytes],
-            )],
+            crdt_constraints: vec![CrdtConstraintEntry {
+                database_id: 0,
+                tenant_id: 7,
+                collection: "users".to_string(),
+                version: 3,
+                constraints: vec![unique_bytes, not_null_bytes],
+            }],
             ..Default::default()
         };
 
@@ -544,11 +572,12 @@ mod tests {
             zerompk::from_msgpack(&bytes).expect("decode snapshot with crdt_constraints");
 
         assert_eq!(decoded.crdt_constraints.len(), 1);
-        let (database_id, tid, collection, version, encoded) = &decoded.crdt_constraints[0];
-        assert_eq!(*database_id, 0);
-        assert_eq!(*tid, 7);
-        assert_eq!(collection, "users");
-        assert_eq!(*version, 3);
+        let entry = &decoded.crdt_constraints[0];
+        let encoded = &entry.constraints;
+        assert_eq!(entry.database_id, 0);
+        assert_eq!(entry.tenant_id, 7);
+        assert_eq!(entry.collection, "users");
+        assert_eq!(entry.version, 3);
         assert_eq!(encoded.len(), 2);
 
         let decoded_unique: nodedb_crdt::Constraint =

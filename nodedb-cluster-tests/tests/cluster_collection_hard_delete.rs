@@ -32,8 +32,14 @@ fn has_tombstone(node: &TestClusterNode, name: &str) -> bool {
     let cat = node.shared.credentials.catalog();
     cat.load_wal_tombstones()
         .map(|set| {
-            set.iter()
-                .any(|(tenant, n, lsn)| tenant == 1 && n == name && lsn > 0)
+            // Tombstones are keyed by database as well as tenant; this helper
+            // only ever asks about collections in the default database.
+            set.iter().any(|(database, tenant, n, lsn)| {
+                database == nodedb_types::DatabaseId::DEFAULT.as_u64()
+                    && tenant == 1
+                    && n == name
+                    && lsn > 0
+            })
         })
         .unwrap_or(false)
 }

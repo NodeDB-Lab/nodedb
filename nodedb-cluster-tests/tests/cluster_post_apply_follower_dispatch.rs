@@ -45,13 +45,18 @@ fn pick_follower_index(cluster: &TestCluster) -> usize {
 
 /// Tombstone tuples `(tenant_id, collection, purge_lsn)` currently
 /// persisted in this node's `_system.wal_tombstones`.
+///
+/// Tombstones are keyed by database as well as tenant; this test only
+/// creates and purges collections in the default database, so entries from
+/// any other database are filtered out rather than flattened away.
 fn follower_tombstones(node: &common::cluster_harness::TestClusterNode) -> Vec<(u64, String, u64)> {
     let catalog = node.shared.credentials.catalog();
     catalog
         .load_wal_tombstones()
         .expect("load_wal_tombstones")
         .iter()
-        .map(|(t, n, l)| (t, n.to_string(), l))
+        .filter(|(database, _, _, _)| *database == nodedb_types::DatabaseId::DEFAULT.as_u64())
+        .map(|(_, t, n, l)| (t, n.to_string(), l))
         .collect()
 }
 

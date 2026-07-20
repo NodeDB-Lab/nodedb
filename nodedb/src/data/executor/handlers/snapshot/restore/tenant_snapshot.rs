@@ -276,14 +276,15 @@ impl CoreLoop {
             // on error — warn and continue, matching the `crdt_state` loop, since
             // a failed reconstruction only reverts to the pre-fix (over-rejecting)
             // behavior rather than corrupting state.
-            for (database_raw, tid_raw, collection, version, encoded) in &snap.crdt_constraints {
+            for entry in &snap.crdt_constraints {
                 if let Err(e) = self.restore_crdt_constraints(
-                    *database_raw,
-                    *tid_raw,
-                    collection,
-                    *version,
-                    encoded,
+                    entry.database_id,
+                    entry.tenant_id,
+                    &entry.collection,
+                    entry.version,
+                    &entry.constraints,
                 ) {
+                    let (tid_raw, collection) = (entry.tenant_id, &entry.collection);
                     warn!(tid_raw, %collection, error = %e, "failed to restore crdt constraints");
                 } else {
                     crdt_constraints_written += 1;

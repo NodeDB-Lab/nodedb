@@ -4,7 +4,7 @@
 //!
 //! The matching write path lives in `handlers/control/checkpoint_crdt.rs`
 //! (`checkpoint_crdt_engines`). Checkpoints are written per-core to
-//! `{data_dir}/crdt-ckpt/core-{core_id}/tenant-{tid}-coll-{hex(collection)}.ckpt` because
+//! `{data_dir}/crdt-ckpt/core-{core_id}/db-{dbid}-tenant-{tid}-coll-{hex(collection)}.ckpt` because
 //! `data_dir` is shared across cores and each core only owns the CRDT
 //! fragments routed to its vShards.
 
@@ -21,7 +21,8 @@ pub(crate) fn crdt_ckpt_dir(data_dir: &std::path::Path, core_id: usize) -> std::
     data_dir.join("crdt-ckpt").join(format!("core-{core_id}"))
 }
 
-/// Per-collection checkpoint filename: `tenant-{tid}-coll-{hex(collection)}.ckpt`.
+/// Per-collection checkpoint filename:
+/// `db-{dbid}-tenant-{tid}-coll-{hex(collection)}.ckpt`.
 ///
 /// The collection is hex-encoded so the filename is filesystem-safe (collection
 /// names may contain `/`, `:` or `-`) and unambiguously parseable: hex contains
@@ -101,7 +102,8 @@ impl CoreLoop {
                 continue;
             }
 
-            // Checkpoint filenames are `"tenant-{tid}-coll-{hex(collection)}.ckpt"`.
+            // Checkpoint filenames are
+            // `"db-{dbid}-tenant-{tid}-coll-{hex(collection)}.ckpt"`.
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -199,7 +201,7 @@ mod tests {
             .expect("an absent checkpoint dir must not be treated as corruption");
     }
 
-    /// A `.ckpt` file with a valid, parseable `tenant-{tid}-coll-{hex}` stem
+    /// A `.ckpt` file with a valid, parseable `db-{dbid}-tenant-{tid}-coll-{hex}` stem
     /// but bytes that are not a real Loro snapshot must fail the load, not be
     /// silently skipped: once the WAL below this checkpoint's LSN is
     /// truncated, the checkpoint is the only durable copy of the CRDT state,

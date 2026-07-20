@@ -128,11 +128,12 @@ async fn crdt_constraint_survives_snapshot_capture_and_restore() {
          validator's installed constraint set"
     );
     assert!(
-        snap.crdt_constraints
-            .iter()
-            .any(|(tid, coll, version, encoded)| {
-                *tid == TENANT && coll == COLLECTION && *version == 1 && !encoded.is_empty()
-            }),
+        snap.crdt_constraints.iter().any(|entry| {
+            entry.tenant_id == TENANT
+                && entry.collection == COLLECTION
+                && entry.version == 1
+                && !entry.constraints.is_empty()
+        }),
         "captured snapshot did not contain an entry for (tenant={TENANT}, collection={COLLECTION}, \
          version=1) with at least one constraint blob; observed: {:?}",
         snap.crdt_constraints

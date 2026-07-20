@@ -292,14 +292,15 @@ async fn snapshot_bytes_roundtrip_write_and_restore() {
     assert_eq!(on_disk, hnsw_bytes, "HNSW checkpoint bytes must match");
 
     // ── Verify CRDT checkpoint file ──────────────────────────────────────────
-    // CRDT checkpoints are per-collection and per-core:
-    // `crdt-ckpt/core-{id}/tenant-{tid}-coll-{hex(collection)}.ckpt`. The hex
-    // encoding mirrors the engine's filename scheme (collection bytes, lowercase).
+    // CRDT checkpoints are per-collection, per-database and per-core:
+    // `crdt-ckpt/core-{id}/db-{dbid}-tenant-{tid}-coll-{hex(collection)}.ckpt`.
+    // The hex encoding mirrors the engine's filename scheme (collection bytes,
+    // lowercase).
     let crdt_coll_hex: String = "testcoll".bytes().map(|b| format!("{b:02x}")).collect();
     let crdt_ckpt = data_dir
         .join("crdt-ckpt")
         .join("core-0")
-        .join(format!("tenant-1-coll-{crdt_coll_hex}.ckpt"));
+        .join(format!("db-0-tenant-1-coll-{crdt_coll_hex}.ckpt"));
     assert!(
         crdt_ckpt.exists(),
         "CRDT checkpoint file must exist after restore"

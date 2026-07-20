@@ -16,7 +16,7 @@ impl CoreLoop {
     /// durable through, plus the number of checkpoint files published.
     ///
     /// Each tenant's Loro state is exported per collection and written to
-    /// `{data_dir}/crdt-ckpt/core-{core_id}/tenant-{tid}-coll-{hex(collection)}.ckpt`
+    /// `{data_dir}/crdt-ckpt/core-{core_id}/db-{dbid}-tenant-{tid}-coll-{hex(collection)}.ckpt`
     /// with atomic temp+rename. The per-core subdir is required because `data_dir` is
     /// shared across all cores and a tenant's CRDT state is fragmented across
     /// cores by collection — without the subdir, cores would race-overwrite
@@ -62,10 +62,10 @@ impl CoreLoop {
         for ((database_id, tenant_id), engine) in &self.crdt_engines {
             let database_id = database_id.as_u64();
             let tid = tenant_id.as_u64();
-            // One checkpoint file per (tenant, collection) — each collection
-            // owns its own LoroDoc. Filenames are
-            // `tenant-{id}-coll-{hex(collection)}.ckpt`, matching the loader's
-            // parse and the cluster-restore writer.
+            // One checkpoint file per (database, tenant, collection) — each
+            // collection owns its own LoroDoc. Filenames are
+            // `db-{dbid}-tenant-{id}-coll-{hex(collection)}.ckpt`, matching the
+            // loader's parse and the cluster-restore writer.
             let snapshots = engine
                 .export_all_snapshots()
                 .map_err(|e| crate::Error::Storage {

@@ -225,11 +225,9 @@ impl DataPlaneSnapshotBuilder {
 
         // CRDT constraints: same per-collection vshard filter as `crdt_state`
         // — each entry is routed by its single collection's vshard.
-        for (database_id, tid, collection, version, encoded) in snap.crdt_constraints {
-            if group_vshards.contains(&Self::vshard_of(&collection)) {
-                merged
-                    .crdt_constraints
-                    .push((database_id, tid, collection, version, encoded));
+        for entry in snap.crdt_constraints {
+            if group_vshards.contains(&Self::vshard_of(&entry.collection)) {
+                merged.crdt_constraints.push(entry);
             }
         }
 

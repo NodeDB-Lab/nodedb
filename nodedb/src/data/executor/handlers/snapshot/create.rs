@@ -173,13 +173,15 @@ impl CoreLoop {
                 if failed || encoded.is_empty() {
                     continue;
                 }
-                snapshot.crdt_constraints.push((
-                    task.request.database_id.as_u64(),
-                    tenant_id,
-                    collection,
-                    version,
-                    encoded,
-                ));
+                snapshot
+                    .crdt_constraints
+                    .push(crate::types::snapshot::CrdtConstraintEntry {
+                        database_id: task.request.database_id.as_u64(),
+                        tenant_id,
+                        collection,
+                        version,
+                        constraints: encoded,
+                    });
             }
         }
 
