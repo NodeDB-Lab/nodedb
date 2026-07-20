@@ -20,7 +20,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, "crdt read");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
@@ -57,7 +57,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, "crdt read at version");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -87,7 +87,7 @@ impl CoreLoop {
         collection: &str,
     ) -> Response {
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -117,7 +117,7 @@ impl CoreLoop {
         from_version_json: &str,
     ) -> Response {
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -149,7 +149,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, "crdt restore");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -180,7 +180,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, "crdt compact at version");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -218,7 +218,7 @@ impl CoreLoop {
     ) -> Response {
         let tid = crate::types::TenantId::new(tenant_id);
         debug!(core = self.core_id, %tid, %collection, "crdt import snapshot");
-        let engine = match self.get_crdt_engine(tid) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tid) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine");

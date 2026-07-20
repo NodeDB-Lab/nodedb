@@ -51,7 +51,11 @@ pub fn compute_chain_hash(previous_hash: &str, row_id: &str, row_contents: &[u8]
 /// and returns the re-encoded document. Updates `chain_hashes` with the new hash.
 /// Returns `None` if hash chain is not enabled for this collection config.
 pub fn apply_chain_on_insert(
-    chain_hashes: &mut std::collections::HashMap<(nodedb_types::TenantId, String), String>,
+    chain_hashes: &mut std::collections::HashMap<
+        (nodedb_types::DatabaseId, nodedb_types::TenantId, String),
+        String,
+    >,
+    database_id: u64,
     tid: u64,
     collection: &str,
     document_id: &str,
@@ -62,7 +66,11 @@ pub fn apply_chain_on_insert(
         return None;
     }
 
-    let key = (nodedb_types::TenantId::new(tid), collection.to_string());
+    let key = (
+        nodedb_types::DatabaseId::new(database_id),
+        nodedb_types::TenantId::new(tid),
+        collection.to_string(),
+    );
     let prev_hash = chain_hashes
         .get(&key)
         .map(|s| s.as_str())

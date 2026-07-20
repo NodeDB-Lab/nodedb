@@ -49,8 +49,13 @@ impl CoreLoop {
             "point get"
         );
 
+        let database_id = task.request.database_id.as_u64();
         // Check if this is a strict collection — affects decode format.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode
@@ -61,9 +66,8 @@ impl CoreLoop {
             }
         });
 
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let is_temporal_read = system_as_of_ms.is_some() || valid_at_ms.is_some();
-        let database_id = task.request.database_id.as_u64();
 
         // Fetch data from cache or storage. Temporal reads bypass the
         // doc cache (cache holds current state) and read the versioned

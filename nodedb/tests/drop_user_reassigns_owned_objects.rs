@@ -22,8 +22,19 @@ const VICTIM: &str = "victim_owner";
 const ADMIN_TARGET: &str = "nodedb";
 
 fn plant_owner(catalog: &SystemCatalog, object_type: &str, name: &str, owner: &str) {
+    plant_owner_in_database(catalog, object_type, 0, name, owner);
+}
+
+fn plant_owner_in_database(
+    catalog: &SystemCatalog,
+    object_type: &str,
+    database_id: u64,
+    name: &str,
+    owner: &str,
+) {
     catalog
         .put_owner(&StoredOwner {
+            database_id,
             object_type: object_type.to_string(),
             object_name: name.to_string(),
             tenant_id: TENANT,
@@ -66,8 +77,16 @@ fn move_collection(catalog: &SystemCatalog, name: &str, database_id: DatabaseId)
     catalog
         .delete_collection(DatabaseId::DEFAULT, TENANT, name)
         .unwrap();
+    catalog.delete_owner("collection", 0, TENANT, name).unwrap();
     collection.database_id = database_id;
     catalog.put_collection(database_id, &collection).unwrap();
+    plant_owner_in_database(
+        catalog,
+        "collection",
+        database_id.as_u64(),
+        name,
+        &collection.owner,
+    );
 }
 
 fn assert_no_dangling_user_references(catalog: &SystemCatalog) {
@@ -96,9 +115,33 @@ async fn drop_user_reassigns_non_default_database_collection() {
         .exec("CREATE USER global_owner PASSWORD 'probe-secret-99'")
         .await
         .expect("create ordinary user");
+    server
+        .exec("CREATE USER other_owner PASSWORD 'probe-secret-99'")
+        .await
+        .unwrap();
     create_collection_as(&server, "global_owner", "global_notes").await;
     let catalog = server.shared.credentials.catalog();
     move_collection(catalog, "global_notes", DatabaseId::new(9));
+    let mut same_name = catalog
+        .get_collection(DatabaseId::new(9), TENANT, "global_notes")
+        .unwrap()
+        .unwrap();
+    same_name.database_id = DatabaseId::new(10);
+    same_name.owner = "other_owner".into();
+    catalog
+        .put_collection(same_name.database_id, &same_name)
+        .unwrap();
+    plant_owner_in_database(catalog, "collection", 10, "global_notes", "other_owner");
+    server
+        .shared
+        .permissions
+        .install_replicated_owner(&StoredOwner {
+            database_id: 10,
+            object_type: "collection".into(),
+            object_name: "global_notes".into(),
+            tenant_id: TENANT,
+            owner_username: "other_owner".into(),
+        });
 
     server
         .exec("DROP USER global_owner")
@@ -114,7 +157,41 @@ async fn drop_user_reassigns_non_default_database_collection() {
             .owner,
         "nodedb"
     );
-    assert_eq!(owner_of(catalog, "collection", "global_notes"), "nodedb");
+    assert_eq!(
+        catalog
+            .get_collection(DatabaseId::new(10), TENANT, "global_notes")
+            .unwrap()
+            .unwrap()
+            .owner,
+        "other_owner"
+    );
+    assert_eq!(
+        server
+            .shared
+            .permissions
+            .get_owner_in_database("collection", 9, TenantId::new(TENANT), "global_notes",)
+            .as_deref(),
+        Some("nodedb")
+    );
+    assert_eq!(
+        server
+            .shared
+            .permissions
+            .get_owner_in_database("collection", 10, TenantId::new(TENANT), "global_notes",)
+            .as_deref(),
+        Some("other_owner")
+    );
+    let owners = catalog.load_all_owners().unwrap();
+    assert!(
+        owners
+            .iter()
+            .any(|owner| owner.database_id == 9 && owner.owner_username == "nodedb")
+    );
+    assert!(
+        owners
+            .iter()
+            .any(|owner| { owner.database_id == 10 && owner.owner_username == "other_owner" })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -195,11 +272,30 @@ async fn startup_repair_recovers_preexisting_dangling_owners() {
         .exec("CREATE USER lost_owner PASSWORD 'probe-secret-99'")
         .await
         .unwrap();
+    server
+        .exec("CREATE USER recovery_peer PASSWORD 'probe-secret-99'")
+        .await
+        .unwrap();
     create_collection_as(&server, "lost_owner", "recoverable_notes").await;
     move_collection(
         server.shared.credentials.catalog(),
         "recoverable_notes",
         DatabaseId::new(10),
+    );
+    let catalog = server.shared.credentials.catalog();
+    let mut peer = catalog
+        .get_collection(DatabaseId::new(10), TENANT, "recoverable_notes")
+        .unwrap()
+        .unwrap();
+    peer.database_id = DatabaseId::new(11);
+    peer.owner = "recovery_peer".into();
+    catalog.put_collection(peer.database_id, &peer).unwrap();
+    plant_owner_in_database(
+        catalog,
+        "collection",
+        11,
+        "recoverable_notes",
+        "recovery_peer",
     );
     server
         .shared
@@ -215,6 +311,14 @@ async fn startup_repair_recovers_preexisting_dangling_owners() {
         "startup repair must recover dangling owners: {report}"
     );
     assert_no_dangling_user_references(server.shared.credentials.catalog());
+    assert_eq!(
+        catalog
+            .get_collection(DatabaseId::new(11), TENANT, "recoverable_notes")
+            .unwrap()
+            .unwrap()
+            .owner,
+        "recovery_peer"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -376,7 +480,13 @@ async fn drop_user_reassigns_every_owner_bearing_kind_and_sweeps_grants() {
         modification_hlc: Default::default(),
     };
     catalog.put_continuous_aggregate(&aggregate).unwrap();
-    plant_owner(&catalog, "continuous_aggregate", "victim_aggregate", VICTIM);
+    plant_owner_in_database(
+        &catalog,
+        "continuous_aggregate",
+        11,
+        "victim_aggregate",
+        VICTIM,
+    );
     plant_owner(&catalog, "index", "victim_index", VICTIM);
 
     let grant = StoredPermission {

@@ -185,7 +185,7 @@ impl CoreLoop {
             scan_budget_bytes,
         );
         let database_id = task.request.database_id.as_u64();
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
 
         let matches = |value: &[u8]| -> bool {
             if filter_predicates.is_empty() {

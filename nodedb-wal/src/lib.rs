@@ -58,7 +58,7 @@ pub use record::{
     SpatialDeletePayload, SpatialPutPayload, WalRecord, WalRecordArgs,
 };
 pub use recovery::{RecoveryInfo, recover};
-pub use replay::{TombstoneSet, extract_tombstones};
+pub use replay::{DatabaseTombstones, TombstoneSet, extract_tombstones};
 pub use secure_mem::SecureKey;
 pub use segmented::{SegmentedWal, SegmentedWalConfig};
 pub use temporal_purge::{TemporalPurgeEngine, TemporalPurgePayload};

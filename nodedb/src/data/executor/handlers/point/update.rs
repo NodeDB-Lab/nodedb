@@ -53,7 +53,11 @@ impl CoreLoop {
             "point update"
         );
 
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let is_strict = self.doc_configs.get(&config_key).is_some_and(|c| {
             matches!(
                 c.storage_mode,
@@ -77,7 +81,7 @@ impl CoreLoop {
             .iter()
             .any(|(_, v)| matches!(v, UpdateValue::Expr(_)));
 
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         let sys_from_for_encode = if bitemporal {
             self.bitemporal_now_ms()
         } else {
@@ -398,7 +402,7 @@ impl CoreLoop {
                         // body rewrite never touched it, so re-index the row's
                         // sparse literal from the new body. No-op when the
                         // collection declares no `SparseVector` column.
-                        let has_sparse = self.collection_has_sparse(tid, collection);
+                        let has_sparse = self.collection_has_sparse(database_id, tid, collection);
                         self.update_reindex_sparse_indexes(
                             super::update_reindex_sparse::UpdateSparseReindex {
                                 database_id,

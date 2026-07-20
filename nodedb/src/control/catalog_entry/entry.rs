@@ -38,7 +38,11 @@ pub enum CatalogEntry {
     /// Mark a collection as `is_active = false`. Record is
     /// preserved for audit + undrop. The soft-delete step in the
     /// two-step DROP → retention-expiry → PURGE flow.
-    DeactivateCollection { tenant_id: u64, name: String },
+    DeactivateCollection {
+        database_id: u64,
+        tenant_id: u64,
+        name: String,
+    },
     /// Hard-delete a collection: remove the `StoredCollection`
     /// row + owner row + cascade-dependent catalog entries, and
     /// dispatch `MetaOp::UnregisterCollection` to every node's Data
@@ -56,7 +60,11 @@ pub enum CatalogEntry {
     /// Preserves the two-step safety net: soft-deleted collections
     /// are UNDROP-able until retention expires; after purge the
     /// record is gone and data is unrecoverable (except from backup).
-    PurgeCollection { tenant_id: u64, name: String },
+    PurgeCollection {
+        database_id: u64,
+        tenant_id: u64,
+        name: String,
+    },
 
     // ── Sequence ───────────────────────────────────────────────────
     /// Upsert a sequence record. Used by CREATE SEQUENCE and ALTER
@@ -269,9 +277,10 @@ pub enum CatalogEntry {
     /// the parent's post_apply instead — this variant is only for
     /// the orphan path.
     PutOwner(Box<StoredOwner>),
-    /// Delete an ownership record by `(object_type, tenant_id, object_name)`.
+    /// Delete an ownership record by database-scoped object identity.
     DeleteOwner {
         object_type: String,
+        database_id: u64,
         tenant_id: u64,
         object_name: String,
     },
@@ -304,11 +313,12 @@ pub enum CatalogEntry {
     DeleteOidcProvider { name: String },
 
     // ── WAL replay tombstone ───────────────────────────────────────
-    /// Record (or raise) a per-(tenant, collection) WAL replay tombstone.
+    /// Record (or raise) a per-(database, tenant, collection) WAL replay tombstone.
     /// Replicated on RESTORE so every replica's boot-time WAL replay barrier
     /// (`purge_lsn`) matches — without it, purged writes resurrect on follower
     /// restart. Idempotent + monotone (see `record_wal_tombstone`).
     RecordWalTombstone {
+        database_id: u64,
         tenant_id: u64,
         collection: String,
         purge_lsn: u64,

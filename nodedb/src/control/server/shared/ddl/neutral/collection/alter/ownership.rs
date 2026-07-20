@@ -89,6 +89,7 @@ pub(super) fn alter_collection_owner(
             .map_err(|e| err("XX000", format!("catalog write: {e}")))?;
         state.permissions.install_replicated_owner(
             &crate::control::security::catalog::StoredOwner {
+                database_id: stored.database_id.as_u64(),
                 object_type: "collection".into(),
                 object_name: stored.name.clone(),
                 tenant_id: stored.tenant_id,

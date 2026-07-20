@@ -170,7 +170,7 @@ impl CoreLoop {
         // monotonic `bitemporal_now_ms` lives on the core, so this is the one
         // place the stamp can be pinned before both the redo and the install.
         for collection in &doc_collections {
-            if !self.is_bitemporal(tid, collection) {
+            if !self.is_bitemporal(task.request.database_id.as_u64(), tid, collection) {
                 continue;
             }
             let coll_key = (
@@ -228,7 +228,8 @@ impl CoreLoop {
                 );
                 // Strict collections store Binary Tuples; resolve the schema
                 // once so the serializer can decode them back to MessagePack.
-                let strict_schema = self.resolve_strict_schema(tid, collection);
+                let strict_schema =
+                    self.resolve_strict_schema(task.request.database_id.as_u64(), tid, collection);
                 document::serialize_document_collection(
                     overlay,
                     &coll_key,
@@ -1306,7 +1307,11 @@ mod tests {
 
     fn register_strict(core: &mut CoreLoop, collection: &str) {
         core.doc_configs.insert(
-            (TenantId::new(TID), collection.to_string()),
+            (
+                DatabaseId::DEFAULT,
+                TenantId::new(TID),
+                collection.to_string(),
+            ),
             CollectionConfig::new(collection).with_storage_mode(StorageMode::Strict {
                 schema: strict_schema(),
             }),

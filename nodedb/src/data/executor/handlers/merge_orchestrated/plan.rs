@@ -108,7 +108,7 @@ impl CoreLoop {
             params.source_join_col,
             params.source_rows,
         )?;
-        let strict_schema = self.merge_strict_schema(tid, params.target_collection);
+        let strict_schema = self.merge_strict_schema(database_id, tid, params.target_collection);
         let target_docs =
             self.collect_target_docs(database_id, tid, params.target_collection, txn_id)?;
 

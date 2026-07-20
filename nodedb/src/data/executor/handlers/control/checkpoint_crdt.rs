@@ -59,7 +59,8 @@ impl CoreLoop {
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
 
         let mut files_written = 0;
-        for (tenant_id, engine) in &self.crdt_engines {
+        for ((database_id, tenant_id), engine) in &self.crdt_engines {
+            let database_id = database_id.as_u64();
             let tid = tenant_id.as_u64();
             // One checkpoint file per (tenant, collection) — each collection
             // owns its own LoroDoc. Filenames are
@@ -77,8 +78,11 @@ impl CoreLoop {
                 if snapshot.is_empty() {
                     continue;
                 }
-                let fname =
-                    crate::data::executor::crdt_checkpoint::crdt_ckpt_filename(tid, &collection);
+                let fname = crate::data::executor::crdt_checkpoint::crdt_ckpt_filename(
+                    database_id,
+                    tid,
+                    &collection,
+                );
                 let ckpt_path = ckpt_dir.join(&fname);
                 let tmp_path = ckpt_dir.join(format!("{fname}.tmp"));
                 nodedb_wal::segment::atomic_write_fsync(&tmp_path, &ckpt_path, &snapshot)

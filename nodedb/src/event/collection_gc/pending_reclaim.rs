@@ -73,6 +73,7 @@ pub async fn drain_once(shared: &SharedState) {
     for entry in queue {
         match crate::control::server::shared::ddl::neutral::collection::purge::dispatch_unregister_collection(
             shared,
+            entry.database_id,
             entry.tenant_id,
             &entry.name,
             entry.purge_lsn,
@@ -80,7 +81,7 @@ pub async fn drain_once(shared: &SharedState) {
         .await
         {
             Ok(()) => {
-                if let Err(e) = catalog.remove_pending_reclaim(entry.tenant_id, &entry.name) {
+                if let Err(e) = catalog.remove_pending_reclaim(entry.database_id, entry.tenant_id, &entry.name) {
                     warn!(
                         tenant = entry.tenant_id,
                         collection = %entry.name,
@@ -99,7 +100,12 @@ pub async fn drain_once(shared: &SharedState) {
             Err(e) => {
                 let msg = e.to_string();
                 if let Err(update_err) =
-                    catalog.record_pending_reclaim_attempt(entry.tenant_id, &entry.name, &msg)
+                    catalog.record_pending_reclaim_attempt(
+                        entry.database_id,
+                        entry.tenant_id,
+                        &entry.name,
+                        &msg,
+                    )
                 {
                     warn!(
                         tenant = entry.tenant_id,

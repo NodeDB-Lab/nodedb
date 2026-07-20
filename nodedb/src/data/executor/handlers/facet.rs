@@ -95,7 +95,13 @@ impl CoreLoop {
         }
 
         // Cache the result.
-        let cache_key = facet_cache_key(tid, collection, fields, filter_bytes);
+        let cache_key = facet_cache_key(
+            task.request.database_id.as_u64(),
+            tid,
+            collection,
+            fields,
+            filter_bytes,
+        );
         if self.aggregate_cache.len() < 256
             && let Ok(bytes) =
                 nodedb_types::json_to_msgpack(&serde_json::Value::Object(facet_result.clone()))
@@ -175,11 +181,12 @@ impl CoreLoop {
 
 /// Build a cache key for facet counts.
 fn facet_cache_key(
+    database_id: u64,
     tid: u64,
     collection: &str,
     fields: &[String],
     filter_bytes: &[u8],
-) -> (crate::types::TenantId, String) {
+) -> (crate::types::DatabaseId, crate::types::TenantId, String) {
     use std::fmt::Write;
     let mut rest = format!("{collection}\0facet:");
     let _ = write!(rest, "{}", fields.join(","));
@@ -188,5 +195,9 @@ fn facet_cache_key(
         let hash = crc32c::crc32c(filter_bytes);
         let _ = write!(rest, "\0filter:{hash:08x}");
     }
-    (crate::types::TenantId::new(tid), rest)
+    (
+        crate::types::DatabaseId::new(database_id),
+        crate::types::TenantId::new(tid),
+        rest,
+    )
 }

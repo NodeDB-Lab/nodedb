@@ -25,7 +25,26 @@ pub(super) fn install_from_parent(
     owner_username: &str,
     shared: &SharedState,
 ) {
+    install_from_parent_in_database(
+        object_type,
+        0,
+        tenant_id,
+        object_name,
+        owner_username,
+        shared,
+    );
+}
+
+pub(super) fn install_from_parent_in_database(
+    object_type: &'static str,
+    database_id: u64,
+    tenant_id: u64,
+    object_name: &str,
+    owner_username: &str,
+    shared: &SharedState,
+) {
     shared.permissions.install_replicated_owner(&StoredOwner {
+        database_id,
         object_type: object_type.to_string(),
         object_name: object_name.to_string(),
         tenant_id,
@@ -44,11 +63,21 @@ pub fn put(stored: StoredOwner, shared: Arc<SharedState>) {
     );
 }
 
-pub fn delete(object_type: String, tenant_id: u64, object_name: String, shared: Arc<SharedState>) {
-    let removed =
-        shared
-            .permissions
-            .install_replicated_remove_owner(&object_type, tenant_id, &object_name);
+pub fn delete(
+    object_type: String,
+    database_id: u64,
+    tenant_id: u64,
+    object_name: String,
+    shared: Arc<SharedState>,
+) {
+    let removed = shared
+        .permissions
+        .install_replicated_remove_owner_in_database(
+            &object_type,
+            database_id,
+            tenant_id,
+            &object_name,
+        );
     tracing::debug!(
         %object_type, tenant = tenant_id, %object_name, removed,
         "post_apply: owner removed"

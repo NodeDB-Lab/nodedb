@@ -56,8 +56,14 @@ impl CoreLoop {
             "upsert"
         );
 
+        let database_id = task.request.database_id.as_u64();
+
         // Detect strict storage mode for this collection.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|config| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 config.storage_mode
@@ -72,8 +78,7 @@ impl CoreLoop {
         // the versioned table's current-state view (reverse-scan to newest
         // non-tombstone); non-bitemporal collections use the legacy point
         // lookup.
-        let bitemporal = self.is_bitemporal(tid, collection);
-        let database_id = task.request.database_id.as_u64();
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         // Computed once for the whole statement: the schemaless half of this
         // check is an unindexed `vector_params` scan, so it must not be paid
         // per branch. Gates the live HNSW re-index + the post-apply redo

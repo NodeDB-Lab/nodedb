@@ -96,6 +96,7 @@ impl CoreLoop {
             let tenant_id = record.header.tenant_id;
             let database_id = record.header.database_id;
             let record_lsn = record.header.lsn;
+            let tombstones = tombstones.for_database(database_id);
 
             if is_vector_params {
                 // Newer records append the vector field name as the 9th

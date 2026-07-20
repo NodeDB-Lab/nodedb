@@ -47,6 +47,7 @@ pub struct HnswSnapshot {
     zerompk::FromMessagePack,
 )]
 pub struct CrdtSnapshot {
+    pub database_id: u64,
     pub tenant_id: u64,
     pub peer_id: u64,
     /// Collection this snapshot belongs to.
@@ -221,6 +222,7 @@ mod tests {
                 checkpoint_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
             }],
             crdt_snapshots: vec![CrdtSnapshot {
+                database_id: 0,
                 tenant_id: 1,
                 peer_id: 100,
                 collection: "notes".into(),

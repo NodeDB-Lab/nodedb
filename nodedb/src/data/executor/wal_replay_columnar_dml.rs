@@ -71,7 +71,12 @@ impl CoreLoop {
             return None;
         }
 
-        if tombstones.is_tombstoned(tenant_id, &record.collection, record_lsn) {
+        if tombstones.is_tombstoned(
+            database_id.as_u64(),
+            tenant_id,
+            &record.collection,
+            record_lsn,
+        ) {
             return Some(0);
         }
 

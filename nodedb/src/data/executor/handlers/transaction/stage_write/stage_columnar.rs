@@ -98,7 +98,7 @@ impl CoreLoop {
             );
         }
 
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         let engine_key = (
             task.request.database_id,
             TenantId::new(tid),

@@ -16,8 +16,9 @@ pub fn put(stored: &StoredContinuousAggregate, catalog: &SystemCatalog) {
             "catalog_entry: put_continuous_aggregate failed"
         );
     }
-    super::owner::put_parent_owner(
+    super::owner::put_parent_owner_in_database(
         object_type::CONTINUOUS_AGGREGATE,
+        stored.database_id,
         stored.tenant_id,
         &stored.name,
         &stored.owner,
@@ -34,5 +35,11 @@ pub fn delete(database_id: u64, tenant_id: u64, name: &str, catalog: &SystemCata
             "catalog_entry: delete_continuous_aggregate failed"
         );
     }
-    super::owner::delete_parent_owner(object_type::CONTINUOUS_AGGREGATE, tenant_id, name, catalog);
+    super::owner::delete_parent_owner_in_database(
+        object_type::CONTINUOUS_AGGREGATE,
+        database_id,
+        tenant_id,
+        name,
+        catalog,
+    );
 }

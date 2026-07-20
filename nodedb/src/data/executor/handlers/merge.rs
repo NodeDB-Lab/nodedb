@@ -127,6 +127,7 @@ impl CoreLoop {
 
         // Check strict schema for target.
         let config_key = (
+            task.request.database_id,
             crate::types::TenantId::new(tid),
             target_collection.to_string(),
         );
@@ -278,10 +279,15 @@ impl CoreLoop {
     /// document collection. `None` for schemaless collections.
     pub(in crate::data::executor) fn merge_strict_schema(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
     ) -> Option<nodedb_types::columnar::StrictSchema> {
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode
@@ -377,7 +383,11 @@ impl CoreLoop {
         join_col: &str,
         source_rows: Option<&[(String, Vec<u8>)]>,
     ) -> crate::Result<std::collections::HashMap<String, serde_json::Value>> {
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode

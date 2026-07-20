@@ -68,7 +68,11 @@ impl CoreLoop {
         // bytes as-is.
         let owned_mp;
         let mp: &[u8] = if p.is_strict {
-            let config_key = (crate::types::TenantId::new(p.tid), p.collection.to_string());
+            let config_key = (
+                crate::types::DatabaseId::new(p.database_id),
+                crate::types::TenantId::new(p.tid),
+                p.collection.to_string(),
+            );
             let Some(config) = self.doc_configs.get(&config_key) else {
                 return;
             };

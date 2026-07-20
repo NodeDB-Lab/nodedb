@@ -31,7 +31,11 @@ impl CoreLoop {
         source_rows: Option<&[(String, Vec<u8>)]>,
     ) -> crate::Result<std::collections::HashMap<String, serde_json::Value>> {
         // Check if the source collection is strict-mode.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode

@@ -32,12 +32,14 @@ use nodedb_physical::physical_plan::MetaOp;
 /// Idempotent: safe to re-dispatch after a partial or failed attempt.
 pub async fn dispatch_unregister_collection(
     state: &SharedState,
+    database_id: u64,
     tenant_id: u64,
     name: &str,
     purge_lsn: u64,
 ) -> crate::Result<()> {
     let tenant = TenantId::new(tenant_id);
-    let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, name);
+    let database = DatabaseId::new(database_id);
+    let vshard = VShardId::from_collection_in_database(database, name);
     let plan = PhysicalPlan::Meta(MetaOp::UnregisterCollection {
         tenant_id,
         name: name.to_string(),
@@ -47,7 +49,7 @@ pub async fn dispatch_unregister_collection(
     let response = crate::control::server::dispatch_utils::dispatch_to_data_plane(
         state,
         tenant,
-        DatabaseId::DEFAULT,
+        database,
         vshard,
         plan,
         TraceId::ZERO,

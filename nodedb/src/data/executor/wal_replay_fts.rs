@@ -122,7 +122,12 @@ impl CoreLoop {
                     }
                 };
 
-                if tombstones.is_tombstoned(tenant_id, &payload.collection, record_lsn) {
+                if tombstones.is_tombstoned(
+                    database_id.as_u64(),
+                    tenant_id,
+                    &payload.collection,
+                    record_lsn,
+                ) {
                     skipped += 1;
                     continue;
                 }
@@ -196,7 +201,12 @@ impl CoreLoop {
                     }
                 };
 
-                if tombstones.is_tombstoned(tenant_id, &payload.collection, record_lsn) {
+                if tombstones.is_tombstoned(
+                    database_id.as_u64(),
+                    tenant_id,
+                    &payload.collection,
+                    record_lsn,
+                ) {
                     skipped += 1;
                     continue;
                 }

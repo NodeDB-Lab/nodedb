@@ -9,4 +9,4 @@
 
 pub mod filter;
 
-pub use filter::{TombstoneSet, extract_tombstones};
+pub use filter::{DatabaseTombstones, TombstoneSet, extract_tombstones};

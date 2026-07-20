@@ -130,7 +130,12 @@ impl CoreLoop {
                 // events were lost, and per-row events are what ROW-level
                 // AFTER-DELETE triggers match on (see
                 // `event::trigger::dispatcher::single`).
-                let old_converted = self.resolve_event_payload(tid, collection, deleted_bytes);
+                let old_converted = self.resolve_event_payload(
+                    task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    deleted_bytes,
+                );
                 self.emit_write_event(
                     task,
                     collection,
@@ -144,7 +149,11 @@ impl CoreLoop {
         }
 
         // Clear aggregate cache for this collection.
-        self.invalidate_aggregate_cache_for_collection(tid, collection);
+        self.invalidate_aggregate_cache_for_collection(
+            task.request.database_id.as_u64(),
+            tid,
+            collection,
+        );
 
         debug!(core = self.core_id, %collection, truncated, "truncate complete");
         let result = serde_json::json!({ "truncated": truncated });

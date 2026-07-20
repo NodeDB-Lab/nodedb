@@ -311,7 +311,7 @@ impl CoreLoop {
             crate::fail_point!("transaction_batch::between_crdt_delta");
 
             let tenant_id = crate::types::TenantId::new(tid);
-            match self.get_crdt_engine(tenant_id) {
+            match self.get_crdt_engine(task.request.database_id, tenant_id) {
                 Ok(engine) => {
                     // NOTE: applies committed CRDT deltas via a bare import, with NO
                     // constraint validation. If deterministic apply-time validation is

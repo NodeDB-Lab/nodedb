@@ -106,7 +106,7 @@ impl CoreLoop {
         // field's committed index (or its DDL params), falling back to L2 when
         // neither is registered yet.
         let mut fields: Vec<String> = self
-            .strict_vector_fields(tid_u64, params.collection)
+            .strict_vector_fields(db, tid_u64, params.collection)
             .into_iter()
             .map(|(field, _dim)| field)
             .collect();

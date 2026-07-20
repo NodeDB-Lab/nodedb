@@ -90,17 +90,23 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) {
     match entry {
         CatalogEntry::PutCollection(stored) => collection::put(stored, catalog),
         CatalogEntry::PutCollectionIfAbsent(stored) => collection::put_if_absent(stored, catalog),
-        CatalogEntry::DeactivateCollection { tenant_id, name } => {
-            collection::deactivate(*tenant_id, name, catalog)
-        }
-        CatalogEntry::PurgeCollection { tenant_id, name } => {
+        CatalogEntry::DeactivateCollection {
+            database_id,
+            tenant_id,
+            name,
+        } => collection::deactivate(*database_id, *tenant_id, name, catalog),
+        CatalogEntry::PurgeCollection {
+            database_id,
+            tenant_id,
+            name,
+        } => {
             // Raft apply runs symmetrically on every node and must not
             // abort on a per-node catalog storage hiccup — log and
             // continue, exactly as before. The swallow is now an
             // explicit choice at the call site rather than hidden
             // inside `purge`; the interactive re-CREATE caller makes
             // the opposite choice and propagates.
-            if let Err(e) = collection::purge(*tenant_id, name, catalog) {
+            if let Err(e) = collection::purge(*database_id, *tenant_id, name, catalog) {
                 tracing::warn!(
                     collection = %name,
                     tenant = tenant_id,
@@ -169,9 +175,10 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) {
         CatalogEntry::PutOwner(stored) => owner::put(stored, catalog),
         CatalogEntry::DeleteOwner {
             object_type,
+            database_id,
             tenant_id,
             object_name,
-        } => owner::delete(object_type, *tenant_id, object_name, catalog),
+        } => owner::delete(object_type, *database_id, *tenant_id, object_name, catalog),
         CatalogEntry::PutSynonymGroup(stored) => synonym_group::put(stored, catalog),
         CatalogEntry::DeleteSynonymGroup { tenant_id, name } => {
             synonym_group::delete(*tenant_id, name, catalog)
@@ -199,10 +206,11 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) {
         CatalogEntry::PutOidcProvider(provider) => oidc_provider::put(provider, catalog),
         CatalogEntry::DeleteOidcProvider { name } => oidc_provider::delete(name, catalog),
         CatalogEntry::RecordWalTombstone {
+            database_id,
             tenant_id,
             collection,
             purge_lsn,
-        } => wal_tombstone::record(*tenant_id, collection, *purge_lsn, catalog),
+        } => wal_tombstone::record(*database_id, *tenant_id, collection, *purge_lsn, catalog),
         CatalogEntry::MoveTenantCutover {
             tenant_id,
             source_db_id,

@@ -20,10 +20,15 @@ impl CoreLoop {
     /// unlike `strict_vector_fields` — only the field NAME is returned.
     pub(in crate::data::executor) fn strict_sparse_fields(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
     ) -> Vec<String> {
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         self.doc_configs
             .get(&config_key)
             .and_then(|config| {
@@ -60,10 +65,13 @@ impl CoreLoop {
     /// `collection_has_vectors` contract.
     pub(in crate::data::executor) fn collection_has_sparse(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
     ) -> bool {
-        !self.strict_sparse_fields(tid, collection).is_empty()
+        !self
+            .strict_sparse_fields(database_id, tid, collection)
+            .is_empty()
     }
 
     /// Sparse inverted-index side-effect: for every declared `SparseVector`
@@ -90,7 +98,7 @@ impl CoreLoop {
         document_id: &str,
         value: &[u8],
     ) {
-        let sparse_fields = self.strict_sparse_fields(tid, collection);
+        let sparse_fields = self.strict_sparse_fields(database_id, tid, collection);
         if sparse_fields.is_empty() {
             return;
         }
@@ -130,7 +138,7 @@ impl CoreLoop {
         collection: &str,
         row_key: &str,
     ) {
-        let sparse_fields = self.strict_sparse_fields(tid, collection);
+        let sparse_fields = self.strict_sparse_fields(database_id, tid, collection);
         for field in &sparse_fields {
             if self
                 .get_or_create_sparse_index(database_id, tid, collection, field)
@@ -193,7 +201,11 @@ mod tests {
         let config =
             CollectionConfig::new(collection).with_storage_mode(StorageMode::Strict { schema });
         core.doc_configs.insert(
-            (crate::types::TenantId::new(tid), collection.to_string()),
+            (
+                crate::types::DatabaseId::DEFAULT,
+                crate::types::TenantId::new(tid),
+                collection.to_string(),
+            ),
             config,
         );
     }
@@ -321,7 +333,11 @@ mod tests {
         let row_key = surrogate_to_doc_id(Surrogate::new(1));
 
         // No strict sparse schema registered.
-        assert!(!core.collection_has_sparse(tid, collection));
+        assert!(!core.collection_has_sparse(
+            crate::types::DatabaseId::DEFAULT.as_u64(),
+            tid,
+            collection,
+        ));
 
         core.apply_point_put_sparse_indexes(
             db,

@@ -162,8 +162,8 @@ pub async fn backup_tenant(state: &Arc<SharedState>, tenant_id: u64) -> Result<B
 
         if let Ok(tset) = catalog.load_wal_tombstones() {
             let mut tombs: Vec<nodedb_types::backup_envelope::SourceTombstoneEntry> = Vec::new();
-            for (tid, name, purge_lsn) in tset.iter() {
-                if tid == tenant_id {
+            for (database_id, tid, name, purge_lsn) in tset.iter() {
+                if database_id == DatabaseId::DEFAULT.as_u64() && tid == tenant_id {
                     tombs.push(nodedb_types::backup_envelope::SourceTombstoneEntry {
                         collection: name.to_string(),
                         purge_lsn,

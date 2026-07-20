@@ -139,7 +139,7 @@ pub fn retain_tenant_data_for_vshards(
     // that collection's vshard is in this source set — exactly one source node
     // (the collection's owner) retains each entry.
     snap.crdt_state
-        .retain(|(_, collection, _)| source_vshards.contains(&vshard_of(collection)));
+        .retain(|(_, _, collection, _)| source_vshards.contains(&vshard_of(collection)));
 }
 
 #[cfg(test)]

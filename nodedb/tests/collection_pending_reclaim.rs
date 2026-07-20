@@ -89,7 +89,7 @@ fn failed_engine_purge_is_durably_recorded_then_reaped_on_success() {
 
     // Worker retry fails again: attempts/last_error advance, entry stays.
     catalog
-        .record_pending_reclaim_attempt(TENANT, "events", "dp: timeout")
+        .record_pending_reclaim_attempt(0, TENANT, "events", "dp: timeout")
         .unwrap();
     let q = catalog.load_pending_reclaim_queue().unwrap();
     assert_eq!(q.len(), 1);
@@ -97,7 +97,7 @@ fn failed_engine_purge_is_durably_recorded_then_reaped_on_success() {
     assert_eq!(q[0].last_error, "dp: timeout");
 
     // Worker retry finally succeeds: entry is reaped so retries stop.
-    catalog.remove_pending_reclaim(TENANT, "events").unwrap();
+    catalog.remove_pending_reclaim(0, TENANT, "events").unwrap();
     assert!(
         catalog.load_pending_reclaim_queue().unwrap().is_empty(),
         "successful engine purge must clear the pending-reclaim record"

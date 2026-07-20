@@ -39,7 +39,11 @@ type Core = CoreLoop;
 /// side-effect path.
 fn register(core: &mut Core) {
     core.doc_configs.insert(
-        (TenantId::new(TID), COLL.to_string()),
+        (
+            nodedb_types::DatabaseId::new(DB),
+            TenantId::new(TID),
+            COLL.to_string(),
+        ),
         CollectionConfig::new(COLL).with_index("status"),
     );
     core.vector_params.insert(

@@ -74,7 +74,7 @@ fn bitemporal_put_undo_removes_version_and_index() {
         secondary_index_removed: Vec::new(),
         chain_hash_prior: None,
     };
-    core.apply_undo_document(TID, 0, entry).unwrap();
+    core.apply_undo_document(DB, TID, 0, entry).unwrap();
 
     assert!(
         core.sparse
@@ -127,7 +127,7 @@ fn bitemporal_delete_undo_restores_prior_live_version() {
         secondary_index_tuples: Vec::new(),
         chain_hash_prior: None,
     };
-    core.apply_undo_document(TID, 0, entry).unwrap();
+    core.apply_undo_document(DB, TID, 0, entry).unwrap();
 
     // Removing the tombstone restores the prior live version as current.
     assert_eq!(
@@ -143,7 +143,13 @@ fn bitemporal_delete_undo_restores_prior_live_version() {
 fn chain_hash_undo_restores_prior_and_removes_genesis() {
     let dir = tempfile::tempdir().unwrap();
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-    let key = || (TenantId::new(TID), "c".to_string());
+    let key = || {
+        (
+            crate::types::DatabaseId::new(DB),
+            TenantId::new(TID),
+            "c".to_string(),
+        )
+    };
 
     // Restore-to-prior case: map holds "h1", undo restores "h0".
     core.chain_hashes.insert(key(), "h1".into());
@@ -158,7 +164,7 @@ fn chain_hash_undo_restores_prior_and_removes_genesis() {
         secondary_index_removed: Vec::new(),
         chain_hash_prior: Some(Some("h0".into())),
     };
-    core.apply_undo_document(TID, 0, restore).unwrap();
+    core.apply_undo_document(DB, TID, 0, restore).unwrap();
     assert_eq!(
         core.chain_hashes.get(&key()).map(String::as_str),
         Some("h0")
@@ -176,7 +182,7 @@ fn chain_hash_undo_restores_prior_and_removes_genesis() {
         secondary_index_removed: Vec::new(),
         chain_hash_prior: Some(None),
     };
-    core.apply_undo_document(TID, 0, genesis).unwrap();
+    core.apply_undo_document(DB, TID, 0, genesis).unwrap();
     assert!(!core.chain_hashes.contains_key(&key()));
 }
 
@@ -286,7 +292,7 @@ fn plain_put_undo_backward_compatible() {
         secondary_index_removed: Vec::new(),
         chain_hash_prior: None,
     };
-    core.apply_undo_document(TID, 0, overwrite).unwrap();
+    core.apply_undo_document(DB, TID, 0, overwrite).unwrap();
     assert_eq!(
         core.sparse.get(DB, TID, "c", "d1").unwrap(),
         Some(b"old".to_vec())
@@ -305,7 +311,7 @@ fn plain_put_undo_backward_compatible() {
         secondary_index_removed: Vec::new(),
         chain_hash_prior: None,
     };
-    core.apply_undo_document(TID, 0, insert).unwrap();
+    core.apply_undo_document(DB, TID, 0, insert).unwrap();
     assert!(core.sparse.get(DB, TID, "c", "d2").unwrap().is_none());
 }
 
@@ -325,7 +331,7 @@ fn plain_delete_undo_backward_compatible() {
         secondary_index_tuples: Vec::new(),
         chain_hash_prior: None,
     };
-    core.apply_undo_document(TID, 0, entry).unwrap();
+    core.apply_undo_document(DB, TID, 0, entry).unwrap();
     assert_eq!(
         core.sparse.get(DB, TID, "c", "d1").unwrap(),
         Some(b"prior".to_vec())

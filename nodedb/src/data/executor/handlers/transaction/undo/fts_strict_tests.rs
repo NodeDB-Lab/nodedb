@@ -10,8 +10,8 @@
 use std::time::{Duration, Instant};
 
 use nodedb_physical::physical_plan::{DocumentOp, StorageMode};
-use nodedb_types::Surrogate;
 use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
+use nodedb_types::{DatabaseId, Surrogate};
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
 use crate::data::executor::core_loop::CoreLoop;
@@ -19,7 +19,7 @@ use crate::data::executor::core_loop::tests::make_core_with_dir;
 use crate::data::executor::handlers::transaction::sub_plan_doc::{TxPointDelete, TxPointPut};
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::CollectionConfig;
-use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
+use crate::types::{ReadConsistency, RequestId, TenantId, TraceId, VShardId};
 
 const DB: u64 = 0;
 const TID: u64 = 1;
@@ -36,7 +36,7 @@ fn register_strict(core: &mut CoreLoop) {
     ])
     .unwrap();
     core.doc_configs.insert(
-        (TenantId::new(TID), COLL.to_string()),
+        (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
         CollectionConfig::new(COLL).with_storage_mode(StorageMode::Strict { schema }),
     );
 }

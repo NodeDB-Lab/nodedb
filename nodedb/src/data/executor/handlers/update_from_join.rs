@@ -129,6 +129,7 @@ impl CoreLoop {
 
         // Check for strict storage mode on the target.
         let config_key = (
+            task.request.database_id,
             crate::types::TenantId::new(tid),
             target_collection.to_string(),
         );

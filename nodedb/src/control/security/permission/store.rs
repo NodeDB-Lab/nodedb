@@ -65,7 +65,12 @@ impl PermissionStore {
             }
         };
         for so in stored_owners {
-            let key = owner_key(&so.object_type, so.tenant_id, &so.object_name);
+            let key = owner_key(
+                &so.object_type,
+                so.database_id,
+                so.tenant_id,
+                &so.object_name,
+            );
             owners.insert(key, so.owner_username);
         }
 

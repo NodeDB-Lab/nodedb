@@ -103,6 +103,7 @@ fn convert_records_to_events(
         // per write sub-op. Raw Put/Delete records still yield at most one.
         for event in record_to_events(record, &mut sequence) {
             if tombstones.is_tombstoned(
+                record.header.database_id,
                 event.tenant_id.as_u64(),
                 &event.collection,
                 event.lsn.as_u64(),

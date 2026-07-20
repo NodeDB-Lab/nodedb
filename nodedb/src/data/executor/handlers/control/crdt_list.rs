@@ -23,7 +23,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, list_path, index, "crdt list insert");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -96,7 +96,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, list_path, index, "crdt list delete");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(
@@ -141,7 +141,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, %document_id, list_path, from_index, to_index, "crdt list move");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 return self.response_error(

@@ -52,7 +52,11 @@ impl CoreLoop {
             wal_lsn,
         } = params;
         // Evaluate generated columns before encoding.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let value = if let Some(config) = self.doc_configs.get(&config_key)
             && !config.enforcement.generated_columns.is_empty()
         {
@@ -92,7 +96,7 @@ impl CoreLoop {
                     stamp.valid_until_ms,
                 ),
                 None => (
-                    self.is_bitemporal(tid, collection),
+                    self.is_bitemporal(database_id, tid, collection),
                     self.bitemporal_now_ms(),
                     i64::MIN,
                     i64::MAX,
@@ -317,7 +321,7 @@ impl CoreLoop {
                 }
             }
 
-            self.invalidate_aggregate_cache_for_collection(tid, collection);
+            self.invalidate_aggregate_cache_for_collection(database_id, tid, collection);
         }
 
         self.doc_cache
@@ -339,7 +343,11 @@ impl CoreLoop {
         let mut bitemporal_index_tuples: Vec<(String, String)> = Vec::new();
         let mut secondary_index_added: Vec<(String, String)> = Vec::new();
         let mut secondary_index_removed: Vec<(String, String)> = Vec::new();
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         if let Some(config) = self.doc_configs.get(&config_key)
             && let Some(doc) = doc_format::decode_document(value)
         {

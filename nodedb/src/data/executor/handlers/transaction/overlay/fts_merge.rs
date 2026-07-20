@@ -99,7 +99,7 @@ impl CoreLoop {
             return;
         }
 
-        let config_key = (tid, collection.to_string());
+        let config_key = (database_id, tid, collection.to_string());
         let bm25_params = Bm25Params::default();
         let ctx = self.staged_score_ctx(database_id, tid, collection, &config_key, &bm25_params);
 
@@ -200,7 +200,7 @@ impl CoreLoop {
             })
             .collect();
 
-        let config_key = (tid, collection.to_string());
+        let config_key = (database_id, tid, collection.to_string());
 
         let mut seen: HashMap<u32, usize> = base_results
             .iter()
@@ -270,7 +270,7 @@ impl CoreLoop {
             return;
         };
 
-        let config_key = (tid, collection.to_string());
+        let config_key = (database_id, tid, collection.to_string());
         let bm25_params = Bm25Params::default();
         let ctx = self.staged_score_ctx(database_id, tid, collection, &config_key, &bm25_params);
 

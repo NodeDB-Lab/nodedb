@@ -6,9 +6,16 @@ use tracing::warn;
 
 use crate::control::security::catalog::SystemCatalog;
 
-pub fn record(tenant_id: u64, collection: &str, purge_lsn: u64, catalog: &SystemCatalog) {
-    if let Err(e) = catalog.record_wal_tombstone(tenant_id, collection, purge_lsn) {
+pub fn record(
+    database_id: u64,
+    tenant_id: u64,
+    collection: &str,
+    purge_lsn: u64,
+    catalog: &SystemCatalog,
+) {
+    if let Err(e) = catalog.record_wal_tombstone(database_id, tenant_id, collection, purge_lsn) {
         warn!(
+            database_id,
             tenant_id,
             collection = %collection,
             purge_lsn,
@@ -38,6 +45,7 @@ mod tests {
 
         // Apply via the top-level apply_to path (entry → apply_to_inner → wal_tombstone::record).
         let entry = CatalogEntry::RecordWalTombstone {
+            database_id: 7,
             tenant_id: 1,
             collection: "users".into(),
             purge_lsn: 100,
@@ -46,13 +54,14 @@ mod tests {
 
         let set = catalog.load_wal_tombstones().expect("load");
         assert_eq!(
-            set.purge_lsn(1, "users"),
+            set.purge_lsn(7, 1, "users"),
             Some(100),
             "initial tombstone not recorded"
         );
 
         // Lower purge_lsn must not regress the stored value (monotone).
         let entry_lower = CatalogEntry::RecordWalTombstone {
+            database_id: 7,
             tenant_id: 1,
             collection: "users".into(),
             purge_lsn: 50,
@@ -60,13 +69,14 @@ mod tests {
         apply_to(&entry_lower, catalog);
         let set = catalog.load_wal_tombstones().expect("load after lower");
         assert_eq!(
-            set.purge_lsn(1, "users"),
+            set.purge_lsn(7, 1, "users"),
             Some(100),
             "lower purge_lsn must not regress stored tombstone"
         );
 
         // Higher purge_lsn must raise the stored value (monotone raise).
         let entry_higher = CatalogEntry::RecordWalTombstone {
+            database_id: 7,
             tenant_id: 1,
             collection: "users".into(),
             purge_lsn: 200,
@@ -74,7 +84,7 @@ mod tests {
         apply_to(&entry_higher, catalog);
         let set = catalog.load_wal_tombstones().expect("load after higher");
         assert_eq!(
-            set.purge_lsn(1, "users"),
+            set.purge_lsn(7, 1, "users"),
             Some(200),
             "higher purge_lsn must raise stored tombstone"
         );

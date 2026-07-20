@@ -75,6 +75,7 @@ impl CoreLoop {
         if disc != "kv_register_sorted_index" {
             return None;
         }
+        let tombstones = &tombstones.for_database(database_id);
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
         }
@@ -443,7 +444,7 @@ mod tests {
         // register record's LSN must be strictly less than the purge LSN
         // for `is_tombstoned` to gate it out.
         let mut tombstones = TombstoneSet::new();
-        tombstones.insert(TID, "players".to_string(), register_lsn + 1);
+        tombstones.insert(0, TID, "players".to_string(), register_lsn + 1);
 
         let mut h = make_core();
         h.core.replay_kv_wal(&records, 1, &tombstones);

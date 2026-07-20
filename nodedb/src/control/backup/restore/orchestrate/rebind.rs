@@ -9,7 +9,7 @@ use nodedb_types::Surrogate;
 
 use crate::Error;
 use crate::control::state::SharedState;
-use crate::types::{SurrogateBindEntry, TenantDataSnapshot, TenantId};
+use crate::types::{DatabaseId, SurrogateBindEntry, TenantDataSnapshot, TenantId};
 
 /// Rebind every PK→surrogate identity carried in the backup into the
 /// destination catalog so restored rows resolve by PK point-lookup.
@@ -70,7 +70,8 @@ pub(super) fn warn_on_tombstoned_restores(
     }
 
     for name in &names {
-        let Some(purge_lsn) = tombstones.purge_lsn(tenant_id, name) else {
+        let Some(purge_lsn) = tombstones.purge_lsn(DatabaseId::DEFAULT.as_u64(), tenant_id, name)
+        else {
             continue;
         };
         if snapshot_watermark != 0 && snapshot_watermark >= purge_lsn {

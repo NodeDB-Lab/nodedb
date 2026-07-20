@@ -27,21 +27,23 @@ pub(crate) fn crdt_ckpt_dir(data_dir: &std::path::Path, core_id: usize) -> std::
 /// names may contain `/`, `:` or `-`) and unambiguously parseable: hex contains
 /// only `[0-9a-f]`, so the `-coll-` separator never collides with the encoded
 /// name and the numeric tenant id never collides with the encoding.
-pub(crate) fn crdt_ckpt_filename(tenant_id: u64, collection: &str) -> String {
+pub(crate) fn crdt_ckpt_filename(database_id: u64, tenant_id: u64, collection: &str) -> String {
     use std::fmt::Write as _;
     let mut hex = String::with_capacity(collection.len() * 2);
     for b in collection.as_bytes() {
         // infallible: writing to a String never returns Err
         let _ = write!(hex, "{b:02x}");
     }
-    format!("tenant-{tenant_id}-coll-{hex}.ckpt")
+    format!("db-{database_id}-tenant-{tenant_id}-coll-{hex}.ckpt")
 }
 
 /// Parse a per-collection checkpoint file stem (no extension) back into
 /// `(tenant_id, collection)`. Returns `None` for the pre-per-collection
 /// `tenant-{tid}` scheme or any unparseable stem.
-fn parse_crdt_ckpt_stem(stem: &str) -> Option<(u64, String)> {
-    let rest = stem.strip_prefix("tenant-")?;
+fn parse_crdt_ckpt_stem(stem: &str) -> Option<(u64, u64, String)> {
+    let rest = stem.strip_prefix("db-")?;
+    let (database_str, rest) = rest.split_once("-tenant-")?;
+    let database_id = database_str.parse::<u64>().ok()?;
     let (tid_str, hex) = rest.split_once("-coll-")?;
     let tenant_id = tid_str.parse::<u64>().ok()?;
     if hex.len() % 2 != 0 {
@@ -57,7 +59,7 @@ fn parse_crdt_ckpt_stem(stem: &str) -> Option<(u64, String)> {
         i += 2;
     }
     let collection = String::from_utf8(bytes).ok()?;
-    Some((tenant_id, collection))
+    Some((database_id, tenant_id, collection))
 }
 
 impl CoreLoop {
@@ -105,18 +107,19 @@ impl CoreLoop {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let Some((tid, collection)) = parse_crdt_ckpt_stem(&stem) else {
+            let Some((database_id, tid, collection)) = parse_crdt_ckpt_stem(&stem) else {
                 // Pre-per-collection `tenant-{tid}.ckpt` (or otherwise
                 // unparseable). No released data to preserve; WAL replay
                 // rebuilds. Count and skip.
                 skipped_legacy += 1;
                 continue;
             };
+            let database_id = crate::types::DatabaseId::new(database_id);
             let tid = crate::types::TenantId::new(tid);
 
             let bytes = nodedb_wal::segment::read_checkpoint_dontneed(&path)?;
 
-            let engine = self.get_crdt_engine(tid)?;
+            let engine = self.get_crdt_engine(database_id, tid)?;
             engine.import_snapshot_bytes(&collection, &bytes)?;
             loaded += 1;
         }
@@ -152,9 +155,11 @@ mod tests {
 
     #[test]
     fn stem_roundtrips_through_parse() {
-        let stem = crdt_ckpt_filename(7, "orders");
+        let stem = crdt_ckpt_filename(3, 7, "orders");
         let stem = stem.strip_suffix(".ckpt").expect("has .ckpt suffix");
-        let (tid, collection) = parse_crdt_ckpt_stem(stem).expect("must parse own filename");
+        let (database_id, tid, collection) =
+            parse_crdt_ckpt_stem(stem).expect("must parse own filename");
+        assert_eq!(database_id, 3);
         assert_eq!(tid, 7);
         assert_eq!(collection, "orders");
     }
@@ -206,7 +211,7 @@ mod tests {
         let core = open_core_at(dir.path());
         let ckpt_dir = crdt_ckpt_dir(&core.data_dir, core.core_id);
         std::fs::create_dir_all(&ckpt_dir).expect("create ckpt dir");
-        let fname = crdt_ckpt_filename(7, "orders");
+        let fname = crdt_ckpt_filename(3, 7, "orders");
         std::fs::write(ckpt_dir.join(&fname), b"not a valid Loro snapshot")
             .expect("write garbage checkpoint");
         drop(core);

@@ -60,13 +60,15 @@ pub fn heal_orphan_rows(
 }
 
 fn repair_missing_owner(catalog: &SystemCatalog, kind: &str, key: &str) -> bool {
-    let Some((tenant_id, name)) = parse_object_key(key) else {
+    let Some((database_id, tenant_id, name)) = parse_object_key(key) else {
         return false;
     };
-    let Some(owner_username) = primary_row_owner(catalog, kind, tenant_id, &name) else {
+    let Some(owner_username) = primary_row_owner(catalog, kind, database_id, tenant_id, &name)
+    else {
         return false;
     };
     let stored = StoredOwner {
+        database_id,
         object_type: kind.to_string(),
         object_name: name.clone(),
         tenant_id,
@@ -87,14 +89,15 @@ fn repair_missing_owner(catalog: &SystemCatalog, kind: &str, key: &str) -> bool 
 }
 
 fn repair_dangling_owner(catalog: &SystemCatalog, from_key: &str, missing_user: &str) -> bool {
-    let Some((kind, tenant_id, name)) = parse_owner_reference(from_key) else {
+    let Some((kind, database_id, tenant_id, name)) = parse_owner_reference(from_key) else {
         return false;
     };
     if kind != object_type::INDEX
-        && let Some(primary_owner) = primary_row_owner(catalog, kind, tenant_id, &name)
+        && let Some(primary_owner) = primary_row_owner(catalog, kind, database_id, tenant_id, &name)
         && user_exists_in_tenant(catalog, tenant_id, &primary_owner)
     {
         let owner = StoredOwner {
+            database_id,
             object_type: kind.to_string(),
             object_name: name.clone(),
             tenant_id,
@@ -124,7 +127,7 @@ fn repair_dangling_owner(catalog: &SystemCatalog, from_key: &str, missing_user: 
         }
     };
 
-    match catalog.rewrite_object_owner(kind, tenant_id, &name, &replacement) {
+    match catalog.rewrite_object_owner(kind, database_id, tenant_id, &name, &replacement) {
         Ok(()) => {
             info!(kind, tenant_id, object = %name, owner = %replacement,
                 "catalog sanity check: reassigned dangling owner reference");
@@ -183,31 +186,34 @@ fn revoke_dangling_grant(catalog: &SystemCatalog, from_key: &str, missing_user: 
     }
 }
 
-fn parse_object_key(key: &str) -> Option<(u64, String)> {
-    let (tenant, name) = key.split_once(':')?;
-    Some((tenant.parse().ok()?, name.to_string()))
+fn parse_object_key(key: &str) -> Option<(u64, u64, String)> {
+    let mut parts = key.splitn(3, ':');
+    let database_id = parts.next()?.parse().ok()?;
+    let tenant_id = parts.next()?.parse().ok()?;
+    Some((database_id, tenant_id, parts.next()?.to_string()))
 }
 
-fn parse_owner_reference(key: &str) -> Option<(&str, u64, String)> {
-    let mut parts = key.splitn(3, ':');
+fn parse_owner_reference(key: &str) -> Option<(&str, u64, u64, String)> {
+    let mut parts = key.splitn(4, ':');
     let kind = parts.next()?;
+    let database_id = parts.next()?.parse().ok()?;
     let tenant_id = parts.next()?.parse().ok()?;
     let name = parts.next()?.to_string();
-    Some((kind, tenant_id, name))
+    Some((kind, database_id, tenant_id, name))
 }
 
 fn primary_row_owner(
     catalog: &SystemCatalog,
     kind: &str,
+    database_id: u64,
     tenant_id: u64,
     name: &str,
 ) -> Option<String> {
     match kind {
         object_type::COLLECTION => catalog
-            .load_all_collections_across_databases()
-            .ok()?
-            .into_iter()
-            .find(|stored| stored.tenant_id == tenant_id && stored.name == name)
+            .get_collection(nodedb_types::DatabaseId::new(database_id), tenant_id, name)
+            .ok()
+            .flatten()
             .map(|stored| stored.owner),
         object_type::FUNCTION => catalog
             .get_function(tenant_id, name)
@@ -246,10 +252,9 @@ fn primary_row_owner(
             .flatten()
             .map(|stored| stored.owner),
         object_type::CONTINUOUS_AGGREGATE => catalog
-            .load_all_continuous_aggregates()
-            .ok()?
-            .into_iter()
-            .find(|stored| stored.tenant_id == tenant_id && stored.name == name)
+            .get_continuous_aggregate(database_id, tenant_id, name)
+            .ok()
+            .flatten()
             .map(|stored| stored.owner),
         _ => None,
     }

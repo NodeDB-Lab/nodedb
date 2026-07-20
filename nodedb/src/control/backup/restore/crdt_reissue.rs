@@ -96,13 +96,19 @@ async fn reissue_crdt_collection(
 /// number of imports issued.
 pub(crate) async fn reissue_crdt_snapshots(
     state: &SharedState,
-    crdt_state: Vec<(u64, String, Vec<u8>)>,
+    crdt_state: Vec<(u64, u64, String, Vec<u8>)>,
 ) -> crate::Result<usize> {
-    let database_id = DatabaseId::DEFAULT;
     let mut imported = 0usize;
 
-    for (tid, collection, bytes) in crdt_state {
-        reissue_crdt_collection(state, TenantId::new(tid), database_id, &collection, bytes).await?;
+    for (database_id, tid, collection, bytes) in crdt_state {
+        reissue_crdt_collection(
+            state,
+            TenantId::new(tid),
+            DatabaseId::new(database_id),
+            &collection,
+            bytes,
+        )
+        .await?;
         imported += 1;
     }
 

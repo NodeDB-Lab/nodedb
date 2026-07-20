@@ -98,24 +98,24 @@ fn extract_and_shadow_writes_before_purge_lsn() {
     let set: TombstoneSet = extract_tombstones(&records);
 
     assert_eq!(set.len(), 1);
-    assert_eq!(set.purge_lsn(1, "users"), Some(purge_lsn));
+    assert_eq!(set.purge_lsn(0, 1, "users"), Some(purge_lsn));
 
     for lsn in &put_lsns {
         assert!(
-            set.is_tombstoned(1, "users", *lsn),
+            set.is_tombstoned(0, 1, "users", *lsn),
             "pre-purge write at lsn {lsn} must be shadowed"
         );
     }
     assert!(
-        !set.is_tombstoned(1, "orders", orders_lsn),
+        !set.is_tombstoned(0, 1, "orders", orders_lsn),
         "different collection must not be shadowed"
     );
     assert!(
-        !set.is_tombstoned(2, "users", other_tenant_lsn),
+        !set.is_tombstoned(0, 2, "users", other_tenant_lsn),
         "different tenant must not be shadowed"
     );
     assert!(
-        !set.is_tombstoned(1, "users", post_purge_lsn),
+        !set.is_tombstoned(0, 1, "users", post_purge_lsn),
         "post-purge write (lsn >= purge_lsn) must not be shadowed"
     );
 }
@@ -160,9 +160,9 @@ fn multiple_tombstones_keep_highest_purge_lsn() {
 
     let records = read_all(&path);
     let set = extract_tombstones(&records);
-    assert_eq!(set.purge_lsn(1, "users"), Some(500));
-    assert!(set.is_tombstoned(1, "users", 499));
-    assert!(!set.is_tombstoned(1, "users", 500));
+    assert_eq!(set.purge_lsn(0, 1, "users"), Some(500));
+    assert!(set.is_tombstoned(0, 1, "users", 499));
+    assert!(!set.is_tombstoned(0, 1, "users", 500));
 }
 
 #[test]

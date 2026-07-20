@@ -209,6 +209,7 @@ async fn snapshot_bytes_roundtrip_write_and_restore() {
             checkpoint_bytes: hnsw_bytes.clone(),
         }],
         crdt_snapshots: vec![CrdtSnapshot {
+            database_id: 0,
             tenant_id: 1,
             peer_id: 42,
             collection: "testcoll".into(),

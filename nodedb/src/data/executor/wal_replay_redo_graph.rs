@@ -82,7 +82,12 @@ impl CoreLoop {
                 else {
                     continue;
                 };
-                if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+                if tombstones.is_tombstoned(
+                    database_id.as_u64(),
+                    tenant_id,
+                    &collection,
+                    record_lsn,
+                ) {
                     continue;
                 }
                 let task = Self::replay_graph_task(
@@ -128,7 +133,12 @@ impl CoreLoop {
                 else {
                     continue;
                 };
-                if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+                if tombstones.is_tombstoned(
+                    database_id.as_u64(),
+                    tenant_id,
+                    &collection,
+                    record_lsn,
+                ) {
                     continue;
                 }
                 let task = Self::replay_graph_task(

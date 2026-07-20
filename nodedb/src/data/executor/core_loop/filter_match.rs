@@ -53,10 +53,15 @@ impl CoreLoop {
     /// matcher over a scan resolve this a single time rather than per row.
     pub(in crate::data::executor) fn resolve_strict_schema(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
     ) -> Option<StrictSchema> {
-        let config_key = (TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            TenantId::new(tid),
+            collection.to_string(),
+        );
         self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode
@@ -76,11 +81,12 @@ impl CoreLoop {
     /// scan loop.
     pub(in crate::data::executor) fn strict_aware_matcher<'a>(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
         filters: &'a [ScanFilter],
     ) -> impl Fn(&[u8]) -> bool + 'a {
-        let strict_schema = self.resolve_strict_schema(tid, collection);
+        let strict_schema = self.resolve_strict_schema(database_id, tid, collection);
         move |body: &[u8]| matches_with_resolved_schema(strict_schema.as_ref(), filters, body)
     }
 }

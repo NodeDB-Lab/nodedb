@@ -67,6 +67,7 @@ pub fn propose_delete_owner(
 ) -> Result<(), DdlError> {
     let entry = CatalogEntry::DeleteOwner {
         object_type: object_type.to_string(),
+        database_id: 0,
         tenant_id: tenant_id.as_u64(),
         object_name: object_name.to_string(),
     };
@@ -76,7 +77,7 @@ pub fn propose_delete_owner(
         {
             let catalog = state.credentials.catalog();
             catalog
-                .delete_owner(object_type, tenant_id.as_u64(), object_name)
+                .delete_owner(object_type, 0, tenant_id.as_u64(), object_name)
                 .map_err(|e| owner_err("XX000", format!("catalog write: {e}")))?;
         }
         state.permissions.install_replicated_remove_owner(

@@ -58,9 +58,10 @@ impl CoreLoop {
         }
 
         let mut crdt_snapshots: Vec<CrdtSnapshot> = Vec::new();
-        for (tid, engine) in &self.crdt_engines {
+        for ((database_id, tid), engine) in &self.crdt_engines {
             for (collection, snapshot_bytes) in engine.export_all_snapshots()? {
                 crdt_snapshots.push(CrdtSnapshot {
+                    database_id: database_id.as_u64(),
                     tenant_id: tid.as_u64(),
                     peer_id: engine.peer_id(),
                     collection,

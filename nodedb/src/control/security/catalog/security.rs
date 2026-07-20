@@ -224,7 +224,12 @@ impl SystemCatalog {
     // ── Ownership operations ────────────────────────────────────────
 
     pub fn put_owner(&self, owner: &StoredOwner) -> crate::Result<()> {
-        let key = owner_key(&owner.object_type, owner.tenant_id, &owner.object_name);
+        let key = owner_key(
+            &owner.object_type,
+            owner.database_id,
+            owner.tenant_id,
+            &owner.object_name,
+        );
         let bytes =
             zerompk::to_msgpack_vec(owner).map_err(|e| catalog_err("serialize owner", e))?;
         let write_txn = self
@@ -245,10 +250,11 @@ impl SystemCatalog {
     pub fn delete_owner(
         &self,
         object_type: &str,
+        database_id: u64,
         tenant_id: u64,
         object_name: &str,
     ) -> crate::Result<()> {
-        let key = owner_key(object_type, tenant_id, object_name);
+        let key = owner_key(object_type, database_id, tenant_id, object_name);
         let write_txn = self
             .db
             .begin_write()

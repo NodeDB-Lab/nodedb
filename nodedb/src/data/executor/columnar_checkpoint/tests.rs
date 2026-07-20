@@ -612,7 +612,12 @@ fn the_schema_seed_does_not_replace_a_restored_engine() {
         .load_columnar_checkpoints()
         .expect("checkpoint load must succeed");
     // Exactly the boot order in `data/runtime.rs`: load, then seed.
-    restored.seed_columnar_schemas(&[(TenantId::new(1), coll.to_string(), schema())]);
+    restored.seed_columnar_schemas(&[(
+        nodedb_types::DatabaseId::DEFAULT,
+        TenantId::new(1),
+        coll.to_string(),
+        schema(),
+    )]);
 
     assert_eq!(
         ids(&scan(&mut restored, coll, None)),

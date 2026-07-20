@@ -19,12 +19,10 @@ use crate::data::executor::core_loop::CoreLoop;
 /// which exists precisely so replay finds the real schema instead of inferring it.
 pub(super) fn seed_catalog_state(
     core: &mut CoreLoop,
-    doc_config_seed: &[(
-        (crate::types::TenantId, String),
-        crate::engine::document::store::CollectionConfig,
-    )],
+    doc_config_seed: &[crate::data::executor::core_loop::DocConfigSeedEntry],
     vector_index_param_seed: &[nodedb_types::StoredVectorIndexParams],
     columnar_schema_seed: &[(
+        crate::types::DatabaseId,
         crate::types::TenantId,
         String,
         nodedb_types::columnar::ColumnarSchema,

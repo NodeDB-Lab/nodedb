@@ -62,8 +62,8 @@ impl CoreLoop {
         // this check and our insert commit. Probe uses `document_id` as
         // the row key, which is how the primary key is encoded for strict
         // and schemaless collections alike (see `dml::convert_insert`).
-        let bitemporal = self.is_bitemporal(tid, collection);
         let database_id = task.request.database_id.as_u64();
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let exists_result = if bitemporal {
             self.sparse
                 .versioned_exists_current_in_txn(&txn, database_id, tid, collection, row_key)

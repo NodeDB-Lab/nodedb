@@ -17,13 +17,14 @@ use redb::ReadableTable;
 use super::types::{SystemCatalog, WAL_TOMBSTONES, catalog_err};
 
 impl SystemCatalog {
-    /// Record (or raise) a tombstone for `(tenant_id, collection)`.
+    /// Record (or raise) a tombstone for `(database_id, tenant_id, collection)`.
     ///
     /// Idempotent: if an existing entry has a higher `purge_lsn`, it is
     /// preserved (repeated purges of the same name do not regress the
     /// shadowing LSN).
     pub fn record_wal_tombstone(
         &self,
+        database_id: u64,
         tenant_id: u64,
         collection: &str,
         purge_lsn: u64,
@@ -37,12 +38,12 @@ impl SystemCatalog {
                 .open_table(WAL_TOMBSTONES)
                 .map_err(|e| catalog_err("open wal_tombstones", e))?;
             let existing = table
-                .get((tenant_id, collection))
+                .get((database_id, tenant_id, collection))
                 .map_err(|e| catalog_err("get wal_tombstone", e))?
                 .map(|g| g.value());
             let next = existing.map_or(purge_lsn, |cur| cur.max(purge_lsn));
             table
-                .insert((tenant_id, collection), next)
+                .insert((database_id, tenant_id, collection), next)
                 .map_err(|e| catalog_err("insert wal_tombstone", e))?;
         }
         write_txn
@@ -61,12 +62,17 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("open wal_tombstones", e))?;
         let mut set = nodedb_wal::TombstoneSet::new();
         for entry in table
-            .range::<(u64, &str)>(..)
+            .range::<(u64, u64, &str)>(..)
             .map_err(|e| catalog_err("range wal_tombstones", e))?
         {
             let (key, value) = entry.map_err(|e| catalog_err("read wal_tombstone", e))?;
-            let (tenant_id, collection) = key.value();
-            set.insert(tenant_id, collection.to_string(), value.value());
+            let (database_id, tenant_id, collection) = key.value();
+            set.insert(
+                database_id,
+                tenant_id,
+                collection.to_string(),
+                value.value(),
+            );
         }
         Ok(set)
     }
@@ -89,21 +95,21 @@ impl SystemCatalog {
                 .map_err(|e| catalog_err("open wal_tombstones", e))?;
             // Two-pass: collect keys to delete, then delete. redb's
             // iterators don't permit concurrent mutation on the same table.
-            let mut to_delete: Vec<(u64, String)> = Vec::new();
+            let mut to_delete: Vec<(u64, u64, String)> = Vec::new();
             for entry in table
-                .range::<(u64, &str)>(..)
+                .range::<(u64, u64, &str)>(..)
                 .map_err(|e| catalog_err("gc range", e))?
             {
                 let (key, value) = entry.map_err(|e| catalog_err("gc read", e))?;
                 if value.value() < min_retained_lsn {
-                    let (tid, name) = key.value();
-                    to_delete.push((tid, name.to_string()));
+                    let (db, tid, name) = key.value();
+                    to_delete.push((db, tid, name.to_string()));
                 }
             }
             removed = to_delete.len();
-            for (tid, name) in to_delete {
+            for (db, tid, name) in to_delete {
                 table
-                    .remove((tid, name.as_str()))
+                    .remove((db, tid, name.as_str()))
                     .map_err(|e| catalog_err("gc remove", e))?;
             }
         }
@@ -129,29 +135,29 @@ mod tests {
     #[test]
     fn record_and_load_roundtrip() {
         let (cat, _tmp) = catalog();
-        cat.record_wal_tombstone(1, "users", 100).unwrap();
-        cat.record_wal_tombstone(1, "orders", 150).unwrap();
-        cat.record_wal_tombstone(2, "users", 200).unwrap();
+        cat.record_wal_tombstone(7, 1, "users", 100).unwrap();
+        cat.record_wal_tombstone(7, 1, "orders", 150).unwrap();
+        cat.record_wal_tombstone(8, 1, "users", 200).unwrap();
 
         let set = cat.load_wal_tombstones().unwrap();
         assert_eq!(set.len(), 3);
-        assert_eq!(set.purge_lsn(1, "users"), Some(100));
-        assert_eq!(set.purge_lsn(1, "orders"), Some(150));
-        assert_eq!(set.purge_lsn(2, "users"), Some(200));
+        assert_eq!(set.purge_lsn(7, 1, "users"), Some(100));
+        assert_eq!(set.purge_lsn(7, 1, "orders"), Some(150));
+        assert_eq!(set.purge_lsn(8, 1, "users"), Some(200));
     }
 
     #[test]
     fn record_is_idempotent_and_monotone() {
         let (cat, _tmp) = catalog();
-        cat.record_wal_tombstone(1, "users", 100).unwrap();
-        cat.record_wal_tombstone(1, "users", 50).unwrap();
+        cat.record_wal_tombstone(7, 1, "users", 100).unwrap();
+        cat.record_wal_tombstone(7, 1, "users", 50).unwrap();
         assert_eq!(
-            cat.load_wal_tombstones().unwrap().purge_lsn(1, "users"),
+            cat.load_wal_tombstones().unwrap().purge_lsn(7, 1, "users"),
             Some(100)
         );
-        cat.record_wal_tombstone(1, "users", 200).unwrap();
+        cat.record_wal_tombstone(7, 1, "users", 200).unwrap();
         assert_eq!(
-            cat.load_wal_tombstones().unwrap().purge_lsn(1, "users"),
+            cat.load_wal_tombstones().unwrap().purge_lsn(7, 1, "users"),
             Some(200)
         );
     }
@@ -159,22 +165,22 @@ mod tests {
     #[test]
     fn gc_removes_only_older_entries() {
         let (cat, _tmp) = catalog();
-        cat.record_wal_tombstone(1, "a", 10).unwrap();
-        cat.record_wal_tombstone(1, "b", 100).unwrap();
-        cat.record_wal_tombstone(1, "c", 1000).unwrap();
+        cat.record_wal_tombstone(7, 1, "a", 10).unwrap();
+        cat.record_wal_tombstone(7, 1, "b", 100).unwrap();
+        cat.record_wal_tombstone(7, 1, "c", 1000).unwrap();
 
         let removed = cat.delete_wal_tombstones_before_lsn(500).unwrap();
         assert_eq!(removed, 2);
 
         let set = cat.load_wal_tombstones().unwrap();
         assert_eq!(set.len(), 1);
-        assert_eq!(set.purge_lsn(1, "c"), Some(1000));
+        assert_eq!(set.purge_lsn(7, 1, "c"), Some(1000));
     }
 
     #[test]
     fn gc_threshold_is_strict_less_than() {
         let (cat, _tmp) = catalog();
-        cat.record_wal_tombstone(1, "a", 100).unwrap();
+        cat.record_wal_tombstone(7, 1, "a", 100).unwrap();
         // Threshold == purge_lsn: entry stays (not strictly less than).
         assert_eq!(cat.delete_wal_tombstones_before_lsn(100).unwrap(), 0);
         assert_eq!(cat.load_wal_tombstones().unwrap().len(), 1);

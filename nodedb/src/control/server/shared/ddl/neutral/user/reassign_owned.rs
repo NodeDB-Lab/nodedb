@@ -131,6 +131,7 @@ pub(super) fn reassign_owned_and_sweep_grants(
             state,
             catalog,
             kind,
+            owner.database_id,
             user_tenant,
             &owner.object_name,
             &admin_name,
@@ -150,6 +151,7 @@ fn reassign_one(
     state: &SharedState,
     catalog: &SystemCatalog,
     kind: OwnerKind,
+    database_id: u64,
     tenant: TenantId,
     name: &str,
     admin_name: &str,
@@ -158,28 +160,26 @@ fn reassign_one(
     let object_type = kind.as_object_type();
     match kind {
         OwnerKind::Collection => {
-            let matches: Vec<_> = catalog
-                .load_all_collections_across_databases()
+            let database_id = nodedb_types::DatabaseId::new(database_id);
+            let mut stored = catalog
+                .get_collection(database_id, tenant_id, name)
                 .map_err(|e| ddl_err(format!("get collection '{name}': {e}")))?
-                .into_iter()
-                .filter(|stored| stored.tenant_id == tenant_id && stored.name == name)
-                .collect();
-            if matches.is_empty() {
-                return Err(missing(object_type, name));
-            }
-            let mut applied_locally = false;
-            for mut stored in matches {
-                stored.owner = admin_name.to_string();
-                let entry = CatalogEntry::PutCollection(Box::new(stored.clone()));
-                if propose(state, &entry)? == 0 {
-                    catalog
-                        .put_collection(stored.database_id, &stored)
-                        .map_err(|e| ddl_err(format!("put collection '{name}': {e}")))?;
-                    applied_locally = true;
-                }
-            }
-            if applied_locally {
-                persist_owner_local(state, catalog, object_type, tenant_id, name, admin_name)?;
+                .ok_or_else(|| missing(object_type, name))?;
+            stored.owner = admin_name.to_string();
+            let entry = CatalogEntry::PutCollection(Box::new(stored.clone()));
+            if propose(state, &entry)? == 0 {
+                catalog
+                    .put_collection(database_id, &stored)
+                    .map_err(|e| ddl_err(format!("put collection '{name}': {e}")))?;
+                persist_owner_local_in_database(
+                    state,
+                    catalog,
+                    object_type,
+                    database_id.as_u64(),
+                    tenant_id,
+                    name,
+                    admin_name,
+                )?;
             }
         }
         OwnerKind::Function => {
@@ -284,34 +284,32 @@ fn reassign_one(
             }
         }
         OwnerKind::ContinuousAggregate => {
-            let matches: Vec<_> = catalog
-                .load_all_continuous_aggregates()
+            let mut stored = catalog
+                .get_continuous_aggregate(database_id, tenant_id, name)
                 .map_err(|e| ddl_err(format!("get continuous_aggregate '{name}': {e}")))?
-                .into_iter()
-                .filter(|stored| stored.tenant_id == tenant_id && stored.name == name)
-                .collect();
-            if matches.is_empty() {
-                return Err(missing(object_type, name));
-            }
-            let mut applied_locally = false;
-            for mut stored in matches {
-                stored.owner = admin_name.to_string();
-                let entry = CatalogEntry::PutContinuousAggregate(Box::new(stored.clone()));
-                if propose(state, &entry)? == 0 {
-                    catalog
-                        .put_continuous_aggregate(&stored)
-                        .map_err(|e| ddl_err(format!("put continuous_aggregate '{name}': {e}")))?;
-                    applied_locally = true;
-                }
-            }
-            if applied_locally {
-                persist_owner_local(state, catalog, object_type, tenant_id, name, admin_name)?;
+                .ok_or_else(|| missing(object_type, name))?;
+            stored.owner = admin_name.to_string();
+            let entry = CatalogEntry::PutContinuousAggregate(Box::new(stored.clone()));
+            if propose(state, &entry)? == 0 {
+                catalog
+                    .put_continuous_aggregate(&stored)
+                    .map_err(|e| ddl_err(format!("put continuous_aggregate '{name}': {e}")))?;
+                persist_owner_local_in_database(
+                    state,
+                    catalog,
+                    object_type,
+                    database_id,
+                    tenant_id,
+                    name,
+                    admin_name,
+                )?;
             }
         }
         OwnerKind::Index => {
             // Standalone owner row — the `StoredOwner` row is the whole
             // object, so there is no parent primary to re-propose.
             let stored = StoredOwner {
+                database_id,
                 object_type: object_type.to_string(),
                 object_name: name.to_string(),
                 tenant_id,
@@ -319,7 +317,15 @@ fn reassign_one(
             };
             let entry = CatalogEntry::PutOwner(Box::new(stored.clone()));
             if propose(state, &entry)? == 0 {
-                persist_owner_local(state, catalog, object_type, tenant_id, name, admin_name)?;
+                persist_owner_local_in_database(
+                    state,
+                    catalog,
+                    object_type,
+                    database_id,
+                    tenant_id,
+                    name,
+                    admin_name,
+                )?;
             }
         }
     }
@@ -366,10 +372,23 @@ fn persist_owner_local(
     name: &str,
     admin_name: &str,
 ) -> Result<(), DdlError> {
+    persist_owner_local_in_database(state, catalog, object_type, 0, tenant_id, name, admin_name)
+}
+
+fn persist_owner_local_in_database(
+    state: &SharedState,
+    catalog: &SystemCatalog,
+    object_type: &str,
+    database_id: u64,
+    tenant_id: u64,
+    name: &str,
+    admin_name: &str,
+) -> Result<(), DdlError> {
     catalog
-        .rewrite_object_owner(object_type, tenant_id, name, admin_name)
+        .rewrite_object_owner(object_type, database_id, tenant_id, name, admin_name)
         .map_err(|e| ddl_err(format!("rewrite owner for {object_type} '{name}': {e}")))?;
     state.permissions.install_replicated_owner(&StoredOwner {
+        database_id,
         object_type: object_type.to_string(),
         object_name: name.to_string(),
         tenant_id,

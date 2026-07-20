@@ -306,6 +306,76 @@ async fn continuous_aggregate_visible_in_show_after_create() {
     );
 }
 
+#[tokio::test]
+async fn continuous_aggregate_drop_is_authorized_scoped_and_cache_consistent() {
+    let srv = TestServer::start().await;
+    srv.exec(
+        "CREATE COLLECTION ts_cagg_drop_src \
+         COLUMNS (id TEXT, ts BIGINT TIME_KEY, value FLOAT) \
+         WITH (engine='timeseries')",
+    )
+    .await
+    .unwrap();
+    srv.exec(
+        "CREATE CONTINUOUS AGGREGATE ts_cagg_drop_view \
+         ON ts_cagg_drop_src BUCKET '5m' \
+         AGGREGATE SUM(value) AS total_value",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        srv.shared
+            .permissions
+            .get_owner_in_database(
+                "continuous_aggregate",
+                0,
+                nodedb::types::TenantId::new(1),
+                "ts_cagg_drop_view",
+            )
+            .as_deref(),
+        Some("nodedb")
+    );
+
+    srv.exec("CREATE USER cagg_intruder PASSWORD 'probe-secret-99'")
+        .await
+        .unwrap();
+    let (client, connection) = srv
+        .connect_as("cagg_intruder", "probe-secret-99")
+        .await
+        .unwrap();
+    assert!(
+        client
+            .simple_query("DROP CONTINUOUS AGGREGATE ts_cagg_drop_view")
+            .await
+            .is_err()
+    );
+    drop(client);
+    connection.abort();
+
+    srv.exec("DROP CONTINUOUS AGGREGATE IF EXISTS ts_cagg_drop_view")
+        .await
+        .unwrap();
+    assert!(
+        srv.shared
+            .credentials
+            .catalog()
+            .get_continuous_aggregate(0, 1, "ts_cagg_drop_view")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        srv.shared
+            .permissions
+            .get_owner_in_database(
+                "continuous_aggregate",
+                0,
+                nodedb::types::TenantId::new(1),
+                "ts_cagg_drop_view",
+            )
+            .is_none()
+    );
+}
+
 /// A continuous aggregate created before a restart must still be present
 /// after one. The registration is meaningless if it disappears on every
 /// process restart — that is the catalog-persistence gap.

@@ -69,11 +69,11 @@ impl CoreLoop {
         // Aggregate + chain-hash + doc-config caches are all keyed
         // `(tenant, collection_or_mv_name)` — same retain sweep.
         self.aggregate_cache
-            .retain(|(t, c), _| !(*t == tid && c == &nm));
+            .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &nm));
         self.chain_hashes
-            .retain(|(t, c), _| !(*t == tid && c == &nm));
+            .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &nm));
         self.doc_configs
-            .retain(|(t, c), _| !(*t == tid && c == &nm));
+            .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &nm));
 
         info!(
             core = self.core_id,

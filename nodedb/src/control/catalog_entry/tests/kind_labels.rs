@@ -15,6 +15,7 @@ fn kind_label_is_stable() {
     );
     assert_eq!(
         CatalogEntry::DeactivateCollection {
+            database_id: 0,
             tenant_id: 1,
             name: "a".into()
         }

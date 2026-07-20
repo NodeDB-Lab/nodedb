@@ -120,6 +120,7 @@ impl CoreLoop {
         // Fast path: incremental aggregate cache.
         if filters.is_empty() && having.is_empty() {
             let cache_key = aggregate_cache_key(
+                task.request.database_id.as_u64(),
                 tid,
                 collection,
                 group_by,
@@ -271,6 +272,7 @@ impl CoreLoop {
                     Ok(payload) => {
                         if filters.is_empty() && having.is_empty() {
                             let cache_key = aggregate_cache_key(
+                                task.request.database_id.as_u64(),
                                 tid,
                                 collection,
                                 group_by,
@@ -302,7 +304,8 @@ impl CoreLoop {
         // Both paths return the same normalized `(doc_id, msgpack)` shape, so
         // the downstream aggregation is identical. Non-bitemporal collections
         // keep the exact `scan_collection` path unchanged.
-        let scan_result = if self.is_bitemporal(tid, collection) {
+        let scan_result = if self.is_bitemporal(task.request.database_id.as_u64(), tid, collection)
+        {
             self.scan_collection_versioned_current(
                 task.request.database_id.as_u64(),
                 tid,

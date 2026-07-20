@@ -42,7 +42,7 @@ pub struct TenantDataSnapshot {
     /// `#[msgpack(default)]`: snapshots written before this field decode empty.
     #[msgpack(default)]
     #[serde(default)]
-    pub crdt_state: Vec<(u64, String, Vec<u8>)>,
+    pub crdt_state: Vec<(u64, u64, String, Vec<u8>)>,
     /// Timeseries memtable data: `[("{tid}:{collection}", serialized_columns_msgpack), ...]`
     pub timeseries: Vec<(String, Vec<u8>)>,
     /// Flushed on-disk timeseries segments per collection.
@@ -156,7 +156,7 @@ pub struct TenantDataSnapshot {
     /// pre-fix (fail-safe, over-rejecting) behavior rather than a hard error.
     #[msgpack(default)]
     #[serde(default)]
-    pub crdt_constraints: Vec<(u64, String, u64, Vec<Vec<u8>>)>,
+    pub crdt_constraints: Vec<(u64, u64, String, u64, Vec<Vec<u8>>)>,
 }
 
 /// A single PK → surrogate identity binding carried in a snapshot/backup.
@@ -530,6 +530,7 @@ mod tests {
 
         let snap = TenantDataSnapshot {
             crdt_constraints: vec![(
+                0,
                 7,
                 "users".to_string(),
                 3,
@@ -543,7 +544,8 @@ mod tests {
             zerompk::from_msgpack(&bytes).expect("decode snapshot with crdt_constraints");
 
         assert_eq!(decoded.crdt_constraints.len(), 1);
-        let (tid, collection, version, encoded) = &decoded.crdt_constraints[0];
+        let (database_id, tid, collection, version, encoded) = &decoded.crdt_constraints[0];
+        assert_eq!(*database_id, 0);
         assert_eq!(*tid, 7);
         assert_eq!(collection, "users");
         assert_eq!(*version, 3);

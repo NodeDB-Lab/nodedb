@@ -119,6 +119,7 @@ async fn deactivate_collection_evicts_plan_entries() {
     assert_eq!(cache.len(), 1);
 
     let entry = CatalogEntry::DeactivateCollection {
+        database_id: 0,
         tenant_id: 1,
         name: "products".into(),
     };
@@ -327,6 +328,7 @@ async fn no_op_variants_do_not_evict_plan_cache() {
         &cache,
         CatalogEntry::DeleteOwner {
             object_type: "collection".into(),
+            database_id: 0,
             tenant_id: 1,
             object_name: "orders".into(),
         },

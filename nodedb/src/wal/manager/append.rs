@@ -465,6 +465,7 @@ impl WalManager {
     pub fn append_collection_tombstone(
         &self,
         tid: TenantId,
+        database_id: DatabaseId,
         collection: &str,
         purge_lsn: u64,
     ) -> crate::Result<Lsn> {
@@ -475,7 +476,7 @@ impl WalManager {
             RecordType::CollectionTombstoned,
             tid,
             VShardId::new(0),
-            DatabaseId::DEFAULT,
+            database_id,
             &payload,
         )
     }

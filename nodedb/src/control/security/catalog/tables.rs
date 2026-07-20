@@ -57,7 +57,7 @@ pub(super) const COLLECTIONS: TableDefinition<(u64, &str), &[u8]> =
 /// a full segment scan to rebuild the set. Entries are GC'd by
 /// `delete_wal_tombstones_before_lsn` when all segments referencing
 /// them have been truncated past retention.
-pub(super) const WAL_TOMBSTONES: TableDefinition<(u64, &str), u64> =
+pub(super) const WAL_TOMBSTONES: TableDefinition<(u64, u64, &str), u64> =
     TableDefinition::new("_system.wal_tombstones");
 
 /// Table: `(tenant_id, collection_name)` -> MessagePack-serialized
@@ -69,7 +69,7 @@ pub(super) const WAL_TOMBSTONES: TableDefinition<(u64, &str), u64> =
 /// `_system.l2_cleanup_queue` virtual view so operators can see the
 /// object-store delete backlog even after the `StoredCollection` row
 /// has been purged.
-pub(super) const L2_CLEANUP_QUEUE: TableDefinition<(u64, &str), &[u8]> =
+pub(super) const L2_CLEANUP_QUEUE: TableDefinition<(u64, u64, &str), &[u8]> =
     TableDefinition::new("_system.l2_cleanup_queue");
 
 /// Table: `(tenant_id, collection_name)` -> MessagePack-serialized
@@ -84,7 +84,7 @@ pub(super) const L2_CLEANUP_QUEUE: TableDefinition<(u64, &str), &[u8]> =
 /// re-CREATE. A Tokio worker (and a boot-time drain) retries the engine
 /// purge for each entry until it succeeds, then removes the row. This
 /// gives durable at-least-once purge without wedging the node.
-pub(super) const PENDING_RECLAIM: TableDefinition<(u64, &str), &[u8]> =
+pub(super) const PENDING_RECLAIM: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.pending_reclaim");
 
 // ── DDL objects ───────────────────────────────────────────────────────

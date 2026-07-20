@@ -92,7 +92,7 @@ impl CoreLoop {
             );
         }
 
-        let strict_schema = self.strict_schema_for(tenant_id, collection);
+        let strict_schema = self.strict_schema_for(task.request.database_id, tenant_id, collection);
         let rows = self.hydrate_text_hits(
             merged,
             HydrateTextHitsParams {
@@ -186,7 +186,7 @@ impl CoreLoop {
         }
 
         // Retrieve the strict schema (if any) so binary-tuple rows decode correctly.
-        let config_key = (tenant_id, collection.to_string());
+        let config_key = (task.request.database_id, tenant_id, collection.to_string());
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode

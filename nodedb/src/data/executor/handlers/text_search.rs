@@ -122,7 +122,7 @@ impl CoreLoop {
             );
         }
 
-        let strict_schema = self.strict_schema_for(tenant_id, collection);
+        let strict_schema = self.strict_schema_for(task.request.database_id, tenant_id, collection);
         let rows = self.hydrate_text_hits(
             merged,
             HydrateTextHitsParams {
@@ -152,10 +152,11 @@ impl CoreLoop {
 
     pub(in crate::data::executor) fn strict_schema_for(
         &self,
+        database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
     ) -> Option<nodedb_types::columnar::StrictSchema> {
-        let key = (tenant_id, collection.to_string());
+        let key = (database_id, tenant_id, collection.to_string());
         self.doc_configs.get(&key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode

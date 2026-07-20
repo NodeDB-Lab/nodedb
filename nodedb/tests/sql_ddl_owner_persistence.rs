@@ -321,7 +321,7 @@ async fn pgwire_create_collection_then_reopen_has_zero_integrity_violations() {
 /// regardless of whether the CREATE handler has been fixed yet.
 fn force_orphan_state(catalog: &SystemCatalog, object_type: &str, object_name: &str) {
     catalog
-        .delete_owner(object_type, TENANT, object_name)
+        .delete_owner(object_type, 0, TENANT, object_name)
         .expect("delete_owner is idempotent");
     assert!(
         owner_row_for(catalog, object_type, object_name).is_none(),

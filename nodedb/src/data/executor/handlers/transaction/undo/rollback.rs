@@ -44,7 +44,7 @@ impl CoreLoop {
     ) -> Result<(), (usize, String)> {
         match entry {
             UndoEntry::PutDocument { .. } | UndoEntry::DeleteDocument { .. } => {
-                self.apply_undo_document(tid, entry_index, entry)
+                self.apply_undo_document(did, tid, entry_index, entry)
             }
             UndoEntry::InsertVector { .. } | UndoEntry::DeleteVector { .. } => {
                 self.apply_undo_vector(tid, entry_index, entry)

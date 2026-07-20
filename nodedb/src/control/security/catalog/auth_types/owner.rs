@@ -4,6 +4,7 @@
 
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 pub struct StoredOwner {
+    pub database_id: u64,
     pub object_type: String,
     pub object_name: String,
     pub tenant_id: u64,

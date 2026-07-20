@@ -372,7 +372,7 @@ impl CoreLoop {
 
             // Skip records for collections that were hard-deleted after
             // this write. Otherwise the purged memtable would resurrect.
-            if tombstones.is_tombstoned(tenant_id, collection, record_lsn) {
+            if tombstones.is_tombstoned(db_id.as_u64(), tenant_id, collection, record_lsn) {
                 skipped += 1;
                 continue;
             }

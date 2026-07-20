@@ -17,20 +17,19 @@
 //! through its real schema and reproduces the same stored bytes a live
 //! write would.
 
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
 
 use super::state::CoreLoop;
 
+pub(crate) type DocConfigSeedEntry = (
+    (DatabaseId, TenantId, String),
+    crate::engine::document::store::CollectionConfig,
+);
+
 impl CoreLoop {
-    /// Insert every `(tenant, collection) -> CollectionConfig` entry into
-    /// `doc_configs`. Called once at core startup, before WAL replay.
-    pub fn seed_doc_configs(
-        &mut self,
-        entries: &[(
-            (TenantId, String),
-            crate::engine::document::store::CollectionConfig,
-        )],
-    ) {
+    /// Insert every `(database, tenant, collection) -> CollectionConfig` entry
+    /// into `doc_configs`. Called once at core startup, before WAL replay.
+    pub fn seed_doc_configs(&mut self, entries: &[DocConfigSeedEntry]) {
         for (key, config) in entries {
             self.doc_configs.insert(key.clone(), config.clone());
         }
@@ -47,7 +46,7 @@ mod tests {
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::strict_format;
     use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
-    use crate::types::TenantId;
+    use crate::types::{DatabaseId, TenantId};
 
     const DB: u64 = 0;
     const TID: u64 = 1;
@@ -135,7 +134,7 @@ mod tests {
         let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
 
         let entries = vec![(
-            (TenantId::new(TID), COLL.to_string()),
+            (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
             CollectionConfig::new(COLL).with_storage_mode(StorageMode::Strict {
                 schema: strict_schema(),
             }),

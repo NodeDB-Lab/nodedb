@@ -91,7 +91,7 @@ impl CoreLoop {
             | CrdtListOpWalRecord::Delete { collection, .. }
             | CrdtListOpWalRecord::Move { collection, .. } => collection,
         };
-        if tombstones.is_tombstoned(tenant_id, collection, record_lsn) {
+        if tombstones.is_tombstoned(record.header.database_id, tenant_id, collection, record_lsn) {
             return Some(0);
         }
 
@@ -408,7 +408,7 @@ mod tests {
         h.core.replay_crdt_wal(&records, 1, &tombstones);
         h.core.replay_crdt_list_wal(&records, 1, &tombstones);
 
-        let engine = h.core.get_crdt_engine(tid).expect("engine");
+        let engine = h.core.get_crdt_engine(db, tid).expect("engine");
         let doc = engine.collection_doc(COLLECTION).expect("doc");
         let len = nodedb_crdt::list_ops::list_length(doc, COLLECTION, DOCUMENT_ID, "blocks")
             .expect("list length");
@@ -484,7 +484,7 @@ mod tests {
         h.core.replay_crdt_wal(&records, 1, &tombstones);
         h.core.replay_crdt_list_wal(&records, 1, &tombstones);
 
-        let engine = h.core.get_crdt_engine(tid).expect("engine");
+        let engine = h.core.get_crdt_engine(db, tid).expect("engine");
         let doc = engine.collection_doc(COLLECTION).expect("doc");
         let len = nodedb_crdt::list_ops::list_length(doc, COLLECTION, DOCUMENT_ID, "blocks")
             .expect("list length");

@@ -35,16 +35,20 @@ impl CoreLoop {
     /// right flag) and before `replay_all_wal`.
     pub fn seed_columnar_schemas(
         &mut self,
-        entries: &[(TenantId, String, nodedb_types::columnar::ColumnarSchema)],
+        entries: &[(
+            DatabaseId,
+            TenantId,
+            String,
+            nodedb_types::columnar::ColumnarSchema,
+        )],
     ) {
-        let db = DatabaseId::DEFAULT;
         let flush_threshold = self.query_tuning.columnar_flush_threshold;
-        for (tid, collection, schema) in entries {
-            let engine_key = (db, *tid, collection.clone());
+        for (db, tid, collection, schema) in entries {
+            let engine_key = (*db, *tid, collection.clone());
             if self.columnar_engines.contains_key(&engine_key) {
                 continue;
             }
-            let bitemporal = self.is_bitemporal(tid.as_u64(), collection);
+            let bitemporal = self.is_bitemporal(db.as_u64(), tid.as_u64(), collection);
             let schema = if bitemporal {
                 crate::data::executor::handlers::columnar_write::schema::prepend_bitemporal_columns(
                     schema.clone(),

@@ -29,6 +29,7 @@ pub fn prepare_owner(
     owner_username: &str,
 ) -> StoredOwner {
     StoredOwner {
+        database_id: 0,
         object_type: object_type.to_string(),
         object_name: object_name.to_string(),
         tenant_id: tenant_id.as_u64(),
@@ -113,7 +114,7 @@ impl PermissionStore {
     /// Whether an owner record already exists (proposer-side
     /// pre-check). `tenant_id` is the raw `u32` value.
     pub fn owner_exists(&self, object_type: &str, tenant_id: u64, object_name: &str) -> bool {
-        let key = owner_key(object_type, tenant_id, object_name);
+        let key = owner_key(object_type, 0, tenant_id, object_name);
         let owners = match self.owners.read() {
             Ok(o) => o,
             Err(p) => p.into_inner(),
@@ -124,7 +125,12 @@ impl PermissionStore {
     /// Install (insert-or-replace) a replicated owner record into
     /// the in-memory map on every node.
     pub fn install_replicated_owner(&self, stored: &StoredOwner) {
-        let key = owner_key(&stored.object_type, stored.tenant_id, &stored.object_name);
+        let key = owner_key(
+            &stored.object_type,
+            stored.database_id,
+            stored.tenant_id,
+            &stored.object_name,
+        );
         let mut owners = match self.owners.write() {
             Ok(o) => o,
             Err(p) => p.into_inner(),
@@ -156,7 +162,17 @@ impl PermissionStore {
         tenant_id: u64,
         object_name: &str,
     ) -> bool {
-        let key = owner_key(object_type, tenant_id, object_name);
+        self.install_replicated_remove_owner_in_database(object_type, 0, tenant_id, object_name)
+    }
+
+    pub fn install_replicated_remove_owner_in_database(
+        &self,
+        object_type: &str,
+        database_id: u64,
+        tenant_id: u64,
+        object_name: &str,
+    ) -> bool {
+        let key = owner_key(object_type, database_id, tenant_id, object_name);
         let mut owners = match self.owners.write() {
             Ok(o) => o,
             Err(p) => p.into_inner(),

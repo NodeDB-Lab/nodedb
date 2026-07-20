@@ -37,6 +37,9 @@ use crate::control::security::catalog::auth_types::object_type;
 
 use super::divergence::{Divergence, DivergenceKind};
 
+type ScopedObjectKey = (u64, u64, String);
+type ParentOwnerRows = (&'static str, Vec<ScopedObjectKey>);
+
 /// Run every cross-table integrity invariant against the
 /// current redb state and return every violation found.
 /// Never panics, never writes.
@@ -98,9 +101,16 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
         .collect();
     let user_names: HashSet<String> = users.iter().map(|u| u.username.clone()).collect();
     let role_names: HashSet<String> = roles.iter().map(|r| r.name.clone()).collect();
-    let owner_keys: HashSet<(String, u64, String)> = owners
+    let owner_keys: HashSet<(String, u64, u64, String)> = owners
         .iter()
-        .map(|o| (o.object_type.clone(), o.tenant_id, o.object_name.clone()))
+        .map(|o| {
+            (
+                o.object_type.clone(),
+                o.database_id,
+                o.tenant_id,
+                o.object_name.clone(),
+            )
+        })
         .collect();
 
     // ── Check 1: every parent-replicated DDL object has an owner. ──
@@ -108,7 +118,7 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
     // row added here plus its `apply/<type>.rs::put` call to
     // `owner::put_parent_owner`. Omitting either half trips an
     // OrphanRow on the next restart.
-    let parent_replicated: [(&'static str, Vec<(u64, String)>); 9] = [
+    let parent_replicated: [ParentOwnerRows; 9] = [
         (
             object_type::COLLECTION,
             // Active AND soft-deleted collections both require an
@@ -118,73 +128,73 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
             // undrop ownership restoration.
             collections
                 .iter()
-                .map(|c| (c.tenant_id, c.name.clone()))
+                .map(|c| (c.database_id.as_u64(), c.tenant_id, c.name.clone()))
                 .collect(),
         ),
         (
             object_type::FUNCTION,
             functions
                 .iter()
-                .map(|f| (f.tenant_id, f.name.clone()))
+                .map(|f| (0, f.tenant_id, f.name.clone()))
                 .collect(),
         ),
         (
             object_type::PROCEDURE,
             procedures
                 .iter()
-                .map(|p| (p.tenant_id, p.name.clone()))
+                .map(|p| (0, p.tenant_id, p.name.clone()))
                 .collect(),
         ),
         (
             object_type::TRIGGER,
             triggers
                 .iter()
-                .map(|t| (t.tenant_id, t.name.clone()))
+                .map(|t| (0, t.tenant_id, t.name.clone()))
                 .collect(),
         ),
         (
             object_type::MATERIALIZED_VIEW,
             materialized_views
                 .iter()
-                .map(|m| (m.tenant_id, m.name.clone()))
+                .map(|m| (0, m.tenant_id, m.name.clone()))
                 .collect(),
         ),
         (
             object_type::SEQUENCE,
             sequences
                 .iter()
-                .map(|s| (s.tenant_id, s.name.clone()))
+                .map(|s| (0, s.tenant_id, s.name.clone()))
                 .collect(),
         ),
         (
             object_type::SCHEDULE,
             schedules
                 .iter()
-                .map(|s| (s.tenant_id, s.name.clone()))
+                .map(|s| (0, s.tenant_id, s.name.clone()))
                 .collect(),
         ),
         (
             object_type::CHANGE_STREAM,
             change_streams
                 .iter()
-                .map(|c| (c.tenant_id, c.name.clone()))
+                .map(|c| (0, c.tenant_id, c.name.clone()))
                 .collect(),
         ),
         (
             object_type::CONTINUOUS_AGGREGATE,
             continuous_aggregates
                 .iter()
-                .map(|c| (c.tenant_id, c.name.clone()))
+                .map(|c| (c.database_id, c.tenant_id, c.name.clone()))
                 .collect(),
         ),
     ];
     for (kind, rows) in &parent_replicated {
-        for (tenant, name) in rows {
-            let key = ((*kind).to_string(), *tenant, name.clone());
+        for (database_id, tenant, name) in rows {
+            let key = ((*kind).to_string(), *database_id, *tenant, name.clone());
             if !owner_keys.contains(&key) {
                 violations.push(Divergence::new(DivergenceKind::OrphanRow {
                     kind,
-                    key: format!("{tenant}:{name}"),
+                    key: format!("{database_id}:{tenant}:{name}"),
                     expected_parent_kind: "owner",
                 }));
             }
@@ -196,7 +206,10 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
         if !user_names.contains(&o.owner_username) {
             violations.push(Divergence::new(DivergenceKind::DanglingReference {
                 from_kind: "owner",
-                from_key: format!("{}:{}:{}", o.object_type, o.tenant_id, o.object_name),
+                from_key: format!(
+                    "{}:{}:{}:{}",
+                    o.object_type, o.database_id, o.tenant_id, o.object_name
+                ),
                 to_kind: "user",
                 to_key: o.owner_username.clone(),
             }));

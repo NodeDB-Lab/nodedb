@@ -16,7 +16,7 @@ use std::time::Duration;
 use nodedb_types::DatabaseId;
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::security::catalog::{StoredCollection, StoredContinuousAggregate};
+use crate::control::security::catalog::{StoredCollection, StoredContinuousAggregate, StoredOwner};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::sync_dispatch;
 use crate::control::state::SharedState;
@@ -235,6 +235,15 @@ pub async fn create_continuous_aggregate(
     // the dispatch here so the local `continuous_agg_mgr` registers
     // immediately, matching the cluster behaviour.
     if log_index == 0 {
+        state.permissions.install_replicated_owner(&StoredOwner {
+            database_id: stored.database_id,
+            object_type:
+                crate::control::security::catalog::auth_types::object_type::CONTINUOUS_AGGREGATE
+                    .to_string(),
+            object_name: stored.name.clone(),
+            tenant_id: stored.tenant_id,
+            owner_username: stored.owner.clone(),
+        });
         let plan = PhysicalPlan::Meta(MetaOp::RegisterContinuousAggregate { def: def.clone() });
         sync_dispatch::dispatch_async(
             state,

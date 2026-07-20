@@ -684,8 +684,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = open_core(dir.path());
         core.watermark = Lsn::new(900);
-        core.get_crdt_engine(nodedb_types::TenantId::new(1))
-            .expect("create a CRDT engine so the flush has a tenant to export");
+        core.get_crdt_engine(
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(1),
+        )
+        .expect("create a CRDT engine so the flush has a tenant to export");
 
         // Occupy the checkpoint directory's path with a FILE so the flush's
         // `create_dir_all` fails and it can publish nothing.
@@ -706,8 +709,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = open_core(dir.path());
         core.watermark = Lsn::new(750);
-        core.get_crdt_engine(nodedb_types::TenantId::new(1))
-            .expect("create a CRDT engine");
+        core.get_crdt_engine(
+            nodedb_types::DatabaseId::DEFAULT,
+            nodedb_types::TenantId::new(1),
+        )
+        .expect("create a CRDT engine");
 
         assert_eq!(core.checkpoint_crdt_durable_lsn(), Lsn::new(750));
         assert_eq!(core.floors.crdt_durable_lsn, Lsn::new(750));

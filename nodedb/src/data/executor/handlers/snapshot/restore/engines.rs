@@ -115,6 +115,7 @@ impl CoreLoop {
 
     pub(super) fn restore_crdt_state(
         &mut self,
+        database_id: u64,
         tenant_id: u64,
         collection: &str,
         bytes: &[u8],
@@ -122,7 +123,7 @@ impl CoreLoop {
         let tid = crate::types::TenantId::new(tenant_id);
         // Lazily create the tenant engine if absent, then import into the
         // target collection's per-collection LoroDoc.
-        let engine = self.get_crdt_engine(tid)?;
+        let engine = self.get_crdt_engine(crate::types::DatabaseId::new(database_id), tid)?;
         engine.import_snapshot_bytes(collection, bytes)
     }
 
@@ -131,13 +132,14 @@ impl CoreLoop {
     /// (`>=`), so this is idempotent against later replay/reconcile.
     pub(super) fn restore_crdt_constraints(
         &mut self,
+        database_id: u64,
         tenant_id: u64,
         collection: &str,
         constraint_version: u64,
         encoded: &[Vec<u8>],
     ) -> crate::Result<()> {
         let tid = crate::types::TenantId::new(tenant_id);
-        let engine = self.get_crdt_engine(tid)?;
+        let engine = self.get_crdt_engine(crate::types::DatabaseId::new(database_id), tid)?;
         let mut constraints = Vec::with_capacity(encoded.len());
         for blob in encoded {
             let c: nodedb_crdt::Constraint =

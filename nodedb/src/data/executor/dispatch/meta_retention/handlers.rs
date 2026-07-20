@@ -92,7 +92,11 @@ impl CoreLoop {
             collection,
         );
 
-        let bitemporal = self.is_bitemporal(task.request.tenant_id.as_u64(), collection);
+        let bitemporal = self.is_bitemporal(
+            task.request.database_id.as_u64(),
+            task.request.tenant_id.as_u64(),
+            collection,
+        );
 
         let ts_key = (
             task.request.database_id,
@@ -331,7 +335,7 @@ impl CoreLoop {
         cutoff_system_ms: i64,
     ) -> Response {
         let tid = TenantId::new(tenant_id);
-        let purged = match self.crdt_engines.get(&tid) {
+        let purged = match self.crdt_engines.get(&(task.request.database_id, tid)) {
             Some(engine) => match engine.purge_history_before(collection, cutoff_system_ms) {
                 Ok(n) => n as u64,
                 Err(e) => {

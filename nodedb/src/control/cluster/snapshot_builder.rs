@@ -215,19 +215,21 @@ impl DataPlaneSnapshotBuilder {
         // single collection; include it iff that collection's vshard belongs to
         // this group — the same per-collection vshard filter every other engine
         // uses.
-        for (tid, collection, bytes) in snap.crdt_state {
+        for (database_id, tid, collection, bytes) in snap.crdt_state {
             if group_vshards.contains(&Self::vshard_of(&collection)) {
-                merged.crdt_state.push((tid, collection, bytes));
+                merged
+                    .crdt_state
+                    .push((database_id, tid, collection, bytes));
             }
         }
 
         // CRDT constraints: same per-collection vshard filter as `crdt_state`
         // — each entry is routed by its single collection's vshard.
-        for (tid, collection, version, encoded) in snap.crdt_constraints {
+        for (database_id, tid, collection, version, encoded) in snap.crdt_constraints {
             if group_vshards.contains(&Self::vshard_of(&collection)) {
                 merged
                     .crdt_constraints
-                    .push((tid, collection, version, encoded));
+                    .push((database_id, tid, collection, version, encoded));
             }
         }
 

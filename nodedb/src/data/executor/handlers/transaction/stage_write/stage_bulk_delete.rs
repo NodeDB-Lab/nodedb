@@ -80,7 +80,8 @@ impl CoreLoop {
         };
 
         {
-            let matches = self.strict_aware_matcher(tid, collection, &filters);
+            let matches =
+                self.strict_aware_matcher(database_id.as_u64(), tid, collection, &filters);
             self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &matches);
         }
 

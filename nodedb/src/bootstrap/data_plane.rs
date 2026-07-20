@@ -17,10 +17,9 @@ use crate::control::server::shared::ddl::neutral::collection::register::{
 };
 use crate::data::eventfd::EventFdNotifier;
 use crate::data::runtime::{CoreCompactionConfig, SpawnCoreParams, spawn_core};
-use crate::engine::document::store::CollectionConfig;
 use crate::event::EventProducer;
 use crate::storage::quarantine::QuarantineRegistry;
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
 
 /// Load the persisted ND-array catalog from redb into the shared in-memory handle.
 pub fn load_array_catalog(
@@ -67,7 +66,7 @@ pub fn load_array_catalog(
 /// yields an empty seed rather than aborting startup.
 pub fn load_doc_config_registry(
     config: &ServerConfig,
-) -> Vec<((TenantId, String), CollectionConfig)> {
+) -> Vec<crate::data::executor::core_loop::DocConfigSeedEntry> {
     let catalog_path = config.catalog_path();
     let catalog = match crate::control::security::catalog::SystemCatalog::open(&catalog_path) {
         Ok(catalog) => catalog,
@@ -87,12 +86,12 @@ pub fn load_doc_config_registry(
 
     all.into_iter()
         .filter(|(_, coll)| coll.is_active)
-        .map(|(_, coll)| {
+        .map(|(database_id, coll)| {
             let tenant_id = TenantId::new(coll.tenant_id);
             let mut indexes = derive_auto_indexes(coll.fields.iter().map(|(n, _)| n.as_str()));
             extend_with_catalog_indexes(&mut indexes, &coll);
             let config = build_doc_config_from_stored(&catalog, tenant_id, &coll, &indexes);
-            let key = (tenant_id, config.name.clone());
+            let key = (database_id, tenant_id, config.name.clone());
             (key, config)
         })
         .collect()
@@ -150,7 +149,12 @@ pub fn load_vector_index_param_seed(
 /// logs a warning and yields an empty seed rather than aborting startup.
 pub fn load_columnar_schema_seed(
     config: &ServerConfig,
-) -> Vec<(TenantId, String, nodedb_types::columnar::ColumnarSchema)> {
+) -> Vec<(
+    DatabaseId,
+    TenantId,
+    String,
+    nodedb_types::columnar::ColumnarSchema,
+)> {
     let catalog_path = config.catalog_path();
     let catalog = match crate::control::security::catalog::SystemCatalog::open(&catalog_path) {
         Ok(catalog) => catalog,
@@ -170,11 +174,16 @@ pub fn load_columnar_schema_seed(
 
     all.into_iter()
         .filter(|(_, coll)| coll.is_active && coll.collection_type.is_columnar_family())
-        .filter_map(|(_, coll)| {
+        .filter_map(|(database_id, coll)| {
             let schema = crate::control::planner::sql_plan_convert::dml::build_columnar_schema(
                 &coll.fields,
             )?;
-            Some((TenantId::new(coll.tenant_id), coll.name.clone(), schema))
+            Some((
+                database_id,
+                TenantId::new(coll.tenant_id),
+                coll.name.clone(),
+                schema,
+            ))
         })
         .collect()
 }
@@ -199,9 +208,16 @@ pub struct CoreSharedResources {
     pub quarantine_registry: Arc<QuarantineRegistry>,
     pub system_metrics: Arc<SystemMetrics>,
     pub maintenance_budget: Arc<crate::control::maintenance::MaintenanceBudgetTracker>,
-    pub doc_config_seed: Arc<Vec<((TenantId, String), CollectionConfig)>>,
+    pub doc_config_seed: Arc<Vec<crate::data::executor::core_loop::DocConfigSeedEntry>>,
     pub vector_index_param_seed: Arc<Vec<nodedb_types::StoredVectorIndexParams>>,
-    pub columnar_schema_seed: Arc<Vec<(TenantId, String, nodedb_types::columnar::ColumnarSchema)>>,
+    pub columnar_schema_seed: Arc<
+        Vec<(
+            DatabaseId,
+            TenantId,
+            String,
+            nodedb_types::columnar::ColumnarSchema,
+        )>,
+    >,
 }
 
 /// Spawn all Data Plane cores, wire dispatcher notifiers, and return core

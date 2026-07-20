@@ -48,10 +48,9 @@ pub fn tenant_target(tenant_id: TenantId) -> String {
     format!("tenant:{}", tenant_id.as_u64())
 }
 
-/// `{object_type}:{tenant_id}:{object_name}` — the canonical key
-/// for both the in-memory owner map and the redb `OWNERS` table.
-pub fn owner_key(object_type: &str, tenant_id: u64, object_name: &str) -> String {
-    crate::control::security::catalog::owner_key(object_type, tenant_id, object_name)
+/// `{object_type}:{database_id}:{tenant_id}:{object_name}` owner key.
+pub fn owner_key(object_type: &str, database_id: u64, tenant_id: u64, object_name: &str) -> String {
+    crate::control::security::catalog::owner_key(object_type, database_id, tenant_id, object_name)
 }
 
 /// Parse a permission name (case-insensitive). Also accepts SQL aliases.

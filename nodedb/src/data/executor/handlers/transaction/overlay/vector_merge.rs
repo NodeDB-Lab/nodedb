@@ -191,7 +191,7 @@ impl CoreLoop {
             payload_filters,
         } = params;
         let coll_key = (database_id, tid, collection.to_string());
-        let config_key = (tid, collection.to_string());
+        let config_key = (database_id, tid, collection.to_string());
 
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);

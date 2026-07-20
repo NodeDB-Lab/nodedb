@@ -118,7 +118,11 @@ impl CoreLoop {
         // 3. Sparse/document engine (schemaless + strict) — TRULY streams
         //    row-at-a-time via `scan_documents_for_each`. The strict schema is
         //    resolved once up front, exactly as in `scan_sparse`.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(did),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode
@@ -327,7 +331,11 @@ impl CoreLoop {
         limit: usize,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let docs = self.sparse.scan_documents(did, tid, collection, limit)?;
-        let strict_schema = self.strict_schema_for(crate::types::TenantId::new(tid), collection);
+        let strict_schema = self.strict_schema_for(
+            crate::types::DatabaseId::new(did),
+            crate::types::TenantId::new(tid),
+            collection,
+        );
 
         let mut normalized = Vec::with_capacity(docs.len());
         for (id, raw) in docs {

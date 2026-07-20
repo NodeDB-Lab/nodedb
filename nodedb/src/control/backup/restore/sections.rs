@@ -153,6 +153,7 @@ pub(super) fn apply_metadata_sections(
                     // replay barrier matches — a coordinator-local tombstone lets purged
                     // writes resurrect on follower restart.
                     let entry = crate::control::catalog_entry::CatalogEntry::RecordWalTombstone {
+                        database_id: DatabaseId::DEFAULT.as_u64(),
                         tenant_id,
                         collection: t.collection,
                         purge_lsn: t.purge_lsn,
@@ -170,7 +171,12 @@ pub(super) fn apply_metadata_sections(
                             ..
                         } = entry
                         {
-                            catalog.record_wal_tombstone(tenant_id, &collection, purge_lsn)?;
+                            catalog.record_wal_tombstone(
+                                DatabaseId::DEFAULT.as_u64(),
+                                tenant_id,
+                                &collection,
+                                purge_lsn,
+                            )?;
                         }
                     }
                 }

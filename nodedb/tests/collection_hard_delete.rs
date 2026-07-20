@@ -118,6 +118,7 @@ fn l2_cleanup_queue_is_idempotent_end_to_end() {
 
     let (_tmp, catalog) = make_catalog();
     let entry = |lsn: u64, bytes: u64, attempts: u32, err: &str| StoredL2CleanupEntry {
+        database_id: 0,
         tenant_id: TENANT,
         name: "events".into(),
         purge_lsn: lsn,
@@ -142,23 +143,23 @@ fn l2_cleanup_queue_is_idempotent_end_to_end() {
 
     // record_attempt bumps in place.
     catalog
-        .record_l2_cleanup_attempt(TENANT, "events", "s3: 503")
+        .record_l2_cleanup_attempt(0, TENANT, "events", "s3: 503")
         .unwrap();
     catalog
-        .record_l2_cleanup_attempt(TENANT, "events", "s3: 503")
+        .record_l2_cleanup_attempt(0, TENANT, "events", "s3: 503")
         .unwrap();
     let rows = catalog.load_l2_cleanup_queue().unwrap();
     assert_eq!(rows[0].attempts, 2);
     assert_eq!(rows[0].last_error, "s3: 503");
 
     // Remove is idempotent.
-    catalog.remove_l2_cleanup(TENANT, "events").unwrap();
-    catalog.remove_l2_cleanup(TENANT, "events").unwrap();
+    catalog.remove_l2_cleanup(0, TENANT, "events").unwrap();
+    catalog.remove_l2_cleanup(0, TENANT, "events").unwrap();
     assert!(catalog.load_l2_cleanup_queue().unwrap().is_empty());
 
     // record_attempt on a missing key is a no-op, not an error.
     catalog
-        .record_l2_cleanup_attempt(TENANT, "events", "doesn't matter")
+        .record_l2_cleanup_attempt(0, TENANT, "events", "doesn't matter")
         .unwrap();
     assert!(catalog.load_l2_cleanup_queue().unwrap().is_empty());
 }

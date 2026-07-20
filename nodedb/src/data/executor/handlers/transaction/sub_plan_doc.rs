@@ -9,7 +9,7 @@ use crate::data::executor::enforcement::{hash_chain, materialized_sum};
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
 
 use super::undo::UndoEntry;
 
@@ -50,7 +50,7 @@ impl CoreLoop {
     fn restore_chain_head(
         &mut self,
         mutated: bool,
-        config_key: &(TenantId, String),
+        config_key: &(DatabaseId, TenantId, String),
         prior: &Option<Option<String>>,
     ) {
         if !mutated {
@@ -91,7 +91,16 @@ impl CoreLoop {
         // hash-chain and materialized-sum side-effects (both fire on insert).
         // The authoritative prior value for the undo entry comes from
         // `apply_point_put`'s outcome, which is bitemporal-aware.
-        let config_key = (TenantId::new(tid), collection.to_string());
+        let config_key = (
+            dummy_task.request.database_id,
+            TenantId::new(tid),
+            collection.to_string(),
+        );
+        let chain_key = (
+            dummy_task.request.database_id,
+            TenantId::new(tid),
+            collection.to_string(),
+        );
         let is_insert = self
             .sparse
             .get(database_id, tid, collection, row_key)
@@ -109,7 +118,7 @@ impl CoreLoop {
         // `None` = not a hash-chain collection; `Some(None)` = no prior head
         // (genesis insert); `Some(Some(prev))` = prior head present.
         let chain_hash_prior: Option<Option<String>> = if hash_chain_enabled {
-            Some(self.chain_hashes.get(&config_key).cloned())
+            Some(self.chain_hashes.get(&chain_key).cloned())
         } else {
             None
         };
@@ -120,6 +129,7 @@ impl CoreLoop {
         let chained: Option<Vec<u8>> = if is_insert {
             hash_chain::apply_chain_on_insert(
                 &mut self.chain_hashes,
+                database_id,
                 tid,
                 collection,
                 document_id,
@@ -143,7 +153,7 @@ impl CoreLoop {
         // Mirrors autocommit `execute_point_insert`. PUT/upsert (`None`) skips
         // this entirely and keeps overwrite behaviour.
         if let Some(if_absent) = insert_if_absent {
-            let exists_result = if self.is_bitemporal(tid, collection) {
+            let exists_result = if self.is_bitemporal(database_id, tid, collection) {
                 self.sparse.versioned_exists_current_in_txn(
                     &txn,
                     database_id,
@@ -157,12 +167,12 @@ impl CoreLoop {
             };
             let exists = exists_result.map_err(|e| {
                 // Restore any chain-head pre-image mutated above before bailing.
-                self.restore_chain_head(chained.is_some(), &config_key, &chain_hash_prior);
+                self.restore_chain_head(chained.is_some(), &chain_key, &chain_hash_prior);
                 ErrorCode::from(e)
             })?;
             if exists {
                 // No write, no undo push — drop the txn without committing.
-                self.restore_chain_head(chained.is_some(), &config_key, &chain_hash_prior);
+                self.restore_chain_head(chained.is_some(), &chain_key, &chain_hash_prior);
                 if if_absent {
                     // `INSERT ... ON CONFLICT DO NOTHING`: silent skip.
                     return Ok(self.response_ok(dummy_task));
@@ -205,7 +215,7 @@ impl CoreLoop {
                 // `apply_point_put` rejected the write (e.g. UNIQUE violation)
                 // after we mutated the chain head. Restore the pre-image so the
                 // aborted op leaves no trace, then propagate the typed error.
-                self.restore_chain_head(chained.is_some(), &config_key, &chain_hash_prior);
+                self.restore_chain_head(chained.is_some(), &chain_key, &chain_hash_prior);
                 return Err(e.into());
             }
         };

@@ -74,7 +74,11 @@ impl CoreLoop {
             limit,
         } = args;
         // Resolve the strict schema (if any) for strict-safe body decode.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let StorageMode::Strict { ref schema } = c.storage_mode {
                 Some(schema.clone())

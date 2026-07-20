@@ -128,11 +128,16 @@ impl CoreLoop {
         // collection) owns its own doc; entries are carried tenant-explicit and
         // collection-tagged so the per-group Raft snapshot builder routes each
         // by its single collection's vshard.
-        if let Some(crdt) = self.crdt_engines.get(&tid_obj) {
+        if let Some(crdt) = self.crdt_engines.get(&(task.request.database_id, tid_obj)) {
             match crdt.export_all_snapshots() {
                 Ok(per_collection) => {
                     for (collection, bytes) in per_collection {
-                        snapshot.crdt_state.push((tenant_id, collection, bytes));
+                        snapshot.crdt_state.push((
+                            task.request.database_id.as_u64(),
+                            tenant_id,
+                            collection,
+                            bytes,
+                        ));
                     }
                 }
                 Err(e) => warn!(tenant_id, error = %e, "snapshot: crdt export failed"),
@@ -168,9 +173,13 @@ impl CoreLoop {
                 if failed || encoded.is_empty() {
                     continue;
                 }
-                snapshot
-                    .crdt_constraints
-                    .push((tenant_id, collection, version, encoded));
+                snapshot.crdt_constraints.push((
+                    task.request.database_id.as_u64(),
+                    tenant_id,
+                    collection,
+                    version,
+                    encoded,
+                ));
             }
         }
 

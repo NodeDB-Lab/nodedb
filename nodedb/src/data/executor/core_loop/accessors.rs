@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
 
 use crate::wal::replay::SyncHwmReplayMaps;
 
@@ -74,7 +74,7 @@ impl CoreLoop {
         let Some(q) = self.quiesce.as_ref() else {
             return Ok(None);
         };
-        match q.try_start_scan(tid, collection) {
+        match q.try_start_scan(task.request.database_id.as_u64(), tid, collection) {
             Ok(g) => Ok(Some(g)),
             Err(_) => Err(self.response_error(
                 task,
@@ -172,8 +172,13 @@ impl CoreLoop {
     /// in strict (Binary Tuple) storage mode.  Used by schema-visibility barrier
     /// integration tests to confirm every core has applied a schema ALTER.
     #[cfg(test)]
-    pub fn schema_version_for_collection(&self, tid: u64, collection: &str) -> Option<u32> {
-        let key = (TenantId::new(tid), collection.to_string());
+    pub fn schema_version_for_collection(
+        &self,
+        database_id: DatabaseId,
+        tid: u64,
+        collection: &str,
+    ) -> Option<u32> {
+        let key = (database_id, TenantId::new(tid), collection.to_string());
         let config = self.doc_configs.get(&key)?;
         match &config.storage_mode {
             nodedb_physical::physical_plan::StorageMode::Strict { schema } => Some(schema.version),

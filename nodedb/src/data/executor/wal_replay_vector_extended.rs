@@ -140,6 +140,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
+        let tombstones = tombstones.for_database(database_id);
         let Ok((
             collection,
             field,
@@ -234,6 +235,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
+        let tombstones = tombstones.for_database(database_id);
         let Ok((collection, field_name, doc_surrogate_u32, vectors_flat, count, dim)) =
             zerompk::from_msgpack::<(String, String, u32, Vec<f32>, usize, usize)>(payload)
         else {
@@ -305,6 +307,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
+        let tombstones = tombstones.for_database(database_id);
         let Ok((collection, field_name, doc_surrogate_u32)) =
             zerompk::from_msgpack::<(String, String, u32)>(payload)
         else {
@@ -361,6 +364,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
+        let tombstones = tombstones.for_database(database_id);
         let Ok((collection, field_name, doc_id, entries)) =
             zerompk::from_msgpack::<(String, String, String, Vec<(u32, f32)>)>(payload)
         else {
@@ -405,6 +409,7 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
+        let tombstones = tombstones.for_database(database_id);
         let Ok((collection, field_name, doc_id)) =
             zerompk::from_msgpack::<(String, String, String)>(payload)
         else {

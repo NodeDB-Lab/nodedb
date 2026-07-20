@@ -20,8 +20,9 @@ pub fn put(stored: StoredContinuousAggregate, shared: Arc<SharedState>) {
         tenant = stored.tenant_id,
         "catalog_entry: continuous aggregate upserted"
     );
-    super::owner::install_from_parent(
+    super::owner::install_from_parent_in_database(
         object_type::CONTINUOUS_AGGREGATE,
+        stored.database_id,
         stored.tenant_id,
         &stored.name,
         &stored.owner,
@@ -29,15 +30,18 @@ pub fn put(stored: StoredContinuousAggregate, shared: Arc<SharedState>) {
     );
 }
 
-pub fn delete(tenant_id: u64, name: String, shared: Arc<SharedState>) {
+pub fn delete(database_id: u64, tenant_id: u64, name: String, shared: Arc<SharedState>) {
     debug!(
         cagg = %name,
         tenant = tenant_id,
         "catalog_entry: continuous aggregate removed"
     );
-    shared.permissions.install_replicated_remove_owner(
-        object_type::CONTINUOUS_AGGREGATE,
-        tenant_id,
-        &name,
-    );
+    shared
+        .permissions
+        .install_replicated_remove_owner_in_database(
+            object_type::CONTINUOUS_AGGREGATE,
+            database_id,
+            tenant_id,
+            &name,
+        );
 }

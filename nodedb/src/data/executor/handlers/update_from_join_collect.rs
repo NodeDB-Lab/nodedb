@@ -37,7 +37,7 @@ pub(in crate::data::executor) struct CollectUpdateRows<'a> {
     pub source_map: &'a HashMap<String, serde_json::Value>,
     pub target_filters: &'a [ScanFilter],
     pub strict_schema: Option<&'a StrictSchema>,
-    pub config_key: &'a (TenantId, String),
+    pub config_key: &'a (DatabaseId, TenantId, String),
 }
 
 /// Borrowed inputs for [`CoreLoop::scan_target_rows`], bundled to keep the
@@ -272,7 +272,8 @@ impl CoreLoop {
         // that satisfies the predicate is surfaced, one that no longer does is
         // dropped, exactly as for a base row.
         if let Some(txn_id) = txn_id {
-            let matches = self.strict_aware_matcher(tid, target_collection, target_filters);
+            let matches =
+                self.strict_aware_matcher(database_id, tid, target_collection, target_filters);
             self.merge_overlay_into_scan(txn_id, target_coll_key, &mut rows, &matches);
         }
         Ok(rows)

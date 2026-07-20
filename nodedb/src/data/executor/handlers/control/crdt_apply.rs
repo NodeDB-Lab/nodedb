@@ -95,7 +95,7 @@ impl CoreLoop {
             // read the merged row back and encode it while the borrow is live,
             // carrying the materialized bytes out.
             let materialized = {
-                let engine = match self.get_crdt_engine(tenant_id) {
+                let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
                     Ok(e) => e,
                     Err(e) => {
                         warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
@@ -208,7 +208,7 @@ impl CoreLoop {
                     Applied(ValidatedApplyOutcome),
                 }
                 let (outcome, materialized) = {
-                    let engine = match self.get_crdt_engine(tenant_id) {
+                    let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
                         Ok(e) => e,
                         Err(e) => {
                             warn!(core = self.core_id, error = %e, "failed to create CRDT engine");

@@ -75,7 +75,12 @@ pub fn undrop_collection(
     }
 
     // Authorization: preserved owner OR admin.
-    let preserved_owner = state.permissions.get_owner("collection", tenant_id, name);
+    let preserved_owner = state.permissions.get_owner_in_database(
+        "collection",
+        database_id.as_u64(),
+        tenant_id,
+        name,
+    );
     let is_preserved_owner = preserved_owner.as_deref() == Some(&identity.username);
     let is_admin = identity.is_superuser || identity.has_role(&Role::TenantAdmin);
 

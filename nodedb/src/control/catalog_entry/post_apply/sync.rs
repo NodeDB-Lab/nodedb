@@ -63,11 +63,17 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
                 None => collection::put_owner_sync(stored, Arc::clone(shared)),
             }
         }
-        CatalogEntry::DeactivateCollection { tenant_id, name } => {
+        CatalogEntry::DeactivateCollection {
+            tenant_id, name, ..
+        } => {
             collection::deactivate(*tenant_id, name.clone(), Arc::clone(shared));
         }
-        CatalogEntry::PurgeCollection { tenant_id, name } => {
-            collection::purge_sync(*tenant_id, name.clone(), Arc::clone(shared));
+        CatalogEntry::PurgeCollection {
+            database_id,
+            tenant_id,
+            name,
+        } => {
+            collection::purge_sync(*database_id, *tenant_id, name.clone(), Arc::clone(shared));
         }
         CatalogEntry::PutSequence(stored) => {
             sequence::put((**stored).clone(), Arc::clone(shared));
@@ -140,9 +146,16 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
             continuous_aggregate::put((**stored).clone(), Arc::clone(shared));
         }
         CatalogEntry::DeleteContinuousAggregate {
-            tenant_id, name, ..
+            database_id,
+            tenant_id,
+            name,
         } => {
-            continuous_aggregate::delete(*tenant_id, name.clone(), Arc::clone(shared));
+            continuous_aggregate::delete(
+                *database_id,
+                *tenant_id,
+                name.clone(),
+                Arc::clone(shared),
+            );
         }
         CatalogEntry::PutTenant(stored) => {
             tenant::put((**stored).clone(), Arc::clone(shared));
@@ -188,11 +201,13 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         }
         CatalogEntry::DeleteOwner {
             object_type,
+            database_id,
             tenant_id,
             object_name,
         } => {
             owner::delete(
                 object_type.clone(),
+                *database_id,
                 *tenant_id,
                 object_name.clone(),
                 Arc::clone(shared),

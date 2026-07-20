@@ -58,7 +58,7 @@ impl CoreLoop {
 
         // Reject direct updates to generated columns, matching the durable
         // and point-write staging paths.
-        let config_key = (TenantId::new(tid), collection.to_string());
+        let config_key = (database_id, TenantId::new(tid), collection.to_string());
         if let Some(config) = self.doc_configs.get(&config_key)
             && let Err(e) =
                 generated::check_generated_readonly(updates, &config.enforcement.generated_columns)
@@ -101,7 +101,8 @@ impl CoreLoop {
         // (an earlier staged update may have moved a row in or out), and
         // appends overlay-only rows that now match.
         {
-            let matches = self.strict_aware_matcher(tid, collection, &filters);
+            let matches =
+                self.strict_aware_matcher(database_id.as_u64(), tid, collection, &filters);
             self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &matches);
         }
 
@@ -110,7 +111,13 @@ impl CoreLoop {
             let Ok(surrogate) = u32::from_str_radix(row_key, 16) else {
                 continue;
             };
-            let new_body = match self.stage_apply_update(tid, collection, current_body, updates) {
+            let new_body = match self.stage_apply_update(
+                database_id.as_u64(),
+                tid,
+                collection,
+                current_body,
+                updates,
+            ) {
                 Ok(b) => b,
                 Err(e) => return self.response_error(task, e),
             };

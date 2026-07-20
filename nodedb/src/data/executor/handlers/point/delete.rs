@@ -81,7 +81,12 @@ impl CoreLoop {
         // `old_value`. A delete against a non-existent key is a true
         // no-op and emits nothing.
         if let Some(prior_bytes) = prior.as_deref() {
-            let old_converted = self.resolve_event_payload(tid, collection, prior_bytes);
+            let old_converted = self.resolve_event_payload(
+                task.request.database_id.as_u64(),
+                tid,
+                collection,
+                prior_bytes,
+            );
             self.emit_write_event(
                 task,
                 collection,

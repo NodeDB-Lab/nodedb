@@ -36,7 +36,7 @@ impl CoreLoop {
         if_absent: bool,
     ) -> Response {
         let row_key = surrogate_to_doc_id(ctx.surrogate);
-        let bitemporal = self.is_bitemporal(ctx.tid, ctx.collection);
+        let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
 
         let overlay_pk = self.stage_overlay_pk(ctx);
         let present = match self.stage_pk_present(
@@ -100,7 +100,11 @@ impl CoreLoop {
         ctx: &StageCtx<'_>,
         updates: &[(String, UpdateValue)],
     ) -> Response {
-        let config_key = (TenantId::new(ctx.tid), ctx.collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(ctx.database_id),
+            TenantId::new(ctx.tid),
+            ctx.collection.to_string(),
+        );
         let row_key = surrogate_to_doc_id(ctx.surrogate);
 
         // Reject direct updates to generated columns (matches the durable path).
@@ -122,7 +126,7 @@ impl CoreLoop {
             Some(Staged::Put(body)) => body,
             Some(Staged::Tombstone) => return self.stage_count_response(ctx.task, 0),
             None => {
-                let bitemporal = self.is_bitemporal(ctx.tid, ctx.collection);
+                let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
                 let read = if bitemporal {
                     self.sparse.versioned_get_current(
                         ctx.database_id,
@@ -142,7 +146,13 @@ impl CoreLoop {
             }
         };
 
-        let body = match self.stage_apply_update(ctx.tid, ctx.collection, &current_bytes, updates) {
+        let body = match self.stage_apply_update(
+            ctx.database_id,
+            ctx.tid,
+            ctx.collection,
+            &current_bytes,
+            updates,
+        ) {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -154,7 +164,11 @@ impl CoreLoop {
 
     /// Run BASE ∪ OVERLAY UNIQUE checks for an incoming put/insert body.
     fn stage_check_unique(&self, ctx: &StageCtx<'_>, value: &[u8]) -> crate::Result<()> {
-        let config_key = (TenantId::new(ctx.tid), ctx.collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(ctx.database_id),
+            TenantId::new(ctx.tid),
+            ctx.collection.to_string(),
+        );
         let Some(config) = self.doc_configs.get(&config_key).cloned() else {
             return Ok(());
         };
@@ -180,7 +194,13 @@ impl CoreLoop {
     }
 
     fn stage_encode_and_commit(&mut self, ctx: &StageCtx<'_>, value: &[u8]) -> Response {
-        let body = match self.stage_encode_put_body(ctx.tid, ctx.collection, ctx.surrogate, value) {
+        let body = match self.stage_encode_put_body(
+            ctx.database_id,
+            ctx.tid,
+            ctx.collection,
+            ctx.surrogate,
+            value,
+        ) {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };

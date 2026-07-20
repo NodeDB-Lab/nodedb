@@ -68,7 +68,7 @@ impl CoreLoop {
             CrdtDocOpWalRecord::Upsert { collection, .. }
             | CrdtDocOpWalRecord::Delete { collection, .. } => collection,
         };
-        if tombstones.is_tombstoned(tenant_id, collection, record_lsn) {
+        if tombstones.is_tombstoned(record.header.database_id, tenant_id, collection, record_lsn) {
             return Some(0);
         }
 
@@ -283,7 +283,7 @@ mod tests {
         h.core.replay_crdt_wal(&records, 1, &tombstones);
         h.core.replay_crdt_doc_wal(&records, 1, &tombstones);
 
-        let engine = h.core.get_crdt_engine(tid).expect("engine");
+        let engine = h.core.get_crdt_engine(db, tid).expect("engine");
         let row = engine
             .read_row(COLLECTION, DOCUMENT_ID)
             .expect("row present");
@@ -323,7 +323,7 @@ mod tests {
         h.core.replay_crdt_wal(&records, 1, &tombstones);
         h.core.replay_crdt_doc_wal(&records, 1, &tombstones);
 
-        let engine = h.core.get_crdt_engine(tid).expect("engine");
+        let engine = h.core.get_crdt_engine(db, tid).expect("engine");
         let row = engine
             .read_row(COLLECTION, DOCUMENT_ID)
             .expect("row present");
@@ -359,7 +359,7 @@ mod tests {
         h.core.replay_crdt_wal(&records, 1, &tombstones);
         h.core.replay_crdt_doc_wal(&records, 1, &tombstones);
 
-        let engine = h.core.get_crdt_engine(tid).expect("engine");
+        let engine = h.core.get_crdt_engine(db, tid).expect("engine");
         assert!(
             engine.read_row(COLLECTION, DOCUMENT_ID).is_none(),
             "row must be gone after the delete is replayed"

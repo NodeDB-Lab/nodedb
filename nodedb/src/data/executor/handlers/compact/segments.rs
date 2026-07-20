@@ -41,7 +41,7 @@ impl CoreLoop {
             .ts_registries
             .keys()
             .map(|(db, tid, col)| {
-                let flag = self.is_bitemporal(tid.as_u64(), col);
+                let flag = self.is_bitemporal(db.as_u64(), tid.as_u64(), col);
                 ((*db, *tid, col.clone()), flag)
             })
             .collect();

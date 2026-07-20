@@ -92,7 +92,12 @@ impl CoreLoop {
                     continue;
                 };
                 let tenant_id = record.header.tenant_id;
-                if tombstones.is_tombstoned(tenant_id, &collection, record.header.lsn) {
+                if tombstones.is_tombstoned(
+                    record.header.database_id,
+                    tenant_id,
+                    &collection,
+                    record.header.lsn,
+                ) {
                     continue;
                 }
                 let database_id = record.header.database_id;
@@ -129,7 +134,12 @@ impl CoreLoop {
 
             let tenant_id = record.header.tenant_id;
             let record_lsn = record.header.lsn;
-            if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+            if tombstones.is_tombstoned(
+                record.header.database_id,
+                tenant_id,
+                &collection,
+                record_lsn,
+            ) {
                 continue;
             }
 

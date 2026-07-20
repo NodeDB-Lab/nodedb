@@ -163,7 +163,9 @@ pub(super) async fn try_typed(
             // fall through to `drop_continuous_aggregate`, which re-derives the
             // name from `parts[3]` exactly as the pgwire admin string dispatch
             // did.
-            if *if_exists && !continuous_agg::continuous_aggregate_exists(state, identity, name) {
+            if *if_exists
+                && !continuous_agg::continuous_aggregate_exists(state, identity, database_id, name)
+            {
                 return Some(Ok(vec![DdlResult::Status {
                     command: "DROP CONTINUOUS AGGREGATE".to_string(),
                     rows_affected: None,

@@ -105,6 +105,7 @@ impl CoreLoop {
                     && having.is_empty()
                 {
                     let cache_key = aggregate_cache_key(
+                        task.request.database_id.as_u64(),
                         tid,
                         collection,
                         group_by,

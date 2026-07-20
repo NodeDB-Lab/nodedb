@@ -70,7 +70,7 @@ pub fn verify_permissions(
         .load_all_owners()?
         .into_iter()
         .map(|o| {
-            let key = owner_key(&o.object_type, o.tenant_id, &o.object_name);
+            let key = owner_key(&o.object_type, o.database_id, o.tenant_id, &o.object_name);
             (key, o.owner_username)
         })
         .collect();

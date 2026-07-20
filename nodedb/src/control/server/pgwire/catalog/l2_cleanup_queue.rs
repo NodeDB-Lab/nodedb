@@ -31,7 +31,8 @@ pub fn l2_cleanup_queue(
         if !is_admin && e.tenant_id != caller_tenant {
             continue;
         }
-        let mut r: HashMap<String, Value> = HashMap::with_capacity(7);
+        let mut r: HashMap<String, Value> = HashMap::with_capacity(8);
+        r.insert("database_id".into(), Value::Integer(e.database_id as i64));
         r.insert("tenant_id".into(), Value::Integer(e.tenant_id as i64));
         r.insert("name".into(), Value::String(e.name.clone()));
         r.insert("purge_lsn".into(), Value::Integer(e.purge_lsn as i64));

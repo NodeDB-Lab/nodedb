@@ -56,7 +56,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, "get collection policy");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine for get policy");
@@ -88,7 +88,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, "set collection policy");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
@@ -124,7 +124,7 @@ impl CoreLoop {
         // + plain-table fallback below would return ZERO rows. Route them to
         // the versioned current-state scan instead (full-scan + range filter,
         // matching `execute_document_scan`).
-        if self.is_bitemporal(args.tid, args.collection) {
+        if self.is_bitemporal(task.request.database_id.as_u64(), args.tid, args.collection) {
             return self.execute_range_scan_bitemporal(task, args);
         }
 

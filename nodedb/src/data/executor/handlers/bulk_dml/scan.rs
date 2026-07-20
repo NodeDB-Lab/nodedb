@@ -35,7 +35,7 @@ impl CoreLoop {
         // Resolve the strict schema ONCE for the whole scan rather than
         // per row: `strict_aware_matcher` captures it in the closure so the
         // `doc_configs` lookup doesn't repeat for every row in `range`.
-        let matches = self.strict_aware_matcher(tid, collection, filters);
+        let matches = self.strict_aware_matcher(database_id, tid, collection, filters);
 
         let mut ids = Vec::new();
         if let Ok(range) = table.range(prefix.as_str()..end.as_str()) {

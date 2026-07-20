@@ -13,11 +13,21 @@ use crate::engine::sparse::btree_versioned::VersionedIndexEntry;
 
 use super::UndoEntry;
 
+#[derive(Clone, Copy)]
+pub(super) struct UndoDocumentContext<'a> {
+    pub database_id: u64,
+    pub tid: u64,
+    pub entry_index: usize,
+    pub collection: &'a str,
+    pub document_id: &'a str,
+}
+
 impl CoreLoop {
     // ── Document ────────────────────────────────────────────────────────────
 
     pub(super) fn apply_undo_document(
         &mut self,
+        database_id: u64,
         tid: u64,
         entry_index: usize,
         entry: UndoEntry,
@@ -34,40 +44,29 @@ impl CoreLoop {
                 secondary_index_removed,
                 chain_hash_prior,
             } => {
+                let ctx = UndoDocumentContext {
+                    database_id,
+                    tid,
+                    entry_index,
+                    collection: &collection,
+                    document_id: &document_id,
+                };
                 if let Some(sys_from_ms) = bitemporal_sys_from_ms {
                     // Bitemporal op: never wrote the non-versioned table, so
                     // physically remove the appended version row (+ its index
                     // entries) instead of a plain put/delete. `versioned_get_current`
                     // recomputes from the remaining rows, so removing the newest
                     // version restores the prior one automatically.
-                    self.undo_bitemporal_write(
-                        tid,
-                        entry_index,
-                        &collection,
-                        &document_id,
-                        sys_from_ms,
-                        &bitemporal_index_tuples,
-                    )?;
+                    self.undo_bitemporal_write(ctx, sys_from_ms, &bitemporal_index_tuples)?;
                 } else {
                     let result = if let Some(old) = old_value {
                         self.sparse
-                            .put(
-                                crate::types::DatabaseId::DEFAULT.as_u64(),
-                                tid,
-                                &collection,
-                                &document_id,
-                                &old,
-                            )
+                            .put(database_id, tid, &collection, &document_id, &old)
                             .map(|_| ())
                             .map_err(|e| e.to_string())
                     } else {
                         self.sparse
-                            .delete(
-                                crate::types::DatabaseId::DEFAULT.as_u64(),
-                                tid,
-                                &collection,
-                                &document_id,
-                            )
+                            .delete(database_id, tid, &collection, &document_id)
                             .map(|_| ())
                             .map_err(|e| e.to_string())
                     };
@@ -90,21 +89,14 @@ impl CoreLoop {
                 // restore the stale entries this put removed. Empty on the
                 // bitemporal path (its index reversal happened in
                 // `undo_bitemporal_write` above), so this is a no-op there.
-                self.undo_secondary_index(
-                    tid,
-                    entry_index,
-                    &collection,
-                    &document_id,
-                    &secondary_index_added,
-                    &secondary_index_removed,
-                )?;
+                self.undo_secondary_index(ctx, &secondary_index_added, &secondary_index_removed)?;
                 // Revert inverted index: remove the postings this rolled-back
                 // put wrote. FATAL on failure — a rollback that leaves stale FTS
                 // postings behind is the same silent-partial-success corruption
                 // the primary-store restore guards against.
                 self.inverted
                     .remove_document(
-                        crate::types::DatabaseId::DEFAULT.as_u64(),
+                        database_id,
                         crate::types::TenantId::new(tid),
                         &collection,
                         surrogate,
@@ -126,13 +118,9 @@ impl CoreLoop {
                 // Evict any cached copy of the reversed document. Always safe:
                 // a stale hit would otherwise resurrect a rolled-back put; the
                 // worst case here is a cache miss.
-                self.doc_cache.invalidate(
-                    crate::types::DatabaseId::DEFAULT.as_u64(),
-                    tid,
-                    &collection,
-                    &document_id,
-                );
-                self.undo_chain_hash(tid, &collection, chain_hash_prior);
+                self.doc_cache
+                    .invalidate(database_id, tid, &collection, &document_id);
+                self.undo_chain_hash(database_id, tid, &collection, chain_hash_prior);
                 Ok(())
             }
             UndoEntry::DeleteDocument {
@@ -145,24 +133,18 @@ impl CoreLoop {
                 secondary_index_tuples,
                 chain_hash_prior,
             } => {
+                let ctx = UndoDocumentContext {
+                    database_id,
+                    tid,
+                    entry_index,
+                    collection: &collection,
+                    document_id: &document_id,
+                };
                 if let Some(sys_from_ms) = bitemporal_sys_from_ms {
-                    self.undo_bitemporal_write(
-                        tid,
-                        entry_index,
-                        &collection,
-                        &document_id,
-                        sys_from_ms,
-                        &bitemporal_index_tuples,
-                    )?;
+                    self.undo_bitemporal_write(ctx, sys_from_ms, &bitemporal_index_tuples)?;
                 } else {
                     self.sparse
-                        .put(
-                            crate::types::DatabaseId::DEFAULT.as_u64(),
-                            tid,
-                            &collection,
-                            &document_id,
-                            &old_value,
-                        )
+                        .put(database_id, tid, &collection, &document_id, &old_value)
                         .map(|_| ())
                         .map_err(|e| {
                             error!(
@@ -182,37 +164,19 @@ impl CoreLoop {
                 // Restore the plain secondary-index entries the forward delete
                 // cascade removed. Empty on the bitemporal path (no plain
                 // INDEXES entries there), so this is a no-op for it.
-                self.undo_secondary_index(
-                    tid,
-                    entry_index,
-                    &collection,
-                    &document_id,
-                    &[],
-                    &secondary_index_tuples,
-                )?;
+                self.undo_secondary_index(ctx, &[], &secondary_index_tuples)?;
                 // Re-index the restored document into the full-text inverted
                 // index. The forward delete cascade removed its postings
                 // unconditionally, so a rollback that restored the row but not
                 // its postings would leave it restored-but-unsearchable. FATAL
                 // on failure — a half-restored FTS index is corruption.
-                self.reindex_restored_document_fts(
-                    tid,
-                    entry_index,
-                    &collection,
-                    &document_id,
-                    surrogate,
-                    &old_value,
-                )?;
+                self.reindex_restored_document_fts(ctx, surrogate, &old_value)?;
                 // Evict any cached copy of the reversed document (see the
                 // PutDocument branch): reversing a delete restores the row, so a
                 // stale post-delete cache entry must not linger.
-                self.doc_cache.invalidate(
-                    crate::types::DatabaseId::DEFAULT.as_u64(),
-                    tid,
-                    &collection,
-                    &document_id,
-                );
-                self.undo_chain_hash(tid, &collection, chain_hash_prior);
+                self.doc_cache
+                    .invalidate(database_id, tid, &collection, &document_id);
+                self.undo_chain_hash(database_id, tid, &collection, chain_hash_prior);
                 Ok(())
             }
             _ => unreachable!("apply_undo_document called with non-document entry"),
@@ -226,14 +190,17 @@ impl CoreLoop {
     /// transaction.
     fn undo_bitemporal_write(
         &self,
-        tid: u64,
-        entry_index: usize,
-        collection: &str,
-        document_id: &str,
+        ctx: UndoDocumentContext<'_>,
         sys_from_ms: i64,
         index_tuples: &[(String, String)],
     ) -> Result<(), (usize, String)> {
-        let database_id = crate::types::DatabaseId::DEFAULT.as_u64();
+        let UndoDocumentContext {
+            database_id,
+            tid,
+            entry_index,
+            collection,
+            document_id,
+        } = ctx;
         let map_err = |stage: &str, e: String| {
             error!(
                 core = self.core_id,
@@ -286,14 +253,17 @@ impl CoreLoop {
     /// than silently diverging the secondary index from the primary store.
     fn undo_secondary_index(
         &self,
-        tid: u64,
-        entry_index: usize,
-        collection: &str,
-        document_id: &str,
+        ctx: UndoDocumentContext<'_>,
         to_remove: &[(String, String)],
         to_restore: &[(String, String)],
     ) -> Result<(), (usize, String)> {
-        let database_id = crate::types::DatabaseId::DEFAULT.as_u64();
+        let UndoDocumentContext {
+            database_id,
+            tid,
+            entry_index,
+            collection,
+            document_id,
+        } = ctx;
         let map_err = |stage: &str, e: String| {
             error!(
                 core = self.core_id,
@@ -326,6 +296,7 @@ impl CoreLoop {
     /// insert); `Some(Some(prev))` = restore the key to its pre-image.
     fn undo_chain_hash(
         &mut self,
+        database_id: u64,
         tid: u64,
         collection: &str,
         chain_hash_prior: Option<Option<String>>,
@@ -333,12 +304,19 @@ impl CoreLoop {
         match chain_hash_prior {
             None => {}
             Some(None) => {
-                self.chain_hashes
-                    .remove(&(crate::types::TenantId::new(tid), collection.to_string()));
+                self.chain_hashes.remove(&(
+                    crate::types::DatabaseId::new(database_id),
+                    crate::types::TenantId::new(tid),
+                    collection.to_string(),
+                ));
             }
             Some(Some(prev)) => {
                 self.chain_hashes.insert(
-                    (crate::types::TenantId::new(tid), collection.to_string()),
+                    (
+                        crate::types::DatabaseId::new(database_id),
+                        crate::types::TenantId::new(tid),
+                        collection.to_string(),
+                    ),
                     prev,
                 );
             }

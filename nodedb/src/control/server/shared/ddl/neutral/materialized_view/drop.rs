@@ -127,6 +127,7 @@ pub fn drop_materialized_view(
         Ok(Some(_))
     ) {
         let coll_entry = crate::control::catalog_entry::CatalogEntry::DeactivateCollection {
+            database_id: DatabaseId::DEFAULT.as_u64(),
             tenant_id: tenant_id.as_u64(),
             name: name.clone(),
         };

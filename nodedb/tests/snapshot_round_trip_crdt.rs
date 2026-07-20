@@ -114,7 +114,7 @@ async fn snapshot_round_trip_crdt() {
         decoded.crdt_state.len()
     );
     assert!(
-        decoded.crdt_state[0].1 == COLL,
+        decoded.crdt_state[0].2 == COLL,
         "carried CRDT entry must be tagged with collection {COLL}; got {:?}",
         decoded.crdt_state[0].1
     );

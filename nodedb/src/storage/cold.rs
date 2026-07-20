@@ -183,6 +183,7 @@ impl ColdStorage {
     pub async fn encode_and_upload(
         &self,
         collection: &str,
+        database_id: u64,
         tenant_id: u64,
         rows: &[(String, serde_json::Value)],
         min_lsn: u64,
@@ -302,8 +303,8 @@ impl ColdStorage {
 
         // Upload to object store.
         let object_path = format!(
-            "{}{}/{}/lsn-{}-{}.parquet",
-            self.config.prefix, tenant_id, collection, min_lsn, max_lsn
+            "{}{}/{}/{}/lsn-{}-{}.parquet",
+            self.config.prefix, database_id, tenant_id, collection, min_lsn, max_lsn
         );
         let path = object_store::path::Path::from(object_path.clone());
 
@@ -420,7 +421,7 @@ mod tests {
             ("d2".into(), serde_json::json!({"name": "bob", "age": 25})),
         ];
         let path = cold
-            .encode_and_upload("users", 1, &rows, 100, 200)
+            .encode_and_upload("users", 0, 1, &rows, 100, 200)
             .await
             .unwrap();
 
@@ -449,7 +450,7 @@ mod tests {
             serde_json::json!({"name": "alice", "score": 95.5, "rank": 1}),
         )];
         let path = cold
-            .encode_and_upload("results", 1, &rows, 1, 1)
+            .encode_and_upload("results", 0, 1, &rows, 1, 1)
             .await
             .unwrap();
 

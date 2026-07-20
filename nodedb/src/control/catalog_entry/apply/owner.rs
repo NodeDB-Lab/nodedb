@@ -36,8 +36,14 @@ pub fn put(stored: &StoredOwner, catalog: &SystemCatalog) {
     }
 }
 
-pub fn delete(object_type: &str, tenant_id: u64, object_name: &str, catalog: &SystemCatalog) {
-    if let Err(e) = catalog.delete_owner(object_type, tenant_id, object_name) {
+pub fn delete(
+    object_type: &str,
+    database_id: u64,
+    tenant_id: u64,
+    object_name: &str,
+    catalog: &SystemCatalog,
+) {
+    if let Err(e) = catalog.delete_owner(object_type, database_id, tenant_id, object_name) {
         warn!(
             object_type = %object_type,
             tenant = tenant_id,
@@ -62,7 +68,26 @@ pub(super) fn put_parent_owner(
     owner_username: &str,
     catalog: &SystemCatalog,
 ) {
+    put_parent_owner_in_database(
+        object_type,
+        0,
+        tenant_id,
+        object_name,
+        owner_username,
+        catalog,
+    );
+}
+
+pub(super) fn put_parent_owner_in_database(
+    object_type: &'static str,
+    database_id: u64,
+    tenant_id: u64,
+    object_name: &str,
+    owner_username: &str,
+    catalog: &SystemCatalog,
+) {
     let stored = StoredOwner {
+        database_id,
         object_type: object_type.to_string(),
         object_name: object_name.to_string(),
         tenant_id,
@@ -91,7 +116,17 @@ pub(super) fn delete_parent_owner(
     object_name: &str,
     catalog: &SystemCatalog,
 ) {
-    if let Err(e) = catalog.delete_owner(object_type, tenant_id, object_name) {
+    delete_parent_owner_in_database(object_type, 0, tenant_id, object_name, catalog);
+}
+
+pub(super) fn delete_parent_owner_in_database(
+    object_type: &'static str,
+    database_id: u64,
+    tenant_id: u64,
+    object_name: &str,
+    catalog: &SystemCatalog,
+) {
+    if let Err(e) = catalog.delete_owner(object_type, database_id, tenant_id, object_name) {
         warn!(
             object_type,
             tenant = tenant_id,

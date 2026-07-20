@@ -111,7 +111,7 @@ impl CoreLoop {
             collection.to_string(),
         );
         let tid = task.request.tenant_id.as_u64();
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         // Ensure MutationEngine exists (auto-create on first write). Prefers
         // the DDL schema carried on `schema_bytes` over inference from the
         // payload — inference cannot distinguish JSON columns from plain
@@ -163,6 +163,7 @@ impl CoreLoop {
         // COUNT(*) and GROUP BY queries see the newly written rows.
         if accepted > 0 {
             self.invalidate_aggregate_cache_for_collection(
+                task.request.database_id.as_u64(),
                 task.request.tenant_id.as_u64(),
                 collection,
             );

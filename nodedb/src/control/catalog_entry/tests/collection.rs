@@ -28,12 +28,18 @@ fn roundtrip_put_collection() {
 #[test]
 fn roundtrip_deactivate_collection() {
     let entry = CatalogEntry::DeactivateCollection {
+        database_id: 0,
         tenant_id: 3,
         name: "legacy".into(),
     };
     let bytes = encode(&entry).unwrap();
     match decode(&bytes).unwrap() {
-        CatalogEntry::DeactivateCollection { tenant_id, name } => {
+        CatalogEntry::DeactivateCollection {
+            database_id,
+            tenant_id,
+            name,
+        } => {
+            assert_eq!(database_id, 0);
             assert_eq!(tenant_id, 3);
             assert_eq!(name, "legacy");
         }
@@ -72,6 +78,7 @@ fn apply_deactivate_collection_preserves_record() {
 
     apply_to(
         &CatalogEntry::DeactivateCollection {
+            database_id: 0,
             tenant_id: 1,
             name: "archived".into(),
         },
@@ -86,11 +93,48 @@ fn apply_deactivate_collection_preserves_record() {
 }
 
 #[test]
+fn purge_collection_is_scoped_to_database() {
+    let (credentials, _tmp) = open_catalog();
+    let catalog = credentials.catalog();
+    let default = StoredCollection::new(1, "shared", "default_owner");
+    let mut other = StoredCollection::new(1, "shared", "other_owner");
+    other.database_id = DatabaseId::new(9);
+    apply_to(&CatalogEntry::PutCollection(Box::new(default)), catalog);
+    apply_to(&CatalogEntry::PutCollection(Box::new(other)), catalog);
+
+    apply_to(
+        &CatalogEntry::PurgeCollection {
+            database_id: 9,
+            tenant_id: 1,
+            name: "shared".into(),
+        },
+        catalog,
+    );
+
+    assert!(
+        catalog
+            .get_collection(DatabaseId::new(9), 1, "shared")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get_collection(DatabaseId::DEFAULT, 1, "shared")
+            .unwrap()
+            .is_some()
+    );
+    let owners = catalog.load_all_owners().unwrap();
+    assert!(!owners.iter().any(|owner| owner.database_id == 9));
+    assert!(owners.iter().any(|owner| owner.database_id == 0));
+}
+
+#[test]
 fn apply_deactivate_missing_is_noop() {
     let (credentials, _tmp) = open_catalog();
     let catalog = credentials.catalog();
     apply_to(
         &CatalogEntry::DeactivateCollection {
+            database_id: 0,
             tenant_id: 1,
             name: "ghost".into(),
         },

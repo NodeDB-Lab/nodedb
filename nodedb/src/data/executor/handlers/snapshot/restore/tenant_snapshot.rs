@@ -260,8 +260,9 @@ impl CoreLoop {
             // way). Loro import is a monotonic CRDT merge, so no replace_mode
             // handling is needed: the snapshot is >= the follower's committed
             // state and the merge converges to the correct result.
-            for (tid_raw, collection, bytes) in &snap.crdt_state {
-                if let Err(e) = self.restore_crdt_state(*tid_raw, collection, bytes) {
+            for (database_raw, tid_raw, collection, bytes) in &snap.crdt_state {
+                if let Err(e) = self.restore_crdt_state(*database_raw, *tid_raw, collection, bytes)
+                {
                     warn!(tid_raw, %collection, error = %e, "failed to restore crdt state");
                 } else {
                     crdt_written += 1;
@@ -275,10 +276,14 @@ impl CoreLoop {
             // on error — warn and continue, matching the `crdt_state` loop, since
             // a failed reconstruction only reverts to the pre-fix (over-rejecting)
             // behavior rather than corrupting state.
-            for (tid_raw, collection, version, encoded) in &snap.crdt_constraints {
-                if let Err(e) =
-                    self.restore_crdt_constraints(*tid_raw, collection, *version, encoded)
-                {
+            for (database_raw, tid_raw, collection, version, encoded) in &snap.crdt_constraints {
+                if let Err(e) = self.restore_crdt_constraints(
+                    *database_raw,
+                    *tid_raw,
+                    collection,
+                    *version,
+                    encoded,
+                ) {
                     warn!(tid_raw, %collection, error = %e, "failed to restore crdt constraints");
                 } else {
                     crdt_constraints_written += 1;

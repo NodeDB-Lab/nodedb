@@ -352,7 +352,7 @@ impl CoreLoop {
         let kv_removed = self.kv_engine.purge_collection(db_raw, tid_raw, collection);
 
         // CRDT engine: clear rows for this collection in the tenant state.
-        let crdt_rows_removed = match self.crdt_engines.get_mut(&tid) {
+        let crdt_rows_removed = match self.crdt_engines.get_mut(&(db, tid)) {
             Some(engine) => retry_reclaim("crdt.purge_collection", tid_raw, collection, || {
                 engine.purge_collection(collection)
             })?,
@@ -399,11 +399,11 @@ impl CoreLoop {
         // carries row data, not the collection definition); removed on a full DROP.
         if !preserve_collection_metadata {
             self.doc_configs
-                .retain(|(t, c), _| !(*t == tid && c == &coll));
+                .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &coll));
             self.chain_hashes
-                .retain(|(t, c), _| !(*t == tid && c == &coll));
+                .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &coll));
             self.aggregate_cache
-                .retain(|(t, c), _| !(*t == tid && c == &coll));
+                .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &coll));
         }
 
         Ok(ClearCollectionStats {

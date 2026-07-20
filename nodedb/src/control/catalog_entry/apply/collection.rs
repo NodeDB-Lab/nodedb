@@ -17,8 +17,9 @@ pub fn put(stored: &StoredCollection, catalog: &SystemCatalog) {
             "catalog_entry: put_collection failed"
         );
     }
-    super::owner::put_parent_owner(
+    super::owner::put_parent_owner_in_database(
         object_type::COLLECTION,
+        stored.database_id.as_u64(),
         stored.tenant_id,
         &stored.name,
         &stored.owner,
@@ -52,8 +53,9 @@ pub fn put_if_absent(stored: &StoredCollection, catalog: &SystemCatalog) {
                     "catalog_entry: put_collection_if_absent put_collection failed"
                 );
             }
-            super::owner::put_parent_owner(
+            super::owner::put_parent_owner_in_database(
                 object_type::COLLECTION,
+                stored.database_id.as_u64(),
                 stored.tenant_id,
                 &stored.name,
                 &stored.owner,
@@ -79,7 +81,13 @@ pub fn put_if_absent(stored: &StoredCollection, catalog: &SystemCatalog) {
 /// hard-purge propagates so a `CREATE COLLECTION` never builds over
 /// data that was not actually purged. Reporting the error rather than
 /// swallowing it is what lets each caller make that choice.
-pub fn purge(tenant_id: u64, name: &str, catalog: &SystemCatalog) -> crate::Result<()> {
+pub fn purge(
+    database_id: u64,
+    tenant_id: u64,
+    name: &str,
+    catalog: &SystemCatalog,
+) -> crate::Result<()> {
+    let database_id = DatabaseId::new(database_id);
     // Hard delete of the primary StoredCollection row. Symmetric
     // with `apply/function.rs::delete` and the other hard-delete
     // peers: remove the primary, then remove the owner row.
@@ -91,32 +99,39 @@ pub fn purge(tenant_id: u64, name: &str, catalog: &SystemCatalog) -> crate::Resu
     // in that case, which is fine — we still call
     // `delete_parent_owner` because the owner row may linger
     // independently.
-    let removed = catalog.delete_collection(DatabaseId::DEFAULT, tenant_id, name)?;
+    let removed = catalog.delete_collection(database_id, tenant_id, name)?;
     debug!(
         collection = %name,
         tenant = tenant_id,
         removed,
         "catalog_entry: purge_collection primary row removed"
     );
-    super::owner::delete_parent_owner(object_type::COLLECTION, tenant_id, name, catalog);
+    super::owner::delete_parent_owner_in_database(
+        object_type::COLLECTION,
+        database_id.as_u64(),
+        tenant_id,
+        name,
+        catalog,
+    );
     // Wipe the surrogate ↔ PK map for this collection. Surrogates are
     // collection-scoped; once the primary row is gone they can never
     // be observed again, so leaving the catalog rows behind would
     // just be allocator-bloat. Mirrors the array-drop cleanup in
     // `array_convert::convert_drop_array`.
     catalog.delete_all_surrogates_for_collection(
-        DatabaseId::DEFAULT,
+        database_id,
         nodedb_types::TenantId::new(tenant_id),
         name,
     )?;
     Ok(())
 }
 
-pub fn deactivate(tenant_id: u64, name: &str, catalog: &SystemCatalog) {
-    match catalog.get_collection(DatabaseId::DEFAULT, tenant_id, name) {
+pub fn deactivate(database_id: u64, tenant_id: u64, name: &str, catalog: &SystemCatalog) {
+    let database_id = DatabaseId::new(database_id);
+    match catalog.get_collection(database_id, tenant_id, name) {
         Ok(Some(mut stored)) => {
             stored.is_active = false;
-            if let Err(e) = catalog.put_collection(DatabaseId::DEFAULT, &stored) {
+            if let Err(e) = catalog.put_collection(database_id, &stored) {
                 warn!(
                     collection = %name,
                     tenant = tenant_id,

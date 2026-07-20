@@ -249,6 +249,7 @@ impl CoreLoop {
         if disc != "kv_transfer" {
             return None;
         }
+        let tombstones = &tombstones.for_database(database_id);
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
         }
@@ -299,6 +300,7 @@ impl CoreLoop {
         if disc != "kv_transfer_item" {
             return None;
         }
+        let tombstones = &tombstones.for_database(database_id);
         if self.skip_kv_replay_record(tombstones, tenant_id, &source_collection, record_lsn)
             || self.skip_kv_replay_record(tombstones, tenant_id, &dest_collection, record_lsn)
         {

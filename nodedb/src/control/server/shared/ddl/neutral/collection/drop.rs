@@ -140,7 +140,7 @@ pub fn drop_collection(
     // Check ownership or admin.
     let is_owner = state
         .permissions
-        .get_owner("collection", tenant_id, name)
+        .get_owner_in_database("collection", database_id.as_u64(), tenant_id, name)
         .as_deref()
         == Some(&identity.username);
 
@@ -229,11 +229,13 @@ pub fn drop_collection(
     // storage-reclaim dispatch on every node symmetrically.
     let entry = if purge {
         crate::control::catalog_entry::CatalogEntry::PurgeCollection {
+            database_id: database_id.as_u64(),
             tenant_id: tenant_id.as_u64(),
             name: name.to_string(),
         }
     } else {
         crate::control::catalog_entry::CatalogEntry::DeactivateCollection {
+            database_id: database_id.as_u64(),
             tenant_id: tenant_id.as_u64(),
             name: name.to_string(),
         }
@@ -246,16 +248,31 @@ pub fn drop_collection(
         // directly, matching what the applier would have done on a
         // clustered deployment.
         if purge {
-            catalog
-                .delete_collection(database_id, tenant_id.as_u64(), name)
-                .map_err(|e| err("XX000", e.to_string()))?;
-        } else if let Ok(Some(mut coll)) =
-            catalog.get_collection(database_id, tenant_id.as_u64(), name)
-        {
-            coll.is_active = false;
-            catalog
-                .put_collection(database_id, &coll)
-                .map_err(|e| err("XX000", e.to_string()))?;
+            crate::control::catalog_entry::apply::collection::purge(
+                database_id.as_u64(),
+                tenant_id.as_u64(),
+                name,
+                catalog,
+            )
+            .map_err(|e| err("XX000", e.to_string()))?;
+            state
+                .permissions
+                .install_replicated_remove_owner_in_database(
+                    "collection",
+                    database_id.as_u64(),
+                    tenant_id.as_u64(),
+                    name,
+                );
+            state
+                .permissions
+                .remove_grants_for_target(&format!("collection:{}:{name}", tenant_id.as_u64()));
+        } else {
+            crate::control::catalog_entry::apply::collection::deactivate(
+                database_id.as_u64(),
+                tenant_id.as_u64(),
+                name,
+                catalog,
+            );
         }
     }
 

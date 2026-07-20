@@ -65,7 +65,7 @@ impl CoreLoop {
             .collect();
 
         let materialized = {
-            let engine = match self.get_crdt_engine(tenant_id) {
+            let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
                 Ok(e) => e,
                 Err(e) => {
                     return self.response_error(
@@ -158,7 +158,7 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, %document_id, "crdt doc delete");
         let tenant_id = task.request.tenant_id;
         {
-            let engine = match self.get_crdt_engine(tenant_id) {
+            let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
                 Ok(e) => e,
                 Err(e) => {
                     return self.response_error(
@@ -206,7 +206,12 @@ impl CoreLoop {
         // removed, threading the pre-delete bytes through as `old_value` so
         // CDC/change-stream consumers observe the prior state.
         if let Some(prior_bytes) = outcome.prior_value.as_deref() {
-            let old_converted = self.resolve_event_payload(tid, collection, prior_bytes);
+            let old_converted = self.resolve_event_payload(
+                task.request.database_id.as_u64(),
+                tid,
+                collection,
+                prior_bytes,
+            );
             self.emit_write_event(
                 task,
                 collection,

@@ -23,6 +23,7 @@ use super::types::{L2_CLEANUP_QUEUE, SystemCatalog, catalog_err};
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 #[msgpack(map, allow_unknown_fields)]
 pub struct StoredL2CleanupEntry {
+    pub database_id: u64,
     pub tenant_id: u64,
     pub name: String,
     /// WAL LSN at which the hard-delete committed. Used for ordering +
@@ -57,7 +58,10 @@ impl SystemCatalog {
                 .open_table(L2_CLEANUP_QUEUE)
                 .map_err(|e| catalog_err("open l2_cleanup_queue", e))?;
             table
-                .insert((entry.tenant_id, entry.name.as_str()), bytes.as_slice())
+                .insert(
+                    (entry.database_id, entry.tenant_id, entry.name.as_str()),
+                    bytes.as_slice(),
+                )
                 .map_err(|e| catalog_err("insert l2_cleanup entry", e))?;
         }
         txn.commit()
@@ -77,7 +81,7 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("open l2_cleanup_queue", e))?;
         let mut out = Vec::new();
         for item in table
-            .range::<(u64, &str)>(..)
+            .range::<(u64, u64, &str)>(..)
             .map_err(|e| catalog_err("range l2_cleanup", e))?
         {
             let (_, v) = item.map_err(|e| catalog_err("read l2_cleanup", e))?;
@@ -92,6 +96,7 @@ impl SystemCatalog {
     /// text. No-op if the entry has already been removed.
     pub fn record_l2_cleanup_attempt(
         &self,
+        database_id: u64,
         tenant_id: u64,
         name: &str,
         last_error: &str,
@@ -105,7 +110,7 @@ impl SystemCatalog {
                 .open_table(L2_CLEANUP_QUEUE)
                 .map_err(|e| catalog_err("open l2_cleanup_queue", e))?;
             let existing = table
-                .get((tenant_id, name))
+                .get((database_id, tenant_id, name))
                 .map_err(|e| catalog_err("get l2_cleanup entry", e))?
                 .map(|g| g.value().to_vec());
             let Some(raw) = existing else { return Ok(()) };
@@ -116,7 +121,7 @@ impl SystemCatalog {
             let bytes = zerompk::to_msgpack_vec(&entry)
                 .map_err(|e| catalog_err("encode l2_cleanup entry", e))?;
             table
-                .insert((tenant_id, name), bytes.as_slice())
+                .insert((database_id, tenant_id, name), bytes.as_slice())
                 .map_err(|e| catalog_err("update l2_cleanup entry", e))?;
         }
         txn.commit()
@@ -124,7 +129,12 @@ impl SystemCatalog {
     }
 
     /// Remove a successfully-drained entry. Idempotent.
-    pub fn remove_l2_cleanup(&self, tenant_id: u64, name: &str) -> crate::Result<()> {
+    pub fn remove_l2_cleanup(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        name: &str,
+    ) -> crate::Result<()> {
         let txn = self
             .db
             .begin_write()
@@ -134,7 +144,7 @@ impl SystemCatalog {
                 .open_table(L2_CLEANUP_QUEUE)
                 .map_err(|e| catalog_err("open l2_cleanup_queue", e))?;
             table
-                .remove((tenant_id, name))
+                .remove((database_id, tenant_id, name))
                 .map_err(|e| catalog_err("remove l2_cleanup entry", e))?;
         }
         txn.commit()
@@ -147,6 +157,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const DB: u64 = 0;
+
     fn cat() -> (SystemCatalog, TempDir) {
         let tmp = TempDir::new().unwrap();
         let cat = SystemCatalog::open(&tmp.path().join("system.redb")).unwrap();
@@ -155,6 +167,7 @@ mod tests {
 
     fn entry(tenant: u64, name: &str, lsn: u64, bytes: u64) -> StoredL2CleanupEntry {
         StoredL2CleanupEntry {
+            database_id: DB,
             tenant_id: tenant,
             name: name.to_string(),
             purge_lsn: lsn,
@@ -182,16 +195,22 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_is_idempotent_per_key() {
+    fn enqueue_is_idempotent_per_database_scoped_key() {
         let (c, _t) = cat();
         c.enqueue_l2_cleanup(&entry(1, "events", 500, 2_000))
             .unwrap();
         c.enqueue_l2_cleanup(&entry(1, "events", 700, 9_000))
             .unwrap();
+        let mut other_database = entry(1, "events", 800, 4_000);
+        other_database.database_id = 1;
+        c.enqueue_l2_cleanup(&other_database).unwrap();
         let all = c.load_l2_cleanup_queue().unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].purge_lsn, 700);
-        assert_eq!(all[0].bytes_pending, 9_000);
+        assert_eq!(all.len(), 2);
+        let default_entry = all.iter().find(|entry| entry.database_id == DB).unwrap();
+        assert_eq!(default_entry.purge_lsn, 700);
+        assert_eq!(default_entry.bytes_pending, 9_000);
+        let other_entry = all.iter().find(|entry| entry.database_id == 1).unwrap();
+        assert_eq!(other_entry.purge_lsn, 800);
     }
 
     #[test]
@@ -199,8 +218,10 @@ mod tests {
         let (c, _t) = cat();
         c.enqueue_l2_cleanup(&entry(1, "events", 500, 2_000))
             .unwrap();
-        c.record_l2_cleanup_attempt(1, "events", "s3: 503").unwrap();
-        c.record_l2_cleanup_attempt(1, "events", "s3: 503").unwrap();
+        c.record_l2_cleanup_attempt(DB, 1, "events", "s3: 503")
+            .unwrap();
+        c.record_l2_cleanup_attempt(DB, 1, "events", "s3: 503")
+            .unwrap();
         let all = c.load_l2_cleanup_queue().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].attempts, 2);
@@ -210,7 +231,8 @@ mod tests {
     #[test]
     fn record_attempt_on_missing_is_noop() {
         let (c, _t) = cat();
-        c.record_l2_cleanup_attempt(1, "missing", "err").unwrap();
+        c.record_l2_cleanup_attempt(DB, 1, "missing", "err")
+            .unwrap();
         assert_eq!(c.load_l2_cleanup_queue().unwrap().len(), 0);
     }
 
@@ -218,9 +240,9 @@ mod tests {
     fn remove_drops_entry() {
         let (c, _t) = cat();
         c.enqueue_l2_cleanup(&entry(1, "events", 500, 0)).unwrap();
-        c.remove_l2_cleanup(1, "events").unwrap();
+        c.remove_l2_cleanup(DB, 1, "events").unwrap();
         assert_eq!(c.load_l2_cleanup_queue().unwrap().len(), 0);
         // Idempotent.
-        c.remove_l2_cleanup(1, "events").unwrap();
+        c.remove_l2_cleanup(DB, 1, "events").unwrap();
     }
 }

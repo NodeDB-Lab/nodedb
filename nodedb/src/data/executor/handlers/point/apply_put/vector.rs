@@ -62,10 +62,15 @@ impl CoreLoop {
     /// scan).
     pub(in crate::data::executor) fn strict_vector_fields(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
     ) -> Vec<(String, u32)> {
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         self.doc_configs
             .get(&config_key)
             .and_then(|config| {
@@ -140,7 +145,9 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
     ) -> bool {
-        !self.strict_vector_fields(tid, collection).is_empty()
+        !self
+            .strict_vector_fields(database_id, tid, collection)
+            .is_empty()
             || !self
                 .schemaless_vector_field_names(database_id, tid, collection)
                 .is_empty()
@@ -178,7 +185,7 @@ impl CoreLoop {
 
         // Vector index: if the strict schema declares Vector(dim) columns,
         // extract float arrays and insert into HNSW so KNN search works.
-        let vector_fields = self.strict_vector_fields(tid, collection);
+        let vector_fields = self.strict_vector_fields(database_id, tid, collection);
 
         if !vector_fields.is_empty() {
             // Decode from MessagePack (internal format) — not JSON.
@@ -464,7 +471,7 @@ impl CoreLoop {
         collection: &str,
         row_key: &str,
     ) -> Vec<VectorIndexDelta> {
-        let strict_fields = self.strict_vector_fields(tid, collection);
+        let strict_fields = self.strict_vector_fields(database_id, tid, collection);
         let candidate_fields: Vec<String> = if !strict_fields.is_empty() {
             strict_fields.into_iter().map(|(name, _dim)| name).collect()
         } else {

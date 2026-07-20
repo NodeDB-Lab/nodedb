@@ -136,11 +136,10 @@ impl CoreLoop {
         let kv_removed = self.kv_engine.purge_tenant(tenant_id);
 
         // 7. CRDT engine: remove tenant state.
-        let crdt_removed = u32::from(
-            self.crdt_engines
-                .remove(&TenantId::new(tenant_id))
-                .is_some(),
-        );
+        let crdt_before = self.crdt_engines.len();
+        self.crdt_engines
+            .retain(|(_, tenant), _| *tenant != TenantId::new(tenant_id));
+        let crdt_removed = (crdt_before - self.crdt_engines.len()) as u32;
 
         // 8. Spatial indexes: remove tenant-scoped entries.
         let tid_key = TenantId::new(tenant_id);
@@ -155,13 +154,13 @@ impl CoreLoop {
         // 9. Caches: evict all tenant data.
         self.doc_cache
             .evict_tenant(task.request.database_id.as_u64(), tenant_id);
-        self.aggregate_cache.retain(|(t, _), _| *t != tid_key);
+        self.aggregate_cache.retain(|(_, t, _), _| *t != tid_key);
 
         // 10. Doc configs: remove collection configs for this tenant.
-        self.doc_configs.retain(|(t, _), _| *t != tid_key);
+        self.doc_configs.retain(|(_, t, _), _| *t != tid_key);
 
         // Chain hashes: remove for this tenant.
-        self.chain_hashes.retain(|(t, _), _| *t != tid_key);
+        self.chain_hashes.retain(|(_, t, _), _| *t != tid_key);
 
         // Sparse vector indexes: remove for this tenant (all databases).
         self.sparse_vector_indexes

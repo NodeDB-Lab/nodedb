@@ -132,8 +132,12 @@ impl CoreLoop {
 
         let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
         let row_key = row_key.as_str();
-        let bitemporal = self.is_bitemporal(tid, collection);
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
 
         // On bitemporal collections: append a doc tombstone + versioned
         // index tombstones for every current field value. `prior` is the
@@ -372,7 +376,7 @@ impl CoreLoop {
         // Invalidate aggregate cache — a delete changes count(*) for this
         // collection. Only needed when a row was actually removed.
         if prior.is_some() {
-            self.invalidate_aggregate_cache_for_collection(tid, collection);
+            self.invalidate_aggregate_cache_for_collection(database_id, tid, collection);
         }
 
         Ok(PointDeleteOutcome {

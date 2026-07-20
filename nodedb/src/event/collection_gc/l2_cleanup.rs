@@ -95,10 +95,12 @@ pub async fn drain_once(shared: &SharedState) {
 
     let store = cold.object_store();
     for entry in queue {
-        let prefix = format!("{}/{}/", entry.tenant_id, entry.name);
+        let prefix = format!("{}/{}/{}/", entry.database_id, entry.tenant_id, entry.name);
         match delete_prefix(store.clone(), &prefix).await {
             Ok(bytes_deleted) => {
-                if let Err(e) = catalog.remove_l2_cleanup(entry.tenant_id, &entry.name) {
+                if let Err(e) =
+                    catalog.remove_l2_cleanup(entry.database_id, entry.tenant_id, &entry.name)
+                {
                     warn!(
                         tenant = entry.tenant_id,
                         collection = %entry.name,
@@ -130,9 +132,12 @@ pub async fn drain_once(shared: &SharedState) {
             }
             Err(e) => {
                 let msg = e.to_string();
-                if let Err(update_err) =
-                    catalog.record_l2_cleanup_attempt(entry.tenant_id, &entry.name, &msg)
-                {
+                if let Err(update_err) = catalog.record_l2_cleanup_attempt(
+                    entry.database_id,
+                    entry.tenant_id,
+                    &entry.name,
+                    &msg,
+                ) {
                     warn!(
                         tenant = entry.tenant_id,
                         collection = %entry.name,

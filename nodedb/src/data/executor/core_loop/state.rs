@@ -76,7 +76,7 @@ pub struct CoreLoop {
     pub(crate) sparse: SparseEngine,
 
     /// Per-tenant CRDT engines, lazily initialized on first access.
-    pub(in crate::data::executor) crdt_engines: HashMap<TenantId, TenantCrdtEngine>,
+    pub(in crate::data::executor) crdt_engines: HashMap<(DatabaseId, TenantId), TenantCrdtEngine>,
 
     /// Per-collection vector collections, lazily initialized on first insert.
     /// Key: `(DatabaseId, TenantId, collection_key)` where `collection_key` is
@@ -182,7 +182,7 @@ pub struct CoreLoop {
     ///
     /// Key: `(TenantId, "{collection}\0{group_by_fields}\0{agg_ops}")`.
     /// Value: cached result rows as JSON.
-    pub(in crate::data::executor) aggregate_cache: HashMap<(TenantId, String), Vec<u8>>,
+    pub(in crate::data::executor) aggregate_cache: HashMap<(DatabaseId, TenantId, String), Vec<u8>>,
 
     /// Last time periodic maintenance (compaction, edge sweep) was run.
     pub(in crate::data::executor) last_maintenance: Option<std::time::Instant>,
@@ -296,14 +296,14 @@ pub struct CoreLoop {
         crate::storage::compaction::CompactionConfig,
 
     /// Per-collection document index configurations.
-    /// Maps (TenantId, collection) → CollectionConfig.
+    /// Maps (DatabaseId, TenantId, collection) → CollectionConfig.
     /// Populated via RegisterDocumentCollection plans.
     pub(in crate::data::executor) doc_configs:
-        HashMap<(TenantId, String), crate::engine::document::store::CollectionConfig>,
+        HashMap<(DatabaseId, TenantId, String), crate::engine::document::store::CollectionConfig>,
 
     /// Per-collection last chain hash for HASH_CHAIN collections.
     /// Maps (TenantId, collection) → last SHA-256 hash.
-    pub(in crate::data::executor) chain_hashes: HashMap<(TenantId, String), String>,
+    pub(in crate::data::executor) chain_hashes: HashMap<(DatabaseId, TenantId, String), String>,
 
     /// Query execution tuning parameters (sort run size, stream chunk size, etc.).
     /// Set at core spawn time from config; never changed at runtime.

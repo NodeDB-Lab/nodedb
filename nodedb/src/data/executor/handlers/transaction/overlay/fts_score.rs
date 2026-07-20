@@ -25,7 +25,7 @@ pub(in crate::data::executor) struct StagedFtsScoreCtx<'a> {
     database_id: u64,
     tid: TenantId,
     collection: &'a str,
-    config_key: &'a (TenantId, String),
+    config_key: &'a (DatabaseId, TenantId, String),
     total_docs: u32,
     avg_doc_len: f32,
     bm25_params: &'a Bm25Params,
@@ -41,7 +41,7 @@ impl CoreLoop {
         database_id: DatabaseId,
         tid: TenantId,
         collection: &'a str,
-        config_key: &'a (TenantId, String),
+        config_key: &'a (DatabaseId, TenantId, String),
         bm25_params: &'a Bm25Params,
     ) -> StagedFtsScoreCtx<'a> {
         let (total_docs, avg_doc_len) = self
@@ -119,7 +119,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn score_staged_phrase_doc(
         &self,
         database_id: u64,
-        config_key: &(TenantId, String),
+        config_key: &(DatabaseId, TenantId, String),
         body: &[u8],
         phrase_terms: &[String],
     ) -> Option<f32> {
@@ -144,7 +144,7 @@ impl CoreLoop {
     fn tokenize_staged_body(
         &self,
         database_id: u64,
-        config_key: &(TenantId, String),
+        config_key: &(DatabaseId, TenantId, String),
         body: &[u8],
     ) -> Option<Vec<String>> {
         let doc = self.decode_indexed_body(config_key, body)?;
@@ -152,7 +152,7 @@ impl CoreLoop {
         if text.is_empty() {
             return None;
         }
-        let (tid, collection) = config_key;
+        let (_, tid, collection) = config_key;
         let tokens =
             match self
                 .inverted

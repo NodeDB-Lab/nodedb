@@ -21,12 +21,15 @@ impl CoreLoop {
     /// sweep itself is unconditional once called.
     pub(in crate::data::executor) fn invalidate_aggregate_cache_for_collection(
         &mut self,
+        database_id: u64,
         tid: u64,
         collection: &str,
     ) {
+        let database_key = crate::types::DatabaseId::new(database_id);
         let tid_key = crate::types::TenantId::new(tid);
         let coll_prefix = format!("{collection}\0");
-        self.aggregate_cache
-            .retain(|(t, rest), _| !(*t == tid_key && rest.starts_with(&coll_prefix)));
+        self.aggregate_cache.retain(|(d, t, rest), _| {
+            !(*d == database_key && *t == tid_key && rest.starts_with(&coll_prefix))
+        });
     }
 }

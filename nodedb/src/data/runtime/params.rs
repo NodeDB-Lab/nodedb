@@ -32,12 +32,7 @@ pub struct SpawnCoreParams<'a> {
     /// Catalog-sourced `doc_configs` seed, applied before `replay_all_wal`
     /// so strict (Binary Tuple) collections redo-replay through their real
     /// schema instead of falling through to the raw-MessagePack fallback.
-    pub doc_config_seed: Arc<
-        Vec<(
-            (crate::types::TenantId, String),
-            crate::engine::document::store::CollectionConfig,
-        )>,
-    >,
+    pub doc_config_seed: Arc<Vec<crate::data::executor::core_loop::DocConfigSeedEntry>>,
     /// Catalog-sourced vector-index build parameters, applied before
     /// `replay_all_wal` (seed `vector_params` + `index_configs`) and again
     /// after it (rebuild the HNSW from the durable store), so vector search
@@ -50,6 +45,7 @@ pub struct SpawnCoreParams<'a> {
     /// row (which loses declared types like Geometry, Timestamp, Decimal).
     pub columnar_schema_seed: Arc<
         Vec<(
+            crate::types::DatabaseId,
             crate::types::TenantId,
             String,
             nodedb_types::columnar::ColumnarSchema,

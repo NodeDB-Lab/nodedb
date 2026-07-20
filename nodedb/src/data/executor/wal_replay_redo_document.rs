@@ -126,7 +126,7 @@ impl CoreLoop {
                 let Ok((collection, value, surrogate_u32, stamp)) = decoded else {
                     continue;
                 };
-                if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+                if tombstones.is_tombstoned(database_id, tenant_id, &collection, record_lsn) {
                     continue;
                 }
                 // Carry the stamp into apply scratch (forcing the versioned
@@ -165,7 +165,7 @@ impl CoreLoop {
                 else {
                     continue;
                 };
-                if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+                if tombstones.is_tombstoned(database_id, tenant_id, &collection, record_lsn) {
                     continue;
                 }
                 if self.apply_document_delete(database_id, tenant_id, &collection, surrogate_u32) {

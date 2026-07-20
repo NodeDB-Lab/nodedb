@@ -54,7 +54,11 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, has_returning = returning.is_some(), "bulk update");
 
         // Reject direct updates to generated columns.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         if let Some(config) = self.doc_configs.get(&config_key)
             && let Err(e) = super::super::generated::check_generated_readonly(
                 updates,

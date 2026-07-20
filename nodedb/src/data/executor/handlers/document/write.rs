@@ -72,7 +72,11 @@ impl CoreLoop {
             Ok(()) => {
                 // Auto-index text fields for full-text search (same as PointPut).
                 // Also extract secondary indexes for any registered collection config.
-                let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+                let config_key = (
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    collection.to_string(),
+                );
                 let index_paths: Vec<crate::engine::document::store::IndexPath> = self
                     .doc_configs
                     .get(&config_key)
@@ -175,7 +179,7 @@ impl CoreLoop {
         // post-image back per row lets the Control Plane mint a durable `Put`
         // redo for each (see `plan_post_apply_redo` / `append_write_set_redo`).
         let has_vectors = self.collection_has_vectors(database_id, tid, collection)
-            || self.collection_has_sparse(tid, collection);
+            || self.collection_has_sparse(database_id, tid, collection);
 
         // Row key for post-commit event emission, captured as each row applies
         // successfully; the value bytes are re-borrowed from `documents` after
@@ -342,7 +346,11 @@ impl CoreLoop {
             .map(crate::engine::document::store::IndexPath::from_registered)
             .collect();
 
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         self.doc_configs.insert(config_key, config);
 
         // Rehydrate the durable CRDT conflict-resolution policy (if any) into
@@ -351,7 +359,7 @@ impl CoreLoop {
         // CONFLICT ...` survives a restart instead of silently reverting to
         // `CollectionPolicy::ephemeral()`.
         if let Some(policy_json) = conflict_policy {
-            match self.get_crdt_engine(crate::types::TenantId::new(tid)) {
+            match self.get_crdt_engine(task.request.database_id, crate::types::TenantId::new(tid)) {
                 Ok(engine) => {
                     if let Err(e) = engine.set_collection_policy(collection, policy_json) {
                         warn!(

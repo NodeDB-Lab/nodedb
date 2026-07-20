@@ -78,7 +78,12 @@ impl CoreLoop {
                 let Ok(payload) = decode_put_with_version(&record.payload) else {
                     continue;
                 };
-                if tombstones.is_tombstoned(tenant_id, &payload.array_id.name, record_lsn) {
+                if tombstones.is_tombstoned(
+                    record.header.database_id,
+                    tenant_id,
+                    &payload.array_id.name,
+                    record_lsn,
+                ) {
                     continue;
                 }
                 if self
@@ -108,7 +113,12 @@ impl CoreLoop {
             let Ok(payload) = decode_delete_with_version(&record.payload) else {
                 continue;
             };
-            if tombstones.is_tombstoned(tenant_id, &payload.array_id.name, record_lsn) {
+            if tombstones.is_tombstoned(
+                record.header.database_id,
+                tenant_id,
+                &payload.array_id.name,
+                record_lsn,
+            ) {
                 continue;
             }
             if self

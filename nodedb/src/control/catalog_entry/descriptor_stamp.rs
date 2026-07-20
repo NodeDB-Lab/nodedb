@@ -327,6 +327,7 @@ mod tests {
         let clock = HlcClock::new();
         let catalog = store.catalog();
         let entry = CatalogEntry::DeactivateCollection {
+            database_id: 0,
             tenant_id: 1,
             name: "orders".into(),
         };

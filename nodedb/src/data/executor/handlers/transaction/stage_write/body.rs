@@ -25,12 +25,17 @@ impl CoreLoop {
     /// slots).
     pub(super) fn stage_encode_put_body(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
         surrogate: Surrogate,
         value: &[u8],
     ) -> crate::Result<Vec<u8>> {
-        let config_key = (TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            TenantId::new(tid),
+            collection.to_string(),
+        );
 
         // Evaluate generated columns before encoding, matching the durable path.
         let value: Vec<u8> = if let Some(config) = self.doc_configs.get(&config_key)
@@ -50,7 +55,7 @@ impl CoreLoop {
             doc_format::canonicalize_document_for_storage(value)
         };
 
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let sys_from_ms = self.bitemporal_now_ms();
 
         if let Some(config) = self.doc_configs.get(&config_key)
@@ -104,13 +109,18 @@ impl CoreLoop {
     /// observed by a later `col = col + 1`.
     pub(in crate::data::executor) fn stage_apply_update(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
         current_bytes: &[u8],
         updates: &[(String, UpdateValue)],
     ) -> crate::Result<Vec<u8>> {
-        let config_key = (TenantId::new(tid), collection.to_string());
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            TenantId::new(tid),
+            collection.to_string(),
+        );
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let sys_from_ms = if bitemporal {
             self.bitemporal_now_ms()
         } else {

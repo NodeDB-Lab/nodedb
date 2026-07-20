@@ -15,6 +15,8 @@ use tracing::error;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::fts_text::extract_fts_text;
 
+use super::document::UndoDocumentContext;
+
 impl CoreLoop {
     /// Re-index a restored document's text into the inverted index during
     /// DELETE rollback. Decodes the restored body through the storage-mode-aware
@@ -23,14 +25,22 @@ impl CoreLoop {
     /// failure so a partial FTS restore escalates to `RollbackFailed`.
     pub(super) fn reindex_restored_document_fts(
         &self,
-        tid: u64,
-        entry_index: usize,
-        collection: &str,
-        document_id: &str,
+        ctx: UndoDocumentContext<'_>,
         surrogate: nodedb_types::Surrogate,
         old_value: &[u8],
     ) -> Result<(), (usize, String)> {
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let UndoDocumentContext {
+            database_id,
+            tid,
+            entry_index,
+            collection,
+            document_id,
+        } = ctx;
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let Some(config) = self.doc_configs.get(&config_key) else {
             // No config → cannot decode a strict tuple and no index paths to
             // reconstruct; the forward cascade could not have indexed text it
@@ -46,7 +56,7 @@ impl CoreLoop {
         }
         self.inverted
             .index_document(
-                crate::types::DatabaseId::DEFAULT.as_u64(),
+                database_id,
                 crate::types::TenantId::new(tid),
                 collection,
                 surrogate,

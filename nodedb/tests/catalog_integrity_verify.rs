@@ -46,6 +46,7 @@ fn verify_redb_integrity_flags_orphan_trigger() {
         .unwrap();
     catalog
         .put_owner(&StoredOwner {
+            database_id: 0,
             object_type: "collection".into(),
             object_name: "orders".into(),
             tenant_id: TENANT,

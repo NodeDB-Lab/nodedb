@@ -26,5 +26,6 @@ mod vector_index_rebuild;
 mod vector_index_seed;
 pub(in crate::data::executor) mod write_index;
 
+pub(crate) use doc_config_seed::DocConfigSeedEntry;
 pub(in crate::data::executor) use segment_keks::SegmentKeks;
 pub use state::CoreLoop;

@@ -177,7 +177,7 @@ impl CoreLoop {
         // mirrors `scan_collection`'s own presence-based (columnar → sparse)
         // routing and is correct regardless of which engine backs the row.
         let database_id = db_id.as_u64();
-        let strict_schema = self.strict_schema_for(tid_id, collection);
+        let strict_schema = self.strict_schema_for(db_id, tid_id, collection);
 
         // Lazily-built columnar id → document map, populated on the first
         // candidate that is absent from the sparse store (i.e. a columnar-family

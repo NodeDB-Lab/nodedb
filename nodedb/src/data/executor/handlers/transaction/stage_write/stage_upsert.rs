@@ -40,12 +40,16 @@ impl CoreLoop {
 
         let (stored_bytes, op) = match existing_bytes {
             None => {
-                let body =
-                    match self.stage_encode_put_body(ctx.tid, ctx.collection, ctx.surrogate, value)
-                    {
-                        Ok(b) => b,
-                        Err(e) => return self.response_error(ctx.task, e),
-                    };
+                let body = match self.stage_encode_put_body(
+                    ctx.database_id,
+                    ctx.tid,
+                    ctx.collection,
+                    ctx.surrogate,
+                    value,
+                ) {
+                    Ok(b) => b,
+                    Err(e) => return self.response_error(ctx.task, e),
+                };
                 (body, "insert")
             }
             Some(current_bytes) => {
@@ -82,7 +86,7 @@ impl CoreLoop {
             Some(Staged::Put(body)) => Ok(Some(body.clone())),
             Some(Staged::Tombstone) => Ok(None),
             None => {
-                let bitemporal = self.is_bitemporal(ctx.tid, ctx.collection);
+                let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
                 let row_key = surrogate_to_doc_id(ctx.surrogate);
                 if bitemporal {
                     self.sparse.versioned_get_current(
@@ -109,7 +113,11 @@ impl CoreLoop {
         value: &[u8],
         on_conflict_updates: &[(String, UpdateValue)],
     ) -> crate::Result<Vec<u8>> {
-        let config_key = (TenantId::new(ctx.tid), ctx.collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(ctx.database_id),
+            TenantId::new(ctx.tid),
+            ctx.collection.to_string(),
+        );
         let strict_schema: Option<StrictSchema> =
             self.doc_configs.get(&config_key).and_then(|config| {
                 if let StorageMode::Strict { ref schema } = config.storage_mode {
@@ -132,7 +140,7 @@ impl CoreLoop {
             apply_on_conflict_updates(existing_val, &new_val, on_conflict_updates)
         };
 
-        let bitemporal = self.is_bitemporal(ctx.tid, ctx.collection);
+        let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
         let sys_from_ms = if bitemporal {
             self.bitemporal_now_ms()
         } else {

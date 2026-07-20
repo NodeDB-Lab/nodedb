@@ -88,9 +88,13 @@ pub fn spawn_post_apply_async_side_effects(
                 }
             }
         }
-        CatalogEntry::PurgeCollection { tenant_id, name } => {
+        CatalogEntry::PurgeCollection {
+            database_id,
+            tenant_id,
+            name,
+        } => {
             tokio::spawn(async move {
-                collection::purge_async(tenant_id, name, raft_index, shared).await;
+                collection::purge_async(database_id, tenant_id, name, raft_index, shared).await;
             });
         }
         // `DeleteMaterializedView` now has async follow-up: every

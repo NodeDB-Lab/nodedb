@@ -61,6 +61,7 @@ fn apply_put_trigger_writes_owner_row_to_redb() {
         .unwrap();
     catalog
         .put_owner(&StoredOwner {
+            database_id: 0,
             object_type: "collection".into(),
             object_name: "orders".into(),
             tenant_id: TENANT,

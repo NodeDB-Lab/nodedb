@@ -122,7 +122,7 @@ impl CoreLoop {
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
             (database_id, TenantId::new(tid), collection.to_string());
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(database_id.as_u64(), tid, collection);
 
         let mut predicted_sorted: Vec<u32> = predicted.to_vec();
         predicted_sorted.sort_unstable();
@@ -160,7 +160,13 @@ impl CoreLoop {
                 }
             };
 
-            let new_body = self.stage_apply_update(tid, collection, &current_bytes, updates)?;
+            let new_body = self.stage_apply_update(
+                database_id.as_u64(),
+                tid,
+                collection,
+                &current_bytes,
+                updates,
+            )?;
             self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &doc_id, new_body)?;
         }
         Ok(())

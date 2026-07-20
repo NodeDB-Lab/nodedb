@@ -188,6 +188,7 @@ pub fn catalog_columns(table: &str) -> Option<Vec<CatalogColumn>> {
             col("partition_strategy", Text),
         ],
         "_system.l2_cleanup_queue" => vec![
+            col("database_id", Int8),
             col("tenant_id", Int8),
             col("name", Text),
             col("purge_lsn", Int8),

@@ -58,7 +58,7 @@ pub(crate) async fn hard_purge_collection(
     //    survives, the new collection must NOT register over it.
     {
         let catalog = state.credentials.catalog();
-        crate::control::catalog_entry::apply::collection::purge(tenant_id, name, catalog)?;
+        crate::control::catalog_entry::apply::collection::purge(0, tenant_id, name, catalog)?;
     }
 
     // 2. Reclaim engine-local storage on the Data Plane (WAL tombstone,
@@ -66,7 +66,7 @@ pub(crate) async fn hard_purge_collection(
     //    dispatch, Lite `CollectionPurged` broadcast) — the async half
     //    of the `PurgeCollection` post-apply, shared verbatim.
     crate::control::catalog_entry::post_apply::reclaim_collection_storage(
-        state, tenant_id, name, purge_lsn,
+        state, 0, tenant_id, name, purge_lsn,
     )
     .await?;
 

@@ -66,6 +66,7 @@ fn apply_deactivate_preserves_record() {
 
     let drop_entry = MetadataEntry::CatalogDdl {
         payload: catalog_entry::encode(&CatalogEntry::DeactivateCollection {
+            database_id: 0,
             tenant_id: 7,
             name: "archived".into(),
         })

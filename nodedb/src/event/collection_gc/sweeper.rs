@@ -12,7 +12,6 @@
 //! Runs everywhere — proposing is idempotent (the leader accepts,
 //! followers' proposals forward or race-lose with no harm).
 
-use nodedb_types::DatabaseId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -113,7 +112,11 @@ pub fn sweep_once(shared: &SharedState, retention: Duration) -> crate::Result<()
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
 
-    let dropped = catalog.load_dropped_collections(DatabaseId::DEFAULT)?;
+    let dropped: Vec<_> = catalog
+        .load_all_collections_across_databases()?
+        .into_iter()
+        .filter(|collection| !collection.is_active)
+        .collect();
 
     // Refresh the pending-purge gauge every pass, even when empty —
     // tenants whose pending count just went to zero need the gauge
@@ -137,6 +140,7 @@ pub fn sweep_once(shared: &SharedState, retention: Duration) -> crate::Result<()
         match resolve_retention(coll, now_ns, effective) {
             PurgeDecision::Purge => {
                 let entry = CatalogEntry::PurgeCollection {
+                    database_id: coll.database_id.as_u64(),
                     tenant_id: coll.tenant_id,
                     name: coll.name.clone(),
                 };

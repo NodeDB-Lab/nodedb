@@ -247,6 +247,7 @@ fn restore_crdt_checkpoints(
 
     for snap in crdt_snapshots {
         let fname = crate::data::executor::crdt_checkpoint::crdt_ckpt_filename(
+            snap.database_id,
             snap.tenant_id,
             &snap.collection,
         );

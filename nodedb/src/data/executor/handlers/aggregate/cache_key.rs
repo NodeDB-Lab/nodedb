@@ -22,13 +22,14 @@ fn group_specs_key(group_by: &[GroupKeySpec]) -> String {
 }
 
 pub(super) fn aggregate_cache_key(
+    database_id: u64,
     tid: u64,
     collection: &str,
     group_by: &[GroupKeySpec],
     aggregates: &[AggregateSpec],
     sub_group_by: &[String],
     sub_aggregates: &[AggregateSpec],
-) -> (crate::types::TenantId, String) {
+) -> (crate::types::DatabaseId, crate::types::TenantId, String) {
     use std::fmt::Write;
     let mut rest = format!(
         "{collection}\0{}\0{}",
@@ -63,7 +64,11 @@ pub(super) fn aggregate_cache_key(
                 .join(",")
         );
     }
-    (crate::types::TenantId::new(tid), rest)
+    (
+        crate::types::DatabaseId::new(database_id),
+        crate::types::TenantId::new(tid),
+        rest,
+    )
 }
 
 pub(super) fn legacy_aggregate_pairs(

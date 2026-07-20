@@ -23,11 +23,16 @@ impl CoreLoop {
     /// Returns `None` for schemaless collections (already msgpack).
     pub(in crate::data::executor) fn resolve_event_payload(
         &self,
+        database_id: u64,
         tid: u64,
         collection: &str,
         stored_bytes: &[u8],
     ) -> Option<Vec<u8>> {
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let config = self.doc_configs.get(&config_key)?;
         if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
             config.storage_mode
@@ -57,9 +62,10 @@ impl CoreLoop {
         new_stored: &[u8],
         prior_stored: Option<&[u8]>,
     ) {
-        let new_converted = self.resolve_event_payload(tid, collection, new_stored);
+        let database_id = task.request.database_id.as_u64();
+        let new_converted = self.resolve_event_payload(database_id, tid, collection, new_stored);
         let old_converted =
-            prior_stored.and_then(|p| self.resolve_event_payload(tid, collection, p));
+            prior_stored.and_then(|p| self.resolve_event_payload(database_id, tid, collection, p));
         let old_bytes: Option<&[u8]> = match (prior_stored, old_converted.as_deref()) {
             (Some(_), Some(c)) => Some(c),
             (Some(raw), None) => Some(raw),

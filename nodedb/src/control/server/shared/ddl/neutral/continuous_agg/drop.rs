@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::server::shared::ddl::sync_dispatch;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -35,10 +35,16 @@ fn err(sqlstate: &str, message: String) -> DdlError {
 pub fn continuous_aggregate_exists(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     name: &str,
 ) -> bool {
-    let tid = identity.tenant_id.as_u64();
-    state.mv_registry.get_def(tid, name).is_some()
+    state
+        .credentials
+        .catalog()
+        .get_continuous_aggregate(database_id.as_u64(), identity.tenant_id.as_u64(), name)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 /// `DROP CONTINUOUS AGGREGATE <name>`.
@@ -58,8 +64,31 @@ pub async fn drop_continuous_aggregate(
         ));
     }
 
-    let name = parts[3].to_lowercase();
+    let name = parts
+        .last()
+        .ok_or_else(|| err("42601", "missing continuous aggregate name".to_string()))?
+        .trim_matches(['\'', '"'])
+        .to_lowercase();
     let tenant_id = identity.tenant_id;
+    let stored = state
+        .credentials
+        .catalog()
+        .get_continuous_aggregate(database_id.as_u64(), tenant_id.as_u64(), &name)
+        .map_err(|e| err("XX000", format!("catalog read: {e}")))?
+        .ok_or_else(|| {
+            err(
+                "42704",
+                format!("continuous aggregate '{name}' does not exist"),
+            )
+        })?;
+    let is_owner = stored.owner == identity.username;
+    let is_admin = identity.is_superuser || identity.has_role(&Role::TenantAdmin);
+    if !is_owner && !is_admin {
+        return Err(err(
+            "42501",
+            format!("permission denied to drop continuous aggregate '{name}'"),
+        ));
+    }
 
     let entry = crate::control::catalog_entry::CatalogEntry::DeleteContinuousAggregate {
         database_id: database_id.as_u64(),
@@ -72,12 +101,20 @@ pub async fn drop_continuous_aggregate(
     // raft-applier path would have done so the local manager forgets the
     // aggregate immediately.
     if log_index == 0 {
+        state
+            .permissions
+            .install_replicated_remove_owner_in_database(
+                crate::control::security::catalog::auth_types::object_type::CONTINUOUS_AGGREGATE,
+                database_id.as_u64(),
+                tenant_id.as_u64(),
+                &name,
+            );
         let plan = PhysicalPlan::Meta(MetaOp::UnregisterContinuousAggregate { name: name.clone() });
         sync_dispatch::dispatch_async(
             state,
             tenant_id,
             database_id,
-            &name,
+            &stored.source,
             plan,
             Duration::from_secs(5),
         )

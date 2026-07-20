@@ -45,7 +45,7 @@ impl CoreLoop {
             }
         }
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
@@ -78,7 +78,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, constraint_version, "crdt drop constraints");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine");
@@ -113,7 +113,7 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %collection, "crdt read constraints");
         let tenant_id = task.request.tenant_id;
-        let engine = match self.get_crdt_engine(tenant_id) {
+        let engine = match self.get_crdt_engine(task.request.database_id, tenant_id) {
             Ok(e) => e,
             Err(e) => {
                 warn!(core = self.core_id, error = %e, "failed to create CRDT engine");

@@ -141,7 +141,11 @@ impl CoreLoop {
         // keys are `:`-delimited with values that may themselves contain `:` —
         // so parsing them back out is unsafe. The removed tuples are instead
         // recomputed from the pre-delete document via `index_tuples_for_doc`.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let index_paths: Vec<crate::engine::document::store::IndexPath> = self
             .doc_configs
             .get(&config_key)
@@ -285,7 +289,12 @@ impl CoreLoop {
                 // (not a `WriteOp::BulkDelete` summary) — the Event Plane's
                 // WAL-replay bulk variant is aggregate metadata reconstructed
                 // only when the live per-row events were lost.
-                let old_converted = self.resolve_event_payload(tid, collection, deleted_bytes);
+                let old_converted = self.resolve_event_payload(
+                    task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    deleted_bytes,
+                );
                 self.emit_write_event(
                     task,
                     collection,
@@ -306,7 +315,11 @@ impl CoreLoop {
         // Invalidate aggregate cache — a delete changes count(*) for this
         // collection. Only needed when at least one row was actually removed.
         if affected > 0 {
-            self.invalidate_aggregate_cache_for_collection(tid, collection);
+            self.invalidate_aggregate_cache_for_collection(
+                task.request.database_id.as_u64(),
+                tid,
+                collection,
+            );
         }
 
         debug!(core = self.core_id, %collection, affected, "bulk delete complete");

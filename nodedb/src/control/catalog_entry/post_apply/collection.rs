@@ -19,6 +19,7 @@ pub fn put_owner_sync(stored: &StoredCollection, shared: Arc<SharedState>) {
     // call `set_owner` directly — ownership is entirely a side
     // effect of the parent `PutCollection` apply.
     shared.permissions.install_replicated_owner(&StoredOwner {
+        database_id: stored.database_id.as_u64(),
         object_type: "collection".into(),
         object_name: stored.name.clone(),
         tenant_id: stored.tenant_id,
@@ -62,11 +63,10 @@ pub async fn put_async(stored: StoredCollection, shared: Arc<SharedState>) {
 /// is already gone at this point (removed by `apply/collection.rs::purge`).
 /// The Data Plane `UnregisterCollection` dispatch is the async half
 /// and lives in `async_dispatch/collection.rs::purge_async`.
-pub fn purge_sync(tenant_id: u64, name: String, shared: Arc<SharedState>) {
-    let owner_removed =
-        shared
-            .permissions
-            .install_replicated_remove_owner("collection", tenant_id, &name);
+pub fn purge_sync(database_id: u64, tenant_id: u64, name: String, shared: Arc<SharedState>) {
+    let owner_removed = shared
+        .permissions
+        .install_replicated_remove_owner_in_database("collection", database_id, tenant_id, &name);
     // Permission grants referencing the purged collection are
     // evicted from the in-memory grant set — stale cached entries
     // would otherwise outlive the catalog row they reference.

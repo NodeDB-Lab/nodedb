@@ -382,7 +382,7 @@ impl CoreLoop {
     /// or a case-insensitive collation it doesn't know about.
     pub(in crate::data::executor) fn index_path_flags(
         &self,
-        config_key: &(TenantId, String),
+        config_key: &(DatabaseId, TenantId, String),
         path: &str,
     ) -> (bool, bool) {
         self.doc_configs
@@ -397,7 +397,7 @@ impl CoreLoop {
     /// config or the bytes fail to decode under that mode.
     pub(in crate::data::executor) fn decode_indexed_body(
         &self,
-        config_key: &(TenantId, String),
+        config_key: &(DatabaseId, TenantId, String),
         body: &[u8],
     ) -> Option<serde_json::Value> {
         let config = self.doc_configs.get(config_key)?;

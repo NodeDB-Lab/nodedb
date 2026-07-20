@@ -12,25 +12,19 @@ impl SystemCatalog {
     pub fn rewrite_object_owner(
         &self,
         kind: &str,
+        database_id: u64,
         tenant_id: u64,
         name: &str,
         new_owner: &str,
     ) -> crate::Result<()> {
         match kind {
             object_type::COLLECTION => {
-                let mut matched = false;
-                for mut stored in self
-                    .load_all_collections_across_databases()?
-                    .into_iter()
-                    .filter(|stored| stored.tenant_id == tenant_id && stored.name == name)
-                {
-                    matched = true;
-                    stored.owner = new_owner.to_string();
-                    self.put_collection(stored.database_id, &stored)?;
-                }
-                if !matched {
-                    return Err(missing(kind, tenant_id, name));
-                }
+                let database_id = nodedb_types::DatabaseId::new(database_id);
+                let mut stored = self
+                    .get_collection(database_id, tenant_id, name)?
+                    .ok_or_else(|| missing(kind, tenant_id, name))?;
+                stored.owner = new_owner.to_string();
+                self.put_collection(database_id, &stored)?;
             }
             object_type::FUNCTION => {
                 let mut stored = self
@@ -84,19 +78,11 @@ impl SystemCatalog {
                 self.put_change_stream(&stored)?;
             }
             object_type::CONTINUOUS_AGGREGATE => {
-                let mut matched = false;
-                for mut stored in self
-                    .load_all_continuous_aggregates()?
-                    .into_iter()
-                    .filter(|stored| stored.tenant_id == tenant_id && stored.name == name)
-                {
-                    matched = true;
-                    stored.owner = new_owner.to_string();
-                    self.put_continuous_aggregate(&stored)?;
-                }
-                if !matched {
-                    return Err(missing(kind, tenant_id, name));
-                }
+                let mut stored = self
+                    .get_continuous_aggregate(database_id, tenant_id, name)?
+                    .ok_or_else(|| missing(kind, tenant_id, name))?;
+                stored.owner = new_owner.to_string();
+                self.put_continuous_aggregate(&stored)?;
             }
             object_type::INDEX => {}
             unknown => {
@@ -108,6 +94,7 @@ impl SystemCatalog {
         }
 
         self.put_owner(&StoredOwner {
+            database_id,
             object_type: kind.to_string(),
             object_name: name.to_string(),
             tenant_id,

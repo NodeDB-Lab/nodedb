@@ -55,7 +55,7 @@ pub fn catalog_err<E: std::fmt::Display>(ctx: &str, e: E) -> crate::Error {
     }
 }
 
-/// Key format: "{object_type}:{tenant_id}:{object_name}"
-pub fn owner_key(object_type: &str, tenant_id: u64, object_name: &str) -> String {
-    format!("{object_type}:{tenant_id}:{object_name}")
+/// Key format: "{object_type}:{database_id}:{tenant_id}:{object_name}"
+pub fn owner_key(object_type: &str, database_id: u64, tenant_id: u64, object_name: &str) -> String {
+    format!("{object_type}:{database_id}:{tenant_id}:{object_name}")
 }

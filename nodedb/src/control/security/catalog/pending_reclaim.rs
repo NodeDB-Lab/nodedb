@@ -50,6 +50,10 @@ pub struct StoredPendingReclaim {
     pub attempts: u32,
 }
 
+fn pending_key(database_id: u64, tenant_id: u64, name: &str) -> String {
+    format!("{database_id}:{tenant_id}:{name}")
+}
+
 impl SystemCatalog {
     /// Add or refresh a queue entry. Idempotent: re-recording the same
     /// `(tenant_id, name)` replaces the previous entry so repeated
@@ -65,8 +69,9 @@ impl SystemCatalog {
             let mut table = txn
                 .open_table(PENDING_RECLAIM)
                 .map_err(|e| catalog_err("open pending_reclaim", e))?;
+            let key = pending_key(entry.database_id, entry.tenant_id, &entry.name);
             table
-                .insert((entry.tenant_id, entry.name.as_str()), bytes.as_slice())
+                .insert(key.as_str(), bytes.as_slice())
                 .map_err(|e| catalog_err("insert pending_reclaim entry", e))?;
         }
         txn.commit()
@@ -85,7 +90,7 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("open pending_reclaim", e))?;
         let mut out = Vec::new();
         for item in table
-            .range::<(u64, &str)>(..)
+            .range::<&str>(..)
             .map_err(|e| catalog_err("range pending_reclaim", e))?
         {
             let (_, v) = item.map_err(|e| catalog_err("read pending_reclaim", e))?;
@@ -100,6 +105,7 @@ impl SystemCatalog {
     /// text. No-op if the entry has already been removed.
     pub fn record_pending_reclaim_attempt(
         &self,
+        database_id: u64,
         tenant_id: u64,
         name: &str,
         last_error: &str,
@@ -112,8 +118,9 @@ impl SystemCatalog {
             let mut table = txn
                 .open_table(PENDING_RECLAIM)
                 .map_err(|e| catalog_err("open pending_reclaim", e))?;
+            let key = pending_key(database_id, tenant_id, name);
             let existing = table
-                .get((tenant_id, name))
+                .get(key.as_str())
                 .map_err(|e| catalog_err("get pending_reclaim entry", e))?
                 .map(|g| g.value().to_vec());
             let Some(raw) = existing else { return Ok(()) };
@@ -124,7 +131,7 @@ impl SystemCatalog {
             let bytes = zerompk::to_msgpack_vec(&entry)
                 .map_err(|e| catalog_err("encode pending_reclaim entry", e))?;
             table
-                .insert((tenant_id, name), bytes.as_slice())
+                .insert(key.as_str(), bytes.as_slice())
                 .map_err(|e| catalog_err("update pending_reclaim entry", e))?;
         }
         txn.commit()
@@ -132,7 +139,12 @@ impl SystemCatalog {
     }
 
     /// Remove a successfully-drained entry. Idempotent.
-    pub fn remove_pending_reclaim(&self, tenant_id: u64, name: &str) -> crate::Result<()> {
+    pub fn remove_pending_reclaim(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        name: &str,
+    ) -> crate::Result<()> {
         let txn = self
             .db
             .begin_write()
@@ -141,8 +153,9 @@ impl SystemCatalog {
             let mut table = txn
                 .open_table(PENDING_RECLAIM)
                 .map_err(|e| catalog_err("open pending_reclaim", e))?;
+            let key = pending_key(database_id, tenant_id, name);
             table
-                .remove((tenant_id, name))
+                .remove(key.as_str())
                 .map_err(|e| catalog_err("remove pending_reclaim entry", e))?;
         }
         txn.commit()
@@ -187,6 +200,20 @@ mod tests {
     }
 
     #[test]
+    fn same_collection_name_in_two_databases_has_distinct_entries() {
+        let (c, _t) = cat();
+        let default = entry(1, "events", 500);
+        let mut other = entry(1, "events", 600);
+        other.database_id = 9;
+        c.enqueue_pending_reclaim(&default).unwrap();
+        c.enqueue_pending_reclaim(&other).unwrap();
+        let all = c.load_pending_reclaim_queue().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|entry| entry.database_id == 0));
+        assert!(all.iter().any(|entry| entry.database_id == 9));
+    }
+
+    #[test]
     fn enqueue_is_idempotent_per_key() {
         let (c, _t) = cat();
         c.enqueue_pending_reclaim(&entry(1, "events", 500)).unwrap();
@@ -200,9 +227,9 @@ mod tests {
     fn record_attempt_updates_in_place() {
         let (c, _t) = cat();
         c.enqueue_pending_reclaim(&entry(1, "events", 500)).unwrap();
-        c.record_pending_reclaim_attempt(1, "events", "dp: timeout")
+        c.record_pending_reclaim_attempt(0, 1, "events", "dp: timeout")
             .unwrap();
-        c.record_pending_reclaim_attempt(1, "events", "dp: timeout")
+        c.record_pending_reclaim_attempt(0, 1, "events", "dp: timeout")
             .unwrap();
         let all = c.load_pending_reclaim_queue().unwrap();
         assert_eq!(all.len(), 1);
@@ -213,7 +240,7 @@ mod tests {
     #[test]
     fn record_attempt_on_missing_is_noop() {
         let (c, _t) = cat();
-        c.record_pending_reclaim_attempt(1, "missing", "err")
+        c.record_pending_reclaim_attempt(0, 1, "missing", "err")
             .unwrap();
         assert_eq!(c.load_pending_reclaim_queue().unwrap().len(), 0);
     }
@@ -222,9 +249,9 @@ mod tests {
     fn remove_drops_entry() {
         let (c, _t) = cat();
         c.enqueue_pending_reclaim(&entry(1, "events", 500)).unwrap();
-        c.remove_pending_reclaim(1, "events").unwrap();
+        c.remove_pending_reclaim(0, 1, "events").unwrap();
         assert_eq!(c.load_pending_reclaim_queue().unwrap().len(), 0);
         // Idempotent.
-        c.remove_pending_reclaim(1, "events").unwrap();
+        c.remove_pending_reclaim(0, 1, "events").unwrap();
     }
 }

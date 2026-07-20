@@ -65,7 +65,7 @@ impl CoreLoop {
             "document index lookup"
         );
 
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         let doc_engine = crate::engine::document::store::DocumentEngine::new(
             &self.sparse,
             task.request.database_id.as_u64(),
@@ -74,7 +74,11 @@ impl CoreLoop {
         match doc_engine.index_lookup(collection, path, value, bitemporal) {
             Ok(mut doc_ids) => {
                 if let Some(txn_id) = task.request.txn_id {
-                    let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+                    let config_key = (
+                        task.request.database_id,
+                        crate::types::TenantId::new(tid),
+                        collection.to_string(),
+                    );
                     let (is_array, case_insensitive) = self.index_path_flags(&config_key, path);
                     let coll_key = (
                         task.request.database_id,
@@ -163,7 +167,7 @@ impl CoreLoop {
         );
 
         let database_id = task.request.database_id.as_u64();
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let doc_engine =
             crate::engine::document::store::DocumentEngine::new(&self.sparse, database_id, tid);
         let mut doc_ids = match doc_engine.index_lookup(collection, path, value, bitemporal) {
@@ -181,7 +185,11 @@ impl CoreLoop {
         // Strict collections store Binary Tuple bytes; the response codec
         // expects msgpack maps. Decode-then-encode here so cross-engine
         // result framing (encode_raw_document_rows) sees valid msgpack.
-        let config_key = (crate::types::TenantId::new(tid), collection.to_string());
+        let config_key = (
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
         let strict_schema = self.doc_configs.get(&config_key).and_then(|c| {
             if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
                 c.storage_mode

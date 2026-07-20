@@ -27,7 +27,7 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        let bitemporal = self.is_bitemporal(tid, collection);
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let sys_now = if bitemporal {
             self.bitemporal_now_ms()
         } else {

@@ -36,7 +36,11 @@ impl CoreLoop {
             },
             &|_| true,
         )?;
-        let strict_schema = self.strict_schema_for(crate::types::TenantId::new(tid), collection);
+        let strict_schema = self.strict_schema_for(
+            crate::types::DatabaseId::new(did),
+            crate::types::TenantId::new(tid),
+            collection,
+        );
 
         let mut normalized = Vec::with_capacity(docs.len());
         for (id, raw) in docs {

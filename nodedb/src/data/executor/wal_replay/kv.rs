@@ -31,7 +31,7 @@ impl CoreLoop {
     /// records that span two collections.
     pub(in crate::data::executor) fn skip_kv_replay_record(
         &self,
-        tombstones: &nodedb_wal::TombstoneSet,
+        tombstones: &nodedb_wal::DatabaseTombstones<'_>,
         tenant_id: u64,
         collection: &str,
         record_lsn: u64,
@@ -84,6 +84,7 @@ impl CoreLoop {
             let tenant_id = record.header.tenant_id;
             let database_id = record.header.database_id;
             let record_lsn = record.header.lsn;
+            let tombstones = &tombstones.for_database(database_id);
 
             // Try to detect KV records by discriminator prefix in the payload.
             if is_put {
