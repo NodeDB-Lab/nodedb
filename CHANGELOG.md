@@ -7,14 +7,6 @@ NodeDB uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
-
-### Fixed
-
-- **Native protocol transactions** — a row committed inside an explicit transaction over the native binary protocol (`Begin` op → SQL DML → `Commit` op) is now visible to PK point lookups and filtered aggregates, not just full scans (#193). The native COMMIT seam routed the commit's `ResolveTxn`/`TransactionBatch` meta-ops through the gateway, which cannot derive a route for collection-less meta plans and fell back to vShard 0 — durably applying the commit batch on the wrong core. Native COMMIT now dispatches with the task's pre-classified vShard, matching pgwire, and the gateway router rejects commit meta-ops outright instead of silently misrouting them. **Note:** rows committed through native-protocol transactions on affected multi-core builds were applied to vShard 0's core and remain there after upgrading — they stay visible to full scans but invisible to point lookups; re-inserting them (or dump/reload) re-homes them.
-
----
-
 ## [0.4.0] - 2026-07-20
 
 NodeDB 0.4.0 is a substantial distributed-correctness and durability release. It adds cross-shard transactional execution and distributed query/graph processing, extends temporal and sparse-vector SQL, and hardens replication, recovery, indexing, authentication, and sync across the storage engines.
@@ -60,6 +52,7 @@ NodeDB 0.4.0 is a substantial distributed-correctness and durability release. It
 - **WAL replay correctness** — timeseries samples are no longer rejected during replay and a mid-record flush no longer duplicates rows on recovery; per-row surrogates are persisted and restored through columnar WAL replay; complete KV WAL replay (`incr`/`expire`/`persist`/`cas`/`field_set`/`register_index`/`drop_index`) with resolved expiry instants; graph node-label and columnar predicate UPDATE/DELETE records persisted and replayed.
 - **Query and SQL correctness** — scan and join execution no longer silently truncates rows at implicit caps; streamed scans drain every chunk; bitemporal range scans, indexed residual predicates, computed and distributed `GROUP BY`, and scalar aggregates over empty input return complete results; strict `AS OF SYSTEM TIME NULL` queries resolve the correct historical schema.
 - **Restore / backup** — WAL tombstones replicated via Raft on restore; plain-columnar rows re-issued durably rather than snapshot-installed; columnar/flushed-timeseries data and catalog propagated cluster-wide; replica multiplication and CRDT loss under RF>1 prevented.
+- **Native protocol transactions** — a row committed inside an explicit `Begin`/`Commit` over the native protocol is now visible to PK point lookups and filtered aggregates, not just full scans; the commit batch was routed to vShard 0 instead of the collection's owning vShard, and the gateway router now rejects unroutable commit meta-ops instead of silently misrouting them (#193).
 - **Session plan cache** — a repeated literal PK point lookup no longer replays a stale empty result after the same session inserted that key. Document point reads and PK-targeted document mutations are excluded from the schema-only plan cache, so a byte-identical `SELECT` reflects the session's own committed writes and the simple and extended protocols agree.
 - **Object ownership** — `DROP USER` reassigns every object the user owned to a validated administrative principal — the tenant's recorded admin, else an active `tenant_admin`, else an active superuser in that tenant — and is refused when no such principal exists, instead of repointing objects at a synthetic name that was never created and leaving the data directory unbootable. Collections inside their drop-retention window are included. Ownership records are keyed by `(object_type, database_id, tenant_id, object_name)`, so ownership of a collection no longer extends to a same-named collection in another database. The startup catalog check now repairs dangling owner references and revokes grants to removed users instead of refusing to start, so a data directory already affected by this recovers on its next boot.
 - **Tenant management** — tenant IDs allocated via a durable high-water-mark; ghost rows in `SHOW TENANTS` after `DROP TENANT` eliminated; an existence gate enforced for unknown numeric tenant IDs; `DROP`/`ALTER`/`PURGE TENANT` accept a tenant name; duplicate `CREATE TENANT` names rejected with `42710` rather than allocating a second tenant id under the same name.
