@@ -7,6 +7,14 @@ NodeDB uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Native protocol transactions** — a row committed inside an explicit transaction over the native binary protocol (`Begin` op → SQL DML → `Commit` op) is now visible to PK point lookups and filtered aggregates, not just full scans (#193). The native COMMIT seam routed the commit's `ResolveTxn`/`TransactionBatch` meta-ops through the gateway, which cannot derive a route for collection-less meta plans and fell back to vShard 0 — durably applying the commit batch on the wrong core. Native COMMIT now dispatches with the task's pre-classified vShard, matching pgwire, and the gateway router rejects commit meta-ops outright instead of silently misrouting them. **Note:** rows committed through native-protocol transactions on affected multi-core builds were applied to vShard 0's core and remain there after upgrading — they stay visible to full scans but invisible to point lookups; re-inserting them (or dump/reload) re-homes them.
+
+---
+
 ## [0.4.0] - 2026-07-20
 
 NodeDB 0.4.0 is a substantial distributed-correctness and durability release. It adds cross-shard transactional execution and distributed query/graph processing, extends temporal and sparse-vector SQL, and hardens replication, recovery, indexing, authentication, and sync across the storage engines.

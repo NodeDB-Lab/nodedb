@@ -15,14 +15,13 @@ use std::pin::Pin;
 use nodedb_types::TraceId;
 use nodedb_types::protocol::NativeResponse;
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
-use crate::control::gateway::core::QueryContext as GatewayQueryContext;
+use crate::bridge::envelope::{ErrorCode, Response};
 use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::server::shared::session::{
     AbortReason, CommitOutcome, TxnDataPlane, commit, lifecycle,
 };
 use crate::control::state::SharedState;
-use crate::types::{Lsn, RequestId};
+use crate::types::Lsn;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::dispatch_utils;
@@ -30,11 +29,12 @@ use super::DispatchCtx;
 
 /// Native Data-Plane dispatch seam for the neutral transaction orchestrator.
 ///
-/// Routes a task through the cluster gateway when one is configured, otherwise
-/// through the direct SPSC dispatch path — the exact branch native COMMIT used
-/// before extraction. The gateway path synthesizes an `Ok` [`Response`] on
-/// success (carrying the first vShard payload so overlay-marker meta-ops still
-/// decode), and surfaces gateway errors as a Rust `Err`.
+/// Always dispatches through the direct SPSC write path using the task's
+/// pre-classified `vshard_id`, mirroring pgwire's `dispatch_task_no_wal`.
+/// The gateway must NOT be used here: commit-time tasks carry `MetaOp` plans
+/// (`ResolveTxn`, `TransactionBatch`) with no named collection, so the
+/// gateway's router cannot derive a route for them and falls back to
+/// vShard 0 — durably applying the commit batch on the wrong core (#193).
 pub(crate) struct NativeTxnDp<'a> {
     pub(crate) state: &'a SharedState,
 }
@@ -47,48 +47,23 @@ impl TxnDataPlane for NativeTxnDp<'_> {
     ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>> {
         let state = self.state;
         Box::pin(async move {
-            match state.gateway.get() {
-                Some(gw) => {
-                    let gw_ctx = GatewayQueryContext {
-                        tenant_id: task.tenant_id,
-                        trace_id: TraceId::generate(),
-                        database_id: task.database_id,
-                        txn_id: task.txn_id,
-                    };
-                    let payloads = gw.execute(&gw_ctx, task.plan).await?;
-                    Ok(Response {
-                        request_id: RequestId::new(0),
-                        status: Status::Ok,
-                        attempt: 0,
-                        partial: false,
-                        payload: Payload::from_vec(payloads.into_iter().next().unwrap_or_default()),
-                        watermark_lsn: Lsn::new(0),
-                        error_code: None,
-                        read_set_valid: None,
-                        read_version_lsn: crate::types::Lsn::ZERO,
-                        write_set: Vec::new(),
-                    })
-                }
-                None => {
-                    dispatch_utils::dispatch_write_to_data_plane(
-                        state,
-                        dispatch_utils::WriteDispatch {
-                            tenant_id: task.tenant_id,
-                            database_id: task.database_id,
-                            vshard_id: task.vshard_id,
-                            plan: task.plan,
-                            trace_id: TraceId::ZERO,
-                            event_source: crate::event::EventSource::User,
-                            txn_id: None,
-                            wal_lsn,
-                            // Batch COMMIT record, not per-task WAL append — see
-                            // `dispatch_task_no_wal`'s equivalent limitation.
-                            resolved_now_ms: None,
-                        },
-                    )
-                    .await
-                }
-            }
+            dispatch_utils::dispatch_write_to_data_plane(
+                state,
+                dispatch_utils::WriteDispatch {
+                    tenant_id: task.tenant_id,
+                    database_id: task.database_id,
+                    vshard_id: task.vshard_id,
+                    plan: task.plan,
+                    trace_id: TraceId::ZERO,
+                    event_source: crate::event::EventSource::User,
+                    txn_id: None,
+                    wal_lsn,
+                    // Batch COMMIT record, not per-task WAL append — see
+                    // `dispatch_task_no_wal`'s equivalent limitation.
+                    resolved_now_ms: None,
+                },
+            )
+            .await
         })
     }
 }

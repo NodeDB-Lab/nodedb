@@ -63,6 +63,26 @@ pub fn route_plan(
     strategy_fn: impl Fn(&str) -> PartitionStrategy,
     extractor: &dyn KeyExtractor,
 ) -> Result<Vec<TaskRoute>> {
+    // Commit-time meta-ops (ResolveTxn / TransactionBatch) carry no collection
+    // name, so their vShard cannot be derived here — the primary_vshard
+    // fallback would silently send them to vShard 0 and durably apply the
+    // commit batch on the wrong core (#193). They are dispatched with the
+    // task's pre-classified `vshard_id` (see `dispatch_single_shard`), never
+    // through the gateway.
+    {
+        use nodedb_physical::physical_plan::MetaOp;
+        if matches!(
+            &plan,
+            PhysicalPlan::Meta(MetaOp::ResolveTxn { .. } | MetaOp::TransactionBatch { .. })
+        ) {
+            return Err(crate::Error::Internal {
+                detail: "commit meta-op cannot be routed by the gateway; \
+                         dispatch it with the task's explicit vshard_id"
+                    .to_owned(),
+            });
+        }
+    }
+
     // In single-node mode every plan runs locally.
     let Some(routing) = routing else {
         let vshard_id = primary_vshard(&plan, database_id);
@@ -439,5 +459,40 @@ mod tests {
             }
         }
         unreachable!()
+    }
+
+    /// Commit-time meta-ops carry no collection name, so the router cannot
+    /// derive their vShard — silently falling back to vShard 0 durably applies
+    /// the commit batch on the wrong core (#193). They must be rejected here;
+    /// callers dispatch them with the task's pre-classified `vshard_id`.
+    #[test]
+    fn commit_meta_ops_are_rejected() {
+        use nodedb_physical::physical_plan::MetaOp;
+
+        for plan in [
+            PhysicalPlan::Meta(MetaOp::TransactionBatch {
+                plans: vec![],
+                txn_id: None,
+            }),
+            PhysicalPlan::Meta(MetaOp::ResolveTxn {
+                txn_id: nodedb_types::id::TxnId::new(7),
+                plans: vec![],
+            }),
+        ] {
+            for table in [None, Some(single_node_table())] {
+                let result = route_plan(
+                    plan.clone(),
+                    1,
+                    table.as_ref(),
+                    DatabaseId::DEFAULT,
+                    |_| PartitionStrategy::CollectionHomed,
+                    &crate::control::gateway::UnwiredKeyExtractor,
+                );
+                assert!(
+                    result.is_err(),
+                    "commit meta-op must not be routable via the gateway: {plan:?}"
+                );
+            }
+        }
     }
 }
