@@ -201,7 +201,8 @@ pub enum Error {
     UndefinedFunction { name: String },
 
     /// Expression evaluation divided or took a modulus by zero. Propagated
-    /// from `nodedb_query::EvalError::DivisionByZero`; the pgwire layer
+    /// from the row-expression evaluator (`nodedb_query::EvalError::DivisionByZero`)
+    /// and the procedural executor's constant folder; the pgwire layer
     /// renders this as SQLSTATE `22012` (division_by_zero).
     #[error("division by zero")]
     DivisionByZero,

@@ -13,16 +13,16 @@ use crate::control::state::SharedState;
 use crate::types::TenantId;
 
 /// Signal from constant-expression evaluation that a `/` or `%` reached a
-/// zero divisor (nodedb issue #227).
+/// zero divisor.
 ///
 /// Kept local to this module — the procedural executor's constant folder is
 /// a separate, sqlparser-based tree-walk evaluator with no dependency on
 /// `nodedb_query` (whose own `EvalError::DivisionByZero`, from the
-/// DataFusion-backed row-expression evaluator fixed under issue #216,
-/// covers a different code path entirely). Every other historically
-/// `None`-folding case (unknown identifiers, unsupported operators,
-/// overflow, non-finite float results) is unaffected and keeps folding to
-/// `Ok(None)` — see `try_eval_constant`, `evaluate_to_value`.
+/// DataFusion-backed row-expression evaluator, covers a different code path
+/// entirely). Every other historically `None`-folding case (unknown
+/// identifiers, unsupported operators, overflow, non-finite float results)
+/// is unaffected and keeps folding to `Ok(None)` — see `try_eval_constant`,
+/// `evaluate_to_value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 enum ConstEvalError {
     #[error("division by zero")]
@@ -127,7 +127,7 @@ pub async fn evaluate_to_value(
 /// (unparseable input, unknown identifiers, unsupported operators,
 /// overflow) — callers fold that to `Value::Null`, matching historical
 /// behavior. Returns `Err(ConstEvalError::DivisionByZero)` only when
-/// evaluation reaches a `/` or `%` with a zero divisor (nodedb issue #227).
+/// evaluation reaches a `/` or `%` with a zero divisor.
 fn try_eval_constant(sql: &str) -> Result<Option<nodedb_types::Value>, ConstEvalError> {
     let trimmed = sql.trim();
     let expr_str = if trimmed.to_uppercase().starts_with("SELECT ") {
@@ -275,7 +275,7 @@ fn eval_binary_op(
 mod tests {
     use super::*;
 
-    // ── Division/modulo by zero (nodedb issue #227) ─────────────────────────
+    // ── Division/modulo by zero ─────────────────────────────────────────────
 
     #[test]
     fn integer_division_by_zero_signals_error() {

@@ -99,8 +99,8 @@ async fn before_trigger_reject_does_not_persist_row() {
 
 /// A BEFORE INSERT trigger that divides by zero in a NEW.* assignment must
 /// reject the insert with a "division by zero" error instead of silently
-/// writing NULL (nodedb issue #227), and the row must NOT be persisted —
-/// the same fail-closed contract as any other BEFORE trigger rejection.
+/// writing NULL, and the row must NOT be persisted — the same fail-closed
+/// contract as any other BEFORE trigger rejection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn before_trigger_division_by_zero_rejects_insert() {
     let server = TestServer::start().await;
