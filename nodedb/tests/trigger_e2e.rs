@@ -97,6 +97,148 @@ async fn before_trigger_reject_does_not_persist_row() {
     server.exec("DROP TRIGGER guard").await.unwrap();
 }
 
+/// A BEFORE INSERT trigger that divides by zero in a NEW.* assignment must
+/// reject the insert with a "division by zero" error instead of silently
+/// writing NULL (nodedb issue #227), and the row must NOT be persisted —
+/// the same fail-closed contract as any other BEFORE trigger rejection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn before_trigger_division_by_zero_rejects_insert() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION ratios (id TEXT PRIMARY KEY, numerator INT, \
+             denominator INT, ratio INT) WITH (engine='document_strict')",
+        )
+        .await
+        .unwrap();
+
+    server
+        .exec(
+            "CREATE TRIGGER compute_ratio BEFORE INSERT ON ratios FOR EACH ROW \
+             BEGIN \
+               NEW.ratio := NEW.numerator / NEW.denominator; \
+             END",
+        )
+        .await
+        .unwrap();
+
+    // Insert with a zero denominator should fail with a division-by-zero error.
+    server
+        .expect_error(
+            "INSERT INTO ratios (id, numerator, denominator) VALUES ('r1', 10, 0)",
+            "division by zero",
+        )
+        .await;
+
+    // Row should NOT exist.
+    let rows = server
+        .query_text("SELECT id FROM ratios WHERE id = 'r1'")
+        .await
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "row rejected by division-by-zero trigger should not be persisted"
+    );
+
+    server.exec("DROP TRIGGER compute_ratio").await.unwrap();
+}
+
+/// Happy-path control for `before_trigger_division_by_zero_rejects_insert`:
+/// a non-zero denominator computes normally and the row persists with the
+/// computed value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn before_trigger_nonzero_division_persists_computed_value() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION ratios2 (id TEXT PRIMARY KEY, numerator INT, \
+             denominator INT, ratio INT) WITH (engine='document_strict')",
+        )
+        .await
+        .unwrap();
+
+    server
+        .exec(
+            "CREATE TRIGGER compute_ratio2 BEFORE INSERT ON ratios2 FOR EACH ROW \
+             BEGIN \
+               NEW.ratio := NEW.numerator / NEW.denominator; \
+             END",
+        )
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO ratios2 (id, numerator, denominator) VALUES ('r2', 10, 2)")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT ratio FROM ratios2 WHERE id = 'r2'")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec!["5".to_string()],
+        "expected computed ratio 10/2 = 5"
+    );
+
+    server.exec("DROP TRIGGER compute_ratio2").await.unwrap();
+}
+
+/// An `EXCEPTION WHEN DIVISION_BY_ZERO` handler inside the trigger body must
+/// catch the division-by-zero signal end-to-end: the insert succeeds and the
+/// handler's fallback assignment is applied, proving the previously-dormant
+/// `DIVISION_BY_ZERO` named condition (see `exception::exception_matches`)
+/// now actually fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn before_trigger_exception_handler_catches_division_by_zero() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION ratios_safe (id TEXT PRIMARY KEY, numerator INT, \
+             denominator INT, ratio INT) WITH (engine='document_strict')",
+        )
+        .await
+        .unwrap();
+
+    server
+        .exec(
+            "CREATE TRIGGER compute_ratio_safe BEFORE INSERT ON ratios_safe FOR EACH ROW \
+             BEGIN \
+               NEW.ratio := NEW.numerator / NEW.denominator; \
+             EXCEPTION WHEN DIVISION_BY_ZERO THEN \
+               NEW.ratio := 0; \
+             END",
+        )
+        .await
+        .unwrap();
+
+    // Insert with a zero denominator: the EXCEPTION handler catches the
+    // division-by-zero error and the insert succeeds with ratio = 0.
+    server
+        .exec("INSERT INTO ratios_safe (id, numerator, denominator) VALUES ('s1', 10, 0)")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT ratio FROM ratios_safe WHERE id = 's1'")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec!["0".to_string()],
+        "EXCEPTION handler should have set ratio to 0"
+    );
+
+    server
+        .exec("DROP TRIGGER compute_ratio_safe")
+        .await
+        .unwrap();
+}
+
 /// AFTER ASYNC trigger failure does NOT affect the parent write.
 /// The write should succeed; trigger error is handled by retry/DLQ.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
