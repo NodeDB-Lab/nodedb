@@ -13,9 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::protocol::{
     AuthMethod, CAP_COLUMNAR, CAP_CRDT, CAP_FTS, CAP_GRAPHRAG, CAP_SPATIAL, CAP_STREAMING,
-    CAP_TIMESERIES, FRAME_HEADER_LEN, HelloAckFrame, HelloFrame, Limits, MAX_FRAME_SIZE,
-    NativeRequest, NativeResponse, OpCode, PROTO_VERSION, RequestFields, ResponseStatus,
-    TextFields,
+    CAP_TIMESERIES, ErrorPayload, FRAME_HEADER_LEN, HelloAckFrame, HelloFrame, Limits,
+    MAX_FRAME_SIZE, NativeRequest, NativeResponse, OpCode, PROTO_VERSION, RequestFields,
+    ResponseStatus, TextFields,
 };
 use nodedb_types::result::QueryResult;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -449,24 +449,30 @@ fn io_err(e: std::io::Error) -> NodeDbError {
     NodeDbError::sync_connection_failed(format!("I/O: {e}"))
 }
 
+/// Rebuild the typed error a server error frame describes.
+///
+/// The frame carries the server's own SQLSTATE alongside the message; reading
+/// only the message would discard the one machine-matchable fact in it and
+/// leave every server-side failure indistinguishable from an internal fault.
+/// A frame with no payload at all has no classification to recover, so it
+/// falls back to `fallback` as an internal error.
+fn error_from_frame(error: Option<ErrorPayload>, fallback: &str) -> NodeDbError {
+    error.map_or_else(
+        || NodeDbError::internal(fallback),
+        |e| NodeDbError::from_sqlstate(&e.code, &e.message),
+    )
+}
+
 fn check_error(resp: NativeResponse) -> NodeDbResult<()> {
     if resp.status == ResponseStatus::Error {
-        let msg = resp
-            .error
-            .map(|e| e.message)
-            .unwrap_or_else(|| "unknown error".into());
-        return Err(NodeDbError::internal(msg));
+        return Err(error_from_frame(resp.error, "unknown error"));
     }
     Ok(())
 }
 
 fn response_to_query_result(resp: NativeResponse) -> NodeDbResult<QueryResult> {
     if resp.status == ResponseStatus::Error {
-        let msg = resp
-            .error
-            .map(|e| e.message)
-            .unwrap_or_else(|| "query failed".into());
-        return Err(NodeDbError::internal(msg));
+        return Err(error_from_frame(resp.error, "query failed"));
     }
     Ok(QueryResult {
         columns: resp.columns.unwrap_or_default(),
@@ -498,11 +504,67 @@ mod tests {
         assert_eq!(qr.rows[0][0].as_i64(), Some(42));
     }
 
+    /// An error frame must surface the server's classification, not just its
+    /// prose: asserting only on the message is what let the SQLSTATE be
+    /// dropped here unnoticed.
     #[test]
     fn response_to_query_result_error() {
         let resp = NativeResponse::error(1, "42P01", "not found");
         let err = response_to_query_result(resp).unwrap_err();
+
         assert!(format!("{err}").contains("not found"));
+        assert_eq!(
+            err.code(),
+            nodedb_types::error::ErrorCode::COLLECTION_NOT_FOUND
+        );
+        assert!(err.is_not_found());
+        assert!(!err.is_internal());
+    }
+
+    /// The same reconstruction happens on the non-query path, which has its
+    /// own copy of the error branch.
+    #[test]
+    fn check_error_reconstructs_sqlstate() {
+        let resp = NativeResponse::error(1, "42501", "authorization denied on t");
+        let err = check_error(resp).unwrap_err();
+
+        assert!(err.is_auth_denied());
+        assert_eq!(err.message(), "authorization denied on t");
+    }
+
+    /// Retriability is the behavioural consequence of the classification: a
+    /// serialization failure the client folds to `Internal` reads as
+    /// permanent, so a retrying caller gives up on a transaction that would
+    /// have succeeded.
+    #[test]
+    fn serialization_failure_frame_is_retriable() {
+        let resp = NativeResponse::error(1, "40001", "transaction aborted");
+        let err = response_to_query_result(resp).unwrap_err();
+
+        assert!(err.is_retriable());
+    }
+
+    /// Non-regression: a SQLSTATE with no mapped variant behaves exactly as
+    /// every server error did before the mapping existed.
+    #[test]
+    fn unmapped_sqlstate_frame_stays_internal() {
+        let resp = NativeResponse::error(1, "XX000", "boom");
+        let err = response_to_query_result(resp).unwrap_err();
+
+        assert!(err.is_internal());
+        assert!(format!("{err}").contains("boom"));
+    }
+
+    /// An error frame with no payload has no SQLSTATE to recover, so it keeps
+    /// the call site's own fallback text.
+    #[test]
+    fn error_frame_without_payload_uses_fallback() {
+        let mut resp = NativeResponse::error(1, "42P01", "not found");
+        resp.error = None;
+        let err = response_to_query_result(resp).unwrap_err();
+
+        assert!(err.is_internal());
+        assert!(format!("{err}").contains("query failed"));
     }
 
     #[test]
