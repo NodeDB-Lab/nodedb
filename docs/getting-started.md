@@ -79,11 +79,11 @@ ports:
 
 ### Common env vars
 
-| Variable                  | Default    | Description                  |
-| ------------------------- | ---------- | ---------------------------- |
-| `NODEDB_MEMORY_LIMIT`     | 1 GiB      | e.g. `4GiB`                  |
-| `NODEDB_DATA_PLANE_CORES` | CPUs - 1   | number of Data Plane threads |
-| `NODEDB_LOG_FORMAT`       | `text`     | `text` or `json`             |
+| Variable                  | Default  | Description                  |
+| ------------------------- | -------- | ---------------------------- |
+| `NODEDB_MEMORY_LIMIT`     | 1 GiB    | e.g. `4GiB`                  |
+| `NODEDB_DATA_PLANE_CORES` | CPUs - 1 | number of Data Plane threads |
+| `NODEDB_LOG_FORMAT`       | `text`   | `text` or `json`             |
 
 Set them under `environment:` in `docker-compose.yml` or pass with `-e` to `docker run`.
 
@@ -220,6 +220,9 @@ memory_limit = "4GiB"
 data_plane_cores = 4
 max_connections = 1024
 log_format = "text"               # "text" or "json"
+raft_ready_timeout_ms = 30000     # Max wait for raft metadata group readiness at boot
+                                  # (default 30s; raise for large WAL replays / big
+                                  # migrations, e.g. 300000)
 
 [server.ports]
 native = 6433                     # Always-on protocols have defaults
@@ -272,18 +275,18 @@ port named — the server never comes up missing a protocol.
 
 **Checkpoint & WAL settings:**
 
-| Config field                    | Environment variable              | Default |
-| -------------------------------- | ---------------------------------- | ------- |
-| `checkpoint.interval_secs`       | `NODEDB_CHECKPOINT_INTERVAL_SECS`  | `300`   |
-| `checkpoint.wal_segment_target_mb` | `NODEDB_WAL_SEGMENT_TARGET_MB`   | `64`    |
+| Config field                       | Environment variable              | Default |
+| ---------------------------------- | --------------------------------- | ------- |
+| `checkpoint.interval_secs`         | `NODEDB_CHECKPOINT_INTERVAL_SECS` | `300`   |
+| `checkpoint.wal_segment_target_mb` | `NODEDB_WAL_SEGMENT_TARGET_MB`    | `64`    |
 
 **Timeseries memtable settings:**
 
-| Config field                              | Environment variable                   | Default |
-| ----------------------------------------- | -------------------------------------- | ------- |
-| `tuning.timeseries.memtable_budget_bytes` | `NODEDB_TS_MEMTABLE_BUDGET_BYTES`      | `67108864` (64 MiB) |
+| Config field                                  | Environment variable                  | Default             |
+| --------------------------------------------- | ------------------------------------- | ------------------- |
+| `tuning.timeseries.memtable_budget_bytes`     | `NODEDB_TS_MEMTABLE_BUDGET_BYTES`     | `67108864` (64 MiB) |
 | `tuning.timeseries.memtable_hard_limit_bytes` | `NODEDB_TS_MEMTABLE_HARD_LIMIT_BYTES` | `83886080` (80 MiB) |
-| `tuning.timeseries.max_tag_cardinality`   | `NODEDB_TS_MAX_TAG_CARDINALITY`        | `100000` |
+| `tuning.timeseries.max_tag_cardinality`       | `NODEDB_TS_MAX_TAG_CARDINALITY`       | `100000`            |
 
 `memtable_budget_bytes` is the soft budget that schedules a flush;
 `memtable_hard_limit_bytes` is the ceiling that forces one before the next
