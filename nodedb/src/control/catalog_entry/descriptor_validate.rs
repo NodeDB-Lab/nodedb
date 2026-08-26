@@ -30,6 +30,21 @@ pub fn validate(
                 .get_collection(stored.database_id, stored.tenant_id, &stored.name)
                 .ok()
                 .flatten();
+            // B10 (2026-08-26): a DROP (deactivate) retains the collection row
+            // and its descriptor_version (is_active=false), so a subsequent
+            // CREATE restarts the lifecycle with the SAME numeric version but
+            // a strictly newer HLC and a byte-different (active) payload.
+            // Comparing versions alone would flag this legit recreate as an
+            // anomaly and wedge the metadata applier permanently on replay.
+            // A newer HLC on a deactivated row is a new lifecycle — apply it.
+            if let Some(current) = &current {
+                if !current.is_active
+                    && stored.descriptor_version == current.descriptor_version
+                    && stored.modification_hlc > current.modification_hlc
+                {
+                    return Ok(ValidationOutcome::Apply);
+                }
+            }
             validate_one(
                 &stored.name,
                 stored.descriptor_version,
@@ -286,6 +301,60 @@ mod tests {
         assert!(matches!(
             validate(&collection_with_version("orders", 4), catalog),
             Ok(ValidationOutcome::Apply)
+        ));
+    }
+
+    #[test]
+    fn validate_allows_recreate_after_deactivate() {
+        // B10 (2026-08-26): DROP retains the row with is_active=false and the
+        // SAME descriptor_version; a later CREATE restarts the lifecycle with
+        // the same numeric version, a newer HLC and a byte-different (active)
+        // payload. Must Apply, not wedge as DescriptorVersionAnomaly.
+        let (store, _tmp) = make_catalog();
+        let catalog = store.catalog();
+        let mut deactivated = StoredCollection::new(1, "orders", "tester");
+        deactivated.descriptor_version = 1;
+        deactivated.is_active = false;
+        deactivated.modification_hlc = nodedb_types::Hlc::new(100, 0);
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &deactivated)
+            .expect("seed deactivated prior");
+
+        let mut recreated = StoredCollection::new(1, "orders", "tester");
+        recreated.descriptor_version = 1;
+        recreated.is_active = true;
+        recreated.modification_hlc = nodedb_types::Hlc::new(200, 0);
+        let entry = CatalogEntry::PutCollection(Box::new(recreated));
+        assert!(
+            matches!(validate(&entry, catalog), Ok(ValidationOutcome::Apply)),
+            "recreate after deactivate must Apply (B10), got: {:?}",
+            validate(&entry, catalog)
+        );
+    }
+
+    #[test]
+    fn validate_treats_stale_recreate_as_already_applied() {
+        // Same version + deactivated row but OLDER HLC = stale replay — the
+        // existing incoming_hlc < current_hlc guard must treat it as applied
+        // (not a new lifecycle, not an anomaly).
+        let (store, _tmp) = make_catalog();
+        let catalog = store.catalog();
+        let mut deactivated = StoredCollection::new(1, "orders", "tester");
+        deactivated.descriptor_version = 1;
+        deactivated.is_active = false;
+        deactivated.modification_hlc = nodedb_types::Hlc::new(200, 0);
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &deactivated)
+            .expect("seed deactivated prior");
+
+        let mut recreated = StoredCollection::new(1, "orders", "tester");
+        recreated.descriptor_version = 1;
+        recreated.is_active = true;
+        recreated.modification_hlc = nodedb_types::Hlc::new(100, 0);
+        let entry = CatalogEntry::PutCollection(Box::new(recreated));
+        assert!(matches!(
+            validate(&entry, catalog),
+            Ok(ValidationOutcome::AlreadyApplied)
         ));
     }
 
