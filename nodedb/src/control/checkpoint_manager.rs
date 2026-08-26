@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::bridge::dispatch::Dispatcher;
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
@@ -387,26 +387,99 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
 ///
 /// Runs `run_checkpoint_cycle` at the configured interval until the
 /// shutdown signal is received. Performs a final checkpoint on graceful shutdown.
+///
+/// B5 (2026-08-26): registered via [`spawn_loop_no_abort`] so the loop registry
+/// JOINS this task during graceful shutdown — the final checkpoint must finish
+/// before the process exits. Previously a bare `tokio::spawn` with its own
+/// watch meant nothing waited on it, so a normal exit could race the final
+/// cycle and leave a torn WAL tail (the force-stop corruption shape).
+///
+/// B4/B5: each cycle outcome is reported to the runtime-health registry; N
+/// consecutive failures escalate to a `CRITICAL` log and mark the node
+/// degraded on `/healthz` + `STATUS`. While unhealthy, the next cycle is
+/// retried sooner (30s doubling, capped at the configured interval) instead of
+/// waiting the full 5-minute interval in silence.
 pub fn spawn_checkpoint_task(
     shared: Arc<crate::control::state::SharedState>,
     watermark_store: Arc<crate::event::watermark::WatermarkStore>,
     num_cores: usize,
     config: CheckpointManagerConfig,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        info!(
-            interval_secs = config.interval.as_secs(),
-            "checkpoint manager started"
-        );
+    registry: &crate::control::shutdown::LoopRegistry,
+    shutdown: &crate::control::shutdown::ShutdownWatch,
+) {
+    use crate::control::shutdown::spawn_loop_no_abort;
 
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(config.interval) => {}
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!("shutdown: running final checkpoint");
-                        run_checkpoint_cycle(CheckpointCycleInputs {
+    spawn_loop_no_abort(
+        registry,
+        shutdown,
+        "checkpoint_manager",
+        move |mut shutdown| async move {
+            info!(
+                interval_secs = config.interval.as_secs(),
+                "checkpoint manager started"
+            );
+
+            let mut consecutive_failures: u32 = 0;
+            let mut escalated = false;
+
+            loop {
+                let cycle = run_checkpoint_cycle(CheckpointCycleInputs {
+                    dispatcher: &shared.dispatcher,
+                    tracker: &shared.tracker,
+                    wal: &shared.wal,
+                    watermark_store: &watermark_store,
+                    num_cores,
+                    timeout: config.core_timeout,
+                    cold_storage: shared.cold_storage.clone(),
+                    catalog: Some(shared.credentials.catalog()),
+                })
+                .await;
+
+                let ok = cycle.is_some();
+                if ok {
+                    consecutive_failures = 0;
+                    escalated = false;
+                } else {
+                    consecutive_failures += 1;
+                }
+
+                // B4/B5: feed the runtime-health registry; escalate once at the
+                // threshold so the wedge becomes a CRITICAL + degraded health
+                // instead of 5-minute silent deferrals.
+                if crate::bridge::runtime_health::record_checkpoint_result(ok)
+                    && !escalated
+                {
+                    escalated = true;
+                    error!(
+                        consecutive_failures,
+                        threshold = crate::bridge::runtime_health::CHECKPOINT_STALL_THRESHOLD,
+                        "checkpoint CRITICAL: repeated failed cycles — WAL truncation suspended, \
+                         node marked degraded"
+                    );
+                }
+
+                // Healthy → configured interval. Unhealthy → fast retry with
+                // backoff (30s, 60s, 120s, capped at the interval) so recovery
+                // is detected promptly instead of after a silent 5 minutes.
+                let wait = if consecutive_failures == 0 {
+                    config.interval
+                } else {
+                    let shift = consecutive_failures.min(3);
+                    Duration::from_secs(30) * (1u32 << shift)
+                }
+                .min(config.interval);
+
+                tokio::select! {
+                    _ = shutdown.wait_cancelled() => {
+                        if consecutive_failures == 0 {
+                            info!("shutdown: running final checkpoint");
+                        } else {
+                            error!(
+                                consecutive_failures,
+                                "shutdown while checkpoint unhealthy — final checkpoint may defer"
+                            );
+                        }
+                        let final_cycle = run_checkpoint_cycle(CheckpointCycleInputs {
                             dispatcher: &shared.dispatcher,
                             tracker: &shared.tracker,
                             wal: &shared.wal,
@@ -415,26 +488,18 @@ pub fn spawn_checkpoint_task(
                             timeout: config.core_timeout,
                             cold_storage: shared.cold_storage.clone(),
                             catalog: Some(shared.credentials.catalog()),
-                        }).await;
+                        })
+                        .await;
+                        let _ =
+                            crate::bridge::runtime_health::record_checkpoint_result(final_cycle.is_some());
                         info!("checkpoint manager stopped");
                         return;
                     }
+                    _ = tokio::time::sleep(wait) => {}
                 }
             }
-
-            run_checkpoint_cycle(CheckpointCycleInputs {
-                dispatcher: &shared.dispatcher,
-                tracker: &shared.tracker,
-                wal: &shared.wal,
-                watermark_store: &watermark_store,
-                num_cores,
-                timeout: config.core_timeout,
-                cold_storage: shared.cold_storage.clone(),
-                catalog: Some(shared.credentials.catalog()),
-            })
-            .await;
-        }
-    })
+        },
+    );
 }
 
 /// Archive WAL segments that will be deleted by the upcoming `truncate_before(checkpoint_lsn)`.
