@@ -4,6 +4,7 @@ pub mod admission_chokepoint;
 pub mod dispatch;
 pub mod envelope;
 pub mod quiesce;
+pub mod runtime_health;
 pub mod slab;
 
 // Re-export shared query engine from nodedb-query crate.

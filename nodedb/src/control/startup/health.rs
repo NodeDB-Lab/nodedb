@@ -25,15 +25,37 @@ pub enum HealthState {
     Ok,
     /// Startup failed; includes the original error.
     Failed { error: Arc<StartupError> },
+    /// Boot completed but the runtime is unhealthy: a data-plane core stopped
+    /// ticking or the coordinated checkpoint is stalling (B4/B5, 2026-08-26).
+    /// The node may still answer some requests, but writes/durability are at
+    /// risk — surfaced as `503 degraded` on HTTP and "Degraded" on STATUS.
+    Degraded { reason: &'static str },
 }
 
-/// Read the current health from `gate`.
+/// Read the current health from `gate` and the runtime health registry.
 pub fn observe(gate: &StartupGate) -> HealthState {
     if let Some(err) = gate.is_failed() {
         return HealthState::Failed { error: err };
     }
     let phase = gate.current_phase();
     if phase >= StartupPhase::GatewayEnable {
+        // Boot is done — fold in runtime signals so a silent wedge degrades
+        // the health surfaces instead of reporting Ok forever.
+        if !crate::bridge::runtime_health::runtime_healthy() {
+            let reason = crate::bridge::runtime_health::unhealthy_reason();
+            let stalled = crate::bridge::runtime_health::stalled_core_ids(
+                crate::bridge::runtime_health::CORE_STALL_THRESHOLD,
+            );
+            if !stalled.is_empty() {
+                tracing::error!(
+                    ?stalled,
+                    "runtime health degraded: data plane core(s) stalled"
+                );
+            } else {
+                tracing::error!("runtime health degraded: {}", reason);
+            }
+            return HealthState::Degraded { reason };
+        }
         HealthState::Ok
     } else {
         HealthState::Starting { phase }
@@ -47,7 +69,7 @@ pub fn observe(gate: &StartupGate) -> HealthState {
 /// HTTP status code and JSON body for the given health state.
 ///
 /// - `200 OK`                  when [`HealthState::Ok`]
-/// - `503 Service Unavailable` when starting or failed
+/// - `503 Service Unavailable` when starting, degraded, or failed
 pub fn to_http_response(state: &HealthState) -> (axum::http::StatusCode, serde_json::Value) {
     use axum::http::StatusCode;
     match state {
@@ -63,6 +85,14 @@ pub fn to_http_response(state: &HealthState) -> (axum::http::StatusCode, serde_j
             serde_json::json!({
                 "status": "starting",
                 "phase": phase.name(),
+            }),
+        ),
+        HealthState::Degraded { reason } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "status": "degraded",
+                "reason": reason,
+                "phase": StartupPhase::GatewayEnable.name(),
             }),
         ),
         HealthState::Failed { error } => (
@@ -84,6 +114,7 @@ pub fn to_http_response(state: &HealthState) -> (axum::http::StatusCode, serde_j
 pub enum NativeStatus {
     Starting,
     Ok,
+    Degraded,
     Failed,
 }
 
@@ -92,6 +123,7 @@ pub fn to_native_status(state: &HealthState) -> NativeStatus {
     match state {
         HealthState::Ok => NativeStatus::Ok,
         HealthState::Starting { .. } => NativeStatus::Starting,
+        HealthState::Degraded { .. } => NativeStatus::Degraded,
         HealthState::Failed { .. } => NativeStatus::Failed,
     }
 }
@@ -101,6 +133,7 @@ impl std::fmt::Display for NativeStatus {
         match self {
             Self::Ok => f.write_str("OK"),
             Self::Starting => f.write_str("Starting"),
+            Self::Degraded => f.write_str("Degraded"),
             Self::Failed => f.write_str("Failed"),
         }
     }
@@ -159,6 +192,22 @@ mod tests {
     fn native_status_display() {
         assert_eq!(NativeStatus::Ok.to_string(), "OK");
         assert_eq!(NativeStatus::Starting.to_string(), "Starting");
+        assert_eq!(NativeStatus::Degraded.to_string(), "Degraded");
         assert_eq!(NativeStatus::Failed.to_string(), "Failed");
+    }
+
+    #[test]
+    fn to_http_response_503_when_degraded() {
+        let state = HealthState::Degraded {
+            reason: "checkpoint stalled (consecutive failed cycles)",
+        };
+        let (code, body) = to_http_response(&state);
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(
+            body["reason"],
+            "checkpoint stalled (consecutive failed cycles)"
+        );
+        assert_eq!(to_native_status(&state), NativeStatus::Degraded);
     }
 }

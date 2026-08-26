@@ -48,6 +48,11 @@ pub(super) fn run_event_loop(
         // Drain all accumulated signals.
         while efd.drain() > 0 {}
 
+        // B4: per-core heartbeat. Recorded every iteration (before any work)
+        // so a loop stuck inside a request still trips the stall detector
+        // instead of wedging silently — the 12:23 wedge shape (2026-08-26).
+        crate::bridge::runtime_health::record_core_tick(core_id);
+
         // If degraded, drain and reject all pending requests.
         if watchdog.is_degraded() {
             drain_and_reject(core, core_id);
