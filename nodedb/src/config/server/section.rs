@@ -71,6 +71,13 @@ pub struct ServerSection {
     #[serde(default)]
     pub log_format: LogFormat,
 
+    /// Boot-time raft metadata group readiness timeout in milliseconds.
+    /// Default 30_000 (30s). Replay of a large raft log (long write bursts,
+    /// big migrations) can exceed 30s — raise this via `raft_ready_timeout_ms`.
+    /// Script/config set: `[server] raft_ready_timeout_ms = 300000`.
+    #[serde(default)]
+    pub raft_ready_timeout_ms: Option<u64>,
+
     /// Per-listener TLS configuration. Lives under `[server.tls]` because
     /// it directly modifies the listeners declared in `[server.ports]`
     /// (per-protocol toggles + cert paths). When absent, every listener
@@ -126,6 +133,7 @@ impl Default for ServerSection {
             memory_limit: default_memory_limit(),
             max_connections: default_max_connections(),
             log_format: LogFormat::Text,
+            raft_ready_timeout_ms: None,
             tls: None,
             single_node_calvin: default_single_node_calvin(),
             native_crash_dumps: false,

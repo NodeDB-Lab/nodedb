@@ -33,6 +33,7 @@ pub async fn await_cluster_ready(
     raft_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
     data_plane_replay_done: Vec<tokio::sync::oneshot::Receiver<()>>,
     gates: ClusterReadyGates,
+    raft_ready_timeout: std::time::Duration,
 ) -> anyhow::Result<()> {
     let ClusterReadyGates {
         raft_gate,
@@ -51,8 +52,7 @@ pub async fn await_cluster_ready(
     // `metadata propose: not leader` because election had not yet
     // completed.
     if let Some(mut ready_rx) = raft_ready_rx {
-        const RAFT_READY_TIMEOUT: Duration = Duration::from_secs(30);
-        match tokio::time::timeout(RAFT_READY_TIMEOUT, ready_rx.wait_for(|v| *v)).await {
+        match tokio::time::timeout(raft_ready_timeout, ready_rx.wait_for(|v| *v)).await {
             Ok(Ok(_)) => {
                 info!("metadata raft group ready — opening client listeners");
             }
@@ -64,10 +64,10 @@ pub async fn await_cluster_ready(
             }
             Err(_) => {
                 raft_gate.fail(format!(
-                    "raft readiness timeout after {RAFT_READY_TIMEOUT:?}"
+                    "raft readiness timeout after {raft_ready_timeout:?}"
                 ));
                 return Err(anyhow::anyhow!(
-                    "raft readiness timeout after {RAFT_READY_TIMEOUT:?} — \
+                    "raft readiness timeout after {raft_ready_timeout:?} — \
                      metadata group failed to apply first entry"
                 ));
             }
