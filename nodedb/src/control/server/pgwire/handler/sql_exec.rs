@@ -43,10 +43,30 @@ impl NodeDbPgHandler {
                     .await
             }
             _ => {
+                let total = statements.len();
                 let mut all = Vec::new();
                 for stmt in statements {
                     let mut resp = self.execute_single_sql(identity, session_id, &stmt).await?;
                     all.append(&mut resp);
+                }
+                // B1 ack reconciliation (2026-08-26): every statement must
+                // produce at least one response. A short count means the
+                // executor silently dropped work (observed: batch 64 → 32
+                // landed, batch 128 → ~25%, no error). Surface it as a hard
+                // error instead of letting the client believe the batch
+                // committed. Defense-in-depth until the propose-path drop
+                // site is traced and fixed.
+                if all.len() < total {
+                    return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "XX000".to_owned(),
+                        format!(
+                            "incomplete batch: {}/{} statements produced responses — \
+                             some work may have been dropped; retry with a smaller batch",
+                            all.len(),
+                            total,
+                        ),
+                    ))));
                 }
                 Ok(all)
             }
