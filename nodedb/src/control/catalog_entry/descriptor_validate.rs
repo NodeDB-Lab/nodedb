@@ -37,10 +37,18 @@ pub fn validate(
             // Comparing versions alone would flag this legit recreate as an
             // anomaly and wedge the metadata applier permanently on replay.
             // A newer HLC on a deactivated row is a new lifecycle — apply it.
+            // `>=` (not `>`) because full-log replay re-delivers the exact
+            // same frozen entry: the stored HLC equals the persisted row's
+            // HLC (frozen at propose, applied once, row later deactivated).
+            // Strict `>` would treat that idempotent re-delivery as a
+            // divergence and wedge (observed: 26298 'bugtest', backup 17:20
+            // + restart replay). Equal-HLC + deactivated + same version is
+            // still a recreate, never a stale anomaly; older HLC stays
+            // AlreadyApplied via the existing guard below.
             if let Some(current) = &current {
                 if !current.is_active
                     && stored.descriptor_version == current.descriptor_version
-                    && stored.modification_hlc > current.modification_hlc
+                    && stored.modification_hlc >= current.modification_hlc
                 {
                     return Ok(ValidationOutcome::Apply);
                 }
@@ -333,10 +341,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_allows_recreate_with_equal_hlc_on_full_log_replay() {
+        // B10 replay regression (2026-08-26, live wedge 26298 'bugtest'):
+        // full-log replay re-delivers the exact frozen entry. The persisted
+        // row (created earlier, then DROPPED) carries the SAME HLC as the
+        // stored entry — frozen at propose, applied once, deactivated later,
+        // then the same entry is replayed from the log after a restart.
+        // Equal HLC + deactivated row + same version is still a recreate,
+        // NOT a divergence: must Apply. Strict `>` previously wedged here.
+        let (store, _tmp) = make_catalog();
+        let catalog = store.catalog();
+        let mut deactivated = StoredCollection::new(1, "orders", "tester");
+        deactivated.descriptor_version = 1;
+        deactivated.is_active = false;
+        deactivated.modification_hlc = nodedb_types::Hlc::new(200, 0);
+        catalog
+            .put_collection(DatabaseId::DEFAULT, &deactivated)
+            .expect("seed deactivated prior");
+
+        let mut recreated = StoredCollection::new(1, "orders", "tester");
+        recreated.descriptor_version = 1;
+        recreated.is_active = true;
+        recreated.modification_hlc = nodedb_types::Hlc::new(200, 0);
+        let entry = CatalogEntry::PutCollection(Box::new(recreated));
+        assert!(
+            matches!(validate(&entry, catalog), Ok(ValidationOutcome::Apply)),
+            "equal-HLC recreate on replay must Apply (B10 replay), got: {:?}",
+            validate(&entry, catalog)
+        );
+    }
+
+    #[test]
     fn validate_treats_stale_recreate_as_already_applied() {
-        // Same version + deactivated row but OLDER HLC = stale replay — the
-        // existing incoming_hlc < current_hlc guard must treat it as applied
-        // (not a new lifecycle, not an anomaly).
         let (store, _tmp) = make_catalog();
         let catalog = store.catalog();
         let mut deactivated = StoredCollection::new(1, "orders", "tester");
