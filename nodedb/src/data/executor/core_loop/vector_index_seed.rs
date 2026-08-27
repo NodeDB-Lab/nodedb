@@ -30,12 +30,13 @@ impl CoreLoop {
     /// `execute_set_vector_params` keys a live `CREATE VECTOR INDEX`.
     /// Called once at core startup, before the durable HNSW rebuild.
     ///
-    /// `CREATE VECTOR INDEX` computes its vshard with `DatabaseId::DEFAULT`
-    /// and the stored entry carries no database id, so the seed keys under
-    /// `DatabaseId::DEFAULT` to match.
+    /// `CREATE VECTOR INDEX` computes its vshard with the session's
+    /// `database_id`, and the stored entry now carries that id. Entries
+    /// written before the field existed decode to `0`
+    /// (`DatabaseId::DEFAULT`) — the historical assumption of this path.
     pub fn seed_vector_index_params(&mut self, entries: &[nodedb_types::StoredVectorIndexParams]) {
         for e in entries {
-            let db = crate::types::DatabaseId::DEFAULT.as_u64();
+            let db = e.database_id;
             let key = CoreLoop::vector_index_key(db, e.tenant_id, &e.collection, &e.field_name);
             let (params, config) = build_index_config_from_stored(e);
             if e.dim > 0 {
@@ -128,6 +129,7 @@ mod tests {
             pq_m: 0,
             ivf_cells: 0,
             ivf_nprobe: 0,
+            database_id: 0,
         }
     }
 

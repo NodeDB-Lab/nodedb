@@ -10,6 +10,36 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use super::types::{SystemCatalog, VECTOR_INDEX_PARAMS, catalog_err};
 
+/// Decode a stored vector-index entry, tolerating the legacy 11-field shape
+/// written before `database_id` existed (field order is the zerompk array
+/// format, so `database_id` is simply appended last). Legacy entries decode
+/// to `database_id = 0` (`DatabaseId::DEFAULT`) — the historical assumption
+/// of the seed/rebuild paths.
+fn decode_vector_index_params(bytes: &[u8]) -> crate::Result<StoredVectorIndexParams> {
+    if let Ok(e) = zerompk::from_msgpack::<StoredVectorIndexParams>(bytes) {
+        return Ok(e);
+    }
+    // Legacy 11-field tuple: (tenant, collection, field, dim, metric, m,
+    // ef_construction, index_type, pq_m, ivf_cells, ivf_nprobe).
+    let legacy: (u64, String, String, usize, String, usize, usize, String, usize, usize, usize) =
+        zerompk::from_msgpack(bytes)
+            .map_err(|e| catalog_err("deser legacy vector index params", e))?;
+    Ok(StoredVectorIndexParams {
+        tenant_id: legacy.0,
+        collection: legacy.1,
+        field_name: legacy.2,
+        dim: legacy.3,
+        metric: legacy.4,
+        m: legacy.5,
+        ef_construction: legacy.6,
+        index_type: legacy.7,
+        pq_m: legacy.8,
+        ivf_cells: legacy.9,
+        ivf_nprobe: legacy.10,
+        database_id: 0,
+    })
+}
+
 impl SystemCatalog {
     /// Store vector index parameters for a collection/field.
     pub fn put_vector_index_params(&self, entry: &StoredVectorIndexParams) -> crate::Result<()> {
@@ -49,8 +79,7 @@ impl SystemCatalog {
 
         match table.get(key.as_str()) {
             Ok(Some(value)) => {
-                let entry: StoredVectorIndexParams = zerompk::from_msgpack(value.value())
-                    .map_err(|e| catalog_err("deser vector index params", e))?;
+                let entry = decode_vector_index_params(value.value())?;
                 Ok(Some(entry))
             }
             Ok(None) => Ok(None),
@@ -114,8 +143,7 @@ pub(super) fn list_all_vector_index_params_in(
         .map_err(|e| catalog_err("range vector index params", e))?
     {
         let (_, value) = item.map_err(|e| catalog_err("read vector index params", e))?;
-        let entry: StoredVectorIndexParams = zerompk::from_msgpack(value.value())
-            .map_err(|e| catalog_err("deser vector index params", e))?;
+        let entry = decode_vector_index_params(value.value())?;
         entries.push(entry);
     }
     Ok(entries)

@@ -216,6 +216,7 @@ pub async fn create_vector_index(
             pq_m: params.pq_m,
             ivf_cells: params.ivf_cells,
             ivf_nprobe: params.ivf_nprobe,
+            database_id: database_id.as_u64(),
         })
         .map_err(|e| {
             ddl_err(

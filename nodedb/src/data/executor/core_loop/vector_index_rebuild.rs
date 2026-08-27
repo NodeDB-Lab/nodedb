@@ -27,20 +27,22 @@ impl CoreLoop {
         entries: &[nodedb_types::StoredVectorIndexParams],
     ) {
         use std::collections::HashSet;
-        let db = crate::types::DatabaseId::DEFAULT.as_u64();
 
-        // One scan per (tenant, collection): `apply_point_put_vector_indexes`
+        // One scan per (db, tenant, collection): `apply_point_put_vector_indexes`
         // re-indexes ALL of the document's vector fields, so multiple field
-        // indexes on one collection need only a single scan.
-        let mut seen: HashSet<(u64, String)> = HashSet::new();
-        let mut targets: Vec<(u64, String)> = Vec::new();
+        // indexes on one collection need only a single scan. `database_id`
+        // comes from the durable entry (0 = DEFAULT for pre-existing entries,
+        // matching the historical behavior of this path).
+        let mut seen: HashSet<(u64, u64, String)> = HashSet::new();
+        let mut targets: Vec<(u64, u64, String)> = Vec::new();
         for e in entries {
-            if seen.insert((e.tenant_id, e.collection.clone())) {
-                targets.push((e.tenant_id, e.collection.clone()));
+            let key = (e.database_id, e.tenant_id, e.collection.clone());
+            if seen.insert(key.clone()) {
+                targets.push(key);
             }
         }
 
-        for (tenant_id, collection) in targets {
+        for (db, tenant_id, collection) in targets {
             // `entries` comes from the `CREATE VECTOR INDEX` param seed, so
             // every target here is a classic collection with a vector index
             // over a document field, and `apply_point_put_vector_indexes`
@@ -82,11 +84,29 @@ impl CoreLoop {
                     if let Some(surrogate) =
                         crate::engine::document::store::doc_id_to_surrogate(doc_id)
                     {
-                        let normalized =
-                            crate::data::executor::scan_normalize::sparse_body_to_msgpack(
+                        let normalized: std::borrow::Cow<[u8]> = match &body_format {
+                            crate::data::executor::sparse_body_format::SparseBodyFormat::Strict(schema) => {
+                                match crate::data::executor::strict_format::binary_tuple_to_msgpack(value, schema) {
+                                    Some(mp) => std::borrow::Cow::Owned(mp),
+                                    None => {
+                                        tracing::warn!(
+                                            core = self.core_id,
+                                            %collection,
+                                            doc_id = %doc_id,
+                                            "strict BT decode failed in vector rebuild — doc will be unsearchable"
+                                        );
+                                        crate::data::executor::scan_normalize::sparse_body_to_msgpack(
+                                            value,
+                                            body_format.as_format_ref(),
+                                        )
+                                    }
+                                }
+                            }
+                            _ => crate::data::executor::scan_normalize::sparse_body_to_msgpack(
                                 value,
                                 body_format.as_format_ref(),
-                            );
+                            ),
+                        };
                         docs.push((surrogate, normalized.into_owned()));
                     }
                     Ok(())

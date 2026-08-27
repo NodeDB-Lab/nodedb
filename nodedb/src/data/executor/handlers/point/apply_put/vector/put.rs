@@ -6,6 +6,58 @@ use crate::data::executor::core_loop::CoreLoop;
 
 use super::types::{VectorFieldInsert, VectorIndexDelta, VectorIndexPutParams};
 
+/// Extract a float vector from a decoded document value.
+///
+/// Accepts both native msgpack arrays (the forward write path) and JSON
+/// strings (schemaless bodies transcoded from a columnar TEXT/JSON column,
+/// e.g. `"[0.1, 0.2, ...]"` or a plain comma/whitespace-separated list) so
+/// the durable-store rebuild path indexes the same vectors a live PUT would.
+fn floats_from_value(v: &nodedb_types::Value) -> Option<Vec<f32>> {
+    match v {
+        nodedb_types::Value::Array(arr) => {
+            let floats: Vec<f32> = arr
+                .iter()
+                .filter_map(|v| match v {
+                    nodedb_types::Value::Float(f) => Some(*f as f32),
+                    nodedb_types::Value::Integer(i) => Some(*i as f32),
+                    nodedb_types::Value::Decimal(d) => {
+                        use rust_decimal::prelude::ToPrimitive;
+                        d.to_f32()
+                    }
+                    nodedb_types::Value::String(s) => s.parse::<f32>().ok(),
+                    _ => None,
+                })
+                .collect();
+            if floats.is_empty() {
+                None
+            } else {
+                Some(floats)
+            }
+        }
+        nodedb_types::Value::String(s) => {
+            // Try JSON array first, then comma/space-separated numbers.
+            if let Ok(vals) = serde_json::from_str::<Vec<f64>>(s) {
+                return Some(vals.into_iter().map(|f| f as f32).collect());
+            }
+            let trimmed = s.trim().trim_start_matches('[').trim_end_matches(']');
+            let mut floats: Vec<f32> = Vec::new();
+            for tok in trimmed.split([',', ' ', '\t', '\n']) {
+                let tok = tok.trim();
+                if tok.is_empty() {
+                    continue;
+                }
+                floats.push(tok.parse::<f32>().ok()?);
+            }
+            if floats.is_empty() {
+                None
+            } else {
+                Some(floats)
+            }
+        }
+        _ => None,
+    }
+}
+
 impl CoreLoop {
     /// HNSW vector indexing side-effect: index declared strict-schema
     /// `Vector(dim)` columns, or (schemaless) fields matched by registered
@@ -54,20 +106,9 @@ impl CoreLoop {
                 && let nodedb_types::Value::Object(ref obj) = ndb_val
             {
                 for (field_name, dim) in &vector_fields {
-                    if let Some(nodedb_types::Value::Array(arr)) = obj.get(field_name) {
-                        let floats: Vec<f32> = arr
-                            .iter()
-                            .filter_map(|v| match v {
-                                nodedb_types::Value::Float(f) => Some(*f as f32),
-                                nodedb_types::Value::Integer(i) => Some(*i as f32),
-                                nodedb_types::Value::Decimal(d) => {
-                                    use rust_decimal::prelude::ToPrimitive;
-                                    d.to_f32()
-                                }
-                                nodedb_types::Value::String(s) => s.parse::<f32>().ok(),
-                                _ => None,
-                            })
-                            .collect();
+                    if let Some(v) = obj.get(field_name)
+                        && let Some(floats) = floats_from_value(v)
+                    {
                         let index_key =
                             Self::vector_index_key(database_id, tid, collection, field_name);
                         self.check_vector_width(&index_key, field_name, floats.len())?;
@@ -156,21 +197,10 @@ impl CoreLoop {
                 && let nodedb_types::Value::Object(ref obj) = ndb_val
             {
                 for (params_key, field_name) in &schemaless_keys {
-                    if let Some(nodedb_types::Value::Array(arr)) = obj.get(field_name) {
-                        let floats: Vec<f32> = arr
-                            .iter()
-                            .filter_map(|v| match v {
-                                nodedb_types::Value::Float(f) => Some(*f as f32),
-                                nodedb_types::Value::Integer(i) => Some(*i as f32),
-                                nodedb_types::Value::Decimal(d) => {
-                                    use rust_decimal::prelude::ToPrimitive;
-                                    d.to_f32()
-                                }
-                                nodedb_types::Value::String(s) => s.parse::<f32>().ok(),
-                                _ => None,
-                            })
-                            .collect();
-                        if !floats.is_empty() {
+                    if let Some(v) = obj.get(field_name)
+                        && let Some(floats) = floats_from_value(v)
+                        && !floats.is_empty()
+                    {
                             let params = self
                                 .vector_params
                                 .get(params_key)
@@ -213,7 +243,6 @@ impl CoreLoop {
                                 inserts.push(delta);
                             }
                         }
-                    }
                 }
             }
         }
