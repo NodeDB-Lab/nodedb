@@ -228,6 +228,9 @@ impl MemoryGovernor {
         // Must resolve BEFORE any increment: with a bad engine name every
         // other path rolls back, this one used to return from the lookup
         // after global/db/tenant counters were already bumped.
+        // Intent: an unknown engine is rejected for ANY size, including 0 —
+        // a zero-size reservation still names an engine, and silently
+        // succeeding under an unknown name would hide configuration drift.
         let engine_budget = self
             .budgets
             .get(&engine)
@@ -513,6 +516,23 @@ mod tests {
             gov.global_counter.allocated.load(Ordering::Relaxed),
             0,
             "D2: UnknownEngine must not leak the global counter"
+        );
+    }
+
+    #[test]
+    fn unknown_engine_rejected_even_for_zero_size() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        let err = gov
+            .try_reserve(db(), tenant(), EngineId::Array, 0)
+            .unwrap_err();
+        assert!(
+            matches!(err, MemError::UnknownEngine(_)),
+            "zero-size reservation must still validate the engine name"
+        );
+        assert_eq!(
+            gov.global_counter.allocated.load(Ordering::Relaxed),
+            0,
+            "no counter may move for a rejected reservation"
         );
     }
 
