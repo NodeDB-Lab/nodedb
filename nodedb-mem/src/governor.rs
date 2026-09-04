@@ -224,6 +224,15 @@ impl MemoryGovernor {
         engine: EngineId,
         size: usize,
     ) -> Result<ReservationToken> {
+        // ── Layer 0: fail fast on unknown engine (D2 / #271) ──────────────────
+        // Must resolve BEFORE any increment: with a bad engine name every
+        // other path rolls back, this one used to return from the lookup
+        // after global/db/tenant counters were already bumped.
+        let engine_budget = self
+            .budgets
+            .get(&engine)
+            .ok_or(MemError::UnknownEngine(engine))?;
+
         // ── Layer 1: global ceiling ───────────────────────────────────────────
         let global_arc = Arc::clone(&self.global_counter);
         if size > 0 {
@@ -306,11 +315,7 @@ impl MemoryGovernor {
             }
         };
 
-        // ── Layer 4: per-engine budget ────────────────────────────────────────
-        let engine_budget = self
-            .budgets
-            .get(&engine)
-            .ok_or(MemError::UnknownEngine(engine))?;
+        // ── Layer 4: per-engine budget (resolved above, fail-fast) ────────────
 
         let engine_counter = if let Some(arc) = engine_budget.try_reserve_arc(size) {
             Some(arc)
@@ -491,6 +496,25 @@ mod tests {
     }
 
     // ── Basic 4-arity reservation ────────────────────────────────────────────
+
+    #[test]
+    fn try_reserve_unknown_engine_rolls_back_global() {
+        // CLAIM D2: engine lookup (`ok_or(UnknownEngine)?`) happens AFTER
+        // global/db/tenant increments; error path must roll back or leak.
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        let err = gov
+            .try_reserve(db(), tenant(), EngineId::Array, 1000)
+            .unwrap_err();
+        assert!(
+            matches!(err, MemError::UnknownEngine(_)),
+            "Array is not in test_config engine limits"
+        );
+        assert_eq!(
+            gov.global_counter.allocated.load(Ordering::Relaxed),
+            0,
+            "D2: UnknownEngine must not leak the global counter"
+        );
+    }
 
     #[test]
     fn reserve_within_budget() {
