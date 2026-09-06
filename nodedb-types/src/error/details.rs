@@ -107,6 +107,9 @@ pub enum ErrorDetails {
     /// A LIMIT/OFFSET/FETCH bound resolved outside `[0, usize::MAX]`.
     #[serde(rename = "invalid_limit_value")]
     InvalidLimitValue { clause: String, value: String },
+    /// A NOT NULL column received an explicit NULL or no value at all.
+    #[serde(rename = "not_null_violation")]
+    NotNullViolation { table: String, column: String },
 
     // Auth
     #[serde(rename = "authorization_denied")]

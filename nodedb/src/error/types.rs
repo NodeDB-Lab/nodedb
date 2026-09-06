@@ -282,6 +282,12 @@ pub enum Error {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
+    /// A NOT NULL column received an explicit NULL or no value at all.
+    /// Propagated from the INSERT/UPSERT planner; the pgwire layer renders
+    /// this as SQLSTATE `23502` (not_null_violation).
+    #[error("null value in column '{column}' violates not-null constraint in table '{table}'")]
+    NotNullViolation { table: String, column: String },
+
     /// Expression evaluation divided or took a modulus by zero. Rendered as
     /// SQLSTATE `22012` (division_by_zero) at the pgwire layer.
     #[error("division by zero")]

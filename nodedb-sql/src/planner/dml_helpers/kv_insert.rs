@@ -100,6 +100,21 @@ pub(crate) fn build_kv_insert_plan(
     check_declared_int_ranges_in_assignments(declared_columns, &on_conflict_updates)?;
     check_declared_float_ranges_in_assignments(declared_columns, &on_conflict_updates)?;
 
+    // PRIMARY KEY implies NOT NULL. A row that omits the key column or
+    // binds it to NULL would commit an empty-keyed entry — unique against
+    // nothing and unreadable — instead of raising. Defaults were already
+    // materialized above, so a present NULL is an explicit violation and
+    // an absent key means the column list never mentioned it.
+    for row in &coerced_rows {
+        let cell = row.iter().find(|(name, _)| name == key_col_name);
+        if cell.is_none() || matches!(cell, Some((_, SqlValue::Null))) {
+            return Err(SqlError::NotNullViolation {
+                table: table_name.clone(),
+                column: key_col_name.to_string(),
+            });
+        }
+    }
+
     let mut entries = Vec::with_capacity(coerced_rows.len());
     let mut ttl_secs: u64 = 0;
     for row in &coerced_rows {

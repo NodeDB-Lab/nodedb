@@ -134,6 +134,22 @@ impl NodeDbError {
         }
     }
 
+    /// A NOT NULL column received an explicit NULL or no value at all.
+    /// Distinct from `constraint_violation` so clients can match on the
+    /// specific code (SQLSTATE `23502`, `not_null_violation`).
+    pub fn not_null_violation(table: impl Into<String>, column: impl Into<String>) -> Self {
+        let table = table.into();
+        let column = column.into();
+        Self {
+            code: ErrorCode::NOT_NULL_VIOLATION,
+            message: format!(
+                "null value in column '{column}' violates not-null constraint in table '{table}'"
+            ),
+            details: ErrorDetails::NotNullViolation { table, column },
+            cause: None,
+        }
+    }
+
     /// Expression evaluation divided or took a modulus by zero. Distinct
     /// from `plan_error` so clients can match on the specific code
     /// (SQLSTATE `22012`, `division_by_zero`) rather than parsing the
