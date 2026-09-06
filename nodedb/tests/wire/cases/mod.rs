@@ -104,6 +104,7 @@ mod merge_insert_renamed_source_column;
 mod merge_insert_surrogate_stability;
 mod move_tenant_idempotent;
 mod move_tenant_round_trip;
+mod not_null_pk_23502;
 mod object_literal_dml_row_level_security;
 mod object_literal_trailing_clause;
 mod pg_catalog_oid_stability;

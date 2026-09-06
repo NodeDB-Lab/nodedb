@@ -148,6 +148,9 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         }
         Error::PlanError { detail } => NodeDbError::plan_error(detail),
         Error::UndefinedFunction { name } => NodeDbError::undefined_function(name.clone()),
+        Error::NotNullViolation { table, column } => {
+            NodeDbError::not_null_violation(table.clone(), column.clone())
+        }
         Error::DivisionByZero => NodeDbError::division_by_zero(),
         Error::InvalidLimitValue { clause, value } => {
             NodeDbError::invalid_limit_value(*clause, value.clone())

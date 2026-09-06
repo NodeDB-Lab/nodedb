@@ -22,6 +22,12 @@ pub enum SqlError {
     #[error("unknown column '{column}' in table '{table}'")]
     UnknownColumn { table: String, column: String },
 
+    /// A write supplied NULL (explicitly or by omission) for a declared
+    /// PRIMARY KEY column. PRIMARY KEY implies NOT NULL on every engine;
+    /// PostgreSQL rejects the same write with SQLSTATE `23502`.
+    #[error("null value in column '{column}' violates not-null constraint in table '{table}'")]
+    NotNullViolation { table: String, column: String },
+
     #[error("ambiguous column '{column}' — qualify with table name")]
     AmbiguousColumn { column: String },
 

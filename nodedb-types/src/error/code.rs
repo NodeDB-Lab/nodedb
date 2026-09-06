@@ -59,6 +59,8 @@ impl ErrorCode {
     pub const DIVISION_BY_ZERO: Self = Self(1204);
     /// A LIMIT/OFFSET/FETCH bound resolved outside `[0, usize::MAX]`.
     pub const INVALID_LIMIT_VALUE: Self = Self(1205);
+    /// A NOT NULL column received an explicit NULL or no value at all.
+    pub const NOT_NULL_VIOLATION: Self = Self(1207);
 
     // Engine ops (1300–1399)
     pub const ARRAY: Self = Self(1300);
