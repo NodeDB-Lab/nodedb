@@ -6,6 +6,7 @@ mod cold_storage;
 mod config;
 mod domain;
 mod env;
+mod env_expand;
 mod log_format;
 mod observability;
 mod paths;
@@ -14,6 +15,8 @@ mod retention;
 pub mod scheduler;
 mod section;
 mod snapshot_storage;
+#[cfg(test)]
+mod test_support;
 mod tls;
 
 pub use checkpoint::CheckpointSettings;
