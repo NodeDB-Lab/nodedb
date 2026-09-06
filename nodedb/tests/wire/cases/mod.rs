@@ -264,6 +264,7 @@ mod transactional_ddl_visibility_routines;
 mod transactional_ddl_visibility_sequence;
 mod trigger_e2e;
 mod txn_ddl_commit_registry_sync;
+mod undefined_column_42703;
 mod vector_index_bulk_delete_reindex;
 mod vector_index_bulk_update_reindex;
 mod vector_index_merge_reindex;

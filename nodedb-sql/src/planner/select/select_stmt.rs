@@ -20,6 +20,8 @@ use crate::resolver::columns::TableScope;
 use crate::temporal::TemporalScope;
 use crate::types::*;
 
+use super::validate_columns;
+
 /// Plan a single SELECT statement (no UNION, no CTE wrapper).
 ///
 /// `tail` carries the enclosing query's ORDER BY / LIMIT so the base scan can
@@ -173,6 +175,16 @@ pub(super) fn plan_select(
     let normalized_select = strip_single_table_qualifiers(select, &valid_qualifiers)?;
     let select = &normalized_select;
 
+    // 4a. Closed-schema existence gate: a reference to a column the
+    // collection does not declare raises 42703 (undefined_column) at plan
+    // time instead of planning as a field lookup that folds to NULL per row
+    // — silently wrong `WHERE` row sets, no-op `ORDER BY`, zero-row writes.
+    // Schemaless collections without a declared column list stay open and
+    // keep the fold. GROUP BY / HAVING may name projection aliases, so the
+    // alias set is computed once here and reused by the ORDER BY check.
+    let projection_aliases = validate_columns::projection_alias_set(select);
+    validate_columns::validate_select(select, table, &projection_aliases)?;
+
     // 4. Extract subqueries from WHERE and rewrite as semi/anti joins.
     let (subquery_joins, effective_where) = if let Some(expr) = &select.selection {
         let extraction =
@@ -289,7 +301,12 @@ pub(super) fn plan_select(
     // itself downstream — the same reason `scan_projection` is empty here.
     let (sort_keys, limit, offset) = if subquery_joins.is_empty() {
         let (limit, offset) = tail.limit_offset()?;
-        (tail.sort_keys()?, limit, offset)
+        let keys = tail.sort_keys()?;
+        // ORDER BY may name projection aliases or output ordinals; the key
+        // expressions are validated here against columns + output names so a
+        // typo'd sort column raises 42703 instead of silently no-oping.
+        validate_columns::validate_sort_keys(&keys, table, &projection_aliases)?;
+        (keys, limit, offset)
     } else {
         (Vec::new(), None, 0)
     };

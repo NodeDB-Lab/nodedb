@@ -282,6 +282,13 @@ pub enum Error {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
+    /// A column reference in a query names no column of the referenced
+    /// collection. Propagated from `SqlError::UnknownColumn`; the pgwire
+    /// layer renders this as SQLSTATE `42703` (undefined_column) — the same
+    /// code the Data Plane raises for the executor-side variant.
+    #[error("unknown column '{column}' in table '{table}'")]
+    UndefinedColumn { table: String, column: String },
+
     /// Expression evaluation divided or took a modulus by zero. Rendered as
     /// SQLSTATE `22012` (division_by_zero) at the pgwire layer.
     #[error("division by zero")]

@@ -87,6 +87,7 @@ error_code_table! {
     FAN_OUT_EXCEEDED => FanOutExceeded { shards_touched: 0, limit: 0 },
     SQL_NOT_ENABLED => SqlNotEnabled,
     UNDEFINED_FUNCTION => UndefinedFunction { name: String::new() },
+    UNDEFINED_COLUMN => UndefinedColumn { table: "remote".into(), column: message.to_owned() },
     DIVISION_BY_ZERO => DivisionByZero,
     INVALID_LIMIT_VALUE => InvalidLimitValue { clause: "remote".into(), value: message.to_owned() },
 

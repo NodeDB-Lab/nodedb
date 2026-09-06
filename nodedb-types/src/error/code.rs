@@ -59,6 +59,8 @@ impl ErrorCode {
     pub const DIVISION_BY_ZERO: Self = Self(1204);
     /// A LIMIT/OFFSET/FETCH bound resolved outside `[0, usize::MAX]`.
     pub const INVALID_LIMIT_VALUE: Self = Self(1205);
+    /// A column reference names no column of the referenced collection.
+    pub const UNDEFINED_COLUMN: Self = Self(1206);
 
     // Engine ops (1300–1399)
     pub const ARRAY: Self = Self(1300);
