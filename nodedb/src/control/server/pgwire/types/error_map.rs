@@ -50,6 +50,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             sqlstate::UNDEFINED_FUNCTION,
             format!("function {name}(...) does not exist"),
         ),
+        crate::Error::UndefinedColumn { table, column } => (
+            "ERROR",
+            sqlstate::UNDEFINED_COLUMN,
+            format!("unknown column '{column}' in table '{table}'"),
+        ),
         crate::Error::DivisionByZero => ("ERROR", sqlstate::DIVISION_BY_ZERO, err.to_string()),
         crate::Error::InvalidLimitValue { .. } => {
             ("ERROR", sqlstate::INVALID_LIMIT_VALUE, err.to_string())

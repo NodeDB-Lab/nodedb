@@ -42,6 +42,12 @@ fn map_plan_error(error: nodedb_sql::SqlError, tenant_id: crate::types::TenantId
         nodedb_sql::SqlError::UndefinedFunction { name } => {
             crate::Error::UndefinedFunction { name }
         }
+        // A column reference that resolves against nothing on a closed-schema
+        // collection reports 42703 (undefined_column), matching the executor
+        // site that raises the same condition for recursive-CTE steps.
+        nodedb_sql::SqlError::UnknownColumn { table, column } => {
+            crate::Error::UndefinedColumn { table, column }
+        }
         // A constant expression that divides by zero is the same condition the
         // row-scope evaluator raises, so it carries the same code.
         nodedb_sql::SqlError::DivisionByZero => crate::Error::DivisionByZero,

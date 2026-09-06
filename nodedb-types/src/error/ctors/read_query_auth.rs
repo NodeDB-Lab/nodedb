@@ -124,6 +124,21 @@ impl NodeDbError {
     /// window function. Distinct from `plan_error` so clients can match on
     /// the specific code (SQLSTATE `42883`, `undefined_function`) rather
     /// than parsing the message.
+    /// A column reference names no column of the referenced collection.
+    /// Distinct from `plan_error` so clients can match on the specific code
+    /// (SQLSTATE `42703`, `undefined_column`) rather than parsing the
+    /// message.
+    pub fn undefined_column(table: impl Into<String>, column: impl Into<String>) -> Self {
+        let table = table.into();
+        let column = column.into();
+        Self {
+            code: ErrorCode::UNDEFINED_COLUMN,
+            message: format!("unknown column '{column}' in table '{table}'"),
+            details: ErrorDetails::UndefinedColumn { table, column },
+            cause: None,
+        }
+    }
+
     pub fn undefined_function(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {

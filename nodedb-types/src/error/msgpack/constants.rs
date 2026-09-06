@@ -161,3 +161,4 @@ pub(super) const TAG_OBJECT_NOT_READY: u16 = 75;
 pub(super) const TAG_NOT_FOUND: u16 = 76;
 pub(super) const TAG_CANNOT_DROP_DEFAULT_DATABASE: u16 = 77;
 pub(super) const TAG_INVALID_LIMIT_VALUE: u16 = 78;
+pub(super) const TAG_UNDEFINED_COLUMN: u16 = 79;

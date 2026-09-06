@@ -15,6 +15,7 @@ mod order_by;
 mod post_process;
 mod query_tail;
 mod select_stmt;
+pub(crate) mod validate_columns;
 mod where_search;
 
 pub use entry::plan_query;

@@ -50,7 +50,21 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
             name: table_name.clone(),
         })?;
 
+    // Closed-schema existence gate (42703): a WHERE or SET target naming a
+    // column the collection does not declare must not silently no-op.
+    let resolved = crate::resolver::columns::ResolvedTable {
+        name: table_name.clone(),
+        alias: None,
+        info: info.clone(),
+    };
+    if let Some(selection) = &update.selection {
+        crate::planner::select::validate_columns::validate_where(selection, &resolved)?;
+    }
+
     let mut assigns = convert_assignments(&update.assignments)?;
+    for (column, _) in &assigns {
+        crate::planner::select::validate_columns::validate_write_column(column, &resolved)?;
+    }
     // Re-type each literal assignment to its declared column type before the
     // range check reads it — the same order, and for the same reason, as the
     // INSERT path's `coerce_and_check_rows`. Engines with a typed write path
@@ -357,6 +371,16 @@ pub fn plan_delete(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
         .ok_or_else(|| SqlError::UnknownTable {
             name: table_name.clone(),
         })?;
+
+    // Closed-schema existence gate (42703) for the DELETE predicate.
+    let resolved = crate::resolver::columns::ResolvedTable {
+        name: table_name.clone(),
+        alias: None,
+        info: info.clone(),
+    };
+    if let Some(selection) = &delete.selection {
+        crate::planner::select::validate_columns::validate_where(selection, &resolved)?;
+    }
 
     let filters = match &delete.selection {
         Some(expr) => super::super::select::convert_where_to_filters(expr)?,

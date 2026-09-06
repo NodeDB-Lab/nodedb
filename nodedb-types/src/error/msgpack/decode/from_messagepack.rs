@@ -131,6 +131,10 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 let (name,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::UndefinedFunction { name })
             }
+            TAG_UNDEFINED_COLUMN => {
+                let (table, column) = read2_str(reader, field_count)?;
+                Ok(ErrorDetails::UndefinedColumn { table, column })
+            }
             TAG_DIVISION_BY_ZERO => {
                 skip_fields(reader, field_count)?;
                 Ok(ErrorDetails::DivisionByZero)
