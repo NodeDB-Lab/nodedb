@@ -93,7 +93,10 @@ pub async fn init_cluster_with_transport(
         replication_factor: config.replication_factor,
         data_dir: data_dir.to_path_buf(),
         force_bootstrap: config.force_bootstrap,
-        join_retry: join_retry_policy_from_env(),
+        join_retry: nodedb_cluster::JoinRetryPolicy {
+            max_attempts: config.join_retry_max_attempts,
+            max_backoff_secs: config.join_retry_max_backoff_secs,
+        },
         swim_udp_addr: None,
         election_timeout_min: std::time::Duration::from_millis(
             transport_tuning.effective_election_timeout_min_ms(),
@@ -224,34 +227,9 @@ pub async fn init_single_node_calvin(
         login_attempts_per_user_per_min: 0,
         insecure_transport: true,
         log_compaction_threshold: None,
+        join_retry_max_attempts: 8,
+        join_retry_max_backoff_secs: 32,
     };
 
     init_cluster_with_transport(&settings, transport, data_dir, transport_tuning).await
-}
-
-/// Build the join retry policy, honouring two optional environment
-/// variables for test/CI overrides:
-///
-/// - `NODEDB_JOIN_RETRY_MAX_ATTEMPTS` — total attempts (default 8)
-/// - `NODEDB_JOIN_RETRY_MAX_BACKOFF_SECS` — per-attempt ceiling
-///   (default 32 s)
-///
-/// Production deployments leave both unset and get the production
-/// schedule. The integration test harness sets both to small values
-/// so a join-retry path doesn't spend ~1 minute sleeping in CI.
-fn join_retry_policy_from_env() -> nodedb_cluster::JoinRetryPolicy {
-    let mut policy = nodedb_cluster::JoinRetryPolicy::default();
-    if let Ok(v) = std::env::var("NODEDB_JOIN_RETRY_MAX_ATTEMPTS")
-        && let Ok(n) = v.parse::<u32>()
-        && n > 0
-    {
-        policy.max_attempts = n;
-    }
-    if let Ok(v) = std::env::var("NODEDB_JOIN_RETRY_MAX_BACKOFF_SECS")
-        && let Ok(n) = v.parse::<u64>()
-        && n > 0
-    {
-        policy.max_backoff_secs = n;
-    }
-    policy
 }

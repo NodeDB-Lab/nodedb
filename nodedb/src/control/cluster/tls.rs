@@ -526,6 +526,8 @@ mod tests {
             login_attempts_per_user_per_min: 10,
             insecure_transport: false,
             log_compaction_threshold: None,
+            join_retry_max_attempts: 8,
+            join_retry_max_backoff_secs: 32,
         }
     }
 

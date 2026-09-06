@@ -288,10 +288,7 @@ pub fn spawn_background_loops(
     // materializer directly.
     {
         let shared_sweep = Arc::clone(shared);
-        let sweep_ms = std::env::var("NODEDB_CLONE_SWEEP_INTERVAL_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30_000);
+        let sweep_ms = config.tuning.maintenance.clone_sweep_interval_ms;
         let sweep_interval = Duration::from_millis(sweep_ms);
         crate::control::shutdown::spawn_loop(
             &shared.loop_registry,
@@ -339,13 +336,19 @@ pub fn spawn_background_loops(
     // That node re-derives each collection's constraint set from the
     // catalog and replicates it to every data-group replica's CRDT validator,
     // so a collection created/altered under any leader converges everywhere.
-    crate::bootstrap::constraint_reconcile::spawn_constraint_reconcile(Arc::clone(shared));
+    crate::bootstrap::constraint_reconcile::spawn_constraint_reconcile(
+        Arc::clone(shared),
+        config.tuning.maintenance.constraint_reconcile_interval_ms,
+    );
     info!("constraint reconcile loop running");
 
     // Scope grant expiry sweep. Executes each expired grant's ON EXPIRE
     // action (hard revoke or downgrade to a lesser scope) through the
     // replicated propose path, so the change is durable and cluster-wide.
-    crate::control::security::scope::expiry::spawn_expiry_task(Arc::clone(shared));
+    crate::control::security::scope::expiry::spawn_expiry_task(
+        Arc::clone(shared),
+        config.tuning.maintenance.scope_expiry_interval_secs,
+    );
 
     // Cold tier task (if configured).
     if let Some(ref cold_settings) = config.cold_storage {

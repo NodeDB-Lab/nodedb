@@ -126,6 +126,11 @@ impl ServerConfig {
         let content = std::fs::read_to_string(path).map_err(|e| crate::Error::Config {
             detail: format!("failed to read config file {}: {e}", path.display()),
         })?;
+        // A `${NODEDB_*}` placeholder here reads the same variable
+        // `apply_env_overrides` reads later. The override still wins for
+        // that field — this is textual substitution before parsing, not a
+        // second, competing expansion.
+        let content = super::env_expand::expand_env(path, &content)?;
         let parsed: Self = toml::from_str(&content).map_err(|e| crate::Error::Config {
             detail: format!("invalid TOML config: {e}"),
         })?;
@@ -139,7 +144,7 @@ impl ServerConfig {
         if let Some(ref jwt) = self.auth.jwt {
             jwt.validate()?;
         }
-        Ok(())
+        super::domain::validate_domain(self)
     }
 
     /// Build a `SocketAddr` from the shared host and a port.
@@ -209,7 +214,9 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::server::apply_env_overrides;
     use crate::config::server::log_format::LogFormat;
+    use crate::config::server::test_support::with_var;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
@@ -310,6 +317,135 @@ mod tests {
         cfg.server.sync_host = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
 
         assert_eq!(cfg.sync_addr().ip(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+    }
+
+    fn write_temp_config(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, contents).expect("write temp config");
+        path
+    }
+
+    #[test]
+    fn from_file_expands_a_quoted_string_placeholder() {
+        with_var(
+            "NODEDB_TEST_DATA_DIR_PLACEHOLDER",
+            "/var/lib/nodedb-test",
+            || {
+                let path = write_temp_config(
+                    "nodedb-env-expand-quoted.toml",
+                    "[server]\ndata_dir = \"${NODEDB_TEST_DATA_DIR_PLACEHOLDER}\"\n",
+                );
+                let cfg = ServerConfig::from_file(&path).expect("load config");
+                std::fs::remove_file(&path).ok();
+                assert_eq!(
+                    cfg.server.data_dir,
+                    std::path::PathBuf::from("/var/lib/nodedb-test")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn from_file_expands_an_unquoted_numeric_placeholder() {
+        with_var("NODEDB_TEST_PGWIRE_PLACEHOLDER", "16432", || {
+            let path = write_temp_config(
+                "nodedb-env-expand-numeric.toml",
+                "[server.ports]\npgwire = ${NODEDB_TEST_PGWIRE_PLACEHOLDER}\n",
+            );
+            let cfg = ServerConfig::from_file(&path).expect("load config");
+            std::fs::remove_file(&path).ok();
+            assert_eq!(cfg.server.ports.pgwire, 16432);
+        });
+    }
+
+    #[test]
+    fn from_file_unset_var_fails_before_the_toml_parse() {
+        unsafe { std::env::remove_var("NODEDB_TEST_UNSET_PLACEHOLDER") };
+        let path = write_temp_config(
+            "nodedb-env-expand-unset.toml",
+            "[server]\ndata_dir = \"${NODEDB_TEST_UNSET_PLACEHOLDER}\"\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("NODEDB_TEST_UNSET_PLACEHOLDER"), "{msg}");
+        assert!(!msg.contains("invalid TOML config"), "{msg}");
+    }
+
+    /// The environment gate rejects a zero core count. A TOML file reaches the
+    /// same field without passing that gate, so the bound holds here too.
+    #[test]
+    fn from_file_rejects_zero_data_plane_cores() {
+        let path = write_temp_config(
+            "nodedb-domain-zero-cores.toml",
+            "[server]\ndata_plane_cores = 0\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("server.data_plane_cores"), "{msg}");
+        assert!(msg.contains("positive integer"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_scope_expiry_below_the_floor() {
+        let path = write_temp_config(
+            "nodedb-domain-expiry-floor.toml",
+            "[tuning.maintenance]\nscope_expiry_interval_secs = 5\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tuning.maintenance.scope_expiry_interval_secs"),
+            "{msg}"
+        );
+        assert!(msg.contains("at least 10 seconds"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_a_wal_write_buffer_under_the_floor() {
+        let path = write_temp_config(
+            "nodedb-domain-wal-buffer.toml",
+            "[tuning.wal]\nwrite_buffer_size = 4096\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.wal.write_buffer_size"), "{msg}");
+    }
+
+    /// Every shipped default satisfies every bound the gate enforces.
+    #[test]
+    fn the_compiled_defaults_are_in_domain() {
+        ServerConfig::default().validate().expect("defaults valid");
+    }
+
+    #[test]
+    fn from_file_env_override_wins_over_an_expanded_value() {
+        with_var(
+            "NODEDB_TEST_OVERRIDE_PLACEHOLDER",
+            "/from-placeholder",
+            || {
+                with_var("NODEDB_DATA_DIR", "/from-override", || {
+                    let path = write_temp_config(
+                        "nodedb-env-expand-override.toml",
+                        "[server]\ndata_dir = \"${NODEDB_TEST_OVERRIDE_PLACEHOLDER}\"\n",
+                    );
+                    let mut cfg = ServerConfig::from_file(&path).expect("load config");
+                    std::fs::remove_file(&path).ok();
+                    assert_eq!(
+                        cfg.server.data_dir,
+                        std::path::PathBuf::from("/from-placeholder")
+                    );
+                    apply_env_overrides(&mut cfg).expect("apply overrides");
+                    assert_eq!(
+                        cfg.server.data_dir,
+                        std::path::PathBuf::from("/from-override")
+                    );
+                });
+            },
+        );
     }
 
     #[test]

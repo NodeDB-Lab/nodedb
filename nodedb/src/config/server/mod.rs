@@ -4,7 +4,9 @@ mod checkpoint;
 mod cluster;
 mod cold_storage;
 mod config;
+mod domain;
 mod env;
+mod env_expand;
 mod log_format;
 mod observability;
 mod paths;
@@ -13,6 +15,8 @@ mod retention;
 pub mod scheduler;
 mod section;
 mod snapshot_storage;
+#[cfg(test)]
+mod test_support;
 mod tls;
 
 pub use checkpoint::CheckpointSettings;
@@ -23,7 +27,7 @@ pub use env::{apply_env_overrides, parse_memory_size, parse_seed_nodes};
 pub use log_format::LogFormat;
 pub use observability::{
     ObservabilityConfig, OtlpConfig, OtlpExportConfig, OtlpReceiverConfig, PromqlConfig,
-    apply_observability_env, validate_feature_availability,
+    validate_feature_availability,
 };
 pub use ports::{DEFAULT_SYNC_PORT, PortsConfig};
 pub use retention::RetentionSettings;

@@ -12,7 +12,7 @@ All three share the same [configuration](#configuration), [connection](#connect)
 
 ## Run with Docker
 
-The easiest way to get started, and the right choice on macOS, Windows, or any host where you don't want to manage a binary directly. On native Linux, the [prebuilt binary](#run-a-prebuilt-binary-linux) gives you better performance.
+The quickest start, and the right choice on macOS and Windows. Also the right choice on any host where you avoid managing a binary. On native Linux, the [prebuilt binary](#run-a-prebuilt-binary-linux) gives you better performance.
 
 ### Docker Compose
 
@@ -50,7 +50,7 @@ docker run -d --name nodedb \
 Sync (9090) is omitted: it binds to loopback, so a mapping cannot reach it.
 See [Protocols](protocols.md).
 
-The container entrypoint runs as root just long enough to fix ownership on the data volume, then drops privileges to the `nodedb` user (uid 10001). To skip the root step, pass `--user 10001:10001` and pre-create the volume with matching ownership.
+The container entrypoint runs as root only to fix ownership on the data volume. It then drops privileges to the `nodedb` user (uid 10001). To skip the root step, pass `--user 10001:10001` and pre-create the volume with matching ownership.
 
 ### Default ports
 
@@ -91,7 +91,7 @@ Set them under `environment:` in `docker-compose.yml` or pass with `-e` to `dock
 
 ## Run a prebuilt binary (Linux)
 
-Each tagged release ships a static `nodedb` tarball on GitHub for `linux-x64` and `linux-arm64`. macOS and Windows users should use Docker until those targets ship.
+Each tagged release ships a static `nodedb` tarball on GitHub for `linux-x64` and `linux-arm64`. macOS and Windows users run Docker until those targets ship.
 
 ```bash
 # Resolve the latest tag and your architecture
@@ -186,10 +186,12 @@ Requires Rust 1.94+ and Linux (the Data Plane uses io_uring). The build produces
 
 ## Configuration
 
-This section applies to **every** install method — Docker, prebuilt binary, and source builds all read the same TOML schema and respond to the same environment variables. Pick whichever is convenient:
+This section applies to **every** install method. Docker, prebuilt binary, and source builds read the same TOML schema and the same environment variables. Pick whichever is convenient:
 
-- **TOML file** — pass `--config /path/to/nodedb.toml` on the command line. Best for production / systemd / pre-baked images.
+- **TOML file** — pass `--config /path/to/nodedb.toml` on the command line. Best for production / systemd / pre-baked images. A value can read the environment with `${VAR}` — see [Placeholders in the config file](#placeholders-in-the-config-file).
 - **Environment variables** — prefix `NODEDB_*`. Best for Docker (`-e`), Compose (`environment:`), and Kubernetes. Env vars **override** values from the TOML file when both are set.
+
+A value NodeDB cannot apply stops startup. See [Startup validation](#startup-validation).
 
 ### Default ports
 
@@ -248,6 +250,7 @@ port named — the server never comes up missing a protocol.
 | Config field       | Environment variable      | Default                                               |
 | ------------------ | ------------------------- | ----------------------------------------------------- |
 | `host`             | `NODEDB_HOST`             | `127.0.0.1`                                           |
+| `sync_host`        | `NODEDB_SYNC_HOST`        | follows `host` when `host` is loopback                |
 | `ports.native`     | `NODEDB_PORT_NATIVE`      | `6433`                                                |
 | `ports.pgwire`     | `NODEDB_PORT_PGWIRE`      | `6432`                                                |
 | `ports.http`       | `NODEDB_PORT_HTTP`        | `6480`                                                |
@@ -260,6 +263,17 @@ port named — the server never comes up missing a protocol.
 | `max_connections`  | `NODEDB_MAX_CONNECTIONS`  | `4096`                                                |
 | `log_format`       | `NODEDB_LOG_FORMAT`       | `text`                                                |
 
+**TLS certificate material:**
+
+| Config field    | Environment variable     | Default |
+| --------------- | ------------------------ | ------- |
+| `tls.cert_path` | `NODEDB_TLS_CERT_PATH`   | none    |
+| `tls.key_path`  | `NODEDB_TLS_KEY_PATH`    | none    |
+
+Setting both creates a `[server.tls]` section when the config file has none.
+Every protocol then starts with TLS on. Setting one without the other stops
+startup.
+
 **Per-protocol TLS** (only applies when `[server.tls]` is configured):
 
 | Config field | Environment variable | Default |
@@ -270,12 +284,23 @@ port named — the server never comes up missing a protocol.
 | `tls.resp`   | `NODEDB_TLS_RESP`    | `true`  |
 | `tls.ilp`    | `NODEDB_TLS_ILP`     | `true`  |
 
+Every toggle on this page accepts `true`, `1`, `yes`, `false`, `0`, and `no`,
+in any case. Turning a listener on without certificate material stops startup.
+Turning one off with no `[server.tls]` section is accepted, because the
+listener is already plaintext.
+
 **Checkpoint & WAL settings:**
 
 | Config field                    | Environment variable              | Default |
 | -------------------------------- | ---------------------------------- | ------- |
 | `checkpoint.interval_secs`       | `NODEDB_CHECKPOINT_INTERVAL_SECS`  | `300`   |
 | `checkpoint.wal_segment_target_mb` | `NODEDB_WAL_SEGMENT_TARGET_MB`   | `64`    |
+| `tuning.wal.direct_io`           | `NODEDB_WAL_DIRECT_IO`             | `true`  |
+| `tuning.wal.write_buffer_size`   | `NODEDB_WAL_WRITE_BUFFER_SIZE`     | `2MiB`  |
+
+Both intervals must be positive. `write_buffer_size` accepts a memory size and
+must be at least `64KiB`. Turn `direct_io` off only on a filesystem that
+rejects `O_DIRECT`.
 
 **Timeseries memtable settings:**
 
@@ -285,12 +310,109 @@ port named — the server never comes up missing a protocol.
 | `tuning.timeseries.memtable_hard_limit_bytes` | `NODEDB_TS_MEMTABLE_HARD_LIMIT_BYTES` | `83886080` (80 MiB) |
 | `tuning.timeseries.max_tag_cardinality`   | `NODEDB_TS_MAX_TAG_CARDINALITY`        | `100000` |
 
-`memtable_budget_bytes` is the soft budget that schedules a flush;
+`memtable_budget_bytes` is the soft budget that schedules a flush.
 `memtable_hard_limit_bytes` is the ceiling that forces one before the next
-write is applied. A single write is always applied whole, so it can carry the
-memtable past the hard limit by its own size before the next flush drains it.
-`max_tag_cardinality` bounds the distinct values a text/tag column may hold
+write. A single write always applies whole, so it can carry the memtable past
+the hard limit by its own size. The next flush then drains it.
+`max_tag_cardinality` bounds the distinct values a text/tag column holds
 between flushes.
+
+**Cluster settings** (each needs a `[cluster]` section in the config file):
+
+| Config field                          | Environment variable                 | Default |
+| ------------------------------------- | ------------------------------------ | ------- |
+| `cluster.node_id`                     | `NODEDB_NODE_ID`                     | none    |
+| `cluster.seed_nodes`                  | `NODEDB_SEED_NODES`                  | none    |
+| `cluster.join_retry_max_attempts`     | `NODEDB_JOIN_RETRY_MAX_ATTEMPTS`     | `8`     |
+| `cluster.join_retry_max_backoff_secs` | `NODEDB_JOIN_RETRY_MAX_BACKOFF_SECS` | `32`    |
+
+`NODEDB_SEED_NODES` takes a comma-separated `host:port` list. Both join-retry
+values must be positive. Setting any of these without a `[cluster]` section
+stops startup.
+
+**Maintenance loop settings:**
+
+| Config field                                          | Environment variable                      | Default |
+| ----------------------------------------------------- | ----------------------------------------- | ------- |
+| `tuning.maintenance.clone_sweep_interval_ms`          | `NODEDB_CLONE_SWEEP_INTERVAL_MS`          | `30000` |
+| `tuning.maintenance.constraint_reconcile_interval_ms` | `NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS` | `1000`  |
+| `tuning.maintenance.scope_expiry_interval_secs`       | `NODEDB_SCOPE_EXPIRY_INTERVAL_SECS`       | `60`    |
+
+All three must be positive. `scope_expiry_interval_secs` has a floor of `10`.
+Below that the sweep costs more than the resolution it buys.
+
+**Observability settings:**
+
+| Config field                                      | Environment variable              | Default        |
+| ------------------------------------------------- | --------------------------------- | -------------- |
+| `observability.promql.enabled`                    | `NODEDB_PROMQL_ENABLED`           | `true`         |
+| `observability.otlp.receiver.enabled`             | `NODEDB_OTLP_RECEIVER_ENABLED`    | `false`        |
+| `observability.otlp.receiver.http_listen`         | `NODEDB_OTLP_HTTP_LISTEN`         | `0.0.0.0:4318` |
+| `observability.otlp.receiver.grpc_listen`         | `NODEDB_OTLP_GRPC_LISTEN`         | `0.0.0.0:4317` |
+| `observability.otlp.export.enabled`               | `NODEDB_OTLP_EXPORT_ENABLED`      | `false`        |
+| `observability.otlp.export.endpoint`              | `NODEDB_OTLP_EXPORT_ENDPOINT`     | none           |
+| `observability.otlp.export.metrics_interval_secs` | `NODEDB_OTLP_EXPORT_INTERVAL`     | `15`           |
+| `observability.debug_endpoints_enabled`           | `NODEDB_DEBUG_ENDPOINTS_ENABLED`  | `false`        |
+
+`NODEDB_OTLP_EXPORT_ENDPOINT` takes an `http://` or `https://` URL. The debug
+endpoints expose raft internals, so they stay off until you enable them.
+
+### Startup validation
+
+A `NODEDB_*` value NodeDB cannot apply stops startup. The server reports every
+bad value at once and exits non-zero.
+
+Three kinds fail:
+
+- **Unparseable** — `NODEDB_DATA_PLANE_CORES=abc`.
+- **Out of domain** — a zero core count, or a WAL buffer under `64KiB`.
+- **Unsatisfiable here** — TLS on with no certificate material, or
+  `NODEDB_NODE_ID` with no `[cluster]` section.
+
+```
+Error: configuration error: invalid value 'abc' for NODEDB_DATA_PLANE_CORES: expected a positive integer; invalid value '4096' for NODEDB_WAL_WRITE_BUFFER_SIZE: expected a memory size of at least 64KiB
+```
+
+A request the server already satisfies is honoured. `NODEDB_TLS_PGWIRE=false`
+with no `[server.tls]` section is accepted, because that listener is already
+plaintext.
+
+An empty value is always a violation. `NODEDB_DATA_DIR=` is a failed template
+substitution, not a request.
+
+### Placeholders in the config file
+
+A config value can read the environment with `${VAR}`. NodeDB substitutes
+before it parses the TOML.
+
+```toml
+[server]
+data_dir = "${DATA_DIR}"
+
+[server.ports]
+pgwire = ${PGWIRE_PORT}
+```
+
+```yaml
+services:
+  nodedb:
+    environment:
+      DATA_DIR: /var/lib/nodedb
+      PGWIRE_PORT: "6432"
+```
+
+- **Quoting is yours** — substitution is textual. Quote for a string, leave
+  bare for a number or a bool.
+- **Escape** — `$${NAME}` produces the literal `${NAME}` and reads nothing.
+- **Comments are skipped** — a commented-out example never requires its
+  variable.
+- **Names** match `[A-Za-z_][A-Za-z0-9_]*`.
+- **Unset fails** — the error names the file and the variable.
+- **No shell syntax** — no command substitution, no recursion, no
+  `${VAR:-default}`.
+- **Never logged** — NodeDB logs the variable name, never the value.
+
+An env override still wins over an expanded value for the same field.
 
 ## Connect
 
@@ -312,7 +434,7 @@ NodeDB speaks PostgreSQL's wire protocol, so standard tools like `psql`, ORMs, a
 
 ### With the Rust SDK or FFI
 
-The `nodedb-client` crate connects over the NDB protocol (port 6433) and supports both SQL and native modes on the same connection:
+The `nodedb-client` crate connects over the NDB protocol (port 6433). One connection carries both SQL and native modes:
 
 ```rust
 // SQL — same as psql/HTTP, full query support

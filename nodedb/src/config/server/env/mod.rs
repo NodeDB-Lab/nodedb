@@ -1,20 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Environment variable overrides for `ServerConfig`, split by concern.
-//! `dispatch::apply_env_overrides` is the public entry point; every other
-//! submodule here handles one section of the override surface.
+//! Environment variable overrides for `ServerConfig`: a table-driven
+//! startup gate. See `table::apply_env_overrides`.
 
-mod checkpoint;
-mod cluster;
-mod dispatch;
-mod helpers;
-mod host_ports;
 mod memory_size;
-mod numeric;
-mod timeseries;
-mod tls;
-mod wal;
+mod parse;
+mod rows;
+mod seed_nodes;
+mod table;
 
-pub use cluster::parse_seed_nodes;
-pub use dispatch::apply_env_overrides;
 pub use memory_size::parse_memory_size;
+pub use seed_nodes::parse_seed_nodes;
+pub use table::apply_env_overrides;

@@ -109,6 +109,22 @@ pub struct ClusterSettings {
     /// `nodedb_cluster::ClusterConfig`.
     #[serde(default)]
     pub log_compaction_threshold: Option<u64>,
+
+    /// Total join attempts before the join loop gives up.
+    ///
+    /// Production leaves this at its default. The integration test harness
+    /// lowers it so a join-retry path does not spend a minute sleeping.
+    /// Default: 8.
+    #[serde(default = "default_join_retry_max_attempts")]
+    pub join_retry_max_attempts: u32,
+
+    /// Cap on the per-attempt join backoff delay, in seconds.
+    ///
+    /// Production leaves this at its default. The integration test harness
+    /// lowers it so a join-retry path does not spend a minute sleeping.
+    /// Default: 32.
+    #[serde(default = "default_join_retry_max_backoff_secs")]
+    pub join_retry_max_backoff_secs: u64,
 }
 
 /// Paths to on-disk PEM-encoded TLS credentials.
@@ -150,6 +166,14 @@ fn default_login_attempts_per_ip_per_min() -> u64 {
 
 fn default_login_attempts_per_user_per_min() -> u64 {
     10
+}
+
+fn default_join_retry_max_attempts() -> u32 {
+    8
+}
+
+fn default_join_retry_max_backoff_secs() -> u64 {
+    32
 }
 
 impl ClusterSettings {
@@ -215,6 +239,8 @@ mod tests {
             login_attempts_per_user_per_min: 10,
             insecure_transport: true,
             log_compaction_threshold: None,
+            join_retry_max_attempts: 8,
+            join_retry_max_backoff_secs: 32,
         }
     }
 
