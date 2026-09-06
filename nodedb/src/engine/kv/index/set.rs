@@ -23,6 +23,18 @@ pub struct KvIndexSet {
     total_index_writes: u64,
 }
 
+fn composite_vals<'a>(ci: &KvCompositeIndex, values: &'a [(&str, &[u8])]) -> Vec<&'a [u8]> {
+    ci.fields()
+        .iter()
+        .filter_map(|f| {
+            values
+                .iter()
+                .find(|(name, _)| *name == f.as_str())
+                .map(|(_, v)| *v)
+        })
+        .collect()
+}
+
 impl KvIndexSet {
     pub fn new() -> Self {
         Self {
@@ -155,62 +167,89 @@ impl KvIndexSet {
 
         let mut writes = 0;
 
-        // Remove old single-field index entries (if this is an update).
+        // Single-field indexes. Elide a no-op in-place update: when the old
+        // indexed value equals the new one *and* the pair is already present,
+        // remove+insert is pure churn. A row written before a backfill=false
+        // registration is absent from the index; the next PUT with identical
+        // bytes must insert it.
         if let Some(old_values) = old_field_values {
             for idx in &mut self.indexes {
-                for &(field, value) in old_values {
+                let f = idx.field();
+                let new_val = field_values
+                    .iter()
+                    .find(|(field, _)| *field == f)
+                    .map(|(_, v)| *v);
+                let old_val = old_values
+                    .iter()
+                    .find(|(field, _)| *field == f)
+                    .map(|(_, v)| *v);
+                if new_val == old_val {
+                    if let Some(v) = new_val {
+                        if idx.contains(v, primary_key) {
+                            continue; // true no-op: already indexed
+                        }
+                        // old == new but absent (backfill=false gap): insert only —
+                        // there's no stale entry to remove, so don't count/perform one.
+                        idx.insert(v.to_vec(), primary_key.to_vec());
+                        writes += 1;
+                    }
+                    continue;
+                }
+                if let Some(v) = old_val {
+                    idx.remove(v, primary_key);
+                    writes += 1;
+                }
+                if let Some(v) = new_val {
+                    idx.insert(v.to_vec(), primary_key.to_vec());
+                    writes += 1;
+                }
+            }
+        } else {
+            // Insert-only (new row): no old values to compare.
+            for idx in &mut self.indexes {
+                for &(field, value) in field_values {
                     if field == idx.field() {
-                        idx.remove(value, primary_key);
+                        idx.insert(value.to_vec(), primary_key.to_vec());
                         writes += 1;
                     }
                 }
             }
         }
 
-        // Insert new single-field index entries.
-        for idx in &mut self.indexes {
-            for &(field, value) in field_values {
-                if field == idx.field() {
-                    idx.insert(value.to_vec(), primary_key.to_vec());
-                    writes += 1;
-                }
-            }
-        }
-
         // Maintain composite indexes.
         for ci in &mut self.composite_indexes {
-            // Remove old composite entry.
-            if let Some(old_values) = old_field_values {
-                let old_vals: Vec<&[u8]> = ci
-                    .fields()
-                    .iter()
-                    .filter_map(|f| {
-                        old_values
-                            .iter()
-                            .find(|(name, _)| *name == f.as_str())
-                            .map(|(_, v)| *v)
-                    })
-                    .collect();
-                if old_vals.len() == ci.fields().len() {
-                    ci.remove(&old_vals, primary_key);
-                    writes += 1;
+            // Composite entry, eliding the same no-op update case.
+            match old_field_values {
+                Some(old_values) => {
+                    let old_vals = composite_vals(ci, old_values);
+                    let new_vals = composite_vals(ci, field_values);
+                    if old_vals.len() == ci.fields().len() && new_vals.len() == ci.fields().len() {
+                        if old_vals == new_vals {
+                            if !ci.contains(&new_vals, primary_key) {
+                                ci.insert(&new_vals, primary_key.to_vec());
+                                writes += 1;
+                            }
+                        } else {
+                            ci.remove(&old_vals, primary_key);
+                            writes += 1;
+                            ci.insert(&new_vals, primary_key.to_vec());
+                            writes += 1;
+                        }
+                    } else if old_vals.len() == ci.fields().len() {
+                        ci.remove(&old_vals, primary_key);
+                        writes += 1;
+                    } else if new_vals.len() == ci.fields().len() {
+                        ci.insert(&new_vals, primary_key.to_vec());
+                        writes += 1;
+                    }
                 }
-            }
-
-            // Insert new composite entry.
-            let new_vals: Vec<&[u8]> = ci
-                .fields()
-                .iter()
-                .filter_map(|f| {
-                    field_values
-                        .iter()
-                        .find(|(name, _)| *name == f.as_str())
-                        .map(|(_, v)| *v)
-                })
-                .collect();
-            if new_vals.len() == ci.fields().len() {
-                ci.insert(&new_vals, primary_key.to_vec());
-                writes += 1;
+                None => {
+                    let new_vals = composite_vals(ci, field_values);
+                    if new_vals.len() == ci.fields().len() {
+                        ci.insert(&new_vals, primary_key.to_vec());
+                        writes += 1;
+                    }
+                }
             }
         }
 
@@ -335,6 +374,24 @@ mod tests {
     }
 
     #[test]
+    fn d6_identical_update_elides_index_writes() {
+        // An in-place update that leaves the indexed value unchanged must not
+        // rewrite the index when the pair is already present.
+        let mut set = KvIndexSet::new();
+        set.add_index("status", 0);
+        set.on_put(b"k1", &[("status", b"active")], None);
+        let writes = set.on_put(
+            b"k1",
+            &[("status", b"active")],
+            Some(&[("status", b"active")]),
+        );
+        assert_eq!(
+            writes, 0,
+            "D6: identical update must elide index writes (got {writes})"
+        );
+    }
+
+    #[test]
     fn index_set_on_put_update_replaces_old() {
         let mut set = KvIndexSet::new();
         set.add_index("status", 0);
@@ -418,6 +475,46 @@ mod tests {
             .get_composite_index(&["a".into(), "b".into()])
             .expect("composite index was registered");
         assert!(ci.lookup_eq(&[b"x", b"y"]).is_empty());
+    }
+
+    #[test]
+    fn d6_backfill_absent_pair_still_gets_inserted() {
+        // old == new alone is not enough to elide — the pair must actually be
+        // present. A row written before a backfill=false registration was never
+        // indexed, so the next identical PUT has to insert it.
+        let mut set = KvIndexSet::new();
+        set.add_index("status", 0);
+        // No prior on_put — simulates backfill=false: this row exists but
+        // was never run through the indexer.
+        let writes = set.on_put(
+            b"k1",
+            &[("status", b"active")],
+            Some(&[("status", b"active")]), // old == new, but never indexed
+        );
+        assert_eq!(
+            writes, 1,
+            "backfill=false: absent pair must insert, got {writes}"
+        );
+        assert_eq!(set.lookup_eq("status", b"active"), vec![b"k1".as_slice()]);
+    }
+
+    #[test]
+    fn d6_composite_backfill_absent_pair_still_gets_inserted() {
+        let mut set = KvIndexSet::new();
+        set.add_composite_index(vec!["region".into(), "status".into()], vec![0, 1]);
+        let writes = set.on_put(
+            b"k1",
+            &[("region", b"us-east"), ("status", b"active")],
+            Some(&[("region", b"us-east"), ("status", b"active")]),
+        );
+        assert_eq!(
+            writes, 1,
+            "composite backfill=false: absent pair must insert"
+        );
+        let ci = set
+            .get_composite_index(&["region".into(), "status".into()])
+            .expect("composite index was registered");
+        assert_eq!(ci.lookup_eq(&[b"us-east", b"active"]).len(), 1);
     }
 
     /// The export accessors must see exactly the indexes that were registered —

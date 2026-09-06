@@ -81,6 +81,13 @@ impl KvFieldIndex {
         }
     }
 
+    /// Whether the index contains the (value, primary_key) pair.
+    pub(crate) fn contains(&self, field_value: &[u8], primary_key: &[u8]) -> bool {
+        self.tree
+            .get(field_value)
+            .is_some_and(|keys| keys.contains(primary_key))
+    }
+
     /// Exact-match lookup: find all primary keys where field == value.
     pub fn lookup_eq(&self, field_value: &[u8]) -> Vec<&[u8]> {
         self.tree

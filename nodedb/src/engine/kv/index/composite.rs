@@ -100,6 +100,14 @@ impl KvCompositeIndex {
         }
     }
 
+    /// Whether the index contains the composite (field_values, primary_key) pair.
+    pub(crate) fn contains(&self, field_values: &[&[u8]], primary_key: &[u8]) -> bool {
+        let key = Self::build_key(field_values);
+        self.tree
+            .get(&key)
+            .is_some_and(|keys| keys.contains(primary_key))
+    }
+
     /// Exact-match lookup on all fields.
     pub fn lookup_eq(&self, field_values: &[&[u8]]) -> Vec<&[u8]> {
         let key = Self::build_key(field_values);
