@@ -46,7 +46,7 @@ const MAX_RECONCILE_PROPOSALS_PER_PASS: usize = 64;
 /// dispatches Control → Data proposes. The catalog read runs in
 /// `spawn_blocking` so a synchronous redb scan never stalls the reactor, and no
 /// lock is ever held across an `.await`.
-pub fn spawn_constraint_reconcile(shared: Arc<SharedState>) {
+pub fn spawn_constraint_reconcile(shared: Arc<SharedState>, interval_ms: u64) {
     // Clone for the task body so the original `shared` remains available to
     // borrow `loop_registry`/`shutdown` for the `spawn_loop` call itself.
     let task_shared = Arc::clone(&shared);
@@ -62,10 +62,6 @@ pub fn spawn_constraint_reconcile(shared: Arc<SharedState>) {
             // accepted by Raft for each `(tenant, collection)`. Skipping equal
             // or older versions keeps steady-state ticks proposal-free.
             let mut delivered: HashMap<(TenantId, String), u64> = HashMap::new();
-            let interval_ms = std::env::var("NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1000);
             let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
             loop {
                 tokio::select! {

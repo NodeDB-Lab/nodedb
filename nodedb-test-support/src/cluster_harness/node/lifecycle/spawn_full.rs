@@ -170,6 +170,8 @@ impl TestClusterNode {
                 login_attempts_per_user_per_min: 10,
                 insecure_transport: true,
                 log_compaction_threshold,
+                join_retry_max_attempts: 8,
+                join_retry_max_backoff_secs: 32,
             };
 
             // Initialise the cluster using the pre-bound transport.
@@ -328,7 +330,20 @@ impl TestClusterNode {
         // call; wire it directly so cluster tests exercise constraint delivery
         // to every replica's validator. Registered on `shared.loop_registry`,
         // so cluster shutdown stops it with the other loops.
-        nodedb::bootstrap::constraint_reconcile::spawn_constraint_reconcile(Arc::clone(&shared));
+        // The interval comes from the same startup gate the server uses, so a
+        // test that sets `NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS` to suppress
+        // the loop is honoured here exactly as it is in production. Parsing it
+        // a second way here is what would let the two drift apart.
+        let mut reconcile_config = nodedb::ServerConfig::default();
+        nodedb::config::server::apply_env_overrides(&mut reconcile_config)
+            .map_err(|e| format!("environment override rejected: {e}"))?;
+        nodedb::bootstrap::constraint_reconcile::spawn_constraint_reconcile(
+            Arc::clone(&shared),
+            reconcile_config
+                .tuning
+                .maintenance
+                .constraint_reconcile_interval_ms,
+        );
 
         // Spawn the descriptor lease renewal loop on the same
         // shutdown channel as raft so cluster shutdown stops it

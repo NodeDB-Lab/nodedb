@@ -26,15 +26,12 @@ use super::grant::{ScopeGrantParams, ScopeStatus};
 ///
 /// The pass itself is synchronous and writes redb, so it runs on a blocking
 /// thread rather than the reactor.
-pub fn spawn_expiry_task(shared: Arc<SharedState>) {
-    let interval_secs = std::env::var("NODEDB_SCOPE_EXPIRY_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(60);
+pub fn spawn_expiry_task(shared: Arc<SharedState>, interval_secs: u64) {
     // Below ~10s the sweep costs more than the resolution it buys: expiry is
     // already enforced on every read by `ScopeGrant::is_effective`, and this
-    // loop only makes the outcome durable.
-    let interval = Duration::from_secs(interval_secs.max(10));
+    // loop only makes the outcome durable. The startup config gate rejects
+    // an interval below that floor, so no clamp runs here.
+    let interval = Duration::from_secs(interval_secs);
     info!(interval_secs, "scope expiry sweep loop running");
     let loop_shared = Arc::clone(&shared);
     crate::control::shutdown::spawn_loop(

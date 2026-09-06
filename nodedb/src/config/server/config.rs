@@ -139,7 +139,7 @@ impl ServerConfig {
         if let Some(ref jwt) = self.auth.jwt {
             jwt.validate()?;
         }
-        Ok(())
+        super::domain::validate_domain(self)
     }
 
     /// Build a `SocketAddr` from the shared host and a port.
@@ -321,5 +321,60 @@ mod tests {
             err.contains("unknown field") || err.contains("server_typo"),
             "unexpected error: {err}"
         );
+    }
+
+    fn write_temp_config(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, contents).expect("write temp config");
+        path
+    }
+
+    /// The environment gate rejects a zero core count. A TOML file reaches the
+    /// same field without passing that gate, so the bound holds here too.
+    #[test]
+    fn from_file_rejects_zero_data_plane_cores() {
+        let path = write_temp_config(
+            "nodedb-domain-zero-cores.toml",
+            "[server]\ndata_plane_cores = 0\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("server.data_plane_cores"), "{msg}");
+        assert!(msg.contains("positive integer"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_scope_expiry_below_the_floor() {
+        let path = write_temp_config(
+            "nodedb-domain-expiry-floor.toml",
+            "[tuning.maintenance]\nscope_expiry_interval_secs = 5\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tuning.maintenance.scope_expiry_interval_secs"),
+            "{msg}"
+        );
+        assert!(msg.contains("at least 10 seconds"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_a_wal_write_buffer_under_the_floor() {
+        let path = write_temp_config(
+            "nodedb-domain-wal-buffer.toml",
+            "[tuning.wal]\nwrite_buffer_size = 4096\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.wal.write_buffer_size"), "{msg}");
+    }
+
+    /// Every shipped default satisfies every bound the gate enforces.
+    #[test]
+    fn the_compiled_defaults_are_in_domain() {
+        ServerConfig::default().validate().expect("defaults valid");
     }
 }
