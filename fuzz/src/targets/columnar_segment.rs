@@ -1,8 +1,13 @@
+use std::sync::Arc;
+
 use nodedb_columnar::memtable::ColumnData;
+use nodedb_columnar::writer::PROFILE_PLAIN;
 use nodedb_columnar::{
     DeleteBitmap, OwnedSegmentReader, ScanPredicate, SegmentReader, SegmentWriter,
 };
+use nodedb_mem::{EngineId, EngineLimits, GovernorConfig, MemoryGovernor, ScopedMemory};
 use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+use nodedb_types::{DatabaseId, TenantId};
 use nodedb_wal::crypto::WalEncryptionKey;
 
 const INPUT_PREFIX_BYTES: usize = 64;
@@ -16,6 +21,26 @@ const MAX_BINARY_VALUE_BYTES: usize = 16;
 const COLUMN_COUNT: usize = 5;
 const FUZZ_KEK_BYTES: [u8; 32] = [0x5a; 32];
 const FUZZ_KEK_EPOCH: [u8; 4] = [0; 4];
+
+/// A memory scope whose governor ceiling covers every engine's limit — the
+/// same shape the integration tests use. Segment writes now take mandatory
+/// ScopedMemory (refactor(mem): make ScopedMemory budgeting mandatory).
+fn fuzz_memory() -> ScopedMemory {
+    let per_engine = usize::MAX / EngineId::ALL.len();
+    let governor = Arc::new(
+        MemoryGovernor::new(GovernorConfig {
+            global_ceiling: per_engine * EngineId::ALL.len(),
+            engine_limits: EngineLimits::uniform(per_engine),
+        })
+        .expect("fuzz governor"),
+    );
+    ScopedMemory::new(
+        governor,
+        DatabaseId::DEFAULT,
+        TenantId::new(0),
+        EngineId::Columnar,
+    )
+}
 
 fn exercise_reader(reader: &SegmentReader<'_>) {
     let count = reader.column_count().min(COLUMN_COUNT);
@@ -169,7 +194,7 @@ fn generated_segment(seed: &[u8], kek: Option<&WalEncryptionKey>) -> Option<Vec<
         },
     ];
 
-    SegmentWriter::plain()
+    SegmentWriter::new(PROFILE_PLAIN, fuzz_memory())
         .write_segment(&schema, &columns, ROW_COUNT, kek)
         .ok()
 }

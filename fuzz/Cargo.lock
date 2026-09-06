@@ -1149,9 +1149,9 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "h3o"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f033ee4f3b98f6842df9ce5111ff2dd36fd9be9804b9c0afd43e69e3891a6fbf"
+checksum = "9fb2db7abbf5a95268cfb53ee6c2d4c02894323e1d3e1d7b300595eee61c482c"
 dependencies = [
  "ahash 0.8.12",
  "either",
@@ -2101,6 +2101,7 @@ dependencies = [
  "libfuzzer-sys",
  "nodedb-codec",
  "nodedb-columnar",
+ "nodedb-mem",
  "nodedb-sql",
  "nodedb-strict",
  "nodedb-types",
@@ -2992,9 +2993,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "ruzstd"
-version = "0.7.3"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fad02996bfc73da3e301efe90b1837be9ed8f4a462b6ed410aa35d00381de89f"
+checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
 dependencies = [
  "twox-hash",
 ]
@@ -3237,9 +3238,9 @@ dependencies = [
 
 [[package]]
 name = "sqlparser"
-version = "0.61.0"
+version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbf5ea8d4d7c808e1af1cbabebca9a2abe603bcefc22294c5b95018d53200cb7"
+checksum = "13c6d1b651dc4edf07eead2a0c6c78016ce971bc2c10da5266861b13f25e7cec"
 dependencies = [
  "log",
  "recursive",
@@ -3275,12 +3276,6 @@ dependencies = [
  "psm",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strsim"
@@ -3642,13 +3637,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "twox-hash"
-version = "1.6.3"
+version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
-dependencies = [
- "cfg-if",
- "static_assertions",
-]
+checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
 
 [[package]]
 name = "typenum"
@@ -4195,16 +4186,18 @@ dependencies = [
 
 [[package]]
 name = "zerompk"
-version = "0.7.1"
-source = "git+https://github.com/farhan-syah/zerompk?rev=bb3156cf17b399b0dc2dd90895133a169a29cac0#bb3156cf17b399b0dc2dd90895133a169a29cac0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44c3e632951a5d373caf7c818d92f0157f5a69d94d9decdb155ce80d26f20e9a"
 dependencies = [
  "zerompk_derive",
 ]
 
 [[package]]
 name = "zerompk_derive"
-version = "0.7.1"
-source = "git+https://github.com/farhan-syah/zerompk?rev=bb3156cf17b399b0dc2dd90895133a169a29cac0#bb3156cf17b399b0dc2dd90895133a169a29cac0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45d40506e32ba80b9a861df3a0f30aa910cf1e6465ebc14ab2b8fdb2b40eec7"
 dependencies = [
  "proc-macro2",
  "quote",

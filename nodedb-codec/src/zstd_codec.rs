@@ -321,7 +321,7 @@ fn compress_native(_data: &[u8], _level: i32) -> Result<Vec<u8>, CodecError> {
 
 #[cfg(target_arch = "wasm32")]
 fn decompress_native(frame: &[u8], expected_size: usize) -> Result<Vec<u8>, CodecError> {
-    use ruzstd::StreamingDecoder;
+    use ruzstd::decoding::StreamingDecoder;
 
     let mut decoder = StreamingDecoder::new(std::io::Cursor::new(frame)).map_err(|e| {
         CodecError::DecompressFailed {
