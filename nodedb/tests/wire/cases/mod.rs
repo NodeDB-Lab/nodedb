@@ -196,6 +196,7 @@ mod sql_order_by_indexed;
 mod sql_parser_string_handling;
 mod sql_path_jail;
 mod sql_prepared_statements;
+mod sql_primary_key_nullability;
 mod sql_procedure_cache_safety;
 mod sql_recursive_cte;
 mod sql_rls_predicate_parse;

@@ -136,3 +136,39 @@ async fn a_conforming_write_returns_no_sqlstate() {
         "a conforming insert must succeed"
     );
 }
+
+/// The strict engine already refuses a NULL primary key, but does it from the
+/// tuple serializer, so the refusal reaches the client as an internal
+/// serialization error. It is a constraint verdict: drivers classify it by
+/// SQLSTATE, and `23502` is the one that names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn null_primary_key_raises_not_null_violation() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION vs_null_pk (id INT PRIMARY KEY, v TEXT) \
+             WITH (engine='document_strict')",
+        )
+        .await
+        .expect("create vs_null_pk");
+
+    let state = sqlstate_of(
+        &server,
+        "INSERT INTO vs_null_pk (id, v) VALUES (NULL, 'strict-null')",
+    )
+    .await
+    .expect("a NULL primary key must be refused");
+    assert_eq!(
+        state, "23502",
+        "expected not_null_violation, got SQLSTATE {state}"
+    );
+
+    let omitted = sqlstate_of(&server, "INSERT INTO vs_null_pk (v) VALUES ('strict-omitted')")
+        .await
+        .expect("an omitted primary key must be refused");
+    assert_eq!(
+        omitted, "23502",
+        "an omitted primary key is the same violation, got SQLSTATE {omitted}"
+    );
+}
