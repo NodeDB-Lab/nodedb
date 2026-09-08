@@ -111,7 +111,11 @@ async fn is_null_and_is_not_null_counts_partition_the_collection() {
     seed(&server, "np_partition").await;
 
     let total = count_of(&server, "SELECT count(*) FROM np_partition").await;
-    let nulls = count_of(&server, "SELECT count(*) FROM np_partition WHERE note IS NULL").await;
+    let nulls = count_of(
+        &server,
+        "SELECT count(*) FROM np_partition WHERE note IS NULL",
+    )
+    .await;
     let non_nulls = count_of(
         &server,
         "SELECT count(*) FROM np_partition WHERE note IS NOT NULL",
@@ -208,11 +212,7 @@ async fn scan_and_count_agree_on_is_null_over_the_identity_column() {
         .query_text("SELECT v FROM np_identity WHERE id IS NULL")
         .await
         .expect("scan id IS NULL");
-    let counted = count_of(
-        &server,
-        "SELECT count(*) FROM np_identity WHERE id IS NULL",
-    )
-    .await;
+    let counted = count_of(&server, "SELECT count(*) FROM np_identity WHERE id IS NULL").await;
 
     assert_eq!(
         counted,

@@ -164,9 +164,12 @@ async fn null_primary_key_raises_not_null_violation() {
         "expected not_null_violation, got SQLSTATE {state}"
     );
 
-    let omitted = sqlstate_of(&server, "INSERT INTO vs_null_pk (v) VALUES ('strict-omitted')")
-        .await
-        .expect("an omitted primary key must be refused");
+    let omitted = sqlstate_of(
+        &server,
+        "INSERT INTO vs_null_pk (v) VALUES ('strict-omitted')",
+    )
+    .await
+    .expect("an omitted primary key must be refused");
     assert_eq!(
         omitted, "23502",
         "an omitted primary key is the same violation, got SQLSTATE {omitted}"

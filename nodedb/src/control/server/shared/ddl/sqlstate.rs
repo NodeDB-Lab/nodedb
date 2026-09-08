@@ -14,15 +14,22 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::QUERY_CANCELED,
             "query cancelled due to deadline".into(),
         ),
-        ErrorCode::RejectedConstraint { constraint, detail } => (
-            "ERROR",
-            sqlstate::UNIQUE_VIOLATION,
-            if detail.is_empty() {
-                format!("constraint violation: {constraint}")
+        ErrorCode::RejectedConstraint { constraint, detail } => {
+            let code = if constraint == "not_null" {
+                sqlstate::NOT_NULL_VIOLATION
             } else {
-                format!("constraint violation: {constraint}: {detail}")
-            },
-        ),
+                sqlstate::UNIQUE_VIOLATION
+            };
+            (
+                "ERROR",
+                code,
+                if detail.is_empty() {
+                    format!("constraint violation: {constraint}")
+                } else {
+                    format!("constraint violation: {constraint}: {detail}")
+                },
+            )
+        }
         ErrorCode::RejectedPrevalidation { reason } => (
             "ERROR",
             sqlstate::CHECK_VIOLATION,
