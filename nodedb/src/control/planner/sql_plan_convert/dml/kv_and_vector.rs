@@ -35,6 +35,16 @@ pub(in super::super) fn convert_kv_insert(
     let ttl_ms = ttl_secs * 1000;
     let mut tasks = Vec::with_capacity(entries.len());
     for (key_val, value_cols) in entries {
+        // A declared PRIMARY KEY implies NOT NULL. The planner substitutes
+        // `SqlValue::Null` for a column the statement omitted, so this also
+        // catches an omitted key, not only an explicit `NULL` literal.
+        if matches!(key_val, SqlValue::Null) {
+            return Err(crate::Error::RejectedConstraint {
+                collection: collection.to_string(),
+                constraint: "not_null".to_string(),
+                detail: "primary key cannot be NULL or omitted".to_string(),
+            });
+        }
         let key = sql_value_to_bytes(key_val);
         let value = if value_cols.len() == 1 && value_cols[0].0 == "value" {
             sql_value_to_bytes(&value_cols[0].1)

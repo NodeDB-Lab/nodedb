@@ -108,7 +108,7 @@ pub(crate) fn build_kv_insert_plan(
         // position in the statement's column list.
         let key_val = match row.iter().find(|(name, _)| name == key_col_name) {
             Some((_, value)) => value.clone(),
-            None => SqlValue::String(String::new()),
+            None => SqlValue::Null,
         };
         if let Some((_, value)) = row.iter().find(|(name, _)| name == "ttl") {
             match value {
