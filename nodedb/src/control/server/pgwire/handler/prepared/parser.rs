@@ -23,19 +23,19 @@ use crate::control::state::SharedState;
 
 use super::super::auth::{pgwire_authorization_error, resolve_session_identity};
 use super::statement::ParsedStatement;
-use parser_schema::{
-    count_placeholders, is_dsl_statement, result_fields_for_returning,
-    substitute_placeholders_with_null,
-};
+use parser_schema::{count_placeholders, is_dsl_statement, substitute_placeholders_with_null};
 
 #[path = "parser_schema.rs"]
 mod parser_schema;
 
-/// Maps the response shaper's protocol-neutral wire type to a pgwire
-/// `Type` for RowDescription. Mirrors the (now-deleted) SQL-reparse path's
-/// `sql_data_type_to_pg`; variants with no dedicated wire type still fall
-/// back to `Type::TEXT` where that was the prior fallback, matching
-/// today's behavior.
+/// Maps the response shaper's protocol-neutral wire type to a pgwire `Type`
+/// for RowDescription.
+///
+/// This is the only mapping the extended-query path uses. Every result column
+/// — a `SELECT` projection and a `RETURNING` clause alike — reaches it through
+/// `build_output_schema`, so Describe and the simple-query path answer one
+/// question with one rule. A `DdlColType` with no dedicated wire type resolves
+/// to `Type::TEXT`, the safe default a client can always parse.
 fn ddl_col_type_to_pg(ty: &DdlColType) -> Type {
     match ty {
         DdlColType::Int8 => Type::INT8,
@@ -302,20 +302,15 @@ impl NodeDbQueryParser {
             Err(_) => return (param_types, Vec::new()),
         };
 
-        // When the original SQL had a RETURNING clause on a DML statement,
-        // build result fields from the collection schema and the RETURNING spec.
-        if let Some(ref spec) = returning_spec
-            && let Some(fields) = result_fields_for_returning(spec, plans.first(), catalog)
-        {
-            return (param_types, fields);
-        }
-
         // Infer result fields from the planner's authoritative output
         // schema — the same derivation used to shape response rows, so
         // Describe's RowDescription always matches what Execute returns.
-        // Empty `plans` (already handled above) or a plan variant with no
-        // resolvable projection yields an empty `OutputSchema`, matching
-        // today's `Vec::new()` fallback for DSL/non-SELECT statements.
+        // A write plan announces what its `RETURNING` spec projects, through
+        // that same derivation, so Describe and the simple-query path can
+        // never disagree on a column's type. Empty `plans` (already handled
+        // above) or a plan variant with no resolvable projection yields an
+        // empty `OutputSchema`, matching the `Vec::new()` fallback for
+        // DSL/non-SELECT statements.
         let output_schema =
             crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
                 &plans,
