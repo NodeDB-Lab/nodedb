@@ -12,7 +12,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, TimeseriesOp};
 
 use super::super::DispatchCtx;
-use super::{collection_type, require_doc_id};
+use super::{collection_type, declared_primary_key, require_doc_id};
 
 pub(crate) fn build_point_get(
     ctx: &DispatchCtx<'_>,
@@ -278,9 +278,9 @@ pub(crate) fn build_update(
         rls_filters: Vec::new(),
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         resolved_sum_targets: Vec::new(),
-        // Native `{ }` updates carry literal field bytes only; this protocol
-        // path has no declared-PK lookup of its own.
-        declared_primary_key: None,
+        // Read from the catalog so a declared PRIMARY KEY refuses a
+        // NULL/omitted value the same way under this protocol as under SQL.
+        declared_primary_key: declared_primary_key(ctx, collection)?,
     }))
 }
 
@@ -373,8 +373,8 @@ pub(crate) fn build_bulk_update(
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         // Filled in by the materialized-sum resolution pass.
         resolved_sum_targets: Vec::new(),
-        // See `build_update`: this protocol path carries literal fields only.
-        declared_primary_key: None,
+        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
+        declared_primary_key: declared_primary_key(ctx, collection)?,
     }))
 }
 

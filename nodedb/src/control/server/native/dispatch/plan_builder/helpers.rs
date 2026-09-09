@@ -26,6 +26,20 @@ pub(in crate::control::server::native::dispatch) fn collection_type(
     Some(coll.collection_type.clone())
 }
 
+/// `collection`'s DDL-declared `PRIMARY KEY` column name, for the apply-time
+/// NOT NULL guard on `PointUpdate` / `BulkUpdate`. `None` means no `PRIMARY
+/// KEY` was declared, so the guard has nothing to enforce.
+pub(in crate::control::server::native::dispatch) fn declared_primary_key(
+    ctx: &DispatchCtx<'_>,
+    collection: &str,
+) -> crate::Result<Option<String>> {
+    ctx.state.credentials.catalog().declared_primary_key(
+        ctx.database_id(),
+        ctx.identity.tenant_id.as_u64(),
+        collection,
+    )
+}
+
 /// Extract document_id from request fields.
 pub(in crate::control::server::native::dispatch) fn require_doc_id(
     fields: &TextFields,

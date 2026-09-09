@@ -19,4 +19,4 @@ pub(crate) mod timeseries;
 pub(crate) mod vector;
 
 pub(crate) use dispatch::build_plan;
-pub(super) use helpers::{collection_type, parse_direction, require_doc_id};
+pub(super) use helpers::{collection_type, declared_primary_key, parse_direction, require_doc_id};

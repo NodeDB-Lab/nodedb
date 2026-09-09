@@ -115,56 +115,50 @@ pub(in super::super) fn declared_primary_key_name(
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(None);
     };
-    let catalog = credentials.catalog();
-    Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), collection)?
-        .and_then(|c| c.declared_primary_key))
+    credentials
+        .catalog()
+        .declared_primary_key(ctx.database_id, ctx.tenant_id.as_u64(), collection)
 }
 
-/// Refuse a row whose declared primary-key column is `NULL` or omitted: a
-/// declared `PRIMARY KEY` implies `NOT NULL`.
+/// Resolve a row's document id + surrogate, refusing a `NULL`/omitted
+/// declared primary key first: a declared `PRIMARY KEY` implies `NOT NULL`.
 ///
-/// Checks the DDL-declared column, not the resolved `primary_key`: those
-/// diverge whenever a natural key sits on a column other than `id`. `_rowid`
-/// carries no declaration, so it mints a surrogate instead.
-pub(super) fn require_pk_present(
-    ctx: &ConvertContext,
-    collection: &str,
-    primary_key: Option<&str>,
-    row: &[(String, SqlValue)],
-) -> crate::Result<()> {
-    if is_auto_rowid_pk(primary_key) {
-        return Ok(());
-    }
-    let Some(declared) = declared_primary_key_name(ctx, collection)? else {
-        return Ok(());
-    };
-    match extract_doc_id(row, Some(&declared)) {
-        DocId::Present(_) => Ok(()),
-        DocId::ExplicitNull | DocId::Absent => Err(crate::Error::RejectedConstraint {
-            collection: collection.to_string(),
-            constraint: "not_null".to_string(),
-            detail: format!("primary key '{declared}' cannot be NULL or omitted"),
-        }),
-    }
-}
-
-/// Resolve a row's document id + surrogate from its extracted `DocId`.
+/// Enforcement keys on the DDL-declared column, not the resolved
+/// `primary_key`: those diverge whenever a natural key sits on a column
+/// other than `id` (e.g. `metrics (sku TEXT PRIMARY KEY)` resolves
+/// `primary_key` to `id` but declares `sku`). `_rowid` carries no
+/// declaration, so it skips the check and mints a surrogate.
 ///
-/// An auto-`_rowid` pk or a missing/null key mints a fresh surrogate; a
-/// present key content-addresses one via [`assign_for_pk`]. Call
-/// [`require_pk_present`] first — this function does not enforce NOT NULL.
+/// Identity minting then runs on the resolved `primary_key`: an auto-`_rowid`
+/// pk or a missing/null key mints a fresh surrogate; a present key
+/// content-addresses one via [`assign_for_pk`]. The two steps are one call so
+/// no caller can mint an identity without the NOT NULL check running first.
 pub(super) fn resolve_doc_identity(
     ctx: &ConvertContext,
     collection: &str,
     primary_key: Option<&str>,
-    doc_id: DocId,
+    row: &[(String, SqlValue)],
 ) -> crate::Result<(String, Surrogate)> {
+    if !is_auto_rowid_pk(primary_key)
+        && let Some(declared) = declared_primary_key_name(ctx, collection)?
+    {
+        match extract_doc_id(row, Some(&declared)) {
+            DocId::Present(_) => {}
+            DocId::ExplicitNull | DocId::Absent => {
+                return Err(crate::Error::RejectedConstraint {
+                    collection: collection.to_string(),
+                    constraint: "not_null".to_string(),
+                    detail: format!("primary key '{declared}' cannot be NULL or omitted"),
+                });
+            }
+        }
+    }
+
     if is_auto_rowid_pk(primary_key) {
         let s = assign_fresh(ctx, collection)?;
         return Ok((s.as_u32().to_string(), s));
     }
-    match doc_id {
+    match extract_doc_id(row, primary_key) {
         DocId::Present(id) => {
             let s = assign_for_pk(ctx, collection, id.as_bytes())?;
             Ok((id, s))
@@ -199,13 +193,12 @@ pub(super) fn is_auto_rowid_pk(primary_key: Option<&str>) -> bool {
     primary_key == Some("_rowid")
 }
 
-/// Mirrors the document-engine identity path (`extract_doc_id` +
-/// `require_pk_present` + `resolve_doc_identity`) for columnar/spatial rows.
-/// The declared `primary_key` — not the legacy `id`/`document_id`/`key` name
-/// guess — determines each row's identity, so a natural key on any column
-/// (e.g. `sku`) gets its own surrogate. A missing/empty key mints a fresh
-/// unique surrogate rather than collapsing onto `Surrogate::ZERO`, which
-/// would silently merge distinct rows.
+/// Mirrors the document-engine identity path (`resolve_doc_identity`) for
+/// columnar/spatial rows. The declared `primary_key` — not the legacy
+/// `id`/`document_id`/`key` name guess — determines each row's identity, so a
+/// natural key on any column (e.g. `sku`) gets its own surrogate. A
+/// missing/empty key mints a fresh unique surrogate rather than collapsing
+/// onto `Surrogate::ZERO`, which would silently merge distinct rows.
 pub(super) fn columnar_row_surrogates(
     ctx: &ConvertContext,
     collection: &str,
@@ -214,9 +207,7 @@ pub(super) fn columnar_row_surrogates(
 ) -> crate::Result<Vec<Surrogate>> {
     let mut out = Vec::with_capacity(columnar_rows.len());
     for row in columnar_rows {
-        let doc_id = extract_doc_id(row, primary_key);
-        require_pk_present(ctx, collection, primary_key, row)?;
-        let (_, surrogate) = resolve_doc_identity(ctx, collection, primary_key, doc_id)?;
+        let (_, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
         out.push(surrogate);
     }
     Ok(out)
@@ -325,8 +316,6 @@ pub(in super::super) fn convert_insert(
     }
 
     for (i, row) in expanded_rows.iter().enumerate() {
-        let doc_id = extract_doc_id(row, primary_key);
-
         match engine {
             EngineType::KeyValue => {
                 return Err(crate::Error::PlanError {
@@ -345,9 +334,7 @@ pub(in super::super) fn convert_insert(
             }
             EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
                 let value_bytes = row_to_msgpack(row)?;
-                require_pk_present(ctx, collection, primary_key, row)?;
-                let (doc_id, surrogate) =
-                    resolve_doc_identity(ctx, collection, primary_key, doc_id)?;
+                let (doc_id, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
                 // One page for the whole statement: the rows of a balanced
                 // INSERT are judged together, so they may not be split across
                 // one task — one boundary — per row.

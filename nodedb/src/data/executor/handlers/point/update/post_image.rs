@@ -44,6 +44,9 @@ pub(in crate::data::executor) struct PointUpdateImage<'a> {
     pub(in crate::data::executor) declared_primary_key: Option<&'a str>,
 }
 
+/// MessagePack encoding of `null`.
+const MSGPACK_NIL: u8 = 0xC0;
+
 impl CoreLoop {
     /// Build the bytes this update will store, in the collection's storage mode.
     pub(in crate::data::executor) fn build_point_update_image(
@@ -127,6 +130,22 @@ impl CoreLoop {
             sys_from_ms: _,
             declared_primary_key,
         } = params;
+
+        // A literal assignment is decided before any path builds an image, so
+        // the binary-merge fast path below is covered too.
+        if let Some(pk) = declared_primary_key {
+            for (field, value) in updates {
+                if field == pk
+                    && let UpdateValue::Literal(bytes) = value
+                    && matches!(bytes.first(), Some(&MSGPACK_NIL))
+                {
+                    return Err(ErrorCode::RejectedConstraint {
+                        constraint: "not_null".to_string(),
+                        detail: format!("primary key '{pk}' cannot be NULL or omitted"),
+                    });
+                }
+            }
+        }
 
         // Fast path: non-strict, no generated columns, all literal — merge at binary level.
         if !is_strict && !has_generated && !has_expr {

@@ -278,6 +278,24 @@ impl SystemCatalog {
         ))
     }
 
+    /// `collection`'s DDL-declared `PRIMARY KEY` column name, if any.
+    ///
+    /// The resolved `primary_key` a plan carries cannot answer this:
+    /// schemaless, columnar, and spatial collections resolve it to `id` by
+    /// convention with nothing declared. This reads `declared_primary_key`,
+    /// set only by the `PRIMARY KEY` keyword itself, naming the column it
+    /// applied `NOT NULL` to. A catalog miss reads as not declared.
+    pub fn declared_primary_key(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        name: &str,
+    ) -> crate::Result<Option<String>> {
+        Ok(self
+            .get_collection(database_id, tenant_id, name)?
+            .and_then(|c| c.declared_primary_key))
+    }
+
     /// Committed-only read, bypassing the transaction DDL overlay. The
     /// descriptor stamper reads through this: a version derived from an
     /// uncommitted overlay row would stamp two entries at the same version.

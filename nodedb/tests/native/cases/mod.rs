@@ -7,6 +7,7 @@ mod native_direct_op_txn_overlay;
 mod native_dml_affected_counts;
 mod native_error_code_classification;
 mod native_gateway_txn_overlay;
+mod native_primary_key_nullability;
 mod native_protocol;
 mod native_result_projection;
 mod native_session_parameters;
