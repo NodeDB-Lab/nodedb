@@ -17,8 +17,10 @@ pub(crate) enum TargetPk {
     AutoRowId,
     /// A declared / built-in primary-key field: the fresh surrogate is
     /// content-addressed on this field's value so a later point-get /
-    /// cross-engine resolve lands on the same identity.
-    Field(String),
+    /// cross-engine resolve lands on the same identity. `declared` is true
+    /// only for a DDL-declared `PRIMARY KEY`, which implies `NOT NULL`; an
+    /// `id`-by-convention field with no declaration stays unenforced.
+    Field { name: String, declared: bool },
 }
 
 /// Resolve how the target collection's primary key maps a written row to a
@@ -32,17 +34,23 @@ pub(crate) fn resolve_target_pk(
     match &target.collection_type {
         CollectionType::Document(DocumentMode::Strict(schema)) => {
             match schema.columns.iter().find(|c| c.primary_key) {
+                // Reached only via an explicit `PRIMARY KEY` column; `_rowid`
+                // already routes to `AutoRowId` above.
                 Some(col) if col.name == "_rowid" => Ok(TargetPk::AutoRowId),
-                Some(col) => Ok(TargetPk::Field(col.name.clone())),
+                Some(col) => Ok(TargetPk::Field {
+                    name: col.name.clone(),
+                    declared: true,
+                }),
                 None => Ok(TargetPk::AutoRowId),
             }
         }
-        CollectionType::Document(DocumentMode::Schemaless) => Ok(TargetPk::Field(
-            target
+        CollectionType::Document(DocumentMode::Schemaless) => Ok(TargetPk::Field {
+            name: target
                 .declared_primary_key
                 .clone()
                 .unwrap_or_else(|| "id".to_string()),
-        )),
+            declared: target.declared_primary_key.is_some(),
+        }),
         CollectionType::KeyValue(_) | CollectionType::Columnar(_) => Err(crate::Error::PlanError {
             detail: format!(
                 "{op_label} target '{}' must be a document collection",

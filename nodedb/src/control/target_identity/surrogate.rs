@@ -24,15 +24,26 @@ pub(crate) fn assign_target_surrogate(
                 .surrogate_assigner
                 .assign_fresh(database_id, tenant_id, target_collection)
         }
-        TargetPk::Field(field) => match extract_pk_value(body, field) {
-            Some(pk) if !pk.is_empty() => state.surrogate_assigner.assign(
+        TargetPk::Field { name, declared } => match extract_pk_value(body, name) {
+            // The empty string is a key like any other. Minting a fresh
+            // surrogate for it would let two rows share it.
+            Some(pk) => state.surrogate_assigner.assign(
                 database_id,
                 tenant_id,
                 target_collection,
                 pk.as_bytes(),
             ),
-            // No usable key value: mint a fresh unique surrogate rather than
-            // collapsing every keyless inserted row onto one binding.
+            // No usable key value on a DDL-declared PRIMARY KEY: NOT NULL is
+            // implied, so refuse rather than mint a surrogate for a row that
+            // plain INSERT would already reject.
+            None if *declared => Err(crate::Error::RejectedConstraint {
+                collection: target_collection.to_string(),
+                constraint: "not_null".to_string(),
+                detail: format!("primary key '{name}' cannot be NULL or omitted"),
+            }),
+            // Undeclared `id`-by-convention field: mint a fresh unique
+            // surrogate rather than collapsing every keyless row onto one
+            // binding.
             _ => state
                 .surrogate_assigner
                 .assign_fresh(database_id, tenant_id, target_collection),

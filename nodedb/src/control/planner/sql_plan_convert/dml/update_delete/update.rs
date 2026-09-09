@@ -54,6 +54,20 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
     let filter_bytes = serialize_filters(filters)?;
     let updates = assignments_to_update_values(assignments)?;
 
+    // A declared PRIMARY KEY implies NOT NULL. Check before any engine
+    // dispatch so every engine is covered by one gate.
+    if let Some(declared) = super::super::declared_primary_key_name(ctx, collection)?
+        && assignments.iter().any(|(field, expr)| {
+            field == &declared && matches!(expr, SqlExpr::Literal(SqlValue::Null))
+        })
+    {
+        return Err(crate::Error::RejectedConstraint {
+            collection: collection.to_string(),
+            constraint: "not_null".to_string(),
+            detail: format!("primary key '{declared}' cannot be set to NULL"),
+        });
+    }
+
     if matches!(engine, EngineType::KeyValue) {
         if let Some((field, _)) = assignments
             .iter()

@@ -293,3 +293,38 @@ async fn empty_string_primary_key_is_a_value_and_stays_unique() {
         "the row must be addressable by its empty-string key"
     );
 }
+
+/// The identity choke point shared by INSERT ... SELECT, MERGE, and
+/// UPDATE ... FROM keys rows on the same values the plain insert path does.
+/// An empty-string key identifies one row there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_select_keys_an_empty_string_like_any_other_value() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION pk_es_src (id TEXT PRIMARY KEY, v TEXT)")
+        .await
+        .expect("create pk_es_src");
+    server
+        .exec("CREATE COLLECTION pk_es_dst (id TEXT PRIMARY KEY, v TEXT)")
+        .await
+        .expect("create pk_es_dst");
+    server
+        .exec("INSERT INTO pk_es_src (id, v) VALUES ('a', 'first'), ('b', 'second')")
+        .await
+        .expect("seed pk_es_src");
+
+    server
+        .exec("INSERT INTO pk_es_dst (id, v) SELECT '', v FROM pk_es_src")
+        .await
+        .expect("an empty-string key is a legal value");
+
+    let rows = server
+        .query_text("SELECT v FROM pk_es_dst WHERE id = ''")
+        .await
+        .expect("point read on the empty-string key");
+    assert_eq!(
+        rows.len(),
+        1,
+        "both source rows carry the same key, so one row survives: {rows:?}"
+    );
+}

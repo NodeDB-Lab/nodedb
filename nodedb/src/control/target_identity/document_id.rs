@@ -20,8 +20,8 @@ pub(crate) fn derive_document_id(
 ) -> String {
     match target_pk {
         TargetPk::AutoRowId => surrogate.as_u32().to_string(),
-        TargetPk::Field(field) => {
-            extract_pk_value(body, field).unwrap_or_else(|| surrogate.as_u32().to_string())
+        TargetPk::Field { name, .. } => {
+            extract_pk_value(body, name).unwrap_or_else(|| surrogate.as_u32().to_string())
         }
     }
 }

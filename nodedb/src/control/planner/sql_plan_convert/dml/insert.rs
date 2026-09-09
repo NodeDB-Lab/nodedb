@@ -108,7 +108,7 @@ pub(super) fn extract_doc_id(row: &[(String, SqlValue)], primary_key: Option<&st
 /// catalog's `declared_primary_key` is set only by the keyword itself, and
 /// names the column the keyword applied `NOT NULL` to. A catalog miss reads
 /// as not declared — nothing to enforce.
-fn declared_primary_key_name(
+pub(in super::super) fn declared_primary_key_name(
     ctx: &ConvertContext,
     collection: &str,
 ) -> crate::Result<Option<String>> {

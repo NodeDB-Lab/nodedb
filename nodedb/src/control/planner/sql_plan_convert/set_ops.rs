@@ -153,6 +153,21 @@ pub(super) fn convert_insert_select(
     let target_qualified = super::convert::db_qualified(ctx.database_id, target);
     let qualified_target = nodedb_types::QualifiedCollection::new(ctx.database_id, target);
     let target = target_qualified.as_str();
+
+    // A declared PRIMARY KEY implies NOT NULL. A literal `SELECT NULL` into
+    // the pk column is knowable at plan time, before any row is scanned.
+    if let Some(declared) = super::dml::declared_primary_key_name(ctx, target)?
+        && column_map.iter().any(|(field, expr)| {
+            field == &declared && matches!(expr, SqlExpr::Literal(SqlValue::Null))
+        })
+    {
+        return Err(crate::Error::RejectedConstraint {
+            collection: target.to_string(),
+            constraint: "not_null".to_string(),
+            detail: format!("primary key '{declared}' cannot be set to NULL"),
+        });
+    }
+
     let SqlPlan::Scan {
         collection,
         filters,
