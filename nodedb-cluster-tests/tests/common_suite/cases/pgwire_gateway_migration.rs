@@ -20,9 +20,9 @@ use crate::common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodedb::control::gateway::Gateway;
 use nodedb::control::gateway::core::QueryContext;
 use nodedb::control::gateway::version_set::GatewayVersionSet;
+use nodedb::control::gateway::{Gateway, LoweredPlan};
 use nodedb::types::TenantId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_types::QualifiedCollection;
@@ -200,7 +200,7 @@ async fn pgwire_gateway_migration_plan_cache_hits() {
 
         let sql = "GET pgwire_gw_cache cache-key";
         let make_plan = || {
-            Ok(PhysicalPlan::Kv(KvOp::Get {
+            Ok(LoweredPlan::cacheable(PhysicalPlan::Kv(KvOp::Get {
                 collection: QualifiedCollection::new(
                     nodedb_types::id::DatabaseId::DEFAULT,
                     "pgwire_gw_cache",
@@ -208,7 +208,7 @@ async fn pgwire_gateway_migration_plan_cache_hits() {
                 key: b"cache-key".to_vec(),
                 rls_filters: vec![],
                 surrogate_ceiling: None,
-            }))
+            })))
         };
         let authorize_plan = |plan: PhysicalPlan| async {
             Ok(common::authorize_gateway_plan(&node.shared, &ctx, plan).await)

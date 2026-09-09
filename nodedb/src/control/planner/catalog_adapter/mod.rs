@@ -31,6 +31,7 @@
 //! queries.
 
 mod adapter;
+mod sequence_access;
 mod sql_catalog_impl;
 mod type_convert;
 

@@ -141,7 +141,7 @@ impl RangeAllocator {
 
         let current_val = state
             .sequence_registry
-            .currval(database_id, tenant_id, sequence_name)
+            .node_current_value(database_id, tenant_id, sequence_name)
             .unwrap_or(0);
 
         let range_start = current_val + increment;

@@ -30,5 +30,6 @@ pub(super) fn m(
         return_type,
         arg_types,
         since: V0_1_0,
+        volatility: nodedb_types::Volatility::Immutable,
     }
 }

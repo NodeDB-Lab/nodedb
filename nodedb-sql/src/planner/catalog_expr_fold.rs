@@ -6,6 +6,7 @@ use nodedb_types::DatabaseId;
 
 use crate::catalog::SqlCatalog;
 use crate::functions::registry::FunctionRegistry;
+use crate::planner::const_fold::FoldScope;
 use crate::types::{SqlExpr, SqlValue};
 
 pub(super) fn eval_catalog_constant(
@@ -29,7 +30,55 @@ pub(super) fn eval_catalog_constant(
             })?;
         return Ok(SqlValue::String(normalized));
     }
-    super::select::helpers::eval_constant_expr(expr, functions)
+    if let Some(value) = eval_sequence_accessor(expr, catalog)? {
+        return Ok(value);
+    }
+    // A from-less SELECT's plan is marked volatile when it holds a volatile
+    // call, so it is never cached. Evaluating the call here therefore serves
+    // this execution only, and the next execution re-plans and re-evaluates.
+    Ok(
+        crate::planner::const_fold::fold_constant_scoped(expr, functions, FoldScope::Once)?
+            .unwrap_or(SqlValue::Null),
+    )
+}
+
+/// Route `nextval` / `currval` / `setval` to the catalog's sequence state.
+///
+/// Returns `Ok(None)` for every other expression. These calls are `Volatile`,
+/// so the constant folder never reaches them and the plan holding the result
+/// is never cached — each execution re-plans and allocates again.
+fn eval_sequence_accessor(
+    expr: &SqlExpr,
+    catalog: &dyn SqlCatalog,
+) -> crate::Result<Option<SqlValue>> {
+    let SqlExpr::Function { name, args, .. } = expr else {
+        return Ok(None);
+    };
+    let lowered = name.to_ascii_lowercase();
+    if !matches!(lowered.as_str(), "nextval" | "currval" | "setval") {
+        return Ok(None);
+    }
+    let sequence = match args.first() {
+        Some(SqlExpr::Literal(SqlValue::String(name))) => name.as_str(),
+        _ => {
+            return Err(crate::SqlError::Arity {
+                detail: format!("{lowered} requires a literal sequence name"),
+            });
+        }
+    };
+    let value = match lowered.as_str() {
+        "nextval" => catalog.sequence_nextval(DatabaseId::DEFAULT, 0, sequence)?,
+        "currval" => catalog.sequence_currval(DatabaseId::DEFAULT, 0, sequence)?,
+        _ => {
+            let Some(SqlExpr::Literal(SqlValue::Int(target))) = args.get(1) else {
+                return Err(crate::SqlError::Arity {
+                    detail: "setval requires a literal bigint second argument".into(),
+                });
+            };
+            catalog.sequence_setval(DatabaseId::DEFAULT, 0, sequence, *target)?
+        }
+    };
+    Ok(Some(SqlValue::Int(value)))
 }
 
 pub(super) fn validate_expr(

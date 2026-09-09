@@ -71,13 +71,14 @@ pub(crate) fn build_kv_insert_plan(
     // the read path can only encode SQL NULL for it. See
     // `declared_type_coerce` for the full rationale.
     let mut coerced_rows: Vec<Vec<(String, SqlValue)>> = Vec::with_capacity(rows_ast.len());
+    let mut volatile_defaults = false;
     for row_exprs in rows_ast {
         let mut row: Vec<(String, SqlValue)> = Vec::with_capacity(columns.len());
         for (i, col) in columns.iter().enumerate() {
             let Some(expr) = row_exprs.get(i) else { break };
             row.push((col.clone(), expr_to_sql_value(expr)?));
         }
-        materialize_declared_defaults(declared_columns, &mut row)?;
+        volatile_defaults |= materialize_declared_defaults(declared_columns, &mut row)?;
         // The key column is exempt — see `coerce_rows_to_declared_types`.
         coerce_row_to_declared_types(declared_columns, &mut row, Some(key_col_name))?;
         coerced_rows.push(row);
@@ -130,6 +131,7 @@ pub(crate) fn build_kv_insert_plan(
         ttl_secs,
         intent,
         on_conflict_updates,
+        volatile_defaults,
     }])
 }
 
@@ -151,10 +153,14 @@ pub(crate) fn build_kv_insert_plan(
 ///   supplied literal. Filling them in afterwards would make `DEFAULT 999999`
 ///   on a `SMALLINT` column a way to store a value the same literal is
 ///   rejected for.
+///
+/// Returns whether any materialized default came from a `Volatile`
+/// expression, so the caller can keep the plan out of the plan cache.
 fn materialize_declared_defaults(
     declared_columns: &[ColumnInfo],
     row: &mut Vec<(String, SqlValue)>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut volatile = false;
     for column in declared_columns {
         let Some(default_expr) = column.default.as_deref() else {
             continue;
@@ -170,9 +176,10 @@ fn materialize_declared_defaults(
             })?;
         let Some(evaluated) = evaluated else { continue };
         let value = nodedb_value_to_sql_value(&column.name, evaluated)?;
+        volatile |= crate::types::plan::default_expr_is_volatile(default_expr);
         row.push((column.name.clone(), value));
     }
-    Ok(())
+    Ok(volatile)
 }
 
 /// Convert an evaluated default back into the planner's literal type.

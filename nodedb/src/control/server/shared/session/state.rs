@@ -215,6 +215,10 @@ pub struct ConnSession {
     /// GAP_FREE sequence reservations pending commit/rollback.
     /// On COMMIT: each reservation is finalized. On ROLLBACK: counter decremented.
     pub pending_sequence_reservations: Vec<crate::control::sequence::gap_free::ReservationHandle>,
+    /// Last `nextval` value this session obtained per sequence — what SQL
+    /// `currval` returns. Shared with the plan-time catalog adapter, which
+    /// writes it on `nextval` and reads it on `currval`.
+    pub sequence_values: Arc<crate::control::sequence::SessionSequenceValues>,
     /// Millis-since-epoch of the last statement COMPLETION on this connection
     /// (also set to "now" at connection start). Read by the pgwire listener
     /// watchdog to decide idle eligibility: a connection is idle only when it
@@ -321,6 +325,7 @@ impl ConnSession {
             temp_tables: super::temp_tables::TempTableRegistry::new(),
             plan_cache: crate::control::server::shared::session::plan_cache::PlanCache::new(128),
             pending_sequence_reservations: Vec::new(),
+            sequence_values: Arc::new(crate::control::sequence::SessionSequenceValues::new()),
             last_activity_ms: AtomicU64::new(now_unix_ms()),
             in_flight: AtomicU32::new(0),
             own_write_versions: HashMap::new(),

@@ -192,6 +192,54 @@ pub trait SqlCatalog {
     fn resolve_regtype(&self, _name: &str) -> Option<i64> {
         None
     }
+
+    /// Advance a sequence and return the allocated value, recording it as this
+    /// session's `currval`. Scoping mirrors `resolve_regclass`.
+    ///
+    /// An unknown name returns [`SqlError::UndefinedObject`] (SQLSTATE
+    /// `42704`). The default returns "sequence access unavailable" so
+    /// implementors with no sequence state compile without change.
+    fn sequence_nextval(
+        &self,
+        _database_id: nodedb_types::DatabaseId,
+        _tenant_id: u64,
+        _name: &str,
+    ) -> Result<i64, crate::SqlError> {
+        Err(sequence_access_unavailable())
+    }
+
+    /// Return the last value this session obtained from `sequence_nextval`.
+    ///
+    /// A sequence this session never advanced returns
+    /// [`SqlError::ObjectNotInPrerequisiteState`] (SQLSTATE `55000`).
+    fn sequence_currval(
+        &self,
+        _database_id: nodedb_types::DatabaseId,
+        _tenant_id: u64,
+        _name: &str,
+    ) -> Result<i64, crate::SqlError> {
+        Err(sequence_access_unavailable())
+    }
+
+    /// Position a sequence so the next `sequence_nextval` returns
+    /// `value + increment`. Returns `value`.
+    fn sequence_setval(
+        &self,
+        _database_id: nodedb_types::DatabaseId,
+        _tenant_id: u64,
+        _name: &str,
+        _value: i64,
+    ) -> Result<i64, crate::SqlError> {
+        Err(sequence_access_unavailable())
+    }
+}
+
+/// The error a catalog with no sequence state returns for every accessor.
+fn sequence_access_unavailable() -> crate::SqlError {
+    crate::SqlError::ObjectNotInPrerequisiteState {
+        object: "sequence".into(),
+        detail: "sequence access unavailable: this catalog carries no sequence registry".into(),
+    }
 }
 
 /// View of a registered array, surfaced to the SQL planner. Decoded by

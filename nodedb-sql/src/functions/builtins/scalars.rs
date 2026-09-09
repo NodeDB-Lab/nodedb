@@ -12,6 +12,7 @@ mod math;
 mod misc;
 mod pg_fts;
 mod pg_json;
+mod sequence_fn;
 mod spatial;
 mod string;
 mod vector;
@@ -32,6 +33,7 @@ pub(super) fn scalar_functions() -> Vec<FunctionMeta> {
     fns.extend(array_fn::array_fn_functions());
     fns.extend(array_elem::array_elem_functions());
     fns.extend(id_fn::id_fn_functions());
+    fns.extend(sequence_fn::sequence_fn_functions());
     fns.extend(misc::misc_functions());
     fns
 }

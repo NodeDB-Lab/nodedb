@@ -31,6 +31,7 @@ pub(in crate::functions::builtins::scalars) fn spatial_functions() -> Vec<Functi
                 return_type: return_type(spec.returns),
                 arg_types: arg_types(spec.args),
                 since: V0_1_0,
+                volatility: nodedb_types::Volatility::Immutable,
             });
         }
     }

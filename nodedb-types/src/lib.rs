@@ -69,6 +69,7 @@ pub mod vector_dtype;
 pub mod vector_index_params;
 pub mod vector_index_stats;
 pub mod vector_model;
+pub mod volatility;
 pub mod wire_version;
 
 pub use approx::{CountMinSketch, HyperLogLog, SpaceSaving, TDigest};
@@ -139,3 +140,4 @@ pub use vector_dtype::VectorStorageDtype;
 pub use vector_index_params::StoredVectorIndexParams;
 pub use vector_index_stats::{VectorIndexQuantization, VectorIndexStats, VectorIndexType};
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};
+pub use volatility::Volatility;

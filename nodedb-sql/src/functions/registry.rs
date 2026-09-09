@@ -6,6 +6,7 @@
 //! and whether they trigger special engine routing (e.g., vector_distance
 //! → VectorSearch).
 
+use nodedb_types::Volatility;
 use nodedb_types::columnar::ColumnType;
 
 use super::builtins::builtin_functions;
@@ -101,6 +102,18 @@ pub struct FunctionMeta {
     pub arg_types: &'static [ArgTypeSpec],
     /// Version in which this function was introduced.
     pub since: Version,
+    /// How far a call's result can be reused. Orthogonal to `category`: a
+    /// function is `Scalar` and `Volatile` at once. A `Volatile` function is
+    /// never folded to a literal and never admitted to a plan cache.
+    pub volatility: Volatility,
+}
+
+impl FunctionMeta {
+    /// Mark this registration `Volatile`.
+    pub fn volatile(mut self) -> Self {
+        self.volatility = Volatility::Volatile;
+        self
+    }
 }
 
 /// The function registry.
@@ -133,6 +146,13 @@ impl FunctionRegistry {
     pub fn is_aggregate(&self, name: &str) -> bool {
         self.lookup(name)
             .is_some_and(|f| f.category == FunctionCategory::Aggregate)
+    }
+
+    /// Whether a function must re-evaluate on every execution.
+    /// An unknown name is not volatile — the existence gate rejects it first.
+    pub fn is_volatile(&self, name: &str) -> bool {
+        self.lookup(name)
+            .is_some_and(|f| f.volatility.is_volatile())
     }
 
     /// Check if a function is a window function.

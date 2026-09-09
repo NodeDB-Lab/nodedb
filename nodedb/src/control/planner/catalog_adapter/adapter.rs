@@ -54,6 +54,14 @@ pub struct OriginCatalog {
     /// negligible — `get_collection` is called only a handful
     /// of times per plan.
     pub(super) recorded_versions: Mutex<DescriptorVersionSet>,
+    /// Node-wide sequence counters. `None` for adapters built without a
+    /// `SharedState`; every sequence accessor then reports that sequence
+    /// access is unavailable.
+    pub(super) sequence_registry: Option<Arc<crate::control::sequence::SequenceRegistry>>,
+    /// The calling session's `currval` map. `nextval` records into it and
+    /// `currval` reads only from it, so one session never sees another
+    /// session's allocation. `None` for planning with no session behind it.
+    pub(super) session_sequences: Option<Arc<crate::control::sequence::SessionSequenceValues>>,
 }
 
 impl OriginCatalog {
@@ -83,6 +91,8 @@ impl OriginCatalog {
             drain_tracker: None,
             recorded_versions: Mutex::new(DescriptorVersionSet::new()),
             array_catalog: None,
+            sequence_registry: None,
+            session_sequences: None,
         }
     }
 
@@ -107,7 +117,18 @@ impl OriginCatalog {
             drain_tracker: Some(Arc::clone(&shared.lease_drain)),
             recorded_versions: Mutex::new(DescriptorVersionSet::new()),
             array_catalog: Some(shared.array_catalog.clone()),
+            sequence_registry: Some(Arc::clone(&shared.sequence_registry)),
+            session_sequences: None,
         }
+    }
+
+    /// Bind the calling session's `currval` map to this adapter.
+    pub fn with_session_sequences(
+        mut self,
+        values: Option<Arc<crate::control::sequence::SessionSequenceValues>>,
+    ) -> Self {
+        self.session_sequences = values;
+        self
     }
 
     /// Drain the recorded descriptor-version set and return it.

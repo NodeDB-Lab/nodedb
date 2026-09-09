@@ -75,10 +75,12 @@ pub(super) fn plan_select(
         let projection = convert_projection(&select.projection, &scope)?;
         let mut columns = Vec::new();
         let mut values = Vec::new();
+        let mut volatile = false;
         for (i, proj) in projection.iter().enumerate() {
             match proj {
                 Projection::Computed { expr, alias } => {
                     columns.push(alias.clone());
+                    volatile |= crate::types::plan::expr_is_volatile(expr);
                     values.push(crate::planner::catalog_expr_fold::eval_catalog_constant(
                         expr, catalog, functions,
                     )?);
@@ -94,7 +96,11 @@ pub(super) fn plan_select(
             }
         }
         return Ok(PlannedSelect {
-            plan: SqlPlan::ConstantResult { columns, values },
+            plan: SqlPlan::ConstantResult {
+                columns,
+                values,
+                volatile,
+            },
             scope,
         });
     }
@@ -188,6 +194,7 @@ pub(super) fn plan_select(
                 Box::new(SqlPlan::ConstantResult {
                     columns: Vec::new(),
                     values: Vec::new(),
+                    volatile: false,
                 }),
             );
             for sq in subquery_joins

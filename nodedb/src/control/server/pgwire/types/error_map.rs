@@ -50,6 +50,14 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             sqlstate::UNDEFINED_FUNCTION,
             format!("function {name}(...) does not exist"),
         ),
+        crate::Error::UndefinedObject { .. } => {
+            ("ERROR", sqlstate::UNDEFINED_OBJECT, err.to_string())
+        }
+        crate::Error::ObjectNotInPrerequisiteState { detail, .. } => (
+            "ERROR",
+            sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            detail.clone(),
+        ),
         crate::Error::UndefinedColumn { column } => (
             "ERROR",
             sqlstate::UNDEFINED_COLUMN,

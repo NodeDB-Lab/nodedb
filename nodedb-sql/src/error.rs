@@ -19,6 +19,19 @@ pub enum SqlError {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
+    /// A statement names a database object that does not exist — a sequence,
+    /// most commonly. Distinct from [`SqlError::UndefinedFunction`]: the
+    /// function exists, the object it names does not. PostgreSQL rejects the
+    /// same input with SQLSTATE `42704` (`undefined_object`).
+    #[error("{kind} \"{name}\" does not exist")]
+    UndefinedObject { kind: &'static str, name: String },
+
+    /// An object exists but a prerequisite step has not run, such as `currval`
+    /// before this session called `nextval`. PostgreSQL rejects the same input
+    /// with SQLSTATE `55000` (`object_not_in_prerequisite_state`).
+    #[error("{detail}")]
+    ObjectNotInPrerequisiteState { object: String, detail: String },
+
     #[error("unknown column '{column}' in table '{table}'")]
     UnknownColumn { table: String, column: String },
 

@@ -6,7 +6,6 @@
 use sqlparser::ast;
 
 use crate::error::{Result, SqlError};
-use crate::functions::registry::FunctionRegistry;
 use crate::parser::normalize::{SCHEMA_QUALIFIED_MSG, normalize_ident};
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
@@ -182,22 +181,6 @@ pub fn extract_func_args(func: &ast::Function) -> Result<Vec<ast::Expr>> {
             .collect()),
         _ => Ok(Vec::new()),
     }
-}
-
-/// Evaluate a constant SqlExpr to a SqlValue. Delegates to the shared
-/// `const_fold::fold_constant` helper so that zero-arg scalar functions
-/// like `now()` and `current_timestamp` go through the same evaluator
-/// as the runtime expression path.
-///
-/// An expression that is not constant yields NULL — this is the from-less
-/// SELECT path, which has no row scope to defer to. An expression that *is*
-/// constant and failed to evaluate raises instead: it can never succeed, so
-/// NULL would be a wrong answer rather than an unknown one.
-pub(crate) fn eval_constant_expr(
-    expr: &SqlExpr,
-    functions: &FunctionRegistry,
-) -> crate::Result<SqlValue> {
-    Ok(crate::planner::const_fold::fold_constant(expr, functions)?.unwrap_or(SqlValue::Null))
 }
 
 pub(super) fn extract_column_name(expr: &ast::Expr) -> Result<String> {

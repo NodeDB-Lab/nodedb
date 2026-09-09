@@ -99,7 +99,14 @@ fn parse_parametric_or_literal(
 /// Attempt to parse the DEFAULT expression as SQL, then const-fold it.
 fn try_const_fold_default(expr: &str) -> Option<nodedb_types::Value> {
     let sql_expr = crate::parse_expr_string(expr).ok()?;
-    let folded = crate::planner::const_fold::fold_constant_default(&sql_expr).ok()??;
+    // `Once`: a materialized DEFAULT serves this insert only, and an INSERT
+    // plan carrying a volatile DEFAULT is never admitted to the plan cache.
+    let folded = crate::planner::const_fold::fold_constant_scoped(
+        &sql_expr,
+        crate::planner::const_fold::default_registry(),
+        crate::planner::const_fold::FoldScope::Once,
+    )
+    .ok()??;
     Some(sql_value_to_ndb(folded))
 }
 

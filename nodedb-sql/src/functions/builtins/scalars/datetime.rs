@@ -44,7 +44,8 @@ pub(super) fn datetime_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Timestamptz),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "current_timestamp",
             Scalar,
@@ -53,7 +54,8 @@ pub(super) fn datetime_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Timestamptz),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "datetime",
             Scalar,

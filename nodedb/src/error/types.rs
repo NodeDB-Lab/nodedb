@@ -282,6 +282,19 @@ pub enum Error {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
+    /// A statement named a database object that does not exist — a sequence,
+    /// most commonly. Propagated from `SqlError::UndefinedObject`; the pgwire
+    /// layer renders this as SQLSTATE `42704` (undefined_object).
+    #[error("{kind} \"{name}\" does not exist")]
+    UndefinedObject { kind: &'static str, name: String },
+
+    /// An object exists but a prerequisite step has not run, such as `currval`
+    /// before this session called `nextval`. Propagated from
+    /// `SqlError::ObjectNotInPrerequisiteState`; the pgwire layer renders this
+    /// as SQLSTATE `55000` (object_not_in_prerequisite_state).
+    #[error("{detail}")]
+    ObjectNotInPrerequisiteState { object: String, detail: String },
+
     /// A column reference resolved against no relation, output alias, or
     /// synthetic column in scope. Propagated from `SqlError::UnknownColumn`;
     /// the pgwire layer renders it as SQLSTATE `42703` (undefined_column).

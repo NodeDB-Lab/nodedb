@@ -42,6 +42,12 @@ fn map_plan_error(error: nodedb_sql::SqlError, tenant_id: crate::types::TenantId
         nodedb_sql::SqlError::UndefinedFunction { name } => {
             crate::Error::UndefinedFunction { name }
         }
+        nodedb_sql::SqlError::UndefinedObject { kind, name } => {
+            crate::Error::UndefinedObject { kind, name }
+        }
+        nodedb_sql::SqlError::ObjectNotInPrerequisiteState { object, detail } => {
+            crate::Error::ObjectNotInPrerequisiteState { object, detail }
+        }
         // A constant expression that divides by zero is the same condition the
         // row-scope evaluator raises, so it carries the same code.
         nodedb_sql::SqlError::DivisionByZero => crate::Error::DivisionByZero,
@@ -128,6 +134,9 @@ impl QueryContext {
         } else {
             inputs.build_adapter(tenant_id.as_u64(), database_id)
         };
+        // `nextval` records into the calling session's map and `currval` reads
+        // only from it, so the adapter must know which session is planning.
+        let catalog = catalog.with_session_sequences(self.session_sequences());
         let plans =
             nodedb_sql::plan_sql(sql, &catalog).map_err(|e| map_plan_error(e, tenant_id))?;
         // Fold catalog-dependent cast expressions (::regclass, ::regtype) to
@@ -189,14 +198,8 @@ impl QueryContext {
                 &catalog,
                 database_id,
             );
-        let cache_eligibility = if plans
-            .iter()
-            .all(|plan| plan.cache_eligibility().is_cacheable())
-        {
-            nodedb_sql::types::PlanCacheEligibility::Cacheable
-        } else {
-            nodedb_sql::types::PlanCacheEligibility::DataDependent
-        };
+        let cache_eligibility =
+            crate::control::planner::sql_plan_convert::batch_cache_eligibility(&plans);
         let tasks = crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
         Ok((tasks, output_schema, version_set, cache_eligibility))
     }

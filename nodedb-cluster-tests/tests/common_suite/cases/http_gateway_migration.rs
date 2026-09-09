@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodedb::Error;
-use nodedb::control::gateway::Gateway;
 use nodedb::control::gateway::GatewayErrorMap;
 use nodedb::control::gateway::core::QueryContext;
+use nodedb::control::gateway::{Gateway, LoweredPlan};
 use nodedb::types::TenantId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_types::QualifiedCollection;
@@ -184,7 +184,7 @@ async fn http_gateway_migration_cross_node_query() {
                 get_sql,
                 &[],
                 || {
-                    Ok(PhysicalPlan::Kv(KvOp::Get {
+                    Ok(LoweredPlan::cacheable(PhysicalPlan::Kv(KvOp::Get {
                         collection: QualifiedCollection::new(
                             nodedb_types::id::DatabaseId::DEFAULT,
                             "http_gw_cross_node",
@@ -192,7 +192,7 @@ async fn http_gateway_migration_cross_node_query() {
                         key: b"cross-key".to_vec(),
                         rls_filters: vec![],
                         surrogate_ceiling: None,
-                    }))
+                    })))
                 },
                 |plan| async {
                     Ok(common::authorize_gateway_plan(&follower.shared, &ctx, plan).await)

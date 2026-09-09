@@ -27,6 +27,10 @@ pub enum SqlPlan {
     ConstantResult {
         columns: Vec<String>,
         values: Vec<SqlValue>,
+        /// Whether any projected expression called a `Volatile` function.
+        /// The values were evaluated while this plan was built, so a cached
+        /// plan would replay them; a volatile plan is never cached.
+        volatile: bool,
     },
 
     // ── Reads ──
@@ -138,6 +142,11 @@ pub enum SqlPlan {
         /// Empty for plain UPSERT (whole-value overwrite) and for INSERT
         /// variants.
         on_conflict_updates: Vec<(String, SqlExpr)>,
+        /// Whether any DEFAULT materialized into `entries` came from a
+        /// `Volatile` expression. The key-value planner evaluates declared
+        /// defaults while building this plan, so a cached plan would replay
+        /// one execution's value; a volatile plan is never cached.
+        volatile_defaults: bool,
     },
     /// UPSERT: insert or merge if document exists.
     Upsert {

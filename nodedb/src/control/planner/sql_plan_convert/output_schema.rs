@@ -568,6 +568,7 @@ mod tests {
         let plans = vec![SqlPlan::ConstantResult {
             columns: vec!["a".to_string(), "b".to_string()],
             values: vec![],
+            volatile: false,
         }];
         let schema = build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT);
         assert_eq!(schema.columns.len(), 2);

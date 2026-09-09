@@ -220,6 +220,37 @@ impl SqlCatalog for OriginCatalog {
         )
     }
 
+    /// Database and tenant come from the adapter's own scope, mirroring
+    /// `resolve_regclass`; the trait's arguments are the caller's plan-time
+    /// defaults and carry no session scope.
+    fn sequence_nextval(
+        &self,
+        _database_id: nodedb_types::DatabaseId,
+        _tenant_id: u64,
+        name: &str,
+    ) -> Result<i64, nodedb_sql::SqlError> {
+        self.advance_sequence(name)
+    }
+
+    fn sequence_currval(
+        &self,
+        _database_id: nodedb_types::DatabaseId,
+        _tenant_id: u64,
+        name: &str,
+    ) -> Result<i64, nodedb_sql::SqlError> {
+        self.session_sequence_value(name)
+    }
+
+    fn sequence_setval(
+        &self,
+        _database_id: nodedb_types::DatabaseId,
+        _tenant_id: u64,
+        name: &str,
+        value: i64,
+    ) -> Result<i64, nodedb_sql::SqlError> {
+        self.position_sequence(name, value)
+    }
+
     fn resolve_regtype(&self, name: &str) -> Option<i64> {
         crate::control::server::pgwire::catalog::tables::pg_type::type_oid_map()
             .get(name)
