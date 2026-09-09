@@ -163,6 +163,7 @@ mod sql_copy_to;
 mod sql_cursors;
 mod sql_declared_column_types;
 mod sql_default_expressions;
+mod sql_default_vector_primary;
 mod sql_default_volatility;
 mod sql_division_by_zero;
 mod sql_division_by_zero_composite;
