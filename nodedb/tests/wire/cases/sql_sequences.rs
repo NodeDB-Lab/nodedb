@@ -205,3 +205,97 @@ async fn serial_column_allocates_successive_keys() {
     }
     assert_eq!(rows, vec!["1".to_string(), "2".to_string()]);
 }
+
+/// Preparing an INSERT must not consume a `nextval` allocation.
+/// Only executing the statement advances the sequence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preparing_an_insert_does_not_advance_a_sequence_default() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE SEQUENCE seq_plan_side_effect;")
+        .await
+        .unwrap();
+    server
+        .exec(
+            "CREATE COLLECTION seq_plan_probe (\
+                id BIGINT DEFAULT nextval('seq_plan_side_effect') PRIMARY KEY, \
+                v TEXT) WITH (engine='document_strict')",
+        )
+        .await
+        .unwrap();
+
+    const INSERT: &str = "INSERT INTO seq_plan_probe (v) VALUES ('a')";
+
+    // Parse/Describe only. Each round trip plans the statement without
+    // executing it, so none of them can allocate a sequence value.
+    for _ in 0..3 {
+        server
+            .client
+            .prepare(INSERT)
+            .await
+            .expect("prepare INSERT with a nextval default must succeed");
+    }
+
+    server.exec(INSERT).await.unwrap();
+
+    let rows = server
+        .query_text("SELECT id FROM seq_plan_probe")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one row expected: {rows:?}");
+    assert_eq!(
+        rows[0].trim(),
+        "1",
+        "planning must leave the sequence at its start, got id `{}`",
+        rows[0]
+    );
+
+    // The next allocation is 2 when exactly one value was consumed.
+    let next = server
+        .query_text("SELECT nextval('seq_plan_side_effect')")
+        .await
+        .unwrap();
+    assert_eq!(
+        next,
+        vec!["2".to_string()],
+        "one execution must consume exactly one value, got {next:?}"
+    );
+}
+
+/// Describing an INSERT that omits a `nextval` DEFAULT reports its columns
+/// without consuming a sequence value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn describing_an_insert_leaves_the_sequence_untouched() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE SEQUENCE seq_describe_probe;")
+        .await
+        .unwrap();
+    server
+        .exec(
+            "CREATE COLLECTION seq_describe_target (\
+                id BIGINT DEFAULT nextval('seq_describe_probe') PRIMARY KEY, \
+                v TEXT) WITH (engine='document_strict')",
+        )
+        .await
+        .unwrap();
+
+    server
+        .client
+        .prepare("INSERT INTO seq_describe_target (v) VALUES ($1) RETURNING id")
+        .await
+        .expect("prepare INSERT ... RETURNING with a nextval default must succeed");
+
+    // The sequence was never executed against, so the first allocation is 1.
+    let first = server
+        .query_text("SELECT nextval('seq_describe_probe')")
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        vec!["1".to_string()],
+        "describe must not allocate, got {first:?}"
+    );
+}
