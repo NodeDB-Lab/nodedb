@@ -74,3 +74,134 @@ async fn drop_sequence_if_exists() {
         .await
         .unwrap();
 }
+
+/// `nextval('seq')` returns 1 on the first call and 2 on the second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nextval_returns_successive_values() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE SEQUENCE seq_nextval_succ")
+        .await
+        .unwrap();
+
+    let first = server
+        .query_text("SELECT nextval('seq_nextval_succ')")
+        .await
+        .unwrap();
+    assert_eq!(first, vec!["1".to_string()], "first nextval must be 1");
+
+    let second = server
+        .query_text("SELECT nextval('seq_nextval_succ')")
+        .await
+        .unwrap();
+    assert_eq!(second, vec!["2".to_string()], "second nextval must be 2");
+}
+
+/// `currval('seq')` returns the session's last `nextval` result, not a fresh
+/// allocation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn currval_returns_the_last_value_of_the_session() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE SEQUENCE seq_currval_session")
+        .await
+        .unwrap();
+
+    server
+        .query_text("SELECT nextval('seq_currval_session')")
+        .await
+        .unwrap();
+    let first = server
+        .query_text("SELECT currval('seq_currval_session')")
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        vec!["1".to_string()],
+        "currval must echo the last nextval"
+    );
+
+    server
+        .query_text("SELECT nextval('seq_currval_session')")
+        .await
+        .unwrap();
+    let second = server
+        .query_text("SELECT currval('seq_currval_session')")
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        vec!["2".to_string()],
+        "currval must track the second nextval"
+    );
+}
+
+/// `setval('seq', 10)` positions the sequence so the next `nextval` returns 11.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn setval_positions_the_next_allocation() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE SEQUENCE seq_setval_pos").await.unwrap();
+
+    server
+        .query_text("SELECT setval('seq_setval_pos', 10)")
+        .await
+        .unwrap();
+    let next = server
+        .query_text("SELECT nextval('seq_setval_pos')")
+        .await
+        .unwrap();
+    assert_eq!(
+        next,
+        vec!["11".to_string()],
+        "nextval after setval(10) must be 11"
+    );
+}
+
+/// `nextval` on a sequence that was never created must fail with `42704`
+/// (undefined_object), not `42883` (undefined_function) — the function
+/// exists, the object does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nextval_on_an_unknown_sequence_errors() {
+    let server = TestServer::start().await;
+
+    server
+        .expect_error("SELECT nextval('seq_that_was_never_created')", "42704")
+        .await;
+}
+
+/// A `SERIAL` column allocates 1 then 2 across two inserts that omit it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serial_column_allocates_successive_keys() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION seq_serial_alloc FIELDS (n SERIAL, v TEXT)")
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO seq_serial_alloc (v) VALUES ('a')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO seq_serial_alloc (v) VALUES ('b')")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT n FROM seq_serial_alloc ORDER BY n")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two rows expected: {rows:?}");
+    for row in &rows {
+        let trimmed = row.trim();
+        assert!(
+            !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("null"),
+            "SERIAL column must not be empty or NULL, got `{row}`"
+        );
+    }
+    assert_eq!(rows, vec!["1".to_string(), "2".to_string()]);
+}
