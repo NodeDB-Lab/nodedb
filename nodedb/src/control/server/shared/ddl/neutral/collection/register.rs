@@ -62,7 +62,7 @@ pub async fn dispatch_register_if_needed(
         return Ok(());
     };
     let (fields, _serial_fields) =
-        crate::control::server::shared::ddl::schema_validation::parse_fields_clause(parts);
+        crate::control::server::shared::ddl::schema_validation::parse_fields_clause(&name, parts);
     let mut indexes = derive_auto_indexes(fields.iter().map(|(n, _)| n.as_str()));
     extend_with_catalog_indexes(&mut indexes, &coll);
     // `sql` is unused on this leader-side path: index derivation reads

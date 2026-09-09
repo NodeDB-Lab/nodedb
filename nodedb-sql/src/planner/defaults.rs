@@ -37,45 +37,84 @@ pub fn evaluate_default_expr(
     catalog: &dyn SqlCatalog,
 ) -> crate::Result<nodedb_types::Value> {
     let upper = expr.trim().to_uppercase();
-    match upper.as_str() {
+    if let Some(value) = eval_keyword_default(&upper) {
+        return Ok(value);
+    }
+    if let Some(value) = eval_parametric_or_literal(expr, &upper)? {
+        return Ok(value);
+    }
+    evaluate_parsed_default(expr, column, catalog)
+}
+
+/// Check that `expr`, the DEFAULT declared on `column`, can be evaluated.
+///
+/// DDL calls this to refuse an unevaluable DEFAULT at declaration time. It
+/// classifies the expression through the same arms `evaluate_default_expr`
+/// uses, then parses anything left over. Parsing runs the resolver's
+/// `FunctionRegistry` gate, so an unregistered function name raises
+/// [`SqlError::UndefinedFunction`].
+///
+/// A sequence accessor is parsed, never called, so declaring a column must
+/// never advance a sequence.
+pub fn validate_default_expr(expr: &str, column: &str) -> crate::Result<()> {
+    let upper = expr.trim().to_uppercase();
+    if eval_keyword_default(&upper).is_some() {
+        return Ok(());
+    }
+    if eval_parametric_or_literal(expr, &upper)?.is_some() {
+        return Ok(());
+    }
+    let sql_expr = crate::parse_expr_string(expr)?;
+    reject_setval_default(&sql_expr, column)
+}
+
+/// Evaluate the keyword-spelled defaults: the ID generators and `NOW()`.
+///
+/// Returns `None` for every other expression. This is the one list of
+/// keyword forms; the DDL gate classifies through it rather than repeating it.
+fn eval_keyword_default(upper: &str) -> Option<nodedb_types::Value> {
+    let value = match upper {
         "UUID_V7" | "UUIDV7" | "GEN_UUID_V7()" | "UUID_V7()" => {
-            Ok(nodedb_types::Value::String(nodedb_types::id_gen::uuid_v7()))
+            nodedb_types::Value::String(nodedb_types::id_gen::uuid_v7())
         }
         "UUID_V4" | "UUIDV4" | "UUID" | "GEN_UUID_V4()" | "UUID_V4()" => {
-            Ok(nodedb_types::Value::String(nodedb_types::id_gen::uuid_v4()))
+            nodedb_types::Value::String(nodedb_types::id_gen::uuid_v4())
         }
         "ULID" | "GEN_ULID()" | "ULID()" => {
-            Ok(nodedb_types::Value::String(nodedb_types::id_gen::ulid()))
+            nodedb_types::Value::String(nodedb_types::id_gen::ulid())
         }
-        "CUID2" | "CUID2()" => Ok(nodedb_types::Value::String(nodedb_types::id_gen::cuid2())),
-        "NANOID" | "NANOID()" => Ok(nodedb_types::Value::String(nodedb_types::id_gen::nanoid())),
+        "CUID2" | "CUID2()" => nodedb_types::Value::String(nodedb_types::id_gen::cuid2()),
+        "NANOID" | "NANOID()" => nodedb_types::Value::String(nodedb_types::id_gen::nanoid()),
         "NOW()" => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
-            Ok(nodedb_types::Value::String(
+            nodedb_types::Value::String(
                 chrono::DateTime::from_timestamp_millis(now.as_millis() as i64)
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_else(|| now.as_millis().to_string()),
-            ))
+            )
         }
-        _ => parse_parametric_or_literal(expr, &upper, column, catalog),
-    }
+        _ => return None,
+    };
+    Some(value)
 }
 
-fn parse_parametric_or_literal(
+/// Evaluate the parametric ID generators and the bare literals.
+///
+/// Returns `Ok(None)` when `expr` is none of them, leaving it to the parser.
+/// This is the one list of literal forms; the DDL gate reuses it.
+fn eval_parametric_or_literal(
     expr: &str,
     upper: &str,
-    column: &str,
-    catalog: &dyn SqlCatalog,
-) -> crate::Result<nodedb_types::Value> {
+) -> crate::Result<Option<nodedb_types::Value>> {
     // NANOID(N) — custom length.
     if upper.starts_with("NANOID(") && upper.ends_with(')') {
         let len_str = &upper[7..upper.len() - 1];
         if let Ok(len) = len_str.parse::<usize>() {
-            return Ok(nodedb_types::Value::String(
+            return Ok(Some(nodedb_types::Value::String(
                 nodedb_types::id_gen::nanoid_with_length(len),
-            ));
+            )));
         }
     }
     // CUID2(N) — custom length; validates length range and surfaces planning errors.
@@ -85,27 +124,27 @@ fn parse_parametric_or_literal(
             let id = nodedb_types::id_gen::cuid2_with_length(len).map_err(|e| SqlError::Parse {
                 detail: format!("CUID2({len}) default expression is invalid: {e}"),
             })?;
-            return Ok(nodedb_types::Value::String(id));
+            return Ok(Some(nodedb_types::Value::String(id)));
         }
     }
     // Numeric literal.
     if let Ok(i) = expr.trim().parse::<i64>() {
-        return Ok(nodedb_types::Value::Integer(i));
+        return Ok(Some(nodedb_types::Value::Integer(i)));
     }
     if let Ok(f) = expr.trim().parse::<f64>() {
-        return Ok(nodedb_types::Value::Float(f));
+        return Ok(Some(nodedb_types::Value::Float(f)));
     }
     // Quoted string literal.
     let trimmed = expr.trim();
     if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
         || (trimmed.starts_with('"') && trimmed.ends_with('"'))
     {
-        return Ok(nodedb_types::Value::String(
+        return Ok(Some(nodedb_types::Value::String(
             trimmed[1..trimmed.len() - 1].to_string(),
-        ));
+        )));
     }
 
-    evaluate_parsed_default(expr, column, catalog)
+    Ok(None)
 }
 
 /// Parse the DEFAULT as SQL, then resolve it against the catalog or the folder.
@@ -138,6 +177,15 @@ fn evaluate_sequence_default(
     column: &str,
     catalog: &dyn SqlCatalog,
 ) -> crate::Result<Option<SqlValue>> {
+    reject_setval_default(expr, column)?;
+    super::catalog_expr_fold::eval_sequence_accessor(expr, catalog)
+}
+
+/// Refuse `setval` as a column DEFAULT.
+///
+/// `setval` moves a sequence rather than reading one, so a column cannot take
+/// its result as a value. Both the evaluator and the DDL gate call this.
+fn reject_setval_default(expr: &SqlExpr, column: &str) -> crate::Result<()> {
     if let SqlExpr::Function { name, .. } = expr
         && name.eq_ignore_ascii_case("setval")
     {
@@ -145,7 +193,7 @@ fn evaluate_sequence_default(
             column: column.to_string(),
         });
     }
-    super::catalog_expr_fold::eval_sequence_accessor(expr, catalog)
+    Ok(())
 }
 
 fn unevaluable(column: &str, expr: &str) -> SqlError {

@@ -34,6 +34,7 @@ use super::super::enforcement::{
 use super::engine_option::validate_engine_name;
 use super::request::CreateCollectionRequest;
 
+use super::build_column_defaults::validate_column_defaults;
 use super::build_flags::{err, resolve_crdt_flag, validate_crdt_signing_storage, validate_name};
 use super::build_post_create::{create_serial_sequences, log_vector_fields};
 use super::build_primary_engine::resolve_primary_engine;
@@ -85,6 +86,13 @@ pub async fn build_and_persist(
                 .to_string(),
         ));
     }
+
+    // Refuse a DEFAULT the server cannot evaluate here, not at the first
+    // INSERT. It runs before any lifecycle guard or predecessor purge, so a
+    // rejected declaration leaves the existing state untouched. A SERIAL
+    // column carries no DEFAULT text yet; the `nextval` this build generates
+    // for it names a registered function and clears the same gate.
+    validate_column_defaults(columns)?;
 
     let tenant_id = identity.tenant_id;
 
@@ -179,10 +187,22 @@ pub async fn build_and_persist(
     let canonical_engine = validate_engine_name(engine, options)?;
     let bitemporal_flag = flags.iter().any(|f| f == "BITEMPORAL");
 
+    // Expand SERIAL / BIGSERIAL first, so every later reader of the column
+    // list sees the backing type plus the `nextval` DEFAULT naming the
+    // sequence `create_serial_sequences` materializes below.
+    let (expanded_columns, serial_fields) =
+        crate::control::server::shared::ddl::schema_validation::parse_fields_clause_from_pairs(
+            name, columns,
+        );
+
     // Resolve user-defined type names to TEXT for schema building.
     // Original names are preserved in `fields` for drop-protection.
-    let resolved_columns: Vec<(String, String)> =
-        resolve_custom_type_columns(columns, state, database_id.as_u64(), tenant_id.as_u64());
+    let resolved_columns: Vec<(String, String)> = resolve_custom_type_columns(
+        &expanded_columns,
+        state,
+        database_id.as_u64(),
+        tenant_id.as_u64(),
+    );
 
     let (collection_type, columnar_schema_columns) = nodedb_sql::ddl_ast::build_collection_type(
         canonical_engine,
@@ -193,10 +213,7 @@ pub async fn build_and_persist(
     )
     .map_err(|e| err("42601", e.to_string()))?;
 
-    let (mut fields, serial_fields) =
-        crate::control::server::shared::ddl::schema_validation::parse_fields_clause_from_pairs(
-            columns,
-        );
+    let mut fields = expanded_columns.clone();
     if fields.is_empty() && !columnar_schema_columns.is_empty() {
         fields = columnar_schema_columns;
     }
@@ -210,7 +227,7 @@ pub async fn build_and_persist(
     };
 
     let (primary, vector_primary) =
-        resolve_primary_engine(options, columns, &fields, &collection_type)?;
+        resolve_primary_engine(options, &expanded_columns, &fields, &collection_type)?;
 
     let append_only = flags.iter().any(|f| f == "APPEND_ONLY");
     let hash_chain = flags.iter().any(|f| f == "HASH_CHAIN");
@@ -245,7 +262,7 @@ pub async fn build_and_persist(
     // column list. Recorded on every engine so schemaless collections can
     // key their document id off it instead of the hardcoded `id` field;
     // harmless for strict/KV, which already track the PK on their schema.
-    let declared_primary_key = columns.iter().find_map(|(col_name, type_str)| {
+    let declared_primary_key = expanded_columns.iter().find_map(|(col_name, type_str)| {
         let (_, is_pk, _, _) =
             nodedb_sql::ddl_ast::collection_type::parse_column_type_str_full(type_str);
         is_pk.then(|| col_name.clone())
