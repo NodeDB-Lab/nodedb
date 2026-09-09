@@ -327,7 +327,7 @@ impl CoreLoop {
         // missing float field is stored as NaN and both paths render it as SQL
         // NULL, which a hand-written projection over the ingest values would
         // have printed as "NaN".
-        let returned_rows: Vec<rmpv::Value> = match returning {
+        let mut returned_rows: Vec<rmpv::Value> = match returning {
             Some(_) => match self.columnar_memtables.get(&key) {
                 Some(mt) => {
                     super::raw_scan::emit_memtable_rows_at(mt, &outcome.accepted_row_indices)
@@ -336,6 +336,13 @@ impl CoreLoop {
             },
             None => Vec::new(),
         };
+        // Same scan-unit rule `SELECT` applies: a declared `TIMESTAMP` cell
+        // leaves the engine as epoch microseconds, not the milliseconds
+        // storage holds.
+        let instant_columns = self.ts_instant_columns(task.request.database_id, tid, collection);
+        if let Err(e) = super::raw_scan::scale_instant_cells(&mut returned_rows, &instant_columns) {
+            return self.response_error(task, e);
+        }
 
         if accepted > 0
             && let Some(lsn) = wal_lsn

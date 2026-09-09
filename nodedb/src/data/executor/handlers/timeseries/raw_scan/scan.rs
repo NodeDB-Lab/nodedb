@@ -271,6 +271,15 @@ impl CoreLoop {
         }
         results.truncate(limit);
 
+        // The engine stores its timestamp columns in milliseconds; a client
+        // reads a `TIMESTAMP` cell as epoch microseconds. Scale here, once
+        // every predicate, sort and computed column has run against the
+        // engine's own unit.
+        let instant_columns = self.ts_instant_columns(task.request.database_id, tid, collection);
+        if let Err(e) = super::row_emit::scale_instant_cells(&mut results, &instant_columns) {
+            return self.response_error(task, e);
+        }
+
         let array = rmpv::Value::Array(results);
         let mut buf = Vec::new();
         rmpv::encode::write_value(&mut buf, &array).unwrap_or(());

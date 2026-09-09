@@ -116,6 +116,54 @@ impl CoreLoop {
             timestamp_idx,
         })
     }
+
+    /// Declared columns of a timeseries collection that carry an instant.
+    ///
+    /// A column declared `TIMESTAMP` or `TIMESTAMPTZ` is one. The memtable
+    /// keeps every timestamp column in epoch milliseconds, while a client
+    /// reads a `TIMESTAMP` cell as epoch microseconds, so row emission scales
+    /// exactly these columns.
+    ///
+    /// A `BIGINT TIME_KEY` shares the same millisecond column and is absent
+    /// from this list: its declared type is an integer, so it hands back the
+    /// number that was inserted.
+    ///
+    /// An undeclared measurement (raw ILP protocol ingest) has no entry and
+    /// yields an empty list — the planner types its columns as text, so no
+    /// cell of it is read as an instant.
+    pub(in crate::data::executor) fn ts_instant_columns(
+        &self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+    ) -> Vec<String> {
+        let Some(declared) = self.declared_timeseries(database_id, tid, collection) else {
+            return Vec::new();
+        };
+        declared
+            .columns
+            .iter()
+            .filter(|(_, type_str)| declared_type_is_instant(type_str))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
+/// Whether a declared DDL type makes a column an instant on the wire.
+///
+/// Mirrors the two spellings the planner resolves to `SqlDataType::Timestamp`
+/// in `control::planner::catalog_adapter::type_convert::parse_type_str`. The
+/// two must name the same set: the planner decides how a cell is READ, this
+/// decides the unit it is WRITTEN in.
+///
+/// `SYSTEM_TIMESTAMP` is deliberately absent — the planner types it as text.
+fn declared_type_is_instant(declared_type: &str) -> bool {
+    let bare = declared_type.split_whitespace().next().unwrap_or("");
+    matches!(
+        bare.parse::<nodedb_types::columnar::ColumnType>(),
+        Ok(nodedb_types::columnar::ColumnType::Timestamp)
+            | Ok(nodedb_types::columnar::ColumnType::Timestamptz)
+    )
 }
 
 /// Map a declared SQL type onto the memtable's storage type.
@@ -187,6 +235,21 @@ mod tests {
             memtable_column_type("TIMESTAMP", false),
             ColumnType::Timestamp
         );
+    }
+
+    /// The declared types the planner reads back as instants are exactly the
+    /// ones emission scales. A `BIGINT` time key is stored in the same
+    /// millisecond column and must NOT be scaled.
+    #[test]
+    fn only_declared_timestamp_types_are_instants() {
+        assert!(declared_type_is_instant("TIMESTAMP TIME_KEY"));
+        assert!(declared_type_is_instant("TIMESTAMPTZ"));
+        assert!(declared_type_is_instant("timestamp"));
+        assert!(!declared_type_is_instant("BIGINT TIME_KEY"));
+        assert!(!declared_type_is_instant("INT"));
+        assert!(!declared_type_is_instant("TEXT"));
+        assert!(!declared_type_is_instant("SYSTEM_TIMESTAMP"));
+        assert!(!declared_type_is_instant(""));
     }
 
     #[test]
