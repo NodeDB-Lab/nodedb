@@ -304,8 +304,8 @@ impl NodeDbQueryParser {
 
         // When the original SQL had a RETURNING clause on a DML statement,
         // build result fields from the collection schema and the RETURNING spec.
-        if let Some(spec) = returning_spec
-            && let Some(fields) = result_fields_for_returning(&spec, plans.first(), catalog)
+        if let Some(ref spec) = returning_spec
+            && let Some(fields) = result_fields_for_returning(spec, plans.first(), catalog)
         {
             return (param_types, fields);
         }
@@ -321,6 +321,7 @@ impl NodeDbQueryParser {
                 &plans,
                 catalog,
                 database_id,
+                returning_spec.as_ref(),
             );
         let result_fields: Vec<FieldInfo> = output_schema
             .columns

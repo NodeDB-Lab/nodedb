@@ -94,7 +94,7 @@ impl<'a> StatementExecutor<'a> {
                         self.tenant_id,
                         self.database_id,
                         &security.context(self.state),
-                        false,
+                        None,
                     )
                     .await?;
                 let lease_scope = self.state.acquire_plan_lease_scope(&versions)?;

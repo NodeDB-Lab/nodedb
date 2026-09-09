@@ -106,7 +106,7 @@ async fn plan_authorize_and_admit_once(
             permission_cache: Some(&*permission_cache),
         };
         let (tasks, output_schema, versions, _cache_eligibility) = query_ctx
-            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &security, false)
+            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &security, None)
             .await?;
         (tasks, output_schema, versions)
     };

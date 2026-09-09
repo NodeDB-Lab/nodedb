@@ -269,8 +269,17 @@ fn convert_column_type(ct: &nodedb_types::columnar::ColumnType) -> SqlDataType {
     }
 }
 
+/// Resolve the declared SQL type of a catalog `fields` entry.
+///
+/// The catalog records the raw DDL text that followed the column name, so an
+/// entry reads `INT DEFAULT 5` or `INT NOT NULL`, not `INT`. The bare type
+/// token comes from `parse_column_type_str_full`, the same splitter
+/// `declared_default` uses and the same boundary `IntWidth::from_declared_type`
+/// and `FloatWidth::from_declared_type` respect. A trailing modifier therefore
+/// never changes the resolved type.
 fn parse_type_str(s: &str) -> SqlDataType {
-    let upper = s.to_uppercase();
+    let (bare, _, _, _) = nodedb_sql::ddl_ast::collection_type::parse_column_type_str_full(s);
+    let upper = bare.to_uppercase();
     // Handle DECIMAL/NUMERIC with optional (p,s) params.
     if upper.starts_with("DECIMAL") || upper.starts_with("NUMERIC") {
         return SqlDataType::Decimal;
@@ -287,9 +296,12 @@ fn parse_type_str(s: &str) -> SqlDataType {
         // Same contract as the integer arm above, for the float family: every
         // spelling `FloatWidth::from_declared_type` recognizes must appear
         // here, or the column falls through to `_ => String` and advertises
-        // OID 25 (text) no matter what width was declared.
-        "FLOAT" | "FLOAT4" | "FLOAT8" | "FLOAT32" | "FLOAT64" | "DOUBLE" | "DOUBLE PRECISION"
-        | "REAL" => SqlDataType::Float64,
+        // OID 25 (text) no matter what width was declared. `DOUBLE PRECISION`
+        // arrives as the bare token `DOUBLE`, matching how
+        // `FloatWidth::from_declared_type` recognizes it.
+        "FLOAT" | "FLOAT4" | "FLOAT8" | "FLOAT32" | "FLOAT64" | "DOUBLE" | "REAL" => {
+            SqlDataType::Float64
+        }
         "BOOL" | "BOOLEAN" => SqlDataType::Bool,
         "BYTES" | "BYTEA" | "BLOB" => SqlDataType::Bytes,
         "TIMESTAMP" | "TIMESTAMPTZ" => SqlDataType::Timestamp,

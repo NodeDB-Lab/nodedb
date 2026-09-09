@@ -2,7 +2,7 @@
 
 //! Pre-dispatch routing gates for pgwire planned task sets.
 
-use pgwire::api::results::{FieldFormat, Response};
+use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use nodedb_physical::physical_task::PhysicalTask;
@@ -90,9 +90,13 @@ impl NodeDbPgHandler {
         tenant_id: TenantId,
         identity: &AuthenticatedIdentity,
         session_id: SessionId,
-        result_formats: &[FieldFormat],
+        shaping: ResultShaping<'_>,
         auth: &crate::control::security::auth_context::AuthContext,
     ) -> PgWireResult<Option<Vec<Response>>> {
+        let ResultShaping {
+            projection,
+            formats: result_formats,
+        } = shaping;
         let tx_state = self.sessions.transaction_state(session_id);
         if tx_state == crate::control::server::shared::session::TransactionState::InBlock
             || self.state.calvin_completion_registry.get().is_none()
@@ -121,6 +125,7 @@ impl NodeDbPgHandler {
                 session_id,
                 result_formats,
                 auth,
+                projection,
             },
             // No settled image read to carry — this fires before materialized-sum settlement.
             &[],

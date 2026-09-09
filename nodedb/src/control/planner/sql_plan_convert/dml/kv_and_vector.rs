@@ -171,7 +171,10 @@ pub(in super::super) fn convert_vector_primary_insert(
                 .iter()
                 .map(|(k, v)| (k.clone(), sql_value_to_nodedb_value(v)))
                 .collect();
-            zerompk::to_msgpack_vec(&value_map).unwrap_or_default()
+            zerompk::to_msgpack_vec(&value_map).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("vector-primary payload: {e}"),
+            })?
         };
 
         tasks.push(PhysicalTask {

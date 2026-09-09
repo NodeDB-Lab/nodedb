@@ -24,11 +24,15 @@
 //! construction* rather than by coincidence, and every cell stays under the
 //! name it was stored with — no padding, no truncation, no re-alignment.
 //!
-//! The simple-query protocol passes no projection (a DML plan's `OutputSchema`
-//! is empty) and keeps the row-derived list. That divergence is correct: it
-//! emits the RowDescription and the DataRows together out of this one
-//! `ShapedRows`, so there is no earlier announcement to honour, and a
-//! schemaless row's undeclared fields stay visible.
+//! The simple-query protocol announces the same list: the planner derives a
+//! DML plan's `OutputSchema` from its `RETURNING` column list, so a named
+//! clause is held to those columns and their catalog types, and a returned
+//! cell renders exactly as the same column renders under `SELECT`.
+//!
+//! `RETURNING *` announces `is_star` instead, and a star keeps the row-derived
+//! list. The concrete columns of a star are only knowable once the rows exist —
+//! a schemaless row carries fields no catalog column declares — which is the
+//! same answer `SELECT *` gives for the same row.
 
 use serde_json::{Map, Value as JsonValue};
 

@@ -48,7 +48,7 @@ pub async fn plan_authorized_sql(
     };
     let query_ctx = QueryContext::for_state(state);
     let (tasks, output_schema, versions, _) = query_ctx
-        .plan_sql_with_rls_and_versions(sql, identity.tenant_id, database_id, &sec, false)
+        .plan_sql_with_rls_and_versions(sql, identity.tenant_id, database_id, &sec, None)
         .await
         .map_err(|error| DdlError::new("42601", format!("query planning failed: {error}")))?;
 
