@@ -35,6 +35,9 @@ pub(in crate::data::executor) struct StageBulkUpdateParams<'a> {
     pub updates: &'a [(String, UpdateValue)],
     /// Compiled RLS write policy gating each matched row's staged post-image.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
+    /// otherwise — see `stage_apply_update`'s post-image guard.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -54,6 +57,7 @@ impl CoreLoop {
             filter_bytes,
             updates,
             rls_write_check,
+            declared_primary_key,
         } = params;
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
@@ -136,6 +140,7 @@ impl CoreLoop {
                 collection,
                 current_body,
                 updates,
+                declared_primary_key,
             ) {
                 Ok(b) => b,
                 Err(e) => return self.response_error(task, e),

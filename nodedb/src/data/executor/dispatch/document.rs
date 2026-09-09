@@ -147,6 +147,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key,
             } => self.execute_point_update(
                 task,
                 crate::data::executor::handlers::point::update::PointUpdateParams {
@@ -159,6 +160,7 @@ impl CoreLoop {
                     rls_filters,
                     rls_write_check,
                     resolved_sum_targets,
+                    declared_primary_key: declared_primary_key.as_deref(),
                 },
             ),
 
@@ -252,6 +254,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key,
             } => self.execute_bulk_update(
                 task,
                 tid,
@@ -265,6 +268,7 @@ impl CoreLoop {
                     rls_filters,
                     rls_write_check,
                     resolved_sum_targets,
+                    declared_primary_key: declared_primary_key.as_deref(),
                 },
             ),
 

@@ -255,11 +255,12 @@ impl CoreLoop {
                 surrogate,
                 updates,
                 rls_write_check,
+                declared_primary_key,
                 ..
             } => {
                 let ctx =
                     StageCtx::new(task, tid, txn_id, collection.as_str(), document_id, *surrogate);
-                self.stage_point_update(&ctx, updates, rls_write_check)
+                self.stage_point_update(&ctx, updates, rls_write_check, declared_primary_key.as_deref())
             }
             // Predicate UPDATE staged like a point update, resolved against
             // base ∪ overlay. RETURNING doesn't change staging.
@@ -274,6 +275,7 @@ impl CoreLoop {
                 rls_write_check,
                 // Staged post-images become concrete point ops at commit.
                 resolved_sum_targets: _,
+                declared_primary_key,
             } => self.stage_bulk_update(StageBulkUpdateParams {
                 task,
                 tid,
@@ -282,6 +284,7 @@ impl CoreLoop {
                 filter_bytes: filters,
                 updates,
                 rls_write_check,
+                declared_primary_key: declared_primary_key.as_deref(),
             }),
 
             // Predicate DELETE staged like a point delete, resolved against

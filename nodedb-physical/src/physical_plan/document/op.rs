@@ -160,6 +160,11 @@ pub enum DocumentOp {
         /// See `PointPut::resolved_sum_targets`.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
+        /// The collection's declared `PRIMARY KEY` column, `Some` only for a
+        /// schemaless collection. The Data Plane refuses a post-image whose
+        /// value at this field is absent or JSON null.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Full collection scan with filtering, sorting, and pagination.
@@ -406,6 +411,9 @@ pub enum DocumentOp {
         /// covering both sides of a join-key change.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Bulk update: scan + apply field updates to all matches.
@@ -435,6 +443,9 @@ pub enum DocumentOp {
         /// covering both sides of a join-key change.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Bulk delete: scan + delete all matches.
@@ -502,6 +513,9 @@ pub enum DocumentOp {
         /// applies the difference (both sides on a join-key rewrite).
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Cursor-paginated scan for the clone materializer. Returns

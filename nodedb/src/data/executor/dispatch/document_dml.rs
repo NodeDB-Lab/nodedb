@@ -37,6 +37,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = op
         else {
             return self.response_error(
@@ -63,6 +64,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key: declared_primary_key.as_deref(),
             },
         )
     }
@@ -88,6 +90,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = op
         else {
             return self.response_error(
@@ -114,6 +117,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key: declared_primary_key.as_deref(),
             },
         )
     }

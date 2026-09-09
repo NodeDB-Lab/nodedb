@@ -128,6 +128,7 @@ fn array_contains_filter() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -169,6 +170,7 @@ fn array_contains_all_filter() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -210,6 +212,7 @@ fn array_overlap_filter() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -341,6 +344,7 @@ fn no_match_returns_zero() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 

@@ -160,6 +160,7 @@ mod tests {
                     rls_filters: Vec::new(),
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     resolved_sum_targets: Vec::new(),
+                    declared_primary_key: None,
                 }),
             ),
             (
@@ -177,6 +178,7 @@ mod tests {
                     rls_filters: Vec::new(),
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     resolved_sum_targets: Vec::new(),
+                    declared_primary_key: None,
                 }),
             ),
             (

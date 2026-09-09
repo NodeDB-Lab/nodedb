@@ -104,6 +104,10 @@ pub enum ReplicatedWrite {
         /// See `PointPut::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// The collection's declared `PRIMARY KEY` column, so every applier
+        /// enforces NOT NULL on the computed post-image, not only the proposer.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
     DocUpsert {
         collection: String,
@@ -566,6 +570,10 @@ pub enum ReplicatedWrite {
         /// See `PointPut::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// See `PointUpdate::declared_primary_key`. `None` on the delete arm
+        /// (`is_update = false`), which has no post-image to check.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
     ColumnarBulkDml {
         collection: String,

@@ -40,6 +40,9 @@ pub(in crate::data::executor) struct ProjectUpdateRows<'a> {
     pub(in crate::data::executor) updates: &'a [(String, UpdateValue)],
     /// `Some` for a strict collection, whose bodies are Binary Tuples.
     pub(in crate::data::executor) strict_schema: Option<&'a StrictSchema>,
+    /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
+    /// otherwise. `Some` makes the post-image guard below run.
+    pub(in crate::data::executor) declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -57,6 +60,7 @@ impl CoreLoop {
             doc_ids,
             updates,
             strict_schema,
+            declared_primary_key,
         } = p;
         let config_key = (
             DatabaseId::new(database_id),
@@ -116,6 +120,17 @@ impl CoreLoop {
                     };
                     obj.insert(field.clone(), val);
                 }
+            }
+
+            // Only schemaless needs this check, and only here does a computed
+            // RHS resolve to NULL — a strict collection already refuses one
+            // at encode time.
+            if strict_schema.is_none() {
+                super::super::merge_helpers::check_declared_pk_not_null(
+                    collection,
+                    &doc,
+                    declared_primary_key,
+                )?;
             }
 
             // Recompute generated columns if any dependency changed. A column

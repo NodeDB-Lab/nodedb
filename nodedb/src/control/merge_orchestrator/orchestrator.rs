@@ -56,6 +56,9 @@ pub struct MergeArgs<'a> {
     /// RLS write predicate, carried onto the apply pass which decides every
     /// arm's image against it. Separate from `rls_filters`: read vs write gate.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// Declared `PRIMARY KEY` column of the target, `None` for none declared.
+    /// Carried on both passes so the Data Plane's UPDATE-arm guard runs.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 /// Consume an authorized autocommit `MERGE` at the orchestration boundary.
@@ -79,6 +82,7 @@ pub async fn run_authorized_merge(
         // Unresolved on the way in: the orchestrator's own RESOLVE pass is what
         // produces the join keys this is filled from.
         resolved_sum_targets: _,
+        declared_primary_key,
     }) = task.plan
     else {
         return Err(crate::Error::BadRequest {
@@ -99,6 +103,7 @@ pub async fn run_authorized_merge(
             returning: returning.as_ref(),
             rls_filters: &rls_filters,
             rls_write_check: &rls_write_check,
+            declared_primary_key: declared_primary_key.as_deref(),
         },
     )
     .await
@@ -274,6 +279,7 @@ fn merge_plan(
         rls_write_check: args.rls_write_check.clone(),
         // Empty on RESOLVE (writes nothing); APPLY carries the resolution.
         resolved_sum_targets,
+        declared_primary_key: args.declared_primary_key.map(str::to_string),
     };
     if resolve_only {
         PhysicalPlan::Document(DocumentOp::ResolveWrite(Box::new(merge)))

@@ -211,6 +211,7 @@ pub async fn query(
                     rls_filters: _,
                     rls_write_check: _,
                     resolved_sum_targets: _,
+                    declared_primary_key: _,
                 },
             ) = &task.plan
             {
@@ -262,6 +263,7 @@ pub async fn query(
                     rls_filters: _,
                     rls_write_check: _,
                     resolved_sum_targets: _,
+                    declared_primary_key: _,
                 },
             ) = &task.plan
             {

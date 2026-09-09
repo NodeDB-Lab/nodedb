@@ -43,6 +43,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = params;
 
         debug!(
@@ -138,6 +139,7 @@ impl CoreLoop {
                 target_filters: &target_filters,
                 strict_schema: strict_schema.as_ref(),
                 config_key: &config_key,
+                declared_primary_key,
             },
         ) {
             Ok(r) => r,

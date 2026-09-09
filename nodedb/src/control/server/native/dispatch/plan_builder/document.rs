@@ -278,6 +278,9 @@ pub(crate) fn build_update(
         rls_filters: Vec::new(),
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         resolved_sum_targets: Vec::new(),
+        // Native `{ }` updates carry literal field bytes only; this protocol
+        // path has no declared-PK lookup of its own.
+        declared_primary_key: None,
     }))
 }
 
@@ -370,6 +373,8 @@ pub(crate) fn build_bulk_update(
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         // Filled in by the materialized-sum resolution pass.
         resolved_sum_targets: Vec::new(),
+        // See `build_update`: this protocol path carries literal fields only.
+        declared_primary_key: None,
     }))
 }
 

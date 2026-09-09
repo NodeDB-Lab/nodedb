@@ -135,6 +135,7 @@ async fn resolve_update_rows(
         updates,
         target_filters,
         rls_write_check,
+        declared_primary_key,
         ..
     }) = &task.plan
     else {
@@ -173,6 +174,7 @@ async fn resolve_update_rows(
             rls_write_check: rls_write_check.clone(),
             // Writes nothing, so folds no materialized-sum delta.
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: declared_primary_key.clone(),
         },
     )));
     // Passing `txn_id` lets the target scan fold rows this transaction staged earlier.

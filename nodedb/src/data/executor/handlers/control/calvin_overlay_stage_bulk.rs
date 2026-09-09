@@ -71,6 +71,9 @@ pub(in crate::data::executor) struct CalvinBulkUpdateStage<'a> {
     pub ollp_predicted_surrogates: Option<&'a [u32]>,
     /// Compiled RLS write policy gating each staged post-image.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The collection's DDL-declared primary key, when it has one. A staged
+    /// post-image that nulls it is refused.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -158,6 +161,7 @@ impl CoreLoop {
             updates,
             ollp_predicted_surrogates,
             rls_write_check,
+            declared_primary_key,
         } = params;
         let Some(predicted) = ollp_predicted_surrogates else {
             return Err(missing_prediction_error(collection));
@@ -209,6 +213,7 @@ impl CoreLoop {
                 collection,
                 &current_bytes,
                 updates,
+                declared_primary_key,
             )?;
             // Decide the staged post-image against the write policy: this is
             // the row the Calvin flush will install.

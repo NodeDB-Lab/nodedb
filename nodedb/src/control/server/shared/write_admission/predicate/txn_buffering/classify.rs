@@ -527,6 +527,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::Scan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -620,6 +621,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::BulkDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -643,6 +645,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::BulkDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -671,6 +674,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::BulkDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1973,6 +1977,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
                 target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "t"),
@@ -1987,6 +1992,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Crdt(CrdtOp::RestoreToVersion {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

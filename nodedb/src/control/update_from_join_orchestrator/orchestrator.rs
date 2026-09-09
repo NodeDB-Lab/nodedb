@@ -39,6 +39,9 @@ pub struct UpdateFromJoinArgs<'a> {
     /// Target RLS write predicate, gating every matched row's post-image
     /// before writing. Separate from `rls_filters` (shown vs. written).
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// Declared `PRIMARY KEY` column of the target, `None` for none declared.
+    /// Carried on both passes so the Data Plane's post-image guard runs.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 /// Consume an authorized autocommit `UPDATE ... FROM` at orchestration.
@@ -61,6 +64,7 @@ pub async fn run_authorized_update_from_join(
         rls_write_check,
         // Unresolved on the way in — resolved below before dispatch.
         resolved_sum_targets: _,
+        declared_primary_key,
     }) = task.plan
     else {
         return Err(crate::Error::BadRequest {
@@ -82,6 +86,7 @@ pub async fn run_authorized_update_from_join(
             returning: returning.as_ref(),
             rls_filters: &rls_filters,
             rls_write_check: &rls_write_check,
+            declared_primary_key: declared_primary_key.as_deref(),
         },
     )
     .await
@@ -147,6 +152,7 @@ pub(crate) async fn run_update_from_join(
             rls_filters: args.rls_filters.to_vec(),
             rls_write_check: args.rls_write_check.clone(),
             resolved_sum_targets,
+            declared_primary_key: args.declared_primary_key.map(str::to_string),
         });
 
         // Join-map now built from the shipped rows, so this lands correctly
@@ -217,6 +223,7 @@ async fn resolve_matched_sum_targets(
             rls_write_check: args.rls_write_check.clone(),
             // Folds no delta, so needs no resolution of its own.
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: args.declared_primary_key.map(str::to_string),
         },
     )));
     let resp = dispatch_local(

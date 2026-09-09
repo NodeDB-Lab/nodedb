@@ -128,6 +128,7 @@ pub(super) fn point_update(
     surrogate: u32,
     resolved_sum_targets: &[ResolvedSumTarget],
     returning: WireReturning<'_>,
+    declared_primary_key: Option<&str>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::PointUpdate {
         collection: collection.to_owned(),
@@ -138,6 +139,7 @@ pub(super) fn point_update(
         resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
+        declared_primary_key: declared_primary_key.map(str::to_owned),
     }
 }
 
@@ -219,6 +221,7 @@ pub(super) fn bulk_delete(
         resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
+        declared_primary_key: None,
     }
 }
 
@@ -229,6 +232,7 @@ pub(super) fn bulk_update(
     resolved_sum_targets: &[ResolvedSumTarget],
     returning: Option<Vec<u8>>,
     rls_filters: &[u8],
+    declared_primary_key: Option<&str>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::BulkDml {
         collection: collection.to_owned(),
@@ -239,6 +243,7 @@ pub(super) fn bulk_update(
         resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
+        declared_primary_key: declared_primary_key.map(str::to_owned),
     }
 }
 

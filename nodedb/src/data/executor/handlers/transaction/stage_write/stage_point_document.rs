@@ -153,6 +153,7 @@ impl CoreLoop {
         ctx: &StageCtx<'_>,
         updates: &[(String, UpdateValue)],
         rls_write_check: &nodedb_types::RlsWriteCheck,
+        declared_primary_key: Option<&str>,
     ) -> Response {
         let config_key = (
             crate::types::DatabaseId::new(ctx.database_id),
@@ -206,6 +207,7 @@ impl CoreLoop {
             ctx.collection,
             &current_bytes,
             updates,
+            declared_primary_key,
         ) {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),

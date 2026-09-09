@@ -240,6 +240,7 @@ fn update_recomputes_generated_column() {
             surrogate: nodedb_types::Surrogate::ZERO,
             pk_bytes: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -308,6 +309,7 @@ fn update_generated_column_directly_rejected() {
             surrogate: nodedb_types::Surrogate::ZERO,
             pk_bytes: Vec::new(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 

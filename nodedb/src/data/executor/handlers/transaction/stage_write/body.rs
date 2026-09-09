@@ -15,6 +15,7 @@ use nodedb_types::Surrogate;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::generated;
+use crate::data::executor::handlers::merge_helpers::check_declared_pk_not_null;
 use crate::data::executor::{doc_format, strict_format};
 use crate::types::TenantId;
 
@@ -128,6 +129,7 @@ impl CoreLoop {
         collection: &str,
         current_bytes: &[u8],
         updates: &[(String, UpdateValue)],
+        declared_primary_key: Option<&str>,
     ) -> crate::Result<Vec<u8>> {
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -188,6 +190,13 @@ impl CoreLoop {
                     };
                 obj.insert(field.clone(), val);
             }
+        }
+
+        // Only schemaless needs this check, and only here does a computed
+        // RHS resolve to NULL — a strict collection already refuses one at
+        // encode time.
+        if strict_schema.is_none() {
+            check_declared_pk_not_null(collection, &doc, declared_primary_key)?;
         }
 
         // Recompute generated columns after the patch.

@@ -88,10 +88,12 @@ pub(in crate::data::executor) fn build_insert_doc(
 /// then overwrite fields on a clone of the target. Shared by the legacy per-row
 /// update path and the orchestrated resolve/apply passes.
 pub(in crate::data::executor) fn build_update_doc(
+    target_collection: &str,
     target_doc: &serde_json::Value,
     source_doc: &serde_json::Value,
     source_alias: &str,
     updates: &[(String, UpdateValue)],
+    declared_primary_key: Option<&str>,
 ) -> crate::Result<serde_json::Value> {
     let merged = build_merged(target_doc, source_doc, source_alias);
     let merged_ndb: nodedb_types::Value = merged.into();
@@ -104,7 +106,28 @@ pub(in crate::data::executor) fn build_update_doc(
             );
         }
     }
+    check_declared_pk_not_null(target_collection, &updated, declared_primary_key)?;
     Ok(updated)
+}
+
+/// A declared `PRIMARY KEY` implies `NOT NULL`. Callers pass `Some` only when
+/// the check has not already run at encode time — a strict target does, so
+/// its callers pass `None`.
+pub(in crate::data::executor) fn check_declared_pk_not_null(
+    collection: &str,
+    doc: &serde_json::Value,
+    declared_primary_key: Option<&str>,
+) -> crate::Result<()> {
+    if let Some(pk) = declared_primary_key
+        && matches!(doc.get(pk), None | Some(serde_json::Value::Null))
+    {
+        return Err(crate::Error::RejectedConstraint {
+            collection: collection.to_string(),
+            constraint: "not_null".to_string(),
+            detail: format!("primary key '{pk}' cannot be NULL or omitted"),
+        });
+    }
+    Ok(())
 }
 
 /// Resolve one `UpdateValue` to JSON: a literal decodes directly from its

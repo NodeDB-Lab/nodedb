@@ -40,6 +40,9 @@ pub(in crate::data::executor) struct CollectUpdateRows<'a> {
     pub target_filters: &'a [ScanFilter],
     pub strict_schema: Option<&'a StrictSchema>,
     pub config_key: &'a (DatabaseId, TenantId, String),
+    /// Declared `PRIMARY KEY` column of a schemaless target, `None`
+    /// otherwise. `Some` makes the post-image guard below run.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 /// Borrowed inputs for [`CoreLoop::scan_target_rows`], bundled to keep the
@@ -72,6 +75,7 @@ impl CoreLoop {
             target_filters,
             strict_schema,
             config_key,
+            declared_primary_key,
         } = ctx;
         let database_id = task.request.database_id.as_u64();
         // Read the TARGET as the transaction's CURRENT view = base ∪ overlay:
@@ -164,6 +168,17 @@ impl CoreLoop {
                     };
                     target_obj.insert(field.clone(), val);
                 }
+            }
+
+            // Only schemaless needs this check, and only here does a computed
+            // RHS resolve to NULL — a strict collection already refuses one
+            // at encode time.
+            if strict_schema.is_none() {
+                super::merge_helpers::check_declared_pk_not_null(
+                    target_collection,
+                    &target_doc,
+                    declared_primary_key,
+                )?;
             }
 
             // Recompute generated columns if any dependency changed. A column

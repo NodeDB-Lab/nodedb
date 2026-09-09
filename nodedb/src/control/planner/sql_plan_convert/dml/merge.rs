@@ -69,6 +69,9 @@ pub(in super::super) fn convert_merge(
         .collect::<crate::Result<Vec<_>>>()?;
 
     let vshard = VShardId::from_collection_in_database(ctx.database_id, target);
+    // A declared PRIMARY KEY implies NOT NULL; the Data Plane checks a MATCHED
+    // or NOT-MATCHED-BY-SOURCE UPDATE arm's post-image against this name.
+    let declared_primary_key = super::declared_primary_key_name(ctx, target)?;
 
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -101,6 +104,7 @@ pub(in super::super) fn convert_merge(
             // Filled in by the merge orchestrator from its RESOLVE pass's arms;
             // the neutral plan has no classification to derive keys from.
             resolved_sum_targets: Vec::new(),
+            declared_primary_key,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

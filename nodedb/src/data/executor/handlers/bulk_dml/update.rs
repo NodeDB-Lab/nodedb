@@ -42,6 +42,9 @@ pub(in crate::data::executor) struct BulkUpdateParams<'a> {
     /// change are present, so a row moved between targets is debited and
     /// credited in the same pass.
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
+    /// otherwise — see `ProjectUpdateRows::declared_primary_key`.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -69,6 +72,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = params;
         debug!(core = self.core_id, %collection, has_returning = returning.is_some(), "bulk update");
 
@@ -198,6 +202,7 @@ impl CoreLoop {
             doc_ids: &apply_ids,
             updates,
             strict_schema: strict_schema.as_ref(),
+            declared_primary_key,
         }) {
             Ok(projected) => projected,
             Err(e) => return self.response_error(task, e),

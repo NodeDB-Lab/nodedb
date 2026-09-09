@@ -767,6 +767,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
 
         let resp = core.execute_stage_write(&task, TID, &plan);
@@ -823,6 +824,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
 
         let resp = core.execute_stage_write(&task, TID, &plan);
@@ -928,6 +930,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
@@ -984,6 +987,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::Merge {
                 target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "t"),
@@ -998,6 +1002,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::BatchInsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),

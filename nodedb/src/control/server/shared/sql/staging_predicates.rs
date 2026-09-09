@@ -285,6 +285,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert!(is_point_write(&point_update));
         assert!(is_stageable_write(&point_update));
@@ -313,6 +314,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert!(is_stageable_write(&bulk_update));
         assert_eq!(staged_tag_kind(&bulk_update, &[]), StagedTagKind::Update);

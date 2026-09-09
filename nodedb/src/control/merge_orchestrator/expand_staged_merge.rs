@@ -123,6 +123,7 @@ async fn resolve_merge_arms(
         source_join_col,
         clauses,
         rls_write_check,
+        declared_primary_key,
         ..
     }) = &task.plan
     else {
@@ -163,6 +164,7 @@ async fn resolve_merge_arms(
             // Writes nothing, so folds no sum delta; the emitted point ops
             // carry their own resolution.
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: declared_primary_key.clone(),
         })));
     // Passing `txn_id` lets the RESOLVE pass fold TARGET's staging overlay,
     // so a MERGE reuses a prior statement's row instead of duplicating it.

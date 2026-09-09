@@ -243,6 +243,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         })
     }
 
@@ -383,6 +384,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert!(inject(&mut plan, &store).is_ok());
         assert!(write_check(&plan).has_predicate());
@@ -597,6 +599,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert!(inject(&mut plan, &store).is_ok());
         match &plan {
@@ -642,6 +645,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert!(inject(&mut plan, &store).is_ok());
         match &plan {

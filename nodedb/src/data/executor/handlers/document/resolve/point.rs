@@ -33,6 +33,9 @@ pub(super) struct ResolvePointUpdate<'a> {
     pub rls_filters: &'a [u8],
     pub rls_write_check: &'a RlsWriteCheck,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
+    /// otherwise — see `PointUpdateImage::declared_primary_key`.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 /// Borrowed arguments for [`CoreLoop::resolve_point_delete`].
@@ -67,6 +70,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
@@ -124,6 +128,7 @@ impl CoreLoop {
             has_expr,
             bitemporal: ctx.bitemporal,
             sys_from_ms,
+            declared_primary_key,
         };
         let body = self.compute_point_update_body(image_params)?;
         // The STORED image the policy decides against and `RETURNING` projects,

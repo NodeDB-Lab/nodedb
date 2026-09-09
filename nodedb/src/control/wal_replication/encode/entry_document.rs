@@ -97,6 +97,9 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             rls_write_check: _,
             // See `PointPut`.
             resolved_sum_targets,
+            // Carried on the record so an applier can enforce NOT NULL on the
+            // computed post-image — see `decode/document.rs`.
+            declared_primary_key,
         } => document::point_update(
             collection.as_str(),
             document_id,
@@ -107,6 +110,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
                 returning: encode_returning(returning),
                 rls_filters,
             },
+            declared_primary_key.as_deref(),
         ),
         DocumentOp::Upsert {
             collection,
@@ -162,6 +166,9 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             rls_write_check: _,
             // See `BulkDelete`.
             resolved_sum_targets,
+            // Carried on the record so an applier can enforce NOT NULL on the
+            // computed post-image — see `decode/document.rs`.
+            declared_primary_key,
         } => document::bulk_update(
             collection.as_str(),
             filters,
@@ -169,6 +176,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             resolved_sum_targets,
             encode_returning(returning),
             rls_filters,
+            declared_primary_key.as_deref(),
         ),
         DocumentOp::InsertSelect {
             target_collection,

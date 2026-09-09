@@ -79,6 +79,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update_from(
     let updates = assignments_to_update_values_qualified(assignments)?;
     let target_filter_bytes = serialize_filters(target_filters)?;
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
+    // A declared PRIMARY KEY implies NOT NULL; the Data Plane checks the
+    // post-image against this name once the SET expressions are evaluated.
+    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection)?;
 
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -104,6 +107,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update_from(
             // Filled in by the materialized-sum resolution pass, which
             // recon-scans the target rows this join matches.
             resolved_sum_targets: Vec::new(),
+            declared_primary_key,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

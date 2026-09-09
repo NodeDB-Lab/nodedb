@@ -116,6 +116,7 @@ impl CoreLoop {
                 surrogate,
                 updates,
                 rls_write_check,
+                declared_primary_key,
                 ..
             }) => {
                 let ctx = StageCtx::new(
@@ -126,7 +127,12 @@ impl CoreLoop {
                     document_id,
                     *surrogate,
                 );
-                let resp = self.stage_point_update(&ctx, updates, rls_write_check);
+                let resp = self.stage_point_update(
+                    &ctx,
+                    updates,
+                    rls_write_check,
+                    declared_primary_key.as_deref(),
+                );
                 Self::stage_result(&resp)
             }
             PhysicalPlan::Document(DocumentOp::Upsert {
@@ -170,6 +176,7 @@ impl CoreLoop {
                 updates,
                 ollp_predicted_surrogates,
                 rls_write_check,
+                declared_primary_key,
                 ..
             }) => self
                 .stage_calvin_bulk_update(super::calvin_overlay_stage_bulk::CalvinBulkUpdateStage {
@@ -180,6 +187,7 @@ impl CoreLoop {
                     updates,
                     ollp_predicted_surrogates: ollp_predicted_surrogates.as_deref(),
                     rls_write_check,
+                    declared_primary_key: declared_primary_key.as_deref(),
                 })
                 .map_err(ErrorCode::from),
             PhysicalPlan::Kv(op) => {

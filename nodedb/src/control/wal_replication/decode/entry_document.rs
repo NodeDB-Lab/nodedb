@@ -101,16 +101,20 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_target_bindings,
             returning,
             rls_filters,
+            declared_primary_key,
         } => document::point_update(
             ctx,
             collection,
             document_id,
             updates,
             *surrogate,
-            &sums(resolved_sum_target_bindings, resolved_sum_targets),
-            ReturningFields {
-                returning: decode_returning(returning)?,
-                rls_filters,
+            document::PointUpdateExtras {
+                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                returning: ReturningFields {
+                    returning: decode_returning(returning)?,
+                    rls_filters,
+                },
+                declared_primary_key: declared_primary_key.clone(),
             },
         ),
         ReplicatedWrite::DocUpsert {
@@ -178,6 +182,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_target_bindings,
             returning,
             rls_filters,
+            declared_primary_key,
         } => Ok(document::bulk_dml(
             collection,
             filters,
@@ -188,6 +193,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
+            declared_primary_key.clone(),
         )),
         ReplicatedWrite::InsertSelect {
             target_collection,

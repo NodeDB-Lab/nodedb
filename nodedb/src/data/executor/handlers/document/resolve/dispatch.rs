@@ -35,6 +35,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key,
                 // Decode re-derives this from `document_id.as_bytes()`.
                 pk_bytes: _,
             } => self.resolve_point_update(
@@ -49,6 +50,7 @@ impl CoreLoop {
                     rls_filters,
                     rls_write_check,
                     resolved_sum_targets,
+                    declared_primary_key: declared_primary_key.as_deref(),
                 },
             ),
             DocumentOp::PointDelete {
@@ -108,6 +110,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key,
                 ollp_predicted_surrogates: _,
                 ollp_predicted_edges: _,
             } => self.resolve_bulk_update(
@@ -121,6 +124,7 @@ impl CoreLoop {
                     rls_filters,
                     rls_write_check,
                     resolved_sum_targets,
+                    declared_primary_key: declared_primary_key.as_deref(),
                 },
             ),
             DocumentOp::BulkDelete {

@@ -36,6 +36,9 @@ pub(super) struct ResolveBulkUpdate<'a> {
     pub rls_filters: &'a [u8],
     pub rls_write_check: &'a RlsWriteCheck,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
+    /// otherwise — see `ProjectUpdateRows::declared_primary_key`.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 /// Borrowed arguments for [`CoreLoop::resolve_bulk_delete`].
@@ -65,6 +68,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let config_key = (
@@ -94,6 +98,7 @@ impl CoreLoop {
                 doc_ids: &doc_ids,
                 updates,
                 strict_schema: ctx.strict_schema.as_ref(),
+                declared_primary_key,
             })
             .map_err(ErrorCode::from)?;
 

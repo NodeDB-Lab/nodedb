@@ -131,6 +131,7 @@ fn bulk_update_returns_affected_count() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -180,6 +181,7 @@ fn conditional_decrement_stops_at_zero() {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
         );
 
@@ -231,6 +233,7 @@ fn bulk_update_zero_match_returns_zero_affected() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -269,6 +272,7 @@ fn bulk_update_returning_returns_updated_documents() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -306,6 +310,7 @@ fn bulk_update_returning_zero_match_returns_affected_zero() {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -341,6 +346,7 @@ fn point_update_returns_affected_count() {
             surrogate: surrogate_for("pu1"),
             pk_bytes: b"pu1".to_vec(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -377,6 +383,7 @@ fn point_update_returning_returns_updated_document() {
             surrogate: surrogate_for("pu2"),
             pk_bytes: b"pu2".to_vec(),
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         }),
     );
 
@@ -432,6 +439,7 @@ fn transaction_batch_does_not_abort_on_zero_row_update() {
                     rls_filters: Vec::new(),
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     resolved_sum_targets: Vec::new(),
+                    declared_primary_key: None,
                 }),
                 PhysicalPlan::Document(DocumentOp::BulkUpdate {
                     collection: nodedb_types::QualifiedCollection::new(
@@ -451,6 +459,7 @@ fn transaction_batch_does_not_abort_on_zero_row_update() {
                     rls_filters: Vec::new(),
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     resolved_sum_targets: Vec::new(),
+                    declared_primary_key: None,
                 }),
             ],
         }),

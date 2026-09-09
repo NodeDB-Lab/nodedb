@@ -876,6 +876,7 @@ mod tests {
                 rls_filters: &[],
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: &resolved,
+                declared_primary_key: None,
             },
         );
 
@@ -987,6 +988,7 @@ mod tests {
                 rls_filters: &[],
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: &resolved,
+                declared_primary_key: None,
             },
         );
 

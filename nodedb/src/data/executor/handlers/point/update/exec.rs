@@ -44,6 +44,9 @@ pub(in crate::data::executor) struct PointUpdateParams<'a> {
     /// this update may touch — both sides of a join-key change. Resolved on the
     /// Control Plane at plan time.
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
+    /// otherwise — see `PointUpdateImage::declared_primary_key`.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -62,6 +65,7 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            declared_primary_key,
         } = params;
         let row_key = surrogate_to_doc_id(surrogate);
         let row_key = row_key.as_str();
@@ -155,6 +159,7 @@ impl CoreLoop {
                     has_expr,
                     bitemporal,
                     sys_from_ms: sys_from_for_encode,
+                    declared_primary_key,
                 }) {
                     Ok(bytes) => bytes,
                     Err(e) => return self.response_error(task, e),
@@ -450,6 +455,7 @@ mod tests {
                 rls_filters: &[],
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: &targets,
+                declared_primary_key: None,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -492,6 +498,7 @@ mod tests {
                 rls_filters: &[],
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: &targets,
+                declared_primary_key: None,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -552,6 +559,7 @@ mod tests {
                 rls_filters: &[],
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: &[],
+                declared_primary_key: None,
             },
         );
         assert_eq!(resp.status, Status::Error);

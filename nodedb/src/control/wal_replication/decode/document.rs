@@ -175,15 +175,28 @@ pub(super) fn point_delete(
     }))
 }
 
+/// `point_update`'s materialized-sum resolution, its RETURNING pair, and the
+/// target's declared primary key, bundled together — plain positional
+/// arguments exceed clippy's arity lint.
+pub(super) struct PointUpdateExtras<'a> {
+    pub resolved_sum_targets: &'a WireSumResolution<'a>,
+    pub returning: ReturningFields<'a>,
+    pub declared_primary_key: Option<String>,
+}
+
 pub(super) fn point_update(
     ctx: &DecodeCtx,
     collection: &str,
     document_id: &str,
     updates: &[(String, UpdateValue)],
     surrogate: u32,
-    resolved_sum_targets: &WireSumResolution<'_>,
-    returning: ReturningFields<'_>,
+    extras: PointUpdateExtras<'_>,
 ) -> crate::Result<PhysicalPlan> {
+    let PointUpdateExtras {
+        resolved_sum_targets,
+        returning,
+        declared_primary_key,
+    } = extras;
     let pk_bytes = document_id.as_bytes().to_vec();
     let carried = nodedb_types::Surrogate::new(surrogate);
     let surrogate = bind_or_lookup(ctx, collection, &pk_bytes, carried)?;
@@ -200,6 +213,9 @@ pub(super) fn point_update(
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
+        // Read off the record so this apply enforces NOT NULL on the
+        // computed post-image, the same as the proposer's own apply.
+        declared_primary_key,
     }))
 }
 
@@ -308,6 +324,7 @@ pub(super) fn bulk_dml(
     updates: &[(String, UpdateValue)],
     resolved_sum_targets: &WireSumResolution<'_>,
     returning: ReturningFields<'_>,
+    declared_primary_key: Option<String>,
 ) -> PhysicalPlan {
     // Matches are re-derived locally; target identity is read off the record.
     let resolved_sum_targets = plan_targets(resolved_sum_targets);
@@ -324,6 +341,8 @@ pub(super) fn bulk_dml(
             // No predicate on replay — see `point_delete`.
             rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             resolved_sum_targets,
+            // Read off the record — see `point_update`.
+            declared_primary_key,
         })
     } else {
         PhysicalPlan::Document(DocumentOp::BulkDelete {
@@ -852,6 +871,7 @@ mod tests {
             rls_filters: b"rls-predicate".to_vec(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         let entry = to_replicated_entry(
             TenantId::new(1),

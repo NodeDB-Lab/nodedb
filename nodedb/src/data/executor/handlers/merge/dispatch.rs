@@ -59,6 +59,9 @@ pub(in crate::data::executor) struct MergeParams<'a> {
     /// RESOLVE pass's classification. Empty on the RESOLVE pass itself, which
     /// writes nothing and therefore folds nothing.
     pub resolved_sum_targets: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
+    /// Declared `PRIMARY KEY` column of a schemaless target, `None`
+    /// otherwise. `Some` makes `build_update_doc`'s post-image guard run.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {

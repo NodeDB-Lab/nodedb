@@ -149,8 +149,22 @@ impl CoreLoop {
             if let Some(arm) = find_arm(params.clauses, arm_kind, &context)? {
                 match &arm.action {
                     MergeActionOp::Update { updates: upd } => {
-                        let updated =
-                            build_update_doc(&target_doc, source_doc, params.source_alias, upd)?;
+                        // A strict target already refuses a NULL primary key
+                        // at encode time; the guard only needs to run here
+                        // for schemaless.
+                        let pk = if strict_schema.is_none() {
+                            params.declared_primary_key
+                        } else {
+                            None
+                        };
+                        let updated = build_update_doc(
+                            params.target_collection,
+                            &target_doc,
+                            source_doc,
+                            params.source_alias,
+                            upd,
+                            pk,
+                        )?;
                         updates.push(MergeUpdate {
                             doc_id: doc_id.clone(),
                             surrogate,

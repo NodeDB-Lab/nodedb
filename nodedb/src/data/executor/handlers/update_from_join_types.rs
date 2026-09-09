@@ -68,4 +68,8 @@ pub(in crate::data::executor) struct UpdateFromJoinParams<'a> {
     /// Join-key VALUE → target row surrogate for every materialized-sum target
     /// the matched target rows may touch, resolved on the Control Plane.
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// Declared `PRIMARY KEY` column of a schemaless target, `None`
+    /// otherwise. `Some` makes `collect_update_from_join_rows`'s post-image
+    /// guard run.
+    pub declared_primary_key: Option<&'a str>,
 }

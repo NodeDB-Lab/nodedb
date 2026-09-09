@@ -328,3 +328,31 @@ async fn insert_select_keys_an_empty_string_like_any_other_value() {
         "both source rows carry the same key, so one row survives: {rows:?}"
     );
 }
+
+/// A non-literal right-hand side reaches the row with a value only the Data
+/// Plane knows. `NULLIF(v, v)` is NULL, so this nulls the key as surely as a
+/// literal does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn update_refuses_a_computed_null_primary_key() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION pk_computed (id TEXT PRIMARY KEY, v TEXT)")
+        .await
+        .expect("create pk_computed");
+    server
+        .exec("INSERT INTO pk_computed (id, v) VALUES ('k1', 'keep')")
+        .await
+        .expect("seed pk_computed");
+
+    assert_not_null_violation(
+        &server,
+        "UPDATE pk_computed SET id = NULLIF(v, v) WHERE v = 'keep'",
+    )
+    .await;
+
+    let rows = server
+        .query_text("SELECT id FROM pk_computed")
+        .await
+        .expect("scan pk_computed");
+    assert_eq!(rows, vec!["k1".to_string()], "the stored key must survive");
+}
