@@ -142,7 +142,7 @@ impl CoreLoop {
                 .into_iter()
                 .map(|(doc_id, _surrogate, value)| (doc_id, value))
                 .collect();
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &|_| true);
+            self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &|_, _| true);
             entries = rows
                 .into_iter()
                 .filter_map(|(doc_id, value)| {

@@ -70,9 +70,12 @@ impl CoreLoop {
                 continue;
             };
 
-            // Decode current value — format depends on storage mode. A row the
-            // statement matched but cannot decode fails the statement rather
-            // than under-reporting the affected count.
+            // Decode current value — format depends on storage mode, with the
+            // storage key attached as `id` for a schemaless row whose body
+            // carries none, so this image matches the one DELETE's
+            // write-gate judges. A row the statement matched but cannot
+            // decode fails the statement rather than under-reporting the
+            // affected count.
             let mut doc = match strict_schema {
                 Some(schema) => crate::data::executor::strict_format::binary_tuple_to_json(
                     &current_bytes,
@@ -82,7 +85,11 @@ impl CoreLoop {
                     crate::diag::strict_row_undecodable(collection, doc_id, "bulk_update_project");
                     crate::data::executor::strict_format::undecodable_strict_row(collection, doc_id)
                 })?,
-                None => doc_format::decode_document(&current_bytes)?,
+                None => crate::data::executor::handlers::returning_doc::from_stored(
+                    &current_bytes,
+                    doc_id,
+                    None,
+                )?,
             };
 
             // Feeds the secondary-index SET diff for values the UPDATE drops.

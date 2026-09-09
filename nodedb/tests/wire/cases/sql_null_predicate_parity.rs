@@ -190,10 +190,12 @@ async fn update_where_is_null_touches_exactly_the_counted_rows() {
     );
 }
 
-/// A collection with no declared primary key stores rows carrying no `id`
-/// field at all. `id IS NULL` is then true of every row, on both paths.
+/// Every row carries an identity: the storage key becomes `id` when the body
+/// holds none. `id IS NULL` therefore matches nothing, on every path. The
+/// dangerous inversion is the scan path — `DELETE ... WHERE id IS NULL`
+/// matching every row empties the collection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scan_and_count_agree_on_is_null_over_the_identity_column() {
+async fn is_null_over_the_identity_column_matches_nothing() {
     let server = TestServer::start().await;
     server
         .exec("CREATE COLLECTION np_identity (v TEXT)")
@@ -212,12 +214,79 @@ async fn scan_and_count_agree_on_is_null_over_the_identity_column() {
         .query_text("SELECT v FROM np_identity WHERE id IS NULL")
         .await
         .expect("scan id IS NULL");
-    let counted = count_of(&server, "SELECT count(*) FROM np_identity WHERE id IS NULL").await;
+    assert!(
+        scanned.is_empty(),
+        "no row has a null identity: {scanned:?}"
+    );
 
+    let counted = count_of(&server, "SELECT count(*) FROM np_identity WHERE id IS NULL").await;
     assert_eq!(
-        counted,
-        scanned.len() as i64,
-        "the aggregate path counted {counted} rows where the scan path returned {}: {scanned:?}",
-        scanned.len()
+        counted, 0,
+        "the aggregate path must agree with the scan path"
+    );
+
+    let present = server
+        .query_text("SELECT v FROM np_identity WHERE id IS NOT NULL")
+        .await
+        .expect("scan id IS NOT NULL");
+    assert_eq!(present.len(), 2, "every row has an identity: {present:?}");
+}
+
+/// The identity is a value the client can read back, not only something the
+/// predicate paths agree about.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_identity_column_is_projectable() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION np_project (v TEXT)")
+        .await
+        .expect("create np_project");
+    server
+        .exec("INSERT INTO np_project (v) VALUES ('only')")
+        .await
+        .expect("seed np_project");
+
+    let ids = server
+        .query_text("SELECT id FROM np_project")
+        .await
+        .expect("project id");
+    assert_eq!(ids.len(), 1, "one row, one identity: {ids:?}");
+    assert!(
+        !ids[0].trim().is_empty(),
+        "the identity must be a readable value, got {:?}",
+        ids[0]
+    );
+}
+
+/// A DELETE keyed on the identity column must not empty the collection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_where_identity_is_null_removes_nothing() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION np_delete_id (v TEXT)")
+        .await
+        .expect("create np_delete_id");
+    server
+        .exec("INSERT INTO np_delete_id (v) VALUES ('keep-a')")
+        .await
+        .expect("seed keep-a");
+    server
+        .exec("INSERT INTO np_delete_id (v) VALUES ('keep-b')")
+        .await
+        .expect("seed keep-b");
+
+    server
+        .exec("DELETE FROM np_delete_id WHERE id IS NULL")
+        .await
+        .expect("delete id IS NULL");
+
+    let remaining = server
+        .query_text("SELECT v FROM np_delete_id")
+        .await
+        .expect("scan after delete");
+    assert_eq!(
+        remaining.len(),
+        2,
+        "no row has a null identity, so none is deleted: {remaining:?}"
     );
 }

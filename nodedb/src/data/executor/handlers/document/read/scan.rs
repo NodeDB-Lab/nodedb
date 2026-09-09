@@ -4,7 +4,6 @@
 
 use tracing::{debug, warn};
 
-use super::decode::decode_scanned_document;
 use super::fetch::{DocFetchParams, DocScanMode};
 use super::projection::{apply_projection, apply_projection_msgpack};
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -12,7 +11,7 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::document::sort;
 use crate::data::executor::response_codec::DocumentRow;
-use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
+use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::data::executor::task::ExecutionTask;
 
@@ -179,18 +178,19 @@ impl CoreLoop {
                         collection.to_string(),
                     );
                     // `merge_overlay_into_scan` takes an infallible
-                    // `Fn(&[u8]) -> bool` predicate, so a division/modulo-by-
-                    // zero is captured via this `Cell` side-channel and
-                    // checked once the merge returns.
+                    // `Fn(&str, &[u8]) -> bool` predicate, so a
+                    // division/modulo-by-zero is captured via this `Cell`
+                    // side-channel and checked once the merge returns.
                     let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
                         std::cell::Cell::new(None);
-                    let matches = |value: &[u8]| -> bool {
+                    let matches = |doc_id: &str, value: &[u8]| -> bool {
                         if filter_predicates.is_empty() {
                             return true;
                         }
                         match crate::data::executor::core_loop::filter_match::matches_with_resolved_schema(
                             effective_schema.as_ref(),
                             &filter_predicates,
+                            doc_id,
                             value,
                         ) {
                             Ok(b) => b,
@@ -239,13 +239,7 @@ impl CoreLoop {
                 let filtered = if !sort_keys.is_empty() || !projection.is_empty() {
                     filtered
                         .into_iter()
-                        .map(|(id, bytes)| {
-                            let transcoded = match sparse_body_to_msgpack(&bytes, body_format) {
-                                std::borrow::Cow::Owned(mp) => Some(mp),
-                                std::borrow::Cow::Borrowed(_) => None,
-                            };
-                            (id, transcoded.unwrap_or(bytes))
-                        })
+                        .map(|(id, bytes)| sparse_row_to_doc(&id, &bytes, body_format))
                         .collect()
                 } else {
                     filtered
@@ -293,7 +287,7 @@ impl CoreLoop {
                     let projected_rows: Vec<_> = match sorted
                         .into_iter()
                         .map(|(doc_id, val)| {
-                            let mp = sparse_body_to_msgpack(&val, body_format);
+                            let (doc_id, mp) = sparse_row_to_doc(&doc_id, &val, body_format);
                             let projected =
                                 apply_projection_msgpack(&mp, &computed_cols, projection)?;
                             Ok((doc_id, projected))
@@ -317,10 +311,15 @@ impl CoreLoop {
                 }
 
                 if !window_specs.is_empty() {
+                    // Route through `sparse_row_to_doc`, like every sibling
+                    // branch, so a schemaless row with no `id` field carries
+                    // its storage-key identity into the window computation.
                     let mut decoded_rows: Vec<(String, serde_json::Value)> = match sorted
                         .into_iter()
                         .map(|(id, val)| {
-                            decode_scanned_document(&val, body_format).map(|doc| (id, doc))
+                            let (doc_id, mp) = sparse_row_to_doc(&id, &val, body_format);
+                            crate::data::executor::doc_format::decode_document(&mp)
+                                .map(|doc| (doc_id, doc))
                         })
                         .collect::<crate::Result<Vec<_>>>()
                     {
@@ -372,7 +371,7 @@ impl CoreLoop {
                         let projected_rows: Vec<_> = match sorted
                             .into_iter()
                             .map(|(doc_id, value)| {
-                                let mp = sparse_body_to_msgpack(&value, body_format);
+                                let (doc_id, mp) = sparse_row_to_doc(&doc_id, &value, body_format);
                                 let projected =
                                     apply_projection_msgpack(&mp, &computed_cols, projection)?;
                                 Ok((doc_id, projected))

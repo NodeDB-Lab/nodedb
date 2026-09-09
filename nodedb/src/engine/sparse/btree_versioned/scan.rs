@@ -18,10 +18,12 @@ impl SparseEngine {
     /// Scan every doc_id in a collection at the requested cutoff.
     /// Returns `(doc_id, body)` pairs for live versions only. O(N)
     /// collection-wide; callers add filter/limit on top.
-    /// `predicate` is evaluated against each surviving version's document body
-    /// before it counts toward `limit`, so a selective filter never causes the
-    /// scan to early-stop with fewer matching rows than exist. Pass `&|_| true`
-    /// for an unfiltered scan.
+    /// `predicate` receives each surviving version's doc-id and document body,
+    /// and is evaluated before the version counts toward `limit`, so a
+    /// selective filter never causes the scan to early-stop with fewer
+    /// matching rows than exist. The doc-id carries a schemaless row's
+    /// identity when its body has no `id` field. Pass `&|_, _| true` for an
+    /// unfiltered scan.
     /// `stop` is consulted once per scanned version and ends the scan where it
     /// stands. The caller owns the signal and decides whether the short result
     /// is an answer or an error. Pass
@@ -30,7 +32,7 @@ impl SparseEngine {
     pub fn versioned_scan_as_of(
         &self,
         params: VersionedScanParams<'_>,
-        predicate: &dyn Fn(&[u8]) -> bool,
+        predicate: &dyn Fn(&str, &[u8]) -> bool,
         stop: &dyn Fn() -> bool,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let VersionedScanParams {
@@ -112,11 +114,12 @@ impl SparseEngine {
     /// row's stored valid-time interval, and `body`. The handler projects these
     /// into the output as the synthetic temporal columns.
     ///
-    /// `predicate` is evaluated against each version's document body **before**
-    /// the `limit` truncation, so a selective filter never causes the scan to
-    /// return fewer rows than exist (the caller must push its scan filters in
-    /// here rather than filtering the truncated result). Pass `&|_| true` for
-    /// an unfiltered scan.
+    /// `predicate` receives each version's doc-id and document body, and is
+    /// evaluated **before** the `limit` truncation, so a selective filter
+    /// never causes the scan to return fewer rows than exist (the caller must
+    /// push its scan filters in here rather than filtering the truncated
+    /// result). The doc-id carries a schemaless row's identity when its body
+    /// has no `id` field. Pass `&|_, _| true` for an unfiltered scan.
     ///
     /// `stop` is consulted once per scanned version and ends the scan where it
     /// stands. The caller owns the signal and decides whether the short result
@@ -129,7 +132,7 @@ impl SparseEngine {
     pub fn versioned_scan_all(
         &self,
         params: VersionedScanParams<'_>,
-        predicate: &dyn Fn(&[u8]) -> bool,
+        predicate: &dyn Fn(&str, &[u8]) -> bool,
         stop: &dyn Fn() -> bool,
     ) -> crate::Result<Vec<VersionedRow>> {
         let VersionedScanParams {
@@ -178,7 +181,7 @@ impl SparseEngine {
             }
             // Push the caller's scan filters down here so the `limit` truncation
             // below counts only matching versions, never raw scanned rows.
-            if !predicate(decoded.body) {
+            if !predicate(doc_id, decoded.body) {
                 continue;
             }
             all.push(VersionedRow {
@@ -206,7 +209,7 @@ fn flush_scan(
     id: &str,
     pick: &Option<(i64, Vec<u8>)>,
     valid_at_ms: Option<i64>,
-    predicate: &dyn Fn(&[u8]) -> bool,
+    predicate: &dyn Fn(&str, &[u8]) -> bool,
     out: &mut Vec<(String, Vec<u8>)>,
 ) -> crate::Result<()> {
     let Some((_sf, v)) = pick else { return Ok(()) };
@@ -221,7 +224,7 @@ fn flush_scan(
     }
     // Caller's scan filters are pushed down here so they are applied before the
     // row counts toward the scan's `limit`.
-    if !predicate(decoded.body) {
+    if !predicate(id, decoded.body) {
         return Ok(());
     }
     out.push((id.to_string(), decoded.body.to_vec()));

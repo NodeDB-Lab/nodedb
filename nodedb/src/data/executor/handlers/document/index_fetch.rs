@@ -287,7 +287,12 @@ impl CoreLoop {
                     match if residual.is_empty() {
                         Ok(true)
                     } else {
-                        matches_with_resolved_schema(strict_schema.as_ref(), &residual, &bytes)
+                        matches_with_resolved_schema(
+                            strict_schema.as_ref(),
+                            &residual,
+                            doc_id,
+                            &bytes,
+                        )
                     } {
                         Ok(true) => {}
                         Ok(false) => continue,

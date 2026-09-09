@@ -456,7 +456,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &[u8]| true,
+                &|_: &str, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -485,7 +485,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &[u8]| true,
+                &|_: &str, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -518,7 +518,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &[u8]| true,
+                &|_: &str, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -538,7 +538,7 @@ mod tests {
             put(&e, "c", "a", 100 + i, format!("v{i}").as_bytes());
         }
         // Match only odd-suffixed bodies: v1, v3, v5, v7, v9.
-        let odd = |body: &[u8]| body.last().map(|b| (b - b'0') % 2 == 1).unwrap_or(false);
+        let odd = |_: &str, body: &[u8]| body.last().map(|b| (b - b'0') % 2 == 1).unwrap_or(false);
 
         let rows = e
             .versioned_scan_all(
@@ -574,7 +574,7 @@ mod tests {
             put(&e, "c", id, 100 + i as i64, format!("x{i}").as_bytes());
         }
         // Match only even-suffixed bodies: x0 (a), x2 (c), x4 (e).
-        let even = |body: &[u8]| {
+        let even = |_: &str, body: &[u8]| {
             body.last()
                 .map(|b| (b - b'0').is_multiple_of(2))
                 .unwrap_or(false)
@@ -623,7 +623,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &[u8]| true,
+                &|_: &str, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -638,7 +638,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &[u8]| true,
+                &|_: &str, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();

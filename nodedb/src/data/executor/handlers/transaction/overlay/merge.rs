@@ -76,14 +76,15 @@ pub(in crate::data::executor) struct IndexOverlayMergeParams<'a> {
 impl CoreLoop {
     /// Merge the overlay for `txn_id` into `rows` (base scan `(hex_row_key,
     /// body)` pairs). `matches` is the SAME predicate the base scan applied,
-    /// evaluated on a stored body (Binary Tuple for strict, MessagePack for
-    /// schemaless). No-op when the transaction has no overlay entries.
+    /// evaluated on a stored row's `(doc_id, body)` (Binary Tuple for strict,
+    /// MessagePack for schemaless). No-op when the transaction has no overlay
+    /// entries.
     pub(in crate::data::executor) fn merge_overlay_into_scan(
         &self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         rows: &mut Vec<(String, Vec<u8>)>,
-        matches: &dyn Fn(&[u8]) -> bool,
+        matches: &dyn Fn(&str, &[u8]) -> bool,
     ) {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -110,7 +111,7 @@ impl CoreLoop {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(staged_body)) => {
                     *body = staged_body.clone();
-                    matches(body)
+                    matches(row_key, body)
                 }
                 None => true,
             }
@@ -124,8 +125,9 @@ impl CoreLoop {
             }
             match staged {
                 Staged::Put(body) => {
-                    if matches(body) {
-                        rows.push((surrogate_to_doc_id(Surrogate::new(surrogate)), body.clone()));
+                    let hex_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+                    if matches(&hex_id, body) {
+                        rows.push((hex_id, body.clone()));
                         seen.insert(surrogate);
                     }
                 }
@@ -309,11 +311,11 @@ impl CoreLoop {
         // passes finish.
         let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
             std::cell::Cell::new(None);
-        let residual_matches = |body: &[u8]| -> bool {
+        let residual_matches = |doc_id: &str, body: &[u8]| -> bool {
             if residual.is_empty() {
                 return true;
             }
-            match matches_with_resolved_schema(strict_schema, residual, body) {
+            match matches_with_resolved_schema(strict_schema, residual, doc_id, body) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -340,7 +342,7 @@ impl CoreLoop {
             };
             match overlay.get(coll_key, surrogate) {
                 Some(Staged::Tombstone) => false,
-                Some(Staged::Put(body)) => value_matches(body) && residual_matches(body),
+                Some(Staged::Put(body)) => value_matches(body) && residual_matches(doc_id, body),
                 None => true,
             }
         });
@@ -355,8 +357,9 @@ impl CoreLoop {
             }
             match staged {
                 Staged::Put(body) => {
-                    if value_matches(body) && residual_matches(body) {
-                        doc_ids.push(surrogate_to_doc_id(Surrogate::new(surrogate)));
+                    let hex_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+                    if value_matches(body) && residual_matches(&hex_id, body) {
+                        doc_ids.push(hex_id);
                         seen.insert(surrogate);
                     }
                 }

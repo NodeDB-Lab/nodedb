@@ -22,7 +22,7 @@ use crate::data::executor::doc_format;
 use crate::data::executor::handlers::bulk_dml::update_project::{
     ProjectUpdateRows, ProjectedUpdateRow,
 };
-use crate::data::executor::handlers::{returning_doc, returning_rows, rls_write_gate};
+use crate::data::executor::handlers::{returning_rows, rls_write_gate};
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::doc_id_to_surrogate;
 
@@ -104,7 +104,7 @@ impl CoreLoop {
                 doc_id,
                 current_bytes,
                 old_doc: _,
-                mut doc,
+                doc,
                 updated_bytes: _,
             } = row;
             // Decided against the post-update image, exactly as
@@ -124,7 +124,6 @@ impl CoreLoop {
                 resolved_sum_targets,
             }));
             if returning.is_some() {
-                returning_doc::attach_row_id(&mut doc, &doc_id);
                 returned_docs.push(doc);
             }
         }

@@ -105,14 +105,14 @@ impl CoreLoop {
         // appends overlay-only rows that now match.
         {
             // `merge_overlay_into_scan` takes an infallible
-            // `Fn(&[u8]) -> bool` predicate, so a division/modulo-by-zero is
-            // captured via this `Cell` side-channel and checked once the
-            // merge returns.
+            // `Fn(&str, &[u8]) -> bool` predicate, so a division/modulo-by-
+            // zero is captured via this `Cell` side-channel and checked once
+            // the merge returns.
             let raw_matches =
                 self.strict_aware_matcher(database_id.as_u64(), tid, collection, &filters);
             let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
                 std::cell::Cell::new(None);
-            let matches = |body: &[u8]| match raw_matches(body) {
+            let matches = |doc_id: &str, body: &[u8]| match raw_matches(doc_id, body) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));

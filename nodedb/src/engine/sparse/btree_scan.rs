@@ -277,8 +277,10 @@ impl SparseEngine {
     /// don't match. This avoids O(N) allocation for large collections when
     /// only a small fraction matches the predicate.
     ///
-    /// `predicate` receives the raw document bytes and returns true if the
-    /// document should be included in results.
+    /// `predicate` receives the row's doc-id key and raw document bytes, and
+    /// returns true if the document should be included in results. The key
+    /// carries a schemaless row's identity when its body has no `id` field,
+    /// so a predicate that checks `id` needs it.
     ///
     /// `stop` is consulted once per scanned row, before the predicate. It ends
     /// the scan where it stands, so the caller that owns the signal — a
@@ -292,7 +294,7 @@ impl SparseEngine {
         tenant_id: u64,
         collection: &str,
         limit: usize,
-        predicate: &dyn Fn(&[u8]) -> bool,
+        predicate: &dyn Fn(&str, &[u8]) -> bool,
         stop: &dyn Fn() -> bool,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let prefix = coll_prefix(database_id, tenant_id, collection);
@@ -317,15 +319,15 @@ impl SparseEngine {
             }
             let entry = entry.map_err(|e| redb_err("doc entry", e))?;
             let value_bytes = entry.1.value();
+            let key = entry.0.value();
+            let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
 
             // Evaluate predicate on raw bytes — skip allocation if no match.
-            if !predicate(value_bytes) {
+            if !predicate(doc_id, value_bytes) {
                 continue;
             }
 
-            let key = entry.0.value().to_string();
-            let doc_id = key.strip_prefix(&prefix).unwrap_or(&key).to_string();
-            results.push((doc_id, value_bytes.to_vec()));
+            results.push((doc_id.to_string(), value_bytes.to_vec()));
         }
 
         debug!(collection, count = results.len(), "filtered document scan");
@@ -546,7 +548,7 @@ mod tests {
                 1,
                 "users",
                 usize::MAX,
-                &|_: &[u8]| {
+                &|_: &str, _: &[u8]| {
                     visited.set(visited.get() + 1);
                     true
                 },
@@ -573,7 +575,7 @@ mod tests {
                 1,
                 "users",
                 usize::MAX,
-                &|_: &[u8]| true,
+                &|_: &str, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();

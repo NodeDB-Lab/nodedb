@@ -34,7 +34,7 @@ impl CoreLoop {
                 valid_at_ms: None,
                 limit,
             },
-            &|_| true,
+            &|_, _| true,
             // No task in scope: this helper serves callers that supply their
             // own bound (an explicit `limit`), so no deadline cuts it short.
             &crate::engine::sparse::scan_stop::never_stop,

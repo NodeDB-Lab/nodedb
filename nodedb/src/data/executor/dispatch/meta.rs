@@ -767,7 +767,7 @@ mod txn_created_columnar_engine_tests {
             "refresh_a".to_string(),
         );
         let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
-        core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_| true);
+        core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_, _| true);
 
         core.reap_expired_overlays();
 

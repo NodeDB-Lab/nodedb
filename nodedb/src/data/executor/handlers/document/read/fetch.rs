@@ -120,15 +120,17 @@ impl CoreLoop {
                 // shared sort/window/computed/projection pipeline (which scans
                 // msgpack) operates uniformly, then hand it downstream with no
                 // schema (bodies are already normalized).
-                // `versioned_scan_as_of` takes an infallible `Fn(&[u8]) -> bool`
-                // predicate (a storage-engine primitive out of scope for this
-                // fix), so a division/modulo-by-zero is captured via this
-                // `Cell` side-channel and checked once the scan returns,
-                // rather than silently folded away.
+                // `versioned_scan_as_of` takes an infallible
+                // `Fn(&str, &[u8]) -> bool` predicate (a storage-engine
+                // primitive out of scope for this fix), so a
+                // division/modulo-by-zero is captured via this `Cell`
+                // side-channel and checked once the scan returns, rather
+                // than silently folded away.
                 let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-                let predicate = |body: &[u8]| match matches_with_resolved_schema(
+                let predicate = |doc_id: &str, body: &[u8]| match matches_with_resolved_schema(
                     strict_schema,
                     filter_predicates,
+                    doc_id,
                     body,
                 ) {
                     Ok(b) => b,
@@ -181,9 +183,10 @@ impl CoreLoop {
                 // so a user can `SELECT` / `ORDER BY` / project on them.
                 // See the `AsOf` arm above for the `Cell` side-channel rationale.
                 let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-                let predicate = |body: &[u8]| match matches_with_resolved_schema(
+                let predicate = |doc_id: &str, body: &[u8]| match matches_with_resolved_schema(
                     strict_schema,
                     filter_predicates,
+                    doc_id,
                     body,
                 ) {
                     Ok(b) => b,
@@ -276,12 +279,13 @@ impl CoreLoop {
         );
 
         // `scan_documents_filtered`/`versioned_scan_as_of`/`scan_collection`
-        // take an infallible `Fn(&[u8]) -> bool` predicate (a storage-engine
-        // primitive out of scope for this fix), so a division/modulo-by-zero
-        // is captured via this `Cell` side-channel and checked once every
-        // branch below returns, rather than silently folded away.
+        // take an infallible `Fn(&str, &[u8]) -> bool` predicate (a
+        // storage-engine primitive out of scope for this fix), so a
+        // division/modulo-by-zero is captured via this `Cell` side-channel
+        // and checked once every branch below returns, rather than silently
+        // folded away.
         let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-        let matches = |value: &[u8]| -> bool {
+        let matches = |doc_id: &str, value: &[u8]| -> bool {
             if filter_predicates.is_empty() {
                 return true;
             }
@@ -296,7 +300,7 @@ impl CoreLoop {
             } else {
                 value
             };
-            match matches_with_resolved_schema(strict_schema, filter_predicates, value) {
+            match matches_with_resolved_schema(strict_schema, filter_predicates, doc_id, value) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -316,7 +320,7 @@ impl CoreLoop {
                         valid_at_ms: None,
                         limit: fetch_limit,
                     },
-                    &|_| true,
+                    &|_, _| true,
                     &stop,
                 )?
             } else {
@@ -330,7 +334,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     fetch_limit,
-                    &|_: &[u8]| true,
+                    &|_: &str, _: &[u8]| true,
                     &stop,
                 );
                 match sparse_result {
@@ -400,7 +404,7 @@ impl CoreLoop {
                 Ok(docs) if docs.is_empty() => self
                     .scan_collection(database_id, tid, collection, fetch_limit)?
                     .into_iter()
-                    .filter(|(_, data)| matches(data))
+                    .filter(|(id, data)| matches(id, data))
                     .collect(),
                 other => other?,
             }

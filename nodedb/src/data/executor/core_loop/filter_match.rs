@@ -37,9 +37,18 @@ use super::CoreLoop;
 /// modulus by zero — this is the base document scan's WHERE predicate, so
 /// the behavior-flip rule applies: the query fails instead of the row being
 /// silently excluded.
+///
+/// `doc_id` is the row's storage key. A schemaless collection with no
+/// declared `id` field carries its identity only in that key, never in the
+/// body, so the body is matched with `id` injected — the same injection
+/// [`super::super::row_shape::sparse_row_to_doc`] applies to a materialized
+/// row, so `WHERE id ...` sees the identity a reader of the same row sees. A
+/// strict row already surfaces `id` as a real tuple column, so no injection
+/// runs on that arm.
 pub(in crate::data::executor) fn matches_with_resolved_schema(
     strict_schema: Option<&StrictSchema>,
     filters: &[ScanFilter],
+    doc_id: &str,
     body: &[u8],
 ) -> Result<bool, EvalError> {
     match strict_schema {
@@ -47,7 +56,10 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
             Some(msgpack) => ScanFilter::all_match_binary(filters, &msgpack),
             None => Ok(false),
         },
-        None => ScanFilter::all_match_binary(filters, body),
+        None => {
+            let with_id = nodedb_query::msgpack_scan::inject_str_field(body, "id", doc_id);
+            ScanFilter::all_match_binary(filters, &with_id)
+        }
     }
 }
 
@@ -78,13 +90,13 @@ impl CoreLoop {
         })
     }
 
-    /// Build a reusable `Fn(&[u8]) -> Result<bool, EvalError>` closure
-    /// evaluating `filters` against a stored row body, resolving
-    /// `collection`'s strict schema ONCE up front (not per row) and
+    /// Build a reusable `Fn(&str, &[u8]) -> Result<bool, EvalError>` closure
+    /// evaluating `filters` against a stored row's `(doc_id, body)`,
+    /// resolving `collection`'s strict schema ONCE up front (not per row) and
     /// capturing it in the closure. Suitable for a hot per-row scan loop
     /// directly, or as the fallible half of a Cell-wrapping call pattern —
     /// [`CoreLoop::merge_overlay_into_scan`] actually expects an
-    /// *infallible* `&dyn Fn(&[u8]) -> bool`, not this function's own
+    /// *infallible* `&dyn Fn(&str, &[u8]) -> bool`, not this function's own
     /// `Result`-returning output, so callers that feed it into that merge
     /// wrap the closure this function returns in a second, infallible one
     /// that stashes any `Err` into a local `Cell<Option<EvalError>>` and
@@ -97,8 +109,10 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         filters: &'a [ScanFilter],
-    ) -> impl Fn(&[u8]) -> Result<bool, EvalError> + 'a {
+    ) -> impl Fn(&str, &[u8]) -> Result<bool, EvalError> + 'a {
         let strict_schema = self.resolve_strict_schema(database_id, tid, collection);
-        move |body: &[u8]| matches_with_resolved_schema(strict_schema.as_ref(), filters, body)
+        move |doc_id: &str, body: &[u8]| {
+            matches_with_resolved_schema(strict_schema.as_ref(), filters, doc_id, body)
+        }
     }
 }
