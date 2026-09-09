@@ -161,6 +161,7 @@ mod sql_conflict_policy;
 mod sql_copy_from;
 mod sql_copy_to;
 mod sql_cursors;
+mod sql_declared_column_types;
 mod sql_default_expressions;
 mod sql_default_volatility;
 mod sql_division_by_zero;
