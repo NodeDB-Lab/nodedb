@@ -14,8 +14,11 @@ use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::*;
 
 use super::super::convert::ConvertContext;
-use super::super::value::{assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array};
+use super::super::value::{
+    assignments_to_update_values, expand_row_defaults, row_to_msgpack, rows_to_msgpack_array,
+};
 use super::insert::{build_schema_bytes, columnar_row_surrogates, resolve_doc_identity};
+use super::route::{WriteRoute, upsert_route};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Bundled arguments for [`convert_upsert`].
@@ -50,6 +53,9 @@ pub(in super::super) fn convert_upsert(
     let collection = coll_qualified.as_str();
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
     let mut tasks = Vec::new();
+    // Resolved once per statement, before any DEFAULT is materialized: an
+    // engine with no UPSERT lowering must not burn a sequence value.
+    let route = upsert_route(engine, collection)?;
 
     // Detect CRDT document collections once. An explicit `ON CONFLICT DO UPDATE
     // SET ...` cannot be honored: CRDT conflict resolution IS the LWW
@@ -73,9 +79,14 @@ pub(in super::super) fn convert_upsert(
 
     let mut columnar_rows: Vec<&Vec<(String, SqlValue)>> = Vec::new();
 
-    for row in rows {
-        match engine {
-            EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
+    // Every engine's rows expand their DEFAULTs here, ahead of identity
+    // derivation, so the primary-key NOT NULL gate reads the row the
+    // declaration promises — see `expand_row_defaults`.
+    let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
+
+    for row in &expanded_rows {
+        match route {
+            WriteRoute::Document => {
                 let value_bytes = row_to_msgpack(row)?;
                 let (doc_id, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
                 let plan = if is_crdt {
@@ -114,21 +125,14 @@ pub(in super::super) fn convert_upsert(
                     txn_id: None,
                 });
             }
-            EngineType::Columnar | EngineType::Spatial => {
+            WriteRoute::ColumnarFamily => {
                 columnar_rows.push(row);
-            }
-            EngineType::Timeseries | EngineType::KeyValue | EngineType::Array => {
-                return Err(crate::Error::PlanError {
-                    detail: format!(
-                        "UPSERT into '{collection}': engine type {engine:?} does not support upsert"
-                    ),
-                });
             }
         }
     }
 
     if !columnar_rows.is_empty() {
-        let payload = rows_to_msgpack_array(&columnar_rows, column_defaults)?;
+        let payload = rows_to_msgpack_array(&columnar_rows)?;
         let surrogates = columnar_row_surrogates(ctx, collection, &columnar_rows, primary_key)?;
         let schema_bytes = build_schema_bytes(column_schema);
         tasks.push(PhysicalTask {

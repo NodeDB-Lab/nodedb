@@ -98,6 +98,25 @@ pub enum SqlError {
     #[error("unsupported: {detail}")]
     Unsupported { detail: String },
 
+    /// A declared column DEFAULT the server cannot evaluate to a value.
+    ///
+    /// The column is never omitted instead. A DEFAULT that disappears stores
+    /// NULL where the declaration promised a value, and nothing reports it.
+    #[error("DEFAULT for column '{column}' cannot be evaluated: {expr}")]
+    UnevaluableDefault { column: String, expr: String },
+
+    /// `setval` appeared inside a column DEFAULT.
+    ///
+    /// A DEFAULT runs once per row, so evaluating `setval` there will move the
+    /// sequence's position on every inserted row. PostgreSQL reports a
+    /// function used in a context that forbids it as SQLSTATE `42601`
+    /// (`syntax_error`), and this refusal carries the same code.
+    #[error(
+        "setval() is not allowed in the DEFAULT for column '{column}'; \
+         a DEFAULT must not move a sequence's position"
+    )]
+    SetvalInColumnDefault { column: String },
+
     #[error("invalid function call: {detail}")]
     InvalidFunction { detail: String },
 

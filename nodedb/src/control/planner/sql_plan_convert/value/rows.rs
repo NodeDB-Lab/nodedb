@@ -5,27 +5,17 @@
 use nodedb_sql::types::SqlValue;
 
 use super::convert::sql_value_to_nodedb_value;
-use nodedb_sql::planner::defaults::evaluate_default_expr;
 
-pub(crate) fn rows_to_msgpack_array(
-    rows: &[&Vec<(String, SqlValue)>],
-    column_defaults: &[(String, String)],
-) -> crate::Result<Vec<u8>> {
+/// Encode already-expanded rows as one msgpack array of maps.
+///
+/// Callers materialize DEFAULTs through `expand_row_defaults` before routing,
+/// so every column the declaration promises is already present in `rows`.
+pub(crate) fn rows_to_msgpack_array(rows: &[&Vec<(String, SqlValue)>]) -> crate::Result<Vec<u8>> {
     let mut arr: Vec<nodedb_types::Value> = Vec::with_capacity(rows.len());
     for row in rows {
         let mut map = std::collections::HashMap::new();
         for (key, val) in row.iter() {
             map.insert(key.clone(), sql_value_to_nodedb_value(val));
-        }
-        for (col_name, default_expr) in column_defaults {
-            if !map.contains_key(col_name)
-                && let Some(val) =
-                    evaluate_default_expr(default_expr).map_err(|e| crate::Error::PlanError {
-                        detail: format!("default for column '{col_name}': {e}"),
-                    })?
-            {
-                map.insert(col_name.clone(), val);
-            }
         }
         arr.push(nodedb_types::Value::Object(map));
     }

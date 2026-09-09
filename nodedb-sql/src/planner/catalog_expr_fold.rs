@@ -47,7 +47,7 @@ pub(super) fn eval_catalog_constant(
 /// Returns `Ok(None)` for every other expression. These calls are `Volatile`,
 /// so the constant folder never reaches them and the plan holding the result
 /// is never cached — each execution re-plans and allocates again.
-fn eval_sequence_accessor(
+pub(super) fn eval_sequence_accessor(
     expr: &SqlExpr,
     catalog: &dyn SqlCatalog,
 ) -> crate::Result<Option<SqlValue>> {

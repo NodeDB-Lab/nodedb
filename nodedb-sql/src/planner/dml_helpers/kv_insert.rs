@@ -3,13 +3,13 @@
 //! Plan construction for the KV engine's `VALUES`-clause insert paths
 //! (plain `INSERT`, `UPSERT`, and `INSERT ... ON CONFLICT DO UPDATE`).
 
-use sqlparser::ast;
-
+use super::params::KvInsertParams;
 use super::range_check::{
     check_declared_float_ranges, check_declared_float_ranges_in_assignments,
     check_declared_int_ranges, check_declared_int_ranges_in_assignments,
 };
 use super::value_convert::expr_to_sql_value;
+use crate::catalog::SqlCatalog;
 use crate::error::{Result, SqlError};
 use crate::planner::declared_type_coerce::{
     coerce_assignments_to_declared_types, coerce_row_to_declared_types,
@@ -21,20 +21,22 @@ use crate::types::*;
 /// differ only in `intent` and `on_conflict_updates`, never in how entries
 /// are extracted from the row exprs.
 ///
-/// `pk_col` is the schema-defined primary-key column name from
+/// `params.pk_col` is the schema-defined primary-key column name from
 /// `CollectionInfo::primary_key`.  When supplied, that column is used as
 /// the KV key regardless of whether it is named `"key"`.  Falls back to
 /// the literal name `"key"` when `pk_col` is `None` (legacy / generic
 /// KV collections that use the built-in key/value column convention).
-pub(crate) fn build_kv_insert_plan(
-    table_name: String,
-    columns: &[String],
-    rows_ast: &[ast::Parens<Vec<ast::Expr>>],
-    intent: KvInsertIntent,
-    mut on_conflict_updates: Vec<(String, SqlExpr)>,
-    pk_col: Option<&str>,
-    declared_columns: &[ColumnInfo],
-) -> Result<Vec<SqlPlan>> {
+pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<SqlPlan>> {
+    let KvInsertParams {
+        collection: table_name,
+        columns,
+        rows_ast,
+        intent,
+        mut on_conflict_updates,
+        pk_col,
+        declared_columns,
+        catalog,
+    } = params;
     // Positional KV insert (no column list): the key/value split below is
     // driven entirely by matching column *names* against `key_col_name`/
     // `"ttl"`. With an empty `columns` list there is no key to bind to, so
@@ -78,7 +80,7 @@ pub(crate) fn build_kv_insert_plan(
             let Some(expr) = row_exprs.get(i) else { break };
             row.push((col.clone(), expr_to_sql_value(expr)?));
         }
-        volatile_defaults |= materialize_declared_defaults(declared_columns, &mut row)?;
+        volatile_defaults |= materialize_declared_defaults(declared_columns, &mut row, catalog)?;
         // The key column is exempt — see `coerce_rows_to_declared_types`.
         coerce_row_to_declared_types(declared_columns, &mut row, Some(key_col_name))?;
         coerced_rows.push(row);
@@ -154,11 +156,15 @@ pub(crate) fn build_kv_insert_plan(
 ///   on a `SMALLINT` column a way to store a value the same literal is
 ///   rejected for.
 ///
+/// A DEFAULT the evaluator cannot resolve raises `SqlError::UnevaluableDefault`
+/// rather than leaving the column out. `catalog` resolves `nextval` / `currval`.
+///
 /// Returns whether any materialized default came from a `Volatile`
 /// expression, so the caller can keep the plan out of the plan cache.
 fn materialize_declared_defaults(
     declared_columns: &[ColumnInfo],
     row: &mut Vec<(String, SqlValue)>,
+    catalog: &dyn SqlCatalog,
 ) -> Result<bool> {
     let mut volatile = false;
     for column in declared_columns {
@@ -169,62 +175,36 @@ fn materialize_declared_defaults(
             continue;
         }
         let evaluated =
-            crate::planner::defaults::evaluate_default_expr(default_expr).map_err(|e| {
-                SqlError::Parse {
-                    detail: format!("default for column '{}' is invalid: {e}", column.name),
-                }
-            })?;
-        let Some(evaluated) = evaluated else { continue };
-        let value = nodedb_value_to_sql_value(&column.name, evaluated)?;
+            crate::planner::defaults::evaluate_default_expr(default_expr, &column.name, catalog)?;
+        let value = crate::planner::defaults::default_value_to_sql(&column.name, evaluated)?;
         volatile |= crate::types::plan::default_expr_is_volatile(default_expr);
         row.push((column.name.clone(), value));
     }
     Ok(volatile)
 }
 
-/// Convert an evaluated default back into the planner's literal type.
-///
-/// The inverse of `sql_value_to_ndb` in `planner::defaults`, which is the only
-/// producer of these values — so every shape the evaluator can emit has an
-/// exact counterpart here. Anything else is rejected rather than rendered
-/// through `Debug`: a `DEFAULT` that silently stored `Uuid("…")` as its own
-/// debug text would be the same class of defect as dropping it entirely, but
-/// harder to notice because the column would look populated.
-fn nodedb_value_to_sql_value(column: &str, value: nodedb_types::Value) -> Result<SqlValue> {
-    Ok(match value {
-        nodedb_types::Value::Null => SqlValue::Null,
-        nodedb_types::Value::Bool(b) => SqlValue::Bool(b),
-        nodedb_types::Value::Integer(i) => SqlValue::Int(i),
-        nodedb_types::Value::Float(f) => SqlValue::Float(f),
-        nodedb_types::Value::Decimal(d) => SqlValue::Decimal(d),
-        nodedb_types::Value::String(s) => SqlValue::String(s),
-        nodedb_types::Value::Bytes(b) => SqlValue::Bytes(b),
-        nodedb_types::Value::NaiveDateTime(dt) => SqlValue::Timestamp(dt),
-        nodedb_types::Value::DateTime(dt) => SqlValue::Timestamptz(dt),
-        nodedb_types::Value::Array(items) => SqlValue::Array(
-            items
-                .into_iter()
-                .map(|item| nodedb_value_to_sql_value(column, item))
-                .collect::<Result<Vec<_>>>()?,
-        ),
-        other => {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "default for column '{column}' evaluates to a value with no SQL literal \
-                     form: {other:?}"
-                ),
-            });
-        }
-    })
-}
-
 #[cfg(test)]
 mod kv_on_conflict_range_tests {
+    use sqlparser::ast;
     use sqlparser::ast::{Expr, Value, ValueWithSpan};
     use sqlparser::tokenizer::Span;
 
     use super::*;
     use nodedb_types::columnar::{FloatWidth, IntWidth};
+
+    /// A catalog with no collections and no sequence state. These cases
+    /// declare no DEFAULT, so no accessor is ever reached.
+    struct NoCatalog;
+
+    impl SqlCatalog for NoCatalog {
+        fn get_collection(
+            &self,
+            _database_id: nodedb_types::DatabaseId,
+            _name: &str,
+        ) -> std::result::Result<Option<CollectionInfo>, crate::catalog::SqlCatalogError> {
+            Ok(None)
+        }
+    }
 
     fn string_column(name: &str) -> ColumnInfo {
         ColumnInfo {
@@ -281,15 +261,16 @@ mod kv_on_conflict_range_tests {
             int_column("n", Some(IntWidth::I32)),
             float_column("r", Some(FloatWidth::F32)),
         ];
-        build_kv_insert_plan(
-            "t".to_string(),
-            &["key".to_string()],
-            &[ast::Parens::with_empty_span(vec![key_value_expr("a")])],
-            KvInsertIntent::Put,
-            updates,
-            Some("key"),
-            &declared,
-        )
+        build_kv_insert_plan(KvInsertParams {
+            collection: "t".to_string(),
+            columns: &["key".to_string()],
+            rows_ast: &[ast::Parens::with_empty_span(vec![key_value_expr("a")])],
+            intent: KvInsertIntent::Put,
+            on_conflict_updates: updates,
+            pk_col: Some("key"),
+            declared_columns: &declared,
+            catalog: &NoCatalog,
+        })
     }
 
     #[test]

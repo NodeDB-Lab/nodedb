@@ -10,7 +10,10 @@ use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::*;
 
 use super::super::convert::ConvertContext;
-use super::super::value::{row_to_msgpack, rows_to_msgpack_array, sql_value_to_string};
+use super::super::value::{
+    expand_row_defaults, row_to_msgpack, rows_to_msgpack_array, sql_value_to_string,
+};
+use super::route::{WriteRoute, insert_route};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Build a `ColumnarSchema` from raw catalog column-type strings.
@@ -213,17 +216,6 @@ pub(super) fn columnar_row_surrogates(
     Ok(out)
 }
 
-pub(in super::super) fn nodedb_value_to_sql(val: nodedb_types::Value) -> SqlValue {
-    match val {
-        nodedb_types::Value::Integer(n) => SqlValue::Int(n),
-        nodedb_types::Value::Float(f) => SqlValue::Float(f),
-        nodedb_types::Value::String(s) => SqlValue::String(s),
-        nodedb_types::Value::Bool(b) => SqlValue::Bool(b),
-        nodedb_types::Value::Null => SqlValue::Null,
-        _ => SqlValue::String(format!("{val:?}")),
-    }
-}
-
 /// Bundled arguments for [`convert_insert`].
 pub(in super::super) struct ConvertInsertArgs<'a> {
     pub collection: &'a str,
@@ -257,6 +249,9 @@ pub(in super::super) fn convert_insert(
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
     let mut tasks = Vec::new();
     let mut columnar_rows: Vec<&Vec<(String, SqlValue)>> = Vec::new();
+    // Resolved once per statement, before any DEFAULT is materialized: an
+    // engine with no INSERT lowering here must not burn a sequence value.
+    let route = insert_route(engine, collection)?;
 
     // Both INSERT routing gates, read from the catalog once for the whole
     // statement (never re-hit per row).
@@ -295,44 +290,17 @@ pub(in super::super) fn convert_insert(
     let mut balanced_documents: Vec<(String, Vec<u8>)> = Vec::new();
     let mut balanced_surrogates: Vec<Surrogate> = Vec::new();
 
-    let mut expanded_rows: Vec<Vec<(String, SqlValue)>> = Vec::with_capacity(rows.len());
-    for row in rows {
-        if column_defaults.is_empty() {
-            expanded_rows.push(row.clone());
-            continue;
-        }
-        let mut expanded = row.clone();
-        for (col_name, default_expr) in column_defaults {
-            if !expanded.iter().any(|(k, _)| k == col_name)
-                && let Some(val) = super::super::value::evaluate_default_expr(default_expr)
-                    .map_err(|e| crate::Error::PlanError {
-                        detail: format!("default for column '{col_name}': {e}"),
-                    })?
-            {
-                expanded.push((col_name.clone(), nodedb_value_to_sql(val)));
-            }
-        }
-        expanded_rows.push(expanded);
-    }
+    // Every engine's rows expand their DEFAULTs here, ahead of identity
+    // derivation. A DEFAULT materialized after the primary-key NOT NULL gate
+    // refuses a key the declaration supplies.
+    let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
 
-    for (i, row) in expanded_rows.iter().enumerate() {
-        match engine {
-            EngineType::KeyValue => {
-                return Err(crate::Error::PlanError {
-                    detail: "KV INSERT must use SqlPlan::KvInsert path".into(),
-                });
+    for row in &expanded_rows {
+        match route {
+            WriteRoute::ColumnarFamily => {
+                columnar_rows.push(row);
             }
-            EngineType::Timeseries => {
-                return Err(crate::Error::PlanError {
-                    detail: format!(
-                        "INSERT into '{collection}': timeseries collections use TimeseriesIngest, not Insert"
-                    ),
-                });
-            }
-            EngineType::Columnar | EngineType::Spatial => {
-                columnar_rows.push(&rows[i]);
-            }
-            EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
+            WriteRoute::Document => {
                 let value_bytes = row_to_msgpack(row)?;
                 let (doc_id, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
                 // One page for the whole statement: the rows of a balanced
@@ -381,13 +349,6 @@ pub(in super::super) fn convert_insert(
                     txn_id: None,
                 });
             }
-            EngineType::Array => {
-                return Err(crate::Error::PlanError {
-                    detail: format!(
-                        "INSERT into '{collection}': array engine uses INSERT INTO ARRAY syntax"
-                    ),
-                });
-            }
         }
     }
 
@@ -405,7 +366,7 @@ pub(in super::super) fn convert_insert(
     }
 
     if !columnar_rows.is_empty() {
-        let payload = rows_to_msgpack_array(&columnar_rows, column_defaults)?;
+        let payload = rows_to_msgpack_array(&columnar_rows)?;
         let intent = if if_absent {
             ColumnarInsertIntent::InsertIfAbsent
         } else {
@@ -495,6 +456,7 @@ mod tests {
             shuffle_agg_num_parts: 0,
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
+            sql_catalog: None,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         };

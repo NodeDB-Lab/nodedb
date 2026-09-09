@@ -6,9 +6,10 @@ use nodedb_types::DatabaseId;
 use sqlparser::ast::{self};
 
 use super::dml_helpers::{
-    bind_insert_select_columns, build_kv_insert_plan, build_vector_primary_insert_plan,
-    check_declared_float_ranges_in_assignments, check_declared_int_ranges_in_assignments,
-    coerce_and_check_rows, convert_value_rows, resolve_insert_columns,
+    KvInsertParams, bind_insert_select_columns, build_kv_insert_plan,
+    build_vector_primary_insert_plan, check_declared_float_ranges_in_assignments,
+    check_declared_int_ranges_in_assignments, coerce_and_check_rows, convert_value_rows,
+    resolve_insert_columns,
 };
 use crate::engine_rules::{self, InsertParams};
 use crate::error::{Result, SqlError};
@@ -177,15 +178,16 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
         } else {
             KvInsertIntent::Insert
         };
-        return build_kv_insert_plan(
-            table_name,
-            &columns,
+        return build_kv_insert_plan(KvInsertParams {
+            collection: table_name,
+            columns: &columns,
             rows_ast,
             intent,
-            Vec::new(),
-            info.primary_key.as_deref(),
-            &info.columns,
-        );
+            on_conflict_updates: Vec::new(),
+            pk_col: info.primary_key.as_deref(),
+            declared_columns: &info.columns,
+            catalog,
+        });
     }
 
     // Positional INSERT (no column list): bind values to the collection's
@@ -270,15 +272,16 @@ pub fn plan_upsert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
     // KV: upsert is just a PUT (natural overwrite). Positional column
     // binding (below) does not apply here — see `plan_insert`.
     if info.engine == EngineType::KeyValue {
-        return build_kv_insert_plan(
-            table_name,
-            &columns,
+        return build_kv_insert_plan(KvInsertParams {
+            collection: table_name,
+            columns: &columns,
             rows_ast,
-            KvInsertIntent::Put,
-            Vec::new(),
-            info.primary_key.as_deref(),
-            &info.columns,
-        );
+            intent: KvInsertIntent::Put,
+            on_conflict_updates: Vec::new(),
+            pk_col: info.primary_key.as_deref(),
+            declared_columns: &info.columns,
+            catalog,
+        });
     }
 
     // Positional UPSERT (no column list): bind to the collection's declared
@@ -355,15 +358,16 @@ fn plan_upsert_with_on_conflict(
     // per-row assignments carried through for the Data Plane to apply
     // against the existing row.
     if info.engine == EngineType::KeyValue {
-        return build_kv_insert_plan(
-            table_name,
-            &columns,
+        return build_kv_insert_plan(KvInsertParams {
+            collection: table_name,
+            columns: &columns,
             rows_ast,
-            KvInsertIntent::Put,
+            intent: KvInsertIntent::Put,
             on_conflict_updates,
-            info.primary_key.as_deref(),
-            &info.columns,
-        );
+            pk_col: info.primary_key.as_deref(),
+            declared_columns: &info.columns,
+            catalog,
+        });
     }
 
     // Positional UPSERT (no column list): bind to the collection's declared

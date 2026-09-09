@@ -129,11 +129,33 @@ pub struct ConvertContext {
     /// `DEFAULT_SHUFFLE_AGG_THRESHOLD`; overridable per-session via
     /// `nodedb.shuffle_agg_threshold` for operator control and test determinism.
     pub shuffle_agg_threshold: usize,
+    /// The catalog the plan was built against. INSERT/UPSERT conversion
+    /// evaluates each declared column DEFAULT here, and a sequence-backed
+    /// DEFAULT (`nextval`, `currval`) reads its value through this handle.
+    /// `None` for converters built by sub-planners that hold no catalog; a
+    /// catalog-reading DEFAULT then raises instead of dropping the column.
+    pub sql_catalog: Option<Arc<dyn nodedb_sql::catalog::SqlCatalog + Send + Sync>>,
 }
 
 impl ConvertContext {
     pub fn is_metadata(&self) -> bool {
         self.purpose == PlanningPurpose::Metadata
+    }
+
+    /// The catalog a column DEFAULT is evaluated against.
+    ///
+    /// Raises when the converter holds none. A DEFAULT that reads the catalog
+    /// must fail loudly: omitting the column stores NULL where the
+    /// declaration promised a value.
+    pub fn sql_catalog(
+        &self,
+    ) -> crate::Result<&(dyn nodedb_sql::catalog::SqlCatalog + Send + Sync)> {
+        self.sql_catalog
+            .as_deref()
+            .ok_or_else(|| crate::Error::PlanError {
+                detail: "plan conversion holds no catalog, so a column DEFAULT that reads                          one cannot be evaluated"
+                    .into(),
+            })
     }
 
     /// Resolve an existing surrogate without creating a mapping while planning
@@ -292,6 +314,7 @@ mod tests {
             shuffle_agg_num_parts: 0,
             broadcast_threshold_bytes: 0,
             shuffle_agg_threshold: 0,
+            sql_catalog: None,
         }
     }
 
