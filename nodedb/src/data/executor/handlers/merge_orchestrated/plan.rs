@@ -60,14 +60,36 @@ pub(super) struct MergePlanActions {
     pub(super) inserts: Vec<MergeInsert>,
 }
 
-/// Decode a stored target row into JSON. Fails rather than skipping — a row
-/// the classifier can't read is not "absent", and treating it as absent
-/// inserts a duplicate of a row that already exists.
+/// Decode a stored target row into JSON, with `id` injected for a schemaless
+/// row whose body carries none. Fails rather than skipping — a row the
+/// classifier can't read is not "absent", and treating it as absent inserts a
+/// duplicate of a row that already exists.
+///
+/// A schemaless collection with no declared `id` field carries its identity
+/// only in `doc_id` (the storage key), never in the body — so a MERGE arm's
+/// `AND id ...` condition, matched by [`find_arm`], must see the identity
+/// injected here. A strict row already surfaces `id` as a real tuple column,
+/// so injection only runs on the schemaless arm.
 fn decode_target(
+    doc_id: &str,
     bytes: &[u8],
     strict_schema: &Option<nodedb_types::columnar::StrictSchema>,
 ) -> crate::Result<serde_json::Value> {
-    doc_format::decode_document_or_binary_tuple(bytes, strict_schema.as_ref(), "MERGE target row")
+    let mut doc = doc_format::decode_document_or_binary_tuple(
+        bytes,
+        strict_schema.as_ref(),
+        "MERGE target row",
+    )?;
+    if strict_schema.is_none()
+        && let Some(obj) = doc.as_object_mut()
+        && !obj.contains_key("id")
+    {
+        obj.insert(
+            "id".to_string(),
+            serde_json::Value::String(doc_id.to_string()),
+        );
+    }
+    Ok(doc)
 }
 
 impl CoreLoop {
@@ -101,7 +123,7 @@ impl CoreLoop {
         let null_source = serde_json::Value::Null;
 
         for (doc_id, bytes) in &target_docs {
-            let target_doc = decode_target(bytes, &strict_schema)?;
+            let target_doc = decode_target(doc_id, bytes, &strict_schema)?;
             let join_val = target_doc
                 .get(params.target_join_col)
                 .map(json_to_str)

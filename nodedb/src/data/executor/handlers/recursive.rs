@@ -119,15 +119,18 @@ impl CoreLoop {
             }
         };
 
-        // Convert raw stored bytes to the msgpack form the CTE steps compare on.
-        let to_msgpack = |value: &[u8]| -> Option<Vec<u8>> {
-            Some(
-                crate::data::executor::scan_normalize::sparse_body_to_msgpack(
-                    value,
-                    body_format.as_format_ref(),
-                )
-                .into_owned(),
+        // Convert raw stored bytes to the msgpack form the CTE steps compare
+        // on. A schemaless row with no declared `id` field carries its
+        // identity only in the storage key, never in the body, so the row
+        // image must inject it before any predicate runs — otherwise
+        // `id IS NULL` and RETURNING rows both lose the identity.
+        let to_msgpack = |doc_id: &str, value: &[u8]| -> Vec<u8> {
+            crate::data::executor::scan_normalize::sparse_row_to_doc(
+                doc_id,
+                value,
+                body_format.as_format_ref(),
             )
+            .1
         };
 
         // Step 1: Seed working table with base query results.
@@ -143,14 +146,8 @@ impl CoreLoop {
             "recursive CTE: starting seed"
         );
 
-        for (_doc_id, value) in &all_docs {
-            let mp = match to_msgpack(value) {
-                Some(m) => m,
-                None => {
-                    tracing::debug!(core = self.core_id, "to_msgpack returned None");
-                    continue;
-                }
-            };
+        for (doc_id, value) in &all_docs {
+            let mp = to_msgpack(doc_id, value);
             match ScanFilter::all_match_binary(&base_preds, &mp) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -197,15 +194,12 @@ impl CoreLoop {
                 }
 
                 let mut new_rows = Vec::new();
-                for (_doc_id, value) in &all_docs {
+                for (doc_id, value) in &all_docs {
                     if results.len() + new_rows.len() >= limit {
                         break;
                     }
 
-                    let mp = match to_msgpack(value) {
-                        Some(m) => m,
-                        None => continue,
-                    };
+                    let mp = to_msgpack(doc_id, value);
 
                     // Apply recursive filters (WHERE clause from recursive branch).
                     match ScanFilter::all_match_binary(&recursive_preds, &mp) {
@@ -263,10 +257,7 @@ impl CoreLoop {
                     if results.len() + new_rows.len() >= limit {
                         break;
                     }
-                    let mp = match to_msgpack(value) {
-                        Some(m) => m,
-                        None => continue,
-                    };
+                    let mp = to_msgpack(doc_id, value);
                     match ScanFilter::all_match_binary(&recursive_preds, &mp) {
                         Ok(true) => {}
                         Ok(false) => continue,

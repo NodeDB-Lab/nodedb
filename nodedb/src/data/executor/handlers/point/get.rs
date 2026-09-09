@@ -6,7 +6,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
+use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::surrogate_to_doc_id;
 use nodedb_types::Surrogate;
@@ -137,23 +137,17 @@ impl CoreLoop {
         // tagged sidecar — and returning the stored bytes hands the client
         // `[4,"alice"]` where it asked for `alice`.
         //
-        // The normalizer borrows when the stored body needed no transcode, so
-        // the common schemaless read costs nothing here; only a body that was
-        // actually rewritten yields an owned buffer, and only then is `data`
-        // superseded.
-        let transcoded = {
-            let normalized = sparse_body_to_msgpack(&data, body_format.as_format_ref());
-            if !rls_filters.is_empty()
-                && !super::super::rls_eval::rls_check_msgpack_bytes(rls_filters, &normalized)
-            {
-                return self.response_with_payload(task, Vec::new());
-            }
-            match normalized {
-                std::borrow::Cow::Owned(v) => Some(v),
-                std::borrow::Cow::Borrowed(_) => None,
-            }
-        };
+        // A schemaless row with no declared `id` field carries its identity
+        // only in `row_key`, never in the body, so the image RLS evaluates
+        // must have `id` injected. Without it, a policy referencing `id`
+        // reads the field as absent instead of as this row's real identity.
+        let (_, normalized) = sparse_row_to_doc(document_id, &data, body_format.as_format_ref());
+        if !rls_filters.is_empty()
+            && !super::super::rls_eval::rls_check_msgpack_bytes(rls_filters, &normalized)
+        {
+            return self.response_with_payload(task, Vec::new());
+        }
 
-        self.response_with_payload(task, transcoded.unwrap_or(data))
+        self.response_with_payload(task, normalized)
     }
 }
