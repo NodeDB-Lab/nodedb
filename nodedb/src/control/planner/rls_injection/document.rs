@@ -4,6 +4,8 @@
 
 use nodedb_physical::physical_plan::DocumentOp;
 
+use crate::engine::document::store::surrogate_to_doc_id;
+
 use super::context::RlsCtx;
 
 /// Exhaustive over [`DocumentOp`] so a new document operation forces a
@@ -112,15 +114,18 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
             collection,
             value,
             rls_filters,
+            surrogate,
             ..
         }
         | DocumentOp::PointInsert {
             collection,
             value,
             rls_filters,
+            surrogate,
             ..
         } => {
-            ctx.admit_write_image(collection, value)?;
+            let row_key = surrogate_to_doc_id(*surrogate);
+            ctx.admit_document_write_image(collection, &row_key, value)?;
             ctx.set_post_filters(collection, rls_filters)
         }
 
@@ -128,10 +133,12 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
             collection,
             documents,
             rls_filters,
+            surrogates,
             ..
         } => {
-            for (_, value) in documents.iter() {
-                ctx.admit_write_image(collection, value)?;
+            for ((_, value), surrogate) in documents.iter().zip(surrogates.iter()) {
+                let row_key = surrogate_to_doc_id(*surrogate);
+                ctx.admit_document_write_image(collection, &row_key, value)?;
             }
             ctx.set_post_filters(collection, rls_filters)
         }

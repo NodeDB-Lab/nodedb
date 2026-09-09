@@ -5,10 +5,11 @@
 //! source page-by-page, apply the residual `WHERE`, assign a fresh
 //! target-keyed surrogate, emit `(target_doc_id, value, surrogate)`.
 //!
-//! Every step here assumes standard msgpack bodies — `MaterializeScan`
-//! already normalized a strict source's Binary Tuple on the Data Plane.
-//! Never re-add a Control-Plane decode here; it would silently corrupt the
-//! filter, PK extraction, and target write.
+//! Every step here assumes standard msgpack bodies carrying an `id` field —
+//! `MaterializeScan` already normalized a strict source's Binary Tuple and
+//! injected the row's storage-key identity on the Data Plane. Never re-add
+//! a Control-Plane decode here; it would silently corrupt the filter, PK
+//! extraction, and target write.
 
 use nodedb_types::{DatabaseId, Surrogate, TenantId};
 

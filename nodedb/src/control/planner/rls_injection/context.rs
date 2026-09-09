@@ -110,6 +110,23 @@ impl RlsCtx<'_> {
         )
     }
 
+    /// Admit a document write, injecting the row's storage key as `id`.
+    ///
+    /// A schemaless row with no declared `id` column carries its identity
+    /// only in that key, never in `image`. The read paths inject the same
+    /// string via `sparse_row_to_doc`, so a policy naming `id` judges the
+    /// write against the value a later read returns. `inject_str_field` is
+    /// a no-op when `image` already carries `id`.
+    pub(super) fn admit_document_write_image(
+        &self,
+        collection: &nodedb_types::QualifiedCollection,
+        row_key: &str,
+        image: &[u8],
+    ) -> crate::Result<()> {
+        let with_id = nodedb_query::msgpack_scan::inject_str_field(image, "id", row_key);
+        self.admit_write_image(collection, &with_id)
+    }
+
     /// Admit a write whose post-image is a JSON object (a graph edge's
     /// `PROPERTIES`). Non-object bytes, including an empty `PROPERTIES`,
     /// deny rather than admit by omission.

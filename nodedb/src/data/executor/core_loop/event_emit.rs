@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+use std::borrow::Cow;
 use std::sync::Arc;
+
+use nodedb_query::msgpack_scan;
 
 use super::CoreLoop;
 
@@ -43,6 +46,29 @@ impl CoreLoop {
         }
     }
 
+    /// Whether `collection` is a schemaless document collection.
+    ///
+    /// A schemaless body carries no storage key of its own, so its `id` field
+    /// is absent whenever the caller declared no `id` column. A strict row's
+    /// `id` is a real tuple column, already present after Binary Tuple
+    /// conversion, so it needs no identity injection.
+    fn is_schemaless_document_collection(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+    ) -> bool {
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
+        matches!(
+            self.doc_configs.get(&config_key).map(|c| &c.storage_mode),
+            Some(nodedb_physical::physical_plan::StorageMode::Schemaless)
+        )
+    }
+
     /// Emit a point write/overwrite/update event derived from the new bytes
     /// produced by the handler and the prior bytes returned from storage.
     ///
@@ -76,13 +102,34 @@ impl CoreLoop {
         } else {
             crate::event::WriteOp::Insert
         };
+
+        // A schemaless body with no declared `id` column carries its identity
+        // only in the storage key. Inject `row_id` verbatim — the string every
+        // read path injects via `sparse_row_to_doc` — so a WHEN filter, CDC,
+        // or change stream reads the same `id` a query returns.
+        // `inject_str_field` is a no-op when the body already carries `id`, so
+        // a declared primary key is never overwritten.
+        let doc_id = self
+            .is_schemaless_document_collection(database_id, tid, collection)
+            .then_some(row_id);
+        let new_final: Cow<[u8]> = match (new_converted.as_deref(), doc_id) {
+            (Some(c), _) => Cow::Borrowed(c),
+            (None, Some(id)) => Cow::Owned(msgpack_scan::inject_str_field(new_stored, "id", id)),
+            (None, None) => Cow::Borrowed(new_stored),
+        };
+        let old_final: Option<Cow<[u8]>> =
+            old_bytes.map(|b| match (old_converted.is_some(), doc_id) {
+                (false, Some(id)) => Cow::Owned(msgpack_scan::inject_str_field(b, "id", id)),
+                _ => Cow::Borrowed(b),
+            });
+
         self.emit_write_event(
             task,
             collection,
             op,
             row_id,
-            Some(new_converted.as_deref().unwrap_or(new_stored)),
-            old_bytes,
+            Some(new_final.as_ref()),
+            old_final.as_deref(),
         );
     }
 

@@ -4,12 +4,14 @@
 //! `(doc_id_hex, surrogate_u32, value_bytes)` triples plus a next-cursor.
 //! `doc_id` is the hex-encoded surrogate; `value_bytes` is always standard
 //! MessagePack — Binary Tuple and vector-primary sidecar sources are
-//! transcoded here so consumers never re-decide the source format.
+//! transcoded here so consumers never re-decide the source format. `value_bytes`
+//! also carries an `id` field via `sparse_row_to_doc`, so a Control-Plane
+//! filter naming `id` sees the same identity the read paths produce.
 //! Payload: `[next_cursor: bin, entries: [[doc_id, surrogate, value], ...]]`.
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
+use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::doc_id_to_surrogate;
 use crate::engine::sparse::btree::DOCUMENTS;
@@ -158,19 +160,16 @@ impl CoreLoop {
             last_doc_id.into_bytes()
         };
 
-        // Normalize every body to standard msgpack here — the one place that
-        // owns the source format — so no consumer repeats the decision.
+        // Normalize every body to standard msgpack and inject its `id` here —
+        // the one place that owns the source format — so no consumer repeats
+        // the decision or filters a row missing the identity its storage key
+        // already carries.
         let body_format =
             self.sparse_body_format(task.request.database_id, TenantId::new(tid), collection);
         let format_ref = body_format.as_format_ref();
         for entry in &mut entries {
-            let normalized = match sparse_body_to_msgpack(&entry.2, format_ref) {
-                std::borrow::Cow::Owned(v) => Some(v),
-                std::borrow::Cow::Borrowed(_) => None,
-            };
-            if let Some(v) = normalized {
-                entry.2 = v;
-            }
+            let (_, normalized) = sparse_row_to_doc(&entry.0, &entry.2, format_ref);
+            entry.2 = normalized;
         }
 
         // Encode response: [next_cursor: bin, entries: [[str, u32, bin], ...]]
