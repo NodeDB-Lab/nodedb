@@ -53,6 +53,10 @@ impl SqlPlan {
             Self::KvInsert {
                 volatile_defaults: true,
                 ..
+            }
+            | Self::VectorPrimaryInsert {
+                volatile_defaults: true,
+                ..
             } => DataDependent,
             Self::PointGet {
                 engine: EngineType::DocumentSchemaless | EngineType::DocumentStrict,

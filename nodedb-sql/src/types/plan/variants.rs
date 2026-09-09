@@ -726,6 +726,11 @@ pub enum SqlPlan {
         /// via `payload.add_index` on the first DirectUpsert.
         payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
         rows: Vec<VectorPrimaryRow>,
+        /// Whether any row carries a value materialized from a volatile
+        /// DEFAULT such as `nextval`. The value was evaluated while the plan
+        /// was built, so caching the lowered tasks would replay one
+        /// execution's value into every later one.
+        volatile_defaults: bool,
     },
 
     // ── Index DDL ───────────────────────────────────────────────────────

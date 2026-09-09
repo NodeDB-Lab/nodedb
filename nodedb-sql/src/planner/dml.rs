@@ -9,7 +9,7 @@ use super::dml_helpers::{
     KvInsertParams, bind_insert_select_columns, build_kv_insert_plan,
     build_vector_primary_insert_plan, check_declared_float_ranges_in_assignments,
     check_declared_int_ranges_in_assignments, coerce_and_check_rows, convert_value_rows,
-    resolve_insert_columns,
+    materialize_defaults_in_rows, resolve_insert_columns,
 };
 use crate::engine_rules::{self, InsertParams};
 use crate::error::{Result, SqlError};
@@ -196,12 +196,26 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
     let columns = resolve_insert_columns(columns, &info, rows_ast)?;
 
     // Vector-primary collection: bypass document encoding.
+    //
+    // The vector path never reaches `EngineRules::plan_insert`, which is where
+    // every other engine hands its declared DEFAULTs on for expansion. It
+    // materializes them here instead, through the same helper the key-value
+    // path uses, and before coercion so a default is range-checked exactly like
+    // a supplied literal.
     if info.primary == nodedb_types::PrimaryEngine::Vector
         && let Some(ref vpc) = info.vector_primary
     {
         let mut rows_parsed = convert_value_rows(&columns, rows_ast)?;
+        let volatile_defaults =
+            materialize_defaults_in_rows(&info.columns, &mut rows_parsed, catalog)?;
         coerce_and_check_rows(&info, &mut rows_parsed)?;
-        return build_vector_primary_insert_plan(&table_name, vpc, &columns, rows_parsed);
+        return build_vector_primary_insert_plan(
+            &table_name,
+            vpc,
+            &columns,
+            rows_parsed,
+            volatile_defaults,
+        );
     }
 
     // All other engines: delegate to engine rules.

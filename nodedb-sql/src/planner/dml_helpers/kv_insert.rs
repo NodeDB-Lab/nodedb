@@ -3,13 +3,13 @@
 //! Plan construction for the KV engine's `VALUES`-clause insert paths
 //! (plain `INSERT`, `UPSERT`, and `INSERT ... ON CONFLICT DO UPDATE`).
 
+use super::declared_defaults::materialize_declared_defaults;
 use super::params::KvInsertParams;
 use super::range_check::{
     check_declared_float_ranges, check_declared_float_ranges_in_assignments,
     check_declared_int_ranges, check_declared_int_ranges_in_assignments,
 };
 use super::value_convert::expr_to_sql_value;
-use crate::catalog::SqlCatalog;
 use crate::error::{Result, SqlError};
 use crate::planner::declared_type_coerce::{
     coerce_assignments_to_declared_types, coerce_row_to_declared_types,
@@ -137,52 +137,6 @@ pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<Sql
     }])
 }
 
-/// Fill in every declared column the statement omitted that carries a DEFAULT.
-///
-/// The key-value engine stores the bytes it is handed and has no typed write
-/// path, so a DEFAULT that is not materialized HERE is materialized nowhere:
-/// the catalog would keep the declaration and every read return nothing for it.
-/// Documents and columnar rows expand theirs through the same
-/// `evaluate_default_expr`, so one expression yields one value on every engine.
-///
-/// Two rules the ordering encodes:
-///
-/// - A column the statement SUPPLIED is never touched, and that includes an
-///   explicit `NULL`. `NULL` is a value the author chose; overwriting it with
-///   the default would make it impossible to store one.
-/// - Materialized values are appended BEFORE the caller's declared-type
-///   coercion and range checks, so a default is validated exactly like a
-///   supplied literal. Filling them in afterwards would make `DEFAULT 999999`
-///   on a `SMALLINT` column a way to store a value the same literal is
-///   rejected for.
-///
-/// A DEFAULT the evaluator cannot resolve raises `SqlError::UnevaluableDefault`
-/// rather than leaving the column out. `catalog` resolves `nextval` / `currval`.
-///
-/// Returns whether any materialized default came from a `Volatile`
-/// expression, so the caller can keep the plan out of the plan cache.
-fn materialize_declared_defaults(
-    declared_columns: &[ColumnInfo],
-    row: &mut Vec<(String, SqlValue)>,
-    catalog: &dyn SqlCatalog,
-) -> Result<bool> {
-    let mut volatile = false;
-    for column in declared_columns {
-        let Some(default_expr) = column.default.as_deref() else {
-            continue;
-        };
-        if row.iter().any(|(name, _)| name == &column.name) {
-            continue;
-        }
-        let evaluated =
-            crate::planner::defaults::evaluate_default_expr(default_expr, &column.name, catalog)?;
-        let value = crate::planner::defaults::default_value_to_sql(&column.name, evaluated)?;
-        volatile |= crate::types::plan::default_expr_is_volatile(default_expr);
-        row.push((column.name.clone(), value));
-    }
-    Ok(volatile)
-}
-
 #[cfg(test)]
 mod kv_on_conflict_range_tests {
     use sqlparser::ast;
@@ -190,6 +144,7 @@ mod kv_on_conflict_range_tests {
     use sqlparser::tokenizer::Span;
 
     use super::*;
+    use crate::catalog::SqlCatalog;
     use nodedb_types::columnar::{FloatWidth, IntWidth};
 
     /// A catalog with no collections and no sequence state. These cases

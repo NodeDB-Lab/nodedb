@@ -5,12 +5,14 @@
 //! - [`range_check`] — declared-width coercion + range validation
 //! - [`insert_columns`] — positional-insert column resolution
 //! - [`ast_extract`] — table-name / primary-key point-lookup extraction
+//! - [`declared_defaults`] — declared column DEFAULT materialization
 //! - [`vector_primary_insert`] — vector-primary collection insert plans
 //! - [`kv_insert`] — KV engine insert plans
 //! - [`insert_select_bind`] — `INSERT ... SELECT` target-column binding
 //! - [`params`] — parameter structs for the helpers above
 
 mod ast_extract;
+mod declared_defaults;
 mod insert_columns;
 mod insert_select_bind;
 mod kv_insert;
@@ -21,6 +23,7 @@ mod vector_primary_insert;
 
 pub use ast_extract::extract_point_keys;
 pub(super) use ast_extract::extract_table_name_from_table_with_joins;
+pub(super) use declared_defaults::materialize_defaults_in_rows;
 pub(super) use insert_columns::resolve_insert_columns;
 pub(super) use insert_select_bind::bind_insert_select_columns;
 pub(super) use kv_insert::build_kv_insert_plan;
