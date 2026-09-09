@@ -61,12 +61,20 @@ pub(super) fn convert_collection_type(
                 .declared_primary_key
                 .clone()
                 .unwrap_or_else(|| "id".to_string());
+            // `stored.fields` carries every declared column by name, the pk
+            // included, so its DEFAULT clause is recovered the same way the
+            // columnar arm recovers one for its synthetic-pk field.
+            let pk_default = stored
+                .fields
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&pk_name))
+                .and_then(|(_, type_str)| declared_default(type_str));
             let mut columns = vec![ColumnInfo {
                 name: pk_name.clone(),
                 data_type: SqlDataType::String,
                 nullable: false,
                 is_primary_key: true,
-                default: None,
+                default: pk_default,
                 raw_type: None,
                 int_width: None,
                 float_width: None,
@@ -81,7 +89,7 @@ pub(super) fn convert_collection_type(
                     data_type: parse_type_str(type_str),
                     nullable: true,
                     is_primary_key: false,
-                    default: None,
+                    default: declared_default(type_str),
                     raw_type: None,
                     int_width: IntWidth::from_declared_type(type_str),
                     float_width: FloatWidth::from_declared_type(type_str),
