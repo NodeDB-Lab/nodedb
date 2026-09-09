@@ -81,5 +81,16 @@ pub(super) fn map_typed_error(err: TypedClusterError, node_id: u64) -> Error {
         // Keep the shard's verdict typed: a restore refused by the Data Plane
         // must not read as a generic internal restore fault.
         TypedClusterError::DataPlane { code } => Error::DataPlane(code.into()),
+        // A constraint verdict keeps its collection and kind, so the client
+        // reads the SQLSTATE the refusing shard meant.
+        TypedClusterError::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        } => Error::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        },
     }
 }

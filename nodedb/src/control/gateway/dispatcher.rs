@@ -372,6 +372,17 @@ pub(super) fn map_typed_cluster_error(err: TypedClusterError, vshard_id: u64) ->
         // Remote Data-Plane verdict: keep the code so the client sees the
         // SQLSTATE local execution renders, not a generic internal error.
         TypedClusterError::DataPlane { code } => Error::DataPlane(code.into()),
+        // Remote constraint refusal: keep the kind so the client sees 23502
+        // vs 23505, exactly as a local refusal on this node would render.
+        TypedClusterError::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        } => Error::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        },
         TypedClusterError::Internal { message, .. } => Error::Internal { detail: message },
     }
 }

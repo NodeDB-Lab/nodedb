@@ -14,8 +14,8 @@
 //! ```json
 //! {
 //!   "code": "NDB-1000",
-//!   "message": "constraint violation on users: duplicate email",
-//!   "details": { "kind": "constraint_violation", "collection": "users" }
+//!   "message": "constraint violation on users (unique): duplicate email",
+//!   "details": { "kind": "constraint_violation", "collection": "users", "constraint": "unique" }
 //! }
 //! ```
 //!

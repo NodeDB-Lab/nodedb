@@ -24,8 +24,11 @@ use crate::bridge::envelope::ErrorCode;
 pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
     match code {
         ErrorCode::DeadlineExceeded => NodeDbError::deadline_exceeded(),
+        // The Data Plane's `RejectedConstraint` carries no collection name,
+        // only the constraint kind and detail — leave collection blank
+        // rather than misreport the kind string as the collection.
         ErrorCode::RejectedConstraint { constraint, detail } => {
-            NodeDbError::constraint_violation(constraint, detail)
+            NodeDbError::constraint_violation("", constraint, detail)
         }
         ErrorCode::RejectedPrevalidation { reason } => {
             NodeDbError::prevalidation_rejected("data plane", reason)
@@ -58,11 +61,14 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         // public surface expresses as a constraint violation.
         ErrorCode::RejectedDanglingEdge { missing_node } => NodeDbError::constraint_violation(
             "",
+            "foreign_key",
             format!("edge rejected: node '{missing_node}' does not exist"),
         ),
-        ErrorCode::DuplicateWrite => {
-            NodeDbError::constraint_violation("", "duplicate write detected via idempotency key")
-        }
+        ErrorCode::DuplicateWrite => NodeDbError::constraint_violation(
+            "",
+            "unique",
+            "duplicate write detected via idempotency key",
+        ),
         ErrorCode::AppendOnlyViolation { collection } => {
             NodeDbError::append_only_violation(collection, "UPDATE/DELETE not allowed")
         }

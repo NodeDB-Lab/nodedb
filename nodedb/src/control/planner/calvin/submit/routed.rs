@@ -150,6 +150,22 @@ pub async fn submit_calvin_routed(
             error: Some(TypedClusterError::DataPlane { code }),
             ..
         })) => Err(Error::DataPlane(code.into())),
+        // A constraint refusal on the sequencer leader keeps its kind, so a
+        // NOT NULL refusal on a routed write reaches the client as 23502
+        // instead of collapsing into a generic internal error.
+        Ok(RaftRpc::SubmitCalvinTxnResponse(SubmitCalvinTxnResponse {
+            error:
+                Some(TypedClusterError::RejectedConstraint {
+                    collection,
+                    constraint,
+                    detail,
+                }),
+            ..
+        })) => Err(Error::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        }),
         Ok(RaftRpc::SubmitCalvinTxnResponse(SubmitCalvinTxnResponse {
             error: Some(e), ..
         })) => Err(Error::Internal {

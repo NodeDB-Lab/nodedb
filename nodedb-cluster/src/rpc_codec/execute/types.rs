@@ -89,6 +89,16 @@ pub enum TypedClusterError {
     DataPlane {
         code: DataPlaneErrorCode,
     },
+    /// A Control-Plane constraint refusal (`crate::Error::RejectedConstraint`
+    /// on the executing node), carried verbatim so the coordinator renders
+    /// the same SQLSTATE (23502 vs 23505) local execution would. Without
+    /// this, `constraint` collapsed into `Internal`'s bare numeric code and
+    /// a NOT NULL refusal on a remote shard read back as unique_violation.
+    RejectedConstraint {
+        collection: String,
+        constraint: String,
+        detail: String,
+    },
 }
 
 /// One streamed chunk of an `ExecuteStreamRequest` result.

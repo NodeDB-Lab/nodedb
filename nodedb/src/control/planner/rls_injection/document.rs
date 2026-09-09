@@ -136,8 +136,13 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
             surrogates,
             ..
         } => {
-            for ((_, value), surrogate) in documents.iter().zip(surrogates.iter()) {
-                let row_key = surrogate_to_doc_id(*surrogate);
+            // Every row is gated. A row whose surrogate is not yet assigned
+            // falls back to its document id, which a declared key already
+            // carries in the body.
+            for (index, (document_id, value)) in documents.iter().enumerate() {
+                let row_key = surrogates
+                    .get(index)
+                    .map_or_else(|| document_id.clone(), |s| surrogate_to_doc_id(*s));
                 ctx.admit_document_write_image(collection, &row_key, value)?;
             }
             ctx.set_post_filters(collection, rls_filters)

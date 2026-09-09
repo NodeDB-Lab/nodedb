@@ -197,6 +197,17 @@ impl From<nodedb_cluster::rpc_codec::TypedClusterError> for Error {
             // A remote shard's Data-Plane verdict, verbatim: rebuilding the
             // code keeps the SQLSTATE `error_classify` renders locally.
             TypedClusterError::DataPlane { code } => Error::DataPlane(code.into()),
+            // A remote constraint refusal, verbatim: keeps 23502 vs 23505
+            // distinct instead of collapsing both into one numeric class.
+            TypedClusterError::RejectedConstraint {
+                collection,
+                constraint,
+                detail,
+            } => Error::RejectedConstraint {
+                collection,
+                constraint,
+                detail,
+            },
             TypedClusterError::Internal { code, message } => {
                 // Legacy or unknown codes retain their message without panicking.
                 match u16::try_from(code) {
@@ -242,6 +253,17 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             // Keep the verdict typed across a further hop instead of
             // degrading it to a numeric class on the second forward.
             Error::DataPlane(code) => TypedClusterError::DataPlane { code: code.into() },
+            // Keep the constraint kind typed across a further hop, same as
+            // a Data-Plane verdict, instead of flattening it to one code.
+            Error::RejectedConstraint {
+                collection,
+                constraint,
+                detail,
+            } => TypedClusterError::RejectedConstraint {
+                collection,
+                constraint,
+                detail,
+            },
             other => {
                 // Preserve classification across multi-hop forwarding.
                 let message = other.to_string();
@@ -294,22 +316,55 @@ mod tests {
         }
     }
 
-    /// Encoding a `RejectedConstraint` must derive its real code
-    /// (`CONSTRAINT_VIOLATION`), never the old hardcoded 0 catch-all.
+    /// Encoding a `RejectedConstraint` must keep its kind typed on the wire,
+    /// never flatten to `Internal`'s bare numeric code — a NOT NULL refusal
+    /// and a UNIQUE refusal both carry `CONSTRAINT_VIOLATION`, so a decoder
+    /// reading only the numeric code cannot tell them apart.
     #[test]
-    fn encode_rejected_constraint_derives_nonzero_code() {
+    fn encode_rejected_constraint_keeps_its_kind_typed() {
         let err = Error::RejectedConstraint {
             collection: "users".to_owned(),
-            constraint: "unique_email".to_owned(),
-            detail: "duplicate email".to_owned(),
+            constraint: "not_null".to_owned(),
+            detail: "column 'email' cannot be null".to_owned(),
         };
         let wire: TypedClusterError = err.into();
         match wire {
-            TypedClusterError::Internal { code, .. } => {
-                assert_ne!(code, 0);
-                assert_eq!(code, u32::from(ErrorCode::CONSTRAINT_VIOLATION.0));
+            TypedClusterError::RejectedConstraint {
+                collection,
+                constraint,
+                detail,
+            } => {
+                assert_eq!(collection, "users");
+                assert_eq!(constraint, "not_null");
+                assert_eq!(detail, "column 'email' cannot be null");
             }
-            other => panic!("expected TypedClusterError::Internal, got {other:?}"),
+            other => panic!("expected TypedClusterError::RejectedConstraint, got {other:?}"),
+        }
+    }
+
+    /// The wire round trip reconstructs `Error::RejectedConstraint` with its
+    /// kind intact, so the coordinator's SQLSTATE mapper sees the same
+    /// `constraint` field a local refusal would carry.
+    #[test]
+    fn rejected_constraint_round_trips_across_the_wire() {
+        let original = Error::RejectedConstraint {
+            collection: "orders".to_owned(),
+            constraint: "not_null".to_owned(),
+            detail: "column 'sku' cannot be null".to_owned(),
+        };
+        let wire: TypedClusterError = original.into();
+        let decoded: Error = wire.into();
+        match decoded {
+            Error::RejectedConstraint {
+                collection,
+                constraint,
+                detail,
+            } => {
+                assert_eq!(collection, "orders");
+                assert_eq!(constraint, "not_null");
+                assert_eq!(detail, "column 'sku' cannot be null");
+            }
+            other => panic!("expected Error::RejectedConstraint, got {other:?}"),
         }
     }
 

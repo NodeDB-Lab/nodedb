@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn error_display_includes_code() {
-        let e = NodeDbError::constraint_violation("users", "duplicate email");
+        let e = NodeDbError::constraint_violation("users", "unique", "duplicate email");
         let msg = e.to_string();
         assert!(msg.contains("NDB-1000"));
         assert!(msg.contains("constraint violation"));

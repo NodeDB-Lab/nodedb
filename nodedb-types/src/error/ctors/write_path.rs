@@ -9,12 +9,24 @@ use super::super::details::ErrorDetails;
 use super::super::types::NodeDbError;
 
 impl NodeDbError {
-    pub fn constraint_violation(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
+    /// `constraint` names the constraint kind (`"not_null"`, `"unique"`,
+    /// ...) so every hop — local or reconstructed from a remote node — can
+    /// pick the right SQLSTATE instead of guessing unique_violation for
+    /// everything.
+    pub fn constraint_violation(
+        collection: impl Into<String>,
+        constraint: impl Into<String>,
+        detail: impl fmt::Display,
+    ) -> Self {
         let collection = collection.into();
+        let constraint = constraint.into();
         Self {
             code: ErrorCode::CONSTRAINT_VIOLATION,
-            message: format!("constraint violation on {collection}: {detail}"),
-            details: ErrorDetails::ConstraintViolation { collection },
+            message: format!("constraint violation on {collection} ({constraint}): {detail}"),
+            details: ErrorDetails::ConstraintViolation {
+                collection,
+                constraint,
+            },
             cause: None,
         }
     }

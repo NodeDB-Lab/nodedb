@@ -18,8 +18,11 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
         let (tag, field_count) = read_header(reader)?;
         match tag {
             TAG_CONSTRAINT_VIOLATION => {
-                let (collection,) = read1_str(reader, field_count)?;
-                Ok(ErrorDetails::ConstraintViolation { collection })
+                let (collection, constraint) = read2_str(reader, field_count)?;
+                Ok(ErrorDetails::ConstraintViolation {
+                    collection,
+                    constraint,
+                })
             }
             TAG_WRITE_CONFLICT => {
                 let (collection, document_id) = read2_str(reader, field_count)?;
@@ -650,9 +653,6 @@ mod tests {
     #[test]
     fn single_string_field_roundtrip() {
         let variants = vec![
-            ErrorDetails::ConstraintViolation {
-                collection: "orders".into(),
-            },
             ErrorDetails::AppendOnlyViolation {
                 collection: "ledger".into(),
             },
@@ -705,6 +705,12 @@ mod tests {
             document_id: "u-99".into(),
         };
         assert_eq!(roundtrip(&v2), v2);
+
+        let v3 = ErrorDetails::ConstraintViolation {
+            collection: "orders".into(),
+            constraint: "not_null".into(),
+        };
+        assert_eq!(roundtrip(&v3), v3);
     }
 
     #[test]

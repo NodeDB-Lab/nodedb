@@ -50,7 +50,7 @@ error_code_table! {
     msg = message;
 
     // Write path.
-    CONSTRAINT_VIOLATION => ConstraintViolation { collection: String::new() },
+    CONSTRAINT_VIOLATION => ConstraintViolation { collection: String::new(), constraint: String::new() },
     WRITE_CONFLICT => WriteConflict { collection: String::new(), document_id: String::new() },
     DEADLINE_EXCEEDED => DeadlineExceeded,
     PREVALIDATION_REJECTED => PrevalidationRejected { constraint: String::new() },

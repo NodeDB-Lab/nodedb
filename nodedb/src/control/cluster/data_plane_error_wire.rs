@@ -30,6 +30,18 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         crate::Error::DeadlineExceeded { .. } => {
             TypedClusterError::DeadlineExceeded { elapsed_ms: 0 }
         }
+        // A Control-Plane constraint refusal crosses verbatim, same as a
+        // Data-Plane verdict, so the coordinator answers 23502 vs 23505
+        // instead of flattening both into one numeric class.
+        crate::Error::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        } => TypedClusterError::RejectedConstraint {
+            collection,
+            constraint,
+            detail,
+        },
         other => {
             let message = other.to_string();
             let code = u32::from(nodedb_types::error::NodeDbError::from(other).code().0);

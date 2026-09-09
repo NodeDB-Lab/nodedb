@@ -13,8 +13,10 @@ use crate::error::Error;
 pub(crate) fn classify(e: &Error) -> NodeDbError {
     match e {
         Error::RejectedConstraint {
-            collection, detail, ..
-        } => NodeDbError::constraint_violation(collection.clone(), detail),
+            collection,
+            constraint,
+            detail,
+        } => NodeDbError::constraint_violation(collection.clone(), constraint.clone(), detail),
         Error::RejectedAuthz { resource, .. } => {
             NodeDbError::authorization_denied(resource.clone())
         }

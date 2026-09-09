@@ -81,9 +81,10 @@ where
 impl ToMessagePack for ErrorDetails {
     fn write<W: Write>(&self, writer: &mut W) -> zerompk::Result<()> {
         match self {
-            ErrorDetails::ConstraintViolation { collection } => {
-                write1(writer, TAG_CONSTRAINT_VIOLATION, collection)
-            }
+            ErrorDetails::ConstraintViolation {
+                collection,
+                constraint,
+            } => write2(writer, TAG_CONSTRAINT_VIOLATION, collection, constraint),
             ErrorDetails::WriteConflict {
                 collection,
                 document_id,

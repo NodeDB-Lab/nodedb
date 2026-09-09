@@ -15,7 +15,14 @@ use serde::{Deserialize, Serialize};
 pub enum ErrorDetails {
     // Write path
     #[serde(rename = "constraint_violation")]
-    ConstraintViolation { collection: String },
+    ConstraintViolation {
+        collection: String,
+        /// The constraint kind (`"not_null"`, `"unique"`, ...). Drives
+        /// SQLSTATE selection (23502 vs 23505) on every hop, local or remote.
+        /// Named `constraint`, not `kind`, because the enum's own
+        /// `#[serde(tag = "kind")]` already owns that JSON key.
+        constraint: String,
+    },
     #[serde(rename = "write_conflict")]
     WriteConflict {
         collection: String,
