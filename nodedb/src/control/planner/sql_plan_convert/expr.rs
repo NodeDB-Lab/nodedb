@@ -364,7 +364,18 @@ pub(super) fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> 
                         // offset 0 = unspecified → inherit CTE's offset.
                         offset: if *offset > 0 { *offset } else { *inner_o },
                         distinct: *distinct || *inner_d,
-                        window_functions: inner_w.clone(),
+                        // Window functions: the derived body's own specs run
+                        // first (they produce columns the outer may reference),
+                        // then the outer's. Dropping the outer's here left
+                        // `SUM(n) OVER ...` over a derived table with a Scan
+                        // body silently NULL (issue #295 Gap 3).
+                        window_functions: {
+                            let mut merged = inner_w.clone();
+                            if !window_functions.is_empty() {
+                                merged.extend(window_functions.iter().cloned());
+                            }
+                            merged
+                        },
                         temporal: *inner_t,
                     }
                 } else if let SqlPlan::VectorSearch { .. } = cte_plan {

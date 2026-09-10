@@ -416,3 +416,74 @@ async fn window_offset_over_expression_argument_returns_previous_evaluated_value
         );
     }
 }
+
+// ── window functions over a DERIVED table (issue #295 Gap 3) ──
+//
+// A derived-table body that is itself a plain Scan (e.g. `SELECT * FROM s`)
+// inlines through the CTE path, where the outer window spec was previously
+// dropped in favour of the inner scan's (empty) window list — every window
+// column answered NULL. These lock in the carriage AND the values.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn derived_table_window_sum_returns_values_not_null() {
+    let server = TestServer::start().await;
+    setup_numbered_rows(&server).await;
+
+    let rows = server
+        .query_rows(
+            "SELECT id, SUM(n) OVER (ORDER BY n) AS s \
+             FROM (SELECT * FROM s) d ORDER BY n",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 5, "expected 5 rows: {rows:?}");
+    for (i, row) in rows.iter().enumerate() {
+        let s = row.get(1).cloned().unwrap_or_default();
+        assert!(
+            !s.is_empty() && s.to_lowercase() != "null",
+            "SUM window dropped at row {i}: {row:?}"
+        );
+    }
+
+    let got = parse_f64s(&rows, 1);
+    let want = [1.0, 3.0, 6.0, 10.0, 15.0];
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-9,
+            "derived SUM[{i}] = {g}, want {w}; rows = {rows:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn derived_table_window_row_number_orders_correctly() {
+    let server = TestServer::start().await;
+    setup_numbered_rows(&server).await;
+
+    let rows = server
+        .query_rows(
+            "SELECT id, row_number() OVER (ORDER BY n) AS rn \
+             FROM (SELECT * FROM s) d ORDER BY n",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 5, "expected 5 rows: {rows:?}");
+    for (i, row) in rows.iter().enumerate() {
+        let rn = row.get(1).cloned().unwrap_or_default();
+        assert!(
+            !rn.is_empty() && rn.to_lowercase() != "null",
+            "row_number dropped at row {i}: {row:?}"
+        );
+    }
+
+    let got = parse_f64s(&rows, 1);
+    let want = [1.0, 2.0, 3.0, 4.0, 5.0];
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-9,
+            "derived row_number[{i}] = {g}, want {w}; rows = {rows:?}"
+        );
+    }
+}
