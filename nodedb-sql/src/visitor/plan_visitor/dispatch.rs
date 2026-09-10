@@ -95,6 +95,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         SqlPlan::Insert {
             collection,
             engine,
+            route,
             rows,
             column_defaults,
             if_absent,
@@ -103,6 +104,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         } => visitor.insert(InsertVisitArgs {
             collection,
             engine: *engine,
+            route: *route,
             rows,
             column_defaults,
             if_absent: *if_absent,
@@ -120,6 +122,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         SqlPlan::Upsert {
             collection,
             engine,
+            route,
             rows,
             column_defaults,
             on_conflict_updates,
@@ -128,6 +131,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         } => visitor.upsert(UpsertVisitArgs {
             collection,
             engine: *engine,
+            route: *route,
             rows,
             column_defaults,
             on_conflict_updates,

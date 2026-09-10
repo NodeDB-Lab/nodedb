@@ -15,7 +15,7 @@ use crate::types::query::{
 };
 
 use super::merge_types::MergePlanClause;
-use super::row_types::{KvInsertIntent, VectorPrimaryRow};
+use super::row_types::{KvInsertIntent, VectorPrimaryRow, WriteRoute};
 use super::vector_opts::{ArrayPrefilter, VectorAnnOptions};
 
 /// The top-level plan produced by the SQL planner.
@@ -104,6 +104,9 @@ pub enum SqlPlan {
     Insert {
         collection: String,
         engine: EngineType,
+        /// The lowering these rows take, chosen by the engine's `EngineRules`.
+        /// The conversion layer reads it instead of re-deciding from `engine`.
+        route: WriteRoute,
         rows: Vec<Vec<(String, SqlValue)>>,
         /// Column defaults from schema: `(column_name, default_expr)`.
         /// Used to auto-generate values for missing columns (e.g. `id` with `UUID_V7`).
@@ -152,6 +155,8 @@ pub enum SqlPlan {
     Upsert {
         collection: String,
         engine: EngineType,
+        /// The lowering these rows take. Mirrors `Insert::route`.
+        route: WriteRoute,
         rows: Vec<Vec<(String, SqlValue)>>,
         column_defaults: Vec<(String, String)>,
         /// `ON CONFLICT (...) DO UPDATE SET field = expr` assignments.

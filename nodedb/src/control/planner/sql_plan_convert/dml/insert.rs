@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use nodedb_sql::types::{EngineType, SqlValue};
+use nodedb_sql::types::{SqlValue, WriteRoute};
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 
@@ -13,7 +13,6 @@ use super::super::convert::ConvertContext;
 use super::super::value::{
     expand_row_defaults, row_to_msgpack, rows_to_msgpack_array, sql_value_to_string,
 };
-use super::route::{WriteRoute, insert_route};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Build a `ColumnarSchema` from raw catalog column-type strings.
@@ -219,7 +218,8 @@ pub(super) fn columnar_row_surrogates(
 /// Bundled arguments for [`convert_insert`].
 pub(in super::super) struct ConvertInsertArgs<'a> {
     pub collection: &'a str,
-    pub engine: &'a EngineType,
+    /// The lowering these rows take, decided by `nodedb-sql`.
+    pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
     pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
@@ -234,7 +234,7 @@ pub(in super::super) fn convert_insert(
 ) -> crate::Result<Vec<PhysicalTask>> {
     let ConvertInsertArgs {
         collection,
-        engine,
+        route,
         rows,
         column_defaults,
         column_schema,
@@ -249,9 +249,6 @@ pub(in super::super) fn convert_insert(
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
     let mut tasks = Vec::new();
     let mut columnar_rows: Vec<&Vec<(String, SqlValue)>> = Vec::new();
-    // Resolved once per statement, before any DEFAULT is materialized: an
-    // engine with no INSERT lowering here must not burn a sequence value.
-    let route = insert_route(engine, collection)?;
 
     // Both INSERT routing gates, read from the catalog once for the whole
     // statement (never re-hit per row).
@@ -476,7 +473,7 @@ mod tests {
         let rows = vec![crdt_row("k1")];
         let tasks = convert_insert(ConvertInsertArgs {
             collection: "crdt_coll",
-            engine: &EngineType::DocumentSchemaless,
+            route: WriteRoute::Document,
             rows: &rows,
             column_defaults: &[],
             column_schema: &[],
@@ -508,7 +505,7 @@ mod tests {
         let rows = vec![crdt_row("k1")];
         let tasks = convert_insert(ConvertInsertArgs {
             collection: "plain",
-            engine: &EngineType::DocumentSchemaless,
+            route: WriteRoute::Document,
             rows: &rows,
             column_defaults: &[],
             column_schema: &[],

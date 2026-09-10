@@ -5,7 +5,6 @@ mod crdt_gate;
 mod insert;
 mod kv_and_vector;
 mod merge;
-mod route;
 mod update_delete;
 mod upsert;
 

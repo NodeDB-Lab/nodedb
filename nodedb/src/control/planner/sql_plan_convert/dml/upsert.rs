@@ -6,7 +6,7 @@
 //! identity helper there (`resolve_doc_identity`) so a row's surrogate is
 //! derived identically whichever statement wrote it.
 
-use nodedb_sql::types::{EngineType, SqlExpr, SqlValue};
+use nodedb_sql::types::{SqlExpr, SqlValue, WriteRoute};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{TenantId, VShardId};
@@ -18,13 +18,13 @@ use super::super::value::{
     assignments_to_update_values, expand_row_defaults, row_to_msgpack, rows_to_msgpack_array,
 };
 use super::insert::{build_schema_bytes, columnar_row_surrogates, resolve_doc_identity};
-use super::route::{WriteRoute, upsert_route};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Bundled arguments for [`convert_upsert`].
 pub(in super::super) struct ConvertUpsertArgs<'a> {
     pub collection: &'a str,
-    pub engine: &'a EngineType,
+    /// The lowering these rows take, decided by `nodedb-sql`.
+    pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
     pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
@@ -39,7 +39,7 @@ pub(in super::super) fn convert_upsert(
 ) -> crate::Result<Vec<PhysicalTask>> {
     let ConvertUpsertArgs {
         collection,
-        engine,
+        route,
         rows,
         column_defaults,
         column_schema,
@@ -53,9 +53,6 @@ pub(in super::super) fn convert_upsert(
     let collection = coll_qualified.as_str();
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
     let mut tasks = Vec::new();
-    // Resolved once per statement, before any DEFAULT is materialized: an
-    // engine with no UPSERT lowering must not burn a sequence value.
-    let route = upsert_route(engine, collection)?;
 
     // Detect CRDT document collections once. An explicit `ON CONFLICT DO UPDATE
     // SET ...` cannot be honored: CRDT conflict resolution IS the LWW
