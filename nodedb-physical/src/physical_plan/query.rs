@@ -85,6 +85,11 @@ pub enum QueryOp {
         /// would silently drop them.
         #[serde(default)]
         computed_columns: Vec<u8>,
+        /// Serialized `Vec<WindowFuncSpec>` evaluated per partition after
+        /// computed columns (window over derived-table rows — issue #295
+        /// Gap 3). Empty = no window functions.
+        #[serde(default)]
+        window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,
@@ -129,6 +134,10 @@ pub enum QueryOp {
         /// `ProviderScan::computed_columns`).
         #[serde(default)]
         computed_columns: Vec<u8>,
+        /// Serialized `Vec<WindowFuncSpec>` (see
+        /// `ProviderScan::window_functions`).
+        #[serde(default)]
+        window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,

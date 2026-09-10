@@ -167,6 +167,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
             filters: filter_bytes.clone(),
             projection: Vec::new(),
             computed_columns: Vec::new(),
+            window_functions: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,
@@ -211,12 +212,15 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
         let derived_group_specs = group_by_to_specs(group_by);
         let derived_agg_specs: Vec<AggregateSpec> =
             aggregates.iter().map(agg_expr_to_spec).collect();
-        let mut body_tasks =
-            super::super::convert::convert_one(input, tenant_id, ctx)?;
+        let mut body_tasks = super::super::convert::convert_one(input, tenant_id, ctx)?;
         if body_tasks.len() == 1 {
             let body_plan = body_tasks.pop().expect("len == 1").plan;
             let body_provider = if let PhysicalPlan::Query(QueryOp::ProviderScan {
-                rows, filters, ..
+                rows,
+                filters,
+                computed_columns,
+                window_functions,
+                ..
             }) = &body_plan
             {
                 PhysicalPlan::Query(QueryOp::ProviderScan {
@@ -224,7 +228,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
                     rows: rows.clone(),
                     filters: filters.clone(),
                     projection: Vec::new(),
-                    computed_columns: Vec::new(),
+                    computed_columns: computed_columns.clone(),
+                    window_functions: window_functions.clone(),
                     sort_keys: Vec::new(),
                     limit: None,
                     offset: 0,

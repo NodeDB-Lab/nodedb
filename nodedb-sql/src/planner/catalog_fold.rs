@@ -112,6 +112,7 @@ fn walk_plan(
             input,
             mut filters,
             mut projection,
+            mut window_functions,
             mut sort_keys,
             offset,
             distinct,
@@ -122,10 +123,15 @@ fn walk_plan(
             }
             fold_projection(&mut projection, catalog, database_id, tenant_id);
             fold_sort_keys(&mut sort_keys, catalog, database_id, tenant_id);
+            // Window specs carry their own exprs (args, PARTITION BY,
+            // ORDER BY) — a wrapper that skips them leaves catalog casts
+            // inside window exprs unfolded, which then match no row.
+            fold_windows(&mut window_functions, catalog, database_id, tenant_id);
             SqlPlan::Subquery {
                 input: Box::new(walk_plan(*input, catalog, database_id, tenant_id)),
                 filters,
                 projection,
+                window_functions,
                 sort_keys,
                 offset,
                 distinct,

@@ -51,3 +51,14 @@ async fn accessor_over_derived_is_loud() {
         .expect_error("SELECT nextval('der_seq') FROM (SELECT 1 AS x) s", "0A000")
         .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn window_partition_division_over_derived_raises() {
+    let server = TestServer::start().await;
+    server
+        .expect_error(
+            "SELECT sum(x) OVER (PARTITION BY x/0) FROM (SELECT 1 AS x) s",
+            "22012",
+        )
+        .await;
+}

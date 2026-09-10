@@ -59,6 +59,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 filters: filter_bytes,
                 projection: proj_names,
                 computed_columns: Vec::new(),
+                window_functions: Vec::new(),
                 sort_keys: sort,
                 limit: *limit,
                 offset: *offset,

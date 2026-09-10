@@ -22,6 +22,7 @@ pub(in crate::data::executor) struct ProviderScanParams<'a> {
     pub filters_bytes: &'a [u8],
     pub projection: &'a [String],
     pub computed_columns: &'a [u8],
+    pub window_functions: &'a [u8],
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub limit: Option<usize>,
     pub offset: usize,
@@ -43,6 +44,7 @@ impl CoreLoop {
             filters_bytes,
             projection,
             computed_columns,
+            window_functions,
             sort_keys,
             limit,
             offset,
@@ -155,6 +157,62 @@ impl CoreLoop {
                     nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(map))
                 {
                     *row = encoded;
+                }
+            }
+        }
+
+        // ── 5b. Window functions. ───────────────────────────────────────────
+        // Window-over-derived-table (issue #295 Gap 3): evaluate each spec
+        // per partition AFTER computed columns (window args may reference
+        // computed aliases) and BEFORE distinct/project (the window alias
+        // must exist in the row map). Partition/order/argument errors —
+        // including division-by-zero — fail the query instead of
+        // silently NULLing. Evaluation is in place, so row order is kept.
+        if !window_functions.is_empty() {
+            let specs: Vec<crate::bridge::window_func::WindowFuncSpec> =
+                match zerompk::from_msgpack(window_functions) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("ProviderScan: malformed window bytes: {e}"),
+                            },
+                        );
+                    }
+                };
+            if !specs.is_empty() && !rows.is_empty() {
+                let mut decoded: Vec<(String, serde_json::Value)> = Vec::with_capacity(rows.len());
+                for (i, row) in rows.iter().enumerate() {
+                    match nodedb_types::json_from_msgpack(row) {
+                        Ok(v) => decoded.push((i.to_string(), v)),
+                        Err(e) => {
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!("ProviderScan: window row decode: {e}"),
+                                },
+                            );
+                        }
+                    }
+                }
+                if let Err(e) =
+                    crate::bridge::window_func::evaluate_window_functions(&mut decoded, &specs)
+                {
+                    return self.response_error(task, ErrorCode::from(crate::Error::from(e)));
+                }
+                for (slot, (_, v)) in rows.iter_mut().zip(decoded) {
+                    match nodedb_types::json_to_msgpack(&v) {
+                        Ok(encoded) => *slot = encoded,
+                        Err(e) => {
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!("ProviderScan: window row encode: {e}"),
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }

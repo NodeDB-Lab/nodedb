@@ -37,6 +37,7 @@ pub struct SubqueryVisitArgs<'a> {
     pub input: &'a SqlPlan,
     pub filters: &'a [Filter],
     pub projection: &'a [Projection],
+    pub window_functions: &'a [crate::types::WindowSpec],
     pub sort_keys: &'a [SortKey],
     pub offset: usize,
     pub distinct: bool,

@@ -37,6 +37,7 @@ pub(in crate::planner::select) fn post_process(
         input: Box::new(input),
         filters: Vec::new(),
         projection,
+        window_functions: Vec::new(),
         sort_keys,
         offset,
         distinct: false,

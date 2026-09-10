@@ -259,6 +259,7 @@ pub fn convert(
                     filters: Vec::new(),
                     projection: Vec::new(),
                     computed_columns: Vec::new(),
+                    window_functions: Vec::new(),
                     sort_keys: Vec::new(),
                     limit: None,
                     offset: 0,

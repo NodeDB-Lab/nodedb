@@ -69,6 +69,7 @@ impl CoreLoop {
             ),
 
             QueryOp::ProviderScan {
+                provider: _,
                 rows,
                 filters,
                 projection,
@@ -77,7 +78,7 @@ impl CoreLoop {
                 offset,
                 distinct,
                 computed_columns,
-                ..
+                window_functions,
             } => self.execute_provider_scan(
                 task,
                 crate::data::executor::handlers::provider_scan::ProviderScanParams {
@@ -85,6 +86,7 @@ impl CoreLoop {
                     filters_bytes: filters,
                     projection,
                     computed_columns,
+                    window_functions,
                     sort_keys,
                     limit: *limit,
                     offset: *offset,
