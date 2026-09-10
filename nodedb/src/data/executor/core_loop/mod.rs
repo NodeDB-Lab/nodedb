@@ -30,6 +30,7 @@ pub use doc_config_seed::DocConfigSeedEntry;
 pub(in crate::data::executor) use segment_keks::SegmentKeks;
 pub use state::CoreLoop;
 pub use test_governor::test_governor;
+pub(in crate::data::executor) use ts_declared_schema::TsGroupKeyKind;
 /// Shared test fixtures (`make_core_with_dir`, `make_default_task`), kept
 /// alongside the write-version-index tests that exercise the same `CoreLoop`
 /// apply chokepoints. Re-exported here so external test modules keep using

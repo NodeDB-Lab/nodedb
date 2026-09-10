@@ -117,6 +117,58 @@ impl CoreLoop {
         })
     }
 
+    /// How each named GROUP BY column of a timeseries collection renders.
+    ///
+    /// A grouped column must carry the type it carries ungrouped, so this
+    /// resolves the same declared shape row emission reads. A declared
+    /// collection answers from its DDL; a measurement ingested over the raw
+    /// ILP protocol has no DDL, so its resident memtable schema answers.
+    /// A column present in neither renders as text.
+    pub(in crate::data::executor) fn ts_group_key_kinds(
+        &self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+        group_by: &[String],
+    ) -> Vec<TsGroupKeyKind> {
+        if let Some(declared) = self.declared_timeseries(database_id, tid, collection) {
+            let time_key_index = declared.time_key_index();
+            return group_by
+                .iter()
+                .map(|name| {
+                    let Some(index) = declared.columns.iter().position(|(c, _)| c == name) else {
+                        return TsGroupKeyKind::Text;
+                    };
+                    let declared_type = declared.columns[index].1.as_str();
+                    if declared_type_is_instant(declared_type) {
+                        return TsGroupKeyKind::Instant;
+                    }
+                    kind_of_storage(memtable_column_type(
+                        declared_type,
+                        Some(index) == time_key_index,
+                    ))
+                })
+                .collect();
+        }
+
+        let key = (database_id, tid, collection.to_string());
+        let Some(memtable) = self.columnar_memtables.get(&key) else {
+            return vec![TsGroupKeyKind::Text; group_by.len()];
+        };
+        let schema = memtable.schema();
+        group_by
+            .iter()
+            .map(|name| {
+                schema
+                    .columns
+                    .iter()
+                    .find(|(c, _)| c == name)
+                    .map(|(_, ty)| kind_of_storage(*ty))
+                    .unwrap_or(TsGroupKeyKind::Text)
+            })
+            .collect()
+    }
+
     /// Declared columns of a timeseries collection that carry an instant.
     ///
     /// A column declared `TIMESTAMP` or `TIMESTAMPTZ` is one. The memtable
@@ -146,6 +198,37 @@ impl CoreLoop {
             .filter(|(_, type_str)| declared_type_is_instant(type_str))
             .map(|(name, _)| name.clone())
             .collect()
+    }
+}
+
+/// How one grouped timeseries column renders in an aggregate result row.
+///
+/// The grouped scan reduces every key to a string, so emission has to put the
+/// column's own type back. The variants name the four shapes a stored
+/// timeseries column can take on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::data::executor) enum TsGroupKeyKind {
+    /// A declared `TIMESTAMP` / `TIMESTAMPTZ` column: epoch microseconds.
+    Instant,
+    /// An integer column, including a `BIGINT TIME_KEY`, in its stored unit.
+    Integer,
+    /// A floating-point column.
+    Float,
+    /// A dictionary symbol, or a column with no resolvable storage type.
+    Text,
+}
+
+/// The wire shape a memtable storage type renders as.
+///
+/// `Timestamp` maps to `Integer` here: the instant case is decided from the
+/// declared DDL type before this runs, so what reaches it is a `BIGINT`
+/// time key or a system-time column, both of which render as the number
+/// storage holds.
+fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
+    match storage {
+        ColumnType::Int64 | ColumnType::Timestamp => TsGroupKeyKind::Integer,
+        ColumnType::Float64 => TsGroupKeyKind::Float,
+        ColumnType::Symbol => TsGroupKeyKind::Text,
     }
 }
 

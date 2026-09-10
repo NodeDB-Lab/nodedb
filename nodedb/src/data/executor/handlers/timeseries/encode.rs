@@ -4,6 +4,47 @@
 
 use nodedb_query::agg_key::canonical_agg_key;
 
+use crate::data::executor::core_loop::TsGroupKeyKind;
+
+/// Render one GROUP BY key part with the type its column carries ungrouped.
+///
+/// The grouped scan reduces every key to a string, so the column's own type
+/// is put back here. An empty part is SQL NULL. A declared instant is stored
+/// in milliseconds and read in microseconds, exactly as row emission reads
+/// it, so the two routes to one stored instant render it identically.
+///
+/// A part that does not parse as its column's type falls back to the text it
+/// holds: the key is data the scan produced, and dropping the group would
+/// lose a row.
+fn group_key_value(part: Option<&&str>, kind: TsGroupKeyKind) -> crate::Result<rmpv::Value> {
+    let Some(text) = part.filter(|s| !s.is_empty()) else {
+        return Ok(rmpv::Value::Nil);
+    };
+    let value = match kind {
+        TsGroupKeyKind::Instant => match text.parse::<i64>() {
+            Ok(millis) => {
+                let micros = nodedb_types::NdbDateTime::from_millis(millis)
+                    .map_err(|e| crate::Error::Internal {
+                        detail: format!("grouped timeseries key at {millis} ms: {e}"),
+                    })?
+                    .micros;
+                rmpv::Value::Integer(micros.into())
+            }
+            Err(_) => rmpv::Value::String((*text).into()),
+        },
+        TsGroupKeyKind::Integer => match text.parse::<i64>() {
+            Ok(n) => rmpv::Value::Integer(n.into()),
+            Err(_) => rmpv::Value::String((*text).into()),
+        },
+        TsGroupKeyKind::Float => match text.parse::<f64>() {
+            Ok(f) => rmpv::Value::F64(f),
+            Err(_) => rmpv::Value::String((*text).into()),
+        },
+        TsGroupKeyKind::Text => rmpv::Value::String((*text).into()),
+    };
+    Ok(value)
+}
+
 /// Serialize GroupedAggResult directly to MessagePack bytes.
 ///
 /// Avoids building `Vec<serde_json::Value>` (2M allocations for 2M groups).
@@ -20,6 +61,7 @@ pub(in crate::data::executor) fn encode_grouped_results(
     limit: usize,
     bucket_interval_ms: i64,
     sort_keys: &[nodedb_physical::physical_plan::SortKeySpec],
+    group_key_kinds: &[TsGroupKeyKind],
 ) -> crate::Result<Vec<u8>> {
     let has_bucket = bucket_interval_ms > 0;
     // An ordered query has to see every group before cutting to `limit`:
@@ -62,20 +104,20 @@ pub(in crate::data::executor) fn encode_grouped_results(
             ));
 
             for (i, field) in group_by.iter().enumerate() {
-                let val = parts
-                    .get(i + 1)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| rmpv::Value::String((*s).into()))
-                    .unwrap_or(rmpv::Value::Nil);
+                let kind = group_key_kinds
+                    .get(i)
+                    .copied()
+                    .unwrap_or(TsGroupKeyKind::Text);
+                let val = group_key_value(parts.get(i + 1), kind)?;
                 fields.push((rmpv::Value::String(field.as_str().into()), val));
             }
         } else {
             for (i, field) in group_by.iter().enumerate() {
-                let val = parts
+                let kind = group_key_kinds
                     .get(i)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| rmpv::Value::String((*s).into()))
-                    .unwrap_or(rmpv::Value::Nil);
+                    .copied()
+                    .unwrap_or(TsGroupKeyKind::Text);
+                let val = group_key_value(parts.get(i), kind)?;
                 fields.push((rmpv::Value::String(field.as_str().into()), val));
             }
         }

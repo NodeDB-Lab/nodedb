@@ -184,6 +184,10 @@ impl CoreLoop {
         };
 
         // Phase 4: Encode response (MessagePack, no serde_json intermediate).
+        // A grouped column carries the type it carries ungrouped, so the
+        // encoder is told each key column's declared shape.
+        let group_key_kinds =
+            self.ts_group_key_kinds(task.request.database_id, tid, collection, group_by);
         let payload = match super::encode::encode_grouped_results(
             &merged,
             group_by,
@@ -191,6 +195,7 @@ impl CoreLoop {
             limit,
             bucket_interval_ms,
             sort_keys,
+            &group_key_kinds,
         ) {
             Ok(p) => p,
             Err(e) => return self.response_error(task, e),
