@@ -5,6 +5,7 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::change_stream::ChangeOperation;
+use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::{
     ArrayOp, ClusterArrayOp, ColumnarOp, CrdtOp, DocumentOp, DocumentResolvedMutation, KvOp,
@@ -283,7 +284,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            surrogate.as_u32().to_string(),
+            surrogate_to_doc_id(*surrogate),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Vector(_) => Vec::new(),
@@ -633,11 +634,13 @@ mod tests {
             rls_filters: Vec::new(),
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
+        // The row id is the document storage key, so a consumer can address
+        // the row the event describes.
         assert_eq!(
             meta,
             vec![(
                 "embeddings".to_string(),
-                "42".to_string(),
+                "0000002a".to_string(),
                 ChangeOperation::Insert
             )]
         );

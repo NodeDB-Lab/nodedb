@@ -3,7 +3,7 @@
 use crate::harness::TestServer;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spatial_insert_duplicate_pk_keeps_latest() {
+async fn spatial_insert_duplicate_pk_refuses_with_23505() {
     let server = TestServer::start().await;
 
     server
@@ -24,30 +24,39 @@ async fn spatial_insert_duplicate_pk_keeps_latest() {
         .await
         .unwrap();
 
-    server
-        .exec("INSERT INTO places (id, geom, label) VALUES ('p1', ST_Point(1.0, 1.0), 'moved')")
+    // A declared PRIMARY KEY means uniqueness on every column, `id` included.
+    match server
+        .client
+        .simple_query(
+            "INSERT INTO places (id, geom, label) VALUES ('p1', ST_Point(1.0, 1.0), 'moved')",
+        )
         .await
-        .unwrap();
+    {
+        Ok(_) => panic!("expected unique_violation on the declared primary key, got success"),
+        Err(e) => {
+            let db_err = e.as_db_error().expect("expected DbError");
+            assert_eq!(
+                db_err.code().code(),
+                "23505",
+                "expected SQLSTATE 23505, got {}: {}",
+                db_err.code().code(),
+                db_err.message()
+            );
+        }
+    }
 
     let rows = server
         .query_rows("SELECT id, label FROM places WHERE id = 'p1'")
         .await
         .unwrap();
-
     assert_eq!(
         rows.len(),
         1,
-        "spatial duplicate PK must not produce two rows, got: {rows:?}"
+        "the refused insert must leave exactly one row, got: {rows:?}"
     );
-    // row[0]=id, row[1]=label
     assert_eq!(
-        rows[0][1], "moved",
-        "expected latest (moved), got: {:?}",
-        rows[0]
-    );
-    assert_ne!(
         rows[0][1], "origin",
-        "prior row must be tombstoned, got: {:?}",
+        "the original row must be unchanged, got: {:?}",
         rows[0]
     );
 }

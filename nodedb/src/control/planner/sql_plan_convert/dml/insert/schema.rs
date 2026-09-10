@@ -8,14 +8,14 @@ use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 /// DDL catalog (`stored.fields`). Unknown type strings are treated as
 /// `ColumnType::String` (matching the memtable's existing fallback).
 ///
-/// `declared_pk` names the collection's DDL-declared `PRIMARY KEY` column,
-/// when one was declared (see [`declared_primary_key_name`]). A column
-/// matching that name is the schema primary key. When `declared_pk` is
-/// `None`, the legacy `id` / `document_id` name convention applies instead.
+/// `identity_column` names the column that carries the row's identity: the
+/// DDL-declared `PRIMARY KEY` when one exists, else the engine's resolved
+/// primary key. The column of that name is the schema primary key. When no
+/// column carries that name, a required `String` column is synthesized under
+/// it.
 ///
-/// Returns `None` when `column_schema` is empty (no catalog schema available
-/// — test fixtures and legacy paths) or the resulting schema fails
-/// validation.
+/// Returns `None` when `column_schema` is empty, meaning no catalog schema is
+/// available, or when the resulting schema fails validation.
 ///
 /// This is the single source of truth for turning a catalog's raw
 /// `(name, type_str)` field list into a typed `ColumnarSchema` — shared by
@@ -23,9 +23,13 @@ use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 /// `bootstrap::data_plane::load_columnar_schema_seed`, which pre-registers
 /// each columnar-family collection's real schema before WAL replay so a
 /// fresh `MutationEngine` never falls back to type-lossy inference.
+/// The identity column a columnar-family collection carries when its DDL
+/// declares no `PRIMARY KEY`. The planner resolves the same name.
+pub(crate) const DEFAULT_IDENTITY_COLUMN: &str = "id";
+
 pub(crate) fn build_columnar_schema(
     column_schema: &[(String, String)],
-    declared_pk: Option<&str>,
+    identity_column: &str,
 ) -> Option<ColumnarSchema> {
     if column_schema.is_empty() {
         return None;
@@ -43,22 +47,18 @@ pub(crate) fn build_columnar_schema(
         let col_type = bare_type
             .parse::<ColumnType>()
             .unwrap_or(ColumnType::String);
-        let is_id = match declared_pk {
-            Some(pk) => name == pk,
-            None => name == "id" || name == "document_id",
-        };
-        if is_id {
+        if name == identity_column {
             has_id = true;
             cols.push(ColumnDef::required(name.clone(), col_type).with_primary_key());
         } else {
             cols.push(ColumnDef::nullable(name.clone(), col_type));
         }
     }
-    // If no PK column found in stored.fields, inject a synthetic one.
+    // No column carries the identity: synthesize it.
     if !has_id {
         cols.insert(
             0,
-            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::required(identity_column, ColumnType::String).with_primary_key(),
         );
     }
     ColumnarSchema::new(cols).ok()
@@ -67,15 +67,15 @@ pub(crate) fn build_columnar_schema(
 /// Build a `ColumnarSchema` from raw catalog column-type strings, then
 /// serialize it as MessagePack for the `ColumnarOp::Insert::schema_bytes` field.
 ///
-/// `declared_pk` is forwarded to [`build_columnar_schema`] unchanged.
+/// `identity_column` is forwarded to [`build_columnar_schema`] unchanged.
 ///
 /// Returns an empty `Vec` when `column_schema` is empty or fails validation
 /// — see [`build_columnar_schema`] for the typed builder this wraps.
-pub(crate) fn build_schema_bytes(
+pub(in super::super) fn build_schema_bytes(
     column_schema: &[(String, String)],
-    declared_pk: Option<&str>,
+    identity_column: &str,
 ) -> Vec<u8> {
-    build_columnar_schema(column_schema, declared_pk)
+    build_columnar_schema(column_schema, identity_column)
         .map(|schema| zerompk::to_msgpack_vec(&schema).unwrap_or_default())
         .unwrap_or_default()
 }

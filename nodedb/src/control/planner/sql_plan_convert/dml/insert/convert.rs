@@ -18,7 +18,7 @@ use super::identity::{
 use super::schema::build_schema_bytes;
 
 /// Bundled arguments for [`convert_insert`].
-pub(crate) struct ConvertInsertArgs<'a> {
+pub(in super::super::super) struct ConvertInsertArgs<'a> {
     pub collection: &'a str,
     /// The lowering these rows take, decided by `nodedb-sql`.
     pub route: WriteRoute,
@@ -26,12 +26,14 @@ pub(crate) struct ConvertInsertArgs<'a> {
     pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
     pub if_absent: bool,
-    pub primary_key: Option<&'a str>,
+    pub primary_key: &'a str,
     pub tenant_id: TenantId,
     pub ctx: &'a ConvertContext,
 }
 
-pub(crate) fn convert_insert(args: ConvertInsertArgs<'_>) -> crate::Result<Vec<PhysicalTask>> {
+pub(in super::super::super) fn convert_insert(
+    args: ConvertInsertArgs<'_>,
+) -> crate::Result<Vec<PhysicalTask>> {
     let ConvertInsertArgs {
         collection,
         route,
@@ -179,15 +181,13 @@ pub(crate) fn convert_insert(args: ConvertInsertArgs<'_>) -> crate::Result<Vec<P
     if !columnar_rows.is_empty() {
         let payload = rows_to_msgpack_array(&columnar_rows)?;
         // `ON CONFLICT DO NOTHING` means skip, not refuse: `if_absent` keeps
-        // `InsertIfAbsent` regardless of the declared key. Otherwise, a
-        // `PRIMARY KEY` declared on a natural key column (not `id` /
-        // `document_id`) refuses a duplicate rather than tombstoning it.
+        // `InsertIfAbsent` regardless of the declared key. A declared
+        // `PRIMARY KEY` means uniqueness on every column: refuse a duplicate.
+        // With no declared key, rows are minted, so there is no key to
+        // enforce.
         let intent = if if_absent {
             ColumnarInsertIntent::InsertIfAbsent
-        } else if declared_pk
-            .as_deref()
-            .is_some_and(|pk| pk != "id" && pk != "document_id")
-        {
+        } else if declared_pk.is_some() {
             ColumnarInsertIntent::InsertUnique
         } else {
             ColumnarInsertIntent::Insert
@@ -199,7 +199,8 @@ pub(crate) fn convert_insert(args: ConvertInsertArgs<'_>) -> crate::Result<Vec<P
             primary_key,
             declared_pk.as_deref(),
         )?;
-        let schema_bytes = build_schema_bytes(column_schema, declared_pk.as_deref());
+        let schema_bytes =
+            build_schema_bytes(column_schema, declared_pk.as_deref().unwrap_or(primary_key));
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,
@@ -307,7 +308,7 @@ mod tests {
             column_defaults: &[],
             column_schema: &[],
             if_absent: false,
-            primary_key: Some("id"),
+            primary_key: "id",
             tenant_id: TenantId::new(0),
             ctx: &ctx,
         })
@@ -339,7 +340,7 @@ mod tests {
             column_defaults: &[],
             column_schema: &[],
             if_absent: false,
-            primary_key: Some("id"),
+            primary_key: "id",
             tenant_id: TenantId::new(0),
             ctx: &ctx,
         })

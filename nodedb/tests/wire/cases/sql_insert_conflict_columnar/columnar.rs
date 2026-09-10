@@ -5,7 +5,7 @@ use crate::harness::TestServer;
 // ── Plain columnar ──────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn columnar_insert_duplicate_pk_keeps_latest() {
+async fn columnar_insert_duplicate_pk_refuses_with_23505() {
     let server = TestServer::start().await;
 
     server
@@ -26,45 +26,43 @@ async fn columnar_insert_duplicate_pk_keeps_latest() {
         .await
         .unwrap();
 
-    // Duplicate PK — must NOT raise 23505 on columnar (OLAP-shaped), but
-    // must also NOT produce two visible rows (the silent-duplicate bug).
-    server
-        .exec("INSERT INTO metrics (id, region, value) VALUES ('m1', 'us-west', 2.0)")
+    // A declared PRIMARY KEY means uniqueness on every column, `id` included.
+    match server
+        .client
+        .simple_query("INSERT INTO metrics (id, region, value) VALUES ('m1', 'us-west', 2.0)")
         .await
-        .unwrap();
+    {
+        Ok(_) => panic!("expected unique_violation on the declared primary key, got success"),
+        Err(e) => {
+            let db_err = e.as_db_error().expect("expected DbError");
+            assert_eq!(
+                db_err.code().code(),
+                "23505",
+                "expected SQLSTATE 23505, got {}: {}",
+                db_err.code().code(),
+                db_err.message()
+            );
+        }
+    }
 
     let rows = server
         .query_rows("SELECT id, region, value FROM metrics WHERE id = 'm1'")
         .await
         .unwrap();
-
-    // Regression guard: the original bug was two rows visible for one PK.
     assert_eq!(
         rows.len(),
         1,
-        "duplicate PK must not produce two visible rows, got: {rows:?}"
+        "the refused insert must leave exactly one row, got: {rows:?}"
     );
-
-    // Latest-write-wins on the tombstoned prior row. row[0]=id, row[1]=region, row[2]=value.
     assert_eq!(
-        rows[0][1], "us-west",
-        "expected latest write (us-west), got: {:?}",
-        rows[0]
-    );
-    assert!(
-        rows[0][2].contains('2'),
-        "expected value 2.0, got: {:?}",
-        rows[0]
-    );
-    assert_ne!(
         rows[0][1], "us-east",
-        "prior row must be tombstoned, got: {:?}",
+        "the original row must be unchanged, got: {:?}",
         rows[0]
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn columnar_full_scan_hides_tombstoned_duplicate() {
+async fn columnar_full_scan_hides_tombstoned_upsert() {
     let server = TestServer::start().await;
 
     server
@@ -80,8 +78,11 @@ async fn columnar_full_scan_hides_tombstoned_duplicate() {
         .exec("INSERT INTO m (id, v) VALUES ('a', 1), ('b', 2), ('c', 3)")
         .await
         .unwrap();
+    // UPSERT merges into the existing row rather than refusing it, and does
+    // so by tombstoning the prior row and writing a new one. A full scan
+    // must hide the tombstoned row and expose only the latest one.
     server
-        .exec("INSERT INTO m (id, v) VALUES ('b', 20)")
+        .exec("UPSERT INTO m (id, v) VALUES ('b', 20)")
         .await
         .unwrap();
 
@@ -93,7 +94,7 @@ async fn columnar_full_scan_hides_tombstoned_duplicate() {
     assert_eq!(
         rows.len(),
         3,
-        "full scan must return 3 rows after dup, got: {rows:?}"
+        "full scan must return 3 rows after upsert, got: {rows:?}"
     );
     // ORDER BY id → a, b, c with latest-wins on b. row[0]=id, row[1]=v.
     assert_eq!(

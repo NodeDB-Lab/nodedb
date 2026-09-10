@@ -8,8 +8,8 @@ mod merge;
 mod update_delete;
 mod upsert;
 
-pub(crate) use insert::build_columnar_schema;
 pub(super) use insert::{ConvertInsertArgs, convert_insert, declared_primary_key_name};
+pub(crate) use insert::{DEFAULT_IDENTITY_COLUMN, build_columnar_schema};
 pub(super) use kv_and_vector::{
     VectorPrimaryInsertCfg, convert_kv_insert, convert_vector_primary_insert,
 };

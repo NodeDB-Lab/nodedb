@@ -13,6 +13,8 @@ use super::vector_search_ann::{ResolvedAnnOptions, apply_ann_options, quantizati
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::surrogate_to_doc_id;
+use nodedb_types::Surrogate;
 
 /// Parameters for [`CoreLoop::search_ivf`].
 struct SearchIvfParams<'a> {
@@ -53,7 +55,7 @@ impl CoreLoop {
         if !attach {
             return hit;
         }
-        let hex = format!("{:08x}", hit.id);
+        let hex = surrogate_to_doc_id(Surrogate::new(hit.id));
         if let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, &hex) {
             let format = self.sparse_body_format(
                 crate::types::DatabaseId::new(database_id),

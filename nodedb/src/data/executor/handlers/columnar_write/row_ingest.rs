@@ -263,7 +263,7 @@ impl CoreLoop {
                             .iter()
                             .zip(final_values.iter())
                             .filter(|(col, _)| col.primary_key)
-                            .map(|(col, v)| format!("{}={v:?}", col.name))
+                            .map(|(col, v)| format!("{}={v}", col.name))
                             .collect::<Vec<_>>()
                             .join(", ");
                         return Err(self.response_error(

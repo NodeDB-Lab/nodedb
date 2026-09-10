@@ -3,8 +3,8 @@
 //! `UPSERT` / `INSERT ... ON CONFLICT DO UPDATE` lowering.
 //!
 //! Split from `insert.rs`, which lowers plain `INSERT`. The two share the row
-//! identity helper there (`resolve_doc_identity`) so a row's surrogate is
-//! derived identically whichever statement wrote it.
+//! identity helper there (`resolve_doc_identity_with_declared`) so a row's
+//! surrogate is derived identically whichever statement wrote it.
 
 use nodedb_sql::types::{SqlExpr, SqlValue, WriteRoute};
 
@@ -18,7 +18,8 @@ use super::super::value::{
     assignments_to_update_values, expand_row_defaults, row_to_msgpack, rows_to_msgpack_array,
 };
 use super::insert::{
-    build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, resolve_doc_identity,
+    build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, is_auto_rowid_pk,
+    resolve_doc_identity_with_declared,
 };
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
@@ -31,7 +32,7 @@ pub(in super::super) struct ConvertUpsertArgs<'a> {
     pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
     pub on_conflict_updates: &'a [(String, SqlExpr)],
-    pub primary_key: Option<&'a str>,
+    pub primary_key: &'a str,
     pub tenant_id: TenantId,
     pub ctx: &'a ConvertContext,
 }
@@ -83,11 +84,25 @@ pub(in super::super) fn convert_upsert(
     // declaration promises — see `expand_row_defaults`.
     let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
 
+    // One catalog read for the whole statement, mirroring `convert_insert`.
+    // `_rowid` carries no declaration, so it skips the read.
+    let declared_pk = if is_auto_rowid_pk(primary_key) {
+        None
+    } else {
+        declared_primary_key_name(ctx, collection)?
+    };
+
     for row in &expanded_rows {
         match route {
             WriteRoute::Document => {
                 let value_bytes = row_to_msgpack(row)?;
-                let (doc_id, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
+                let (doc_id, surrogate) = resolve_doc_identity_with_declared(
+                    ctx,
+                    collection,
+                    primary_key,
+                    declared_pk.as_deref(),
+                    row,
+                )?;
                 let plan = if is_crdt {
                     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                         collection: qualified_collection.clone(),
@@ -132,7 +147,6 @@ pub(in super::super) fn convert_upsert(
 
     if !columnar_rows.is_empty() {
         let payload = rows_to_msgpack_array(&columnar_rows)?;
-        let declared_pk = declared_primary_key_name(ctx, collection)?;
         let surrogates = columnar_row_surrogates(
             ctx,
             collection,
@@ -140,7 +154,8 @@ pub(in super::super) fn convert_upsert(
             primary_key,
             declared_pk.as_deref(),
         )?;
-        let schema_bytes = build_schema_bytes(column_schema, declared_pk.as_deref());
+        let schema_bytes =
+            build_schema_bytes(column_schema, declared_pk.as_deref().unwrap_or(primary_key));
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,

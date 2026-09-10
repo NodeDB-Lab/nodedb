@@ -257,7 +257,9 @@ pub fn load_columnar_schema_seed(
         .filter_map(|(database_id, coll)| {
             let schema = crate::control::planner::sql_plan_convert::dml::build_columnar_schema(
                 &coll.fields,
-                coll.declared_primary_key.as_deref(),
+                coll.declared_primary_key.as_deref().unwrap_or(
+                    crate::control::planner::sql_plan_convert::dml::DEFAULT_IDENTITY_COLUMN,
+                ),
             )?;
             Some((
                 database_id,

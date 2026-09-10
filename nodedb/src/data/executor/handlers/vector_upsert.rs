@@ -24,6 +24,7 @@ use tracing::debug;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::surrogate_to_doc_id;
 
 /// Decode MessagePack payload bytes into `HashMap<String, Value>` and
 /// lower-case all field names so bitmap inserts agree with SELECT
@@ -214,7 +215,7 @@ impl CoreLoop {
         // row scannable at all, so skipping it made such a row invisible to
         // `SELECT *` while every other path still counted it as stored. An
         // empty tagged map is the honest sidecar for "no non-vector columns".
-        let row_key = format!("{:08x}", surrogate.as_u32());
+        let row_key = surrogate_to_doc_id(surrogate);
         let sidecar: std::borrow::Cow<'_, [u8]> = if payload.is_empty() {
             match zerompk::to_msgpack_vec(&HashMap::<String, Value>::new()) {
                 Ok(bytes) => std::borrow::Cow::Owned(bytes),
