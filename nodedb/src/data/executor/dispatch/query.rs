@@ -137,7 +137,6 @@ impl CoreLoop {
                     task.request.database_id,
                     crate::types::TenantId::new(tid),
                     &local_sides,
-                    projection,
                 );
                 self.execute_hash_join(HashJoinParams {
                 join: JoinParams {
@@ -231,7 +230,6 @@ impl CoreLoop {
                             qualifier: right_collection.as_str(),
                         },
                     ],
-                    &[],
                 );
                 self.execute_nested_loop_join(NestedLoopJoinParams {
                     task,
@@ -270,7 +268,6 @@ impl CoreLoop {
                             qualifier: right_collection.as_str(),
                         },
                     ],
-                    &[],
                 );
                 self.execute_sort_merge_join(SortMergeJoinParams {
                     task,

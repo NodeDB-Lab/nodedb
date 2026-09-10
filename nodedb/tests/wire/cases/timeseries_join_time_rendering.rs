@@ -155,3 +155,62 @@ async fn a_joined_time_key_denotes_the_stored_instant() {
          or {EARLY_MICROS}, got {joined:?}"
     );
 }
+
+/// A computed projection of a time key renders it as a direct read does.
+/// `COALESCE` returns the stored cell untouched, so both reads name one instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_computed_projection_of_a_time_key_matches_a_direct_read() {
+    let server = TestServer::start().await;
+    setup(&server, "tsj_comp_events", "tsj_comp_hosts").await;
+
+    let direct = server
+        .query_text("SELECT COALESCE(captured_at, captured_at) AS captured_at FROM tsj_comp_events")
+        .await
+        .expect("a computed projection of the time key must succeed");
+    assert_eq!(direct.len(), 1, "one stored point: {direct:?}");
+
+    let joined = server
+        .query_text(
+            "SELECT COALESCE(tsj_comp_events.captured_at, tsj_comp_events.captured_at) \
+             AS captured_at FROM tsj_comp_events \
+             INNER JOIN tsj_comp_hosts ON tsj_comp_events.host = tsj_comp_hosts.id",
+        )
+        .await
+        .expect("the same computed projection over a JOIN must succeed");
+    assert_eq!(joined.len(), 1, "the join yields one row: {joined:?}");
+
+    assert_eq!(
+        joined[0], direct[0],
+        "a computed projection of the time key must render the same through a JOIN \
+         as through a SELECT: joined={joined:?} direct={direct:?}"
+    );
+}
+
+/// An aliased joined time key denotes the instant the INSERT supplied.
+/// The alias renames the cell, so the emitted name must still carry the instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_aliased_joined_time_key_denotes_the_stored_instant() {
+    let server = TestServer::start().await;
+    setup(&server, "tsj_alias_events", "tsj_alias_hosts").await;
+
+    let joined = server
+        .query_text(
+            "SELECT tsj_alias_events.captured_at AS ts FROM tsj_alias_events \
+             INNER JOIN tsj_alias_hosts ON tsj_alias_events.host = tsj_alias_hosts.id",
+        )
+        .await
+        .expect("an aliased time key projected through a JOIN must succeed");
+    assert_eq!(joined.len(), 1, "the join yields one row: {joined:?}");
+
+    // The expected value is EARLY, the inserted instant, in whichever unit the
+    // alias announces a type for. EARLY_ISO is 2020-03-05T10:00:00Z as a cell
+    // typed TIMESTAMP renders it; EARLY_MICROS is the same instant in the epoch
+    // microseconds a TIMESTAMP cell carries, which an untyped cell leaves as a
+    // number. The stored 1583402400000 milliseconds denote 1970-01-19 read
+    // either way, so a millisecond value fails both arms.
+    assert!(
+        joined[0] == EARLY_ISO || joined[0] == EARLY_MICROS,
+        "an aliased joined time key must denote {EARLY}: expected {EARLY_ISO} \
+         or {EARLY_MICROS}, got {joined:?}"
+    );
+}

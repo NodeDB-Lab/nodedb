@@ -12,8 +12,11 @@
 //! Exactly once: a handler rescales ONLY the cells it read from a local
 //! collection scan. Rows that arrive from a sub-plan response were already
 //! rescaled by the handler that read them, and are never touched again.
-
-use nodedb_physical::physical_plan::JoinProjection;
+//!
+//! The rescale runs on the merged row, before any projection. A cell is named
+//! by the key the join itself wrote, so a rename cannot hide it: the rename
+//! happens strictly downstream, and a projected cell copies bytes the rescale
+//! has already corrected.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::raw_scan::scale_instant_cells;
@@ -27,43 +30,29 @@ pub(in crate::data::executor) struct JoinInstantSide<'a> {
 }
 
 impl CoreLoop {
-    /// The emitted names of the declared-instant cells `sides` contribute.
+    /// The merged-row keys of the declared-instant cells `sides` contribute.
     ///
-    /// A merged join row keys every cell `<qualifier>.<column>`, and a
-    /// projection renames it to its output name. The returned names are what
-    /// the emitted row actually carries, so the caller matches on them
-    /// directly. A side that is not a timeseries collection contributes none,
-    /// so a join over ordinary collections returns an empty list and pays
-    /// nothing.
+    /// A merged join row keys every cell `<qualifier>.<column>`, so the
+    /// returned names are what the row carries before any projection runs. A
+    /// side that is not a timeseries collection contributes none, so a join
+    /// over ordinary collections returns an empty list and pays nothing.
     pub(in crate::data::executor) fn join_instant_columns(
         &self,
         database_id: DatabaseId,
         tid: TenantId,
         sides: &[JoinInstantSide<'_>],
-        projection: &[JoinProjection],
     ) -> Vec<String> {
-        let mut emitted = Vec::new();
+        let mut merged_keys = Vec::new();
         for side in sides {
             for column in self.ts_instant_columns(database_id, tid, side.collection) {
-                let qualified = format!("{}.{column}", side.qualifier);
-                if projection.is_empty() {
-                    emitted.push(qualified);
-                    continue;
-                }
-                // Mirrors `binary_row_project`: a projection entry names
-                // either the qualified key or its bare last segment.
-                for entry in projection {
-                    if entry.source == qualified || entry.source == column {
-                        emitted.push(entry.output.clone());
-                    }
-                }
+                merged_keys.push(format!("{}.{column}", side.qualifier));
             }
         }
-        emitted
+        merged_keys
     }
 }
 
-/// Rescale the named cells of already-projected join rows, in place.
+/// Rescale the named cells of merged join rows, in place.
 ///
 /// Each row is a msgpack map. An empty `instant_columns` is a no-op, so a
 /// join that touches no timeseries collection never decodes a row.
