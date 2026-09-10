@@ -17,6 +17,11 @@ pub(crate) struct JoinParams<'a> {
     pub computed_projection_bytes: &'a [u8],
     pub join_filter_bytes: &'a [u8],
     pub post_filter_bytes: &'a [u8],
+    /// Emitted names of the declared-instant cells this join reads from its
+    /// own local scans. Empty when no timeseries collection is scanned
+    /// locally — including for every side supplied by a sub-plan, whose rows
+    /// were already rescaled by the handler that read them.
+    pub instant_columns: &'a [String],
 }
 
 /// Hash join: scans both sides from storage or executes resolved child sub-plans.
@@ -76,6 +81,9 @@ pub(crate) struct NestedLoopJoinParams<'a> {
     pub left_rls_filters: &'a [u8],
     /// Row-level-security filters for the locally-scanned right side.
     pub right_rls_filters: &'a [u8],
+    /// Emitted names of the declared-instant cells the two local scans
+    /// contribute. Empty when neither side is a timeseries collection.
+    pub instant_columns: &'a [String],
 }
 
 /// Sort-merge join: O((N+M)·log N) equi-join with optional pre-sorted inputs.
@@ -95,6 +103,9 @@ pub(crate) struct SortMergeJoinParams<'a> {
     pub left_rls_filters: &'a [u8],
     /// Row-level-security filters for the locally-scanned right side.
     pub right_rls_filters: &'a [u8],
+    /// Emitted names of the declared-instant cells the two local scans
+    /// contribute. Empty when neither side is a timeseries collection.
+    pub instant_columns: &'a [String],
 }
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -212,6 +223,10 @@ impl JoinParams<'_> {
             }
         }
 
+        // Last step before emission: every predicate above compared the
+        // milliseconds storage holds, and the client reads microseconds.
+        super::instant_scale::scale_join_instant_rows(results, self.instant_columns)?;
+
         Ok(())
     }
 }
@@ -258,6 +273,7 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: &[],
+            instant_columns: &[],
         };
         let mut results = vec![vec![1u8, 2, 3], vec![4u8, 5, 6]];
         assert!(params.filter_and_project(&mut results).is_ok());
@@ -280,6 +296,7 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: corrupt,
+            instant_columns: &[],
         };
         let mut results = vec![vec![0u8; 8]]; // would be "leaked" under the old code
         let err = params.filter_and_project(&mut results);
@@ -310,6 +327,7 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: &filter_bytes,
+            instant_columns: &[],
         };
         let mut results = vec![
             row_with_score(99), // should be kept
