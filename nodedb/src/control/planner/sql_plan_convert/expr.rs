@@ -280,6 +280,22 @@ pub(super) fn convert_sort_keys(keys: &[SortKey]) -> Vec<SortKeySpec> {
         .collect()
 }
 
+/// Whether a projection list carries anything beyond bare column
+/// references / stars. A computed expression (`x/0`, a function call, a
+/// window over a column) has no row to evaluate against once the CTE body
+/// is inlined as a bare value row — the response shaper would look the
+/// aliased column up, find nothing, and emit NULL. Such projections need a
+/// real Subquery post-processor over the materialized rows, not a bare
+/// `cte_plan.clone()`.
+fn has_expression_projection(projection: &[nodedb_sql::types::query::Projection]) -> bool {
+    projection.iter().any(|p| match p {
+        nodedb_sql::types::query::Projection::Computed { .. } => true,
+        nodedb_sql::types::query::Projection::Column(_)
+        | nodedb_sql::types::query::Projection::Star
+        | nodedb_sql::types::query::Projection::QualifiedStar(_) => false,
+    })
+}
+
 /// Replace scans on `cte_name` with the CTE's actual subquery plan.
 ///
 /// Outer constraints on the CTE reference are merged onto the CTE body as far
@@ -298,6 +314,7 @@ pub(super) fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> 
             limit,
             offset,
             distinct,
+            window_functions,
             ..
         } if collection == cte_name => {
             // If the outer query adds filters/sort/limit, wrap the CTE plan.
@@ -399,11 +416,14 @@ pub(super) fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> 
                     && *offset == 0
                     && !*distinct
                     && limit.is_none()
+                    && !has_expression_projection(projection)
+                    && window_functions.is_empty()
                 {
                     // Any other non-`Scan` body (Aggregate, Join, TextSearch,
                     // HybridSearch, SparseSearch, SpatialScan, MultiVectorSearch,
-                    // ...) with only an outer projection: the response boundary
-                    // projects by output schema, so no post-processor is needed.
+                    // ...) with only an outer projection of bare columns: the
+                    // response boundary projects by output schema, so no
+                    // post-processor is needed.
                     cte_plan.clone()
                 } else {
                     // The body has no slot for these outer constraints. Apply

@@ -76,6 +76,7 @@ impl CoreLoop {
                 limit,
                 offset,
                 distinct,
+                computed_columns,
                 ..
             } => self.execute_provider_scan(
                 task,
@@ -83,6 +84,7 @@ impl CoreLoop {
                     rows_bytes: rows,
                     filters_bytes: filters,
                     projection,
+                    computed_columns,
                     sort_keys,
                     limit: *limit,
                     offset: *offset,

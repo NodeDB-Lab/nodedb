@@ -166,6 +166,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
             // before the rows reach the aggregate.
             filters: filter_bytes.clone(),
             projection: Vec::new(),
+            computed_columns: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,
@@ -196,6 +197,65 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
             post_set_op: PostSetOp::None,
             txn_id: None,
         }]);
+    }
+
+    // Aggregate over a derived/CTE body: the input is not a Scan (a
+    // constant subquery, a set operation, a join materialized earlier), so
+    // there is no per-shard collection to aggregate. Lower the body to a
+    // single coordinator-local ProviderScan sub-plan — the same shape the
+    // catalog path uses above — so the executor receives the body's rows and
+    // evaluates the aggregate arguments / group keys against them. Without
+    // this the aggregate scanned an empty (non-existent) collection and
+    // silently returned NULL / no rows (issue #295).
+    if !matches!(input, SqlPlan::Scan { .. }) {
+        let derived_group_specs = group_by_to_specs(group_by);
+        let derived_agg_specs: Vec<AggregateSpec> =
+            aggregates.iter().map(agg_expr_to_spec).collect();
+        let mut body_tasks =
+            super::super::convert::convert_one(input, tenant_id, ctx)?;
+        if body_tasks.len() == 1 {
+            let body_plan = body_tasks.pop().expect("len == 1").plan;
+            let body_provider = if let PhysicalPlan::Query(QueryOp::ProviderScan {
+                rows, filters, ..
+            }) = &body_plan
+            {
+                PhysicalPlan::Query(QueryOp::ProviderScan {
+                    provider: None,
+                    rows: rows.clone(),
+                    filters: filters.clone(),
+                    projection: Vec::new(),
+                    computed_columns: Vec::new(),
+                    sort_keys: Vec::new(),
+                    limit: None,
+                    offset: 0,
+                    distinct: false,
+                })
+            } else {
+                body_plan
+            };
+            return Ok(vec![PhysicalTask {
+                tenant_id,
+                vshard_id: VShardId::from_collection_in_database(ctx.database_id, ""),
+                database_id: ctx.database_id,
+                plan: PhysicalPlan::Query(QueryOp::Aggregate {
+                    collection: nodedb_types::QualifiedCollection::from_stored(
+                        raw_collection.clone(),
+                    ),
+                    input: Some(Box::new(body_provider)),
+                    group_by: derived_group_specs,
+                    aggregates: derived_agg_specs,
+                    filters: Vec::new(),
+                    having: having_bytes,
+                    limit,
+                    sub_group_by: Vec::new(),
+                    sub_aggregates: Vec::new(),
+                    grouping_sets: Vec::new(),
+                    sort_keys: bridge_sort_keys,
+                }),
+                post_set_op: PostSetOp::None,
+                txn_id: None,
+            }]);
+        }
     }
 
     let collection = db_qualified(ctx.database_id, &raw_collection);

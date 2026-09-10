@@ -21,6 +21,7 @@ pub(in crate::data::executor) struct ProviderScanParams<'a> {
     pub rows_bytes: &'a [u8],
     pub filters_bytes: &'a [u8],
     pub projection: &'a [String],
+    pub computed_columns: &'a [u8],
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub limit: Option<usize>,
     pub offset: usize,
@@ -41,6 +42,7 @@ impl CoreLoop {
             rows_bytes,
             filters_bytes,
             projection,
+            computed_columns,
             sort_keys,
             limit,
             offset,
@@ -108,7 +110,56 @@ impl CoreLoop {
             return self.response_error(task, crate::Error::from(e));
         }
 
-        // ── 5. Distinct (on the would-be projected row). ──────────────────────
+        // ── 5. Computed columns. ──────────────────────────────────────────────
+        // Expression projections over materialized rows (derived tables,
+        // constant subqueries) ride as computed columns: evaluate each per
+        // row BEFORE distinct/project so the aliased value exists in the row
+        // map and division/accessor errors fail the query instead of
+        // silently NULLing (issue #295).
+        if !computed_columns.is_empty() {
+            let computed_cols: Vec<crate::bridge::expr_eval::ComputedColumn> =
+                match zerompk::from_msgpack(computed_columns) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("ProviderScan: malformed computed columns: {e}"),
+                            },
+                        );
+                    }
+                };
+            for row in rows.iter_mut() {
+                let Ok(doc_val) = nodedb_types::value_from_msgpack(row) else {
+                    continue;
+                };
+                let mut map = match doc_val {
+                    nodedb_types::Value::Object(m) => m,
+                    _ => continue,
+                };
+                for cc in &computed_cols {
+                    if matches!(map.get(&cc.alias), Some(v) if !v.is_null()) {
+                        continue;
+                    }
+                    match cc.expr.eval(&nodedb_types::Value::Object(map.clone())) {
+                        Ok(v) => {
+                            map.insert(cc.alias.clone(), v);
+                        }
+                        Err(e) => {
+                            return self
+                                .response_error(task, ErrorCode::from(crate::Error::from(e)));
+                        }
+                    }
+                }
+                if let Ok(encoded) =
+                    nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(map))
+                {
+                    *row = encoded;
+                }
+            }
+        }
+
+        // ── 6. Distinct (on the would-be projected row). ──────────────────────
         // Deduplicate on the projected shape so SQL DISTINCT semantics are
         // honoured: two rows with the same projected columns but different
         // non-projected columns are considered equal.

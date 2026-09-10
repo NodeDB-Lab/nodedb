@@ -78,6 +78,13 @@ pub enum QueryOp {
         /// Output column names to keep. Empty = emit all columns.
         #[serde(default)]
         projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` applied per row after
+        /// projection-name extraction (same wire format as the engine
+        /// scans). Expression projections over materialized rows (derived
+        /// tables, constant subqueries) need these — name-only projection
+        /// would silently drop them.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,
@@ -118,6 +125,10 @@ pub enum QueryOp {
         /// Output column names to keep. Empty = emit all columns.
         #[serde(default)]
         projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` applied per row (see
+        /// `ProviderScan::computed_columns`).
+        #[serde(default)]
+        computed_columns: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,

@@ -58,6 +58,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 rows: Vec::new(),
                 filters: filter_bytes,
                 projection: proj_names,
+                computed_columns: Vec::new(),
                 sort_keys: sort,
                 limit: *limit,
                 offset: *offset,
