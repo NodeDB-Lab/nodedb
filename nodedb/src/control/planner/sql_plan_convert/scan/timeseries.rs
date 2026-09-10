@@ -110,11 +110,16 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_ingest(
         // A timeseries row's natural identity is its (timestamp, tag-set)
         // tuple, which is not a cross-engine surrogate and carries no PK
         // column. Mint a FRESH unique surrogate per row (mirroring the
-        // columnar auto-`_rowid` path in `dml/insert.rs`) so every row
-        // occupies its own transaction-overlay slot for statement-time
-        // read-your-own-writes staging. Content-addressing an empty PK would
-        // collapse every row onto `Surrogate::ZERO` and merge distinct rows.
-        let s = ctx.fresh_surrogate(collection)?;
+        // document-storage-key path a keyless schemaless row takes in
+        // `dml/insert.rs`), so every row holds its own transaction-overlay
+        // slot for read-your-own-writes staging. Content-addressing an empty
+        // PK collapses every row onto `Surrogate::ZERO` and merges distinct
+        // rows. Nothing looks a timeseries row up by this binding, so the
+        // identity string is discarded.
+        let (s, _) = ctx.fresh_surrogate(
+            collection,
+            nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
+        )?;
         surrogates.push(s);
     }
     Ok(vec![PhysicalTask {

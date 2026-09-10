@@ -7,22 +7,28 @@
 use nodedb_types::Surrogate;
 
 use super::pk::{TargetPk, extract_pk_value};
+use crate::control::surrogate::fresh_identity_string;
 
 /// The user-visible primary key (`document_id`) for a row written on this
 /// target, mirroring the plain-`INSERT` identity path (`insert.rs`): an
 /// auto-`_rowid` row's PK is the decimal surrogate the Data Plane also writes
-/// into `_rowid`; a declared-PK row's PK is the field value extracted from
-/// the body.
+/// into `_rowid`. A declared-PK row's PK is the field value extracted from
+/// the body. A row with no content key is stored under its document storage
+/// key.
+///
+/// Both forms come from `fresh_identity_string`, the same formatter
+/// `assign_target_surrogate` binds a freshly minted row under.
 pub(crate) fn derive_document_id(
     target_pk: &TargetPk,
     body: &[u8],
     surrogate: Surrogate,
 ) -> String {
+    use nodedb_physical::FreshSurrogateKind;
     match target_pk {
-        TargetPk::AutoRowId => surrogate.as_u32().to_string(),
-        TargetPk::Field { name, .. } => {
-            extract_pk_value(body, name).unwrap_or_else(|| surrogate.as_u32().to_string())
-        }
+        TargetPk::AutoRowId => fresh_identity_string(FreshSurrogateKind::AutoRowId, surrogate),
+        TargetPk::Field { name, .. } => extract_pk_value(body, name).unwrap_or_else(|| {
+            fresh_identity_string(FreshSurrogateKind::DocumentStorageKey, surrogate)
+        }),
     }
 }
 

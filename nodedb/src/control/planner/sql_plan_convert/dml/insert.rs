@@ -157,8 +157,12 @@ pub(super) fn resolve_doc_identity(
     }
 
     if is_auto_rowid_pk(primary_key) {
-        let s = assign_fresh(ctx, collection)?;
-        return Ok((s.as_u32().to_string(), s));
+        let (s, pk) = assign_fresh(
+            ctx,
+            collection,
+            nodedb_physical::FreshSurrogateKind::AutoRowId,
+        )?;
+        return Ok((pk, s));
     }
     match extract_doc_id(row, primary_key) {
         DocId::Present(id) => {
@@ -166,8 +170,12 @@ pub(super) fn resolve_doc_identity(
             Ok((id, s))
         }
         DocId::ExplicitNull | DocId::Absent => {
-            let s = assign_fresh(ctx, collection)?;
-            Ok((s.as_u32().to_string(), s))
+            let (s, pk) = assign_fresh(
+                ctx,
+                collection,
+                nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
+            )?;
+            Ok((pk, s))
         }
     }
 }
@@ -181,11 +189,19 @@ pub(super) fn assign_for_pk(
 }
 
 /// Allocate a fresh, unique surrogate for a row whose primary key is the
-/// auto-generated `_rowid` (no `PRIMARY KEY` declared). Content-addressing an
-/// empty pk here would collapse every such row onto one surrogate — a
-/// duplicate-key violation on the second insert.
-pub(super) fn assign_fresh(ctx: &ConvertContext, collection: &str) -> crate::Result<Surrogate> {
-    ctx.fresh_surrogate(collection)
+/// auto-generated `_rowid` (no `PRIMARY KEY` declared), or that carries no
+/// content primary key at all.
+///
+/// Content-addressing an empty pk collapses every such row onto one
+/// surrogate, a duplicate-key violation on the second insert.
+///
+/// Returns the identity string `kind` binds. The caller uses it verbatim.
+pub(super) fn assign_fresh(
+    ctx: &ConvertContext,
+    collection: &str,
+    kind: nodedb_physical::FreshSurrogateKind,
+) -> crate::Result<(Surrogate, String)> {
+    ctx.fresh_surrogate(collection, kind)
 }
 
 /// Whether a collection's declared primary key is the auto-generated `_rowid`

@@ -6,4 +6,5 @@
 pub(super) mod cluster_reserve;
 pub mod core;
 
+pub(crate) use core::fresh_identity_string;
 pub use core::{SurrogateAssigner, SurrogateRegistryHandle};

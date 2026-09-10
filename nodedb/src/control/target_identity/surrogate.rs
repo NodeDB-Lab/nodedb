@@ -20,9 +20,13 @@ pub(crate) fn assign_target_surrogate(
 ) -> crate::Result<Surrogate> {
     match target_pk {
         TargetPk::AutoRowId => {
-            state
-                .surrogate_assigner
-                .assign_fresh(database_id, tenant_id, target_collection)
+            let (surrogate, _) = state.surrogate_assigner.assign_fresh(
+                database_id,
+                tenant_id,
+                target_collection,
+                nodedb_physical::FreshSurrogateKind::AutoRowId,
+            )?;
+            Ok(surrogate)
         }
         TargetPk::Field { name, declared } => match extract_pk_value(body, name) {
             // The empty string is a key like any other. Minting a fresh
@@ -43,10 +47,17 @@ pub(crate) fn assign_target_surrogate(
             }),
             // Undeclared `id`-by-convention field: mint a fresh unique
             // surrogate rather than collapsing every keyless row onto one
-            // binding.
-            _ => state
-                .surrogate_assigner
-                .assign_fresh(database_id, tenant_id, target_collection),
+            // binding. The row's identity is its document storage key, so
+            // the allocator binds the hex form.
+            _ => {
+                let (surrogate, _) = state.surrogate_assigner.assign_fresh(
+                    database_id,
+                    tenant_id,
+                    target_collection,
+                    nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
+                )?;
+                Ok(surrogate)
+            }
         },
     }
 }

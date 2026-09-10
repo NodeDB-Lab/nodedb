@@ -193,15 +193,35 @@ impl ConvertContext {
             .unwrap_or(nodedb_types::Surrogate::ZERO))
     }
 
-    /// Allocate a new surrogate only while producing executable work.
-    /// Metadata plans use a zero placeholder because no fresh identity exists.
-    pub fn fresh_surrogate(&self, collection: &str) -> crate::Result<nodedb_types::Surrogate> {
+    /// Allocate a new surrogate and its bound identity string, only while
+    /// producing executable work.
+    ///
+    /// A metadata plan, or a plan with no wired assigner, returns a
+    /// `Surrogate::ZERO` placeholder. Its identity string comes from
+    /// [`fresh_identity_string`](crate::control::surrogate::fresh_identity_string),
+    /// the same function the allocator calls.
+    pub fn fresh_surrogate(
+        &self,
+        collection: &str,
+        kind: nodedb_physical::FreshSurrogateKind,
+    ) -> crate::Result<(nodedb_types::Surrogate, String)> {
+        let placeholder = || {
+            Ok((
+                nodedb_types::Surrogate::ZERO,
+                crate::control::surrogate::fresh_identity_string(
+                    kind,
+                    nodedb_types::Surrogate::ZERO,
+                ),
+            ))
+        };
         if self.is_metadata() {
-            return Ok(nodedb_types::Surrogate::ZERO);
+            return placeholder();
         }
         match self.surrogate_assigner.as_ref() {
-            Some(assigner) => assigner.assign_fresh(self.database_id, self.tenant_id, collection),
-            None => Ok(nodedb_types::Surrogate::ZERO),
+            Some(assigner) => {
+                assigner.assign_fresh(self.database_id, self.tenant_id, collection, kind)
+            }
+            None => placeholder(),
         }
     }
 
@@ -340,7 +360,14 @@ mod tests {
                 .as_u32(),
             0
         );
-        assert_eq!(metadata.fresh_surrogate("users").unwrap().as_u32(), 0);
+        assert_eq!(
+            metadata
+                .fresh_surrogate("users", nodedb_physical::FreshSurrogateKind::AutoRowId)
+                .unwrap()
+                .0
+                .as_u32(),
+            0
+        );
         assert_eq!(
             assigner
                 .lookup(DatabaseId::DEFAULT, TenantId::new(1), "users", b"new-user")

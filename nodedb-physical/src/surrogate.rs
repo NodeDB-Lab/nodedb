@@ -24,6 +24,20 @@ pub enum SurrogateAssignError {
     Backend(String),
 }
 
+/// The identity convention a freshly minted row's surrogate binds under.
+///
+/// This enum names the convention. It never formats one.
+/// `nodedb`'s allocator turns the variant into the identity string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshSurrogateKind {
+    /// The row's identity is its document storage key. Covers a schemaless
+    /// row with no declared `PRIMARY KEY`, and a timeseries row.
+    DocumentStorageKey,
+    /// The row's identity is the strict-schema auto `_rowid` column value.
+    /// The Data Plane writes that column as an `Int64`.
+    AutoRowId,
+}
+
 /// Allocate stable, cross-engine surrogates for `(collection, pk_bytes)`.
 ///
 /// Implementations must be:
@@ -51,18 +65,20 @@ pub trait SurrogateAssigner: Send + Sync {
 
     /// Allocate a FRESH, never-before-issued surrogate for a row that has no
     /// content primary key — i.e. a collection whose primary key is the
-    /// auto-generated `_rowid` (no `PRIMARY KEY` was declared at CREATE). Each
-    /// call returns a new value; there is no `pk_bytes` to content-address on,
-    /// so repeated calls do NOT collapse to the same surrogate (which is
-    /// exactly the bug that content-addressing an empty key would cause).
+    /// auto-generated `_rowid` (no `PRIMARY KEY` was declared at CREATE), or
+    /// a timeseries row.
     ///
-    /// The Data Plane sets the row's `_rowid` equal to this surrogate, so
-    /// implementations should bind the surrogate to its own value for reverse
-    /// `_rowid = N` point lookups.
+    /// Every call allocates a new value. There is no `pk_bytes` to
+    /// content-address on, so repeated calls never collapse onto one
+    /// surrogate.
+    ///
+    /// `kind` picks the convention the binding uses. The returned `String` is
+    /// the identity. Callers use it verbatim and never re-derive it.
     fn assign_fresh(
         &self,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-    ) -> Result<Surrogate, SurrogateAssignError>;
+        kind: FreshSurrogateKind,
+    ) -> Result<(Surrogate, String), SurrogateAssignError>;
 }

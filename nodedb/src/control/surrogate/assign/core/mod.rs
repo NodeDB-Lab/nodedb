@@ -22,4 +22,5 @@ mod assign_ops;
 mod flush;
 mod types;
 
+pub(crate) use assign_ops::fresh_identity_string;
 pub use types::{SurrogateAssigner, SurrogateRegistryHandle};

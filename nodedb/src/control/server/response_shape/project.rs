@@ -36,8 +36,14 @@ pub fn push_flat_rows(
         }
         serde_json::Value::Object(mut map) => {
             if is_scan_wrapper(&map)
-                && let Some(serde_json::Value::Object(inner)) = map.remove("data")
+                && let Some(serde_json::Value::Object(mut inner)) = map.remove("data")
             {
+                // The envelope carries the row's storage-key identity. A body
+                // with no `id` field carries it nowhere else. `or_insert`
+                // leaves a declared primary key as the authority.
+                if let Some(id) = map.remove("id") {
+                    inner.entry("id").or_insert(id);
+                }
                 out.push(inner);
                 return;
             }

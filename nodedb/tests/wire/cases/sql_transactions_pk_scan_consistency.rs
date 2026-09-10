@@ -231,3 +231,166 @@ async fn point_lookup_scan_and_count_agree_after_restart() {
         "COUNT(*) must equal the scanned row count after restart, got {count:?}"
     );
 }
+
+// ── Minted identity (no declared PRIMARY KEY) ───────────────────────────────
+//
+// A schemaless collection with no declared `PRIMARY KEY` mints its row
+// identity from the surrogate counter. That identity must be one value, not
+// one per read path: `RETURNING id`, `SELECT id`, `SELECT *`, the scan
+// predicate, the aggregate predicate, and the UPDATE key must all name it the
+// same way. The tests above cover the declared-key case only, where the body
+// carries `id` and every path reads it from there.
+
+/// Insert one row into a collection with no declared `PRIMARY KEY` and return
+/// the id `RETURNING` reports.
+async fn insert_minted_row(server: &TestServer, table: &str) -> String {
+    let returned = server
+        .query_text(&format!(
+            "INSERT INTO {table} (v) VALUES ('x') RETURNING id"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        returned.len(),
+        1,
+        "RETURNING id must report exactly one id, got {returned:?}"
+    );
+    returned[0].clone()
+}
+
+/// `RETURNING id` and `SELECT id` name the same row, so they must answer the
+/// same string. Two encodings of one surrogate is one identity too many.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn minted_identity_agrees_between_returning_and_projection() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION mint_ret (v TEXT)")
+        .await
+        .unwrap();
+
+    let returned = insert_minted_row(&server, "mint_ret").await;
+    let projected = server.query_text("SELECT id FROM mint_ret").await.unwrap();
+
+    assert_eq!(
+        projected,
+        vec![returned.clone()],
+        "SELECT id must answer the same identity RETURNING id reported ('{returned}')"
+    );
+}
+
+/// The identity a read returns must address the row it came from. A client
+/// that reads an id and cannot fetch that row again holds a value that names
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn minted_identity_addresses_its_own_row() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION mint_addr (v TEXT)")
+        .await
+        .unwrap();
+
+    let returned = insert_minted_row(&server, "mint_addr").await;
+    let projected = server.query_text("SELECT id FROM mint_addr").await.unwrap();
+
+    for id in [returned.as_str(), projected[0].as_str()] {
+        let rows = server
+            .query_text(&format!("SELECT v FROM mint_addr WHERE id = '{id}'"))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec!["x".to_string()],
+            "id '{id}' was returned by a read of this row and must address it"
+        );
+    }
+}
+
+/// The scan path and the aggregate path answer the same predicate over `id`
+/// identically. A predicate that finds the row on one path and misses it on
+/// the other is a silently wrong count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn minted_identity_scan_and_aggregate_agree_on_equality() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION mint_agg (v TEXT)")
+        .await
+        .unwrap();
+
+    let returned = insert_minted_row(&server, "mint_agg").await;
+    let projected = server.query_text("SELECT id FROM mint_agg").await.unwrap();
+
+    // Both encodings a read has ever produced for this row are probed. Any
+    // value that addresses the row on one path must address it on both.
+    for id in [returned.as_str(), projected[0].as_str()] {
+        let scan = server
+            .query_text(&format!("SELECT v FROM mint_agg WHERE id = '{id}'"))
+            .await
+            .unwrap();
+        let count = server
+            .query_text(&format!("SELECT count(*) FROM mint_agg WHERE id = '{id}'"))
+            .await
+            .unwrap();
+        assert_eq!(
+            count,
+            vec![scan.len().to_string()],
+            "scan and count(*) must agree on `id = '{id}'`; scan got {scan:?}, count got {count:?}"
+        );
+    }
+}
+
+/// `SELECT *` exposes `id` whenever `SELECT id` resolves it. A projection that
+/// drops the row's only identity leaves the client no way to address it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn minted_identity_star_projection_includes_id() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION mint_star (v TEXT)")
+        .await
+        .unwrap();
+
+    let returned = insert_minted_row(&server, "mint_star").await;
+    let star = server.query_rows("SELECT * FROM mint_star").await.unwrap();
+
+    assert_eq!(star.len(), 1, "one row inserted, got {star:?}");
+    assert!(
+        star[0].iter().any(|cell| cell == &returned),
+        "SELECT * must carry the row's identity '{returned}', got {star:?}"
+    );
+}
+
+/// A read-then-write round trip addresses the row by the identity the read
+/// reported. `UPDATE` keyed on that value touches that row and no other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn minted_identity_addresses_its_own_row_for_update() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION mint_upd (v TEXT)")
+        .await
+        .unwrap();
+
+    let returned = insert_minted_row(&server, "mint_upd").await;
+    server
+        .exec(&format!(
+            "UPDATE mint_upd SET v = 'y' WHERE id = '{returned}'"
+        ))
+        .await
+        .unwrap();
+
+    let rows = server.query_text("SELECT v FROM mint_upd").await.unwrap();
+    assert_eq!(
+        rows,
+        vec!["y".to_string()],
+        "UPDATE keyed on the id RETURNING reported ('{returned}') must reach the row, got {rows:?}"
+    );
+
+    // The update addressed an existing row, so it minted no second one.
+    let count = server
+        .query_text("SELECT count(*) FROM mint_upd")
+        .await
+        .unwrap();
+    assert_eq!(
+        count,
+        vec!["1".to_string()],
+        "the collection must still hold exactly one row, got {count:?}"
+    );
+}
