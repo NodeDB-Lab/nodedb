@@ -149,7 +149,16 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
             NodeDbError::quota_overcommit(field.clone(), detail)
         }
         Error::PlanError { detail } => NodeDbError::plan_error(detail),
+        // The native surface carries this as a plan error; the pgwire
+        // surface renders SQLSTATE `0A000`.
+        Error::FeatureNotSupported { detail } => NodeDbError::plan_error(detail),
         Error::UndefinedFunction { name } => NodeDbError::undefined_function(name.clone()),
+        Error::UndefinedObject { kind, name } => {
+            NodeDbError::undefined_object(format!("{kind} \"{name}\""))
+        }
+        Error::ObjectNotInPrerequisiteState { object, detail } => {
+            NodeDbError::object_not_ready(object.clone(), detail.clone())
+        }
         Error::UndefinedColumn { column } => NodeDbError::undefined_column(column.clone()),
         Error::AmbiguousColumn { column } => NodeDbError::ambiguous_column(column.clone()),
         Error::UnknownStrictField { column, .. } => NodeDbError::undefined_column(column.clone()),

@@ -17,7 +17,9 @@ use crate::types::SqlPlan;
 
 pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Output, V::Error> {
     match plan {
-        SqlPlan::ConstantResult { columns, values } => visitor.constant_result(columns, values),
+        SqlPlan::ConstantResult {
+            columns, values, ..
+        } => visitor.constant_result(columns, values),
         SqlPlan::Scan {
             collection,
             alias,
@@ -93,6 +95,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         SqlPlan::Insert {
             collection,
             engine,
+            route,
             rows,
             column_defaults,
             if_absent,
@@ -101,6 +104,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         } => visitor.insert(InsertVisitArgs {
             collection,
             engine: *engine,
+            route: *route,
             rows,
             column_defaults,
             if_absent: *if_absent,
@@ -113,10 +117,12 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             ttl_secs,
             intent,
             on_conflict_updates,
+            ..
         } => visitor.kv_insert(collection, entries, *ttl_secs, *intent, on_conflict_updates),
         SqlPlan::Upsert {
             collection,
             engine,
+            route,
             rows,
             column_defaults,
             on_conflict_updates,
@@ -125,6 +131,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         } => visitor.upsert(UpsertVisitArgs {
             collection,
             engine: *engine,
+            route: *route,
             rows,
             column_defaults,
             on_conflict_updates,

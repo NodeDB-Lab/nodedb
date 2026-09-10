@@ -482,10 +482,20 @@ async fn extended_query_returning_star_matches_the_announced_row_description() {
     // RowDescription announced for it.
     for (i, column) in row.columns().iter().enumerate() {
         let ty = column.type_();
+        // One arm per numeric OID the RowDescription can carry. `score` is
+        // declared `INT`, so it is announced as int4 and must be read as
+        // `i32`: reading it as `String` is a client-side type error, not a
+        // fallback. The narrower widths are listed for the same reason.
         let value = if *ty == Type::INT8 {
             row.get::<_, i64>(i).to_string()
+        } else if *ty == Type::INT4 {
+            row.get::<_, i32>(i).to_string()
+        } else if *ty == Type::INT2 {
+            row.get::<_, i16>(i).to_string()
         } else if *ty == Type::FLOAT8 {
             row.get::<_, f64>(i).to_string()
+        } else if *ty == Type::FLOAT4 {
+            row.get::<_, f32>(i).to_string()
         } else {
             row.get::<_, String>(i)
         };

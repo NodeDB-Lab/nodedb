@@ -2,18 +2,50 @@
 
 //! Schema parsing and type validation helpers for collection DDL.
 
+/// Expand a `SERIAL` / `BIGSERIAL` type token into its backing type and DEFAULT.
+///
+/// `SERIAL` yields `INT DEFAULT nextval('{collection}_{field}_seq')` and
+/// `BIGSERIAL` yields `BIGINT DEFAULT nextval(...)`. The sequence name matches
+/// the one `create_serial_sequences` materializes, so the column reads the
+/// sequence its own declaration created. Returns `None` for every other type.
+///
+/// Trailing modifiers such as `PRIMARY KEY` follow the DEFAULT clause, where
+/// `parse_column_type_str_full` expects them.
+fn expand_serial_type(collection: &str, field: &str, type_str: &str) -> Option<String> {
+    let trimmed = type_str.trim();
+    let (head, tail) = match trimmed.find(char::is_whitespace) {
+        Some(index) => (&trimmed[..index], trimmed[index..].trim()),
+        None => (trimmed, ""),
+    };
+    let base = if head.eq_ignore_ascii_case("SERIAL") {
+        "INT"
+    } else if head.eq_ignore_ascii_case("BIGSERIAL") {
+        "BIGINT"
+    } else {
+        return None;
+    };
+    let expanded = format!("{base} DEFAULT nextval('{collection}_{field}_seq')");
+    Some(if tail.is_empty() {
+        expanded
+    } else {
+        format!("{expanded} {tail}")
+    })
+}
+
 /// Parse FIELDS clause from CREATE COLLECTION parts.
 ///
 /// Syntax: `CREATE COLLECTION name FIELDS (field1 type1, field2 type2, ...)`
 /// Returns empty vec if no FIELDS clause.
 ///
-/// SERIAL and BIGSERIAL are expanded:
-///   `id SERIAL` → `id INT` (caller creates implicit sequence)
-///   `id BIGSERIAL` → `id BIGINT` (caller creates implicit sequence)
+/// SERIAL and BIGSERIAL expand to their backing type plus a `nextval` DEFAULT
+/// naming the sequence the caller creates for that column.
 ///
 /// The second return value lists field names that had SERIAL/BIGSERIAL types,
 /// so the caller can create the implicit sequences.
-pub(crate) fn parse_fields_clause(parts: &[&str]) -> (Vec<(String, String)>, Vec<String>) {
+pub(crate) fn parse_fields_clause(
+    collection: &str,
+    parts: &[&str],
+) -> (Vec<(String, String)>, Vec<String>) {
     let fields_idx = parts.iter().position(|p| p.eq_ignore_ascii_case("FIELDS"));
     let fields_idx = match fields_idx {
         Some(i) => i,
@@ -40,17 +72,13 @@ pub(crate) fn parse_fields_clause(parts: &[&str]) -> (Vec<(String, String)>, Vec
         let name = name.to_string();
         let type_name = tokens.next().unwrap_or("text").to_uppercase();
 
-        // Expand SERIAL/BIGSERIAL shorthand.
-        let actual_type = match type_name.as_str() {
-            "SERIAL" => {
+        // Expand SERIAL/BIGSERIAL shorthand into type + nextval DEFAULT.
+        let actual_type = match expand_serial_type(collection, &name, &type_name) {
+            Some(expanded) => {
                 serial_fields.push(name.clone());
-                "INT".to_string()
+                expanded
             }
-            "BIGSERIAL" => {
-                serial_fields.push(name.clone());
-                "BIGINT".to_string()
-            }
-            other => other.to_string(),
+            None => type_name,
         };
 
         fields.push((name, actual_type));
@@ -68,20 +96,19 @@ pub(crate) fn parse_fields_clause(parts: &[&str]) -> (Vec<(String, String)>, Vec
 /// of columns whose type was expanded from SERIAL / BIGSERIAL so the caller
 /// can create implicit sequences.
 pub(crate) fn parse_fields_clause_from_pairs(
+    collection: &str,
     columns: &[(String, String)],
 ) -> (Vec<(String, String)>, Vec<String>) {
     let mut fields: Vec<(String, String)> = Vec::new();
     let mut serial_fields: Vec<String> = Vec::new();
 
     for (name, type_str) in columns {
-        let actual_type = if type_str.eq_ignore_ascii_case("SERIAL") {
-            serial_fields.push(name.clone());
-            "INT".to_string()
-        } else if type_str.eq_ignore_ascii_case("BIGSERIAL") {
-            serial_fields.push(name.clone());
-            "BIGINT".to_string()
-        } else {
-            type_str.clone()
+        let actual_type = match expand_serial_type(collection, name, type_str) {
+            Some(expanded) => {
+                serial_fields.push(name.clone());
+                expanded
+            }
+            None => type_str.clone(),
         };
         fields.push((name.clone(), actual_type));
     }

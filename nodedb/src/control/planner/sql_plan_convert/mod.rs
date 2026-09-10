@@ -4,6 +4,7 @@ pub mod aggregate;
 pub mod array_alter_convert;
 pub mod array_convert;
 pub mod array_fn_convert;
+pub mod cache_verdict;
 pub mod convert;
 pub mod dml;
 pub mod expr;
@@ -19,4 +20,5 @@ pub mod set_ops;
 pub mod value;
 pub mod visitor;
 
+pub use cache_verdict::batch_cache_eligibility;
 pub use convert::{ConvertContext, PlanningPurpose, convert};

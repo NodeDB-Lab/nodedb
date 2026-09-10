@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Schema-inference utilities for `NodeDbQueryParser`.
+//! SQL-text utilities for `NodeDbQueryParser`.
 //!
-//! These free functions are called by `parser.rs` during Parse-message
-//! handling to infer parameter and result-field types from SQL text and
-//! catalog metadata.
-
-use nodedb_types::DatabaseId;
-use pgwire::api::Type;
-use pgwire::api::results::FieldInfo;
+//! `parser.rs` calls these during Parse-message handling to classify a
+//! statement and to count and neutralise its `$N` placeholders. Result-column
+//! types come from the planner's `OutputSchema`, never from here.
 
 /// Return true if `sql` starts with a DSL or DDL keyword that `plan_sql`
 /// cannot parse and must be routed through `execute_sql` at Execute time.
@@ -121,99 +117,6 @@ pub(super) fn count_placeholders(sql: &str) -> usize {
         }
     }
     max_idx
-}
-
-/// Build result `FieldInfo`s for a DML statement with a RETURNING clause.
-///
-/// Resolves the target collection from the DML plan, looks up its schema, and
-/// projects the RETURNING spec onto it. Returns `None` if the plan isn't a
-/// recognized DML type or the collection schema cannot be found.
-pub(super) fn result_fields_for_returning(
-    spec: &nodedb_physical::physical_plan::ReturningSpec,
-    plan: Option<&nodedb_sql::SqlPlan>,
-    catalog: &dyn nodedb_sql::SqlCatalog,
-) -> Option<Vec<FieldInfo>> {
-    use nodedb_physical::physical_plan::{ReturningColumns, ReturningItem};
-    use nodedb_sql::types::SqlDataType;
-    use pgwire::api::results::FieldFormat;
-
-    // Local, self-contained mapping from the planner's `SqlDataType` to a
-    // pgwire `Type`; kept private to this function since RETURNING is the
-    // only remaining caller after the DESCRIBE path moved to the planner's
-    // authoritative `OutputSchema` (see `ddl_col_type_to_pg` in parser.rs).
-    fn returning_col_type_to_pg(dt: &SqlDataType) -> Type {
-        match dt {
-            SqlDataType::Int64 => Type::INT8,
-            SqlDataType::Float64 => Type::FLOAT8,
-            SqlDataType::String => Type::TEXT,
-            SqlDataType::Bool => Type::BOOL,
-            SqlDataType::Bytes => Type::BYTEA,
-            SqlDataType::Timestamp => Type::TIMESTAMP,
-            SqlDataType::Timestamptz => Type::TIMESTAMPTZ,
-            SqlDataType::Decimal => Type::NUMERIC,
-            SqlDataType::Uuid => Type::TEXT,
-            SqlDataType::Vector(_) => Type::BYTEA,
-            SqlDataType::Geometry => Type::BYTEA,
-            SqlDataType::Unknown => Type::TEXT,
-        }
-    }
-
-    // Every write that can carry a RETURNING clause resolves its target here.
-    // A write whose target is missed announces NO result columns while its
-    // response still ships one field per stored column, which the client
-    // cannot read against the RowDescription it was given — so the list is
-    // the write plans, not just the two that first needed it.
-    let collection = match plan? {
-        nodedb_sql::SqlPlan::Update { collection, .. }
-        | nodedb_sql::SqlPlan::UpdateFrom { collection, .. }
-        | nodedb_sql::SqlPlan::Delete { collection, .. }
-        | nodedb_sql::SqlPlan::Insert { collection, .. }
-        | nodedb_sql::SqlPlan::KvInsert { collection, .. }
-        | nodedb_sql::SqlPlan::Upsert { collection, .. }
-        | nodedb_sql::SqlPlan::TimeseriesIngest { collection, .. }
-        | nodedb_sql::SqlPlan::VectorPrimaryInsert { collection, .. } => collection.as_str(),
-        nodedb_sql::SqlPlan::Merge { target, .. }
-        | nodedb_sql::SqlPlan::InsertSelect { target, .. } => target.as_str(),
-        _ => return None,
-    };
-
-    let info = catalog
-        .get_collection(DatabaseId::DEFAULT, collection)
-        .ok()
-        .flatten()?;
-
-    let columns_to_field_info = |columns: &[nodedb_sql::ColumnInfo]| -> Vec<FieldInfo> {
-        columns
-            .iter()
-            .map(|c| {
-                FieldInfo::new(
-                    c.name.clone(),
-                    None,
-                    None,
-                    returning_col_type_to_pg(&c.data_type),
-                    FieldFormat::Text,
-                )
-            })
-            .collect()
-    };
-
-    let fields = match &spec.columns {
-        ReturningColumns::Star => columns_to_field_info(&info.columns),
-        ReturningColumns::Named(items) => items
-            .iter()
-            .map(|item: &ReturningItem| {
-                let display_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
-                let pg_type = info
-                    .columns
-                    .iter()
-                    .find(|c| c.name == item.name)
-                    .map(|c| returning_col_type_to_pg(&c.data_type))
-                    .unwrap_or(Type::TEXT);
-                FieldInfo::new(display_name, None, None, pg_type, FieldFormat::Text)
-            })
-            .collect(),
-    };
-    Some(fields)
 }
 
 #[cfg(test)]

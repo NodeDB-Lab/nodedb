@@ -192,7 +192,7 @@ pub async fn coordinate_cross_shard_hop(
                     crate::types::TenantId::new(tenant_id_u64),
                     database_id,
                     &security.context(shared),
-                    false,
+                    None,
                 )
                 .await
             {

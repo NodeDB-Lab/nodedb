@@ -30,6 +30,7 @@ pub mod read_set;
 pub mod record_reads;
 mod reservation_release;
 pub mod savepoint_ops;
+mod sequence_values;
 pub mod set_validation;
 pub mod staging_gate;
 mod state;

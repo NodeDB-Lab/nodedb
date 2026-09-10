@@ -20,7 +20,7 @@ use nodedb::control::gateway::core::QueryContext;
 use nodedb::control::gateway::plan_cache::PlanCacheKey;
 use nodedb::control::gateway::plan_cache::{hash_placeholder_types, hash_sql};
 use nodedb::control::gateway::version_set::GatewayVersionSet;
-use nodedb::control::gateway::{Gateway, PlanCache};
+use nodedb::control::gateway::{Gateway, LoweredPlan, PlanCache};
 use nodedb::types::TenantId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_types::QualifiedCollection;
@@ -135,7 +135,7 @@ async fn gateway_execute_sql_plan_cache_populated() {
 
     let sql = "GET gw_cache_smoke smoke-key";
     let make_plan = || {
-        Ok(PhysicalPlan::Kv(KvOp::Get {
+        Ok(LoweredPlan::cacheable(PhysicalPlan::Kv(KvOp::Get {
             collection: QualifiedCollection::new(
                 nodedb_types::id::DatabaseId::DEFAULT,
                 "gw_cache_smoke",
@@ -143,7 +143,7 @@ async fn gateway_execute_sql_plan_cache_populated() {
             key: b"smoke-key".to_vec(),
             rls_filters: vec![],
             surrogate_ceiling: None,
-        }))
+        })))
     };
 
     // Cache starts empty.

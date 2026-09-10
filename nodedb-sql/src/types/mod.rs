@@ -15,7 +15,7 @@ pub use filter::{CompareOp, Filter, FilterExpr};
 pub use plan::{
     ArrayPrefilter, DistanceMetric, KvInsertIntent, MergeClauseKind, MergePlanAction,
     MergePlanClause, PlanCacheEligibility, SqlPlan, VectorAnnOptions, VectorPrimaryRow,
-    VectorQuantization,
+    VectorQuantization, WriteRoute,
 };
 pub use query::{
     AggOutputSlot, AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate,

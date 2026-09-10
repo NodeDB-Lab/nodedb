@@ -171,7 +171,10 @@ pub(in super::super) fn convert_vector_primary_insert(
                 .iter()
                 .map(|(k, v)| (k.clone(), sql_value_to_nodedb_value(v)))
                 .collect();
-            zerompk::to_msgpack_vec(&value_map).unwrap_or_default()
+            zerompk::to_msgpack_vec(&value_map).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("vector-primary payload: {e}"),
+            })?
         };
 
         tasks.push(PhysicalTask {
@@ -223,6 +226,7 @@ mod tests {
             shuffle_agg_num_parts: 0,
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
+            sql_catalog: None,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         }

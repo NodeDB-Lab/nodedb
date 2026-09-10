@@ -13,7 +13,7 @@ pub mod schema;
 pub mod wal_record;
 
 pub use column_def::{ColumnDef, ColumnModifier};
-pub use column_parse::ColumnTypeParseError;
+pub use column_parse::{ColumnTypeParseError, DECLARED_FLOAT_KEYWORDS, DECLARED_INT_KEYWORDS};
 pub use column_type::ColumnType;
 pub use declared_type_keyword::declared_type_matches;
 pub use dml_wal_record::ColumnarDmlWalRecord;

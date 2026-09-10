@@ -15,7 +15,7 @@ use crate::types::query::{
 };
 
 use super::merge_types::MergePlanClause;
-use super::row_types::{KvInsertIntent, VectorPrimaryRow};
+use super::row_types::{KvInsertIntent, VectorPrimaryRow, WriteRoute};
 use super::vector_opts::{ArrayPrefilter, VectorAnnOptions};
 
 /// The top-level plan produced by the SQL planner.
@@ -27,6 +27,10 @@ pub enum SqlPlan {
     ConstantResult {
         columns: Vec<String>,
         values: Vec<SqlValue>,
+        /// Whether any projected expression called a `Volatile` function.
+        /// The values were evaluated while this plan was built, so a cached
+        /// plan would replay them; a volatile plan is never cached.
+        volatile: bool,
     },
 
     // ── Reads ──
@@ -100,6 +104,9 @@ pub enum SqlPlan {
     Insert {
         collection: String,
         engine: EngineType,
+        /// The lowering these rows take, chosen by the engine's `EngineRules`.
+        /// The conversion layer reads it instead of re-deciding from `engine`.
+        route: WriteRoute,
         rows: Vec<Vec<(String, SqlValue)>>,
         /// Column defaults from schema: `(column_name, default_expr)`.
         /// Used to auto-generate values for missing columns (e.g. `id` with `UUID_V7`).
@@ -138,11 +145,18 @@ pub enum SqlPlan {
         /// Empty for plain UPSERT (whole-value overwrite) and for INSERT
         /// variants.
         on_conflict_updates: Vec<(String, SqlExpr)>,
+        /// Whether any DEFAULT materialized into `entries` came from a
+        /// `Volatile` expression. The key-value planner evaluates declared
+        /// defaults while building this plan, so a cached plan would replay
+        /// one execution's value; a volatile plan is never cached.
+        volatile_defaults: bool,
     },
     /// UPSERT: insert or merge if document exists.
     Upsert {
         collection: String,
         engine: EngineType,
+        /// The lowering these rows take. Mirrors `Insert::route`.
+        route: WriteRoute,
         rows: Vec<Vec<(String, SqlValue)>>,
         column_defaults: Vec<(String, String)>,
         /// `ON CONFLICT (...) DO UPDATE SET field = expr` assignments.
@@ -717,6 +731,11 @@ pub enum SqlPlan {
         /// via `payload.add_index` on the first DirectUpsert.
         payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
         rows: Vec<VectorPrimaryRow>,
+        /// Whether any row carries a value materialized from a volatile
+        /// DEFAULT such as `nextval`. The value was evaluated while the plan
+        /// was built, so caching the lowered tasks would replay one
+        /// execution's value into every later one.
+        volatile_defaults: bool,
     },
 
     // ── Index DDL ───────────────────────────────────────────────────────

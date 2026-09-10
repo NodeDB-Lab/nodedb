@@ -11,6 +11,7 @@ use crate::control::server::shared::clone_write::CloneCheckedTask;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 use super::core::{Gateway, QueryContext, authorized_plan_for_context};
+use super::lowered_plan::LoweredPlan;
 use super::plan_cache::{PlanCacheKey, SqlKey, hash_placeholder_types, hash_sql};
 use super::version_set::{permission_tree_version_key, rls_version_key};
 
@@ -20,12 +21,17 @@ impl Gateway {
     /// `plan_fn` runs at most once on a cache miss. `authorize_fn` clone-checks
     /// and authorizes the exact plan — the cached plan or the newly planned
     /// value — the same way every other dispatch entry point does.
+    ///
+    /// `plan_fn` returns the plan together with its
+    /// [`nodedb_sql::types::PlanCacheEligibility`] verdict. A `DataDependent`
+    /// plan enters neither the plan cache nor the version-set side cache, so
+    /// the next execution re-plans and re-evaluates its volatile calls.
     pub async fn execute_sql<Authorize, AuthorizeFut>(
         &self,
         ctx: &QueryContext,
         sql: &str,
         placeholder_types: &[&str],
-        plan_fn: impl FnOnce() -> Result<PhysicalPlan, Error>,
+        plan_fn: impl FnOnce() -> Result<LoweredPlan, Error>,
         authorize_fn: Authorize,
     ) -> Result<Vec<Vec<u8>>, Error>
     where
@@ -88,19 +94,29 @@ impl Gateway {
             }
         }
 
-        let plan = plan_fn()?;
+        let lowered = plan_fn()?;
+        let cacheable = lowered.is_cacheable();
+        let plan = lowered.plan;
         let actual_vs = self
             .collect_version_set(&plan, ctx.tenant_id.as_u64(), ctx.database_id)
             .await?;
-        let actual_key = PlanCacheKey {
-            sql_text_hash: sql_hash,
-            placeholder_types_hash: ph_hash,
-            version_set: actual_vs.clone(),
-        };
 
-        self.plan_cache
-            .insert_version_set(sql_key, actual_vs.clone());
-        self.plan_cache.insert(actual_key, Arc::new(plan.clone()));
+        // A volatile plan froze its `nextval` / `now()` / UUID values while it
+        // was built. Admitting it would replay this execution's values into
+        // every later one, so it skips both caches and re-plans next time.
+        // The side cache is skipped too: its entry is pruned only alongside the
+        // plan entry it maps to, so storing one without a plan leaves an orphan
+        // that survives every DDL invalidation and buys no hit.
+        if cacheable {
+            let actual_key = PlanCacheKey {
+                sql_text_hash: sql_hash,
+                placeholder_types_hash: ph_hash,
+                version_set: actual_vs.clone(),
+            };
+            self.plan_cache
+                .insert_version_set(sql_key, actual_vs.clone());
+            self.plan_cache.insert(actual_key, Arc::new(plan.clone()));
+        }
 
         let checked = authorize_fn(plan.clone()).await?;
         let plan = authorized_plan_for_context(ctx, checked)?;

@@ -10,11 +10,17 @@ use crate::types::*;
 /// Extracts the vector-field column into `vector: Vec<f32>` and collects
 /// all remaining columns into `payload_fields`. Rows missing the vector
 /// column are rejected.
+///
+/// `rows` arrive with every declared DEFAULT already materialized, so a
+/// defaulted key or payload column reaches `payload_fields` like a supplied
+/// one. `volatile_defaults` reports whether any of those defaults was volatile,
+/// which keeps the plan out of the physical-plan cache.
 pub(crate) fn build_vector_primary_insert_plan(
     collection: &str,
     vpc: &nodedb_types::VectorPrimaryConfig,
     _columns: &[String],
     rows: Vec<Vec<(String, SqlValue)>>,
+    volatile_defaults: bool,
 ) -> Result<Vec<SqlPlan>> {
     let mut result_rows = Vec::with_capacity(rows.len());
     for row in rows {
@@ -82,5 +88,6 @@ pub(crate) fn build_vector_primary_insert_plan(
         storage_dtype: vpc.storage_dtype,
         payload_indexes: vpc.payload_indexes.clone(),
         rows: result_rows,
+        volatile_defaults,
     }])
 }

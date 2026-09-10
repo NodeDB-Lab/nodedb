@@ -86,6 +86,16 @@ pub(super) fn convert_function_depth(
         return Err(SqlError::UndefinedFunction { name });
     }
 
+    // Per-row gate: a sequence accessor is evaluated at plan time, by
+    // `planner::catalog_expr_fold` for a FROM-less SELECT and by
+    // `planner::defaults` for a column DEFAULT. A call over a FROM relation
+    // reaches the row evaluator instead, which holds no sequence state and
+    // answers `NULL` for every row. Refuse it here so the statement fails
+    // loudly at plan time.
+    if scope.is_row_scope() && crate::functions::sequence_accessor::is_sequence_accessor(&name) {
+        return Err(SqlError::SequencePerRowUnsupported { name });
+    }
+
     let args = collect_function_args(func, depth, scope)?;
 
     let distinct = match &func.args {
@@ -296,5 +306,42 @@ mod tests {
             convert_function_depth(&upper_quoted, &mut depth, &ColumnScope::Unchecked).is_ok(),
             "quoted 'UPPER' must still resolve via case-insensitive registry lookup"
         );
+    }
+
+    /// A FROM-less SELECT resolves against an empty relation set, where the
+    /// planner evaluates the accessor through the catalog.
+    #[test]
+    fn a_sequence_accessor_resolves_without_a_relation() {
+        let func = function_ast("SELECT nextval('s')");
+        let mut depth = 0;
+        let scope = crate::resolver::columns::TableScope::new();
+        let expr = convert_function_depth(&func, &mut depth, &ColumnScope::Relations(&scope))
+            .expect("a FROM-less sequence accessor must resolve");
+        match expr {
+            SqlExpr::Function { name, .. } => assert_eq!(name, "nextval"),
+            other => panic!("expected SqlExpr::Function, got {other:?}"),
+        }
+    }
+
+    /// A relation in scope makes the call per-row, which the row evaluator
+    /// cannot serve, so the resolver refuses it.
+    #[test]
+    fn a_sequence_accessor_over_a_relation_is_refused() {
+        let mut depth = 0;
+        let outer = crate::resolver::columns::TableScope::new();
+        let scope = crate::resolver::columns::TableScope::new().nested_in(outer);
+        for call in [
+            "SELECT nextval('s')",
+            "SELECT currval('s')",
+            "SELECT setval('s', 1)",
+        ] {
+            let func = function_ast(call);
+            let err = convert_function_depth(&func, &mut depth, &ColumnScope::Relations(&scope))
+                .unwrap_err();
+            assert!(
+                matches!(err, SqlError::SequencePerRowUnsupported { .. }),
+                "expected SqlError::SequencePerRowUnsupported for {call}, got {err:?}"
+            );
+        }
     }
 }

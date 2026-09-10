@@ -3,6 +3,7 @@
 //! Protocol-neutral TYPEGUARD DDL family handlers.
 
 pub mod handlers;
+mod injected_expr;
 pub mod parse;
 pub mod validate;
 

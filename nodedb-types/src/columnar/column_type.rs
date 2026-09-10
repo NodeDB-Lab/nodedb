@@ -108,6 +108,19 @@ impl ColumnType {
         self.fixed_size().is_none()
     }
 
+    /// Whether a column of this type carries an instant.
+    ///
+    /// This is the single answer to that question for both planes: the
+    /// Control Plane types such a column as a timestamp on the wire, and the
+    /// Data Plane scales exactly these columns from the epoch milliseconds
+    /// storage holds to the epoch microseconds a client reads.
+    ///
+    /// `SystemTimestamp` is not an instant. It is engine-assigned from HLC at
+    /// commit and the planner types it as text.
+    pub const fn is_instant(&self) -> bool {
+        matches!(self, Self::Timestamp | Self::Timestamptz)
+    }
+
     /// Return the canonical PostgreSQL type OID for this column type.
     ///
     /// This is the single authoritative mapping between NodeDB `ColumnType`

@@ -239,8 +239,10 @@ impl SequenceRegistry {
         handle.nextval_batch(n)
     }
 
-    /// Get the current value (last nextval result on this node).
-    pub fn currval(
+    /// Read this NODE's counter — the last value any session on this node
+    /// allocated. SQL `currval` is session-scoped and does not read this;
+    /// range allocation and diagnostics do.
+    pub fn node_current_value(
         &self,
         database_id: u64,
         tenant_id: u64,
@@ -419,7 +421,7 @@ pub enum SequenceValue {
     Formatted(String),
 }
 
-fn registry_key(database_id: u64, tenant_id: u64, name: &str) -> String {
+pub(crate) fn registry_key(database_id: u64, tenant_id: u64, name: &str) -> String {
     format!("{database_id}:{tenant_id}:{name}")
 }
 
@@ -452,9 +454,9 @@ mod tests {
             );
             assert_eq!(registry.nextval(4, 1, "orders_seq").unwrap(), 1);
             assert_eq!(registry.nextval(4, 1, "orders_seq").unwrap(), 2);
-            assert_eq!(registry.currval(4, 1, "orders_seq").unwrap(), 2);
+            assert_eq!(registry.node_current_value(4, 1, "orders_seq").unwrap(), 2);
             assert_eq!(registry.setval(4, 1, "orders_seq", 10).unwrap(), 10);
-            assert_eq!(registry.currval(4, 1, "orders_seq").unwrap(), 10);
+            assert_eq!(registry.node_current_value(4, 1, "orders_seq").unwrap(), 10);
         })
         .await;
     }

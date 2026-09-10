@@ -391,3 +391,11 @@ pub static JSON_CONTAINS_ARGS: &[ArgTypeSpec] = &[any("container"), any("needle"
 
 /// `json_merge(base, overlay)` / `json_patch(base, overlay)`.
 pub static JSON_MERGE_ARGS: &[ArgTypeSpec] = &[any("base"), any("overlay")];
+
+// ── Sequence accessors ───────────────────────────────────────────────────────
+
+/// `nextval(name)` / `currval(name)` — one sequence name.
+pub static SEQUENCE_NAME_ARGS: &[ArgTypeSpec] = &[typed("sequence", TEXT)];
+
+/// `setval(name, value)` — a sequence name and the value it must take.
+pub static SETVAL_ARGS: &[ArgTypeSpec] = &[typed("sequence", TEXT), typed("value", INT64_ONLY)];

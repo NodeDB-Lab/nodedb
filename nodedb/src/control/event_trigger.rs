@@ -340,7 +340,7 @@ pub async fn run_event_action_sql(
             tenant_id,
             database_id,
             &security.context(&shared),
-            false,
+            None,
         )
         .await
         .map_err(|source| TriggerActionError::Plan { source })?;

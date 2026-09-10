@@ -10,7 +10,8 @@ macro_rules! impl_dml_arms_for_convert_visitor {
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::InsertVisitArgs {
                 collection,
-                engine,
+                engine: _engine,
+                route,
                 rows,
                 column_defaults,
                 if_absent,
@@ -19,7 +20,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             } = args;
             super::super::dml::convert_insert(super::super::dml::ConvertInsertArgs {
                 collection,
-                engine: &engine,
+                route,
                 rows,
                 column_defaults,
                 column_schema,
@@ -36,7 +37,8 @@ macro_rules! impl_dml_arms_for_convert_visitor {
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::UpsertVisitArgs {
                 collection,
-                engine,
+                engine: _engine,
+                route,
                 rows,
                 column_defaults,
                 on_conflict_updates,
@@ -45,7 +47,7 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             } = args;
             super::super::dml::convert_upsert(super::super::dml::ConvertUpsertArgs {
                 collection,
-                engine: &engine,
+                route,
                 rows,
                 column_defaults,
                 column_schema,

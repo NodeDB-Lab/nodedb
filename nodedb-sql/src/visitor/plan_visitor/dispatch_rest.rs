@@ -162,6 +162,8 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             storage_dtype,
             payload_indexes,
             rows,
+            // Cache eligibility only; lowering does not read it.
+            volatile_defaults: _,
         } => visitor.vector_primary_insert(
             collection,
             field,

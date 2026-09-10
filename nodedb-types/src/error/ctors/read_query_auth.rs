@@ -134,6 +134,32 @@ impl NodeDbError {
         }
     }
 
+    /// A statement names a database object that does not exist. Distinct from
+    /// `undefined_function`: the function exists, the object it names does
+    /// not. Renders as SQLSTATE `42704` (`undefined_object`).
+    pub fn undefined_object(object: impl Into<String>) -> Self {
+        let object = object.into();
+        Self {
+            code: ErrorCode::UNDEFINED_OBJECT,
+            message: format!("{object} does not exist"),
+            details: ErrorDetails::UndefinedObject { object },
+            cause: None,
+        }
+    }
+
+    /// An object exists but a prerequisite step has not run, such as `currval`
+    /// before this session called `nextval`. Renders as SQLSTATE `55000`
+    /// (`object_not_in_prerequisite_state`).
+    pub fn object_not_ready(object: impl Into<String>, detail: impl Into<String>) -> Self {
+        let object = object.into();
+        Self {
+            code: ErrorCode::OBJECT_NOT_READY,
+            message: detail.into(),
+            details: ErrorDetails::ObjectNotReady { object },
+            cause: None,
+        }
+    }
+
     /// A column reference names no column of any relation in scope. Distinct
     /// from `plan_error` so clients match on the code rather than parsing the
     /// message.

@@ -9,7 +9,7 @@
 use crate::temporal::TemporalScope;
 use crate::types::SqlPlan;
 use crate::types::filter::Filter;
-use crate::types::plan::{ArrayPrefilter, MergePlanClause, VectorAnnOptions};
+use crate::types::plan::{ArrayPrefilter, MergePlanClause, VectorAnnOptions, WriteRoute};
 use crate::types::query::{
     AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate, WindowSpec,
 };
@@ -65,6 +65,8 @@ pub struct DocumentIndexLookupVisitArgs<'a> {
 pub struct InsertVisitArgs<'a> {
     pub collection: &'a str,
     pub engine: EngineType,
+    /// The lowering these rows take, decided by the engine's `EngineRules`.
+    pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
     pub column_defaults: &'a [(String, String)],
     pub if_absent: bool,
@@ -76,6 +78,8 @@ pub struct InsertVisitArgs<'a> {
 pub struct UpsertVisitArgs<'a> {
     pub collection: &'a str,
     pub engine: EngineType,
+    /// The lowering these rows take, decided by the engine's `EngineRules`.
+    pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
     pub column_defaults: &'a [(String, String)],
     pub on_conflict_updates: &'a [(String, SqlExpr)],

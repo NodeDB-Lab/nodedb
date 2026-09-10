@@ -51,15 +51,38 @@ pub fn fold_constant_default(expr: &SqlExpr) -> FoldResult {
     fold_constant(expr, default_registry())
 }
 
+/// Whether a fold is allowed to evaluate `Volatile` functions.
+///
+/// `Reuse` is plan-time folding whose result outlives this execution, so a
+/// volatile call is never evaluated. `Once` is folding for a plan that is
+/// itself marked volatile and never cached, so the call is evaluated here and
+/// re-evaluated on the next execution's re-plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldScope {
+    /// The folded value can be reused by a later execution.
+    Reuse,
+    /// The folded value serves this execution only.
+    Once,
+}
+
 /// Fold a `SqlExpr` to a literal `SqlValue` at plan time. See [`FoldResult`]
-/// for what each outcome means.
+/// for what each outcome means. Volatile calls are never folded.
 pub fn fold_constant(expr: &SqlExpr, registry: &FunctionRegistry) -> FoldResult {
+    fold_constant_scoped(expr, registry, FoldScope::Reuse)
+}
+
+/// Fold a `SqlExpr` under an explicit [`FoldScope`].
+pub fn fold_constant_scoped(
+    expr: &SqlExpr,
+    registry: &FunctionRegistry,
+    scope: FoldScope,
+) -> FoldResult {
     match expr {
         SqlExpr::Literal(v) => Ok(Some(v.clone())),
         SqlExpr::ArrayLiteral(items) => {
             let mut folded = Vec::with_capacity(items.len());
             for item in items {
-                match fold_constant(item, registry)? {
+                match fold_constant_scoped(item, registry, scope)? {
                     Some(v) => folded.push(v),
                     None => return Ok(None),
                 }
@@ -69,7 +92,7 @@ pub fn fold_constant(expr: &SqlExpr, registry: &FunctionRegistry) -> FoldResult 
         SqlExpr::UnaryOp {
             op: UnaryOp::Neg,
             expr,
-        } => Ok(match fold_constant(expr, registry)? {
+        } => Ok(match fold_constant_scoped(expr, registry, scope)? {
             // `checked_neg` so negating `i64::MIN` declines to fold rather
             // than wrapping (release) or panicking (debug).
             Some(SqlValue::Int(i)) => i.checked_neg().map(SqlValue::Int),
@@ -79,17 +102,18 @@ pub fn fold_constant(expr: &SqlExpr, registry: &FunctionRegistry) -> FoldResult 
         }),
         SqlExpr::BinaryOp { left, op, right } => {
             let (Some(l), Some(r)) = (
-                fold_constant(left, registry)?,
-                fold_constant(right, registry)?,
+                fold_constant_scoped(left, registry, scope)?,
+                fold_constant_scoped(right, registry, scope)?,
             ) else {
                 return Ok(None);
             };
             fold_binary(l, *op, r)
         }
-        SqlExpr::Function { name, args, .. } => fold_function_call(name, args, registry),
-        SqlExpr::Cast { expr, to_type } => {
-            Ok(fold_constant(expr, registry)?.and_then(|inner| fold_cast(inner, to_type)))
+        SqlExpr::Function { name, args, .. } => {
+            fold_function_call_scoped(name, args, registry, scope)
         }
+        SqlExpr::Cast { expr, to_type } => Ok(fold_constant_scoped(expr, registry, scope)?
+            .and_then(|inner| fold_cast(inner, to_type))),
         _ => Ok(None),
     }
 }
@@ -310,12 +334,23 @@ fn fold_binary(l: SqlValue, op: BinaryOp, r: SqlValue) -> FoldResult {
 /// through the shared scalar evaluator, and converting the result back to
 /// `SqlValue`. Only folds functions that are present in `registry`, so
 /// callers can distinguish "unknown function" from "known function, all
-/// args folded".
+/// args folded". A `Volatile` function is never folded.
 pub fn fold_function_call(name: &str, args: &[SqlExpr], registry: &FunctionRegistry) -> FoldResult {
+    fold_function_call_scoped(name, args, registry, FoldScope::Reuse)
+}
+
+/// Fold a function call under an explicit [`FoldScope`].
+pub fn fold_function_call_scoped(
+    name: &str,
+    args: &[SqlExpr],
+    registry: &FunctionRegistry,
+    scope: FoldScope,
+) -> FoldResult {
     // Gate on registry so unknown-function paths keep their existing
     // fallbacks instead of collapsing to SqlValue::Null. Aggregates and
     // window functions aren't foldable — they need a row stream.
-    let Some(meta) = registry.lookup(name) else {
+    let name_lower = name.to_lowercase();
+    let Some(meta) = registry.lookup(&name_lower) else {
         return Ok(None);
     };
     if matches!(
@@ -324,10 +359,22 @@ pub fn fold_function_call(name: &str, args: &[SqlExpr], registry: &FunctionRegis
     ) {
         return Ok(None);
     }
+    // A volatile call must run per execution, so folding it into a reusable
+    // literal would freeze the first result into every later execution of the
+    // same plan. Same "not folded" outcome the category guard above produces.
+    if meta.volatility.is_volatile() && scope == FoldScope::Reuse {
+        return Ok(None);
+    }
+    // Sequence accessors read catalog state this folder has no handle on.
+    // `planner::catalog_expr_fold::eval_catalog_constant` resolves them
+    // through `SqlCatalog` before any fold runs.
+    if matches!(name_lower.as_str(), "nextval" | "currval" | "setval") {
+        return Ok(None);
+    }
 
     let mut folded_args = Vec::with_capacity(args.len());
     for arg in args {
-        match fold_constant(arg, registry)? {
+        match fold_constant_scoped(arg, registry, scope)? {
             Some(v) => folded_args.push(sql_to_ndb_value(v)),
             None => return Ok(None),
         }
@@ -339,7 +386,7 @@ pub fn fold_function_call(name: &str, args: &[SqlExpr], registry: &FunctionRegis
     // clause; `SELECT mod(5, 0)` has no row scope and became NULL.
     // Exhaustive on purpose: a new `EvalError` variant must be classified
     // here rather than defaulting to "defer to a runtime that may not exist".
-    match nodedb_query::functions::eval_function(&name.to_lowercase(), &folded_args) {
+    match nodedb_query::functions::eval_function(&name_lower, &folded_args) {
         Ok(result) => Ok(Some(ndb_to_sql_value(result))),
         Err(nodedb_query::EvalError::DivisionByZero) => Err(SqlError::DivisionByZero),
     }
@@ -402,16 +449,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fold_now_produces_timestamptz() {
+    fn fold_now_produces_timestamptz_once_only() {
         let registry = FunctionRegistry::new();
         let expr = SqlExpr::Function {
             name: "now".into(),
             args: vec![],
             distinct: false,
         };
-        let val = fold_constant(&expr, &registry)
+        // `now` is volatile, so a reusable plan must never carry its value.
+        assert!(
+            matches!(fold_constant(&expr, &registry), Ok(None)),
+            "now() must not fold into a reusable plan"
+        );
+        let val = fold_constant_scoped(&expr, &registry, FoldScope::Once)
             .expect("fold must not error")
-            .expect("now() should fold");
+            .expect("now() must fold for a single execution");
         match val {
             SqlValue::Timestamptz(dt) => {
                 // Sanity: must not be epoch (year 1970).
@@ -422,15 +474,19 @@ mod tests {
     }
 
     #[test]
-    fn fold_current_timestamp_produces_timestamptz() {
+    fn fold_current_timestamp_produces_timestamptz_once_only() {
         let registry = FunctionRegistry::new();
         let expr = SqlExpr::Function {
             name: "current_timestamp".into(),
             args: vec![],
             distinct: false,
         };
+        assert!(
+            matches!(fold_constant(&expr, &registry), Ok(None)),
+            "current_timestamp must not fold into a reusable plan"
+        );
         assert!(matches!(
-            fold_constant(&expr, &registry),
+            fold_constant_scoped(&expr, &registry, FoldScope::Once),
             Ok(Some(SqlValue::Timestamptz(_)))
         ));
     }

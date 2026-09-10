@@ -81,6 +81,10 @@ pub fn apply_planning_session_overrides(
         query_ctx.set_max_vector_dim(tenants.quota(tenant_id).max_vector_dim);
     }
 
+    // Sequence accessors resolve at plan time, so the planner needs this
+    // connection's `currval` map before it plans.
+    query_ctx.set_session_sequences(sessions.sequence_values(session_id));
+
     // Distributed shuffle-join override (`SET nodedb.force_shuffle_join = on`
     // and, optionally, `SET nodedb.shuffle_num_parts = N`).
     let force_shuffle_join = sessions

@@ -17,7 +17,11 @@
 //! `BIGINT` time keys. A name the engine happens to recognise internally
 //! (`ts`, `timestamp`, `time`) is not special: it is the user's column.
 //!
-//! Time-key values read back as the epoch milliseconds the engine stores.
+//! A declared `TIMESTAMP` time key reads back as the instant that was
+//! inserted: the engine stores epoch milliseconds and a `TIMESTAMP` cell is
+//! read as epoch microseconds, so the two units meet as the row leaves the
+//! scan. A `BIGINT` time key shares that storage column and is not a
+//! timestamp, so it reads back as the number that was inserted.
 
 use crate::harness::TestServer;
 
@@ -29,9 +33,14 @@ const LATE: &str = "2020-03-05 13:00:00";
 /// Upper bound that both event times fall below but no ingest-assigned
 /// wall-clock time ever will.
 const AFTER_BOTH: &str = "2021-01-01 00:00:00";
-/// `EARLY` as the epoch milliseconds the timeseries engine stores and reads
-/// back for a time-key column.
-const EARLY_MS: &str = "1583402400000";
+/// `EARLY` as a declared `TIMESTAMP` column renders it. The engine stores
+/// 1583402400000 epoch milliseconds; a `TIMESTAMP` cell carries epoch
+/// microseconds, which the pgwire encoder writes as ISO-8601 UTC.
+const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
+/// `EARLY` as `SELECT *` renders it: a star projection announces no catalog
+/// type, so its cells stay the raw stored number — here the same instant in
+/// epoch microseconds.
+const EARLY_MICROS: &str = "1583402400000000";
 
 #[tokio::test]
 async fn time_key_named_ts_round_trips() {
@@ -58,7 +67,10 @@ async fn time_key_named_ts_round_trips() {
         !ts.is_empty(),
         "declared TIME_KEY column `ts` must not read back NULL: {rows:?}"
     );
-    assert_eq!(ts, EARLY_MS, "`ts` must round-trip the inserted event time");
+    assert_eq!(
+        ts, EARLY_ISO,
+        "`ts` must round-trip the inserted event time"
+    );
 }
 
 #[tokio::test]
@@ -114,7 +126,7 @@ async fn select_star_projects_declared_columns_only() {
     );
     assert_eq!(
         rows[0].get("ts").map(String::as_str),
-        Some(EARLY_MS),
+        Some(EARLY_MICROS),
         "`SELECT *` must carry the inserted event time under `ts`: {rows:?}"
     );
 }
@@ -141,7 +153,7 @@ async fn custom_named_time_key_round_trips() {
     assert_eq!(rows.len(), 1, "one inserted row must read back: {rows:?}");
     assert_eq!(
         rows[0].get("captured_at").map(String::as_str),
-        Some(EARLY_MS),
+        Some(EARLY_ISO),
         "`captured_at` must round-trip the inserted event time: {rows:?}"
     );
 }
@@ -289,7 +301,7 @@ async fn non_time_key_column_named_timestamp_keeps_its_value() {
     );
     assert_eq!(
         rows[0].get("captured_at").map(String::as_str),
-        Some(EARLY_MS),
+        Some(EARLY_ISO),
         "the declared time key must still round-trip: {rows:?}"
     );
 }

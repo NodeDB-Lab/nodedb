@@ -31,4 +31,15 @@ impl ColumnScope<'_> {
             Self::Relations(scope) => scope.check_name(table_ref, column),
         }
     }
+
+    /// Whether an expression here is evaluated once per row of some relation.
+    ///
+    /// `Unchecked` stands behind stored DEFAULTs, index predicates, and the
+    /// constant folders, none of which iterate rows.
+    pub fn is_row_scope(&self) -> bool {
+        match self {
+            Self::Unchecked => false,
+            Self::Relations(scope) => scope.is_row_scope(),
+        }
+    }
 }

@@ -3,8 +3,7 @@
 //! Plan construction for the KV engine's `VALUES`-clause insert paths
 //! (plain `INSERT`, `UPSERT`, and `INSERT ... ON CONFLICT DO UPDATE`).
 
-use sqlparser::ast;
-
+use super::params::KvInsertParams;
 use super::range_check::{
     check_declared_float_ranges, check_declared_float_ranges_in_assignments,
     check_declared_int_ranges, check_declared_int_ranges_in_assignments,
@@ -14,6 +13,7 @@ use crate::error::{Result, SqlError};
 use crate::planner::declared_type_coerce::{
     coerce_assignments_to_declared_types, coerce_row_to_declared_types,
 };
+use crate::planner::defaults::ColumnDefaults;
 use crate::types::*;
 
 /// Build a `SqlPlan::KvInsert` from a VALUES clause. Shared by plain INSERT,
@@ -21,20 +21,22 @@ use crate::types::*;
 /// differ only in `intent` and `on_conflict_updates`, never in how entries
 /// are extracted from the row exprs.
 ///
-/// `pk_col` is the schema-defined primary-key column name from
+/// `params.pk_col` is the schema-defined primary-key column name from
 /// `CollectionInfo::primary_key`.  When supplied, that column is used as
 /// the KV key regardless of whether it is named `"key"`.  Falls back to
 /// the literal name `"key"` when `pk_col` is `None` (legacy / generic
 /// KV collections that use the built-in key/value column convention).
-pub(crate) fn build_kv_insert_plan(
-    table_name: String,
-    columns: &[String],
-    rows_ast: &[ast::Parens<Vec<ast::Expr>>],
-    intent: KvInsertIntent,
-    mut on_conflict_updates: Vec<(String, SqlExpr)>,
-    pk_col: Option<&str>,
-    declared_columns: &[ColumnInfo],
-) -> Result<Vec<SqlPlan>> {
+pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<SqlPlan>> {
+    let KvInsertParams {
+        collection: table_name,
+        columns,
+        rows_ast,
+        intent,
+        mut on_conflict_updates,
+        pk_col,
+        declared_columns,
+        catalog,
+    } = params;
     // Positional KV insert (no column list): the key/value split below is
     // driven entirely by matching column *names* against `key_col_name`/
     // `"ttl"`. With an empty `columns` list there is no key to bind to, so
@@ -70,14 +72,18 @@ pub(crate) fn build_kv_insert_plan(
     // string — while `RowDescription` advertises the declared numeric type, and
     // the read path can only encode SQL NULL for it. See
     // `declared_type_coerce` for the full rationale.
+    // Compiled once, outside the row loop: a DEFAULT expression's parse is a
+    // property of the declaration, not of the row.
+    let compiled_defaults = ColumnDefaults::compile_columns(declared_columns)?;
     let mut coerced_rows: Vec<Vec<(String, SqlValue)>> = Vec::with_capacity(rows_ast.len());
+    let mut volatile_defaults = false;
     for row_exprs in rows_ast {
         let mut row: Vec<(String, SqlValue)> = Vec::with_capacity(columns.len());
         for (i, col) in columns.iter().enumerate() {
             let Some(expr) = row_exprs.get(i) else { break };
             row.push((col.clone(), expr_to_sql_value(expr)?));
         }
-        materialize_declared_defaults(declared_columns, &mut row)?;
+        volatile_defaults |= compiled_defaults.materialize_row(&mut row, catalog)?;
         // The key column is exempt — see `coerce_rows_to_declared_types`.
         coerce_row_to_declared_types(declared_columns, &mut row, Some(key_col_name))?;
         coerced_rows.push(row);
@@ -130,94 +136,33 @@ pub(crate) fn build_kv_insert_plan(
         ttl_secs,
         intent,
         on_conflict_updates,
+        volatile_defaults,
     }])
-}
-
-/// Fill in every declared column the statement omitted that carries a DEFAULT.
-///
-/// The key-value engine stores the bytes it is handed and has no typed write
-/// path, so a DEFAULT that is not materialized HERE is materialized nowhere:
-/// the catalog would keep the declaration and every read return nothing for it.
-/// Documents and columnar rows expand theirs through the same
-/// `evaluate_default_expr`, so one expression yields one value on every engine.
-///
-/// Two rules the ordering encodes:
-///
-/// - A column the statement SUPPLIED is never touched, and that includes an
-///   explicit `NULL`. `NULL` is a value the author chose; overwriting it with
-///   the default would make it impossible to store one.
-/// - Materialized values are appended BEFORE the caller's declared-type
-///   coercion and range checks, so a default is validated exactly like a
-///   supplied literal. Filling them in afterwards would make `DEFAULT 999999`
-///   on a `SMALLINT` column a way to store a value the same literal is
-///   rejected for.
-fn materialize_declared_defaults(
-    declared_columns: &[ColumnInfo],
-    row: &mut Vec<(String, SqlValue)>,
-) -> Result<()> {
-    for column in declared_columns {
-        let Some(default_expr) = column.default.as_deref() else {
-            continue;
-        };
-        if row.iter().any(|(name, _)| name == &column.name) {
-            continue;
-        }
-        let evaluated =
-            crate::planner::defaults::evaluate_default_expr(default_expr).map_err(|e| {
-                SqlError::Parse {
-                    detail: format!("default for column '{}' is invalid: {e}", column.name),
-                }
-            })?;
-        let Some(evaluated) = evaluated else { continue };
-        let value = nodedb_value_to_sql_value(&column.name, evaluated)?;
-        row.push((column.name.clone(), value));
-    }
-    Ok(())
-}
-
-/// Convert an evaluated default back into the planner's literal type.
-///
-/// The inverse of `sql_value_to_ndb` in `planner::defaults`, which is the only
-/// producer of these values — so every shape the evaluator can emit has an
-/// exact counterpart here. Anything else is rejected rather than rendered
-/// through `Debug`: a `DEFAULT` that silently stored `Uuid("…")` as its own
-/// debug text would be the same class of defect as dropping it entirely, but
-/// harder to notice because the column would look populated.
-fn nodedb_value_to_sql_value(column: &str, value: nodedb_types::Value) -> Result<SqlValue> {
-    Ok(match value {
-        nodedb_types::Value::Null => SqlValue::Null,
-        nodedb_types::Value::Bool(b) => SqlValue::Bool(b),
-        nodedb_types::Value::Integer(i) => SqlValue::Int(i),
-        nodedb_types::Value::Float(f) => SqlValue::Float(f),
-        nodedb_types::Value::Decimal(d) => SqlValue::Decimal(d),
-        nodedb_types::Value::String(s) => SqlValue::String(s),
-        nodedb_types::Value::Bytes(b) => SqlValue::Bytes(b),
-        nodedb_types::Value::NaiveDateTime(dt) => SqlValue::Timestamp(dt),
-        nodedb_types::Value::DateTime(dt) => SqlValue::Timestamptz(dt),
-        nodedb_types::Value::Array(items) => SqlValue::Array(
-            items
-                .into_iter()
-                .map(|item| nodedb_value_to_sql_value(column, item))
-                .collect::<Result<Vec<_>>>()?,
-        ),
-        other => {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "default for column '{column}' evaluates to a value with no SQL literal \
-                     form: {other:?}"
-                ),
-            });
-        }
-    })
 }
 
 #[cfg(test)]
 mod kv_on_conflict_range_tests {
+    use sqlparser::ast;
     use sqlparser::ast::{Expr, Value, ValueWithSpan};
     use sqlparser::tokenizer::Span;
 
     use super::*;
+    use crate::catalog::SqlCatalog;
     use nodedb_types::columnar::{FloatWidth, IntWidth};
+
+    /// A catalog with no collections and no sequence state. These cases
+    /// declare no DEFAULT, so no accessor is ever reached.
+    struct NoCatalog;
+
+    impl SqlCatalog for NoCatalog {
+        fn get_collection(
+            &self,
+            _database_id: nodedb_types::DatabaseId,
+            _name: &str,
+        ) -> std::result::Result<Option<CollectionInfo>, crate::catalog::SqlCatalogError> {
+            Ok(None)
+        }
+    }
 
     fn string_column(name: &str) -> ColumnInfo {
         ColumnInfo {
@@ -274,15 +219,16 @@ mod kv_on_conflict_range_tests {
             int_column("n", Some(IntWidth::I32)),
             float_column("r", Some(FloatWidth::F32)),
         ];
-        build_kv_insert_plan(
-            "t".to_string(),
-            &["key".to_string()],
-            &[ast::Parens::with_empty_span(vec![key_value_expr("a")])],
-            KvInsertIntent::Put,
-            updates,
-            Some("key"),
-            &declared,
-        )
+        build_kv_insert_plan(KvInsertParams {
+            collection: "t".to_string(),
+            columns: &["key".to_string()],
+            rows_ast: &[ast::Parens::with_empty_span(vec![key_value_expr("a")])],
+            intent: KvInsertIntent::Put,
+            on_conflict_updates: updates,
+            pk_col: Some("key"),
+            declared_columns: &declared,
+            catalog: &NoCatalog,
+        })
     }
 
     #[test]

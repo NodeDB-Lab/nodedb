@@ -10,6 +10,7 @@ mod grace_repartition;
 mod grace_spill;
 pub mod hash;
 mod hash_handlers;
+pub(in crate::data::executor) mod instant_scale;
 pub mod lateral;
 pub mod nested_loop;
 pub mod params;

@@ -16,6 +16,11 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 /// Shared inputs for shaping one task of a completed Calvin batch.
 pub(super) struct CalvinResponseCtx<'a> {
+    /// The statement's announced output columns, when it announced any. A
+    /// `RETURNING` write is held to them here exactly as the single-shard
+    /// dispatch loop holds it, so the same statement renders the same row
+    /// whichever route it took.
+    pub(super) projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
     pub(super) state: &'a crate::control::state::SharedState,
     pub(super) tenant_id: TenantId,
     pub(super) database_id: crate::types::DatabaseId,
@@ -55,6 +60,7 @@ pub(super) fn calvin_execution_response(
     use crate::control::server::response_shape::types::{PlanKind, describe_plan};
 
     let CalvinResponseCtx {
+        projection,
         state,
         tenant_id,
         database_id,
@@ -70,7 +76,7 @@ pub(super) fn calvin_execution_response(
                 payload: resp.payload.as_bytes(),
                 plan: &task.plan,
                 plan_kind: PlanKind::ReturningRows,
-                projection: None,
+                projection,
                 state,
                 database_id,
                 tenant_id,

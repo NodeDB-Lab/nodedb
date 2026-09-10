@@ -8,6 +8,7 @@ use nodedb_physical::physical_plan::{GroupKeySpec, QueryOp};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::join::{
     HashJoinParams, JoinParams, NestedLoopJoinParams, ShuffleJoinInputs, SortMergeJoinParams,
+    instant_scale::JoinInstantSide,
     lateral::{LateralLoopParams, LateralTopKParams},
 };
 use crate::data::executor::task::ExecutionTask;
@@ -110,7 +111,34 @@ impl CoreLoop {
                 left_scan_filters,
                 right_scan_filters,
                 ..
-            } => self.execute_hash_join(HashJoinParams {
+            } => {
+                // Only a side this join scans itself carries stored
+                // milliseconds. A side supplied by a sub-plan was already
+                // rescaled by the handler that read it, so listing it here
+                // would scale one instant twice.
+                let mut local_sides = Vec::with_capacity(2);
+                if left_input.is_none() {
+                    local_sides.push(JoinInstantSide {
+                        collection: left_collection.as_str(),
+                        qualifier: left_alias
+                            .as_deref()
+                            .unwrap_or_else(|| left_collection.as_str()),
+                    });
+                }
+                if right_input.is_none() {
+                    local_sides.push(JoinInstantSide {
+                        collection: right_collection.as_str(),
+                        qualifier: right_alias
+                            .as_deref()
+                            .unwrap_or_else(|| right_collection.as_str()),
+                    });
+                }
+                let instant_columns = self.join_instant_columns(
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    &local_sides,
+                );
+                self.execute_hash_join(HashJoinParams {
                 join: JoinParams {
                     task,
                     on,
@@ -120,6 +148,7 @@ impl CoreLoop {
                     computed_projection_bytes: computed_projection,
                     join_filter_bytes: join_filters,
                     post_filter_bytes: post_filters,
+                    instant_columns: &instant_columns,
                 },
                 tid,
                 left_collection: left_collection.as_str(),
@@ -134,7 +163,8 @@ impl CoreLoop {
                 right_rls_filters,
                 left_scan_filters,
                 right_scan_filters,
-            }),
+            })
+            }
 
             QueryOp::ShuffleJoinConsume {
                 build_path,
@@ -161,6 +191,10 @@ impl CoreLoop {
                     computed_projection_bytes: &[],
                     join_filter_bytes: &[],
                     post_filter_bytes: &[],
+                    // A shuffle consumer's rows are gathered by the
+                    // coordinator, not sent to a client, and its staged
+                    // frames were produced by the sides' own scans.
+                    instant_columns: &[],
                 };
                 let inputs = ShuffleJoinInputs {
                     build_path: std::path::PathBuf::from(build_path),
@@ -182,17 +216,34 @@ impl CoreLoop {
                 limit,
                 left_rls_filters,
                 right_rls_filters,
-            } => self.execute_nested_loop_join(NestedLoopJoinParams {
-                task,
-                tid,
-                left_collection: left_collection.as_str(),
-                right_collection: right_collection.as_str(),
-                condition,
-                join_type,
-                limit: *limit,
-                left_rls_filters,
-                right_rls_filters,
-            }),
+            } => {
+                let instant_columns = self.join_instant_columns(
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    &[
+                        JoinInstantSide {
+                            collection: left_collection.as_str(),
+                            qualifier: left_collection.as_str(),
+                        },
+                        JoinInstantSide {
+                            collection: right_collection.as_str(),
+                            qualifier: right_collection.as_str(),
+                        },
+                    ],
+                );
+                self.execute_nested_loop_join(NestedLoopJoinParams {
+                    task,
+                    tid,
+                    left_collection: left_collection.as_str(),
+                    right_collection: right_collection.as_str(),
+                    condition,
+                    join_type,
+                    limit: *limit,
+                    left_rls_filters,
+                    right_rls_filters,
+                    instant_columns: &instant_columns,
+                })
+            }
 
             QueryOp::SortMergeJoin {
                 left_collection,
@@ -203,18 +254,35 @@ impl CoreLoop {
                 pre_sorted,
                 left_rls_filters,
                 right_rls_filters,
-            } => self.execute_sort_merge_join(SortMergeJoinParams {
-                task,
-                tid,
-                left_collection: left_collection.as_str(),
-                right_collection: right_collection.as_str(),
-                on,
-                join_type,
-                limit: *limit,
-                pre_sorted: *pre_sorted,
-                left_rls_filters,
-                right_rls_filters,
-            }),
+            } => {
+                let instant_columns = self.join_instant_columns(
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    &[
+                        JoinInstantSide {
+                            collection: left_collection.as_str(),
+                            qualifier: left_collection.as_str(),
+                        },
+                        JoinInstantSide {
+                            collection: right_collection.as_str(),
+                            qualifier: right_collection.as_str(),
+                        },
+                    ],
+                );
+                self.execute_sort_merge_join(SortMergeJoinParams {
+                    task,
+                    tid,
+                    left_collection: left_collection.as_str(),
+                    right_collection: right_collection.as_str(),
+                    on,
+                    join_type,
+                    limit: *limit,
+                    pre_sorted: *pre_sorted,
+                    left_rls_filters,
+                    right_rls_filters,
+                    instant_columns: &instant_columns,
+                })
+            }
 
             QueryOp::RecursiveScan {
                 collection,

@@ -13,6 +13,7 @@ impl EngineRules for SpatialRules {
         Ok(vec![SqlPlan::Insert {
             collection: p.collection,
             engine: EngineType::Spatial,
+            route: WriteRoute::ColumnarFamily,
             rows: p.rows,
             column_defaults: p.column_defaults,
             if_absent: p.if_absent,
@@ -28,6 +29,7 @@ impl EngineRules for SpatialRules {
         Ok(vec![SqlPlan::Upsert {
             collection: p.collection,
             engine: EngineType::Spatial,
+            route: WriteRoute::ColumnarFamily,
             rows: p.rows,
             column_defaults: p.column_defaults,
             on_conflict_updates: p.on_conflict_updates,

@@ -53,14 +53,16 @@ fn meter_calvin_task(
 
 /// Who issued the statement and how its rows must be encoded back.
 ///
-/// Bundled because these four are the connection's identity, not parameters of
-/// the dispatch: they are looked up together at the call site and travel
-/// unchanged through every branch below.
+/// Bundled because these are the connection's identity and result contract,
+/// not parameters of the dispatch: they are looked up together at the call
+/// site and travel unchanged through every branch below.
 pub(super) struct CalvinDispatchSession<'a> {
     pub identity: &'a AuthenticatedIdentity,
     pub session_id: SessionId,
     pub result_formats: &'a [pgwire::api::results::FieldFormat],
     pub auth: &'a crate::control::security::auth_context::AuthContext,
+    /// The statement's announced output columns, when it announced any.
+    pub projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
 }
 
 impl NodeDbPgHandler {
@@ -81,6 +83,7 @@ impl NodeDbPgHandler {
             session_id,
             result_formats,
             auth,
+            projection,
         } = session;
         let cross_shard_mode = self.sessions.cross_shard_txn_mode(session_id);
         let tx_state = self.sessions.transaction_state(session_id);
@@ -180,6 +183,7 @@ impl NodeDbPgHandler {
                     task,
                     apply_resp.as_ref(),
                     CalvinResponseCtx {
+                        projection,
                         state: &self.state,
                         tenant_id,
                         database_id,
@@ -259,6 +263,7 @@ impl NodeDbPgHandler {
                 task,
                 outcome.apply_result.as_ref(),
                 CalvinResponseCtx {
+                    projection,
                     state: &self.state,
                     tenant_id,
                     database_id,

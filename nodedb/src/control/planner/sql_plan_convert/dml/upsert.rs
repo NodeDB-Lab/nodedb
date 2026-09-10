@@ -6,7 +6,7 @@
 //! identity helper there (`resolve_doc_identity`) so a row's surrogate is
 //! derived identically whichever statement wrote it.
 
-use nodedb_sql::types::{EngineType, SqlExpr, SqlValue};
+use nodedb_sql::types::{SqlExpr, SqlValue, WriteRoute};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{TenantId, VShardId};
@@ -14,14 +14,17 @@ use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::*;
 
 use super::super::convert::ConvertContext;
-use super::super::value::{assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array};
+use super::super::value::{
+    assignments_to_update_values, expand_row_defaults, row_to_msgpack, rows_to_msgpack_array,
+};
 use super::insert::{build_schema_bytes, columnar_row_surrogates, resolve_doc_identity};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Bundled arguments for [`convert_upsert`].
 pub(in super::super) struct ConvertUpsertArgs<'a> {
     pub collection: &'a str,
-    pub engine: &'a EngineType,
+    /// The lowering these rows take, decided by `nodedb-sql`.
+    pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
     pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
@@ -36,7 +39,7 @@ pub(in super::super) fn convert_upsert(
 ) -> crate::Result<Vec<PhysicalTask>> {
     let ConvertUpsertArgs {
         collection,
-        engine,
+        route,
         rows,
         column_defaults,
         column_schema,
@@ -73,9 +76,14 @@ pub(in super::super) fn convert_upsert(
 
     let mut columnar_rows: Vec<&Vec<(String, SqlValue)>> = Vec::new();
 
-    for row in rows {
-        match engine {
-            EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
+    // Every engine's rows expand their DEFAULTs here, ahead of identity
+    // derivation, so the primary-key NOT NULL gate reads the row the
+    // declaration promises — see `expand_row_defaults`.
+    let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
+
+    for row in &expanded_rows {
+        match route {
+            WriteRoute::Document => {
                 let value_bytes = row_to_msgpack(row)?;
                 let (doc_id, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
                 let plan = if is_crdt {
@@ -114,21 +122,14 @@ pub(in super::super) fn convert_upsert(
                     txn_id: None,
                 });
             }
-            EngineType::Columnar | EngineType::Spatial => {
+            WriteRoute::ColumnarFamily => {
                 columnar_rows.push(row);
-            }
-            EngineType::Timeseries | EngineType::KeyValue | EngineType::Array => {
-                return Err(crate::Error::PlanError {
-                    detail: format!(
-                        "UPSERT into '{collection}': engine type {engine:?} does not support upsert"
-                    ),
-                });
             }
         }
     }
 
     if !columnar_rows.is_empty() {
-        let payload = rows_to_msgpack_array(&columnar_rows, column_defaults)?;
+        let payload = rows_to_msgpack_array(&columnar_rows)?;
         let surrogates = columnar_row_surrogates(ctx, collection, &columnar_rows, primary_key)?;
         let schema_bytes = build_schema_bytes(column_schema);
         tasks.push(PhysicalTask {

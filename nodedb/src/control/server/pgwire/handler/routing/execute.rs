@@ -144,7 +144,10 @@ impl NodeDbPgHandler {
                 tenant_id,
                 identity,
                 session_id,
-                shaping.formats,
+                ResultShaping {
+                    projection: effective_schema,
+                    formats: shaping.formats,
+                },
                 &auth_ctx,
             )
             .await?
@@ -214,6 +217,7 @@ impl NodeDbPgHandler {
                                     session_id,
                                     result_formats: shaping.formats,
                                     auth: &auth_ctx,
+                                    projection: effective_schema,
                                 },
                                 &sum_target_reads,
                             )

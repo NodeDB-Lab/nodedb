@@ -31,7 +31,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Uuid),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         // `uuid_v4` and `gen_random_uuid` are aliases for `uuid` — same
         // `nodedb_query::functions::id::try_eval` match arm
         // (`"uuid" | "uuid_v4" | "gen_random_uuid"`).
@@ -43,7 +44,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Uuid),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "gen_random_uuid",
             Scalar,
@@ -52,7 +54,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Uuid),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "uuid_v7",
             Scalar,
@@ -61,7 +64,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Uuid),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "ulid",
             Scalar,
@@ -70,7 +74,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::Ulid),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "cuid2",
             Scalar,
@@ -79,7 +84,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::String),
             arg_types::NO_ARGS,
-        ),
+        )
+        .volatile(),
         // `nanoid(length?)` — the optional length argument means max_args is
         // 1 even though the common call form `nanoid()` takes none.
         m(
@@ -90,7 +96,8 @@ pub(super) fn id_fn_functions() -> Vec<FunctionMeta> {
             no_trigger(),
             Some(ColumnType::String),
             arg_types::NANOID_ARGS,
-        ),
+        )
+        .volatile(),
         m(
             "is_uuid",
             Scalar,

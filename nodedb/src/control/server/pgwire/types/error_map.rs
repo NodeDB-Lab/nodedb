@@ -45,10 +45,21 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
                  it is hard-deleted"
             ),
         ),
+        crate::Error::FeatureNotSupported { detail } => {
+            ("ERROR", sqlstate::FEATURE_NOT_SUPPORTED, detail.clone())
+        }
         crate::Error::UndefinedFunction { name } => (
             "ERROR",
             sqlstate::UNDEFINED_FUNCTION,
             format!("function {name}(...) does not exist"),
+        ),
+        crate::Error::UndefinedObject { .. } => {
+            ("ERROR", sqlstate::UNDEFINED_OBJECT, err.to_string())
+        }
+        crate::Error::ObjectNotInPrerequisiteState { detail, .. } => (
+            "ERROR",
+            sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+            detail.clone(),
         ),
         crate::Error::UndefinedColumn { column } => (
             "ERROR",

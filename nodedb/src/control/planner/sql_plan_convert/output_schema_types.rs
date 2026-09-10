@@ -21,14 +21,23 @@ use nodedb_sql::types_expr::{BinaryOp, SqlExpr, SqlValue, UnaryOp};
 
 use crate::control::server::response_shape::types::DdlColType;
 
-/// Resolves a bare (unqualified or table-qualified) column reference to its
-/// catalog type from `types`. Returns `None` for any non-column expression, or
-/// for a column absent from the map. `types` is keyed by bare column name (the
-/// last dotted segment), matching how the catalog map is built for the
-/// collection in scope.
+/// Resolves a column reference to its catalog type from `types`. Returns
+/// `None` for any non-column expression, or for a column absent from the map.
+///
+/// A join's map is keyed on the qualified name, because two sides can carry
+/// the same bare column with different types, so a table-qualified reference
+/// tries `<table>.<name>` first. A single-collection map holds bare names
+/// only, where that lookup misses and the bare name answers.
 fn bare_column_type(expr: &SqlExpr, types: &HashMap<String, DdlColType>) -> Option<DdlColType> {
     match expr {
-        SqlExpr::Column { name, .. } => types.get(name).copied(),
+        SqlExpr::Column {
+            table: Some(table),
+            name,
+        } => types
+            .get(&format!("{table}.{name}"))
+            .or_else(|| types.get(name))
+            .copied(),
+        SqlExpr::Column { table: None, name } => types.get(name).copied(),
         _ => None,
     }
 }

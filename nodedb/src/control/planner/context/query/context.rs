@@ -98,6 +98,13 @@ pub struct QueryContext {
     /// mirrors `broadcast_threshold_bytes` so `&self` plan calls read it without
     /// an exclusive borrow.
     pub(super) shuffle_agg_threshold: std::sync::atomic::AtomicUsize,
+    /// The calling connection's `currval` map, forwarded into the catalog
+    /// adapter each plan call. Written per request by
+    /// `apply_planning_session_overrides`, exactly like the knobs above.
+    /// `None` for planning with no session behind it, which then reports
+    /// that sequence access is unavailable rather than crossing sessions.
+    pub(super) session_sequences:
+        std::sync::Mutex<Option<Arc<crate::control::sequence::SessionSequenceValues>>>,
 }
 
 impl QueryContext {
@@ -122,6 +129,7 @@ impl QueryContext {
             shuffle_agg_threshold: std::sync::atomic::AtomicUsize::new(
                 super::tuning::DEFAULT_SHUFFLE_AGG_THRESHOLD,
             ),
+            session_sequences: std::sync::Mutex::new(None),
         }
     }
 
@@ -191,6 +199,7 @@ impl QueryContext {
             shuffle_agg_threshold: std::sync::atomic::AtomicUsize::new(
                 super::tuning::DEFAULT_SHUFFLE_AGG_THRESHOLD,
             ),
+            session_sequences: std::sync::Mutex::new(None),
         }
     }
 
@@ -228,7 +237,32 @@ impl QueryContext {
             shuffle_agg_threshold: std::sync::atomic::AtomicUsize::new(
                 super::tuning::DEFAULT_SHUFFLE_AGG_THRESHOLD,
             ),
+            session_sequences: std::sync::Mutex::new(None),
         }
+    }
+}
+
+impl QueryContext {
+    /// Bind the calling connection's `currval` map for the next plan call.
+    pub fn set_session_sequences(
+        &self,
+        values: Option<Arc<crate::control::sequence::SessionSequenceValues>>,
+    ) {
+        let mut slot = self
+            .session_sequences
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *slot = values;
+    }
+
+    /// The `currval` map bound for the current plan call.
+    pub(super) fn session_sequences(
+        &self,
+    ) -> Option<Arc<crate::control::sequence::SessionSequenceValues>> {
+        self.session_sequences
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

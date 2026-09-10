@@ -9,7 +9,8 @@ use super::SqlPlan;
 pub enum PlanCacheEligibility {
     /// Lowering depends only on schema/catalog descriptors tracked by the cache.
     Cacheable,
-    /// Lowering consults mutable row identity and must run for every execution.
+    /// Lowering consults mutable row identity, or the plan holds a volatile
+    /// expression, and must run for every execution.
     DataDependent,
 }
 
@@ -34,10 +35,29 @@ impl SqlPlan {
     /// Document point operations resolve primary-key bytes to a surrogate while
     /// lowering. That binding can appear after an earlier miss without any
     /// schema-version change, so those physical tasks cannot be cached.
+    ///
+    /// A plan holding a volatile call is `DataDependent` for the same reason:
+    /// the call was evaluated while the plan was built, so caching it would
+    /// replay one execution's value into every later one.
     pub fn cache_eligibility(&self) -> PlanCacheEligibility {
         use PlanCacheEligibility::{Cacheable, DataDependent};
 
         match self {
+            Self::ConstantResult { volatile: true, .. } => DataDependent,
+            Self::Insert {
+                column_defaults, ..
+            }
+            | Self::Upsert {
+                column_defaults, ..
+            } if super::volatility_scan::defaults_are_volatile(column_defaults) => DataDependent,
+            Self::KvInsert {
+                volatile_defaults: true,
+                ..
+            }
+            | Self::VectorPrimaryInsert {
+                volatile_defaults: true,
+                ..
+            } => DataDependent,
             Self::PointGet {
                 engine: EngineType::DocumentSchemaless | EngineType::DocumentStrict,
                 ..

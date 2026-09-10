@@ -41,7 +41,7 @@ const ALLOWED: &[&str] = &[
     "control/cluster/snapshot_applier.rs",
     // Committed DDL applied to engine state, and catalog maintenance.
     "control/server/shared/ddl/engine_apply.rs",
-    "control/server/shared/ddl/neutral/convert.rs",
+    "control/server/shared/ddl/neutral/convert/driver.rs",
     "control/server/shared/ddl/neutral/continuous_agg/create.rs",
     "control/server/shared/ddl/neutral/continuous_agg/drop.rs",
     "control/server/shared/ddl/neutral/continuous_agg/register.rs",

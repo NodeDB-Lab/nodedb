@@ -175,6 +175,10 @@ pub const STATEMENT_TOO_COMPLEX: &str = "54001";
 
 // ── Class 55 — Object Not In Prerequisite State ──────────────────────────────
 
+/// `55000` — `object_not_in_prerequisite_state` (the object exists but the
+/// step this statement needs has not run, e.g. `currval` before `nextval`)
+pub const OBJECT_NOT_IN_PREREQUISITE_STATE: &str = "55000";
+
 /// `55P03` — `lock_not_available` (no cluster leader)
 pub const LOCK_NOT_AVAILABLE: &str = "55P03";
 
@@ -362,6 +366,7 @@ mod tests {
             CONFIGURATION_LIMIT_EXCEEDED,
             PROGRAM_LIMIT_EXCEEDED,
             STATEMENT_TOO_COMPLEX,
+            OBJECT_NOT_IN_PREREQUISITE_STATE,
             LOCK_NOT_AVAILABLE,
             QUERY_CANCELED,
             CANNOT_CONNECT_NOW,

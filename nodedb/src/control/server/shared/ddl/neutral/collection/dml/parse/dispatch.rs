@@ -134,7 +134,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
     // Injection happens HERE, before the task set is consumed: implicit-edge
     // extraction, authorization, staging, and dispatch all read `tasks` after
     // this point, and injecting later would hand them un-injected copies.
-    let (mut tasks, versions) = {
+    let (mut tasks, output_schema, versions) = {
         let scope = RequestAuthScope::for_database(identity, state.auth_stores(), database_id);
         let permission_cache = state.permission_cache.read().await;
         let sec = PlanSecurityContext {
@@ -147,14 +147,20 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
             permission_cache: Some(&*permission_cache),
         };
         let query_ctx = crate::control::planner::context::QueryContext::for_state(state);
-        let (tasks, _output_schema, versions, _) = query_ctx
-            .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec, false)
+        let (tasks, output_schema, versions, _) = query_ctx
+            .plan_sql_with_rls_and_versions(
+                sql,
+                tenant_id,
+                database_id,
+                &sec,
+                returning_spec.as_ref(),
+            )
             .await
             .map_err(|error| {
                 let (_, sqlstate, message) = error_to_sqlstate(&error);
                 ddl_err(sqlstate, message)
             })?;
-        (tasks, versions)
+        (tasks, output_schema, versions)
     };
 
     // Attach the projection to every planned write, refusing any insert shape
@@ -414,7 +420,9 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
                 payload: response.payload.as_bytes(),
                 plan: &task.plan,
                 plan_kind: PlanKind::ReturningRows,
-                projection: None,
+                // The statement's announced `RETURNING` columns, so this
+                // transport renders a returned cell exactly as pgwire does.
+                projection: Some(&output_schema),
                 state,
                 database_id,
                 tenant_id,

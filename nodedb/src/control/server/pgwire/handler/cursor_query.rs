@@ -68,7 +68,7 @@ impl NodeDbPgHandler {
                 permission_cache: Some(&*perm_cache),
             };
             let (tasks, _output_schema, versions, _) = query_ctx
-                .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec, false)
+                .plan_sql_with_rls_and_versions(sql, tenant_id, database_id, &sec, None)
                 .await
                 .map_err(StatementSetupError::from)?;
             drop(perm_cache);

@@ -210,3 +210,128 @@ pub(super) fn nodedb_value_to_rmpv(v: &nodedb_types::Value) -> rmpv::Value {
         _ => rmpv::Value::Nil,
     }
 }
+
+/// Rescale every declared-instant cell of `rows` from the milliseconds the
+/// memtable and the partitions store to the epoch microseconds a `TIMESTAMP`
+/// cell carries on the wire.
+///
+/// The engine's own unit stays milliseconds: partition ranges, retention,
+/// `time_bucket` and every scan predicate read it. The scale therefore runs
+/// once, as rows leave the scan — after filtering, sorting and computed
+/// columns — so nothing inside the engine sees the wire unit.
+///
+/// `instant_columns` comes from `CoreLoop::ts_instant_columns`, which lists
+/// the columns declared `TIMESTAMP` or `TIMESTAMPTZ`. A `BIGINT TIME_KEY`
+/// lives in the same millisecond column and is not in that list, so it keeps
+/// the integer the client inserted.
+///
+/// SQL NULL cells pass through untouched. A stored value that cannot be
+/// expressed in microseconds fails the read rather than wrapping.
+pub(in crate::data::executor) fn scale_instant_cells(
+    rows: &mut [rmpv::Value],
+    instant_columns: &[String],
+) -> crate::Result<()> {
+    if instant_columns.is_empty() {
+        return Ok(());
+    }
+    for row in rows.iter_mut() {
+        let rmpv::Value::Map(fields) = row else {
+            continue;
+        };
+        for (key, value) in fields.iter_mut() {
+            let Some(name) = key.as_str() else { continue };
+            if !instant_columns.iter().any(|c| c == name) {
+                continue;
+            }
+            let rmpv::Value::Integer(stored) = value else {
+                continue;
+            };
+            let millis = stored.as_i64().ok_or_else(|| crate::Error::Internal {
+                detail: format!(
+                    "timeseries column {name} holds {stored}, which is not a millisecond \
+                     count an instant can be read from"
+                ),
+            })?;
+            let micros = nodedb_types::NdbDateTime::from_millis(millis)
+                .map_err(|e| crate::Error::Internal {
+                    detail: format!("timeseries column {name} at {millis} ms: {e}"),
+                })?
+                .micros;
+            *value = rmpv::Value::Integer(micros.into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_instant_cells;
+
+    fn row(cells: &[(&str, i64)]) -> rmpv::Value {
+        rmpv::Value::Map(
+            cells
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        rmpv::Value::String((*k).into()),
+                        rmpv::Value::Integer((*v).into()),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn cell(row: &rmpv::Value, name: &str) -> Option<i64> {
+        let rmpv::Value::Map(fields) = row else {
+            return None;
+        };
+        fields
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(name))
+            .and_then(|(_, v)| v.as_i64())
+    }
+
+    /// A declared `TIMESTAMP` column is read as epoch microseconds, so the
+    /// millisecond value storage holds is scaled on the way out. 2020-03-05
+    /// stays 2020-03-05 instead of landing 50 years earlier.
+    #[test]
+    fn a_declared_instant_column_leaves_the_scan_in_microseconds() {
+        let mut rows = vec![row(&[("captured_at", 1_583_402_400_000)])];
+        scale_instant_cells(&mut rows, &["captured_at".to_string()]).expect("scale");
+        assert_eq!(cell(&rows[0], "captured_at"), Some(1_583_402_400_000_000));
+    }
+
+    /// A `BIGINT TIME_KEY` shares the millisecond storage column but is not a
+    /// declared instant, so its value is handed back exactly as inserted.
+    #[test]
+    fn a_column_that_is_not_a_declared_instant_keeps_its_value() {
+        let mut rows = vec![row(&[("ts", 1000), ("n", 7)])];
+        scale_instant_cells(&mut rows, &["other".to_string()]).expect("scale");
+        assert_eq!(cell(&rows[0], "ts"), Some(1000));
+        assert_eq!(cell(&rows[0], "n"), Some(7));
+    }
+
+    /// A NULL instant cell stays NULL — there is no instant to scale.
+    #[test]
+    fn a_null_instant_cell_passes_through() {
+        let mut rows = vec![rmpv::Value::Map(vec![(
+            rmpv::Value::String("captured_at".into()),
+            rmpv::Value::Nil,
+        )])];
+        scale_instant_cells(&mut rows, &["captured_at".to_string()]).expect("scale");
+        assert_eq!(cell(&rows[0], "captured_at"), None);
+    }
+
+    /// A stored millisecond count past the microsecond range fails the read.
+    /// Wrapping it would hand back an instant that is not the stored one.
+    #[test]
+    fn a_millisecond_value_beyond_the_microsecond_range_fails_the_read() {
+        let mut rows = vec![row(&[("captured_at", i64::MAX)])];
+        let err = scale_instant_cells(&mut rows, &["captured_at".to_string()])
+            .expect_err("i64::MAX ms cannot be expressed in microseconds");
+        assert!(
+            err.to_string().contains("captured_at"),
+            "the error must name the column: {err}"
+        );
+    }
+}

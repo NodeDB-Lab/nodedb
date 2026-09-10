@@ -19,6 +19,35 @@ pub enum SqlError {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
+    /// A sequence accessor appeared where every output row needs its own
+    /// allocation, such as a SELECT list over a FROM clause.
+    ///
+    /// Rendered as SQLSTATE `0A000` (feature_not_supported). Constant
+    /// contexts evaluate the call for real: a FROM-less `SELECT`, a column
+    /// `DEFAULT`, a `VALUES` list. The refusal keeps a per-row call from
+    /// reaching the row evaluator, which has no sequence state and would
+    /// return `NULL` for every row.
+    #[error(
+        "{name}(...) is not supported in a per-row context; \
+         a SELECT list, WHERE clause, or SET clause over a FROM relation \
+         evaluates once per row. Call it in a FROM-less SELECT or a column \
+         DEFAULT instead"
+    )]
+    SequencePerRowUnsupported { name: String },
+
+    /// A statement names a database object that does not exist — a sequence,
+    /// most commonly. Distinct from [`SqlError::UndefinedFunction`]: the
+    /// function exists, the object it names does not. PostgreSQL rejects the
+    /// same input with SQLSTATE `42704` (`undefined_object`).
+    #[error("{kind} \"{name}\" does not exist")]
+    UndefinedObject { kind: &'static str, name: String },
+
+    /// An object exists but a prerequisite step has not run, such as `currval`
+    /// before this session called `nextval`. PostgreSQL rejects the same input
+    /// with SQLSTATE `55000` (`object_not_in_prerequisite_state`).
+    #[error("{detail}")]
+    ObjectNotInPrerequisiteState { object: String, detail: String },
+
     #[error("unknown column '{column}' in table '{table}'")]
     UnknownColumn { table: String, column: String },
 
@@ -84,6 +113,25 @@ pub enum SqlError {
 
     #[error("unsupported: {detail}")]
     Unsupported { detail: String },
+
+    /// A declared column DEFAULT the server cannot evaluate to a value.
+    ///
+    /// The column is never omitted instead. A DEFAULT that disappears stores
+    /// NULL where the declaration promised a value, and nothing reports it.
+    #[error("DEFAULT for column '{column}' cannot be evaluated: {expr}")]
+    UnevaluableDefault { column: String, expr: String },
+
+    /// `setval` appeared inside a column DEFAULT.
+    ///
+    /// A DEFAULT runs once per row, so evaluating `setval` there will move the
+    /// sequence's position on every inserted row. PostgreSQL reports a
+    /// function used in a context that forbids it as SQLSTATE `42601`
+    /// (`syntax_error`), and this refusal carries the same code.
+    #[error(
+        "setval() is not allowed in the DEFAULT for column '{column}'; \
+         a DEFAULT must not move a sequence's position"
+    )]
+    SetvalInColumnDefault { column: String },
 
     #[error("invalid function call: {detail}")]
     InvalidFunction { detail: String },

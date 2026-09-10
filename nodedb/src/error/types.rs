@@ -276,11 +276,32 @@ pub enum Error {
     #[error("query plan error: {detail}")]
     PlanError { detail: String },
 
+    /// A statement asked for a SQL feature this server does not implement.
+    /// Propagated from a planner refusal such as
+    /// `SqlError::SequencePerRowUnsupported`; the pgwire layer renders this
+    /// as SQLSTATE `0A000` (feature_not_supported), so a client stops rather
+    /// than retries.
+    #[error("{detail}")]
+    FeatureNotSupported { detail: String },
+
     /// A function call in a query names no registered scalar, aggregate, or
     /// window function. Propagated from `SqlError::UndefinedFunction`; the
     /// pgwire layer renders this as SQLSTATE `42883` (undefined_function).
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
+
+    /// A statement named a database object that does not exist — a sequence,
+    /// most commonly. Propagated from `SqlError::UndefinedObject`; the pgwire
+    /// layer renders this as SQLSTATE `42704` (undefined_object).
+    #[error("{kind} \"{name}\" does not exist")]
+    UndefinedObject { kind: &'static str, name: String },
+
+    /// An object exists but a prerequisite step has not run, such as `currval`
+    /// before this session called `nextval`. Propagated from
+    /// `SqlError::ObjectNotInPrerequisiteState`; the pgwire layer renders this
+    /// as SQLSTATE `55000` (object_not_in_prerequisite_state).
+    #[error("{detail}")]
+    ObjectNotInPrerequisiteState { object: String, detail: String },
 
     /// A column reference resolved against no relation, output alias, or
     /// synthetic column in scope. Propagated from `SqlError::UnknownColumn`;

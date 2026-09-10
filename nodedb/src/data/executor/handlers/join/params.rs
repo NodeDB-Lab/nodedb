@@ -17,6 +17,11 @@ pub(crate) struct JoinParams<'a> {
     pub computed_projection_bytes: &'a [u8],
     pub join_filter_bytes: &'a [u8],
     pub post_filter_bytes: &'a [u8],
+    /// Merged-row keys of the declared-instant cells this join reads from its
+    /// own local scans. Empty when no timeseries collection is scanned
+    /// locally — including for every side supplied by a sub-plan, whose rows
+    /// were already rescaled by the handler that read them.
+    pub instant_columns: &'a [String],
 }
 
 /// Hash join: scans both sides from storage or executes resolved child sub-plans.
@@ -76,6 +81,9 @@ pub(crate) struct NestedLoopJoinParams<'a> {
     pub left_rls_filters: &'a [u8],
     /// Row-level-security filters for the locally-scanned right side.
     pub right_rls_filters: &'a [u8],
+    /// Merged-row keys of the declared-instant cells the two local scans
+    /// contribute. Empty when neither side is a timeseries collection.
+    pub instant_columns: &'a [String],
 }
 
 /// Sort-merge join: O((N+M)·log N) equi-join with optional pre-sorted inputs.
@@ -95,6 +103,9 @@ pub(crate) struct SortMergeJoinParams<'a> {
     pub left_rls_filters: &'a [u8],
     /// Row-level-security filters for the locally-scanned right side.
     pub right_rls_filters: &'a [u8],
+    /// Merged-row keys of the declared-instant cells the two local scans
+    /// contribute. Empty when neither side is a timeseries collection.
+    pub instant_columns: &'a [String],
 }
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -191,6 +202,11 @@ impl JoinParams<'_> {
             }
         }
 
+        // Every predicate above compared the milliseconds storage holds, and
+        // the client reads microseconds. Scale here, on the keys the join
+        // wrote, so a projection that renames a cell copies a corrected value.
+        super::instant_scale::scale_join_instant_rows(results, self.instant_columns)?;
+
         if !self.computed_projection_bytes.is_empty() {
             let computed: Vec<crate::bridge::expr_eval::ComputedColumn> =
                 zerompk::from_msgpack(self.computed_projection_bytes).map_err(|e| {
@@ -258,6 +274,7 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: &[],
+            instant_columns: &[],
         };
         let mut results = vec![vec![1u8, 2, 3], vec![4u8, 5, 6]];
         assert!(params.filter_and_project(&mut results).is_ok());
@@ -280,6 +297,7 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: corrupt,
+            instant_columns: &[],
         };
         let mut results = vec![vec![0u8; 8]]; // would be "leaked" under the old code
         let err = params.filter_and_project(&mut results);
@@ -292,6 +310,50 @@ mod tests {
         assert!(
             msg.contains("decode join post-filters") || msg.contains("serialization"),
             "error message should identify the decode failure, got: {msg}"
+        );
+    }
+
+    /// A renaming projection cannot hide an instant cell from the rescale.
+    ///
+    /// The rescale names the merged key the join wrote, and the projection
+    /// renames the cell afterwards, so the emitted cell carries microseconds
+    /// under its output name.
+    #[test]
+    fn projection_rename_still_rescales_the_instant_cell() {
+        let task = make_dummy_task();
+        let projection = vec![JoinProjection {
+            source: "e.captured_at".into(),
+            output: "ts".into(),
+        }];
+        let params = JoinParams {
+            task: &task,
+            on: &[],
+            join_type: "inner",
+            limit: usize::MAX,
+            projection: &projection,
+            computed_projection_bytes: &[],
+            join_filter_bytes: &[],
+            post_filter_bytes: &[],
+            instant_columns: &["e.captured_at".to_string()],
+        };
+        let mut results = vec![
+            nodedb_types::json_to_msgpack(
+                &serde_json::json!({"e.captured_at": 1_583_402_400_000i64}),
+            )
+            .expect("encode test row"),
+        ];
+        params
+            .filter_and_project(&mut results)
+            .expect("filter_and_project");
+
+        let decoded = nodedb_types::value_from_msgpack(&results[0]).expect("decode emitted row");
+        let nodedb_types::Value::Object(fields) = decoded else {
+            panic!("emitted row must be a map, got {decoded:?}");
+        };
+        assert_eq!(
+            fields.get("ts"),
+            Some(&nodedb_types::Value::Integer(1_583_402_400_000_000)),
+            "the renamed cell must carry epoch microseconds: {fields:?}"
         );
     }
 
@@ -310,6 +372,7 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: &filter_bytes,
+            instant_columns: &[],
         };
         let mut results = vec![
             row_with_score(99), // should be kept

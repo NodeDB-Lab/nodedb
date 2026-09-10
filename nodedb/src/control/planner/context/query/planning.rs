@@ -11,57 +11,10 @@ use std::sync::Arc;
 
 use super::QueryContext;
 use crate::control::planner::context::security::PlanSecurityContext;
+use crate::control::planner::plan_error_map::map_plan_error;
 use crate::control::planner::sql_plan_convert::PlanningPurpose;
 use crate::control::server::response_shape::schema::OutputSchema;
-
-/// Map a planner error onto its Control-Plane equivalent.
-///
-/// One mapping for every `plan_sql*` call site. Four copies of this match
-/// existed and had already drifted — only one of them mapped
-/// `RetryableSchemaChanged`, so the same condition was retryable on one path
-/// and a flat plan error on the others. A new variant added to `SqlError`
-/// reaches every site through here or none.
-fn map_plan_error(error: nodedb_sql::SqlError, tenant_id: crate::types::TenantId) -> crate::Error {
-    match error {
-        nodedb_sql::SqlError::RetryableSchemaChanged { descriptor } => {
-            crate::Error::RetryableSchemaChanged { descriptor }
-        }
-        nodedb_sql::SqlError::CollectionDeactivated {
-            name,
-            retention_expires_at_ns,
-            ..
-        } => crate::Error::CollectionDeactivated {
-            tenant_id,
-            collection: name,
-            retention_expires_at_ns,
-        },
-        nodedb_sql::SqlError::UnknownTable { name } => crate::Error::CollectionNotFound {
-            tenant_id,
-            collection: name,
-        },
-        nodedb_sql::SqlError::UndefinedFunction { name } => {
-            crate::Error::UndefinedFunction { name }
-        }
-        // A constant expression that divides by zero is the same condition the
-        // row-scope evaluator raises, so it carries the same code.
-        nodedb_sql::SqlError::DivisionByZero => crate::Error::DivisionByZero,
-        nodedb_sql::SqlError::InvalidLimitValue { clause, value } => {
-            crate::Error::InvalidLimitValue { clause, value }
-        }
-        nodedb_sql::SqlError::UnknownColumn { column, .. } => {
-            crate::Error::UndefinedColumn { column }
-        }
-        nodedb_sql::SqlError::AmbiguousColumn { column } => {
-            crate::Error::AmbiguousColumn { column }
-        }
-        // A target/expression count mismatch is a syntax error in PostgreSQL,
-        // so it renders 42601 through `BadRequest`.
-        nodedb_sql::SqlError::Arity { detail } => crate::Error::BadRequest { detail },
-        other => crate::Error::PlanError {
-            detail: other.to_string(),
-        },
-    }
-}
+use nodedb_physical::physical_plan::ReturningSpec;
 
 /// Bundled arguments for [`QueryContext::plan_sql_with_rls`].
 pub struct PlanSqlWithRlsParams<'a> {
@@ -97,6 +50,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         purpose: PlanningPurpose,
+        returning: Option<&ReturningSpec>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -128,8 +82,13 @@ impl QueryContext {
         } else {
             inputs.build_adapter(tenant_id.as_u64(), database_id)
         };
-        let plans =
-            nodedb_sql::plan_sql(sql, &catalog).map_err(|e| map_plan_error(e, tenant_id))?;
+        // `nextval` records into the calling session's map and `currval` reads
+        // only from it, so the adapter must know which session is planning.
+        // `Arc` because the converters evaluate column DEFAULTs that read the
+        // catalog — `nextval` and `currval` — after planning returns.
+        let catalog = Arc::new(catalog.with_session_sequences(self.session_sequences()));
+        let plans = nodedb_sql::plan_sql(sql, catalog.as_ref())
+            .map_err(|e| map_plan_error(e, tenant_id))?;
         // Fold catalog-dependent cast expressions (::regclass, ::regtype) to
         // constant OID literals at plan time, before crossing the bridge.
         // The data-plane evaluator is pure and has no catalog access.
@@ -138,7 +97,7 @@ impl QueryContext {
             .map(|p| {
                 nodedb_sql::planner::catalog_fold::fold_catalog_exprs_in_plan(
                     p,
-                    &catalog,
+                    catalog.as_ref(),
                     database_id,
                     tenant_id.as_u64(),
                 )
@@ -182,21 +141,17 @@ impl QueryContext {
                 .load(std::sync::atomic::Ordering::Relaxed),
             database_id,
             tenant_id,
+            sql_catalog: Some(Arc::clone(&catalog) as _),
         };
         let output_schema =
             crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
                 &plans,
-                &catalog,
+                catalog.as_ref(),
                 database_id,
+                returning,
             );
-        let cache_eligibility = if plans
-            .iter()
-            .all(|plan| plan.cache_eligibility().is_cacheable())
-        {
-            nodedb_sql::types::PlanCacheEligibility::Cacheable
-        } else {
-            nodedb_sql::types::PlanCacheEligibility::DataDependent
-        };
+        let cache_eligibility =
+            crate::control::planner::sql_plan_convert::batch_cache_eligibility(&plans);
         let tasks = crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
         Ok((tasks, output_schema, version_set, cache_eligibility))
     }
@@ -217,18 +172,22 @@ impl QueryContext {
             database_id,
             sec,
         } = params;
-        self.plan_sql_with_rls_returning(sql, tenant_id, database_id, sec, false)
+        self.plan_sql_with_rls_returning(sql, tenant_id, database_id, sec, None)
             .await
     }
 
-    /// Plan SQL with RLS injection, optionally propagating a RETURNING flag.
+    /// Plan SQL with RLS injection, announcing a DML `RETURNING` clause.
+    ///
+    /// `returning` is the spec `strip_returning` parsed off the statement, so
+    /// the write announces the columns it projects. `None` for a statement
+    /// that carries no clause.
     pub async fn plan_sql_with_rls_returning(
         &self,
         sql: &str,
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: bool,
+        returning: Option<&ReturningSpec>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -250,7 +209,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: bool,
+        returning: Option<&ReturningSpec>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -289,7 +248,7 @@ impl QueryContext {
             tenant_id,
             database_id,
             sec,
-            false,
+            None,
             PlanningPurpose::Metadata,
         )
         .await
@@ -302,7 +261,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        _returning: bool,
+        returning: Option<&ReturningSpec>,
         purpose: PlanningPurpose,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
@@ -311,7 +270,7 @@ impl QueryContext {
         nodedb_sql::types::PlanCacheEligibility,
     )> {
         let (mut tasks, output_schema, mut version_set, cache_eligibility) =
-            self.plan_with_nodedb_sql_for_purpose(sql, tenant_id, database_id, purpose)?;
+            self.plan_with_nodedb_sql_for_purpose(sql, tenant_id, database_id, purpose, returning)?;
 
         // Versions read BEFORE injection, never after: injection reads live
         // policy/grant state under its own lock, and a mutation racing in
@@ -361,13 +320,21 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
+        returning: Option<&ReturningSpec>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
     )> {
-        self.plan_sql_with_params_and_rls_and_versions(sql, params, tenant_id, database_id, sec)
-            .await
-            .map(|(tasks, schema, _)| (tasks, schema))
+        self.plan_sql_with_params_and_rls_and_versions(
+            sql,
+            params,
+            tenant_id,
+            database_id,
+            sec,
+            returning,
+        )
+        .await
+        .map(|(tasks, schema, _)| (tasks, schema))
     }
 
     /// Parameterized RLS planning plus the descriptor versions observed by its
@@ -380,6 +347,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
+        returning: Option<&ReturningSpec>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -396,15 +364,23 @@ impl QueryContext {
         // Fresh adapter per plan call: same rationale as
         // `plan_with_nodedb_sql_for_purpose`. Its recorded version set is returned to the
         // caller so parameterized plans participate in descriptor admission.
-        let catalog = inputs.build_adapter(tenant_id.as_u64(), database_id);
-        let raw_plans = nodedb_sql::plan_sql_with_params(sql, params, &catalog)
+        // `nextval` records into the calling session's map and `currval` reads
+        // only from it, so the adapter must know which session is planning.
+        // `Arc` because the converters evaluate column DEFAULTs that read the
+        // catalog after planning returns.
+        let catalog = Arc::new(
+            inputs
+                .build_adapter(tenant_id.as_u64(), database_id)
+                .with_session_sequences(self.session_sequences()),
+        );
+        let raw_plans = nodedb_sql::plan_sql_with_params(sql, params, catalog.as_ref())
             .map_err(|error| map_plan_error(error, tenant_id))?;
         let plans: Vec<_> = raw_plans
             .into_iter()
             .map(|p| {
                 nodedb_sql::planner::catalog_fold::fold_catalog_exprs_in_plan(
                     p,
-                    &catalog,
+                    catalog.as_ref(),
                     database_id,
                     tenant_id.as_u64(),
                 )
@@ -447,12 +423,14 @@ impl QueryContext {
                 .load(std::sync::atomic::Ordering::Relaxed),
             database_id,
             tenant_id,
+            sql_catalog: Some(Arc::clone(&catalog) as _),
         };
         let output_schema =
             crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
                 &plans,
-                &catalog,
+                catalog.as_ref(),
                 database_id,
+                returning,
             );
         let mut tasks =
             crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;

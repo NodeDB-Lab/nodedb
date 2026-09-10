@@ -35,3 +35,18 @@ pub enum KvInsertIntent {
     /// duplicate key overwrites. Also the shape used by the RESP SET path.
     Put,
 }
+
+/// The lowering a row-shaped write takes, carried on `SqlPlan::Insert` and
+/// `SqlPlan::Upsert`.
+///
+/// The engine's `EngineRules` picks it while it builds the variant, so the
+/// conversion layer reads the route instead of re-deciding from `EngineType`.
+/// An engine with no row-shaped lowering builds another variant entirely and
+/// never names a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteRoute {
+    /// One task per row, carrying a `DocumentOp` or a `CrdtOp`.
+    Document,
+    /// One batched columnar task for the whole statement.
+    ColumnarFamily,
+}

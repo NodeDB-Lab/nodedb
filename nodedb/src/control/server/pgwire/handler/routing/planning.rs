@@ -156,13 +156,12 @@ impl NodeDbPgHandler {
         // Request-admission already ran once in `execute_single_sql` — must not admit again.
 
         // Per-query ON DENY always wins over the session-level override in `scope`.
-        let (clean_sql, scope) =
+        let (statement_sql, scope) =
             crate::control::server::session_auth::apply_per_query_on_deny(sql, scope);
 
         // Strip RETURNING clause before DataFusion planning.
         let (clean_sql, returning_spec) =
-            returning::strip_returning(&clean_sql).map_err(StatementSetupError::from)?;
-        let has_returning = returning_spec.is_some();
+            returning::strip_returning(&statement_sql).map_err(StatementSetupError::from)?;
 
         // Forwards per-session planning GUCs into the shared query context, protocol-neutral
         // so pgwire and native honor them identically; flags drive the cache bypass below.
@@ -215,9 +214,13 @@ impl NodeDbPgHandler {
             let state = Arc::clone(&self.state);
             let tenant = tenant_id.as_u64();
             let db = database_id;
+            // Keyed on the statement INCLUDING its `RETURNING` clause: the
+            // clause is stripped before planning, so two statements that
+            // differ only in what they project share the stripped text — and
+            // the cached entry carries the announced output columns.
             self.sessions.get_cached_plan(
                 session_id,
-                &clean_sql,
+                &statement_sql,
                 move |id| current_descriptor_version(&state, tenant, db, id),
                 current_permission_tree_version,
                 current_rls_version,
@@ -243,6 +246,7 @@ impl NodeDbPgHandler {
                     tenant_id,
                     database_id,
                     &sec,
+                    returning_spec.as_ref(),
                 )
                 .await
                 .map_err(StatementSetupError::from)?;
@@ -275,7 +279,7 @@ impl NodeDbPgHandler {
                         tenant_id,
                         database_id,
                         &sec,
-                        has_returning,
+                        returning_spec.as_ref(),
                     )
                     .await
                     .map_err(StatementSetupError::from)?
@@ -286,7 +290,7 @@ impl NodeDbPgHandler {
             if !bypass_cache && cache_eligibility.is_cacheable() {
                 self.sessions.put_cached_plan(
                     session_id,
-                    &clean_sql,
+                    &statement_sql,
                     planned.clone(),
                     versions.clone(),
                     output_schema.clone(),
