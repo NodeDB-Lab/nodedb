@@ -123,6 +123,15 @@ impl TableScope {
         }
     }
 
+    /// Whether an expression here is evaluated once per row of some relation.
+    ///
+    /// A scope with no relation of its own and no enclosing query stands
+    /// behind a FROM-less `SELECT`, which produces exactly one row and
+    /// evaluates its projection at plan time.
+    pub fn is_row_scope(&self) -> bool {
+        !self.tables.is_empty() || self.outer.is_some()
+    }
+
     /// A copy of this scope nested inside `outer`, for planning a correlated
     /// subquery body.
     pub fn nested_in(mut self, outer: TableScope) -> Self {

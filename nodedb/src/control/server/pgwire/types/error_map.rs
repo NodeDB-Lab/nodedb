@@ -45,6 +45,9 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
                  it is hard-deleted"
             ),
         ),
+        crate::Error::FeatureNotSupported { detail } => {
+            ("ERROR", sqlstate::FEATURE_NOT_SUPPORTED, detail.clone())
+        }
         crate::Error::UndefinedFunction { name } => (
             "ERROR",
             sqlstate::UNDEFINED_FUNCTION,

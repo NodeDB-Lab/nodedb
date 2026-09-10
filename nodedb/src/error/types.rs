@@ -276,6 +276,14 @@ pub enum Error {
     #[error("query plan error: {detail}")]
     PlanError { detail: String },
 
+    /// A statement asked for a SQL feature this server does not implement.
+    /// Propagated from a planner refusal such as
+    /// `SqlError::SequencePerRowUnsupported`; the pgwire layer renders this
+    /// as SQLSTATE `0A000` (feature_not_supported), so a client stops rather
+    /// than retries.
+    #[error("{detail}")]
+    FeatureNotSupported { detail: String },
+
     /// A function call in a query names no registered scalar, aggregate, or
     /// window function. Propagated from `SqlError::UndefinedFunction`; the
     /// pgwire layer renders this as SQLSTATE `42883` (undefined_function).

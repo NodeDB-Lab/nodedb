@@ -19,6 +19,22 @@ pub enum SqlError {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
+    /// A sequence accessor appeared where every output row needs its own
+    /// allocation, such as a SELECT list over a FROM clause.
+    ///
+    /// Rendered as SQLSTATE `0A000` (feature_not_supported). Constant
+    /// contexts evaluate the call for real: a FROM-less `SELECT`, a column
+    /// `DEFAULT`, a `VALUES` list. The refusal keeps a per-row call from
+    /// reaching the row evaluator, which has no sequence state and would
+    /// return `NULL` for every row.
+    #[error(
+        "{name}(...) is not supported in a per-row context; \
+         a SELECT list, WHERE clause, or SET clause over a FROM relation \
+         evaluates once per row. Call it in a FROM-less SELECT or a column \
+         DEFAULT instead"
+    )]
+    SequencePerRowUnsupported { name: String },
+
     /// A statement names a database object that does not exist — a sequence,
     /// most commonly. Distinct from [`SqlError::UndefinedFunction`]: the
     /// function exists, the object it names does not. PostgreSQL rejects the

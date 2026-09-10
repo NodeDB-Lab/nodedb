@@ -55,7 +55,7 @@ pub(super) fn eval_sequence_accessor(
         return Ok(None);
     };
     let lowered = name.to_ascii_lowercase();
-    if !matches!(lowered.as_str(), "nextval" | "currval" | "setval") {
+    if !crate::functions::sequence_accessor::is_sequence_accessor(&lowered) {
         return Ok(None);
     }
     let sequence = match args.first() {

@@ -35,6 +35,13 @@ pub(crate) fn map_plan_error(
         nodedb_sql::SqlError::UndefinedFunction { name } => {
             crate::Error::UndefinedFunction { name }
         }
+        // A per-row sequence accessor is a refusal, not a syntax error, so it
+        // keeps SQLSTATE `0A000` rather than the `42601` the fallback gives.
+        nodedb_sql::SqlError::SequencePerRowUnsupported { .. } => {
+            crate::Error::FeatureNotSupported {
+                detail: error.to_string(),
+            }
+        }
         nodedb_sql::SqlError::UndefinedObject { kind, name } => {
             crate::Error::UndefinedObject { kind, name }
         }
