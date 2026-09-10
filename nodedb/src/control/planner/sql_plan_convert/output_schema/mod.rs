@@ -2,6 +2,7 @@
 
 pub mod build;
 pub mod columns;
+pub mod join_types;
 pub mod returning;
 
 pub use build::build_output_schema;

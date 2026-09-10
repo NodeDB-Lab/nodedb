@@ -11,10 +11,12 @@
 use std::collections::HashMap;
 
 use nodedb_physical::physical_plan::ReturningSpec;
+use nodedb_query::agg_key::canonical_agg_key;
 use nodedb_sql::catalog::SqlCatalog;
 use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::query::AggOutputSlot;
 
+use crate::control::planner::sql_plan_convert::aggregate::agg_expr_to_pair;
 use crate::control::planner::sql_plan_convert::lateral::collection_name_from_plan;
 use crate::control::planner::sql_plan_convert::output_schema_types::infer_aggregate_type;
 use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
@@ -46,6 +48,47 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
     };
 
     match plan {
+        // A grouped timeseries scan announces the columns its aggregate
+        // encoder emits, in that encoder's order: each GROUP BY key, then
+        // each aggregate. A GROUP BY key carries its own catalog type, so one
+        // stored instant renders the same grouped as it does through a plain
+        // `SELECT`. An aggregate result stays `Text`: the timeseries plan
+        // carries no SELECT-list alias for it, so its type cannot be resolved
+        // with certainty.
+        //
+        // A `time_bucket` query is excluded: its encoder prepends a `bucket`
+        // boundary column that the plan's GROUP BY list does not name, so the
+        // announced shape would not be the emitted one.
+        SqlPlan::TimeseriesScan {
+            collection,
+            group_by,
+            aggregates,
+            bucket_interval_ms,
+            ..
+        } if !group_by.is_empty() && *bucket_interval_ms == 0 => {
+            let types = column_types_for(catalog, database_id, collection);
+            let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
+            for key in group_by {
+                columns.push(OutputColumn {
+                    display_name: key.clone(),
+                    lookup_key: key.clone(),
+                    ty: types.get(key).copied().unwrap_or(DdlColType::Text),
+                });
+            }
+            for agg in aggregates {
+                let (function, field) = agg_expr_to_pair(agg);
+                let key = canonical_agg_key(&function, &field);
+                columns.push(OutputColumn {
+                    display_name: key.clone(),
+                    lookup_key: key,
+                    ty: DdlColType::Text,
+                });
+            }
+            OutputSchema {
+                columns,
+                is_star: false,
+            }
+        }
         SqlPlan::Scan {
             collection,
             projection,
@@ -115,12 +158,19 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             let ordered_cols = ordered_columns_for(catalog, database_id, collection);
             schema_from_projection(projection, &types, &ordered_cols)
         }
-        SqlPlan::Join { projection, .. } => {
-            // A join has no single source collection; column types default
-            // to `Text` for every projected field rather than picking one
-            // side arbitrarily. A star here has no single catalog to expand
-            // against, so no ordered columns are supplied.
-            let types = HashMap::new();
+        SqlPlan::Join {
+            left,
+            right,
+            projection,
+            ..
+        } => {
+            // Each projected column resolves against the catalog of the side
+            // it came from, keyed on the qualified name the join executor
+            // emits (`orders.ts`). A bare name two sides declare differently
+            // cannot be attributed and stays `Text`. A star here has no
+            // single catalog to expand against, so no ordered columns are
+            // supplied.
+            let types = super::join_types::join_column_types(left, right, catalog, database_id);
             schema_from_projection(projection, &types, &[])
         }
         SqlPlan::ConstantResult { columns, .. } => OutputSchema {

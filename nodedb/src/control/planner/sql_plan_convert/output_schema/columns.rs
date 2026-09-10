@@ -44,8 +44,13 @@ pub(super) fn projection_to_column(
                 .next()
                 .map(str::to_string)
                 .unwrap_or_else(|| qname.clone());
+            // A join's map is keyed on the qualified name, because two
+            // sides can carry the same bare column with different types. A
+            // single-collection map holds bare names only, so the qualified
+            // lookup misses there and the bare name answers.
             let ty = types
-                .get(&display_name)
+                .get(qname)
+                .or_else(|| types.get(&display_name))
                 .copied()
                 .unwrap_or(DdlColType::Text);
             Some(OutputColumn {
