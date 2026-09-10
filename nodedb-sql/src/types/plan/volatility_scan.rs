@@ -45,7 +45,7 @@ pub fn expr_is_volatile(expr: &SqlExpr) -> bool {
 
 /// Column DEFAULT spellings that generate a fresh value per row but name no
 /// registered function. Kept in step with the generator arms of
-/// `crate::planner::defaults::evaluate_default_expr`.
+/// `crate::planner::defaults`.
 const VOLATILE_DEFAULT_ALIASES: &[&str] =
     &["uuidv7", "uuidv4", "gen_uuid_v7", "gen_uuid_v4", "gen_ulid"];
 

@@ -3,7 +3,6 @@
 //! Plan construction for the KV engine's `VALUES`-clause insert paths
 //! (plain `INSERT`, `UPSERT`, and `INSERT ... ON CONFLICT DO UPDATE`).
 
-use super::declared_defaults::materialize_declared_defaults;
 use super::params::KvInsertParams;
 use super::range_check::{
     check_declared_float_ranges, check_declared_float_ranges_in_assignments,
@@ -14,6 +13,7 @@ use crate::error::{Result, SqlError};
 use crate::planner::declared_type_coerce::{
     coerce_assignments_to_declared_types, coerce_row_to_declared_types,
 };
+use crate::planner::defaults::ColumnDefaults;
 use crate::types::*;
 
 /// Build a `SqlPlan::KvInsert` from a VALUES clause. Shared by plain INSERT,
@@ -72,6 +72,9 @@ pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<Sql
     // string — while `RowDescription` advertises the declared numeric type, and
     // the read path can only encode SQL NULL for it. See
     // `declared_type_coerce` for the full rationale.
+    // Compiled once, outside the row loop: a DEFAULT expression's parse is a
+    // property of the declaration, not of the row.
+    let compiled_defaults = ColumnDefaults::compile_columns(declared_columns)?;
     let mut coerced_rows: Vec<Vec<(String, SqlValue)>> = Vec::with_capacity(rows_ast.len());
     let mut volatile_defaults = false;
     for row_exprs in rows_ast {
@@ -80,7 +83,7 @@ pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<Sql
             let Some(expr) = row_exprs.get(i) else { break };
             row.push((col.clone(), expr_to_sql_value(expr)?));
         }
-        volatile_defaults |= materialize_declared_defaults(declared_columns, &mut row, catalog)?;
+        volatile_defaults |= compiled_defaults.materialize_row(&mut row, catalog)?;
         // The key column is exempt — see `coerce_rows_to_declared_types`.
         coerce_row_to_declared_types(declared_columns, &mut row, Some(key_col_name))?;
         coerced_rows.push(row);

@@ -15,8 +15,9 @@ use crate::types::TenantId;
 /// row. A DEFAULT materialized per engine after that gate refuses a key the
 /// declaration supplies.
 ///
-/// Each DEFAULT evaluates once per row, so a `nextval` DEFAULT allocates
-/// exactly one value per row of a multi-row VALUES clause.
+/// Each DEFAULT compiles once per statement and evaluates once per row, so a
+/// `nextval` DEFAULT allocates exactly one value per row of a multi-row VALUES
+/// clause and the expression is parsed once however many rows it fills.
 ///
 /// `column_defaults` empty means nothing to expand: the rows pass through and
 /// the catalog is never read.
@@ -30,10 +31,13 @@ pub(in super::super) fn expand_row_defaults(
         return Ok(rows.to_vec());
     }
     let catalog = ctx.sql_catalog()?;
+    let compiled = nodedb_sql::planner::defaults::ColumnDefaults::compile_pairs(column_defaults)
+        .map_err(|e| map_plan_error(e, tenant_id))?;
     let mut expanded = Vec::with_capacity(rows.len());
     for row in rows {
         let mut row = row.clone();
-        nodedb_sql::planner::defaults::materialize_row_defaults(&mut row, column_defaults, catalog)
+        compiled
+            .materialize_row(&mut row, catalog)
             .map_err(|e| map_plan_error(e, tenant_id))?;
         expanded.push(row);
     }
