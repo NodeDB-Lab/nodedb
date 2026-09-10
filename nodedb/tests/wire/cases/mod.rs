@@ -264,6 +264,7 @@ mod strict_bitemporal_audit_query;
 mod strict_bitemporal_select_star;
 mod strict_schema_restart;
 mod timeseries_declared_time_key;
+mod timeseries_join_time_rendering;
 mod timeseries_write_row_level_security;
 mod transactional_ddl_atomicity;
 mod transactional_ddl_compensation;
