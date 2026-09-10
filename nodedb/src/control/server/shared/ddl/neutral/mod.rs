@@ -18,6 +18,7 @@ pub mod change_stream;
 pub mod chunk_text;
 pub mod cluster;
 pub mod collection;
+mod column_default;
 pub mod conflict_policy;
 pub mod constraint;
 pub mod consumer_group;

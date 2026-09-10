@@ -34,10 +34,10 @@ use super::super::enforcement::{
 use super::engine_option::validate_engine_name;
 use super::request::CreateCollectionRequest;
 
-use super::build_column_defaults::validate_column_defaults;
 use super::build_flags::{err, resolve_crdt_flag, validate_crdt_signing_storage, validate_name};
 use super::build_post_create::{create_serial_sequences, log_vector_fields};
 use super::build_primary_engine::resolve_primary_engine;
+use crate::control::server::shared::ddl::neutral::column_default::validate_column_defaults;
 
 /// Per-surface configuration. The fields are the entire surface-level
 /// difference between `CREATE COLLECTION` and `CREATE TABLE`.

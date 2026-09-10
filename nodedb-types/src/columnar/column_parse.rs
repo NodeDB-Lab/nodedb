@@ -48,6 +48,8 @@ pub enum ColumnTypeParseError {
     UseTimestamp,
     #[error("invalid VECTOR dimension: '{0}' (must be a positive integer)")]
     InvalidVectorDim(String),
+    #[error("invalid VARCHAR length: '{0}' (must be a positive integer)")]
+    InvalidCharLength(String),
     #[error(
         "invalid DECIMAL/NUMERIC params: '{0}' (expected DECIMAL(precision, scale) with precision 1-38 and scale <= precision)"
     )]
@@ -150,6 +152,24 @@ impl FromStr for ColumnType {
             return Ok(Self::Vector(dim));
         }
 
+        // VARCHAR(n) special case. A declared character length is a wire
+        // contract, not a storage property — nodedb stores every string
+        // unbounded — so `VARCHAR(255)` resolves to the answer bare `VARCHAR`
+        // gives. The length still parses, so a malformed one errors here
+        // instead of resolving to a type the author did not write.
+        if let Some(rest) = upper.strip_prefix("VARCHAR")
+            && let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')'))
+        {
+            let length: u32 = inner
+                .trim()
+                .parse()
+                .map_err(|_| ColumnTypeParseError::InvalidCharLength(inner.trim().to_string()))?;
+            if length == 0 {
+                return Err(ColumnTypeParseError::InvalidCharLength("0".into()));
+            }
+            return Ok(Self::String);
+        }
+
         match upper.as_str() {
             // Every PostgreSQL wire-width integer keyword collapses to the
             // one `Int64` storage variant; `DECLARED_INT_KEYWORDS` lists them
@@ -160,7 +180,7 @@ impl FromStr for ColumnType {
             "TEXT" | "STRING" | "VARCHAR" => Ok(Self::String),
             "BOOL" | "BOOLEAN" => Ok(Self::Bool),
             "BYTES" | "BYTEA" | "BLOB" => Ok(Self::Bytes),
-            "TIMESTAMP" => Ok(Self::Timestamp),
+            "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" => Ok(Self::Timestamp),
             "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => Ok(Self::Timestamptz),
             "SYSTEM_TIMESTAMP" | "SYSTEMTIMESTAMP" => Ok(Self::SystemTimestamp),
             "GEOMETRY" => Ok(Self::Geometry),
@@ -305,6 +325,40 @@ mod tests {
         assert_eq!(
             ColumnType::from_declared_type("VECTOR(768)"),
             Some(ColumnType::Vector(768))
+        );
+    }
+
+    /// The two zone spellings resolve whole, so a parser that reads the full
+    /// string reads the zone the author wrote.
+    #[test]
+    fn both_timestamp_zone_spellings_resolve_whole() {
+        assert_eq!(
+            "TIMESTAMP WITH TIME ZONE".parse::<ColumnType>(),
+            Ok(ColumnType::Timestamptz)
+        );
+        assert_eq!(
+            "timestamp without time zone".parse::<ColumnType>(),
+            Ok(ColumnType::Timestamp)
+        );
+    }
+
+    /// A declared character length resolves to `String` and a malformed one
+    /// errors rather than resolving to an unwritten type.
+    #[test]
+    fn varchar_length_resolves_to_string() {
+        assert_eq!("VARCHAR(255)".parse::<ColumnType>(), Ok(ColumnType::String));
+        assert_eq!("varchar(1)".parse::<ColumnType>(), Ok(ColumnType::String));
+        assert_eq!(
+            ColumnType::from_declared_type("VARCHAR(8) NOT NULL"),
+            Some(ColumnType::String)
+        );
+        assert_eq!(
+            "VARCHAR(0)".parse::<ColumnType>(),
+            Err(ColumnTypeParseError::InvalidCharLength("0".into()))
+        );
+        assert_eq!(
+            "VARCHAR(abc)".parse::<ColumnType>(),
+            Err(ColumnTypeParseError::InvalidCharLength("ABC".into()))
         );
     }
 

@@ -422,3 +422,37 @@ async fn strict_default_now() {
         .unwrap();
     assert_eq!(rows.len(), 1, "should have 1 row: {rows:?}");
 }
+
+// ── Unresolvable declared type ──
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn typeguard_unresolvable_type_is_refused_at_declaration() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE COLLECTION tg_bad_type").await.unwrap();
+
+    // A type name the engine resolves to nothing.
+    server
+        .expect_error("CREATE TYPEGUARD ON tg_bad_type (gadget WIDGET)", "42601")
+        .await;
+
+    // A trailing word that reading the leading token alone would ignore.
+    server
+        .expect_error(
+            "CREATE TYPEGUARD ON tg_bad_type (at TIMESTAMP GARBAGE)",
+            "42601",
+        )
+        .await;
+
+    // ALTER carries the same refusal.
+    server
+        .expect_error("ALTER TYPEGUARD ON tg_bad_type ADD gadget WIDGET", "42601")
+        .await;
+
+    // A refused declaration reaches no storage.
+    let rows = server
+        .query_text("SHOW TYPEGUARD ON tg_bad_type")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 0, "refused guard must not be stored: {rows:?}");
+}
