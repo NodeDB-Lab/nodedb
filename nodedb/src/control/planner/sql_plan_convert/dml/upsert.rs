@@ -17,7 +17,9 @@ use super::super::convert::ConvertContext;
 use super::super::value::{
     assignments_to_update_values, expand_row_defaults, row_to_msgpack, rows_to_msgpack_array,
 };
-use super::insert::{build_schema_bytes, columnar_row_surrogates, resolve_doc_identity};
+use super::insert::{
+    build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, resolve_doc_identity,
+};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Bundled arguments for [`convert_upsert`].
@@ -130,8 +132,15 @@ pub(in super::super) fn convert_upsert(
 
     if !columnar_rows.is_empty() {
         let payload = rows_to_msgpack_array(&columnar_rows)?;
-        let surrogates = columnar_row_surrogates(ctx, collection, &columnar_rows, primary_key)?;
-        let schema_bytes = build_schema_bytes(column_schema);
+        let declared_pk = declared_primary_key_name(ctx, collection)?;
+        let surrogates = columnar_row_surrogates(
+            ctx,
+            collection,
+            &columnar_rows,
+            primary_key,
+            declared_pk.as_deref(),
+        )?;
+        let schema_bytes = build_schema_bytes(column_schema, declared_pk.as_deref());
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,

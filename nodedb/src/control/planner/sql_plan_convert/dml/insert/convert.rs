@@ -2,237 +2,23 @@
 
 use nodedb_sql::types::{SqlValue, WriteRoute};
 use nodedb_types::Surrogate;
-use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{TenantId, VShardId};
-use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::*;
 
-use super::super::convert::ConvertContext;
-use super::super::value::{
-    expand_row_defaults, row_to_msgpack, rows_to_msgpack_array, sql_value_to_string,
-};
+use super::super::super::convert::ConvertContext;
+use super::super::super::value::{expand_row_defaults, row_to_msgpack, rows_to_msgpack_array};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
-/// Build a `ColumnarSchema` from raw catalog column-type strings.
-///
-/// `column_schema` is the list of `(column_name, type_str)` pairs from the
-/// DDL catalog (`stored.fields`). Unknown type strings are treated as
-/// `ColumnType::String` (matching the memtable's existing fallback).
-///
-/// The `id` column is treated as the primary key when present; all other
-/// columns are treated as nullable.
-///
-/// Returns `None` when `column_schema` is empty (no catalog schema available
-/// — test fixtures and legacy paths) or the resulting schema fails
-/// validation.
-///
-/// This is the single source of truth for turning a catalog's raw
-/// `(name, type_str)` field list into a typed `ColumnarSchema` — shared by
-/// the live SQL insert path (via [`build_schema_bytes`]) and
-/// `bootstrap::data_plane::load_columnar_schema_seed`, which pre-registers
-/// each columnar-family collection's real schema before WAL replay so a
-/// fresh `MutationEngine` never falls back to type-lossy inference.
-pub(crate) fn build_columnar_schema(column_schema: &[(String, String)]) -> Option<ColumnarSchema> {
-    if column_schema.is_empty() {
-        return None;
-    }
-    let mut cols = Vec::with_capacity(column_schema.len());
-    let mut has_id = false;
-    for (name, type_str) in column_schema {
-        // `type_str` may contain SQL modifiers such as `NOT NULL` or `PRIMARY KEY`
-        // (e.g. "BIGINT NOT NULL"). Strip everything after the first token so that
-        // `ColumnType::from_str` receives the bare type name (e.g. "BIGINT").
-        let bare_type = type_str
-            .split_whitespace()
-            .next()
-            .unwrap_or(type_str.as_str());
-        let col_type = bare_type
-            .parse::<ColumnType>()
-            .unwrap_or(ColumnType::String);
-        let is_id = name == "id" || name == "document_id";
-        if is_id {
-            has_id = true;
-            cols.push(ColumnDef::required(name.clone(), col_type).with_primary_key());
-        } else {
-            cols.push(ColumnDef::nullable(name.clone(), col_type));
-        }
-    }
-    // If no PK column found in stored.fields, inject a synthetic one.
-    if !has_id {
-        cols.insert(
-            0,
-            ColumnDef::required("id", ColumnType::String).with_primary_key(),
-        );
-    }
-    ColumnarSchema::new(cols).ok()
-}
-
-/// Build a `ColumnarSchema` from raw catalog column-type strings, then
-/// serialize it as MessagePack for the `ColumnarOp::Insert::schema_bytes` field.
-///
-/// Returns an empty `Vec` when `column_schema` is empty or fails validation
-/// — see [`build_columnar_schema`] for the typed builder this wraps.
-pub(super) fn build_schema_bytes(column_schema: &[(String, String)]) -> Vec<u8> {
-    build_columnar_schema(column_schema)
-        .map(|schema| zerompk::to_msgpack_vec(&schema).unwrap_or_default())
-        .unwrap_or_default()
-}
-
-/// A row's primary-key column as found during identity derivation.
-///
-/// `Present("")` is the empty string — a real key, not an absence.
-pub(super) enum DocId {
-    Present(String),
-    ExplicitNull,
-    Absent,
-}
-
-/// Extract the document-id value from a row, keyed off the declared
-/// `primary_key` column when present, falling back to the legacy
-/// `id`/`document_id`/`key` convention otherwise.
-pub(super) fn extract_doc_id(row: &[(String, SqlValue)], primary_key: Option<&str>) -> DocId {
-    match row.iter().find(|(k, _)| match primary_key {
-        Some(pk) => k == pk,
-        None => k == "id" || k == "document_id" || k == "key",
-    }) {
-        Some((_, SqlValue::Null)) => DocId::ExplicitNull,
-        Some((_, v)) => DocId::Present(sql_value_to_string(v)),
-        None => DocId::Absent,
-    }
-}
-
-/// `collection`'s DDL-declared `PRIMARY KEY` column name, if any.
-///
-/// `primary_key` cannot answer this: schemaless, columnar, and spatial
-/// collections resolve it to `id` by convention with nothing declared. The
-/// catalog's `declared_primary_key` is set only by the keyword itself, and
-/// names the column the keyword applied `NOT NULL` to. A catalog miss reads
-/// as not declared — nothing to enforce.
-pub(in super::super) fn declared_primary_key_name(
-    ctx: &ConvertContext,
-    collection: &str,
-) -> crate::Result<Option<String>> {
-    let Some(credentials) = ctx.credentials.as_ref() else {
-        return Ok(None);
-    };
-    credentials
-        .catalog()
-        .declared_primary_key(ctx.database_id, ctx.tenant_id.as_u64(), collection)
-}
-
-/// Resolve a row's document id + surrogate, refusing a `NULL`/omitted
-/// declared primary key first: a declared `PRIMARY KEY` implies `NOT NULL`.
-///
-/// Enforcement keys on the DDL-declared column, not the resolved
-/// `primary_key`: those diverge whenever a natural key sits on a column
-/// other than `id` (e.g. `metrics (sku TEXT PRIMARY KEY)` resolves
-/// `primary_key` to `id` but declares `sku`). `_rowid` carries no
-/// declaration, so it skips the check and mints a surrogate.
-///
-/// Identity minting then runs on the resolved `primary_key`: an auto-`_rowid`
-/// pk or a missing/null key mints a fresh surrogate; a present key
-/// content-addresses one via [`assign_for_pk`]. The two steps are one call so
-/// no caller can mint an identity without the NOT NULL check running first.
-pub(super) fn resolve_doc_identity(
-    ctx: &ConvertContext,
-    collection: &str,
-    primary_key: Option<&str>,
-    row: &[(String, SqlValue)],
-) -> crate::Result<(String, Surrogate)> {
-    if !is_auto_rowid_pk(primary_key)
-        && let Some(declared) = declared_primary_key_name(ctx, collection)?
-    {
-        match extract_doc_id(row, Some(&declared)) {
-            DocId::Present(_) => {}
-            DocId::ExplicitNull | DocId::Absent => {
-                return Err(crate::Error::RejectedConstraint {
-                    collection: collection.to_string(),
-                    constraint: "not_null".to_string(),
-                    detail: format!("primary key '{declared}' cannot be NULL or omitted"),
-                });
-            }
-        }
-    }
-
-    if is_auto_rowid_pk(primary_key) {
-        let (s, pk) = assign_fresh(
-            ctx,
-            collection,
-            nodedb_physical::FreshSurrogateKind::AutoRowId,
-        )?;
-        return Ok((pk, s));
-    }
-    match extract_doc_id(row, primary_key) {
-        DocId::Present(id) => {
-            let s = assign_for_pk(ctx, collection, id.as_bytes())?;
-            Ok((id, s))
-        }
-        DocId::ExplicitNull | DocId::Absent => {
-            let (s, pk) = assign_fresh(
-                ctx,
-                collection,
-                nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
-            )?;
-            Ok((pk, s))
-        }
-    }
-}
-
-pub(super) fn assign_for_pk(
-    ctx: &ConvertContext,
-    collection: &str,
-    pk_bytes: &[u8],
-) -> crate::Result<Surrogate> {
-    ctx.surrogate_for_pk(collection, pk_bytes)
-}
-
-/// Allocate a fresh, unique surrogate for a row whose primary key is the
-/// auto-generated `_rowid` (no `PRIMARY KEY` declared), or that carries no
-/// content primary key at all.
-///
-/// Content-addressing an empty pk collapses every such row onto one
-/// surrogate, a duplicate-key violation on the second insert.
-///
-/// Returns the identity string `kind` binds. The caller uses it verbatim.
-pub(super) fn assign_fresh(
-    ctx: &ConvertContext,
-    collection: &str,
-    kind: nodedb_physical::FreshSurrogateKind,
-) -> crate::Result<(Surrogate, String)> {
-    ctx.fresh_surrogate(collection, kind)
-}
-
-/// Whether a collection's declared primary key is the auto-generated `_rowid`
-/// sentinel — injected by strict-schema construction when no `PRIMARY KEY` was
-/// declared. Such rows carry no user identity: each needs a fresh surrogate.
-pub(super) fn is_auto_rowid_pk(primary_key: Option<&str>) -> bool {
-    primary_key == Some("_rowid")
-}
-
-/// Mirrors the document-engine identity path (`resolve_doc_identity`) for
-/// columnar/spatial rows. The declared `primary_key` — not the legacy
-/// `id`/`document_id`/`key` name guess — determines each row's identity, so a
-/// natural key on any column (e.g. `sku`) gets its own surrogate. A
-/// missing/empty key mints a fresh unique surrogate rather than collapsing
-/// onto `Surrogate::ZERO`, which would silently merge distinct rows.
-pub(super) fn columnar_row_surrogates(
-    ctx: &ConvertContext,
-    collection: &str,
-    columnar_rows: &[&Vec<(String, SqlValue)>],
-    primary_key: Option<&str>,
-) -> crate::Result<Vec<Surrogate>> {
-    let mut out = Vec::with_capacity(columnar_rows.len());
-    for row in columnar_rows {
-        let (_, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
-        out.push(surrogate);
-    }
-    Ok(out)
-}
+use super::identity::{
+    columnar_row_surrogates, declared_primary_key_name, is_auto_rowid_pk,
+    resolve_doc_identity_with_declared,
+};
+use super::schema::build_schema_bytes;
 
 /// Bundled arguments for [`convert_insert`].
-pub(in super::super) struct ConvertInsertArgs<'a> {
+pub(crate) struct ConvertInsertArgs<'a> {
     pub collection: &'a str,
     /// The lowering these rows take, decided by `nodedb-sql`.
     pub route: WriteRoute,
@@ -245,9 +31,7 @@ pub(in super::super) struct ConvertInsertArgs<'a> {
     pub ctx: &'a ConvertContext,
 }
 
-pub(in super::super) fn convert_insert(
-    args: ConvertInsertArgs<'_>,
-) -> crate::Result<Vec<PhysicalTask>> {
+pub(crate) fn convert_insert(args: ConvertInsertArgs<'_>) -> crate::Result<Vec<PhysicalTask>> {
     let ConvertInsertArgs {
         collection,
         route,
@@ -259,7 +43,7 @@ pub(in super::super) fn convert_insert(
         tenant_id,
         ctx,
     } = args;
-    let coll_qualified = super::super::convert::db_qualified(ctx.database_id, collection);
+    let coll_qualified = super::super::super::convert::db_qualified(ctx.database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(ctx.database_id, collection);
     let collection = coll_qualified.as_str();
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
@@ -271,7 +55,7 @@ pub(in super::super) fn convert_insert(
     //
     // `IF NOT EXISTS` (ON CONFLICT DO NOTHING → `if_absent`) cannot be honored by
     // `CrdtOp::DocUpsert`, which is an unconditional LWW full-replace: reject.
-    let gates = super::balanced_gate::document_collection_write_gates(ctx, collection)?;
+    let gates = super::super::balanced_gate::document_collection_write_gates(ctx, collection)?;
     let is_crdt = gates.crdt;
     if is_crdt && if_absent {
         return Err(crate::Error::BadRequest {
@@ -308,6 +92,14 @@ pub(in super::super) fn convert_insert(
     // refuses a key the declaration supplies.
     let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
 
+    // One catalog read for the whole statement. `_rowid` carries no
+    // declaration, so it skips the read.
+    let declared_pk = if is_auto_rowid_pk(primary_key) {
+        None
+    } else {
+        declared_primary_key_name(ctx, collection)?
+    };
+
     for row in &expanded_rows {
         match route {
             WriteRoute::ColumnarFamily => {
@@ -315,7 +107,13 @@ pub(in super::super) fn convert_insert(
             }
             WriteRoute::Document => {
                 let value_bytes = row_to_msgpack(row)?;
-                let (doc_id, surrogate) = resolve_doc_identity(ctx, collection, primary_key, row)?;
+                let (doc_id, surrogate) = resolve_doc_identity_with_declared(
+                    ctx,
+                    collection,
+                    primary_key,
+                    declared_pk.as_deref(),
+                    row,
+                )?;
                 // One page for the whole statement: the rows of a balanced
                 // INSERT are judged together, so they may not be split across
                 // one task — one boundary — per row.
@@ -328,7 +126,7 @@ pub(in super::super) fn convert_insert(
                     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                         collection: qualified_collection.clone(),
                         document_id: doc_id,
-                        fields_json: super::crdt_gate::row_to_fields_json(row)?,
+                        fields_json: super::super::crdt_gate::row_to_fields_json(row)?,
                         surrogate,
                         partial: false,
                         returning: None,
@@ -366,8 +164,8 @@ pub(in super::super) fn convert_insert(
     }
 
     if !balanced_documents.is_empty() {
-        tasks.push(super::balanced_gate::balanced_batch_task(
-            super::balanced_gate::BalancedBatch {
+        tasks.push(super::super::balanced_gate::balanced_batch_task(
+            super::super::balanced_gate::BalancedBatch {
                 collection,
                 tenant_id,
                 vshard,
@@ -380,13 +178,28 @@ pub(in super::super) fn convert_insert(
 
     if !columnar_rows.is_empty() {
         let payload = rows_to_msgpack_array(&columnar_rows)?;
+        // `ON CONFLICT DO NOTHING` means skip, not refuse: `if_absent` keeps
+        // `InsertIfAbsent` regardless of the declared key. Otherwise, a
+        // `PRIMARY KEY` declared on a natural key column (not `id` /
+        // `document_id`) refuses a duplicate rather than tombstoning it.
         let intent = if if_absent {
             ColumnarInsertIntent::InsertIfAbsent
+        } else if declared_pk
+            .as_deref()
+            .is_some_and(|pk| pk != "id" && pk != "document_id")
+        {
+            ColumnarInsertIntent::InsertUnique
         } else {
             ColumnarInsertIntent::Insert
         };
-        let surrogates = columnar_row_surrogates(ctx, collection, &columnar_rows, primary_key)?;
-        let schema_bytes = build_schema_bytes(column_schema);
+        let surrogates = columnar_row_surrogates(
+            ctx,
+            collection,
+            &columnar_rows,
+            primary_key,
+            declared_pk.as_deref(),
+        )?;
+        let schema_bytes = build_schema_bytes(column_schema, declared_pk.as_deref());
         tasks.push(PhysicalTask {
             tenant_id,
             vshard_id: vshard,
