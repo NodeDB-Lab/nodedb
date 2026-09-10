@@ -8,6 +8,36 @@ use std::str::FromStr;
 
 use super::column_type::ColumnType;
 
+/// Every declared spelling that resolves to [`ColumnType::Int64`].
+///
+/// nodedb stores every integer as a full `i64`, so all of these collapse to
+/// one storage variant. The declared width travels separately as an
+/// [`IntWidth`](super::IntWidth), which narrows the advertised wire OID and
+/// bounds writes. [`IntWidth::from_declared_type`](super::IntWidth::from_declared_type)
+/// must recognize every spelling listed here — a spelling it does not know
+/// advertises OID 20 (`bigint`) whatever the author declared.
+pub const DECLARED_INT_KEYWORDS: [&str; 8] = [
+    "BIGINT", "INT64", "INTEGER", "INT", "INT4", "INT8", "SMALLINT", "INT2",
+];
+
+/// Every declared spelling that resolves to [`ColumnType::Float64`].
+///
+/// The float counterpart of [`DECLARED_INT_KEYWORDS`]: nodedb stores every
+/// float as a full `f64`, and
+/// [`FloatWidth::from_declared_type`](super::FloatWidth::from_declared_type)
+/// carries the declared width that narrows the advertised wire OID. It must
+/// recognize every spelling listed here.
+pub const DECLARED_FLOAT_KEYWORDS: [&str; 8] = [
+    "FLOAT64",
+    "DOUBLE",
+    "DOUBLE PRECISION",
+    "FLOAT8",
+    "REAL",
+    "FLOAT4",
+    "FLOAT32",
+    "FLOAT",
+];
+
 /// Error from parsing a column type string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -121,28 +151,12 @@ impl FromStr for ColumnType {
         }
 
         match upper.as_str() {
-            // `INT4`/`INT8`/`SMALLINT`/`INT2` are PostgreSQL wire-width integer
-            // keywords: strict/kv `CREATE COLLECTION` must accept
-            // them as valid aliases, not reject them as unknown types. They
-            // all collapse to the same `Int64` storage variant as
-            // `BIGINT`/`INTEGER`/`INT` — nodedb always stores integers as a
-            // full i64. The declared width is carried separately as an
-            // [`super::IntWidth`], which is what bounds writes and narrows the
-            // advertised wire OID; it is deliberately not a storage variant.
-            "BIGINT" | "INT64" | "INTEGER" | "INT" | "INT4" | "INT8" | "SMALLINT" | "INT2" => {
-                Ok(Self::Int64)
-            }
-            // `FLOAT4`/`FLOAT8`/`FLOAT32`/`DOUBLE PRECISION` are PostgreSQL
-            // wire-width float keywords, rejected as unknown types here for
-            // the same reason `INT4` was. They all collapse to
-            // the same `Float64` storage variant as `DOUBLE`/`REAL`/`FLOAT` —
-            // nodedb always stores floats as a full f64. The declared width is
-            // carried separately as a [`super::FloatWidth`], which narrows the
-            // advertised wire OID; it is deliberately not a storage variant.
-            // Unlike integers it bounds no writes: narrowing a float rounds
-            // rather than wraps, and PostgreSQL accepts-and-rounds too.
-            "FLOAT64" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" | "REAL" | "FLOAT4"
-            | "FLOAT32" | "FLOAT" => Ok(Self::Float64),
+            // Every PostgreSQL wire-width integer keyword collapses to the
+            // one `Int64` storage variant; `DECLARED_INT_KEYWORDS` lists them
+            // and carries the width contract.
+            keyword if DECLARED_INT_KEYWORDS.contains(&keyword) => Ok(Self::Int64),
+            // The float counterpart, listed by `DECLARED_FLOAT_KEYWORDS`.
+            keyword if DECLARED_FLOAT_KEYWORDS.contains(&keyword) => Ok(Self::Float64),
             "TEXT" | "STRING" | "VARCHAR" => Ok(Self::String),
             "BOOL" | "BOOLEAN" => Ok(Self::Bool),
             "BYTES" | "BYTEA" | "BLOB" => Ok(Self::Bytes),
@@ -167,5 +181,148 @@ impl FromStr for ColumnType {
             "DATETIME" => Err(ColumnTypeParseError::UseTimestamp),
             other => Err(ColumnTypeParseError::Unknown(other.to_string())),
         }
+    }
+}
+
+impl ColumnType {
+    /// Resolve a declared DDL type string to a column type.
+    ///
+    /// This is the single answer to "which [`ColumnType`] does this declared
+    /// string denote", shared by both planes. The catalog records the raw DDL
+    /// text that followed the column name, so an entry reads `INT DEFAULT 5`
+    /// or `DECIMAL(10, 2) NOT NULL`, not `INT`. This resolves the leading type
+    /// token, so a trailing modifier never changes the answer.
+    ///
+    /// `None` means the token names no known type. A caller that needs a
+    /// fallback picks its own — this reports the absence rather than guessing.
+    ///
+    /// A multi-word spelling resolves from its first word: `DOUBLE PRECISION`
+    /// is [`ColumnType::Float64`], and `TIMESTAMP WITH TIME ZONE` reaching
+    /// here as catalog text resolves to [`ColumnType::Timestamp`]. Pass such a
+    /// spelling to [`str::parse`] instead to resolve it whole.
+    pub fn from_declared_type(declared: &str) -> Option<Self> {
+        bare_declared_token(declared).parse().ok()
+    }
+}
+
+/// The leading type token of a declared DDL type string.
+///
+/// The cut is the first whitespace outside parentheses, so a parameter list
+/// keeps its internal spaces and `DECIMAL(10, 2) NOT NULL` yields
+/// `DECIMAL(10, 2)`. A trailing comma left by a column-list split is dropped.
+fn bare_declared_token(declared: &str) -> &str {
+    let trimmed = declared.trim_start();
+    let mut depth = 0usize;
+    let mut end = trimmed.len();
+    for (index, ch) in trimmed.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && ch.is_whitespace() => {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    trimmed.get(..end).unwrap_or(trimmed).trim_end_matches(',')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{FloatWidth, IntWidth};
+    use super::*;
+
+    /// Every spelling the parser resolves to `Int64` must also resolve to a
+    /// declared [`IntWidth`]. A spelling one side knows and the other does not
+    /// advertises the wrong `RowDescription` OID for the column.
+    ///
+    /// The list is the one the parser itself matches on, so adding a spelling
+    /// there extends this test rather than leaving it behind.
+    #[test]
+    fn every_declared_int_keyword_resolves_to_int64_and_a_width() {
+        for keyword in DECLARED_INT_KEYWORDS {
+            assert_eq!(
+                keyword.parse::<ColumnType>(),
+                Ok(ColumnType::Int64),
+                "{keyword} must resolve to Int64"
+            );
+            assert!(
+                IntWidth::from_declared_type(keyword).is_some(),
+                "{keyword} must resolve to a declared IntWidth"
+            );
+        }
+    }
+
+    /// The float counterpart of
+    /// [`every_declared_int_keyword_resolves_to_int64_and_a_width`].
+    #[test]
+    fn every_declared_float_keyword_resolves_to_float64_and_a_width() {
+        for keyword in DECLARED_FLOAT_KEYWORDS {
+            assert_eq!(
+                keyword.parse::<ColumnType>(),
+                Ok(ColumnType::Float64),
+                "{keyword} must resolve to Float64"
+            );
+            assert!(
+                FloatWidth::from_declared_type(keyword).is_some(),
+                "{keyword} must resolve to a declared FloatWidth"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_type_ignores_trailing_modifiers() {
+        assert_eq!(
+            ColumnType::from_declared_type("INT DEFAULT 5"),
+            Some(ColumnType::Int64)
+        );
+        assert_eq!(
+            ColumnType::from_declared_type("TEXT NOT NULL PRIMARY KEY"),
+            Some(ColumnType::String)
+        );
+        assert_eq!(
+            ColumnType::from_declared_type("timestamp time_key"),
+            Some(ColumnType::Timestamp)
+        );
+        assert_eq!(
+            ColumnType::from_declared_type("BIGINT,"),
+            Some(ColumnType::Int64)
+        );
+    }
+
+    /// A parameter list keeps its internal spaces: cutting at the first
+    /// whitespace would leave `DECIMAL(10,` and lose the type.
+    #[test]
+    fn declared_type_keeps_a_spaced_parameter_list() {
+        assert_eq!(
+            ColumnType::from_declared_type("DECIMAL(10, 2) NOT NULL"),
+            Some(ColumnType::Decimal {
+                precision: 10,
+                scale: 2
+            })
+        );
+        assert_eq!(
+            ColumnType::from_declared_type("VECTOR(768)"),
+            Some(ColumnType::Vector(768))
+        );
+    }
+
+    #[test]
+    fn declared_type_reports_an_unknown_token_as_none() {
+        assert_eq!(ColumnType::from_declared_type("SOMETHING_ELSE"), None);
+        assert_eq!(ColumnType::from_declared_type(""), None);
+        assert_eq!(ColumnType::from_declared_type("   "), None);
+    }
+
+    /// `Timestamp` and `Timestamptz` are instants; `SystemTimestamp` is
+    /// engine-assigned and is not.
+    #[test]
+    fn only_timestamp_types_are_instants() {
+        assert!(ColumnType::Timestamp.is_instant());
+        assert!(ColumnType::Timestamptz.is_instant());
+        assert!(!ColumnType::SystemTimestamp.is_instant());
+        assert!(!ColumnType::Int64.is_instant());
+        assert!(!ColumnType::String.is_instant());
     }
 }

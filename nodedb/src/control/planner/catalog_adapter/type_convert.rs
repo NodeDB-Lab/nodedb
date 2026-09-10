@@ -272,40 +272,47 @@ fn convert_column_type(ct: &nodedb_types::columnar::ColumnType) -> SqlDataType {
 /// Resolve the declared SQL type of a catalog `fields` entry.
 ///
 /// The catalog records the raw DDL text that followed the column name, so an
-/// entry reads `INT DEFAULT 5` or `INT NOT NULL`, not `INT`. The bare type
-/// token comes from `parse_column_type_str_full`, the same splitter
-/// `declared_default` uses and the same boundary `IntWidth::from_declared_type`
-/// and `FloatWidth::from_declared_type` respect. A trailing modifier therefore
-/// never changes the resolved type.
+/// entry reads `INT DEFAULT 5` or `INT NOT NULL`, not `INT`.
+/// [`nodedb_types::columnar::ColumnType::from_declared_type`] is the single
+/// classifier both planes resolve that text through, so a trailing modifier
+/// never changes the resolved type and the Data Plane cannot disagree about
+/// which columns carry an instant.
+///
+/// A token that names no known type resolves to `SqlDataType::String`, the
+/// widest rendering a catalog column can fall back to.
 fn parse_type_str(s: &str) -> SqlDataType {
-    let (bare, _, _, _) = nodedb_sql::ddl_ast::collection_type::parse_column_type_str_full(s);
-    let upper = bare.to_uppercase();
-    // Handle DECIMAL/NUMERIC with optional (p,s) params.
-    if upper.starts_with("DECIMAL") || upper.starts_with("NUMERIC") {
-        return SqlDataType::Decimal;
+    match nodedb_types::columnar::ColumnType::from_declared_type(s) {
+        Some(declared) => declared_column_type_to_sql(declared),
+        None => SqlDataType::String,
     }
-    match upper.as_str() {
-        // Every spelling `IntWidth::from_declared_type` recognizes must appear
-        // here too, or the column resolves to the `_ => String` default and
-        // advertises OID 25 (text) — the exact failure that made `SMALLINT`
-        // columns unreadable. `parse_type_str` decides *whether*
-        // the column is an integer; `IntWidth` decides *how wide*.
-        "INT" | "INTEGER" | "INT4" | "INT8" | "INT64" | "BIGINT" | "SMALLINT" | "INT2" => {
-            SqlDataType::Int64
-        }
-        // Same contract as the integer arm above, for the float family: every
-        // spelling `FloatWidth::from_declared_type` recognizes must appear
-        // here, or the column falls through to `_ => String` and advertises
-        // OID 25 (text) no matter what width was declared. `DOUBLE PRECISION`
-        // arrives as the bare token `DOUBLE`, matching how
-        // `FloatWidth::from_declared_type` recognizes it.
-        "FLOAT" | "FLOAT4" | "FLOAT8" | "FLOAT32" | "FLOAT64" | "DOUBLE" | "REAL" => {
-            SqlDataType::Float64
-        }
-        "BOOL" | "BOOLEAN" => SqlDataType::Bool,
-        "BYTES" | "BYTEA" | "BLOB" => SqlDataType::Bytes,
-        "TIMESTAMP" | "TIMESTAMPTZ" => SqlDataType::Timestamp,
-        _ => SqlDataType::String,
+}
+
+/// Map a declared column type onto the SQL type a `fields` column advertises.
+///
+/// Every type whose declared spelling and whose resolved strict/kv schema
+/// type advertise the same SQL type defers to [`convert_column_type`], so the
+/// two mappings cannot drift. The arms above that tail are the exceptions: a
+/// schemaless or columnar-family column stores these as the text the client
+/// wrote, not in the strict engine's binary encoding, so it renders as text.
+fn declared_column_type_to_sql(declared: nodedb_types::columnar::ColumnType) -> SqlDataType {
+    use nodedb_types::columnar::ColumnType;
+    match declared {
+        // A declared TIMESTAMPTZ column reads back in the naive timestamp
+        // shape these engines store, so it advertises OID 1114.
+        ColumnType::Timestamptz => SqlDataType::Timestamp,
+        // Bitemporal system time is engine-assigned and renders as text.
+        ColumnType::SystemTimestamp => SqlDataType::String,
+        // Stored as the client's own text: WKT geometry, JSON text, a vector
+        // or duration literal, and the collection literals.
+        ColumnType::Geometry
+        | ColumnType::Json
+        | ColumnType::Vector(_)
+        | ColumnType::Duration
+        | ColumnType::Array
+        | ColumnType::Set
+        | ColumnType::Range
+        | ColumnType::Record => SqlDataType::String,
+        other => convert_column_type(&other),
     }
 }
 
@@ -315,6 +322,41 @@ mod tests {
 
     use super::{SqlDataType, convert_collection_type, parse_type_str};
     use crate::control::security::catalog::StoredCollection;
+
+    /// The planner reads a cell as an instant for exactly the declared types
+    /// `ColumnType::is_instant` names, which is the same predicate the Data
+    /// Plane scales emission by. Pinning the equivalence here is what a
+    /// comment could not do: a spelling added to one side and not the other
+    /// fails this test instead of shipping a millisecond value labelled as
+    /// microseconds.
+    #[test]
+    fn parse_type_str_reads_exactly_the_instant_declared_types_as_timestamps() {
+        use nodedb_types::columnar::ColumnType;
+        for declared in [
+            "TIMESTAMP",
+            "TIMESTAMPTZ",
+            "timestamp",
+            "TIMESTAMP TIME_KEY",
+            "TIMESTAMPTZ NOT NULL",
+            "SYSTEM_TIMESTAMP",
+            "BIGINT TIME_KEY",
+            "INT",
+            "TEXT",
+            "GEOMETRY",
+            "DECIMAL(10, 2)",
+            "VECTOR(768)",
+            "SOMETHING_ELSE",
+            "",
+        ] {
+            let is_instant =
+                ColumnType::from_declared_type(declared).is_some_and(|ty| ty.is_instant());
+            assert_eq!(
+                is_instant,
+                parse_type_str(declared) == SqlDataType::Timestamp,
+                "{declared}: the instant predicate and the planner type must agree"
+            );
+        }
+    }
 
     /// `SMALLINT`/`INT2` are valid PostgreSQL wire-width integer keywords
     /// that must resolve to the same `SqlDataType::Int64` arm as

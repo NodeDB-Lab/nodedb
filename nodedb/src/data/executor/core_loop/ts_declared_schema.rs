@@ -234,19 +234,12 @@ fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
 
 /// Whether a declared DDL type makes a column an instant on the wire.
 ///
-/// Mirrors the two spellings the planner resolves to `SqlDataType::Timestamp`
-/// in `control::planner::catalog_adapter::type_convert::parse_type_str`. The
-/// two must name the same set: the planner decides how a cell is READ, this
-/// decides the unit it is WRITTEN in.
-///
-/// `SYSTEM_TIMESTAMP` is deliberately absent — the planner types it as text.
+/// Both planes answer this from `nodedb_types::columnar::ColumnType`: the
+/// Control Plane decides how a cell is READ, this decides the unit it is
+/// WRITTEN in, and one classifier keeps them from naming different sets.
 fn declared_type_is_instant(declared_type: &str) -> bool {
-    let bare = declared_type.split_whitespace().next().unwrap_or("");
-    matches!(
-        bare.parse::<nodedb_types::columnar::ColumnType>(),
-        Ok(nodedb_types::columnar::ColumnType::Timestamp)
-            | Ok(nodedb_types::columnar::ColumnType::Timestamptz)
-    )
+    nodedb_types::columnar::ColumnType::from_declared_type(declared_type)
+        .is_some_and(|declared| declared.is_instant())
 }
 
 /// Map a declared SQL type onto the memtable's storage type.
@@ -255,20 +248,21 @@ fn declared_type_is_instant(declared_type: &str) -> bool {
 /// regardless of how it was spelled — `TIMESTAMP`, `TIMESTAMPTZ`, and
 /// `BIGINT` time keys all store epoch milliseconds.
 fn memtable_column_type(declared_type: &str, is_time_key: bool) -> ColumnType {
+    use nodedb_types::columnar::ColumnType as DeclaredType;
+
     if is_time_key {
         return ColumnType::Timestamp;
     }
-    let bare = declared_type.split_whitespace().next().unwrap_or("");
-    match bare.parse::<nodedb_types::columnar::ColumnType>() {
-        Ok(nodedb_types::columnar::ColumnType::Timestamp)
-        | Ok(nodedb_types::columnar::ColumnType::Timestamptz)
-        | Ok(nodedb_types::columnar::ColumnType::SystemTimestamp) => ColumnType::Timestamp,
-        Ok(nodedb_types::columnar::ColumnType::Int64) => ColumnType::Int64,
-        // The memtable has no boolean column; ILP ingest has always widened
-        // booleans to f64, so a declared BOOLEAN lands in the same place.
-        Ok(nodedb_types::columnar::ColumnType::Float64)
-        | Ok(nodedb_types::columnar::ColumnType::Bool)
-        | Ok(nodedb_types::columnar::ColumnType::Decimal { .. }) => ColumnType::Float64,
+    match DeclaredType::from_declared_type(declared_type) {
+        Some(
+            DeclaredType::Timestamp | DeclaredType::Timestamptz | DeclaredType::SystemTimestamp,
+        ) => ColumnType::Timestamp,
+        Some(DeclaredType::Int64) => ColumnType::Int64,
+        // The memtable has no boolean column; ILP ingest widens booleans to
+        // f64, so a declared BOOLEAN lands in the same place.
+        Some(DeclaredType::Float64 | DeclaredType::Bool | DeclaredType::Decimal { .. }) => {
+            ColumnType::Float64
+        }
         // Everything else — TEXT, UUID, JSON, and any type the memtable
         // cannot represent natively — is stored as a dictionary symbol.
         _ => ColumnType::Symbol,
