@@ -207,7 +207,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
     // catalog path uses above — so the executor receives the body's rows and
     // evaluates the aggregate arguments / group keys against them. Without
     // this the aggregate scanned an empty (non-existent) collection and
-    // silently returned NULL / no rows (issue #295).
+    // silently returned NULL / no rows.
     if !matches!(input, SqlPlan::Scan { .. }) {
         let derived_group_specs = group_by_to_specs(group_by);
         let derived_agg_specs: Vec<AggregateSpec> =

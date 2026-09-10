@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Expression errors over a constant derived table must raise, not fold to
-//! NULL / empty rows (issue #295). The derived body materializes as rows on
+//! NULL / empty rows. The derived body materializes as rows on
 //! the coordinator; expression projections and aggregate/group-key arguments
 //! evaluate against those rows per-row, so division raises 22012 and
 //! sequence accessors raise 0A000 instead of silently vanishing.

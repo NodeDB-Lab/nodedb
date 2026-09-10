@@ -117,7 +117,7 @@ impl CoreLoop {
         // constant subqueries) ride as computed columns: evaluate each per
         // row BEFORE distinct/project so the aliased value exists in the row
         // map and division/accessor errors fail the query instead of
-        // silently NULLing (issue #295).
+        // silently NULLing.
         if !computed_columns.is_empty() {
             let computed_cols: Vec<crate::bridge::expr_eval::ComputedColumn> =
                 match zerompk::from_msgpack(computed_columns) {

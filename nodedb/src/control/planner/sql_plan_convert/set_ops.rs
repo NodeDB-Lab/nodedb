@@ -315,7 +315,7 @@ pub(super) fn convert_subquery(
             // Expression projections ride as computed columns so the
             // materialized-row ProviderScan evaluates them per row instead
             // of the response shaper looking up an alias that was never
-            // computed (silent NULL — issue #295). Window-aliased items are
+            // computed (silent NULL). Window-aliased items are
             // excluded here; they ride as window specs below.
             computed_columns: super::aggregate::extract_computed_columns(
                 projection,
