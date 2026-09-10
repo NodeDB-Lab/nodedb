@@ -162,10 +162,12 @@ impl CoreLoop {
         }
 
         // ── 5b. Window functions. ───────────────────────────────────────────
-        // Window-over-derived-table (issue #295 Gap 3): evaluate each spec
-        // per partition AFTER computed columns (window args may reference
-        // computed aliases) and BEFORE distinct/project (the window alias
-        // must exist in the row map). Partition/order/argument errors —
+        // Evaluate each window spec per partition after computed columns
+        // (window arguments may reference computed aliases) and before
+        // distinct/project (the window alias must exist in the row map).
+        // This ordering is required for derived tables; previously window
+        // specs were dropped and every window column returned NULL.
+        // Partition/order/argument errors —
         // including division-by-zero — fail the query instead of
         // silently NULLing. Evaluation is in place, so row order is kept.
         if !window_functions.is_empty() {

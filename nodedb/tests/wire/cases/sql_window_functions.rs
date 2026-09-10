@@ -417,7 +417,7 @@ async fn window_offset_over_expression_argument_returns_previous_evaluated_value
     }
 }
 
-// ── window functions over a DERIVED table (issue #295 Gap 3) ──
+// ── window functions over a DERIVED table ──
 //
 // A derived-table body that is itself a plain Scan (e.g. `SELECT * FROM s`)
 // inlines through the CTE path, where the outer window spec was previously

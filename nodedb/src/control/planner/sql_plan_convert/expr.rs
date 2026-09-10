@@ -368,7 +368,7 @@ pub(super) fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> 
                         // first (they produce columns the outer may reference),
                         // then the outer's. Dropping the outer's here left
                         // `SUM(n) OVER ...` over a derived table with a Scan
-                        // body silently NULL (issue #295 Gap 3).
+                        // body silently returning NULL.
                         window_functions: {
                             let mut merged = inner_w.clone();
                             if !window_functions.is_empty() {

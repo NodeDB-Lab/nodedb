@@ -86,8 +86,9 @@ pub enum QueryOp {
         #[serde(default)]
         computed_columns: Vec<u8>,
         /// Serialized `Vec<WindowFuncSpec>` evaluated per partition after
-        /// computed columns (window over derived-table rows — issue #295
-        /// Gap 3). Empty = no window functions.
+        /// computed columns. Window functions over derived-table rows must
+        /// evaluate after computed columns because window arguments may
+        /// reference computed aliases. Empty = no window functions.
         #[serde(default)]
         window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
