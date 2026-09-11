@@ -67,7 +67,7 @@ impl CoreLoop {
             }
         };
 
-        let matching_set: HashSet<String> = matching_ids.iter().cloned().collect();
+        let matching_set: HashSet<String> = matching_ids.iter().map(|k| k.to_string()).collect();
 
         // Step 2: For each facet field, count values.
         let mut facet_result = serde_json::Map::new();
@@ -133,7 +133,7 @@ impl CoreLoop {
         collection: &str,
         field: &str,
         matching_set: &HashSet<String>,
-        matching_ids: &[String],
+        matching_ids: &[nodedb_types::StorageKey],
     ) -> Vec<(String, usize)> {
         // Fast path: index-backed counting with filtered doc set.
         if let Ok(groups) = self.sparse.scan_index_groups_filtered(
@@ -161,15 +161,8 @@ impl CoreLoop {
             collection,
         );
         let mut counts: HashMap<String, usize> = HashMap::new();
-        for doc_id in matching_ids {
-            // `doc_id` is a bare string from a raw-table scan several calls
-            // removed from `SparseEngine`'s typed scan methods; a shape that
-            // fails to parse as a storage key contributes no row, the same as
-            // a `get` miss below.
-            let Some(key) = nodedb_types::StorageKey::parse(doc_id) else {
-                continue;
-            };
-            if let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, &key) {
+        for key in matching_ids {
+            if let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, key) {
                 let mp = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
                     &bytes,
                     body_format.as_format_ref(),

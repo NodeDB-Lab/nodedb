@@ -196,15 +196,9 @@ impl CoreLoop {
             .scan_matching_documents(database_id, tid, collection, filters)
             .map_err(|e| self.response_error(task, e))?;
         let mut rows: Vec<(String, Vec<u8>)> = Vec::with_capacity(matching_ids.len());
-        for doc_id in matching_ids {
-            // `doc_id` is a bare string from a raw-table scan; a shape that
-            // fails to parse as a storage key contributes no row, same as a
-            // `get` miss right below.
-            let Some(key) = crate::engine::document::store::StorageKey::parse(&doc_id) else {
-                continue;
-            };
+        for key in matching_ids {
             if let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, &key) {
-                rows.push((doc_id, bytes));
+                rows.push((key.to_string(), bytes));
             }
         }
         Ok(rows)

@@ -329,7 +329,7 @@ mod tests {
             .scan_index_values(DB, TID, COLL, "status", 100)
             .unwrap()
             .into_iter()
-            .map(|(doc_id, _value)| doc_id)
+            .map(|(doc_id, _value)| doc_id.to_string())
             .collect();
         v.sort();
         v

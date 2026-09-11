@@ -93,7 +93,7 @@ impl<'a> DocumentEngine<'a> {
                             collection,
                             &index_path.path,
                             &v,
-                            &doc_id_str,
+                            doc_id,
                         )?;
                     }
                 }

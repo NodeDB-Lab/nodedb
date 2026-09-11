@@ -22,18 +22,16 @@ pub(in crate::engine::sparse) fn redb_err<E: std::fmt::Display>(ctx: &str, e: E)
     }
 }
 
-/// Report a DOCUMENTS row whose key does not parse as a [`nodedb_types::StorageKey`].
+/// Report a row on `table` whose key does not parse as a [`nodedb_types::StorageKey`].
 ///
-/// A non-parsing key on this table is a violated storage invariant, not a
-/// legacy row to skip: every DOCUMENTS key is minted by [`StorageKey::for_surrogate`].
-pub(in crate::engine::sparse) fn invalid_storage_key_err(
-    collection: &str,
-    key: &str,
-) -> crate::Error {
+/// A non-parsing key on any of DOCUMENTS, INDEXES, or INDEXES_VERSIONED is a
+/// violated storage invariant, not a legacy row to skip: every stored key is
+/// minted by [`StorageKey::for_surrogate`].
+pub(crate) fn invalid_storage_key_err(table: &str, collection: &str, key: &str) -> crate::Error {
     crate::Error::Storage {
         engine: "sparse".into(),
         detail: format!(
-            "collection '{collection}' has a DOCUMENTS row whose key is not a valid storage key: '{key}'"
+            "collection '{collection}' has a {table} row whose key is not a valid storage key: '{key}'"
         ),
     }
 }

@@ -169,14 +169,7 @@ impl CoreLoop {
 
         let mut mutations = Vec::with_capacity(doc_ids.len());
         let mut rows: Vec<(RowIdentity, Vec<u8>)> = Vec::new();
-        for doc_id in doc_ids {
-            // `doc_id` is a bare string from the raw-table scan. A shape
-            // that fails to parse as a storage key can hold no row in
-            // DOCUMENTS either way, so it is skipped the same as a row that
-            // vanished between the scan and this read.
-            let Some(key) = crate::engine::document::store::StorageKey::parse(&doc_id) else {
-                continue;
-            };
+        for key in doc_ids {
             let Some(stored) = self.doc_resolve_read(&ctx, collection, &key)? else {
                 continue;
             };
@@ -195,7 +188,7 @@ impl CoreLoop {
             let surrogate = key.surrogate();
             mutations.push(delete_mutation(
                 collection,
-                &doc_id,
+                &key.to_string(),
                 surrogate,
                 Some(stored.clone()),
                 resolved_sum_targets,

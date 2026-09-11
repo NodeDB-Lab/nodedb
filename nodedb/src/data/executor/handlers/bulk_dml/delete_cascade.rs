@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::bridge::envelope::WriteSetEntry;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::{IndexPath, RowIdentity, StorageKey};
+use crate::engine::document::store::{IndexPath, StorageKey};
 
 /// Borrowed + owned inputs for [`CoreLoop::bulk_delete_row_cascade`], grouped
 /// so the call stays within the argument-count budget.
@@ -23,7 +23,7 @@ pub(in crate::data::executor) struct BulkDeleteRowCascade<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub doc_id: &'a str,
-    pub storage_key: Option<StorageKey>,
+    pub storage_key: StorageKey,
     /// The row's pre-deletion bytes, as `sparse.delete` returned them —
     /// never re-read.
     pub deleted_bytes: &'a [u8],
@@ -60,35 +60,26 @@ impl CoreLoop {
             returning,
         } = cascade;
 
-        // Cascade: inverted index. doc_id is the hex-encoded surrogate
-        // (the redb storage key). `storage_key` already holds the parsed
-        // form; reuse it for the write version + write-set entry below.
-        let row_surrogate = storage_key.map(|key| key.surrogate());
-        match row_surrogate {
-            Some(surrogate) => {
-                if let Err(e) = self.inverted.remove_document(
-                    task.request.database_id.as_u64(),
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    surrogate,
-                ) {
-                    // Recorded here, at the detection site: the row's own
-                    // transaction has already committed, so this cleanup
-                    // failure cannot roll it back.
-                    crate::diag::orphaned_index_entry_after_delete(&e, collection, "inverted");
-                    warn!(core = self.core_id, %collection, %doc_id, error = %e, "bulk delete: inverted index removal failed");
-                }
-            }
-            None => {
-                warn!(core = self.core_id, %collection, %doc_id, "bulk delete: doc_id is not a valid surrogate; FTS entry may be orphaned");
-            }
+        // Cascade: inverted index.
+        let row_surrogate = storage_key.surrogate();
+        if let Err(e) = self.inverted.remove_document(
+            task.request.database_id.as_u64(),
+            crate::types::TenantId::new(tid),
+            collection,
+            row_surrogate,
+        ) {
+            // Recorded here, at the detection site: the row's own
+            // transaction has already committed, so this cleanup
+            // failure cannot roll it back.
+            crate::diag::orphaned_index_entry_after_delete(&e, collection, "inverted");
+            warn!(core = self.core_id, %collection, %doc_id, error = %e, "bulk delete: inverted index removal failed");
         }
         // Cascade: secondary indexes.
         if let Err(e) = self.sparse.delete_indexes_for_document(
             task.request.database_id.as_u64(),
             tid,
             collection,
-            doc_id,
+            &storage_key,
         ) {
             crate::diag::orphaned_index_entry_after_delete(&e, collection, "secondary");
             warn!(core = self.core_id, %collection, %doc_id, error = %e, "bulk delete: secondary index cascade failed");
@@ -117,39 +108,39 @@ impl CoreLoop {
         if has_vectors {
             self.remove_document_vector_indexes(database_id, tid, collection, doc_id);
         }
-        if let Some(key) = storage_key {
-            self.doc_cache
-                .invalidate(task.request.database_id.as_u64(), tid, collection, &key);
-        }
+        self.doc_cache.invalidate(
+            task.request.database_id.as_u64(),
+            tid,
+            collection,
+            &storage_key,
+        );
         // Record the committed delete's write version against its
         // surrogate + collection.
-        if let Some(surrogate) = row_surrogate {
-            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
-            // Record the removed secondary-index tuples into the
-            // per-index write-value substrate, recomputed from the
-            // pre-delete document (see `index_paths` comment above).
-            if let (Some(lsn), Some(doc)) = (task.wal_lsn(), pre_delete_doc.as_ref()) {
-                let tuples = self.index_tuples_for_doc(doc, index_paths);
-                self.note_index_write_values(
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    &tuples,
-                    lsn,
-                );
-            }
-            // Carry the surrogate back for a post-apply `Delete` redo so
-            // the removed vector node does not resurrect on a WAL-only
-            // restart. Gated on `has_vectors` — a non-vector collection
-            // pays nothing. A delete carries no post-image body.
-            if has_vectors {
-                write_set.push(WriteSetEntry {
-                    surrogate: surrogate.as_u32(),
-                    is_delete: true,
-                    value: Vec::new(),
-                    collection: None,
-                });
-            }
+        self.note_surrogate_write_lsn(task, tid, collection, row_surrogate.as_u32());
+        // Record the removed secondary-index tuples into the
+        // per-index write-value substrate, recomputed from the
+        // pre-delete document (see `index_paths` comment above).
+        if let (Some(lsn), Some(doc)) = (task.wal_lsn(), pre_delete_doc.as_ref()) {
+            let tuples = self.index_tuples_for_doc(doc, index_paths);
+            self.note_index_write_values(
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+                collection,
+                &tuples,
+                lsn,
+            );
+        }
+        // Carry the surrogate back for a post-apply `Delete` redo so
+        // the removed vector node does not resurrect on a WAL-only
+        // restart. Gated on `has_vectors` — a non-vector collection
+        // pays nothing. A delete carries no post-image body.
+        if has_vectors {
+            write_set.push(WriteSetEntry {
+                surrogate: row_surrogate.as_u32(),
+                is_delete: true,
+                value: Vec::new(),
+                collection: None,
+            });
         }
         // Emit a delete event per affected row to the Event Plane, so
         // AFTER-DELETE triggers and CDC/change-stream consumers see
@@ -167,9 +158,7 @@ impl CoreLoop {
             collection,
             deleted_bytes,
         );
-        let event_identity = storage_key
-            .map(|key| key.to_identity())
-            .unwrap_or_else(|| RowIdentity::from_user_key(doc_id));
+        let event_identity = storage_key.to_identity();
         self.emit_document_delete_event(
             task,
             collection,

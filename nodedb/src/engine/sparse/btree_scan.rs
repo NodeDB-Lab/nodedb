@@ -44,7 +44,7 @@ impl SparseEngine {
             // Extract document_id from key format "{database_id}:{tenant}:{collection}:{doc_id}"
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
             let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err(collection, doc_id))?;
+                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
             let value = entry.1.value().to_vec();
             results.push((storage_key, value));
         }
@@ -100,7 +100,7 @@ impl SparseEngine {
             // Extract document_id from key format "{database_id}:{tenant}:{collection}:{doc_id}"
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
             let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err(collection, doc_id))?;
+                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
             let value = entry.1.value();
             f(&storage_key, value)?;
             count += 1;
@@ -152,7 +152,7 @@ impl SparseEngine {
             let key = entry.0.value();
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
             let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err(collection, doc_id))?;
+                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
             let value = entry.1.value().to_vec();
             chunk.push((storage_key, value));
             total += 1;
@@ -331,7 +331,7 @@ impl SparseEngine {
             let key = entry.0.value();
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
             let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err(collection, doc_id))?;
+                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
 
             // Evaluate predicate on raw bytes — skip allocation if no match.
             if !predicate(&storage_key, value_bytes) {

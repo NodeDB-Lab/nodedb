@@ -113,7 +113,10 @@ impl CoreLoop {
         // Deduplicate-unique-as-we-go: track `(normalized_value → doc_id)`
         // so a dup within the existing set is flagged before we ever
         // touch the index table.
-        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<
+            String,
+            crate::engine::document::store::StorageKey,
+        > = std::collections::HashMap::new();
 
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
@@ -132,11 +135,6 @@ impl CoreLoop {
         let mut pending_keys: Vec<String> = Vec::with_capacity(docs.len());
 
         for (doc_id, bytes) in &docs {
-            // `IndexEntryTxn` and the dedup map below are INDEXES-table
-            // concerns, out of this unit's typed scope, so the storage key
-            // is rendered once here at the boundary.
-            let doc_id = doc_id.to_string();
-            let doc_id = doc_id.as_str();
             // A row skipped here is a row the finished index permanently omits,
             // and the index is then reported as built — every later lookup on
             // that row's value silently misses it.
@@ -175,7 +173,7 @@ impl CoreLoop {
                     );
                 }
                 if unique {
-                    seen.insert(stored.clone(), doc_id.to_string());
+                    seen.insert(stored.clone(), *doc_id);
                 }
                 pending_keys.push(crate::engine::sparse::btree_index::index_key_for(
                     crate::engine::sparse::btree_index::IndexEntryTxn {

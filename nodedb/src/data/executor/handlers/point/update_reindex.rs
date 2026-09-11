@@ -208,7 +208,7 @@ impl CoreLoop {
                     collection: p.collection,
                     old_doc: Some(p.old_doc),
                     new_doc: p.new_doc,
-                    doc_id: p.doc_id,
+                    doc_id: p.storage_key,
                     index_paths: p.index_paths,
                 },
             )?

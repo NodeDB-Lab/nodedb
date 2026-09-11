@@ -111,15 +111,12 @@ impl CoreLoop {
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
-            for (&surrogate, doc_id) in predicted_sorted.iter().zip(&doc_ids) {
-                let key = nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(
-                    surrogate,
-                ));
+            for doc_id in &doc_ids {
                 if let Some(body) =
                     self.sparse
-                        .get(task.request.database_id.as_u64(), tid, collection, &key)?
+                        .get(task.request.database_id.as_u64(), tid, collection, doc_id)?
                 {
-                    let identity = crate::engine::document::store::identity_of(doc_id);
+                    let identity = doc_id.to_identity();
                     self.stage_admit_write(
                         rls_write_check,
                         &body,
@@ -134,7 +131,7 @@ impl CoreLoop {
 
         let overlay = self.txn_overlay_mut(txn_id);
         for (surrogate, doc_id) in predicted_sorted.into_iter().zip(doc_ids) {
-            overlay.insert_tombstone(coll_key.clone(), surrogate, &doc_id);
+            overlay.insert_tombstone(coll_key.clone(), surrogate, &doc_id.to_string());
         }
         Ok(())
     }

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::engine::document::store::StorageKey;
 use crate::engine::document::store::config::CollectionConfig;
 use crate::engine::sparse::btree::SparseEngine;
 
@@ -73,16 +74,29 @@ impl<'a> DocumentEngine<'a> {
         path: &str,
         value: &str,
         bitemporal: bool,
-    ) -> crate::Result<Vec<String>> {
+    ) -> crate::Result<Vec<StorageKey>> {
         if bitemporal {
-            return self.sparse.versioned_index_lookup_as_of(
+            // The versioned index still yields text, so this parses at the boundary.
+            let ids = self.sparse.versioned_index_lookup_as_of(
                 self.database_id,
                 self.tenant_id,
                 collection,
                 path,
                 value,
                 None,
-            );
+            )?;
+            return ids
+                .into_iter()
+                .map(|id| {
+                    StorageKey::parse(&id).ok_or_else(|| {
+                        crate::engine::sparse::btree::invalid_storage_key_err(
+                            "INDEXES_VERSIONED",
+                            collection,
+                            &id,
+                        )
+                    })
+                })
+                .collect();
         }
         let prefix_with_value = format!("{value}:");
         let results =
@@ -105,7 +119,12 @@ impl<'a> DocumentEngine<'a> {
                     self.database_id, self.tenant_id
                 );
                 if key.starts_with(&expected_prefix) {
-                    doc_ids.push(doc_id.to_string());
+                    let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
+                        crate::engine::sparse::btree::invalid_storage_key_err(
+                            "INDEXES", collection, doc_id,
+                        )
+                    })?;
+                    doc_ids.push(doc_id);
                 }
             }
         }
@@ -117,7 +136,6 @@ impl<'a> DocumentEngine<'a> {
 mod tests {
     use nodedb_types::Surrogate;
 
-    use crate::engine::document::store::StorageKey;
     use crate::engine::document::store::extract::json_to_msgpack;
 
     use super::*;
@@ -157,7 +175,7 @@ mod tests {
         let results = doc_engine
             .index_lookup("users", "$.email", "alice@example.com", false)
             .unwrap();
-        assert_eq!(results, vec![key(1).to_string()]);
+        assert_eq!(results, vec![key(1)]);
     }
 
     #[test]
@@ -178,12 +196,12 @@ mod tests {
         let results = doc_engine
             .index_lookup("users", "$.tags", "admin", false)
             .unwrap();
-        assert_eq!(results, vec![key(1).to_string()]);
+        assert_eq!(results, vec![key(1)]);
 
         let results = doc_engine
             .index_lookup("users", "$.tags", "editor", false)
             .unwrap();
-        assert_eq!(results, vec![key(1).to_string()]);
+        assert_eq!(results, vec![key(1)]);
     }
 
     #[test]
@@ -204,7 +222,7 @@ mod tests {
         let results = doc_engine
             .index_lookup("docs", "$.metadata.lang", "en", false)
             .unwrap();
-        assert_eq!(results, vec![key(1).to_string()]);
+        assert_eq!(results, vec![key(1)]);
     }
 
     #[test]
@@ -224,6 +242,6 @@ mod tests {
         let results = doc_engine
             .index_lookup("items", "$.category", "tools", false)
             .unwrap();
-        assert_eq!(results, vec![key(1).to_string()]);
+        assert_eq!(results, vec![key(1)]);
     }
 }

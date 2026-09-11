@@ -39,7 +39,7 @@ pub(in crate::data::executor) struct ProjectUpdateRows<'a> {
     pub(in crate::data::executor) tid: u64,
     pub(in crate::data::executor) collection: &'a str,
     /// The settled apply set, in statement order.
-    pub(in crate::data::executor) doc_ids: &'a [String],
+    pub(in crate::data::executor) doc_ids: &'a [crate::engine::document::store::StorageKey],
     pub(in crate::data::executor) updates: &'a [(String, UpdateValue)],
     /// `Some` for a strict collection, whose bodies are Binary Tuples.
     pub(in crate::data::executor) strict_schema: Option<&'a StrictSchema>,
@@ -72,15 +72,10 @@ impl CoreLoop {
         );
 
         let mut projected = Vec::with_capacity(doc_ids.len());
-        for doc_id in doc_ids {
-            // `doc_id` is a bare string from the settled apply set, several
-            // calls removed from any typed scan. A shape that fails to parse
-            // as a storage key is skipped the same as a row deleted between
-            // the match and this pass.
-            let Some(key) = crate::engine::document::store::StorageKey::parse(doc_id) else {
-                continue;
-            };
-            let Some(current_bytes) = self.sparse.get(database_id, tid, collection, &key)? else {
+        for key in doc_ids {
+            let doc_id_owned = key.to_string();
+            let doc_id = doc_id_owned.as_str();
+            let Some(current_bytes) = self.sparse.get(database_id, tid, collection, key)? else {
                 continue;
             };
 
@@ -97,19 +92,17 @@ impl CoreLoop {
                 )
                 .ok_or_else(|| {
                     crate::diag::strict_row_undecodable(collection, doc_id, "bulk_update_project");
-                    let identity = crate::engine::document::store::identity_of(doc_id);
+                    let identity = key.to_identity();
                     crate::data::executor::strict_format::undecodable_strict_row(
                         collection,
                         identity.as_str(),
                     )
                 })?,
                 None => {
-                    // `doc_id` is the storage key from the apply set. The
-                    // decoded document's `id` must be the row's client-visible
-                    // identity, not the storage key. A value that fails to
-                    // parse as a minted key is a legacy or user key, taken
-                    // verbatim.
-                    let identity = crate::engine::document::store::identity_of(doc_id);
+                    // `key` is the storage key from the apply set. The
+                    // decoded document's `id` is the row's client-visible
+                    // identity, not the storage key.
+                    let identity = key.to_identity();
                     crate::data::executor::handlers::returning_doc::from_stored(
                         &current_bytes,
                         &identity,
@@ -185,8 +178,8 @@ impl CoreLoop {
             };
 
             projected.push(ProjectedUpdateRow {
-                doc_id: doc_id.clone(),
-                storage_key: key,
+                doc_id: doc_id_owned,
+                storage_key: *key,
                 current_bytes,
                 old_doc,
                 doc,

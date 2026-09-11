@@ -238,7 +238,7 @@ impl CoreLoop {
                 tid,
                 collection,
                 doc: &doc,
-                document_id,
+                document_id: &storage_key,
                 paths: &paths,
                 bitemporal,
             })?;
@@ -288,7 +288,7 @@ impl CoreLoop {
                         collection,
                         old_doc: old_doc_for_index.as_ref(),
                         new_doc: &doc,
-                        doc_id: document_id,
+                        doc_id: &storage_key,
                         index_paths: &paths,
                     },
                 )?;

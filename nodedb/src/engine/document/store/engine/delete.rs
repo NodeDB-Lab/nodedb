@@ -60,7 +60,7 @@ impl<'a> DocumentEngine<'a> {
             self.database_id,
             self.tenant_id,
             collection,
-            &doc_id_str,
+            doc_id,
         )?;
         Ok(self
             .sparse

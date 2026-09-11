@@ -175,19 +175,13 @@ impl CoreLoop {
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
-            for doc_id in &apply_ids {
-                // `doc_id` is a bare string from a raw-table scan; a shape
-                // that fails to parse as a storage key is treated the same
-                // as the row-already-gone case right below it.
-                let Some(key) = crate::engine::document::store::StorageKey::parse(doc_id) else {
-                    continue;
-                };
-                let stored = match self.sparse.get(database_id, tid, collection, &key) {
+            for key in &apply_ids {
+                let stored = match self.sparse.get(database_id, tid, collection, key) {
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => continue,
                     Err(e) => return self.response_error(task, e),
                 };
-                let identity = crate::engine::document::store::identity_of(doc_id);
+                let identity = key.to_identity();
                 if let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
                     &stored,
@@ -232,13 +226,8 @@ impl CoreLoop {
         } else {
             Vec::new()
         };
-        for doc_id in &apply_ids {
-            // `doc_id` is a bare string from a raw-table scan several calls
-            // removed from `SparseEngine`'s typed scan methods. A shape that
-            // fails to parse as a storage key can hold no row in DOCUMENTS
-            // either way, so every call below that needs the typed key treats
-            // it exactly like the "row already gone" case it already handles.
-            let storage_key = crate::engine::document::store::StorageKey::parse(doc_id);
+        for storage_key in &apply_ids {
+            let doc_id = storage_key.to_string();
 
             // Capture pre-deletion snapshot if RETURNING was requested, or if
             // the collection is indexed (needed to recompute the removed
@@ -251,18 +240,19 @@ impl CoreLoop {
             let pre_delete_doc: Option<serde_json::Value> = if returning.is_some()
                 || !index_paths.is_empty()
             {
-                match storage_key.and_then(|key| {
-                    self.sparse
-                        .get(task.request.database_id.as_u64(), tid, collection, &key)
-                        .ok()
-                        .flatten()
-                }) {
+                match self
+                    .sparse
+                    .get(
+                        task.request.database_id.as_u64(),
+                        tid,
+                        collection,
+                        storage_key,
+                    )
+                    .ok()
+                    .flatten()
+                {
                     Some(bytes) => {
-                        // `doc_id` is the storage key from the scan. `RETURNING`
-                        // reports the row's client-visible identity, not the
-                        // storage key. A value that fails to parse as a minted
-                        // key is a legacy or user key, taken verbatim.
-                        let identity = crate::engine::document::store::identity_of(doc_id);
+                        let identity = storage_key.to_identity();
                         match returning_doc::from_stored(&bytes, &identity, strict_schema.as_ref())
                         {
                             Ok(doc) => Some(doc),
@@ -285,18 +275,17 @@ impl CoreLoop {
                 Ok(txn) => txn,
                 Err(e) => return self.response_error(task, e),
             };
-            let deleted_bytes = storage_key.and_then(|key| {
-                self.sparse
-                    .delete_in_txn(
-                        &row_txn,
-                        task.request.database_id.as_u64(),
-                        tid,
-                        collection,
-                        &key,
-                    )
-                    .ok()
-                    .flatten()
-            });
+            let deleted_bytes = self
+                .sparse
+                .delete_in_txn(
+                    &row_txn,
+                    task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    storage_key,
+                )
+                .ok()
+                .flatten();
             // Period lock, the pre-deletion image — a delete has no other.
             // Checked before `write_hook::run` and before commit: dropping
             // `row_txn` un-committed on a refusal reverses the removal.
@@ -362,7 +351,7 @@ impl CoreLoop {
                         tid,
                         collection,
                         doc_id: doc_id.as_str(),
-                        storage_key,
+                        storage_key: *storage_key,
                         deleted_bytes: bytes,
                         has_vectors,
                         index_paths: &index_paths,

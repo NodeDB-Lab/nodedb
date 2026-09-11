@@ -14,7 +14,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::unique::{
     UniqueCheck, check_unique_constraints,
 };
-use crate::engine::document::store::{CollectionConfig, extract_index_values};
+use crate::engine::document::store::{CollectionConfig, StorageKey, extract_index_values};
 
 /// The overlay's verdict on a primary key within the current transaction.
 pub(super) enum OverlayPk {
@@ -32,7 +32,7 @@ impl CoreLoop {
         &self,
         ctx: &StageCtx<'_>,
         row_key: &str,
-        storage_key: &crate::engine::document::store::StorageKey,
+        storage_key: &StorageKey,
         bitemporal: bool,
         overlay: OverlayPk,
     ) -> crate::Result<bool> {
@@ -80,13 +80,16 @@ impl CoreLoop {
     ) -> crate::Result<()> {
         let collection = ctx.collection;
         // BASE: another durable row already owning one of the unique values.
+        // The row's own index entries are keyed by its storage key. The
+        // self-match exclusion compares that key, not the plan's document id.
+        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
         check_unique_constraints(UniqueCheck {
             sparse: &self.sparse,
             database_id: ctx.database_id,
             tid: ctx.tid,
             collection,
             doc: incoming_doc,
-            document_id: &ctx.document_id,
+            document_id: &storage_key,
             paths: &config.index_paths,
             bitemporal: config.bitemporal,
         })?;

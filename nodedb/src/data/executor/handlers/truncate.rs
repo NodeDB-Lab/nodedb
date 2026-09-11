@@ -106,13 +106,8 @@ impl CoreLoop {
         // `Put` record and resurrect its HNSW vector — mirrors
         // `execute_bulk_delete`'s `write_set` cascade.
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
-        for doc_id in &all_ids {
-            // `doc_id` is a bare string from a raw-table scan several calls
-            // removed from `SparseEngine`'s typed scan methods. A shape that
-            // fails to parse as a storage key can hold no row in DOCUMENTS
-            // either way, so `delete_in_txn` below sees the same "nothing to
-            // remove" outcome a lookup miss would have produced.
-            let storage_key = crate::engine::document::store::StorageKey::parse(doc_id);
+        for storage_key in &all_ids {
+            let doc_id = storage_key.to_string();
 
             // One transaction per removed row, shared with the materialized-sum
             // delta that row owes — identical to `execute_bulk_delete`, so a
@@ -121,12 +116,11 @@ impl CoreLoop {
                 Ok(txn) => txn,
                 Err(e) => return self.response_error(task, e),
             };
-            let deleted_bytes = storage_key.and_then(|key| {
-                self.sparse
-                    .delete_in_txn(&row_txn, database_id, tid, collection, &key)
-                    .ok()
-                    .flatten()
-            });
+            let deleted_bytes = self
+                .sparse
+                .delete_in_txn(&row_txn, database_id, tid, collection, storage_key)
+                .ok()
+                .flatten();
             let mut target_writes = Vec::new();
             if let Some(bytes) = deleted_bytes.as_deref() {
                 match write_hook::run(
@@ -161,23 +155,21 @@ impl CoreLoop {
             }
             write_set.extend(write_hook::target_write_set(&target_writes));
             if let Some(deleted_bytes) = deleted_bytes.as_deref() {
-                // doc_id is the hex-encoded surrogate (the redb storage key).
-                // `storage_key` already holds the parsed form. Non-hex keys
-                // (legacy non-surrogate docs) hold `None` and skip FTS.
-                if let Some(surrogate) = storage_key.map(|key| key.surrogate())
-                    && let Err(e) = self.inverted.remove_document(
-                        database_id,
-                        crate::types::TenantId::new(tid),
-                        collection,
-                        surrogate,
-                    )
-                {
+                let surrogate = storage_key.surrogate();
+                if let Err(e) = self.inverted.remove_document(
+                    database_id,
+                    crate::types::TenantId::new(tid),
+                    collection,
+                    surrogate,
+                ) {
                     warn!(core = self.core_id, %collection, %doc_id, error = %e, "truncate: inverted removal failed");
                 }
-                if let Err(e) =
-                    self.sparse
-                        .delete_indexes_for_document(database_id, tid, collection, doc_id)
-                {
+                if let Err(e) = self.sparse.delete_indexes_for_document(
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key,
+                ) {
                     warn!(core = self.core_id, %collection, %doc_id, error = %e, "truncate: index cascade failed");
                 }
                 // Cascade: secondary HNSW vector index. The put path indexed
@@ -186,38 +178,34 @@ impl CoreLoop {
                 // the leaked vector keeps scoring in KNN search in the same
                 // process (mirrors `execute_bulk_delete`'s vector cascade).
                 if has_vectors {
-                    self.remove_document_vector_indexes(database_id, tid, collection, doc_id);
-                    if let Some(surrogate) = storage_key.map(|key| key.surrogate()) {
-                        write_set.push(WriteSetEntry {
-                            surrogate: surrogate.as_u32(),
-                            is_delete: true,
-                            value: Vec::new(),
-                            collection: None,
-                        });
-                    }
+                    self.remove_document_vector_indexes(database_id, tid, collection, &doc_id);
+                    write_set.push(WriteSetEntry {
+                        surrogate: surrogate.as_u32(),
+                        is_delete: true,
+                        value: Vec::new(),
+                        collection: None,
+                    });
                 }
                 let edges = self
                     .csr_partition_mut(database_id, tid)
-                    .remove_node_edges(doc_id);
+                    .remove_node_edges(&doc_id);
                 let cascade_ord = self.hlc.next_ordinal();
                 if edges > 0
                     && let Err(e) = self.edge_store.delete_edges_for_node(
                         database_id,
                         nodedb_types::TenantId::new(tid),
-                        doc_id,
+                        &doc_id,
                         cascade_ord,
                     )
                 {
                     warn!(core = self.core_id, %doc_id, error = %e, "truncate: edge cascade failed");
                 }
-                if let Some(key) = storage_key {
-                    self.doc_cache.invalidate(
-                        task.request.database_id.as_u64(),
-                        tid,
-                        collection,
-                        &key,
-                    );
-                }
+                self.doc_cache.invalidate(
+                    task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    storage_key,
+                );
                 // Emit a delete event per removed row to the Event Plane, so
                 // AFTER-DELETE triggers and CDC/change-stream consumers see
                 // each row TRUNCATE removed — mirroring `execute_point_delete`
@@ -235,9 +223,7 @@ impl CoreLoop {
                     collection,
                     deleted_bytes,
                 );
-                let identity = storage_key.map(|key| key.to_identity()).unwrap_or_else(|| {
-                    crate::engine::document::store::RowIdentity::from_user_key(doc_id.as_str())
-                });
+                let identity = storage_key.to_identity();
                 self.emit_document_delete_event(
                     task,
                     collection,

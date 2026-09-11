@@ -52,13 +52,15 @@ pub(super) fn with_tenant_key<R>(
 }
 
 /// Build a database/tenant-scoped index key `"{db}:{tenant}:{a}:{b}:{c}:{d}"`.
+/// `d` is written via `Display`, so a [`nodedb_types::StorageKey`] lands as
+/// its 8 hex characters with no intermediate `String`.
 pub(in crate::engine::sparse) fn with_tenant_key4<R>(
     database_id: u64,
     tenant_id: u64,
     a: &str,
     b: &str,
     c: &str,
-    d: &str,
+    d: impl std::fmt::Display,
     f: impl FnOnce(&str) -> R,
 ) -> R {
     KEY_BUF.with(|buf| {
@@ -75,7 +77,7 @@ pub(in crate::engine::sparse) fn with_tenant_key4<R>(
         buf.push(':');
         buf.push_str(c);
         buf.push(':');
-        buf.push_str(d);
+        let _ = write!(buf, "{d}");
         f(&buf)
     })
 }

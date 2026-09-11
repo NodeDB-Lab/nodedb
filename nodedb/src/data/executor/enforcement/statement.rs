@@ -92,21 +92,14 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        document_ids: &[String],
+        document_ids: &[nodedb_types::StorageKey],
     ) -> crate::Result<Vec<BalancedEntry>> {
         let Some(def) = self.balanced_def(database_id, tid, collection) else {
             return Ok(Vec::new());
         };
         let mut entries = Vec::new();
-        for document_id in document_ids {
-            // `document_id` arrives as a bare string several calls removed
-            // from the scan that produced it. A shape that fails to parse
-            // as a storage key is treated the same as a row that is not
-            // there: this check contributes nothing for a row it cannot read.
-            let Some(key) = nodedb_types::StorageKey::parse(document_id) else {
-                continue;
-            };
-            let Some(stored) = self.sparse.get(database_id, tid, collection, &key)? else {
+        for key in document_ids {
+            let Some(stored) = self.sparse.get(database_id, tid, collection, key)? else {
                 continue;
             };
             // A stored row of a collection that declares constraints over its

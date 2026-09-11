@@ -94,7 +94,12 @@ impl CoreLoop {
                 // restore the stale entries this put removed. Empty on the
                 // bitemporal path (its index reversal happened in
                 // `undo_bitemporal_write` above), so this is a no-op there.
-                self.undo_secondary_index(ctx, &secondary_index_added, &secondary_index_removed)?;
+                self.undo_secondary_index(
+                    ctx,
+                    &storage_key,
+                    &secondary_index_added,
+                    &secondary_index_removed,
+                )?;
                 // Revert inverted index: remove the postings this rolled-back
                 // put wrote. FATAL on failure — a rollback that leaves stale FTS
                 // postings behind is the same silent-partial-success corruption
@@ -174,7 +179,7 @@ impl CoreLoop {
                 // Restore the plain secondary-index entries the forward delete
                 // cascade removed. Empty on the bitemporal path (no plain
                 // INDEXES entries there), so this is a no-op for it.
-                self.undo_secondary_index(ctx, &[], &secondary_index_tuples)?;
+                self.undo_secondary_index(ctx, &storage_key, &[], &secondary_index_tuples)?;
                 // Re-index the restored document into the full-text inverted
                 // index. The forward delete cascade removed its postings
                 // unconditionally, so a rollback that restored the row but not
@@ -264,6 +269,7 @@ impl CoreLoop {
     fn undo_secondary_index(
         &self,
         ctx: UndoDocumentContext<'_>,
+        storage_key: &crate::engine::document::store::StorageKey,
         to_remove: &[(String, String)],
         to_restore: &[(String, String)],
     ) -> Result<(), (usize, String)> {
@@ -290,12 +296,12 @@ impl CoreLoop {
         };
         for (field, value) in to_remove {
             self.sparse
-                .index_remove(database_id, tid, collection, field, value, document_id)
+                .index_remove(database_id, tid, collection, field, value, storage_key)
                 .map_err(|e| map_err("remove", e.to_string()))?;
         }
         for (field, value) in to_restore {
             self.sparse
-                .index_put(database_id, tid, collection, field, value, document_id)
+                .index_put(database_id, tid, collection, field, value, storage_key)
                 .map_err(|e| map_err("restore", e.to_string()))?;
         }
         Ok(())

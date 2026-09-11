@@ -72,7 +72,8 @@ impl CoreLoop {
             tid,
         );
         match doc_engine.index_lookup(collection, path, value, bitemporal) {
-            Ok(mut doc_ids) => {
+            Ok(doc_ids) => {
+                let mut doc_ids: Vec<String> = doc_ids.into_iter().map(|k| k.to_string()).collect();
                 if let Some(txn_id) = task.request.txn_id {
                     let config_key = (
                         task.request.database_id,
@@ -175,17 +176,18 @@ impl CoreLoop {
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let doc_engine =
             crate::engine::document::store::DocumentEngine::new(&self.sparse, database_id, tid);
-        let mut doc_ids = match doc_engine.index_lookup(collection, path, value, bitemporal) {
-            Ok(ids) => ids,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("indexed fetch: {e}"),
-                    },
-                );
-            }
-        };
+        let mut doc_ids: Vec<String> =
+            match doc_engine.index_lookup(collection, path, value, bitemporal) {
+                Ok(ids) => ids.into_iter().map(|k| k.to_string()).collect(),
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("indexed fetch: {e}"),
+                        },
+                    );
+                }
+            };
 
         // Strict collections store Binary Tuple bytes; the response codec
         // expects msgpack maps. Decode-then-encode here so cross-engine

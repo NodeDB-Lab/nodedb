@@ -325,7 +325,7 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            row_key,
+            &storage_key,
         ) {
             warn!(core = self.core_id, %collection, %document_id, error = %e, "secondary index cascade failed; rejecting the delete");
             return Err(e);
