@@ -7,7 +7,7 @@ use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget};
 
 use super::lookup::lookup_period_surrogate;
 use crate::control::planner::materialized_sum::recon::recon_point_row;
-use crate::control::planner::materialized_sum::{join_value_from_body, resolve_one_target};
+use crate::control::planner::materialized_sum::{ResolvedTargets, join_value_from_body};
 use crate::control::security::catalog::PeriodLockDef;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
@@ -93,16 +93,24 @@ pub(super) async fn resolve_batch_period_values(
     database_id: DatabaseId,
     trace_id: TraceId,
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
-    let mut resolved: Vec<ResolvedSumTarget> = Vec::new();
+    let mut resolved = ResolvedTargets::new();
     for body in bodies {
         let Some(period_key) = join_value_from_body(body, &def.period_column) else {
             continue;
         };
-        resolve_one_target(&mut resolved, &def.ref_table, period_key, async |key| {
-            lookup_period_surrogate(state, &def.ref_table, key, tenant_id, database_id, trace_id)
+        resolved
+            .resolve(&def.ref_table, period_key, async |key| {
+                lookup_period_surrogate(
+                    state,
+                    &def.ref_table,
+                    key,
+                    tenant_id,
+                    database_id,
+                    trace_id,
+                )
                 .await
-        })
-        .await?;
+            })
+            .await?;
     }
-    Ok(resolved)
+    Ok(resolved.into_vec())
 }

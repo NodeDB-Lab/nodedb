@@ -7,8 +7,8 @@
 use nodedb_physical::physical_plan::{ResolvedSumTarget, UpdateValue};
 
 use super::lookup::{PeriodLockScope, lookup_period_surrogate};
+use crate::control::planner::materialized_sum::ResolvedTargets;
 use crate::control::planner::materialized_sum::recon::recon_scan_rows;
-use crate::control::planner::materialized_sum::resolve_one_target;
 use crate::control::security::catalog::PeriodLockDef;
 
 /// What a predicate-driven statement does to each row it matches — decides
@@ -45,10 +45,10 @@ pub(super) async fn resolve_predicate_period_values(
     )
     .await?;
 
-    // `resolve_one_target` dedupes on `(target, value)` itself, so every
-    // row's pre- and post-image resolves through the same call regardless of
-    // how many rows or images share a period value.
-    let mut resolved: Vec<ResolvedSumTarget> = Vec::new();
+    // `ResolvedTargets` dedupes on `(target, value)` itself, so every row's
+    // pre- and post-image resolves through the same call regardless of how
+    // many rows or images share a period value.
+    let mut resolved = ResolvedTargets::new();
     for row in &read.rows {
         resolve_period_value(scope, def, row, &mut resolved).await?;
         if matches!(effect, PeriodLockEffect::Assign) {
@@ -56,7 +56,7 @@ pub(super) async fn resolve_predicate_period_values(
             resolve_period_value(scope, def, &new_row, &mut resolved).await?;
         }
     }
-    Ok(resolved)
+    Ok(resolved.into_vec())
 }
 
 /// Resolve one row's period value into `resolved`, when it carries the
@@ -67,21 +67,22 @@ async fn resolve_period_value(
     scope: &PeriodLockScope<'_>,
     def: &PeriodLockDef,
     row: &serde_json::Value,
-    resolved: &mut Vec<ResolvedSumTarget>,
+    resolved: &mut ResolvedTargets,
 ) -> crate::Result<()> {
     let Some(value) = row.get(def.period_column.as_str()).and_then(|v| v.as_str()) else {
         return Ok(());
     };
-    resolve_one_target(resolved, &def.ref_table, value.to_string(), async |key| {
-        lookup_period_surrogate(
-            scope.state,
-            &def.ref_table,
-            key,
-            scope.tenant_id,
-            scope.database_id,
-            scope.trace_id,
-        )
+    resolved
+        .resolve(&def.ref_table, value.to_string(), async |key| {
+            lookup_period_surrogate(
+                scope.state,
+                &def.ref_table,
+                key,
+                scope.tenant_id,
+                scope.database_id,
+                scope.trace_id,
+            )
+            .await
+        })
         .await
-    })
-    .await
 }

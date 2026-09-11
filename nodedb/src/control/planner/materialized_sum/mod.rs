@@ -31,4 +31,4 @@ pub use index::MaterializedSumIndex;
 pub use resolve::{
     resolve_materialized_sum_targets, resolve_sum_targets_for_bodies, source_drives_bindings,
 };
-pub use resolve_target::resolve_one_target;
+pub use resolve_target::ResolvedTargets;

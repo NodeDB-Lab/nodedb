@@ -12,7 +12,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::Surrogate;
 
 use super::extract::join_value_from_body;
-use super::resolve_target::resolve_one_target;
+use super::resolve_target::ResolvedTargets;
 use super::settle::{
     SettleInput, co_resident_target_keys, omit_shipped, settle_cross_shard_images,
 };
@@ -111,14 +111,14 @@ pub async fn resolve_materialized_sum_targets(
                     resolve_bodies(state, &bindings, bodies, tenant_id, database_id, trace_id)
                         .await?
                 }
-                None => Vec::new(),
+                None => ResolvedTargets::new(),
             };
             // A point write that rewrites a stored row reads it here — for the
             // join values it addresses AND for the pre-image a cross-shard
             // delta is folded from. One read, one snapshot: settling from a
             // second read would total a different one.
             match &stored {
-                None => (resolved, None),
+                None => (resolved.into_vec(), None),
                 Some(scope) => {
                     let images = super::stored::extend_with_stored_row(
                         state,
@@ -130,6 +130,7 @@ pub async fn resolve_materialized_sum_targets(
                         trace_id,
                     )
                     .await?;
+                    let mut resolved = resolved.into_vec();
                     let input = SettleInput {
                         source_collection: collection,
                         images: &images.images,
@@ -309,7 +310,11 @@ pub async fn resolve_sum_targets_for_bodies(
     else {
         return Ok(Vec::new());
     };
-    resolve_bodies(state, &bindings, bodies, tenant_id, database_id, trace_id).await
+    Ok(
+        resolve_bodies(state, &bindings, bodies, tenant_id, database_id, trace_id)
+            .await?
+            .into_vec(),
+    )
 }
 
 /// Whether `source_collection` drives any materialized-sum binding.
@@ -381,8 +386,8 @@ async fn resolve_bodies(
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
-) -> crate::Result<Vec<ResolvedSumTarget>> {
-    let mut resolved: Vec<ResolvedSumTarget> = Vec::new();
+) -> crate::Result<ResolvedTargets> {
+    let mut resolved = ResolvedTargets::new();
     for binding in bindings.iter() {
         for body in bodies {
             let Some(join_value) = join_value_from_body(body, &binding.join_column) else {
@@ -391,17 +396,13 @@ async fn resolve_bodies(
                 // and nothing to add a delta to.
                 continue;
             };
-            resolve_one_target(
-                &mut resolved,
-                &binding.target_collection,
-                join_value,
-                async |v| {
+            resolved
+                .resolve(&binding.target_collection, join_value, async |v| {
                     lookup_join_value(state, binding, v, tenant_id, database_id, trace_id)
                         .await
                         .map(Some)
-                },
-            )
-            .await?;
+                })
+                .await?;
         }
     }
     Ok(resolved)
