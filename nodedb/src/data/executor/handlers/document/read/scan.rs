@@ -4,8 +4,9 @@
 
 use tracing::{debug, warn};
 
-use super::fetch::{DocFetchParams, DocScanMode, RowOrigin};
+use super::fetch_types::parse_fetched_key;
 use super::projection::{apply_projection, apply_projection_msgpack};
+use super::{DocFetchParams, DocScanMode};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -17,31 +18,17 @@ use crate::data::executor::task::ExecutionTask;
 
 /// Shape one fetched row into `(identity, standard msgpack body)`.
 ///
-/// A sparse row's id reaches this handler as rendered storage-key text
-/// several calls removed from the scan that produced it (`document_scan_fetch`
-/// unifies every source — current, `AS OF`, bitemporal — to
-/// `(String, Vec<u8>)`), so a shape that fails to parse names a
-/// fetch-pipeline bug rather than a row to skip. A foreign row already
-/// carries its engine's identity and a msgpack body, so it passes through.
+/// The id reaches this handler as rendered storage-key text several calls
+/// removed from the scan that produced it: `document_scan_fetch` unifies every
+/// source — current, `AS OF`, bitemporal — to `(String, Vec<u8>)`.
 fn fetched_row_to_doc(
-    origin: RowOrigin,
     collection: &str,
-    id: String,
-    body: Vec<u8>,
+    id: &str,
+    body: &[u8],
     body_format: SparseBodyFormatRef<'_>,
 ) -> crate::Result<(String, Vec<u8>)> {
-    match origin {
-        RowOrigin::Sparse => {
-            let key = nodedb_types::StorageKey::parse(&id).ok_or_else(|| crate::Error::Storage {
-                engine: "sparse".into(),
-                detail: format!(
-                    "collection '{collection}' scan fetched a row whose id is not a valid storage key: '{id}'"
-                ),
-            })?;
-            Ok(sparse_row_to_doc(&key, &body, body_format))
-        }
-        RowOrigin::Foreign => Ok((id, body)),
-    }
+    let key = parse_fetched_key(collection, id)?;
+    Ok(sparse_row_to_doc(&key, body, body_format))
 }
 
 /// Parameters for [`CoreLoop::execute_document_scan`].
@@ -176,7 +163,6 @@ impl CoreLoop {
                     return self.response_error(task, ErrorCode::DeadlineExceeded);
                 }
                 let mut filtered = fetched.rows;
-                let origin = fetched.origin;
                 let effective_schema = fetched.effective_schema;
                 // The encoding the rows arrive in from the fetch stage. It is
                 // NOT the collection's stored encoding: the fetch stage has
@@ -268,9 +254,7 @@ impl CoreLoop {
                 let filtered = if !sort_keys.is_empty() || !projection.is_empty() {
                     match filtered
                         .into_iter()
-                        .map(|(id, bytes)| {
-                            fetched_row_to_doc(origin, collection, id, bytes, body_format)
-                        })
+                        .map(|(id, bytes)| fetched_row_to_doc(collection, &id, &bytes, body_format))
                         .collect::<crate::Result<Vec<_>>>()
                     {
                         Ok(rows) => rows,
@@ -323,7 +307,7 @@ impl CoreLoop {
                         .into_iter()
                         .map(|(doc_id, val)| {
                             let (doc_id, mp) =
-                                fetched_row_to_doc(origin, collection, doc_id, val, body_format)?;
+                                fetched_row_to_doc(collection, &doc_id, &val, body_format)?;
                             let projected =
                                 apply_projection_msgpack(&mp, &computed_cols, projection)?;
                             Ok((doc_id, projected))
@@ -354,7 +338,7 @@ impl CoreLoop {
                         .into_iter()
                         .map(|(id, val)| {
                             let (doc_id, mp) =
-                                fetched_row_to_doc(origin, collection, id, val, body_format)?;
+                                fetched_row_to_doc(collection, &id, &val, body_format)?;
                             crate::data::executor::doc_format::decode_document(&mp)
                                 .map(|doc| (doc_id, doc))
                         })
@@ -408,13 +392,8 @@ impl CoreLoop {
                         let projected_rows: Vec<_> = match sorted
                             .into_iter()
                             .map(|(doc_id, value)| {
-                                let (doc_id, mp) = fetched_row_to_doc(
-                                    origin,
-                                    collection,
-                                    doc_id,
-                                    value,
-                                    body_format,
-                                )?;
+                                let (doc_id, mp) =
+                                    fetched_row_to_doc(collection, &doc_id, &value, body_format)?;
                                 let projected =
                                     apply_projection_msgpack(&mp, &computed_cols, projection)?;
                                 Ok((doc_id, projected))

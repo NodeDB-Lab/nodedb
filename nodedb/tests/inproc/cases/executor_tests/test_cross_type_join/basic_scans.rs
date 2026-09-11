@@ -5,10 +5,7 @@
 use super::super::helpers::{make_ctx, send_ok};
 use nodedb::data::executor::handlers::join;
 use nodedb::data::executor::response_codec;
-use nodedb_physical::physical_plan::{
-    DocumentOp, EnforcementOptions, KvOp, PhysicalPlan, StorageMode,
-};
-use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
+use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
 
 pub(super) fn build_msgpack_map(fields: &[(&str, &str)]) -> Vec<u8> {
     let mut map = serde_json::Map::new();
@@ -80,96 +77,6 @@ fn kv_put_scan_roundtrip() {
             "doc {doc_id} missing 'theme': {json}"
         );
     }
-}
-
-#[test]
-fn document_scan_preserves_kv_rows_when_collection_has_strict_config() {
-    let mut ctx = make_ctx();
-
-    send_ok(
-        &mut ctx.core,
-        &mut ctx.tx,
-        &mut ctx.rx,
-        PhysicalPlan::Document(DocumentOp::Register {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "prefs",
-            ),
-            indexes: Vec::new(),
-            crdt_enabled: false,
-            storage_mode: StorageMode::Strict {
-                schema: StrictSchema {
-                    columns: vec![
-                        ColumnDef::required("key", ColumnType::String).with_primary_key(),
-                        ColumnDef::required("theme", ColumnType::String),
-                        ColumnDef::nullable("lang", ColumnType::String),
-                    ],
-                    version: 1,
-                    dropped_columns: Vec::new(),
-                    bitemporal: false,
-                },
-            },
-            enforcement: Box::new(EnforcementOptions::default()),
-            bitemporal: false,
-            conflict_policy: None,
-            timeseries: None,
-            vector_primary: None,
-        }),
-    );
-
-    let value = build_msgpack_map(&[("theme", "dark"), ("lang", "en")]);
-    send_ok(
-        &mut ctx.core,
-        &mut ctx.tx,
-        &mut ctx.rx,
-        PhysicalPlan::Kv(KvOp::Put {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "prefs",
-            ),
-            key: b"d1".to_vec(),
-            value,
-            ttl_ms: 0,
-            surrogate: nodedb_types::Surrogate::ZERO,
-            returning: None,
-            rls_filters: Vec::new(),
-        }),
-    );
-
-    let payload = send_ok(
-        &mut ctx.core,
-        &mut ctx.tx,
-        &mut ctx.rx,
-        PhysicalPlan::Document(DocumentOp::Scan {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "prefs",
-            ),
-            filters: Vec::new(),
-            limit: 100,
-            offset: 0,
-            sort_keys: Vec::new(),
-            distinct: false,
-            projection: Vec::new(),
-            computed_columns: Vec::new(),
-            window_functions: Vec::new(),
-            system_time: nodedb_types::SystemTimeScope::Current,
-            valid_at_ms: None,
-            prefilter: None,
-        }),
-    );
-
-    let json = response_codec::decode_payload_to_json(&payload);
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&json).unwrap_or_else(|e| panic!("invalid JSON: {e}\nraw: {json}"));
-    assert_eq!(parsed.len(), 1, "expected 1 row, got {json}");
-
-    let data = parsed[0]["data"]
-        .as_object()
-        .unwrap_or_else(|| panic!("expected object data, got {}", parsed[0]["data"]));
-    assert_eq!(data.get("key").and_then(|v| v.as_str()), Some("d1"));
-    assert_eq!(data.get("theme").and_then(|v| v.as_str()), Some("dark"));
-    assert_eq!(data.get("lang").and_then(|v| v.as_str()), Some("en"));
 }
 
 #[test]

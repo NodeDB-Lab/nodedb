@@ -44,6 +44,7 @@ pub async fn verify_balance(
     // rows, so a redaction rule over either side is refused: a count computed
     // from masked values would call a consistent ledger broken.
     let gate = CollectionReadGate::open(state, identity, database_id, &collection)?;
+    gate.require_document_engine(&collection, "VERIFY_BALANCE")?;
     gate.refuse_if_field_redacted(&collection, &column, "the balance verification")?;
 
     // Find the materialized sum definition.
@@ -65,6 +66,7 @@ pub async fn verify_balance(
     };
 
     gate.authorize(&mat_def.source_collection)?;
+    gate.require_document_engine(&mat_def.source_collection, "VERIFY_BALANCE")?;
     gate.refuse_if_any_redaction(&mat_def.source_collection, "the balance verification")?;
 
     // Scan all target rows.

@@ -32,12 +32,6 @@ impl DocScanMode {
     }
 }
 
-/// Rows a current-mode fetch produced, typed by [`RowOrigin`].
-pub(super) enum Fetched {
-    Sparse(Vec<(StorageKey, Vec<u8>)>),
-    Foreign(Vec<(String, Vec<u8>)>),
-}
-
 /// Borrowed inputs for [`crate::data::executor::core_loop::CoreLoop::document_scan_fetch`].
 pub(in crate::data::executor) struct DocFetchParams<'a> {
     pub collection: &'a str,
@@ -54,24 +48,23 @@ pub(in crate::data::executor) struct DocFetchParams<'a> {
     pub full_fetch: bool,
 }
 
-/// Which engine keyed the rows a fetch produced. A fetch never mixes the
-/// two: the foreign fallback runs only when the sparse store holds nothing
-/// for the collection, and an empty fetch always reports `Sparse`.
-#[derive(Clone, Copy)]
-pub(in crate::data::executor) enum RowOrigin {
-    /// Sparse-store rows. Every id is a rendered storage key.
-    Sparse,
-    /// `scan_collection` fallback rows. A KV row is keyed by its user key and
-    /// a columnar row by its `id` column, so the id is the engine's own
-    /// identity text, never a storage key, and the body is already a
-    /// standard msgpack map.
-    Foreign,
+/// Parse a fetched row's id back into the storage key it was minted as.
+///
+/// Every row a document fetch produces is keyed by a rendered surrogate, so
+/// a shape that fails to parse names a fetch-pipeline bug, never a row to
+/// skip.
+pub(super) fn parse_fetched_key(collection: &str, id: &str) -> crate::Result<StorageKey> {
+    StorageKey::parse(id).ok_or_else(|| crate::Error::Storage {
+        engine: "sparse".into(),
+        detail: format!(
+            "collection '{collection}' fetched a row whose id is not a valid storage key: '{id}'"
+        ),
+    })
 }
 
 /// Raw rows plus the schema the downstream should decode them with.
 pub(in crate::data::executor) struct FetchedRows {
     pub rows: Vec<(String, Vec<u8>)>,
-    pub origin: RowOrigin,
     pub effective_schema: Option<StrictSchema>,
     /// The statement's deadline passed while the storage scan was running, so
     /// `rows` holds an arbitrary prefix of the answer. The caller MUST fail the

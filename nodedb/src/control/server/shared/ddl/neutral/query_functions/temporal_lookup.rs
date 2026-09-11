@@ -43,6 +43,7 @@ pub async fn temporal_lookup(
     // authorized, row-filtered, and redacted here — nothing downstream of the
     // hand-built plan does any of it.
     let gate = CollectionReadGate::open(state, identity, database_id, &table)?;
+    gate.require_document_engine(&table, "TEMPORAL_LOOKUP")?;
 
     // Scan the table.
     let vshard = VShardId::from_collection_in_database(database_id, &table);

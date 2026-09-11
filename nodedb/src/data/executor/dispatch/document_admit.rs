@@ -11,7 +11,7 @@
 use nodedb_physical::physical_plan::DocumentOp;
 use nodedb_types::SystemTimeScope;
 
-use crate::data::executor::handlers::document::read::fetch::DocScanMode;
+use crate::data::executor::handlers::document::read::DocScanMode;
 
 /// Whether the op mutates stored state.
 ///

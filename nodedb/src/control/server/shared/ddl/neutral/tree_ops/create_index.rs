@@ -79,15 +79,21 @@ pub async fn create_graph_index(
 
     let (parent_col, id_col) = parse_edge_columns(sql)?;
 
+    // The index is built from a document scan, which reads the sparse store
+    // only, so a KV or columnar-family collection is refused rather than
+    // indexed from zero rows.
     let catalog = state.credentials.catalog();
-    if catalog
+    let stored = catalog
         .get_collection(database_id, tenant_id.as_u64(), &collection)
         .map_err(|e| ddl_err("XX000", e.to_string()))?
-        .is_none()
-    {
+        .ok_or_else(|| ddl_err("42P01", format!("collection '{collection}' not found")))?;
+    if !stored.collection_type.is_document() {
         return Err(ddl_err(
-            "42P01",
-            format!("collection '{collection}' not found"),
+            "0A000",
+            format!(
+                "CREATE GRAPH INDEX reads document collections; '{collection}' is a {} collection",
+                stored.collection_type.as_str()
+            ),
         ));
     }
 
