@@ -18,5 +18,5 @@ pub mod visitor;
 
 pub use convert_context::SharedConvertContext;
 pub use error::ConvertError;
-pub use surrogate::{FreshSurrogateKind, SurrogateAssignError, SurrogateAssigner};
+pub use surrogate::{SurrogateAssignError, SurrogateAssigner};
 pub use visitor::{PhysicalTaskVisitor, dispatch};

@@ -139,7 +139,9 @@ impl CoreLoop {
             .iter()
             .enumerate()
             .map(|(rank, r)| RankedResult {
-                document_id: crate::engine::document::store::surrogate_to_doc_id(r.doc_id),
+                document_id: crate::engine::document::store::RowIdentity::for_surrogate(r.doc_id)
+                    .as_str()
+                    .to_string(),
                 rank,
                 score: r.score,
                 source: "text",

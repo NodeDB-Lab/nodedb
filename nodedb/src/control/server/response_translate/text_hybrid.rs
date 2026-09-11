@@ -100,11 +100,11 @@ pub fn translate_text_search_payload(
 /// (`{doc_id: <surrogate hex or __local_ sentinel>, <score alias>: f64,
 /// vector_rank?, text_rank?}`), resolve each row's `doc_id` surrogate to the
 /// user PK via the catalog, and inject it as `id` — the field name every
-/// `SELECT id` projection looks up. `doc_id` itself is left in place (mirrors
-/// the vector translator's `_surrogate` debug field). A `__local_` sentinel
-/// or an unresolved surrogate is left untouched: no `id` field is added, so
-/// the projection reads NULL rather than a fabricated PK. On any decode
-/// failure the payload is returned unchanged.
+/// `SELECT id` projection looks up. A storage key must never reach a client,
+/// so `doc_id` itself is rewritten to the row's identity too: the catalog PK
+/// when one is declared, else the surrogate's decimal string. A `__local_`
+/// sentinel (no surrogate binding) passes through untouched in both fields.
+/// On any decode failure the payload is returned unchanged.
 pub fn translate_hybrid_search_payload(
     payload: &[u8],
     state: &SharedState,
@@ -131,10 +131,10 @@ pub fn translate_hybrid_search_payload(
         let Some(surrogate) = parse_surrogate_hex(&hex_id) else {
             continue;
         };
-        if let Some(pk) = resolve_surrogate_pk(state, database_id, tenant_id, collection, surrogate)
-        {
-            map.insert("id".to_string(), JsonValue::String(pk));
-        }
+        let identity = resolve_surrogate_pk(state, database_id, tenant_id, collection, surrogate)
+            .unwrap_or_else(|| surrogate.as_u32().to_string());
+        map.insert("id".to_string(), JsonValue::String(identity.clone()));
+        map.insert("doc_id".to_string(), JsonValue::String(identity));
     }
 
     match sonic_rs::to_string(&JsonValue::Array(rows)) {

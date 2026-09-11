@@ -227,12 +227,11 @@ impl CoreLoop {
                     collection,
                     deleted_bytes,
                 );
-                self.emit_write_event(
+                let identity = crate::engine::document::store::identity_of(doc_id);
+                self.emit_document_delete_event(
                     task,
                     collection,
-                    crate::event::WriteOp::Delete,
-                    doc_id,
-                    None,
+                    identity,
                     Some(old_converted.as_deref().unwrap_or(deleted_bytes)),
                 );
                 truncated += 1;

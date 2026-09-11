@@ -110,20 +110,23 @@ impl RlsCtx<'_> {
         )
     }
 
-    /// Admit a document write, injecting the row's storage key as `id`.
+    /// Admit a document write, injecting the row's client-visible identity
+    /// as `id`.
     ///
     /// A schemaless row with no declared `id` column carries its identity
-    /// only in that key, never in `image`. The read paths inject the same
-    /// string via `sparse_row_to_doc`, so a policy naming `id` judges the
-    /// write against the value a later read returns. `inject_str_field` is
-    /// a no-op when `image` already carries `id`.
+    /// only in its storage key, never in `image`. The caller decides the
+    /// encoding: a minted key renders as the surrogate's decimal string,
+    /// never the hex storage key, matching what the read paths inject via
+    /// `sparse_row_to_doc` — a policy naming `id` judges the write against
+    /// the value a later read returns. `inject_str_field` is a no-op when
+    /// `image` already carries `id`.
     pub(super) fn admit_document_write_image(
         &self,
         collection: &nodedb_types::QualifiedCollection,
-        row_key: &str,
+        identity: &crate::engine::document::store::RowIdentity,
         image: &[u8],
     ) -> crate::Result<()> {
-        let with_id = nodedb_query::msgpack_scan::inject_str_field(image, "id", row_key);
+        let with_id = nodedb_query::msgpack_scan::inject_str_field(image, "id", identity.as_str());
         self.admit_write_image(collection, &with_id)
     }
 

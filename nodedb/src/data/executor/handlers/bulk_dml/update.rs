@@ -342,21 +342,26 @@ impl CoreLoop {
             // Event Plane's WAL-replay bulk variants are aggregate
             // metadata reconstructed only when the live per-row events
             // were lost — the live path always emits per row.
+            // `doc_id` is the surrogate hex storage key. A value that fails
+            // to parse as a minted key is a legacy or user key, taken
+            // verbatim.
+            let row_identity = crate::engine::document::store::identity_of(doc_id);
+            // `row_identity` is read again below for `RETURNING`'s `id` field,
+            // so the event-emit boundary gets a clone rather than the move.
             self.emit_put_event(
                 task,
                 tid,
                 collection,
-                doc_id,
+                row_identity.clone(),
                 &updated_bytes,
                 Some(&current_bytes),
             );
             affected += 1;
             if returning.is_some() {
-                // `doc_id` is the surrogate hex storage key, which only
-                // stands in as `id` for a row that declares no primary
-                // key of its own — overwriting a declared key would
-                // return a value the client never wrote.
-                returning_doc::attach_row_id(&mut doc, doc_id);
+                // `row_identity` only stands in as `id` for a row that
+                // declares no primary key of its own — overwriting a
+                // declared key would return a value the client never wrote.
+                returning_doc::attach_row_id(&mut doc, &row_identity);
                 returned_docs.push(doc);
             }
             // Carry the surrogate + post-image back for a post-apply

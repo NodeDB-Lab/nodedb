@@ -62,7 +62,10 @@ pub(super) fn gate_merge_arms(
     ) {
         return Ok(());
     }
-    let arms = plan
+    // Updates and deletes name their row by its storage key; inserts name
+    // theirs by the source join value, an engine-native key that is never a
+    // document storage key.
+    let doc_arms = plan
         .updates
         .iter()
         .map(|u| (u.body.as_slice(), u.doc_id.as_str()))
@@ -70,14 +73,22 @@ pub(super) fn gate_merge_arms(
             plan.deletes
                 .iter()
                 .map(|d| (d.body.as_slice(), d.doc_id.as_str())),
-        )
-        .chain(
-            plan.inserts
-                .iter()
-                .map(|i| (i.body.as_slice(), i.join_key.as_str())),
         );
-    for (body, row_id) in arms {
-        rls_write_gate::admit_stored_row(rls_write_check, body, row_id, None, tid, collection)?;
+    for (body, doc_id) in doc_arms {
+        let identity = crate::engine::document::store::identity_of(doc_id);
+        rls_write_gate::admit_stored_row(rls_write_check, body, &identity, None, tid, collection)?;
+    }
+    for insert in &plan.inserts {
+        let identity =
+            crate::engine::document::store::RowIdentity::from_user_key(insert.join_key.as_str());
+        rls_write_gate::admit_stored_row(
+            rls_write_check,
+            &insert.body,
+            &identity,
+            None,
+            tid,
+            collection,
+        )?;
     }
     Ok(())
 }
@@ -86,10 +97,15 @@ pub(super) fn gate_merge_arms(
 /// reads. Same shape the point and bulk DML RETURNING paths emit, so a MERGE
 /// row projects identically.
 ///
+/// `doc_id` is the row's storage key, every caller's `MergeUpdate::doc_id`,
+/// `MergeDelete::doc_id`, or a minted insert key from `surrogate_to_doc_id`.
+/// This function converts it to the client-visible identity before decoding.
+///
 /// The schema argument is `None` unconditionally: a merge plan's captured
 /// bodies are MessagePack for BOTH storage modes (`collect_merge_plan` decodes
 /// a strict target's Binary Tuple and re-encodes the resolved row before the
 /// apply pass ever sees it), so the strict decoder would have nothing to read.
 pub(super) fn returning_doc(body: &[u8], doc_id: &str) -> crate::Result<serde_json::Value> {
-    super::super::returning_doc::from_stored(body, doc_id, None)
+    let identity = crate::engine::document::store::identity_of(doc_id);
+    super::super::returning_doc::from_stored(body, &identity, None)
 }

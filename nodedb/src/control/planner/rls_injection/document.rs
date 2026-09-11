@@ -4,7 +4,7 @@
 
 use nodedb_physical::physical_plan::DocumentOp;
 
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 use super::context::RlsCtx;
 
@@ -124,8 +124,8 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
             surrogate,
             ..
         } => {
-            let row_key = surrogate_to_doc_id(*surrogate);
-            ctx.admit_document_write_image(collection, &row_key, value)?;
+            let identity = StorageKey::for_surrogate(*surrogate).to_identity();
+            ctx.admit_document_write_image(collection, &identity, value)?;
             ctx.set_post_filters(collection, rls_filters)
         }
 
@@ -140,10 +140,11 @@ pub(super) fn inject_document(ctx: &RlsCtx<'_>, op: &mut DocumentOp) -> crate::R
             // falls back to its document id, which a declared key already
             // carries in the body.
             for (index, (document_id, value)) in documents.iter().enumerate() {
-                let row_key = surrogates
-                    .get(index)
-                    .map_or_else(|| document_id.clone(), |s| surrogate_to_doc_id(*s));
-                ctx.admit_document_write_image(collection, &row_key, value)?;
+                let identity = surrogates.get(index).map_or_else(
+                    || RowIdentity::from_user_key(document_id.clone()),
+                    |s| StorageKey::for_surrogate(*s).to_identity(),
+                );
+                ctx.admit_document_write_image(collection, &identity, value)?;
             }
             ctx.set_post_filters(collection, rls_filters)
         }

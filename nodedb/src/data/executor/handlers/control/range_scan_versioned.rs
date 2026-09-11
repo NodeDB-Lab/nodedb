@@ -134,13 +134,18 @@ impl CoreLoop {
                     // the same encoding every other RLS site filters on — a
                     // strict body is a Binary Tuple until it is decoded here.
                     // A schemaless row's identity lives only in its storage
-                    // key when its body carries no `id` field, so it is
-                    // injected before the RLS check, matching what a reader
-                    // of the same row sees.
+                    // key when its body carries no `id` field, so the
+                    // client-visible identity is injected before the RLS
+                    // check, matching what a reader of the same row sees.
                     Some(filters) => match nodedb_types::json_msgpack::json_to_msgpack(&doc) {
                         Ok(mp) => {
                             let mp = if strict_schema.is_none() {
-                                nodedb_query::msgpack_scan::inject_str_field(&mp, "id", doc_id)
+                                let identity = crate::engine::document::store::identity_of(doc_id);
+                                nodedb_query::msgpack_scan::inject_str_field(
+                                    &mp,
+                                    "id",
+                                    identity.as_str(),
+                                )
                             } else {
                                 mp
                             };

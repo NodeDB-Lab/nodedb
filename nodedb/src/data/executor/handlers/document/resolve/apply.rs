@@ -50,7 +50,9 @@ impl CoreLoop {
                 && let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
                     value,
-                    document_id,
+                    &crate::engine::document::store::RowIdentity::from_user_key(
+                        document_id.as_str(),
+                    ),
                     None,
                     tid,
                     collection.as_str(),

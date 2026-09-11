@@ -115,10 +115,11 @@ impl CoreLoop {
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
             for (row_key, body) in &rows {
+                let identity = crate::engine::document::store::identity_of(row_key);
                 if let Err(e) = self.stage_admit_write(
                     rls_write_check,
                     body,
-                    row_key,
+                    &identity,
                     database_id.as_u64(),
                     tid,
                     collection,

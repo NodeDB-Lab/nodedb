@@ -79,10 +79,13 @@ pub(in crate::data::executor) fn admit_row(
 /// A body that does not decode at all is refused rather than written
 /// unchecked — an image the policy could not be evaluated against is not an
 /// image the policy admitted.
+///
+/// `identity` is the row's client-visible identity. The caller decides the
+/// encoding: a caller holding a document storage key converts it first.
 pub(in crate::data::executor) fn admit_stored_row(
     rls_write_check: &RlsWriteCheck,
     body: &[u8],
-    doc_id: &str,
+    identity: &crate::engine::document::store::RowIdentity,
     strict_schema: Option<&StrictSchema>,
     tid: u64,
     collection: &str,
@@ -96,13 +99,13 @@ pub(in crate::data::executor) fn admit_stored_row(
             ),
         }),
         WriteGateDecision::Evaluate(_) => {
-            match returning_doc::from_stored(body, doc_id, strict_schema) {
+            match returning_doc::from_stored(body, identity, strict_schema) {
                 Ok(image) => admit_row(rls_write_check, &image, tid, collection),
                 Err(e) => Err(crate::Error::RejectedAuthz {
                     tenant_id: crate::types::TenantId::new(tid),
                     resource: format!(
-                        "RLS write policy on '{collection}': row '{doc_id}' did not decode, so the \
-                     policy could not be evaluated against it: {e}"
+                        "RLS write policy on '{collection}': row '{identity}' did not decode, so \
+                     the policy could not be evaluated against it: {e}"
                     ),
                 }),
             }

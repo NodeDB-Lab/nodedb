@@ -84,12 +84,14 @@ impl CoreLoop {
                 collection,
                 target_type,
                 schema_json,
+                source_storage_mode,
             } => self.execute_convert_collection(
                 task,
                 tid,
                 collection.as_str(),
                 target_type,
                 schema_json,
+                source_storage_mode,
             ),
 
             MetaOp::PurgeTenant { tenant_id } => self.execute_purge_tenant(task, *tenant_id),

@@ -87,13 +87,25 @@ impl CoreLoop {
                 )
                 .ok_or_else(|| {
                     crate::diag::strict_row_undecodable(collection, doc_id, "bulk_update_project");
-                    crate::data::executor::strict_format::undecodable_strict_row(collection, doc_id)
+                    let identity = crate::engine::document::store::identity_of(doc_id);
+                    crate::data::executor::strict_format::undecodable_strict_row(
+                        collection,
+                        identity.as_str(),
+                    )
                 })?,
-                None => crate::data::executor::handlers::returning_doc::from_stored(
-                    &current_bytes,
-                    doc_id,
-                    None,
-                )?,
+                None => {
+                    // `doc_id` is the storage key from the apply set. The
+                    // decoded document's `id` must be the row's client-visible
+                    // identity, not the storage key. A value that fails to
+                    // parse as a minted key is a legacy or user key, taken
+                    // verbatim.
+                    let identity = crate::engine::document::store::identity_of(doc_id);
+                    crate::data::executor::handlers::returning_doc::from_stored(
+                        &current_bytes,
+                        &identity,
+                        None,
+                    )?
+                }
             };
 
             // Feeds the secondary-index SET diff for values the UPDATE drops.

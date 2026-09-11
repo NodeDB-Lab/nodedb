@@ -137,7 +137,7 @@ impl CoreLoop {
             task,
             collection,
             op,
-            &key_str,
+            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
             Some(&stored_bytes),
             old_slice,
         );

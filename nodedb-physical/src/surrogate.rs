@@ -24,20 +24,6 @@ pub enum SurrogateAssignError {
     Backend(String),
 }
 
-/// The identity convention a freshly minted row's surrogate binds under.
-///
-/// This enum names the convention. It never formats one.
-/// `nodedb`'s allocator turns the variant into the identity string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FreshSurrogateKind {
-    /// The row's identity is its document storage key. Covers a schemaless
-    /// row with no declared `PRIMARY KEY`, and a timeseries row.
-    DocumentStorageKey,
-    /// The row's identity is the strict-schema auto `_rowid` column value.
-    /// The Data Plane writes that column as an `Int64`.
-    AutoRowId,
-}
-
 /// Allocate stable, cross-engine surrogates for `(collection, pk_bytes)`.
 ///
 /// Implementations must be:
@@ -72,13 +58,12 @@ pub trait SurrogateAssigner: Send + Sync {
     /// content-address on, so repeated calls never collapse onto one
     /// surrogate.
     ///
-    /// `kind` picks the convention the binding uses. The returned `String` is
-    /// the identity. Callers use it verbatim and never re-derive it.
+    /// The returned `String` is the bound identity. The caller uses it
+    /// verbatim and never re-derives it.
     fn assign_fresh(
         &self,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-        kind: FreshSurrogateKind,
     ) -> Result<(Surrogate, String), SurrogateAssignError>;
 }

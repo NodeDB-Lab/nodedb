@@ -80,11 +80,7 @@ pub(in super::super) fn resolve_doc_identity_with_declared(
     }
 
     if is_auto_rowid_pk(primary_key) {
-        let (s, pk) = assign_fresh(
-            ctx,
-            collection,
-            nodedb_physical::FreshSurrogateKind::AutoRowId,
-        )?;
+        let (s, pk) = assign_fresh(ctx, collection)?;
         return Ok((pk, s));
     }
     let mint_key: &str = declared.unwrap_or(primary_key);
@@ -94,11 +90,7 @@ pub(in super::super) fn resolve_doc_identity_with_declared(
             Ok((id, s))
         }
         DocId::ExplicitNull | DocId::Absent => {
-            let (s, pk) = assign_fresh(
-                ctx,
-                collection,
-                nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
-            )?;
+            let (s, pk) = assign_fresh(ctx, collection)?;
             Ok((pk, s))
         }
     }
@@ -119,13 +111,12 @@ pub(in super::super) fn assign_for_pk(
 /// Content-addressing an empty pk collapses every such row onto one
 /// surrogate, a duplicate-key violation on the second insert.
 ///
-/// Returns the identity string `kind` binds. The caller uses it verbatim.
+/// Returns the bound identity string. The caller uses it verbatim.
 pub(super) fn assign_fresh(
     ctx: &ConvertContext,
     collection: &str,
-    kind: nodedb_physical::FreshSurrogateKind,
 ) -> crate::Result<(Surrogate, String)> {
-    ctx.fresh_surrogate(collection, kind)
+    ctx.fresh_surrogate(collection)
 }
 
 /// Whether a collection's declared primary key is the auto-generated `_rowid`

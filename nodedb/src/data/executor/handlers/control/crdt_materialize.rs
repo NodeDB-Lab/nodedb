@@ -36,7 +36,7 @@ use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::crdt::tenant_state::TenantCrdtEngine;
 use crate::engine::document::crdt_store::loro_value_to_json;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Read the merged Loro row back and encode it into the schemaless
@@ -106,7 +106,8 @@ impl CoreLoop {
         index_text: bool,
     ) {
         let database_id = task.request.database_id.as_u64();
-        let storage_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
 
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
@@ -122,7 +123,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: storage_key.as_str(),
+                document_id: row_key.as_str(),
                 surrogate,
                 value,
                 index_text,
@@ -158,7 +159,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            storage_key.as_str(),
+            storage_key.to_identity(),
             value,
             prior.prior_value.as_deref(),
         );

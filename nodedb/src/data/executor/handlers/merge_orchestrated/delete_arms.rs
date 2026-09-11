@@ -17,7 +17,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 use super::apply_support::returning_doc;
 use super::plan::MergeDelete;
@@ -160,13 +160,10 @@ impl CoreLoop {
                                     });
                                 }
                             }
-                            let row_key = surrogate_to_doc_id(surrogate);
-                            self.emit_write_event(
+                            self.emit_document_delete_event(
                                 task,
                                 collection,
-                                crate::event::WriteOp::Delete,
-                                &row_key,
-                                None,
+                                StorageKey::for_surrogate(surrogate).to_identity(),
                                 outcome.prior_value.as_deref(),
                             );
                         }

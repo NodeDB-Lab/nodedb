@@ -15,7 +15,7 @@ use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, W
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 /// One already-decided row write, as the apply loop hands it over.
 pub(super) struct ApplyResolvedPut<'a> {
@@ -56,7 +56,8 @@ impl CoreLoop {
             resolved_sum_targets,
         } = put;
         let database_id = task.request.database_id.as_u64();
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         let row_key = row_key.as_str();
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
@@ -146,7 +147,14 @@ impl CoreLoop {
         }
 
         let stored_bytes = outcome.stored_value;
-        self.emit_put_event(task, tid, collection, row_key, &stored_bytes, precondition);
+        self.emit_put_event(
+            task,
+            tid,
+            collection,
+            storage_key.to_identity(),
+            &stored_bytes,
+            precondition,
+        );
         self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
 
         let mut write_set = Vec::new();
@@ -244,12 +252,10 @@ impl CoreLoop {
             }
             let old_converted =
                 self.resolve_event_payload(database_id, tid, collection, prior_bytes);
-            self.emit_write_event(
+            self.emit_document_delete_event(
                 task,
                 collection,
-                crate::event::WriteOp::Delete,
-                document_id,
-                None,
+                StorageKey::for_surrogate(surrogate).to_identity(),
                 Some(old_converted.as_deref().unwrap_or(prior_bytes)),
             );
         }

@@ -9,13 +9,14 @@
 use std::sync::Arc;
 
 use super::CoreLoop;
+use crate::engine::document::store::RowIdentity;
 use crate::event::types::{EventSource, RowId, WriteEvent, WriteOp};
 
 /// A write that occurred during a transaction, pending deferred trigger emission.
 pub(in crate::data::executor) struct DeferredWrite {
     pub collection: String,
     pub op: WriteOp,
-    pub row_id: String,
+    pub identity: RowIdentity,
     pub new_value: Option<Vec<u8>>,
     pub old_value: Option<Vec<u8>>,
 }
@@ -49,7 +50,7 @@ impl CoreLoop {
                 sequence: self.event_sequence,
                 collection: Arc::from(write.collection.as_str()),
                 op: write.op,
-                row_id: RowId::new(write.row_id.as_str()),
+                row_id: RowId::new(write.identity.as_str()),
                 lsn: self.watermark,
                 database_id,
                 tenant_id,

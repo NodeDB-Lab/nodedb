@@ -17,7 +17,7 @@ use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::ReturningSpec;
 
 /// Borrowed arguments for [`CoreLoop::execute_crdt_doc_upsert`], grouped so the
@@ -123,7 +123,11 @@ impl CoreLoop {
                 // No strict schema: a CRDT row's stored body is whatever
                 // `encode_crdt_row` materialized from Loro, which is always
                 // MessagePack regardless of the collection's storage mode.
-                let doc = match returning_doc::from_stored(&bytes, document_id, None) {
+                let doc = match returning_doc::from_stored(
+                    &bytes,
+                    &RowIdentity::from_user_key(document_id),
+                    None,
+                ) {
                     Ok(doc) => doc,
                     Err(e) => return self.response_error(task, e),
                 };
@@ -201,7 +205,8 @@ impl CoreLoop {
         }
 
         let tid = tenant_id.as_u64();
-        let storage_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         // The sparse-store removal and its index cascades run in one write txn
         // this handler owns: on any failure it is dropped un-committed and none
         // of them land.
@@ -222,7 +227,7 @@ impl CoreLoop {
                 database_id: task.request.database_id.as_u64(),
                 tid,
                 collection,
-                document_id: storage_key.as_str(),
+                document_id: row_key.as_str(),
                 surrogate,
                 user_roles: &task.request.user_roles,
                 enforce: false,
@@ -258,12 +263,10 @@ impl CoreLoop {
                 collection,
                 prior_bytes,
             );
-            self.emit_write_event(
+            self.emit_document_delete_event(
                 task,
                 collection,
-                crate::event::WriteOp::Delete,
-                storage_key.as_str(),
-                None,
+                storage_key.to_identity(),
                 Some(old_converted.as_deref().unwrap_or(prior_bytes)),
             );
         }
@@ -276,7 +279,11 @@ impl CoreLoop {
             if let Some(prior_bytes) = outcome.prior_value.as_deref() {
                 // No strict schema — see the upsert path: a CRDT row is
                 // materialized as MessagePack in either storage mode.
-                let doc = match returning_doc::from_stored(prior_bytes, document_id, None) {
+                let doc = match returning_doc::from_stored(
+                    prior_bytes,
+                    &RowIdentity::from_user_key(document_id),
+                    None,
+                ) {
                     Ok(doc) => doc,
                     Err(e) => return self.response_error(task, e),
                 };

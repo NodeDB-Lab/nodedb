@@ -325,7 +325,8 @@ impl CoreLoop {
         }
 
         for (i, row_key) in applied.iter().enumerate() {
-            self.emit_put_event(task, tid, collection, row_key, &documents[i].1, None);
+            let identity = crate::engine::document::store::identity_of(row_key);
+            self.emit_put_event(task, tid, collection, identity, &documents[i].1, None);
         }
 
         let mut response = if let Some(spec) = returning {
@@ -337,10 +338,16 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
             );
-            let rows: Vec<(&str, &[u8])> = documents
+            let identities: Vec<crate::engine::document::store::RowIdentity> = documents
+                .iter()
+                .map(|(document_id, _)| {
+                    crate::engine::document::store::RowIdentity::from_user_key(document_id.as_str())
+                })
+                .collect();
+            let rows: Vec<(&crate::engine::document::store::RowIdentity, &[u8])> = identities
                 .iter()
                 .zip(stored_bodies.iter())
-                .map(|((document_id, _), stored)| (document_id.as_str(), stored.as_slice()))
+                .map(|(identity, stored)| (identity, stored.as_slice()))
                 .collect();
             self.stored_returning_response(task, spec, rls_filters, strict_schema.as_ref(), &rows)
         } else {

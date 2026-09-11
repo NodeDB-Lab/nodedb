@@ -179,10 +179,11 @@ impl CoreLoop {
                     Ok(None) => continue,
                     Err(e) => return self.response_error(task, e),
                 };
+                let identity = crate::engine::document::store::identity_of(doc_id);
                 if let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
                     &stored,
-                    doc_id,
+                    &identity,
                     strict_schema.as_ref(),
                     tid,
                     collection,
@@ -242,7 +243,13 @@ impl CoreLoop {
                     .flatten()
                 {
                     Some(bytes) => {
-                        match returning_doc::from_stored(&bytes, doc_id, strict_schema.as_ref()) {
+                        // `doc_id` is the storage key from the scan. `RETURNING`
+                        // reports the row's client-visible identity, not the
+                        // storage key. A value that fails to parse as a minted
+                        // key is a legacy or user key, taken verbatim.
+                        let identity = crate::engine::document::store::identity_of(doc_id);
+                        match returning_doc::from_stored(&bytes, &identity, strict_schema.as_ref())
+                        {
                             Ok(doc) => Some(doc),
                             Err(e) => return self.response_error(task, e),
                         }
@@ -417,12 +424,11 @@ impl CoreLoop {
                     collection,
                     deleted_bytes,
                 );
-                self.emit_write_event(
+                let event_identity = crate::engine::document::store::identity_of(doc_id);
+                self.emit_document_delete_event(
                     task,
                     collection,
-                    crate::event::WriteOp::Delete,
-                    doc_id,
-                    None,
+                    event_identity,
                     Some(old_converted.as_deref().unwrap_or(deleted_bytes)),
                 );
                 affected += 1;

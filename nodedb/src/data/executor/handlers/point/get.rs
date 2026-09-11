@@ -149,7 +149,7 @@ impl CoreLoop {
         let transcoded = {
             let normalized = sparse_body_to_msgpack(&data, body_format.as_format_ref());
             if !rls_filters.is_empty() {
-                let (_, gated) = sparse_row_to_doc(document_id, &data, body_format.as_format_ref());
+                let (_, gated) = sparse_row_to_doc(row_key, &data, body_format.as_format_ref());
                 if !super::super::rls_eval::rls_check_msgpack_bytes(rls_filters, &gated) {
                     return self.response_with_payload(task, Vec::new());
                 }

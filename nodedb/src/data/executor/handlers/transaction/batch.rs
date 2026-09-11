@@ -430,7 +430,11 @@ impl CoreLoop {
     }
 
     /// Emit deferred trigger events for every write recorded in the
-    /// committed transaction's undo log.
+    /// committed transaction's undo log. `UndoEntry::{PutDocument,
+    /// DeleteDocument}.document_id` is the row's storage key, so a deferred
+    /// trigger converts it to the client-visible identity here — the same
+    /// conversion an immediate trigger sees via `emit_put_event` /
+    /// `emit_document_delete_event`.
     fn emit_deferred_writes(&mut self, task: &ExecutionTask, undo_log: Vec<UndoEntry>) {
         use crate::data::executor::core_loop::deferred::DeferredWrite;
         let deferred_writes: Vec<DeferredWrite> = undo_log
@@ -448,7 +452,7 @@ impl CoreLoop {
                     } else {
                         crate::event::WriteOp::Insert
                     },
-                    row_id: document_id,
+                    identity: crate::engine::document::store::identity_of(&document_id),
                     new_value: None,
                     old_value,
                 }),
@@ -460,7 +464,7 @@ impl CoreLoop {
                 } => Some(DeferredWrite {
                     collection,
                     op: crate::event::WriteOp::Delete,
-                    row_id: document_id,
+                    identity: crate::engine::document::store::identity_of(&document_id),
                     new_value: None,
                     old_value: Some(old_value),
                 }),

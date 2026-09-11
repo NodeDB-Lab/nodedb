@@ -15,7 +15,7 @@ use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, surrogate_to_doc_id};
 
 /// What a resolver returns: the decided mutations and the decided reply, or the
 /// error the live handler would have returned for the same input.
@@ -155,7 +155,7 @@ pub(super) fn resolved_response_payload(
     returning: Option<&ReturningSpec>,
     rls_filters: &[u8],
     strict_schema: Option<&StrictSchema>,
-    rows: &[(&str, &[u8])],
+    rows: &[(&RowIdentity, &[u8])],
 ) -> Result<Vec<u8>, ErrorCode> {
     match returning {
         Some(spec) => {

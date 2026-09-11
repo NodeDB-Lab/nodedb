@@ -242,7 +242,7 @@ impl CoreLoop {
         self.stage_admit_write(
             rls_write_check,
             image,
-            &ctx.document_id,
+            &crate::engine::document::store::RowIdentity::from_user_key(ctx.document_id.as_ref()),
             ctx.database_id,
             ctx.tid,
             ctx.collection,

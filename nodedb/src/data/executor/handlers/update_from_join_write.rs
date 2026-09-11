@@ -141,11 +141,15 @@ impl CoreLoop {
                 // `collect_update_from_join_rows`; `emit_put_event` derives
                 // `WriteOp::Update` from the Some prior + Some new pair and
                 // handles strict->msgpack conversion on both sides.
+                let row_identity = crate::engine::document::store::identity_of(&doc_id);
+                // `row_identity` is read again below for `RETURNING`'s `id`
+                // field, so the event-emit boundary gets a clone rather than
+                // the move.
                 self.emit_put_event(
                     task,
                     tid,
                     target_collection,
-                    &doc_id,
+                    row_identity.clone(),
                     &updated_bytes,
                     Some(&old_body),
                 );
@@ -177,11 +181,10 @@ impl CoreLoop {
                 }
                 affected += 1;
                 if want_returning {
-                    // `doc_id` is the surrogate hex storage key, which only
-                    // stands in as `id` for a row that declares no primary key
-                    // of its own — overwriting a declared key would return a
-                    // value the client never wrote.
-                    returning_doc::attach_row_id(&mut doc, &doc_id);
+                    // `row_identity` only stands in as `id` for a row that
+                    // declares no primary key of its own — overwriting a
+                    // declared key would return a value the client never wrote.
+                    returning_doc::attach_row_id(&mut doc, &row_identity);
                     returned_docs.push(doc);
                 }
             }

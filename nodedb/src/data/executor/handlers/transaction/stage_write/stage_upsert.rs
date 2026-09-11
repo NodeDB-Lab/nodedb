@@ -67,7 +67,7 @@ impl CoreLoop {
         if let Err(e) = self.stage_admit_write(
             rls_write_check,
             &stored_bytes,
-            &ctx.document_id,
+            &crate::engine::document::store::RowIdentity::from_user_key(ctx.document_id.as_ref()),
             ctx.database_id,
             ctx.tid,
             ctx.collection,

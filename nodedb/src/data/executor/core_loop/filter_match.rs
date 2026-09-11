@@ -43,8 +43,9 @@ use super::CoreLoop;
 /// body, so the body is matched with `id` injected — the same injection
 /// [`super::super::row_shape::sparse_row_to_doc`] applies to a materialized
 /// row, so `WHERE id ...` sees the identity a reader of the same row sees. A
-/// strict row already surfaces `id` as a real tuple column, so no injection
-/// runs on that arm.
+/// minted key injects the client-visible decimal identity, not the hex
+/// storage key. A strict row already surfaces `id` as a real tuple column, so
+/// no injection runs on that arm.
 pub(in crate::data::executor) fn matches_with_resolved_schema(
     strict_schema: Option<&StrictSchema>,
     filters: &[ScanFilter],
@@ -57,7 +58,12 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
             None => Ok(false),
         },
         None => {
-            let with_id = nodedb_query::msgpack_scan::inject_str_field(body, "id", doc_id);
+            // `doc_id` comes straight off a store iterator, so only a `&str`
+            // is available here, not a `StorageKey`. A value that fails to
+            // parse as a minted key is a legacy or user key, taken verbatim.
+            let identity = crate::engine::document::store::identity_of(doc_id);
+            let with_id =
+                nodedb_query::msgpack_scan::inject_str_field(body, "id", identity.as_str());
             ScanFilter::all_match_binary(filters, &with_id)
         }
     }

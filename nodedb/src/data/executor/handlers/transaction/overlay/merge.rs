@@ -97,14 +97,18 @@ impl CoreLoop {
         // retain pass has just superseded in place).
         let mut seen: HashSet<u32> = rows
             .iter()
-            .filter_map(|(k, _)| u32::from_str_radix(k, 16).ok())
+            .filter_map(|(k, _)| {
+                crate::engine::document::store::doc_id_to_surrogate(k).map(|s| s.as_u32())
+            })
             .collect();
 
         // Base-minus-superseded: a single in-place pass. Drop tombstoned rows,
         // replace put-superseded bodies and re-check the predicate, keep the
         // rest untouched.
         rows.retain_mut(|(row_key, body)| {
-            let Ok(surrogate) = u32::from_str_radix(row_key, 16) else {
+            let Some(surrogate) =
+                crate::engine::document::store::doc_id_to_surrogate(row_key).map(|s| s.as_u32())
+            else {
                 return true;
             };
             match overlay.get(coll_key, surrogate) {
@@ -328,7 +332,9 @@ impl CoreLoop {
         // don't re-append a row the base index lookup already returned.
         let mut seen: HashSet<u32> = doc_ids
             .iter()
-            .filter_map(|id| u32::from_str_radix(id, 16).ok())
+            .filter_map(|id| {
+                crate::engine::document::store::doc_id_to_surrogate(id).map(|s| s.as_u32())
+            })
             .collect();
 
         // Base-minus-superseded: resolve each base hex doc_id to its surrogate
@@ -337,7 +343,9 @@ impl CoreLoop {
         // have moved the row off the indexed value); no overlay entry — or an
         // unparseable key — keeps it as-is.
         doc_ids.retain(|doc_id| {
-            let Ok(surrogate) = u32::from_str_radix(doc_id, 16) else {
+            let Some(surrogate) =
+                crate::engine::document::store::doc_id_to_surrogate(doc_id).map(|s| s.as_u32())
+            else {
                 return true;
             };
             match overlay.get(coll_key, surrogate) {
@@ -399,7 +407,8 @@ impl CoreLoop {
             // Read-your-own-writes refreshes the lease (see the reaper).
             self.touch_overlay(txn_id);
             if let Some(overlay) = self.txn_overlays.get(&txn_id)
-                && let Ok(surrogate) = u32::from_str_radix(doc_id, 16)
+                && let Some(surrogate) =
+                    crate::engine::document::store::doc_id_to_surrogate(doc_id).map(|s| s.as_u32())
             {
                 match overlay.get(coll_key, surrogate) {
                     Some(Staged::Put(body)) => return Ok(Some(body.clone())),

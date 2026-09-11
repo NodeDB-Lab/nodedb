@@ -200,11 +200,12 @@ impl CoreLoop {
         // would only hash it straight back to the same node.
         //
         // The reporting key is resolved once per hit: the graph node name when
-        // the surrogate is bound to one, otherwise the document storage key.
-        // Falling back to the document key rather than to an index-local
-        // sentinel is what lets a hit fuse with the *text* leg, which keys on
-        // exactly that; the old `__local_{hnsw_id}` sentinel could match nothing
-        // and leaked an internal index id into the response's `node_id`.
+        // the surrogate is bound to one, otherwise the surrogate's
+        // client-visible decimal identity. Falling back to the identity rather
+        // than to an index-local sentinel is what lets a hit fuse with the
+        // *text* leg, which keys on exactly that; the old `__local_{hnsw_id}`
+        // sentinel could match nothing and leaked an internal index id into
+        // the response's `node_id`.
         let csr = self.csr_partition(database_id, tenant_id);
         let mut vector_scores: HashMap<String, (usize, f32)> = HashMap::new();
         let mut seeds: Vec<Surrogate> = Vec::with_capacity(vector_results.len());
@@ -217,7 +218,11 @@ impl CoreLoop {
                 Some(s) => csr
                     .and_then(|c| c.node_id_for_surrogate(s))
                     .map(str::to_string)
-                    .unwrap_or_else(|| crate::engine::document::store::surrogate_to_doc_id(s)),
+                    .unwrap_or_else(|| {
+                        crate::engine::document::store::RowIdentity::for_surrogate(s)
+                            .as_str()
+                            .to_string()
+                    }),
                 // No surrogate at all: the vector entry predates surrogate
                 // plumbing, so it has no cross-engine identity. It still ranks
                 // in the vector leg under a key that deliberately matches

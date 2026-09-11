@@ -14,12 +14,13 @@ use crate::data::executor::response_codec::RowsPayload;
 use crate::data::executor::scan_normalize::{kv_row_to_doc, sparse_row_to_doc};
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::RowIdentity;
 use nodedb_physical::physical_plan::{ReturningColumns, ReturningSpec};
 use nodedb_types::columnar::StrictSchema;
 
-/// Rows a write path hands back to a `RETURNING` projection: the user-facing
-/// document id paired with the exact bytes stored for it.
-pub(in crate::data::executor) type StoredRow<'a> = (&'a str, &'a [u8]);
+/// Rows a write path hands back to a `RETURNING` projection: the row's
+/// client-visible identity paired with the exact bytes stored for it.
+pub(in crate::data::executor) type StoredRow<'a> = (&'a RowIdentity, &'a [u8]);
 
 impl CoreLoop {
     /// Build this task's `RETURNING` response from the rows it just stored.

@@ -40,7 +40,10 @@ pub(in crate::data::executor) fn admit_kv_row(
         return Ok(());
     }
     // The key is shown for diagnostics only; a non-UTF-8 key is lossily
-    // rendered rather than failing a security decision on its encoding.
+    // rendered rather than failing a security decision on its encoding. A
+    // KV key is never a document storage key, so it is always the row's
+    // own identity, taken verbatim.
     let key_display = String::from_utf8_lossy(key);
-    rls_write_gate::admit_stored_row(rls_write_check, body, &key_display, None, tid, collection)
+    let identity = crate::engine::document::store::RowIdentity::from_user_key(key_display.as_ref());
+    rls_write_gate::admit_stored_row(rls_write_check, body, &identity, None, tid, collection)
 }

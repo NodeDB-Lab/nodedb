@@ -89,11 +89,7 @@ pub(in crate::data::executor) fn ollp_actual_surrogates(doc_ids: &[String]) -> V
     let mut surrogates: Vec<u32> = doc_ids
         .iter()
         .filter_map(|id| {
-            if id.len() == 8 {
-                u32::from_str_radix(id, 16).ok()
-            } else {
-                None
-            }
+            crate::engine::document::store::doc_id_to_surrogate(id).map(|s| s.as_u32())
         })
         .collect();
     surrogates.sort_unstable();

@@ -224,10 +224,9 @@ impl CoreLoop {
 
                 if let Some(pf) = prefilter {
                     filtered.retain(|(doc_id, _)| {
-                        if let Ok(n) = u32::from_str_radix(doc_id, 16) {
-                            pf.contains(nodedb_types::Surrogate::new(n))
-                        } else {
-                            false
+                        match crate::engine::document::store::doc_id_to_surrogate(doc_id) {
+                            Some(surrogate) => pf.contains(surrogate),
+                            None => false,
                         }
                     });
                 }

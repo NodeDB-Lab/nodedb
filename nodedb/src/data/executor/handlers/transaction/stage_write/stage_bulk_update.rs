@@ -149,10 +149,11 @@ impl CoreLoop {
             // policy. A rejected row fails the statement rather than being
             // skipped: skipping would under-report `affected` while the rest of
             // the predicate's matches were still rewritten.
+            let identity = crate::engine::document::store::identity_of(row_key);
             if let Err(e) = self.stage_admit_write(
                 rls_write_check,
                 &new_body,
-                row_key,
+                &identity,
                 database_id.as_u64(),
                 tid,
                 collection,

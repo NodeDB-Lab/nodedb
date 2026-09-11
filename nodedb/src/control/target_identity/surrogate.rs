@@ -20,12 +20,10 @@ pub(crate) fn assign_target_surrogate(
 ) -> crate::Result<Surrogate> {
     match target_pk {
         TargetPk::AutoRowId => {
-            let (surrogate, _) = state.surrogate_assigner.assign_fresh(
-                database_id,
-                tenant_id,
-                target_collection,
-                nodedb_physical::FreshSurrogateKind::AutoRowId,
-            )?;
+            let (surrogate, _) =
+                state
+                    .surrogate_assigner
+                    .assign_fresh(database_id, tenant_id, target_collection)?;
             Ok(surrogate)
         }
         TargetPk::Field { name, declared } => match extract_pk_value(body, name) {
@@ -54,7 +52,6 @@ pub(crate) fn assign_target_surrogate(
                     database_id,
                     tenant_id,
                     target_collection,
-                    nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
                 )?;
                 Ok(surrogate)
             }

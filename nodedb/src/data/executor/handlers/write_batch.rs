@@ -165,7 +165,7 @@ impl CoreLoop {
                     // bytes captured per row above.
                     if let PhysicalPlan::Document(DocumentOp::PointPut {
                         collection,
-                        document_id,
+                        surrogate,
                         value,
                         ..
                     }) = task.plan()
@@ -175,14 +175,10 @@ impl CoreLoop {
                             Ok(p) => p.prior_value.as_deref(),
                             Err(_) => None,
                         };
-                        self.emit_put_event(
-                            task,
-                            tid,
-                            collection.as_str(),
-                            document_id,
-                            value,
-                            prior,
-                        );
+                        let identity =
+                            crate::engine::document::store::StorageKey::for_surrogate(*surrogate)
+                                .to_identity();
+                        self.emit_put_event(task, tid, collection.as_str(), identity, value, prior);
                     }
                     self.response_ok(task)
                 }

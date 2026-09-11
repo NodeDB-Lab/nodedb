@@ -116,7 +116,9 @@ impl CoreLoop {
                     && let Err(e) = self.stage_admit_write(
                         rls_write_check,
                         &body,
-                        &doc_id,
+                        &crate::engine::document::store::RowIdentity::from_user_key(
+                            doc_id.as_str(),
+                        ),
                         did.as_u64(),
                         tid,
                         collection,

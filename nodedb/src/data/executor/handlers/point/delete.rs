@@ -173,6 +173,8 @@ impl CoreLoop {
         // through so CDC/trigger consumers see the pre-delete state as
         // `old_value`. A delete against a non-existent key is a true
         // no-op and emits nothing.
+        let document_identity =
+            crate::engine::document::store::RowIdentity::from_user_key(document_id);
         if let Some(prior_bytes) = prior.as_deref() {
             let old_converted = self.resolve_event_payload(
                 task.request.database_id.as_u64(),
@@ -180,12 +182,13 @@ impl CoreLoop {
                 collection,
                 prior_bytes,
             );
-            self.emit_write_event(
+            // `document_identity` is read again below for `RETURNING`'s `id`
+            // field, so the event-emit boundary gets a clone rather than the
+            // move.
+            self.emit_document_delete_event(
                 task,
                 collection,
-                crate::event::WriteOp::Delete,
-                document_id,
-                None,
+                document_identity.clone(),
                 Some(old_converted.as_deref().unwrap_or(prior_bytes)),
             );
         }
@@ -208,7 +211,7 @@ impl CoreLoop {
                         StorageMode::Strict { schema } => Some(schema),
                         StorageMode::Schemaless => None,
                     });
-                returning_doc::from_stored(prior_bytes, document_id, strict_schema)
+                returning_doc::from_stored(prior_bytes, &document_identity, strict_schema)
             };
             let doc = match doc {
                 Ok(doc) => doc,
@@ -274,7 +277,8 @@ impl CoreLoop {
             return Ok(());
         }
         let database_id = task.request.database_id.as_u64();
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         let row_key = row_key.as_str();
         let stored = if self.is_bitemporal(database_id, tid, collection) {
             self.sparse
@@ -299,7 +303,7 @@ impl CoreLoop {
         rls_write_gate::admit_stored_row(
             rls_write_check,
             &body,
-            row_key,
+            &storage_key.to_identity(),
             strict_schema,
             tid,
             collection,

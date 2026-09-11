@@ -20,6 +20,7 @@ use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::upsert::merge::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::strict_format;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::RowIdentity;
 
 /// Borrowed arguments for [`CoreLoop::resolve_upsert`].
 pub(super) struct ResolveUpsert<'a> {
@@ -57,6 +58,9 @@ impl CoreLoop {
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
         let row_key = row_key.as_str();
+        let row_identity =
+            crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_identity();
+        let document_identity = RowIdentity::from_user_key(document_id);
 
         let existing = self.doc_resolve_read(&ctx, collection, row_key)?;
         let (body, precondition) = match existing {
@@ -75,8 +79,15 @@ impl CoreLoop {
         };
 
         // Both live branches gate the MessagePack body, no schema passed.
-        rls_write_gate::admit_stored_row(rls_write_check, &body, row_key, None, tid, collection)
-            .map_err(ErrorCode::from)?;
+        rls_write_gate::admit_stored_row(
+            rls_write_check,
+            &body,
+            &row_identity,
+            None,
+            tid,
+            collection,
+        )
+        .map_err(ErrorCode::from)?;
 
         // `RETURNING` projects the stored image via the same `build_stored_body`
         // the apply runs, so the resolve reports the row that will actually land.
@@ -101,7 +112,7 @@ impl CoreLoop {
             returning,
             rls_filters,
             ctx.strict_schema.as_ref(),
-            &[(document_id, stored_image.as_slice())],
+            &[(&document_identity, stored_image.as_slice())],
         )?;
 
         Ok(DocumentResolveOutcome {

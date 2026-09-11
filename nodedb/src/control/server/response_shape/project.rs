@@ -38,11 +38,16 @@ pub fn push_flat_rows(
             if is_scan_wrapper(&map)
                 && let Some(serde_json::Value::Object(mut inner)) = map.remove("data")
             {
-                // The envelope carries the row's storage-key identity. A body
-                // with no `id` field carries it nowhere else. `or_insert`
-                // leaves a declared primary key as the authority.
-                if let Some(id) = map.remove("id") {
-                    inner.entry("id").or_insert(id);
+                // The envelope carries the row's storage key, which is
+                // internal. A body with no `id` field carries identity
+                // nowhere else, so the key renders to an identity at this
+                // boundary. `or_insert` leaves a declared primary key as the
+                // authority.
+                if let Some(serde_json::Value::String(key)) = map.remove("id") {
+                    let identity = crate::engine::document::store::identity_of(&key);
+                    inner
+                        .entry("id")
+                        .or_insert(serde_json::Value::String(identity.into_string()));
                 }
                 out.push(inner);
                 return;

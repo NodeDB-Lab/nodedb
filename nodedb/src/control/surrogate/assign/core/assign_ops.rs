@@ -9,24 +9,6 @@ use nodedb_types::Surrogate;
 
 use super::types::SurrogateAssigner;
 
-/// Format the identity string a freshly minted surrogate binds under.
-///
-/// This is the one site in `nodedb` that formats a minted surrogate.
-/// [`assign_fresh`](SurrogateAssigner::assign_fresh) calls it on the
-/// allocation path. The SQL-plan converter's placeholder paths call it for
-/// `Surrogate::ZERO`, so both stay on one rule.
-pub(crate) fn fresh_identity_string(
-    kind: nodedb_physical::FreshSurrogateKind,
-    surrogate: Surrogate,
-) -> String {
-    match kind {
-        nodedb_physical::FreshSurrogateKind::AutoRowId => surrogate.as_u32().to_string(),
-        nodedb_physical::FreshSurrogateKind::DocumentStorageKey => {
-            crate::engine::document::store::surrogate_to_doc_id(surrogate)
-        }
-    }
-}
-
 impl SurrogateAssigner {
     /// Resolve `(collection, pk_bytes)` to a stable surrogate.
     ///
@@ -129,20 +111,19 @@ impl SurrogateAssigner {
     /// [`assign`](Self::assign) has a fast-path lookup. This does not. Every
     /// call allocates a new value, so N rows get N distinct surrogates.
     ///
-    /// The surrogate self-binds to the identity string `kind` picks.
-    /// `AutoRowId` binds the decimal string, matching the `_rowid` value the
-    /// Data Plane writes, so `WHERE _rowid = N` resolves back to it.
-    /// `DocumentStorageKey` binds the 8-hex key the row is stored under.
+    /// The surrogate self-binds under its identity, so a later keyed lookup
+    /// resolves. The identity is the surrogate's decimal string, matching the
+    /// `_rowid` value the Data Plane writes for an auto-`_rowid` row, so
+    /// `WHERE _rowid = N` resolves back to it.
     ///
-    /// Both reuse `assign`'s bind/flush machinery, so the hwm advance
-    /// persists and Raft-proposes identically. Returns the bound identity
-    /// string, which the caller uses verbatim.
+    /// Reuses `assign`'s bind/flush machinery, so the hwm advance persists
+    /// and Raft-proposes identically. Returns the bound identity string,
+    /// which the caller uses verbatim.
     pub fn assign_fresh(
         &self,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-        kind: nodedb_physical::FreshSurrogateKind,
     ) -> crate::Result<(Surrogate, String)> {
         let catalog = self.credential_store.catalog();
 
@@ -162,7 +143,8 @@ impl SurrogateAssigner {
                     continue;
                 }
             };
-            let pk = fresh_identity_string(kind, surrogate);
+            let pk =
+                crate::engine::document::store::RowIdentity::for_surrogate(surrogate).into_string();
             let pk_bytes = pk.as_bytes();
             catalog.put_surrogate(database_id, tenant_id, collection, pk_bytes, surrogate)?;
             self.wal_appender.record_bind_to_wal(

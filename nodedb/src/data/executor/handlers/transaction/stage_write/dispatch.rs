@@ -384,7 +384,7 @@ impl CoreLoop {
         &self,
         rls_write_check: &nodedb_types::RlsWriteCheck,
         body: &[u8],
-        doc_id: &str,
+        identity: &crate::engine::document::store::RowIdentity,
         database_id: u64,
         tid: u64,
         collection: &str,
@@ -399,7 +399,7 @@ impl CoreLoop {
         crate::data::executor::handlers::rls_write_gate::admit_stored_row(
             rls_write_check,
             body,
-            doc_id,
+            identity,
             schema.as_ref(),
             tid,
             collection,

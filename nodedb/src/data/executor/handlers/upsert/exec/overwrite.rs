@@ -11,6 +11,7 @@ use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::upsert::merge::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::StrictSchema;
 
@@ -62,6 +63,9 @@ impl CoreLoop {
             strict_schema,
             current_bytes,
         } = ctx;
+
+        let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
+        let document_identity = RowIdentity::from_user_key(document_id);
 
         // Decode existing document to nodedb_types::Value.
         let existing_val = if let Some(schema) = strict_schema {
@@ -153,7 +157,7 @@ impl CoreLoop {
         if let Err(e) = rls_write_gate::admit_stored_row(
             rls_write_check,
             &merged_body,
-            row_key,
+            &row_identity,
             None,
             tid,
             collection,
@@ -265,7 +269,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            row_key,
+            row_identity,
             &stored_bytes,
             Some(&current_bytes),
         );
@@ -285,7 +289,7 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 strict_schema,
-                &[(document_id, stored_bytes.as_slice())],
+                &[(&document_identity, stored_bytes.as_slice())],
             ),
             None => self.response_affected(task, 1),
         };

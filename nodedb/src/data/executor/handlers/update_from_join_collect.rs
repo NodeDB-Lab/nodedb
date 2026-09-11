@@ -116,9 +116,10 @@ impl CoreLoop {
                             &doc_id,
                             "update_from_join_collect",
                         );
+                        let identity = crate::engine::document::store::identity_of(&doc_id);
                         super::super::strict_format::undecodable_strict_row(
                             target_collection,
-                            &doc_id,
+                            identity.as_str(),
                         )
                     })?
             } else {

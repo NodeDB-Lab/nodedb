@@ -16,7 +16,7 @@ use crate::data::executor::enforcement::chain_guard::{self, ChainGuard};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec};
 use nodedb_types::Surrogate;
 
@@ -65,8 +65,10 @@ impl CoreLoop {
             resolved_sum_targets,
             deferred_sum_targets,
         } = p;
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         let row_key = row_key.as_str();
+        let document_identity = RowIdentity::from_user_key(document_id);
         debug!(
             core = self.core_id,
             %collection, %document_id, if_absent,
@@ -267,7 +269,14 @@ impl CoreLoop {
         // only writes the document; it no longer derives edges (which mis-homed
         // cross-shard edges by the document's vShard).
 
-        self.emit_put_event(task, tid, collection, row_key, value, None);
+        self.emit_put_event(
+            task,
+            tid,
+            collection,
+            storage_key.to_identity(),
+            value,
+            None,
+        );
 
         let mut response = if let Some(spec) = returning {
             let strict_schema = self.strict_schema_for(
@@ -280,7 +289,7 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 strict_schema.as_ref(),
-                &[(document_id, stored_value.as_slice())],
+                &[(&document_identity, stored_value.as_slice())],
             )
         } else {
             // The row was inserted: exactly one row affected.
@@ -299,7 +308,7 @@ mod tests {
     use crate::bridge::envelope::Status;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
-    use crate::engine::document::store::CollectionConfig;
+    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
     use crate::types::{DatabaseId, TenantId};
 
     const DB: u64 = 0;

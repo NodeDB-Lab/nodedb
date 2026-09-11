@@ -14,7 +14,6 @@ pub mod physical_impl;
 pub mod registry;
 pub mod wal_appender;
 
-pub(crate) use assign::fresh_identity_string;
 pub use assign::{SurrogateAssigner, SurrogateRegistryHandle};
 pub use bootstrap::bootstrap_registry;
 pub use persist::{SURROGATE_HWM, SurrogateHwmPersist, SystemCatalogHwm};

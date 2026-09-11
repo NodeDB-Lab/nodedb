@@ -4,9 +4,7 @@
 //! `nodedb_physical::SurrogateAssigner` trait so the shared converter
 //! can allocate surrogates without depending on Origin internals.
 
-use nodedb_physical::{
-    FreshSurrogateKind, SurrogateAssignError, SurrogateAssigner as PhysicalSurrogateAssigner,
-};
+use nodedb_physical::{SurrogateAssignError, SurrogateAssigner as PhysicalSurrogateAssigner};
 
 use super::assign::SurrogateAssigner;
 
@@ -31,9 +29,8 @@ impl PhysicalSurrogateAssigner for SurrogateAssigner {
         database_id: nodedb_types::DatabaseId,
         tenant_id: nodedb_types::TenantId,
         collection: &str,
-        kind: FreshSurrogateKind,
     ) -> Result<(nodedb_types::Surrogate, String), SurrogateAssignError> {
-        Self::assign_fresh(self, database_id, tenant_id, collection, kind)
+        Self::assign_fresh(self, database_id, tenant_id, collection)
             .map_err(|e| SurrogateAssignError::Backend(e.to_string()))
     }
 }

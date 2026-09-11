@@ -64,7 +64,14 @@ impl CoreLoop {
             Some(o) => (crate::event::WriteOp::Update, Some(o)),
             None => (crate::event::WriteOp::Insert, None),
         };
-        self.emit_write_event(task, collection, op, &key_str, Some(value), old_slice);
+        self.emit_write_event(
+            task,
+            collection,
+            op,
+            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+            Some(value),
+            old_slice,
+        );
 
         self.note_kv_write_lsn(task, did, tid, collection, key);
         if let Some(spec) = returning {
@@ -151,7 +158,7 @@ impl CoreLoop {
             task,
             collection,
             crate::event::WriteOp::Insert,
-            &key_str,
+            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
             Some(value),
             None,
         );
@@ -232,7 +239,7 @@ impl CoreLoop {
             task,
             collection,
             crate::event::WriteOp::Insert,
-            &key_str,
+            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
             Some(value),
             None,
         );

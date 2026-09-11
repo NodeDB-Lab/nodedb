@@ -116,10 +116,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_ingest(
         // PK collapses every row onto `Surrogate::ZERO` and merges distinct
         // rows. Nothing looks a timeseries row up by this binding, so the
         // identity string is discarded.
-        let (s, _) = ctx.fresh_surrogate(
-            collection,
-            nodedb_physical::FreshSurrogateKind::DocumentStorageKey,
-        )?;
+        let (s, _) = ctx.fresh_surrogate(collection)?;
         surrogates.push(s);
     }
     Ok(vec![PhysicalTask {

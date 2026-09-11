@@ -1696,6 +1696,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 target_type: "kv".into(),
                 schema_json: "{}".into(),
+                source_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
             }),
             PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot { tenant_id: 1 }),
             PhysicalPlan::Meta(MetaOp::RestoreTenantSnapshot {

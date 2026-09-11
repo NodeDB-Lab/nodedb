@@ -116,10 +116,11 @@ impl CoreLoop {
                     self.sparse
                         .get(task.request.database_id.as_u64(), tid, collection, doc_id)?
                 {
+                    let identity = crate::engine::document::store::identity_of(doc_id);
                     self.stage_admit_write(
                         rls_write_check,
                         &body,
-                        doc_id,
+                        &identity,
                         task.request.database_id.as_u64(),
                         tid,
                         collection,
@@ -217,10 +218,11 @@ impl CoreLoop {
             )?;
             // Decide the staged post-image against the write policy: this is
             // the row the Calvin flush will install.
+            let identity = crate::engine::document::store::identity_of(&doc_id);
             self.stage_admit_write(
                 rls_write_check,
                 &new_body,
-                &doc_id,
+                &identity,
                 database_id.as_u64(),
                 tid,
                 collection,

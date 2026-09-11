@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::doc_format::encode_resolved_wire_body as encode_doc_body;
-use crate::engine::document::store::doc_id_to_surrogate;
+use crate::engine::document::store::{RowIdentity, doc_id_to_surrogate};
 use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind as MergeClauseKindOp,
 };
@@ -66,12 +66,13 @@ pub(super) struct MergePlanActions {
 /// duplicate of a row that already exists.
 ///
 /// A schemaless collection with no declared `id` field carries its identity
-/// only in `doc_id` (the storage key), never in the body — so a MERGE arm's
-/// `AND id ...` condition, matched by [`find_arm`], must see the identity
-/// injected here. A strict row already surfaces `id` as a real tuple column,
-/// so injection only runs on the schemaless arm.
+/// only in the row's storage key, never in the body — so a MERGE arm's
+/// `AND id ...` condition, matched by [`find_arm`], must see the row's
+/// client-visible identity injected here, never the raw storage key. A
+/// strict row already surfaces `id` as a real tuple column, so injection
+/// only runs on the schemaless arm.
 fn decode_target(
-    doc_id: &str,
+    identity: &RowIdentity,
     bytes: &[u8],
     strict_schema: &Option<nodedb_types::columnar::StrictSchema>,
 ) -> crate::Result<serde_json::Value> {
@@ -86,7 +87,7 @@ fn decode_target(
     {
         obj.insert(
             "id".to_string(),
-            serde_json::Value::String(doc_id.to_string()),
+            serde_json::Value::String(identity.as_str().to_string()),
         );
     }
     Ok(doc)
@@ -123,12 +124,16 @@ impl CoreLoop {
         let null_source = serde_json::Value::Null;
 
         for (doc_id, bytes) in &target_docs {
-            let target_doc = decode_target(doc_id, bytes, &strict_schema)?;
+            let surrogate = doc_id_to_surrogate(doc_id);
+            let identity = match surrogate {
+                Some(s) => RowIdentity::for_surrogate(s),
+                None => RowIdentity::from_user_key(doc_id.clone()),
+            };
+            let target_doc = decode_target(&identity, bytes, &strict_schema)?;
             let join_val = target_doc
                 .get(params.target_join_col)
                 .map(json_to_str)
                 .unwrap_or_default();
-            let surrogate = doc_id_to_surrogate(doc_id);
 
             let (arm_kind, source_doc): (MergeClauseKindOp, &serde_json::Value) =
                 if let Some(source_doc) = source_map.get(&join_val) {

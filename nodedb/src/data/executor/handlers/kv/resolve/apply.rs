@@ -121,7 +121,7 @@ impl CoreLoop {
                     task,
                     collection.as_str(),
                     op,
-                    &key_str,
+                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
                     Some(value),
                     precondition.as_deref(),
                 );
@@ -142,7 +142,7 @@ impl CoreLoop {
                     task,
                     collection.as_str(),
                     crate::event::WriteOp::Delete,
-                    &key_str,
+                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
                     None,
                     precondition.as_deref(),
                 );

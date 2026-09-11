@@ -18,7 +18,7 @@ use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec, StorageMode, UpdateValue};
 use nodedb_types::Surrogate;
 
@@ -67,8 +67,10 @@ impl CoreLoop {
             resolved_sum_targets,
             declared_primary_key,
         } = params;
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         let row_key = row_key.as_str();
+        let document_identity = RowIdentity::from_user_key(document_id);
         debug!(
             core = self.core_id,
             %collection,
@@ -173,7 +175,7 @@ impl CoreLoop {
                 if let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
                     &updated_bytes,
-                    document_id,
+                    &document_identity,
                     strict_schema.as_ref(),
                     tid,
                     collection,
@@ -229,7 +231,7 @@ impl CoreLoop {
                             task,
                             tid,
                             collection,
-                            row_key,
+                            storage_key.to_identity(),
                             &updated_bytes,
                             Some(&current_bytes),
                         );
@@ -249,7 +251,7 @@ impl CoreLoop {
                             // as `id` when the row declares none of its own.
                             let doc = match returning_doc::from_stored(
                                 &updated_bytes,
-                                document_id,
+                                &document_identity,
                                 strict_schema.as_ref(),
                             ) {
                                 Ok(doc) => doc,

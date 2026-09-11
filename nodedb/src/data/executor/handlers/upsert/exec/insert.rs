@@ -10,6 +10,7 @@ use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, W
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::StrictSchema;
 
@@ -56,14 +57,22 @@ impl CoreLoop {
             strict_schema,
         } = ctx;
 
+        let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
+        let document_identity = RowIdentity::from_user_key(document_id);
+
         // Insert: document doesn't exist, create new (same as PointPut).
         // The incoming body IS the post-image here, and the planner
         // emits it as MessagePack for both storage modes (the strict
         // tuple is encoded on the way to disk), so it is decoded
         // without a schema.
-        if let Err(e) =
-            rls_write_gate::admit_stored_row(rls_write_check, value, row_key, None, tid, collection)
-        {
+        if let Err(e) = rls_write_gate::admit_stored_row(
+            rls_write_check,
+            value,
+            &row_identity,
+            None,
+            tid,
+            collection,
+        ) {
             return self.response_error(task, e);
         }
 
@@ -160,7 +169,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            row_key,
+            row_identity,
             value,
             prior.prior_value.as_deref(),
         );
@@ -177,7 +186,7 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 strict_schema,
-                &[(document_id, prior.stored_value.as_slice())],
+                &[(&document_identity, prior.stored_value.as_slice())],
             ),
             None => self.response_affected(task, 1),
         };
