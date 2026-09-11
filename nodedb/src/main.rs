@@ -31,7 +31,14 @@ fn main() -> anyhow::Result<()> {
     // worker threads while building its runtime, and the default panic hook
     // renders arbitrary panic payloads.
     nodedb::bootstrap::panic_hook::install();
+    // Worker threads carry the whole planning -> dispatch -> execution
+    // pipeline synchronously; the DDL/index path in particular nests deep
+    // enough to exhaust tokio's 2 MiB default and die with a silent SIGSEGV.
+    // 16 MiB gives the same headroom the rest of the process
+    // already relies on for main-thread work; tokio reserves it virtually
+    // and commits pages on demand, so idle workers cost nothing.
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()?;
     if let Err(error) = runtime.block_on(server_main()) {
