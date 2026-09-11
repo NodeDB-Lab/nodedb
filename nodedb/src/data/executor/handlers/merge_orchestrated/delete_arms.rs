@@ -91,6 +91,7 @@ impl CoreLoop {
                             surrogate,
                             user_roles: &task.request.user_roles,
                             enforce: true,
+                            resolved_targets,
                         },
                     ) {
                         Ok(outcome) => {
@@ -171,23 +172,23 @@ impl CoreLoop {
                     }
                 }
                 None => {
-                    if let Err(e) = self
-                        .sparse
-                        .delete(database_id, tid, collection, &del.doc_id)
-                    {
-                        return Err(self.response_error(task, e));
-                    }
-                    // Legacy non-surrogate row: the raw delete reports no prior
-                    // value, so the plan's captured pre-image is the only image
-                    // of the removed row — without it a RETURNING delete of such
-                    // a row would silently drop it from the result set.
-                    if returning {
-                        match returning_doc(&del.body, &del.doc_id) {
-                            Ok(doc) => returned_docs.push(doc),
-                            Err(e) => return Err(self.response_error(task, e)),
-                        }
-                    }
-                    *affected += 1;
+                    // A target row whose `doc_id` does not parse as a storage
+                    // key: `delete` addresses DOCUMENTS rows by `StorageKey`
+                    // only, and the workspace carries no on-disk-format
+                    // compatibility burden for a row shape that predates
+                    // surrogate keying, so this arm is refused rather than
+                    // removed through a raw string key.
+                    return Err(self.response_error(
+                        task,
+                        crate::Error::Storage {
+                            engine: "document".into(),
+                            detail: format!(
+                                "MERGE DELETE target row '{}' in '{collection}' has no \
+                                 surrogate storage key",
+                                del.doc_id
+                            ),
+                        },
+                    ));
                 }
             }
         }

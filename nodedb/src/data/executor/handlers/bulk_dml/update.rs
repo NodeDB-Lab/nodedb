@@ -227,12 +227,42 @@ impl CoreLoop {
         for row in projected {
             let ProjectedUpdateRow {
                 doc_id,
+                storage_key,
                 current_bytes,
                 old_doc: old_doc_json,
                 mut doc,
                 updated_bytes,
             } = row;
             let doc_id = doc_id.as_str();
+            // Period lock, both images — matching `execute_point_update`: a
+            // closed period must reject an edit to a row it already holds,
+            // and must reject an edit that assigns the period column into it.
+            if let Some(config) = self.doc_configs.get(&config_key)
+                && let Some(ref pl) = config.enforcement.period_lock
+            {
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    collection,
+                    &current_bytes,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return self.response_error(task, e);
+                }
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    collection,
+                    &updated_bytes,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return self.response_error(task, e);
+                }
+            }
             // Gate the persist on the collection's write policy, decided
             // against this row's post-update image — `doc` already has
             // the assignments and any regenerated columns applied, so it
@@ -255,6 +285,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     doc_id,
+                    storage_key: &storage_key,
                     new_body: &updated_bytes,
                     index_paths: &index_paths,
                     old_doc: &old_doc_json,
@@ -302,7 +333,7 @@ impl CoreLoop {
                 task.request.database_id.as_u64(),
                 tid,
                 collection,
-                doc_id,
+                &storage_key,
                 &updated_bytes,
             );
             // Record the committed row's write version against its

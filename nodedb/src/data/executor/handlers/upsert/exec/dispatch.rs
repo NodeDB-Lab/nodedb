@@ -118,7 +118,8 @@ impl CoreLoop {
             self.sparse
                 .versioned_get_current(database_id, tid, collection, row_key)
         } else {
-            self.sparse.get(database_id, tid, collection, row_key)
+            let key = nodedb_types::StorageKey::for_surrogate(surrogate);
+            self.sparse.get(database_id, tid, collection, &key)
         };
 
         match existing {
@@ -234,7 +235,7 @@ mod tests {
                 DB,
                 TID,
                 TARGET,
-                &surrogate_to_doc_id(T1),
+                &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -253,7 +254,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)

@@ -16,7 +16,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Handle `DocumentOp::ResolvedWrite`: check every precondition, apply every
@@ -124,13 +124,9 @@ impl CoreLoop {
     ) -> Result<(), ErrorCode> {
         let database_id = task.request.database_id.as_u64();
         for mutation in mutations {
-            let row_key = surrogate_to_doc_id(mutation.surrogate());
-            let current = self.doc_current_bytes(
-                database_id,
-                tid,
-                mutation.collection().as_str(),
-                row_key.as_str(),
-            )?;
+            let row_key = StorageKey::for_surrogate(mutation.surrogate());
+            let current =
+                self.doc_current_bytes(database_id, tid, mutation.collection().as_str(), &row_key)?;
             if current.as_deref() != mutation.precondition() {
                 return Err(ErrorCode::OllpRetryRequired);
             }

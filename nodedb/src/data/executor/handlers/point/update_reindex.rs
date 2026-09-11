@@ -44,6 +44,8 @@ pub(in crate::data::executor) struct NonbitemporalUpdateReindex<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub doc_id: &'a str,
+    /// The same storage key, typed — `put_in_txn` below takes it directly.
+    pub storage_key: &'a crate::engine::document::store::StorageKey,
     /// New stored bytes for the primary document row.
     pub new_body: &'a [u8],
     pub index_paths: &'a [IndexPath],
@@ -193,7 +195,7 @@ impl CoreLoop {
             p.database_id,
             p.tid,
             p.collection,
-            p.doc_id,
+            p.storage_key,
             p.new_body,
         )?;
 

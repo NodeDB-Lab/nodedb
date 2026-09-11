@@ -114,6 +114,7 @@ impl CoreLoop {
                     user_roles: &task.request.user_roles,
                     enforce: true,
                     wal_lsn: task.wal_lsn(),
+                    resolved_targets: resolved_sum_targets,
                 },
             ) {
                 Ok(mut outcome) => {

@@ -38,6 +38,12 @@ pub enum ErrorDetails {
     BalanceViolation { collection: String },
     #[serde(rename = "period_locked")]
     PeriodLocked { collection: String },
+    #[serde(rename = "period_lock_misconfigured")]
+    PeriodLockMisconfigured {
+        collection: String,
+        ref_table: String,
+        status_column: String,
+    },
     #[serde(rename = "state_transition_violation")]
     StateTransitionViolation { collection: String },
     #[serde(rename = "transition_check_violation")]

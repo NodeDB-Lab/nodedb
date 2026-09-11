@@ -73,7 +73,7 @@ impl CoreLoop {
         let chained = if chain.enabled()
             && self
                 .sparse
-                .get(database_id, tid, collection, row_key)
+                .get(database_id, tid, collection, &storage_key)
                 .ok()
                 .flatten()
                 .is_none()
@@ -109,17 +109,32 @@ impl CoreLoop {
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: resolved_sum_targets,
             },
         ) {
             Ok(p) => p,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
 
         if let Err(e) = chain.persist_head(self, &txn) {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -139,7 +154,14 @@ impl CoreLoop {
         let enforcement = match write_hook::run(self, &txn, &hook_ctx, images) {
             Ok(outcome) => outcome,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
@@ -151,7 +173,14 @@ impl CoreLoop {
         if let Err(e) =
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -226,7 +255,7 @@ mod tests {
     use crate::bridge::envelope::Status;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::{DatabaseId, TenantId};
 
     const DB: u64 = 0;
@@ -283,7 +312,7 @@ mod tests {
                 DB,
                 TID,
                 TARGET,
-                &surrogate_to_doc_id(T1),
+                &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -302,7 +331,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)

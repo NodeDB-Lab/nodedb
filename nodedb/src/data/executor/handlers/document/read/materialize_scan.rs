@@ -168,7 +168,12 @@ impl CoreLoop {
             self.sparse_body_format(task.request.database_id, TenantId::new(tid), collection);
         let format_ref = body_format.as_format_ref();
         for entry in &mut entries {
-            let (_, normalized) = sparse_row_to_doc(&entry.0, &entry.2, format_ref);
+            // `entry.1` is this row's surrogate, already parsed out of
+            // `entry.0` when the row was collected above — minted directly
+            // from it rather than re-parsed.
+            let key =
+                nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(entry.1));
+            let (_, normalized) = sparse_row_to_doc(&key, &entry.2, format_ref);
             entry.2 = normalized;
         }
 

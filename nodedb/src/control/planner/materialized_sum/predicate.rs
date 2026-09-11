@@ -21,6 +21,7 @@ use nodedb_types::id::TxnId;
 
 use super::recon::recon_scan_rows;
 use super::resolve::{lookup_join_value, source_drives_bindings};
+use super::resolve_target::resolve_one_target;
 use super::settle::{
     SettleInput, Settlement, co_resident_target_keys, omit_shipped, settle_cross_shard_images,
 };
@@ -156,26 +157,17 @@ async fn resolve_scanned_rows(
     let mut resolved: Vec<ResolvedSumTarget> = Vec::new();
     for binding in bindings.iter() {
         for join_value in crate::query::binding_join_keys(binding, updates, rows)? {
-            if resolved
-                .iter()
-                .any(|entry| entry.addresses(&binding.target_collection, &join_value))
-            {
-                continue;
-            }
-            let surrogate = lookup_join_value(
-                state,
-                binding,
-                &join_value,
-                tenant_id,
-                database_id,
-                trace_id,
-            )
-            .await?;
-            resolved.push(ResolvedSumTarget::new(
+            resolve_one_target(
+                &mut resolved,
                 &binding.target_collection,
                 join_value,
-                surrogate,
-            ));
+                async |v| {
+                    lookup_join_value(state, binding, v, tenant_id, database_id, trace_id)
+                        .await
+                        .map(Some)
+                },
+            )
+            .await?;
         }
     }
     Ok(resolved)

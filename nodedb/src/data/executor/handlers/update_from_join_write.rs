@@ -59,6 +59,11 @@ impl CoreLoop {
             want_returning,
         } = ctx;
         let database_id = task.request.database_id.as_u64();
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            target_collection.to_string(),
+        );
         let mut affected = 0u64;
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
         let mut returned_docs: Vec<serde_json::Value> = if want_returning {
@@ -76,6 +81,57 @@ impl CoreLoop {
                 mut doc,
             } = row;
 
+            // `put_in_txn` addresses DOCUMENTS rows by `StorageKey` only, and
+            // the workspace carries no on-disk-format compatibility burden
+            // for a row shape that predates surrogate keying, so a row whose
+            // `doc_id` does not parse as one is refused rather than written
+            // through a raw string key.
+            let storage_key = match crate::engine::document::store::StorageKey::parse(&doc_id) {
+                Some(key) => key,
+                None => {
+                    return Err(self.response_error(
+                        task,
+                        crate::Error::Storage {
+                            engine: "document".into(),
+                            detail: format!(
+                                "UPDATE ... FROM target row '{doc_id}' in \
+                                 '{target_collection}' has no surrogate storage key"
+                            ),
+                        },
+                    ));
+                }
+            };
+
+            // Period lock, both images — matching `execute_point_update`: a
+            // closed period must reject an edit to a row it already holds,
+            // and must reject an edit that assigns the period column into it.
+            if let Some(config) = self.doc_configs.get(&config_key)
+                && let Some(ref pl) = config.enforcement.period_lock
+            {
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    target_collection,
+                    &old_body,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return Err(self.response_error(task, e));
+                }
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    target_collection,
+                    &updated_bytes,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return Err(self.response_error(task, e));
+                }
+            }
+
             // The row's body and the materialized-sum delta it owes share ONE
             // transaction. `ResolvedUpdateRow` already carries BOTH images —
             // `old_body` as stored and `body` as the post-image — so the fold
@@ -89,7 +145,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 target_collection,
-                &doc_id,
+                &storage_key,
                 &updated_bytes,
             );
             if stored.is_ok() {
@@ -131,8 +187,13 @@ impl CoreLoop {
                 // collection — this statement's redo describes only the rows of
                 // `target_collection` it rewrote.
                 write_set.extend(write_hook::target_write_set(&target_writes));
-                self.doc_cache
-                    .put(database_id, tid, target_collection, &doc_id, &updated_bytes);
+                self.doc_cache.put(
+                    database_id,
+                    tid,
+                    target_collection,
+                    &storage_key,
+                    &updated_bytes,
+                );
                 // Emit an update event per affected row to the Event Plane, so
                 // AFTER-UPDATE triggers and CDC/change-stream consumers see
                 // each row `UPDATE ... FROM` touched — mirroring

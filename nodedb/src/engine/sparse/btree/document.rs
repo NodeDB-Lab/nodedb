@@ -7,6 +7,7 @@
 //! `delete_in_txn`, `exists_in_txn`), where the caller owns the redb write
 //! transaction — plus the collection-wide byte-size estimate.
 
+use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, WriteTransaction};
 use tracing::debug;
 
@@ -26,7 +27,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
         value: &[u8],
     ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
@@ -45,7 +46,7 @@ impl SparseEngine {
             };
             write_txn.commit().map_err(|e| redb_err("commit", e))?;
 
-            debug!(collection, document_id, len = value.len(), "document put");
+            debug!(collection, %document_id, len = value.len(), "document put");
             Ok(prior)
         })
     }
@@ -58,7 +59,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
         value: &[u8],
     ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
@@ -87,7 +88,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<bool> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
             let table = txn
@@ -116,7 +117,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
             let table = txn
@@ -136,7 +137,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        documents: &[(&str, &[u8])],
+        documents: &[(StorageKey, &[u8])],
     ) -> crate::Result<()> {
         if documents.is_empty() {
             return Ok(());
@@ -180,7 +181,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
             let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
@@ -241,7 +242,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
             let write_txn = self
@@ -261,7 +262,7 @@ impl SparseEngine {
 
             debug!(
                 collection,
-                document_id,
+                %document_id,
                 removed = prior.is_some(),
                 "document delete"
             );
@@ -281,7 +282,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         with_tenant_key(database_id, tenant_id, collection, document_id, |key| {
             let mut table = txn
@@ -298,6 +299,8 @@ impl SparseEngine {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use super::*;
 
     fn open_temp() -> (SparseEngine, tempfile::TempDir) {
@@ -306,33 +309,37 @@ mod tests {
         (engine, dir)
     }
 
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
     #[test]
     fn put_and_get() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(0, 1, "users", "u2", b"bob").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(0, 1, "users", &key(2), b"bob").unwrap();
         assert_eq!(
-            engine.get(0, 1, "users", "u1").unwrap(),
+            engine.get(0, 1, "users", &key(1)).unwrap(),
             Some(b"alice".to_vec())
         );
         assert_eq!(
-            engine.get(0, 1, "users", "u2").unwrap(),
+            engine.get(0, 1, "users", &key(2)).unwrap(),
             Some(b"bob".to_vec())
         );
-        assert_eq!(engine.get(0, 1, "users", "u3").unwrap(), None);
+        assert_eq!(engine.get(0, 1, "users", &key(3)).unwrap(), None);
     }
 
     #[test]
     fn databases_are_isolated() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(7, 1, "users", "u1", b"alice-db7").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(7, 1, "users", &key(1), b"alice-db7").unwrap();
         assert_eq!(
-            engine.get(0, 1, "users", "u1").unwrap(),
+            engine.get(0, 1, "users", &key(1)).unwrap(),
             Some(b"alice".to_vec())
         );
         assert_eq!(
-            engine.get(7, 1, "users", "u1").unwrap(),
+            engine.get(7, 1, "users", &key(1)).unwrap(),
             Some(b"alice-db7".to_vec())
         );
     }
@@ -340,10 +347,10 @@ mod tests {
     #[test]
     fn put_overwrites() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(0, 1, "users", "u1", b"ALICE").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(0, 1, "users", &key(1), b"ALICE").unwrap();
         assert_eq!(
-            engine.get(0, 1, "users", "u1").unwrap(),
+            engine.get(0, 1, "users", &key(1)).unwrap(),
             Some(b"ALICE".to_vec())
         );
     }
@@ -351,26 +358,26 @@ mod tests {
     #[test]
     fn delete_removes() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
         assert_eq!(
-            engine.delete(0, 1, "users", "u1").unwrap(),
+            engine.delete(0, 1, "users", &key(1)).unwrap(),
             Some(b"alice".to_vec())
         );
-        assert_eq!(engine.get(0, 1, "users", "u1").unwrap(), None);
-        assert_eq!(engine.delete(0, 1, "users", "u1").unwrap(), None);
+        assert_eq!(engine.get(0, 1, "users", &key(1)).unwrap(), None);
+        assert_eq!(engine.delete(0, 1, "users", &key(1)).unwrap(), None);
     }
 
     #[test]
     fn collections_are_isolated() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(0, 1, "orders", "u1", b"order-1").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(0, 1, "orders", &key(1), b"order-1").unwrap();
         assert_eq!(
-            engine.get(0, 1, "users", "u1").unwrap(),
+            engine.get(0, 1, "users", &key(1)).unwrap(),
             Some(b"alice".to_vec())
         );
         assert_eq!(
-            engine.get(0, 1, "orders", "u1").unwrap(),
+            engine.get(0, 1, "orders", &key(1)).unwrap(),
             Some(b"order-1".to_vec())
         );
     }

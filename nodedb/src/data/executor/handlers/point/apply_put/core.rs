@@ -43,7 +43,10 @@ impl CoreLoop {
             user_roles,
             enforce,
             wal_lsn,
+            resolved_targets,
         } = params;
+        // `surrogate` IS the storage key: no parse, no failure arm.
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
@@ -100,7 +103,8 @@ impl CoreLoop {
             self.sparse
                 .versioned_get_current(database_id, tid, collection, document_id)?
         } else if need_old {
-            self.sparse.get(database_id, tid, collection, document_id)?
+            self.sparse
+                .get(database_id, tid, collection, &storage_key)?
         } else {
             None
         };
@@ -131,6 +135,7 @@ impl CoreLoop {
                 value,
                 old_value: &old_value,
                 user_roles,
+                resolved_targets,
             },
         )?;
 
@@ -152,7 +157,7 @@ impl CoreLoop {
             old_value
         } else {
             self.sparse
-                .put_in_txn(txn, database_id, tid, collection, document_id, &stored)?
+                .put_in_txn(txn, database_id, tid, collection, &storage_key, &stored)?
         };
 
         // Pre-image capture for the column-stats read-modify-write, so a
@@ -205,7 +210,7 @@ impl CoreLoop {
         }
 
         self.doc_cache
-            .put(database_id, tid, collection, document_id, &stored);
+            .put(database_id, tid, collection, &storage_key, &stored);
 
         // Secondary index extraction into the caller's write txn — the
         // non-_in_txn variant would deadlock since `execute_point_put`
@@ -395,8 +400,10 @@ mod tests {
     }
 
     fn stored_row(core: &CoreLoop, row_key: &str) -> Option<Vec<u8>> {
+        let key = crate::engine::document::store::StorageKey::parse(row_key)
+            .expect("test row_key is always a rendered storage key");
         core.sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, row_key)
+            .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, &key)
             .unwrap()
     }
 
@@ -466,9 +473,11 @@ mod tests {
             "the rejected write must leave no committed row — a stored row whose \
              index update failed is invisible to full-text search forever"
         );
+        let key = crate::engine::document::store::StorageKey::parse(&row_key)
+            .expect("test row_key is always a rendered storage key");
         assert!(
             core.doc_cache
-                .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, &row_key)
+                .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, &key)
                 .is_none(),
             "the rejected write must not populate the document cache either, or \
              reads would serve a row that is not in durable storage"
@@ -498,6 +507,7 @@ mod tests {
                 user_roles: &[],
                 enforce: true,
                 wal_lsn: None,
+                resolved_targets: &[],
             },
         );
 
@@ -538,6 +548,7 @@ mod tests {
                 user_roles: &[],
                 enforce: true,
                 wal_lsn: None,
+                resolved_targets: &[],
             },
         );
 

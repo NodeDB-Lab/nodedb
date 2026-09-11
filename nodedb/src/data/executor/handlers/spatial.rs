@@ -203,16 +203,22 @@ impl CoreLoop {
                 None => continue,
             };
 
+            // The doc-map id is the hex surrogate for a document-collection
+            // row, and a columnar-family user `id` otherwise — the latter
+            // never parses as a storage key, so it falls through exactly
+            // where a sparse miss on a parsed key would.
+            let storage_key = nodedb_types::StorageKey::parse(&doc_id);
+
             // Prefilter: skip candidates not in the surrogate bitmap before
             // any geometry evaluation. The doc_id is a hex-encoded surrogate.
             if let Some(bitmap) = prefilter {
-                match u32::from_str_radix(&doc_id, 16) {
-                    Ok(raw) => {
-                        if !bitmap.contains(Surrogate(raw)) {
+                match storage_key {
+                    Some(key) => {
+                        if !bitmap.contains(key.surrogate()) {
                             continue;
                         }
                     }
-                    Err(_) => continue,
+                    None => continue,
                 }
             }
 
@@ -223,10 +229,24 @@ impl CoreLoop {
             // is resolved from the columnar id → doc map. Both forms normalise
             // to standard msgpack maps that `decode_document_value` and
             // `extract_geometry` read identically.
-            let doc = match self.sparse.get(database_id, tid, collection, &doc_id) {
+            let sparse_result = match storage_key {
+                Some(key) => self.sparse.get(database_id, tid, collection, &key),
+                None => Ok(None),
+            };
+            let doc = match sparse_result {
                 Ok(Some(raw)) => {
+                    // `sparse_result` is only `Ok(Some(_))` when `storage_key`
+                    // resolved to a key above.
+                    let Some(key) = storage_key else {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: "spatial scan: sparse hit with no storage key".into(),
+                            },
+                        );
+                    };
                     let (_, doc_mp) = crate::data::executor::scan_normalize::sparse_row_to_doc(
-                        &doc_id,
+                        &key,
                         &raw,
                         body_format.as_format_ref(),
                     );
@@ -538,8 +558,9 @@ mod tests {
         });
         let msgpack = nodedb_types::json_to_msgpack(&geojson).unwrap();
 
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
         core.sparse
-            .put(0, tid, collection, &doc_id, &msgpack)
+            .put(0, tid, collection, &storage_key, &msgpack)
             .unwrap();
 
         // Manually populate the R-tree and the doc-map.

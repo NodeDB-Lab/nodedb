@@ -81,13 +81,14 @@ impl CoreLoop {
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: resolved_sum_targets,
             },
         ) {
             Ok(outcome) => outcome,
             Err(e) => {
                 // Dropping `txn` reverses the write but not the cache entry.
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return Err(ErrorCode::from(e));
             }
         };
@@ -113,7 +114,7 @@ impl CoreLoop {
             Ok(enforcement) => enforcement,
             Err(e) => {
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return Err(ErrorCode::from(e));
             }
         };
@@ -123,7 +124,7 @@ impl CoreLoop {
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
             self.doc_cache
-                .invalidate(database_id, tid, collection, row_key);
+                .invalidate(database_id, tid, collection, &storage_key);
             return Err(ErrorCode::from(e));
         }
 
@@ -201,6 +202,7 @@ impl CoreLoop {
                     surrogate,
                     user_roles: &task.request.user_roles,
                     enforce: true,
+                    resolved_targets: resolved_sum_targets,
                 },
             )
             .map_err(ErrorCode::from)?;

@@ -374,6 +374,10 @@ mod tests {
         format!("{SURROGATE:08x}")
     }
 
+    fn storage_key() -> nodedb_types::StorageKey {
+        nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(SURROGATE))
+    }
+
     fn point(x: f64, y: f64) -> Geometry {
         Geometry::Point {
             coordinates: [x, y],
@@ -452,7 +456,7 @@ mod tests {
             .cloned();
         let body = core
             .sparse
-            .get(DB, TENANT, COLLECTION, &doc_id())
+            .get(DB, TENANT, COLLECTION, &storage_key())
             .expect("sparse read")
             .map(|bytes| nodedb_types::value_from_msgpack(&bytes).expect("decode body"));
         (entries, mapped, body)

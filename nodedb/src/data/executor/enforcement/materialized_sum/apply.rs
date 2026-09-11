@@ -187,11 +187,14 @@ impl CoreLoop {
                         // cache entries those writes populated. Left behind, they
                         // serve balances that no longer exist in storage.
                         for write in &writes {
+                            let key = crate::engine::document::store::StorageKey::for_surrogate(
+                                write.surrogate,
+                            );
                             self.doc_cache.invalidate(
                                 ctx.database_id,
                                 ctx.tid,
                                 &write.collection,
-                                &write.document_id,
+                                &key,
                             );
                         }
                         return Err(e);
@@ -447,7 +450,7 @@ mod tests {
         row.insert("balance".to_string(), Value::String("100".into()));
         let tuple = strict_format::value_to_binary_tuple(&Value::Object(row), &schema, TARGET)
             .expect("encode seed tuple");
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         core.sparse
             .put(DB, TID, TARGET, &target_key, &tuple)
             .expect("seed target row");
@@ -502,7 +505,7 @@ mod tests {
 
         let seed = serde_json::json!({"id": ACCOUNT, "owner": "alice", "balance": "100"});
         let body = doc_format::encode_to_msgpack(&seed);
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         core.sparse
             .put(DB, TID, TARGET, &target_key, &body)
             .expect("seed target row");
@@ -534,7 +537,7 @@ mod tests {
         );
         register_source(&mut core);
 
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         let seed = serde_json::json!({"id": ACCOUNT, "balance": "100"});
         core.sparse
             .put(
@@ -668,7 +671,7 @@ mod tests {
 
         // Seeded so that an accidental apply would be VISIBLE as a moved total
         // rather than failing on an absent row and looking like a refusal.
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         let seed = serde_json::json!({"id": ACCOUNT, "balance": "100"});
         core.sparse
             .put(
@@ -798,7 +801,7 @@ mod tests {
                 DB,
                 TID,
                 collection,
-                &surrogate_to_doc_id(surrogate),
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
                 &doc_format::encode_to_msgpack(&row),
             )
             .expect("seed target row");
@@ -811,7 +814,7 @@ mod tests {
                 DB,
                 TID,
                 SOURCE,
-                &surrogate_to_doc_id(surrogate),
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
                 &doc_format::encode_to_msgpack(&row),
             )
             .expect("seed source row");
@@ -824,7 +827,12 @@ mod tests {
     fn balance_in(core: &CoreLoop, collection: &str, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, collection, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                collection,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target row")
             .expect("target row must still exist");
         doc_format::decode_document(&stored)
@@ -957,7 +965,7 @@ mod tests {
                 DB,
                 TID,
                 SOURCE,
-                &surrogate_to_doc_id(Surrogate(1)),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate(1)),
                 &doc_format::encode_to_msgpack(&entry),
             )
             .expect("seed written row");
@@ -1103,7 +1111,12 @@ mod tests {
         assert_eq!(balance_of(&core, SURROGATE_B), "50");
         assert!(
             core.sparse
-                .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(1)))
+                .get(
+                    DB,
+                    TID,
+                    SOURCE,
+                    &nodedb_types::StorageKey::for_surrogate(Surrogate(1))
+                )
                 .expect("read source row")
                 .is_some(),
             "no source row may be removed on a refused statement"
@@ -1182,7 +1195,12 @@ mod tests {
         assert_eq!(balance_in(&core, REMOTE_TARGET, SURROGATE_B), "50");
         assert!(
             core.sparse
-                .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(1)))
+                .get(
+                    DB,
+                    TID,
+                    SOURCE,
+                    &nodedb_types::StorageKey::for_surrogate(Surrogate(1))
+                )
                 .expect("read source row")
                 .is_none(),
             "the statement itself must have run: the matched source rows are gone"
@@ -1558,7 +1576,12 @@ mod tests {
         );
         assert!(
             core.sparse
-                .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(1)))
+                .get(
+                    DB,
+                    TID,
+                    SOURCE,
+                    &nodedb_types::StorageKey::for_surrogate(Surrogate(1))
+                )
                 .expect("read source row")
                 .is_some(),
             "the source row must still have been written"

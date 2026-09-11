@@ -112,6 +112,20 @@ pub enum Error {
     #[error("period locked on {collection}: {detail}")]
     PeriodLocked { collection: String, detail: String },
 
+    /// A period-lock reference row exists but does not carry the
+    /// configured `status_column` — a misconfigured column name, not a
+    /// locked period.
+    #[error(
+        "period lock on {collection} misconfigured: reference table '{ref_table}' row \
+         '{row_identity}' has no column '{status_column}'"
+    )]
+    PeriodLockMisconfigured {
+        collection: String,
+        ref_table: String,
+        status_column: String,
+        row_identity: String,
+    },
+
     #[error("retention violation on {collection}: {detail}")]
     RetentionViolation { collection: String, detail: String },
 

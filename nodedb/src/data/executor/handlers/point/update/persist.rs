@@ -36,6 +36,9 @@ pub(in crate::data::executor) struct PointUpdatePersist<'a> {
     pub(in crate::data::executor) collection: &'a str,
     /// Storage key (the surrogate hex).
     pub(in crate::data::executor) row_key: &'a str,
+    /// The same storage key, typed — passed alongside `row_key` because the
+    /// versioned-table methods below still take the rendered text.
+    pub(in crate::data::executor) storage_key: &'a crate::engine::document::store::StorageKey,
     /// The row as it was before this update — the old side of the index diff,
     /// and the pre-image every folded constraint subtracts.
     pub(in crate::data::executor) current_bytes: &'a [u8],
@@ -69,6 +72,7 @@ impl CoreLoop {
             tid,
             collection,
             row_key,
+            storage_key,
             current_bytes,
             updated_bytes,
             bitemporal,
@@ -163,7 +167,14 @@ impl CoreLoop {
             // No secondary index to maintain — nothing to diff, and no index
             // tuples to publish, so the body write is the whole write.
             self.sparse
-                .put_in_txn(&txn, database_id, tid, collection, row_key, updated_bytes)
+                .put_in_txn(
+                    &txn,
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key,
+                    updated_bytes,
+                )
                 .map(|_prior| Vec::new())
         } else {
             // Reconcile the plain secondary index atomically with the
@@ -191,6 +202,7 @@ impl CoreLoop {
                         tid,
                         collection,
                         doc_id: row_key,
+                        storage_key,
                         new_body: updated_bytes,
                         index_paths: &index_paths,
                         old_doc: &old_doc,

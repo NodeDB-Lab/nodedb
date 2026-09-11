@@ -274,7 +274,14 @@ impl CoreLoop {
                     self.sparse
                         .versioned_get_current(database_id, tid, collection, doc_id)
                 } else {
-                    self.sparse.get(database_id, tid, collection, doc_id)
+                    // `doc_id` is an index-lookup result, not a scan of
+                    // DOCUMENTS itself; a shape that fails to parse as a
+                    // storage key names no row in that table, matching what
+                    // a lookup on the unparsed key would already have found.
+                    match nodedb_types::StorageKey::parse(doc_id) {
+                        Some(key) => self.sparse.get(database_id, tid, collection, &key),
+                        None => Ok(None),
+                    }
                 }
             });
             match fetched {

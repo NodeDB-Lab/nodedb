@@ -60,6 +60,7 @@ mod drop_consumer_group_if_exists;
 mod drop_recreate_bitemporal_no_resurrection;
 mod drop_rls_policy_if_exists;
 mod enforcement_balanced;
+mod enforcement_period_lock;
 mod engine_surface_array;
 mod engine_surface_columnar;
 mod engine_surface_crdt_document;

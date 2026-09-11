@@ -119,6 +119,7 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::AppendOnlyViolation { .. }
         | ErrorCode::BalanceViolation { .. }
         | ErrorCode::PeriodLocked { .. }
+        | ErrorCode::PeriodLockMisconfigured { .. }
         | ErrorCode::RetentionViolation { .. }
         | ErrorCode::LegalHoldActive { .. }
         | ErrorCode::StateTransitionViolation { .. }

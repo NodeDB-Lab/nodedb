@@ -226,12 +226,16 @@ impl CoreLoop {
                 if rls_filters.is_empty() {
                     return true;
                 }
-                match self.sparse.get(
-                    task.request.database_id.as_u64(),
-                    tid,
-                    collection,
-                    &f.document_id,
-                ) {
+                // `document_id` is a fused-result string several hops from any
+                // scan; a shape that fails to parse as a storage key is
+                // treated the same as a row the lookup below could not find.
+                let Some(key) = nodedb_types::StorageKey::parse(&f.document_id) else {
+                    return false;
+                };
+                match self
+                    .sparse
+                    .get(task.request.database_id.as_u64(), tid, collection, &key)
+                {
                     Ok(Some(bytes)) => {
                         let normalized =
                             sparse_body_to_msgpack(&bytes, body_format.as_format_ref());

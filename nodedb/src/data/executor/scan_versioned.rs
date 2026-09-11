@@ -47,7 +47,16 @@ impl CoreLoop {
 
         let mut normalized = Vec::with_capacity(docs.len());
         for (id, raw) in docs {
-            normalized.push(sparse_row_to_doc(&id, &raw, format.as_format_ref()));
+            // The versioned table keys every row by the same surrogate hex
+            // as the plain table; a shape that fails to parse is a violated
+            // storage invariant, not a legacy row to skip.
+            let key = nodedb_types::StorageKey::parse(&id).ok_or_else(|| crate::Error::Storage {
+                engine: "sparse".into(),
+                detail: format!(
+                    "collection '{collection}' has a versioned row whose key is not a valid storage key: '{id}'"
+                ),
+            })?;
+            normalized.push(sparse_row_to_doc(&key, &raw, format.as_format_ref()));
         }
         Ok(normalized)
     }

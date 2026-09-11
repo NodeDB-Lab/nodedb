@@ -57,12 +57,11 @@ impl CoreLoop {
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
-        let row_key = row_key.as_str();
         let row_identity =
             crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_identity();
         let document_identity = RowIdentity::from_user_key(document_id);
 
-        let existing = self.doc_resolve_read(&ctx, collection, row_key)?;
+        let existing = self.doc_resolve_read(&ctx, collection, &row_key)?;
         let (body, precondition) = match existing {
             Some(current_bytes) => {
                 let merged = self.merge_upsert_body(

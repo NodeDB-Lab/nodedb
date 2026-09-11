@@ -116,7 +116,8 @@ impl CoreLoop {
             });
         }
 
-        let Some(old_bytes) = self.read_balance_row(txn, params, &document_id)? else {
+        let Some(old_bytes) = self.read_balance_row(txn, params, &document_id, params.surrogate)?
+        else {
             return Err(params.target_not_found());
         };
 
@@ -169,6 +170,7 @@ impl CoreLoop {
                 user_roles: &[],
                 enforce: false,
                 wal_lsn: params.wal_lsn,
+                resolved_targets: &[],
             },
         );
         let outcome = match put {
@@ -181,7 +183,7 @@ impl CoreLoop {
                     params.database_id,
                     params.tid,
                     params.target_collection,
-                    &document_id,
+                    &nodedb_types::StorageKey::for_surrogate(params.surrogate),
                 );
                 return Err(e);
             }
@@ -207,6 +209,7 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: &BalanceRmw<'_>,
         document_id: &str,
+        surrogate: Surrogate,
     ) -> crate::Result<Option<Vec<u8>>> {
         if self.is_bitemporal(params.database_id, params.tid, params.target_collection) {
             self.sparse.versioned_get_current(
@@ -216,12 +219,13 @@ impl CoreLoop {
                 document_id,
             )
         } else {
+            let key = nodedb_types::StorageKey::for_surrogate(surrogate);
             self.sparse.get_in_txn(
                 txn,
                 params.database_id,
                 params.tid,
                 params.target_collection,
-                document_id,
+                &key,
             )
         }
     }

@@ -99,6 +99,34 @@ impl NodeDbError {
         }
     }
 
+    /// A period-lock reference row exists but does not carry the configured
+    /// `status_column` — a misconfigured column name, refused as a config
+    /// error rather than admitted or treated as locked. `row_identity`
+    /// names the reference row that is missing the column.
+    pub fn period_lock_misconfigured(
+        collection: impl Into<String>,
+        ref_table: impl Into<String>,
+        status_column: impl Into<String>,
+        row_identity: impl fmt::Display,
+    ) -> Self {
+        let collection = collection.into();
+        let ref_table = ref_table.into();
+        let status_column = status_column.into();
+        Self {
+            code: ErrorCode::PERIOD_LOCK_MISCONFIGURED,
+            message: format!(
+                "period lock on {collection} misconfigured: reference table \
+                 '{ref_table}' row '{row_identity}' has no column '{status_column}'"
+            ),
+            details: ErrorDetails::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+            },
+            cause: None,
+        }
+    }
+
     pub fn state_transition_violation(
         collection: impl Into<String>,
         detail: impl fmt::Display,

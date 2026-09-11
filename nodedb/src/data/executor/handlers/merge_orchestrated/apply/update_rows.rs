@@ -115,6 +115,7 @@ impl CoreLoop {
                             user_roles: &task.request.user_roles,
                             enforce: true,
                             wal_lsn: task.wal_lsn(),
+                            resolved_targets: resolved_sum_targets,
                         },
                     ) {
                         Ok(mut outcome) => {
@@ -199,45 +200,29 @@ impl CoreLoop {
                     }
                 }
                 None => {
-                    // Legacy non-surrogate target row: raw in-txn body rewrite
-                    // (no cross-engine index — these rows predate surrogate
-                    // keying and were never indexed).
-                    applied_keys.push(upd.doc_id.clone());
-                    if let Err(e) = self.sparse.put_in_txn(
-                        txn,
+                    // A target row whose `doc_id` does not parse as a storage
+                    // key: `put_in_txn` addresses DOCUMENTS rows by
+                    // `StorageKey` only, and the workspace carries no
+                    // on-disk-format compatibility burden for a row shape
+                    // that predates surrogate keying, so this arm is refused
+                    // rather than written through a raw string key.
+                    return Err(self.abort_merge_apply(MergeAbort {
+                        task,
                         database_id,
                         tid,
                         collection,
-                        &upd.doc_id,
-                        &upd.body,
-                    ) {
-                        return Err(self.abort_merge_apply(MergeAbort {
-                            task,
-                            database_id,
-                            tid,
-                            collection,
-                            applied_keys: applied_keys.as_slice(),
-                            undo_log: std::mem::take(undo_log),
-                            err: e.into(),
-                        }));
-                    }
-                    if returning {
-                        match returning_doc(&upd.body, &upd.doc_id) {
-                            Ok(doc) => returned_docs.push(doc),
-                            Err(e) => {
-                                return Err(self.abort_merge_apply(MergeAbort {
-                                    task,
-                                    database_id,
-                                    tid,
-                                    collection,
-                                    applied_keys: applied_keys.as_slice(),
-                                    undo_log: std::mem::take(undo_log),
-                                    err: e.into(),
-                                }));
-                            }
+                        applied_keys: applied_keys.as_slice(),
+                        undo_log: std::mem::take(undo_log),
+                        err: crate::Error::Storage {
+                            engine: "document".into(),
+                            detail: format!(
+                                "MERGE UPDATE target row '{}' in '{collection}' has no \
+                                 surrogate storage key",
+                                upd.doc_id
+                            ),
                         }
-                    }
-                    *affected += 1;
+                        .into(),
+                    }));
                 }
             }
         }

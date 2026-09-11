@@ -166,7 +166,7 @@ pub(in crate::data::executor) fn abort_after_apply(
     database_id: u64,
     tid: u64,
     collection: &str,
-    row_key: &str,
+    row_key: &crate::engine::document::store::StorageKey,
 ) {
     guard.restore(core);
     core.doc_cache

@@ -35,15 +35,15 @@ impl CoreLoop {
         value: &[u8],
         if_absent: bool,
     ) -> Response {
-        let row_key = StorageKey::for_surrogate(ctx.surrogate).to_string();
+        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
+        let row_key = storage_key.to_string();
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
 
         let overlay_pk = self.stage_overlay_pk(ctx);
         let present = match self.stage_pk_present(
-            ctx.database_id,
-            ctx.tid,
-            ctx.collection,
+            ctx,
             row_key.as_str(),
+            &storage_key,
             bitemporal,
             overlay_pk,
         ) {
@@ -102,10 +102,9 @@ impl CoreLoop {
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
         let overlay_pk = self.stage_overlay_pk(ctx);
         let present = match self.stage_pk_present(
-            ctx.database_id,
-            ctx.tid,
-            ctx.collection,
+            ctx,
             row_key.as_str(),
+            &storage_key,
             bitemporal,
             overlay_pk,
         ) {
@@ -193,7 +192,7 @@ impl CoreLoop {
                     )
                 } else {
                     self.sparse
-                        .get(ctx.database_id, ctx.tid, ctx.collection, row_key.as_str())
+                        .get(ctx.database_id, ctx.tid, ctx.collection, &storage_key)
                 };
                 match read {
                     Ok(Some(bytes)) => bytes,

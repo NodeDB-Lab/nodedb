@@ -24,67 +24,18 @@ use std::cell::Cell;
 
 use tracing::warn;
 
-use nodedb_types::columnar::schema::StrictSchema;
+use nodedb_types::StorageKey;
 
 use super::audit_body::{inject_temporal_columns, strict_audit_body};
-use crate::bridge::scan_filter::ScanFilter;
+use super::fetch_types::Fetched;
+pub(in crate::data::executor) use super::fetch_types::{
+    DocFetchParams, DocScanMode, FetchedRows, RowOrigin,
+};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
 use crate::data::executor::sparse_body_format::{SparseBodyFormat, SparseBodyFormatRef};
 use crate::data::executor::task::ExecutionTask;
-
-/// Which temporal slice of a document collection a scan fetches.
-pub(in crate::data::executor) enum DocScanMode {
-    /// Newest live version per document. Bitemporal collections read current
-    /// state from the versioned store; plain collections from the live table.
-    Current,
-    /// Newest version per document visible at a system-time cutoff and/or a
-    /// valid-time instant (`AS OF SYSTEM TIME` / `AS OF VALID TIME`).
-    AsOf {
-        system_as_of_ms: Option<i64>,
-        valid_at_ms: Option<i64>,
-    },
-    /// Every system-time version of every document (`AS OF SYSTEM TIME NULL`
-    /// audit log), each row carrying the synthetic `_ts_*` temporal columns.
-    AllVersions { valid_at_ms: Option<i64> },
-}
-
-impl DocScanMode {
-    /// The current-time read is the only mode that folds this transaction's
-    /// staging overlay onto the base result — temporal reads never see staged
-    /// (current-version-only) writes.
-    pub(in crate::data::executor) fn is_current(&self) -> bool {
-        matches!(self, DocScanMode::Current)
-    }
-}
-
-/// Borrowed inputs for [`CoreLoop::document_scan_fetch`].
-pub(in crate::data::executor) struct DocFetchParams<'a> {
-    pub collection: &'a str,
-    pub mode: &'a DocScanMode,
-    pub limit: usize,
-    pub offset: usize,
-    pub filter_predicates: &'a [ScanFilter],
-    pub strict_schema: Option<&'a StrictSchema>,
-    /// The fetch may not stop at `limit`: a downstream ORDER BY or DISTINCT
-    /// decides which rows survive, so the first `limit` rows the store happens
-    /// to return are not the first `limit` rows of the answer. The fetch is
-    /// bounded by the memory budget instead, and the caller surfaces
-    /// `ResourcesExhausted` rather than truncating silently.
-    pub full_fetch: bool,
-}
-
-/// Raw rows plus the schema the downstream should decode them with.
-pub(in crate::data::executor) struct FetchedRows {
-    pub rows: Vec<(String, Vec<u8>)>,
-    pub effective_schema: Option<StrictSchema>,
-    /// The statement's deadline passed while the storage scan was running, so
-    /// `rows` holds an arbitrary prefix of the answer. The caller MUST fail the
-    /// statement rather than emit these rows — a truncated result set is
-    /// indistinguishable from a complete one at the client.
-    pub deadline_expired: bool,
-}
 
 impl CoreLoop {
     /// Fetch the raw rows for a document scan according to `mode`, feeding the
@@ -172,6 +123,7 @@ impl CoreLoop {
                     .collect();
                 Ok(FetchedRows {
                     rows,
+                    origin: RowOrigin::Sparse,
                     effective_schema: None,
                     deadline_expired: deadline.tripped(),
                 })
@@ -226,6 +178,7 @@ impl CoreLoop {
                 }
                 Ok(FetchedRows {
                     rows,
+                    origin: RowOrigin::Sparse,
                     effective_schema: None,
                     deadline_expired: deadline.tripped(),
                 })
@@ -308,21 +261,46 @@ impl CoreLoop {
                 }
             }
         };
+        // `scan_documents_filtered` hands the predicate a typed `StorageKey`;
+        // `matches` (and `versioned_scan_as_of`'s predicate, and the
+        // `scan_collection` fallback filter) still take the row's storage
+        // key as text, so this renders it once per candidate row.
+        let matches_by_key = |key: &StorageKey, value: &[u8]| matches(&key.to_string(), value);
 
-        let rows = if filter_predicates.is_empty() {
+        // `versioned_scan_as_of` hands back a rendered storage key, parsed
+        // back ONCE here rather than carried as text and re-parsed later. A
+        // shape that fails to parse names a fetch-pipeline bug, not a row to
+        // skip.
+        let parse_row_key = |id: String, body: Vec<u8>| -> crate::Result<(StorageKey, Vec<u8>)> {
+            let key = StorageKey::parse(&id).ok_or_else(|| crate::Error::Storage {
+                engine: "sparse".into(),
+                detail: format!(
+                    "collection '{collection}' fetched a row whose id is not a valid storage key: '{id}'"
+                ),
+            })?;
+            Ok((key, body))
+        };
+
+        let rows: Fetched = if filter_predicates.is_empty() {
             if bitemporal {
-                self.sparse.versioned_scan_as_of(
-                    crate::engine::sparse::btree_versioned::VersionedScanParams {
-                        database_id,
-                        tenant: tid,
-                        coll: collection,
-                        sys_cutoff_ms: None,
-                        valid_at_ms: None,
-                        limit: fetch_limit,
-                    },
-                    &|_, _| true,
-                    &stop,
-                )?
+                Fetched::Sparse(
+                    self.sparse
+                        .versioned_scan_as_of(
+                            crate::engine::sparse::btree_versioned::VersionedScanParams {
+                                database_id,
+                                tenant: tid,
+                                coll: collection,
+                                sys_cutoff_ms: None,
+                                valid_at_ms: None,
+                                limit: fetch_limit,
+                            },
+                            &|_, _| true,
+                            &stop,
+                        )?
+                        .into_iter()
+                        .map(|(id, body)| parse_row_key(id, body))
+                        .collect::<crate::Result<Vec<_>>>()?,
+                )
             } else {
                 // Routed through the filtered scan with an always-true
                 // predicate rather than `scan_documents`: the unfiltered full
@@ -334,7 +312,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     fetch_limit,
-                    &|_: &str, _: &[u8]| true,
+                    &|_: &StorageKey, _: &[u8]| true,
                     &stop,
                 );
                 match sparse_result {
@@ -349,64 +327,77 @@ impl CoreLoop {
                                 "document scan fallback to scan_collection"
                             );
                         }
-                        fallback
+                        Fetched::Foreign(fallback)
                     }
-                    other => other?,
+                    other => Fetched::Sparse(other?),
                 }
             }
         } else if strict_schema.is_some() {
             if bitemporal {
-                self.sparse.versioned_scan_as_of(
-                    crate::engine::sparse::btree_versioned::VersionedScanParams {
-                        database_id,
-                        tenant: tid,
-                        coll: collection,
-                        sys_cutoff_ms: None,
-                        valid_at_ms: None,
-                        limit: fetch_limit,
-                    },
-                    &matches,
-                    &stop,
-                )?
+                Fetched::Sparse(
+                    self.sparse
+                        .versioned_scan_as_of(
+                            crate::engine::sparse::btree_versioned::VersionedScanParams {
+                                database_id,
+                                tenant: tid,
+                                coll: collection,
+                                sys_cutoff_ms: None,
+                                valid_at_ms: None,
+                                limit: fetch_limit,
+                            },
+                            &matches,
+                            &stop,
+                        )?
+                        .into_iter()
+                        .map(|(id, body)| parse_row_key(id, body))
+                        .collect::<crate::Result<Vec<_>>>()?,
+                )
             } else {
-                self.sparse.scan_documents_filtered(
+                Fetched::Sparse(self.sparse.scan_documents_filtered(
                     database_id,
                     tid,
                     collection,
                     fetch_limit,
-                    &matches,
+                    &matches_by_key,
                     &stop,
-                )?
+                )?)
             }
         } else if bitemporal {
-            self.sparse.versioned_scan_as_of(
-                crate::engine::sparse::btree_versioned::VersionedScanParams {
-                    database_id,
-                    tenant: tid,
-                    coll: collection,
-                    sys_cutoff_ms: None,
-                    valid_at_ms: None,
-                    limit: fetch_limit,
-                },
-                &matches,
-                &stop,
-            )?
+            Fetched::Sparse(
+                self.sparse
+                    .versioned_scan_as_of(
+                        crate::engine::sparse::btree_versioned::VersionedScanParams {
+                            database_id,
+                            tenant: tid,
+                            coll: collection,
+                            sys_cutoff_ms: None,
+                            valid_at_ms: None,
+                            limit: fetch_limit,
+                        },
+                        &matches,
+                        &stop,
+                    )?
+                    .into_iter()
+                    .map(|(id, body)| parse_row_key(id, body))
+                    .collect::<crate::Result<Vec<_>>>()?,
+            )
         } else {
             let sparse_result = self.sparse.scan_documents_filtered(
                 database_id,
                 tid,
                 collection,
                 fetch_limit,
-                &matches,
+                &matches_by_key,
                 &stop,
             );
             match sparse_result {
-                Ok(docs) if docs.is_empty() => self
-                    .scan_collection(database_id, tid, collection, fetch_limit)?
-                    .into_iter()
-                    .filter(|(id, data)| matches(id, data))
-                    .collect(),
-                other => other?,
+                Ok(docs) if docs.is_empty() => Fetched::Foreign(
+                    self.scan_collection(database_id, tid, collection, fetch_limit)?
+                        .into_iter()
+                        .filter(|(id, data)| matches(id, data))
+                        .collect(),
+                ),
+                other => Fetched::Sparse(other?),
             }
         };
 
@@ -420,17 +411,33 @@ impl CoreLoop {
         // every downstream transform — sort, window functions, computed
         // columns, projection, DISTINCT — sees the same standard-msgpack shape
         // it sees for every other collection. Without it the tagged values pass
-        // through untouched and reach the client as `[4,"alice"]`.
-        let rows = if is_vector_sidecar {
-            rows.into_iter()
-                .map(|(id, body)| sparse_row_to_doc(&id, &body, SparseBodyFormatRef::VectorSidecar))
-                .collect()
-        } else {
-            rows
+        // through untouched and reach the client as `[4,"alice"]`. The key
+        // stays typed from the scan above, so this needs no re-parse.
+        let (rows, origin): (Vec<(String, Vec<u8>)>, RowOrigin) = match rows {
+            Fetched::Sparse(rows) if is_vector_sidecar => (
+                rows.into_iter()
+                    .map(|(key, body)| {
+                        sparse_row_to_doc(&key, &body, SparseBodyFormatRef::VectorSidecar)
+                    })
+                    .collect(),
+                RowOrigin::Sparse,
+            ),
+            Fetched::Sparse(rows) => (
+                rows.into_iter()
+                    .map(|(key, body)| (key.to_string(), body))
+                    .collect(),
+                RowOrigin::Sparse,
+            ),
+            // An empty fallback proves nothing about which engine owns the
+            // collection, and the rows a transaction overlay merges in later
+            // are sparse-shaped, so an empty fetch reports the sparse origin.
+            Fetched::Foreign(rows) if rows.is_empty() => (rows, RowOrigin::Sparse),
+            Fetched::Foreign(rows) => (rows, RowOrigin::Foreign),
         };
 
         Ok(FetchedRows {
             rows,
+            origin,
             effective_schema: strict_schema.cloned(),
             deadline_expired: deadline.tripped(),
         })

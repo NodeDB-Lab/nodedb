@@ -10,9 +10,14 @@
 //! Ceiling-at-head, and arbitrary system-time cutoffs via
 //! `versioned_get_as_of`.
 
-use nodedb::engine::document::store::{CollectionConfig, DocumentEngine};
+use nodedb::engine::document::store::{CollectionConfig, DocumentEngine, StorageKey};
 use nodedb::engine::sparse::btree::SparseEngine;
 use nodedb::engine::sparse::btree_versioned::VersionedScanParams;
+use nodedb_types::Surrogate;
+
+fn key(n: u32) -> StorageKey {
+    StorageKey::for_surrogate(Surrogate::new(n))
+}
 
 fn open() -> (SparseEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -27,10 +32,10 @@ fn bitemporal_put_and_current_get_roundtrip() {
     engine.register_collection(CollectionConfig::new("users").with_bitemporal(true));
 
     engine
-        .put("users", "u1", &serde_json::json!({"name": "Alice"}))
+        .put("users", &key(1), &serde_json::json!({"name": "Alice"}))
         .unwrap();
 
-    let got = engine.get("users", "u1").unwrap().unwrap();
+    let got = engine.get("users", &key(1)).unwrap().unwrap();
     assert_eq!(got["name"], "Alice");
 }
 
@@ -40,12 +45,14 @@ fn bitemporal_delete_appends_tombstone_so_current_get_is_none() {
     let mut engine = DocumentEngine::new(&sparse, 0, 1);
     engine.register_collection(CollectionConfig::new("c").with_bitemporal(true));
 
-    engine.put("c", "a", &serde_json::json!({"v": 1})).unwrap();
-    assert!(engine.get("c", "a").unwrap().is_some());
-    let removed = engine.delete("c", "a").unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 1}))
+        .unwrap();
+    assert!(engine.get("c", &key(1)).unwrap().is_some());
+    let removed = engine.delete("c", &key(1)).unwrap();
     assert!(removed, "delete should report row was live");
     assert!(
-        engine.get("c", "a").unwrap().is_none(),
+        engine.get("c", &key(1)).unwrap().is_none(),
         "after tombstone current-state get is None"
     );
 }
@@ -58,15 +65,19 @@ fn bitemporal_multiple_puts_retain_history_via_versioned_get_as_of() {
 
     // Three puts create three versions. The versioned API is the way
     // callers query history — engine.get() returns current state only.
-    engine.put("c", "k", &serde_json::json!({"v": 1})).unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 1}))
+        .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let t_mid = wall_ms();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    engine.put("c", "k", &serde_json::json!({"v": 2})).unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 2}))
+        .unwrap();
 
     // A cutoff before the second write should surface v=1.
     let body = sparse
-        .versioned_get_as_of(0, 1, "c", "k", Some(t_mid), None)
+        .versioned_get_as_of(0, 1, "c", &key(1).to_string(), Some(t_mid), None)
         .unwrap()
         .expect("version at cutoff");
     let val: serde_json::Value = {
@@ -76,7 +87,7 @@ fn bitemporal_multiple_puts_retain_history_via_versioned_get_as_of() {
     assert_eq!(val["v"], 1);
 
     // Current state reflects the latest write.
-    let now = engine.get("c", "k").unwrap().unwrap();
+    let now = engine.get("c", &key(1)).unwrap().unwrap();
     assert_eq!(now["v"], 2);
 }
 
@@ -85,7 +96,9 @@ fn non_bitemporal_collection_uses_legacy_storage() {
     let (sparse, _d) = open();
     let mut engine = DocumentEngine::new(&sparse, 0, 1);
     engine.register_collection(CollectionConfig::new("c"));
-    engine.put("c", "k", &serde_json::json!({"v": 1})).unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 1}))
+        .unwrap();
 
     // The versioned table must be empty for this collection because
     // writes went to the legacy path.
@@ -108,7 +121,7 @@ fn non_bitemporal_collection_uses_legacy_storage() {
         "non-bitemporal collection should not populate the versioned table"
     );
     // And the legacy read still works.
-    let got = engine.get("c", "k").unwrap().unwrap();
+    let got = engine.get("c", &key(1)).unwrap().unwrap();
     assert_eq!(got["v"], 1);
 }
 

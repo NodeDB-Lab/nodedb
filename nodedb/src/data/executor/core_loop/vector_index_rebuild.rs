@@ -79,16 +79,11 @@ impl CoreLoop {
                 &collection,
                 usize::MAX,
                 |doc_id, value| {
-                    if let Some(surrogate) =
-                        crate::engine::document::store::doc_id_to_surrogate(doc_id)
-                    {
-                        let normalized =
-                            crate::data::executor::scan_normalize::sparse_body_to_msgpack(
-                                value,
-                                body_format.as_format_ref(),
-                            );
-                        docs.push((surrogate, normalized.into_owned()));
-                    }
+                    let normalized = crate::data::executor::scan_normalize::sparse_body_to_msgpack(
+                        value,
+                        body_format.as_format_ref(),
+                    );
+                    docs.push((doc_id.surrogate(), normalized.into_owned()));
                     Ok(())
                 },
             );

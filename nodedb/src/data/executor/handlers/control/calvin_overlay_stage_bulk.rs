@@ -111,10 +111,13 @@ impl CoreLoop {
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
-            for doc_id in &doc_ids {
+            for (&surrogate, doc_id) in predicted_sorted.iter().zip(&doc_ids) {
+                let key = nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(
+                    surrogate,
+                ));
                 if let Some(body) =
                     self.sparse
-                        .get(task.request.database_id.as_u64(), tid, collection, doc_id)?
+                        .get(task.request.database_id.as_u64(), tid, collection, &key)?
                 {
                     let identity = crate::engine::document::store::identity_of(doc_id);
                     self.stage_admit_write(
@@ -177,6 +180,7 @@ impl CoreLoop {
 
         for surrogate in predicted_sorted {
             let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+            let storage_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
             // Current body: overlay wins over base (read-your-own-writes),
             // mirroring `stage_point_update`'s exact overlay-then-base read.
@@ -198,7 +202,7 @@ impl CoreLoop {
                         )
                     } else {
                         self.sparse
-                            .get(database_id.as_u64(), tid, collection, &doc_id)
+                            .get(database_id.as_u64(), tid, collection, &storage_key)
                     };
                     match read {
                         Ok(Some(bytes)) => bytes,

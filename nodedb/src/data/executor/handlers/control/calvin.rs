@@ -509,7 +509,6 @@ mod tests {
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::doc_format;
     use crate::data::executor::handlers::transaction::overlay::Staged;
-    use crate::engine::document::store::surrogate_to_doc_id;
     use crate::types::{DatabaseId, RequestId, TraceId, VShardId};
 
     /// A minimal `ExecutionTask` homing to vShard 0, tenant 1, database
@@ -598,7 +597,7 @@ mod tests {
     /// Seed a row directly into base storage (bypassing Calvin staging), the
     /// pre-existing state the active-path OLLP verifier scans against.
     fn seed_row(core: &mut CoreLoop, collection: &str, surrogate: u32) {
-        let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let doc_id = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         let body = doc_format::canonicalize_document_for_storage(&doc_value("a", "1"));
         core.sparse
             .put(DatabaseId::DEFAULT.as_u64(), 1, collection, &doc_id, &body)
@@ -1015,7 +1014,7 @@ mod tests {
         );
 
         // No base mutation at stage time — the row appears only after flush.
-        let doc_id = surrogate_to_doc_id(Surrogate::new(7));
+        let doc_id = nodedb_types::StorageKey::for_surrogate(Surrogate::new(7));
         assert!(
             core.sparse
                 .get(DatabaseId::DEFAULT.as_u64(), 1, "orders", &doc_id)

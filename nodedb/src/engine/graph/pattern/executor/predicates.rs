@@ -252,7 +252,7 @@ fn fetch_node_doc(
     let Some(surrogate) = props.csr.node_surrogate(node_id) else {
         return Ok(None);
     };
-    let doc_id = crate::engine::document::store::key::surrogate_to_doc_id(surrogate);
+    let doc_id = crate::engine::document::store::key::StorageKey::for_surrogate(surrogate);
     let bytes = match props
         .sparse
         .get(props.database_id, props.tenant_id, collection, &doc_id)?

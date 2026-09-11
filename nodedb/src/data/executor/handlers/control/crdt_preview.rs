@@ -119,7 +119,6 @@ mod tests {
     use crate::bridge::envelope::{ErrorCode, Status};
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::task::ExecutionTask;
-    use crate::engine::document::store::surrogate_to_doc_id;
 
     fn task() -> ExecutionTask {
         crate::data::executor::core_loop::tests::make_default_task()
@@ -267,7 +266,12 @@ mod tests {
         );
         assert_eq!(
             core.sparse
-                .get(DatabaseId::DEFAULT.as_u64(), 1, "docs", "00000001")
+                .get(
+                    DatabaseId::DEFAULT.as_u64(),
+                    1,
+                    "docs",
+                    &nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(1)),
+                )
                 .expect("sparse read"),
             None,
             "preview must not materialize sparse state"
@@ -395,7 +399,12 @@ mod tests {
         assert_eq!(core.checkpoint_coordinator.total_dirty_pages(), 0);
         assert_eq!(
             core.sparse
-                .get(DatabaseId::DEFAULT.as_u64(), 1, "docs", "0000004d")
+                .get(
+                    DatabaseId::DEFAULT.as_u64(),
+                    1,
+                    "docs",
+                    &nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(0x4d)),
+                )
                 .expect("sparse read"),
             None
         );
@@ -454,7 +463,7 @@ mod tests {
                 .and_then(|engine| engine.read_row("docs", "one"))
                 .is_some()
         );
-        let doc_id = surrogate_to_doc_id(surrogate);
+        let doc_id = nodedb_types::StorageKey::for_surrogate(surrogate);
         assert!(
             core.sparse
                 .get(DatabaseId::DEFAULT.as_u64(), 1, "docs", &doc_id)

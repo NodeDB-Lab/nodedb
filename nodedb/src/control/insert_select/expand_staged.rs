@@ -77,7 +77,7 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
     // statement-level resolution, so without this a bound target collection
     // would fold against an empty resolution.
     let sum_bodies: Vec<&[u8]> = rows.iter().map(|(_, value, _)| value.as_slice()).collect();
-    let resolved_sum_targets =
+    let mut resolved_sum_targets =
         crate::control::planner::materialized_sum::resolve_sum_targets_for_bodies(
             state,
             &sum_bodies,
@@ -87,6 +87,20 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
             crate::types::TraceId::ZERO,
         )
         .await?;
+    // Period-lock target for the same rows, in the SAME slot — a target
+    // collection under a period lock reads its reference row's surrogate off
+    // `resolved_sum_targets` exactly like a materialized-sum fold does.
+    resolved_sum_targets.extend(
+        crate::control::planner::period_lock::resolve_period_lock_targets_for_bodies(
+            state,
+            &sum_bodies,
+            target_collection.as_str(),
+            tenant_id,
+            task.database_id,
+            crate::types::TraceId::ZERO,
+        )
+        .await?,
+    );
 
     let mut out: Vec<PhysicalTask> = Vec::with_capacity(rows.len());
     for (document_id, value, surrogate) in rows {

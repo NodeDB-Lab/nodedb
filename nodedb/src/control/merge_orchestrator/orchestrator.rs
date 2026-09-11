@@ -166,7 +166,7 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
             .chain(arms.deletes.iter().map(|(_, _, body)| body.as_slice()))
             .chain(arms.inserts.iter().map(|(_, body)| body.as_slice()))
             .collect();
-        let resolved_sum_targets = resolve_sum_targets_for_bodies(
+        let mut resolved_sum_targets = resolve_sum_targets_for_bodies(
             state,
             &sum_bodies,
             args.target_collection,
@@ -175,6 +175,21 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
             crate::types::TraceId::ZERO,
         )
         .await?;
+        // Period-lock targets for the same arms, in the SAME slot: an UPDATE or
+        // DELETE arm on a period-locked target reads its reference row's
+        // surrogate off `resolved_sum_targets` exactly like a materialized-sum
+        // fold does, and an unresolved period refuses the whole apply.
+        resolved_sum_targets.extend(
+            crate::control::planner::period_lock::resolve_period_lock_targets_for_bodies(
+                state,
+                &sum_bodies,
+                args.target_collection,
+                args.tenant_id,
+                args.database_id,
+                crate::types::TraceId::ZERO,
+            )
+            .await?,
+        );
 
         let insert_rows = arms.inserts;
 

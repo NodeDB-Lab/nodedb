@@ -34,6 +34,6 @@ pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTrunc
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use write_path::{
-    BatchInsertWithoutSurrogates, FtsIndexUpdateFailed, StrictRowUndecodable,
-    WriteAckedWithoutDurability,
+    BatchInsertWithoutSurrogates, FtsIndexUpdateFailed, OrphanedIndexEntryAfterDelete,
+    StrictRowUndecodable, WriteAckedWithoutDurability,
 };

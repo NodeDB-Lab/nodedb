@@ -152,9 +152,15 @@ impl CoreLoop {
         }
         let mut rows: Vec<serde_json::Value> = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
+            // `doc_id` is a bare string from a raw-table scan; a shape that
+            // fails to parse as a storage key contributes no row, same as a
+            // `get` miss right below.
+            let Some(key) = nodedb_types::StorageKey::parse(doc_id) else {
+                continue;
+            };
             let Ok(Some(bytes)) =
                 self.sparse
-                    .get(check.database_id, check.tid, check.collection, doc_id)
+                    .get(check.database_id, check.tid, check.collection, &key)
             else {
                 continue;
             };

@@ -17,6 +17,7 @@ use crate::data::executor::enforcement::{
     append_only, period_lock, state_transition, transition_check,
 };
 use crate::types::{DatabaseId, TenantId};
+use nodedb_physical::physical_plan::ResolvedSumTarget;
 
 use super::types::map_enforcement_error;
 
@@ -32,6 +33,11 @@ pub(in crate::data::executor::handlers::point) struct PutEnforcement<'a> {
     /// The row as currently stored, when one exists.
     pub(in crate::data::executor::handlers::point) old_value: &'a Option<Vec<u8>>,
     pub(in crate::data::executor::handlers::point) user_roles: &'a [String],
+    /// `(target collection, join-key value)` → target row surrogate, resolved
+    /// on the Control Plane at plan time. A period-lock check reads its
+    /// reference row's surrogate off this slice, keyed by
+    /// `(config.ref_table, period value)`.
+    pub(in crate::data::executor::handlers::point) resolved_targets: &'a [ResolvedSumTarget],
 }
 
 impl CoreLoop {
@@ -58,6 +64,7 @@ impl CoreLoop {
             value,
             old_value,
             user_roles,
+            resolved_targets,
         } = p;
         if !enforce {
             return Ok(());
@@ -69,8 +76,16 @@ impl CoreLoop {
         append_only::check_point_put(collection, &config.enforcement, old_value)
             .map_err(map_enforcement_error)?;
         if let Some(ref pl) = config.enforcement.period_lock {
-            period_lock::check_period_lock(&self.sparse, database_id, tid, collection, value, pl)
-                .map_err(map_enforcement_error)?;
+            period_lock::check_period_lock(
+                &self.sparse,
+                database_id,
+                tid,
+                collection,
+                value,
+                pl,
+                resolved_targets,
+            )
+            .map_err(map_enforcement_error)?;
         }
         // Both images must be readable whenever a transition rule is
         // configured: skipping a configured check because an image would

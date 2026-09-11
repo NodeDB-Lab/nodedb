@@ -25,7 +25,6 @@ use crate::data::executor::response_codec;
 use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::identity_of;
 
 /// Map the plan's declared source storage mode to the row-decode format.
 ///
@@ -148,7 +147,7 @@ impl CoreLoop {
 
         for (doc_id, doc_bytes) in &docs {
             let normalized = sparse_body_to_msgpack(doc_bytes, source_format.as_format_ref());
-            let identity = identity_of(doc_id);
+            let identity = doc_id.to_identity();
             let with_id = msgpack_scan::inject_str_field(&normalized, "id", identity.as_str());
 
             let tuple_bytes = match super::super::strict_format::bytes_to_binary_tuple(
@@ -240,7 +239,7 @@ impl CoreLoop {
             SparseBodyFormat::Strict(schema) => {
                 let mut converted = 0u64;
                 for (doc_id, doc_bytes) in &docs {
-                    let identity = identity_of(doc_id);
+                    let identity = doc_id.to_identity();
                     let Some(mp) =
                         super::super::strict_format::binary_tuple_to_msgpack(doc_bytes, &schema)
                     else {

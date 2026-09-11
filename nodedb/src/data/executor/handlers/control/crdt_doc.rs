@@ -231,6 +231,7 @@ impl CoreLoop {
                 surrogate,
                 user_roles: &task.request.user_roles,
                 enforce: false,
+                resolved_targets: &[],
             },
         ) {
             Ok(outcome) => outcome,

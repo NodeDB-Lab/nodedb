@@ -30,10 +30,9 @@ impl CoreLoop {
     /// True when the primary key is present under BASE ∪ OVERLAY semantics.
     pub(super) fn stage_pk_present(
         &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
+        ctx: &StageCtx<'_>,
         row_key: &str,
+        storage_key: &crate::engine::document::store::StorageKey,
         bitemporal: bool,
         overlay: OverlayPk,
     ) -> crate::Result<bool> {
@@ -49,14 +48,19 @@ impl CoreLoop {
                 let exists = if bitemporal {
                     self.sparse.versioned_exists_current_in_txn(
                         &txn,
-                        database_id,
-                        tid,
-                        collection,
+                        ctx.database_id,
+                        ctx.tid,
+                        ctx.collection,
                         row_key,
                     )?
                 } else {
-                    self.sparse
-                        .exists_in_txn(&txn, database_id, tid, collection, row_key)?
+                    self.sparse.exists_in_txn(
+                        &txn,
+                        ctx.database_id,
+                        ctx.tid,
+                        ctx.collection,
+                        storage_key,
+                    )?
                 };
                 drop(txn);
                 Ok(exists)

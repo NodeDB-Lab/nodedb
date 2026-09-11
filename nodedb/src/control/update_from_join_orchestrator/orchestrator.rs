@@ -98,8 +98,9 @@ pub(crate) async fn run_update_from_join(
     state: &SharedState,
     args: UpdateFromJoinArgs<'_>,
 ) -> crate::Result<Response> {
-    // Checked once: a target driving no materialized-sum binding skips the
-    // RESOLVE round trip and retry loop entirely.
+    // Checked once: a target driving no materialized-sum binding AND
+    // declaring no period lock skips the RESOLVE round trip and retry loop
+    // entirely.
     let drives_bindings = source_drives_bindings(
         state,
         args.target_collection,
@@ -107,6 +108,13 @@ pub(crate) async fn run_update_from_join(
         args.database_id,
     )?
     .is_some();
+    let has_period_lock = crate::control::planner::period_lock::target_declares_period_lock(
+        state,
+        args.target_collection,
+        args.tenant_id,
+        args.database_id,
+    )?;
+    let needs_resolve = drives_bindings || has_period_lock;
 
     let mut attempt: u32 = 0;
     loop {
@@ -121,13 +129,13 @@ pub(crate) async fn run_update_from_join(
         )
         .await?;
 
-        let resolved_sum_targets = if drives_bindings {
+        let resolved_sum_targets = if needs_resolve {
             match resolve_matched_sum_targets(state, &args, source_rows.clone()).await? {
                 Some(resolved) => resolved,
                 // RESOLVE pass failed on the Data Plane; its response is the answer.
                 None => {
                     return Err(crate::Error::Dispatch {
-                        detail: "UPDATE ... FROM materialized-sum resolve pass failed".into(),
+                        detail: "UPDATE ... FROM target-row resolve pass failed".into(),
                     });
                 }
             }
@@ -194,9 +202,10 @@ pub(crate) async fn run_update_from_join(
     }
 }
 
-/// Resolve the materialized-sum targets this statement's matched rows need.
-/// Resolves both images of every matched row (a join-column rewrite debits
-/// one target and credits another). `None` means RESOLVE failed.
+/// Resolve the materialized-sum AND period-lock targets this statement's
+/// matched rows need. Resolves both images of every matched row (a
+/// join-column rewrite debits one target and credits another; a period-lock
+/// check may read either image). `None` means RESOLVE failed.
 async fn resolve_matched_sum_targets(
     state: &SharedState,
     args: &UpdateFromJoinArgs<'_>,
@@ -244,7 +253,7 @@ async fn resolve_matched_sum_targets(
         .iter()
         .flat_map(|(_, _, body, old_body)| [body.as_slice(), old_body.as_slice()])
         .collect();
-    resolve_sum_targets_for_bodies(
+    let mut resolved = resolve_sum_targets_for_bodies(
         state,
         &bodies,
         args.target_collection,
@@ -252,6 +261,17 @@ async fn resolve_matched_sum_targets(
         args.database_id,
         crate::types::TraceId::ZERO,
     )
-    .await
-    .map(Some)
+    .await?;
+    resolved.extend(
+        crate::control::planner::period_lock::resolve_period_lock_targets_for_bodies(
+            state,
+            &bodies,
+            args.target_collection,
+            args.tenant_id,
+            args.database_id,
+            crate::types::TraceId::ZERO,
+        )
+        .await?,
+    );
+    Ok(Some(resolved))
 }

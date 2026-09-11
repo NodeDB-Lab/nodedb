@@ -112,7 +112,7 @@ mod tests {
                 DB,
                 TID,
                 COLL,
-                &surrogate_to_doc_id(Surrogate::new(surrogate)),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .unwrap()
             .expect("document should have been replayed");
@@ -153,7 +153,7 @@ mod tests {
                 DB,
                 TID,
                 COLL,
-                &surrogate_to_doc_id(Surrogate::new(surrogate)),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .unwrap()
             .expect("document should have been replayed");

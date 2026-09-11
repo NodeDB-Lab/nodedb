@@ -23,6 +23,10 @@ impl ErrorCode {
     pub const TRANSITION_CHECK_VIOLATION: Self = Self(1014);
     pub const RETENTION_VIOLATION: Self = Self(1015);
     pub const LEGAL_HOLD_ACTIVE: Self = Self(1016);
+    /// A period-lock reference row exists but does not carry the
+    /// configured `status_column` — a misconfigured column name, not a
+    /// locked period.
+    pub const PERIOD_LOCK_MISCONFIGURED: Self = Self(1017);
     pub const TYPE_MISMATCH: Self = Self(1020);
     pub const OVERFLOW: Self = Self(1021);
     pub const INSUFFICIENT_BALANCE: Self = Self(1022);

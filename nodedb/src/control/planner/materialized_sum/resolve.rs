@@ -12,6 +12,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::Surrogate;
 
 use super::extract::join_value_from_body;
+use super::resolve_target::resolve_one_target;
 use super::settle::{
     SettleInput, co_resident_target_keys, omit_shipped, settle_cross_shard_images,
 };
@@ -383,7 +384,6 @@ async fn resolve_bodies(
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
     let mut resolved: Vec<ResolvedSumTarget> = Vec::new();
     for binding in bindings.iter() {
-        let target = db_qualified(database_id, &binding.target_collection);
         for body in bodies {
             let Some(join_value) = join_value_from_body(body, &binding.join_column) else {
                 // The row does not carry this binding's join column, so it does
@@ -391,33 +391,17 @@ async fn resolve_bodies(
                 // and nothing to add a delta to.
                 continue;
             };
-            if resolved
-                .iter()
-                .any(|entry| entry.addresses(&binding.target_collection, &join_value))
-            {
-                continue;
-            }
-            let vshard = VShardId::from_key(join_value.as_bytes());
-            let surrogate = lookup_surrogate_routed(
-                state,
-                vshard,
-                database_id,
-                tenant_id,
-                target.as_str(),
-                join_value.as_bytes(),
-                trace_id,
-            )
-            .await?
-            .ok_or_else(|| crate::Error::MaterializedSumTargetNotFound {
-                target_collection: binding.target_collection.clone(),
-                join_column: binding.join_column.clone(),
-                join_value: join_value.clone(),
-            })?;
-            resolved.push(ResolvedSumTarget::new(
+            resolve_one_target(
+                &mut resolved,
                 &binding.target_collection,
                 join_value,
-                surrogate,
-            ));
+                async |v| {
+                    lookup_join_value(state, binding, v, tenant_id, database_id, trace_id)
+                        .await
+                        .map(Some)
+                },
+            )
+            .await?;
         }
     }
     Ok(resolved)

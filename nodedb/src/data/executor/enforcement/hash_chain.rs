@@ -241,7 +241,7 @@ mod tests {
     fn the_chain_head_survives_a_restart() {
         use crate::bridge::envelope::Status;
         use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
-        use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+        use crate::engine::document::store::CollectionConfig;
         use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
         use nodedb_types::{DatabaseId, Surrogate, TenantId};
 
@@ -333,7 +333,7 @@ mod tests {
         let stored_hashes: Vec<String> = rows
             .iter()
             .map(|(surrogate, _, _)| {
-                let row_key = surrogate_to_doc_id(Surrogate::new(*surrogate));
+                let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(*surrogate));
                 let stored = core
                     .sparse
                     .get(db.as_u64(), TID, COLL, &row_key)

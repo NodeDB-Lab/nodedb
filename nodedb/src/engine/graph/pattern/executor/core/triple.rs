@@ -852,18 +852,19 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
 
     /// Store a node-property document in collection `"col"` (matching
     /// `make_csr`'s `(DatabaseId::DEFAULT, TenantId::new(1))` scope), keyed by
-    /// `surrogate_to_doc_id(surrogate)` — the REAL document key. A graph node
-    /// and its same-pk document share one surrogate, so the caller assigns the
-    /// same surrogate to the node in the CSR via `set_node_surrogate`.
+    /// `StorageKey::for_surrogate(surrogate)` — the REAL document key. A graph
+    /// node and its same-pk document share one surrogate, so the caller
+    /// assigns the same surrogate to the node in the CSR via
+    /// `set_node_surrogate`.
     fn put_node_doc(
         sparse: &SparseEngine,
         surrogate: nodedb_types::Surrogate,
         doc: nodedb_types::Value,
     ) {
-        use crate::engine::document::store::key::surrogate_to_doc_id;
+        use nodedb_types::StorageKey;
         let bytes = nodedb_types::value_to_msgpack(&doc).unwrap();
         sparse
-            .put(0, 1, "col", &surrogate_to_doc_id(surrogate), &bytes)
+            .put(0, 1, "col", &StorageKey::for_surrogate(surrogate), &bytes)
             .unwrap();
     }
 

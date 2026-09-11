@@ -404,6 +404,7 @@ mod tests {
         core.apply_point_put(
             &txn,
             PointPutParams {
+                resolved_targets: &[],
                 database_id: DB,
                 tid: TID,
                 collection: COLL,
@@ -427,6 +428,7 @@ mod tests {
         core.apply_point_delete(
             &txn,
             PointDeleteParams {
+                resolved_targets: &[],
                 database_id: DB,
                 tid: TID,
                 collection: COLL,

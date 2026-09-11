@@ -41,6 +41,7 @@ impl CoreLoop {
         } = p;
         let row_key = surrogate_to_doc_id(surrogate);
         let row_key = row_key.as_str();
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
         debug!(
             core = self.core_id,
             %collection,
@@ -99,7 +100,7 @@ impl CoreLoop {
         } else {
             let cached = self
                 .doc_cache
-                .get(database_id, tid, collection, row_key)
+                .get(database_id, tid, collection, &storage_key)
                 .map(|v| v.to_vec());
             if let Some(data) = cached {
                 data
@@ -108,12 +109,12 @@ impl CoreLoop {
                     self.sparse
                         .versioned_get_current(database_id, tid, collection, row_key)
                 } else {
-                    self.sparse.get(database_id, tid, collection, row_key)
+                    self.sparse.get(database_id, tid, collection, &storage_key)
                 };
                 match res {
                     Ok(Some(data)) => {
                         self.doc_cache
-                            .put(database_id, tid, collection, row_key, &data);
+                            .put(database_id, tid, collection, &storage_key, &data);
                         data
                     }
                     Ok(None) => return self.response_with_payload(task, Vec::new()),
@@ -149,7 +150,8 @@ impl CoreLoop {
         let transcoded = {
             let normalized = sparse_body_to_msgpack(&data, body_format.as_format_ref());
             if !rls_filters.is_empty() {
-                let (_, gated) = sparse_row_to_doc(row_key, &data, body_format.as_format_ref());
+                let (_, gated) =
+                    sparse_row_to_doc(&storage_key, &data, body_format.as_format_ref());
                 if !super::super::rls_eval::rls_check_msgpack_bytes(rls_filters, &gated) {
                     return self.response_with_payload(task, Vec::new());
                 }

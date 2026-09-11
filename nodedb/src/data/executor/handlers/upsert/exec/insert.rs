@@ -57,7 +57,8 @@ impl CoreLoop {
             strict_schema,
         } = ctx;
 
-        let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_identity = storage_key.to_identity();
         let document_identity = RowIdentity::from_user_key(document_id);
 
         // Insert: document doesn't exist, create new (same as PointPut).
@@ -112,11 +113,19 @@ impl CoreLoop {
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: hook_ctx.resolved_targets,
             },
         ) {
             Ok(p) => p,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
@@ -124,7 +133,14 @@ impl CoreLoop {
         // The advanced head lands in the SAME transaction as the row
         // whose hash it is.
         if let Err(e) = chain.persist_head(self, &txn) {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -141,7 +157,14 @@ impl CoreLoop {
         ) {
             Ok(o) => o,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
@@ -152,7 +175,14 @@ impl CoreLoop {
         if let Err(e) =
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 

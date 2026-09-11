@@ -42,7 +42,7 @@ use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 /// read-set entry so the Calvin OCC check aborts the statement if the source
 /// rows moved between this read and the apply. Rows without their version would
 /// be a silently stale total.
-pub(super) struct ReconRead<T> {
+pub(crate) struct ReconRead<T> {
     /// The decoded rows.
     pub rows: T,
     /// The source collection's write floor at read time — the comparand
@@ -61,7 +61,7 @@ pub(super) struct ReconRead<T> {
 ///
 /// Empty `filters` means "no WHERE clause" — every row, which is what `TRUNCATE`
 /// needs.
-pub(super) async fn recon_scan_rows(
+pub(in crate::control::planner) async fn recon_scan_rows(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
@@ -108,7 +108,7 @@ pub(super) async fn recon_scan_rows(
 ///
 /// Identity is the surrogate, exactly as on the write path — `document_id` is
 /// the user-facing primary key and carries no storage addressing.
-pub(super) async fn recon_point_row(
+pub(crate) async fn recon_point_row(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,

@@ -24,7 +24,7 @@ use crate::data::executor::handlers::bulk_dml::update_project::{
 };
 use crate::data::executor::handlers::{returning_rows, rls_write_gate};
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::{RowIdentity, doc_id_to_surrogate};
+use crate::engine::document::store::RowIdentity;
 
 /// Borrowed arguments for [`CoreLoop::resolve_bulk_update`].
 pub(super) struct ResolveBulkUpdate<'a> {
@@ -107,6 +107,7 @@ impl CoreLoop {
         for row in projected {
             let ProjectedUpdateRow {
                 doc_id,
+                storage_key,
                 current_bytes,
                 old_doc: _,
                 doc,
@@ -116,10 +117,9 @@ impl CoreLoop {
             // `execute_bulk_update` decides it — on the same JSON document.
             rls_write_gate::admit_row(rls_write_check, &doc, tid, collection)
                 .map_err(ErrorCode::from)?;
-            let Some(surrogate) = doc_id_to_surrogate(&doc_id) else {
-                // No surrogate identity to address on a replica; live handler skips too.
-                continue;
-            };
+            // The projection stage already parsed `doc_id` as a storage key,
+            // so its surrogate identity is always available here.
+            let surrogate = storage_key.surrogate();
             mutations.push(put_mutation(ResolvedPut {
                 collection,
                 document_id: &doc_id,
@@ -170,16 +170,19 @@ impl CoreLoop {
         let mut mutations = Vec::with_capacity(doc_ids.len());
         let mut rows: Vec<(RowIdentity, Vec<u8>)> = Vec::new();
         for doc_id in doc_ids {
-            // A row that vanished between the scan and this read removes
-            // nothing, so it carries no image for the policy to restrict.
-            let Some(stored) = self.doc_resolve_read(&ctx, collection, &doc_id)? else {
+            // `doc_id` is a bare string from the raw-table scan. A shape
+            // that fails to parse as a storage key can hold no row in
+            // DOCUMENTS either way, so it is skipped the same as a row that
+            // vanished between the scan and this read.
+            let Some(key) = crate::engine::document::store::StorageKey::parse(&doc_id) else {
                 continue;
             };
-            // `doc_id` is the storage key from the scan. A value that fails
-            // to parse as a minted key is a legacy or user key, taken
-            // verbatim; `RETURNING` reports the client-visible identity
-            // either way, never the storage key.
-            let identity = crate::engine::document::store::identity_of(&doc_id);
+            let Some(stored) = self.doc_resolve_read(&ctx, collection, &key)? else {
+                continue;
+            };
+            // `RETURNING` reports the row's client-visible identity, never
+            // the storage key.
+            let identity = key.to_identity();
             rls_write_gate::admit_stored_row(
                 rls_write_check,
                 &stored,
@@ -189,9 +192,7 @@ impl CoreLoop {
                 collection,
             )
             .map_err(ErrorCode::from)?;
-            let Some(surrogate) = doc_id_to_surrogate(&doc_id) else {
-                continue;
-            };
+            let surrogate = key.surrogate();
             mutations.push(delete_mutation(
                 collection,
                 &doc_id,

@@ -135,15 +135,10 @@ impl CoreLoop {
         // are inherent methods — no extra trait import needed.
         let mut edges: Vec<OllpPredictedEdge> = Vec::new();
         for doc_id in matching_ids {
-            let surrogate = if doc_id.len() == 8 {
-                match u32::from_str_radix(doc_id, 16) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                }
-            } else {
+            let Some(key) = crate::engine::document::store::StorageKey::parse(doc_id) else {
                 continue;
             };
-            let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, doc_id) else {
+            let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, &key) else {
                 continue;
             };
             let Ok(doc) = doc_format::decode_document(&bytes) else {
@@ -157,7 +152,7 @@ impl CoreLoop {
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
                 edges.push(OllpPredictedEdge {
-                    surrogate,
+                    surrogate: key.surrogate().as_u32(),
                     from: from.to_string(),
                     to: to.to_string(),
                     label,

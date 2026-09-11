@@ -140,11 +140,12 @@ impl CoreLoop {
             }
         };
 
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
         if let Err(e) = self.sparse.put(
             task.request.database_id.as_u64(),
             tid,
             collection,
-            &doc_id,
+            &storage_key,
             &msgpack,
         ) {
             error!(
@@ -247,10 +248,13 @@ impl CoreLoop {
             }
         }
 
-        if let Err(e) =
-            self.sparse
-                .delete(task.request.database_id.as_u64(), tid, collection, &doc_id)
-        {
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
+        if let Err(e) = self.sparse.delete(
+            task.request.database_id.as_u64(),
+            tid,
+            collection,
+            &storage_key,
+        ) {
             error!(
                 core = self.core_id,
                 %collection,

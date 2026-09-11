@@ -742,7 +742,7 @@ mod tests {
         let txn = TxnId::new(41);
         let task = make_stage_task(txn);
         let surrogate = 5u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
         // Seed a base row directly into the scan-visible sparse store.
         core.sparse
@@ -750,14 +750,14 @@ mod tests {
                 DatabaseId::DEFAULT.as_u64(),
                 TID,
                 "notes",
-                row_key.as_str(),
+                &row_key,
                 &schemaless_body("alice"),
             )
             .expect("seed base row");
 
         let plan = PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
-            document_id: row_key.as_str().to_string(),
+            document_id: row_key.to_string(),
             surrogate: Surrogate::new(surrogate),
             pk_bytes: Vec::new(),
             updates: vec![("name".to_string(), literal_str("bob"))],
@@ -798,13 +798,13 @@ mod tests {
         let task = make_stage_task(txn);
 
         for s in [1u32, 2u32] {
-            let row_key = surrogate_to_doc_id(Surrogate::new(s));
+            let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(s));
             core.sparse
                 .put(
                     DatabaseId::DEFAULT.as_u64(),
                     TID,
                     "notes",
-                    row_key.as_str(),
+                    &row_key,
                     &schemaless_body("old"),
                 )
                 .expect("seed base row");
@@ -857,13 +857,13 @@ mod tests {
         let task = make_stage_task(txn);
 
         for s in [1u32, 2u32] {
-            let row_key = surrogate_to_doc_id(Surrogate::new(s));
+            let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(s));
             core.sparse
                 .put(
                     DatabaseId::DEFAULT.as_u64(),
                     TID,
                     "notes",
-                    row_key.as_str(),
+                    &row_key,
                     &schemaless_body("doomed"),
                 )
                 .expect("seed base row");
@@ -951,10 +951,10 @@ mod tests {
         .expect("redo replay must succeed");
 
         for s in [1u32, 2u32] {
-            let row_key = surrogate_to_doc_id(Surrogate::new(s));
+            let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(s));
             let stored = dst
                 .sparse
-                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
                 .expect("get")
                 .expect("updated row must replay from resolve output");
             assert_eq!(
@@ -1384,7 +1384,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(20);
         let surrogate = 7u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
         src.txn_overlay_mut(txn).insert_put(
             coll_key("sdocs"),
@@ -1411,7 +1411,7 @@ mod tests {
 
         let stored = dst
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "sdocs", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "sdocs", &row_key)
             .expect("get")
             .expect("strict document row must be restored from redo replay");
         let decoded = strict_format::binary_tuple_to_value(&stored, &strict_schema())
@@ -1434,7 +1434,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(21);
         let surrogate = 3u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         let body = schemaless_body("alice");
 
         src.txn_overlay_mut(txn)
@@ -1455,7 +1455,7 @@ mod tests {
 
         let stored = dst
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get")
             .expect("schemaless document row must replay");
         assert_eq!(stored, body, "schemaless body round-trips verbatim");
@@ -1467,7 +1467,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(22);
         let surrogate = 11u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
         src.txn_overlay_mut(txn)
             .insert_tombstone(coll_key("notes"), surrogate, "gone");
@@ -1519,7 +1519,7 @@ mod tests {
         .expect("redo replay must succeed");
         assert!(
             dst.sparse
-                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
                 .expect("get")
                 .is_some(),
             "row seeded"
@@ -1534,7 +1534,7 @@ mod tests {
         .expect("redo replay must succeed");
         assert!(
             dst.sparse
-                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
                 .expect("get")
                 .is_none(),
             "redo delete must remove the document row"
@@ -1565,7 +1565,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(23);
         let surrogate = 1u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
         // Seed a base document row, then stage a DIFFERENT body for it.
         let seed = wrap_redo(&RedoRecord {
@@ -1591,7 +1591,7 @@ mod tests {
         .expect("redo replay must succeed");
         let before = core
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get");
         assert_eq!(before.as_deref(), Some(schemaless_body("base").as_slice()));
 
@@ -1608,7 +1608,7 @@ mod tests {
         // Base is untouched: resolve reads the overlay only, never writes base.
         let after = core
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get");
         assert_eq!(
             after.as_deref(),
@@ -1623,7 +1623,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(24);
         let doc_surrogate = 5u32;
-        let doc_row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
+        let doc_row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(doc_surrogate));
 
         {
             let overlay = src.txn_overlay_mut(txn);
@@ -1667,7 +1667,7 @@ mod tests {
         );
         assert!(
             dst.sparse
-                .get(db, TID, "notes", doc_row_key.as_str())
+                .get(db, TID, "notes", &doc_row_key)
                 .expect("get")
                 .is_some(),
             "document sub-record must replay"
@@ -2045,7 +2045,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(35);
         let doc_surrogate = 6u32;
-        let doc_row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
+        let doc_row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(doc_surrogate));
 
         {
             let overlay = src.txn_overlay_mut(txn);
@@ -2091,7 +2091,7 @@ mod tests {
         assert!(
             dst_core
                 .sparse
-                .get(db, TID, "notes", doc_row_key.as_str())
+                .get(db, TID, "notes", &doc_row_key)
                 .expect("get")
                 .is_some(),
             "document sub-record must replay"
@@ -2966,15 +2966,10 @@ mod tests {
             dst.spatial_doc_map.contains_key(&doc_map_key),
             "surrogate -> doc-id reverse map must be rebuilt"
         );
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         assert!(
             dst.sparse
-                .get(
-                    DatabaseId::DEFAULT.as_u64(),
-                    TID,
-                    "places",
-                    row_key.as_str()
-                )
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
                 .expect("get")
                 .is_some(),
             "sparse geometry document must be rebuilt by replay"
@@ -3038,15 +3033,10 @@ mod tests {
             0,
             "redo delete must remove the R-tree entry"
         );
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         assert!(
             dst.sparse
-                .get(
-                    DatabaseId::DEFAULT.as_u64(),
-                    TID,
-                    "places",
-                    row_key.as_str()
-                )
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
                 .expect("get")
                 .is_none(),
             "redo delete must remove the sparse geometry document"
@@ -3107,15 +3097,10 @@ mod tests {
             !core.spatial_indexes.contains_key(&key),
             "resolve must not mutate the base spatial R-tree"
         );
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         assert!(
             core.sparse
-                .get(
-                    DatabaseId::DEFAULT.as_u64(),
-                    TID,
-                    "places",
-                    row_key.as_str()
-                )
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
                 .expect("get")
                 .is_none(),
             "resolve must not mutate the base sparse store"

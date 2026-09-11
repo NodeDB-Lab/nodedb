@@ -74,6 +74,17 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::PeriodLocked {
             collection, detail, ..
         } => NodeDbError::period_locked(collection.clone(), detail),
+        Error::PeriodLockMisconfigured {
+            collection,
+            ref_table,
+            status_column,
+            row_identity,
+        } => NodeDbError::period_lock_misconfigured(
+            collection.clone(),
+            ref_table.clone(),
+            status_column.clone(),
+            row_identity,
+        ),
         Error::RetentionViolation {
             collection, detail, ..
         } => NodeDbError::retention_violation(collection.clone(), detail),

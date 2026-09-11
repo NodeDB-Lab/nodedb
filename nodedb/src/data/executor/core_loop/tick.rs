@@ -256,7 +256,15 @@ mod tests {
     fn watermark_in_response() {
         let (mut core, mut req_tx, mut resp_rx, _dir) = make_core();
         core.advance_watermark(Lsn::new(99));
-        core.sparse.put(0, 1, "x", "y", b"data").unwrap();
+        core.sparse
+            .put(
+                0,
+                1,
+                "x",
+                &nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(999)),
+                b"data",
+            )
+            .unwrap();
         req_tx
             .try_push(BridgeRequest {
                 inner: make_request(PhysicalPlan::Document(DocumentOp::PointGet {
@@ -355,7 +363,12 @@ mod tests {
         // "00000000".
         let stored = core
             .sparse
-            .get(0, 1, "orders", "00000000")
+            .get(
+                0,
+                1,
+                "orders",
+                &nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::ZERO),
+            )
             .unwrap()
             .unwrap();
         assert!(nodedb_query::msgpack_scan::map_header(&stored, 0).is_some());

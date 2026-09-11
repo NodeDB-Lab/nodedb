@@ -264,6 +264,7 @@ impl CoreLoop {
                 index_text: true,
                 user_roles: &[],
                 enforce: false,
+                resolved_targets: &[],
                 wal_lsn: (record_lsn != 0).then(|| crate::types::Lsn::new(record_lsn)),
             },
         ) {
@@ -330,6 +331,7 @@ impl CoreLoop {
                 surrogate,
                 user_roles: &[],
                 enforce: false,
+                resolved_targets: &[],
             },
         ) {
             Ok(outcome) => match txn.commit() {
@@ -485,12 +487,8 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
-        let stored = h
-            .core
-            .sparse
-            .get(0, 7, "notes", row_key.as_str())
-            .expect("get");
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let stored = h.core.sparse.get(0, 7, "notes", &row_key).expect("get");
         assert!(
             stored.is_some(),
             "document row must be restored from redo replay"
@@ -520,12 +518,8 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
-        let stored = h
-            .core
-            .sparse
-            .get(0, 7, "notes", row_key.as_str())
-            .expect("get");
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let stored = h.core.sparse.get(0, 7, "notes", &row_key).expect("get");
         assert!(stored.is_none(), "redo delete must remove the document row");
     }
 
@@ -547,7 +541,7 @@ mod tests {
                 0,
                 7,
                 "notes",
-                surrogate_to_doc_id(Surrogate::new(surrogate)).as_str(),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .expect("get");
         h.core
@@ -560,7 +554,7 @@ mod tests {
                 0,
                 7,
                 "notes",
-                surrogate_to_doc_id(Surrogate::new(surrogate)).as_str(),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .expect("get");
         assert_eq!(
@@ -831,11 +825,11 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        let row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(doc_surrogate));
         assert!(
             h.core
                 .sparse
-                .get(0, 7, "notes", row_key.as_str())
+                .get(0, 7, "notes", &row_key)
                 .expect("get")
                 .is_some(),
             "document sub-record must be replayed"

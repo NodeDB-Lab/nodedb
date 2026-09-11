@@ -83,6 +83,7 @@ impl CoreLoop {
                 surrogate,
                 user_roles,
                 enforce: true,
+                resolved_targets: resolved_sum_targets,
             },
         )?;
 

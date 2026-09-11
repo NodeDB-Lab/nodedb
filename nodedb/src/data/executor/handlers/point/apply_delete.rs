@@ -13,6 +13,7 @@ use tracing::warn;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::{append_only, period_lock, retention};
+use nodedb_physical::physical_plan::ResolvedSumTarget;
 use nodedb_types::Surrogate;
 
 use crate::data::executor::handlers::point::apply_put::VectorIndexDelta;
@@ -38,6 +39,11 @@ pub(in crate::data::executor) struct PointDeleteParams<'a> {
     /// deletes (e.g. CRDT-sync materialization) whose admission already
     /// happened on their origin replica.
     pub enforce: bool,
+    /// `(target collection, join-key value)` → target row surrogate, resolved
+    /// on the Control Plane at plan time — read by period-lock enforcement to
+    /// find its reference row. Empty for `enforce: false` callers, which
+    /// never read it.
+    pub resolved_targets: &'a [ResolvedSumTarget],
 }
 
 /// Capture of the mutations an [`CoreLoop::apply_point_delete`] performed, so
@@ -134,11 +140,13 @@ impl CoreLoop {
             surrogate,
             user_roles,
             enforce,
+            resolved_targets,
         } = params;
         let _ = user_roles;
 
         let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
         let row_key = row_key.as_str();
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -167,6 +175,7 @@ impl CoreLoop {
                         collection,
                         config,
                         Some(body),
+                        resolved_targets,
                     )?;
                 }
                 let sys_from = self.bitemporal_now_ms();
@@ -223,7 +232,9 @@ impl CoreLoop {
             prior
         } else {
             if enforce && let Some(config) = self.doc_configs.get(&config_key) {
-                let old_value = self.sparse.get(database_id, tid, collection, row_key)?;
+                let old_value = self
+                    .sparse
+                    .get(database_id, tid, collection, &storage_key)?;
                 run_delete_enforcement(
                     &self.sparse,
                     database_id,
@@ -231,10 +242,11 @@ impl CoreLoop {
                     collection,
                     config,
                     old_value.as_deref(),
+                    resolved_targets,
                 )?;
             }
             self.sparse
-                .delete_in_txn(txn, database_id, tid, collection, row_key)?
+                .delete_in_txn(txn, database_id, tid, collection, &storage_key)?
         };
 
         // Capture the plain secondary-index `(field, value)` tuples this
@@ -399,7 +411,7 @@ impl CoreLoop {
 
         // Invalidate document cache.
         self.doc_cache
-            .invalidate(database_id, tid, collection, row_key);
+            .invalidate(database_id, tid, collection, &storage_key);
 
         // Invalidate aggregate cache — a delete changes count(*) for this
         // collection. Only needed when a row was actually removed.
@@ -431,14 +443,23 @@ fn run_delete_enforcement(
     collection: &str,
     config: &crate::engine::document::store::CollectionConfig,
     old_value: Option<&[u8]>,
+    resolved_targets: &[ResolvedSumTarget],
 ) -> crate::Result<()> {
     append_only::check_point_delete(collection, &config.enforcement)
         .map_err(map_enforcement_error)?;
     if let Some(ref pl) = config.enforcement.period_lock
         && let Some(old_bytes) = old_value
     {
-        period_lock::check_period_lock(sparse, database_id, tid, collection, old_bytes, pl)
-            .map_err(map_enforcement_error)?;
+        period_lock::check_period_lock(
+            sparse,
+            database_id,
+            tid,
+            collection,
+            old_bytes,
+            pl,
+            resolved_targets,
+        )
+        .map_err(map_enforcement_error)?;
     }
     let created_at = old_value.and_then(retention::extract_created_at_secs);
     retention::check_delete_allowed(collection, &config.enforcement, created_at)

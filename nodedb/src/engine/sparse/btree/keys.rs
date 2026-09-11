@@ -26,12 +26,14 @@ std::thread_local! {
 }
 
 /// Build a database/tenant-scoped composite key `"{db}:{tenant}:{a}:{b}"`
-/// using a thread-local buffer.
+/// in the thread-local buffer. `b` is written via `Display`, so a
+/// [`nodedb_types::StorageKey`] lands as its 8 hex characters with no
+/// intermediate `String`.
 pub(super) fn with_tenant_key<R>(
     database_id: u64,
     tenant_id: u64,
     a: &str,
-    b: &str,
+    b: impl std::fmt::Display,
     f: impl FnOnce(&str) -> R,
 ) -> R {
     KEY_BUF.with(|buf| {
@@ -44,7 +46,7 @@ pub(super) fn with_tenant_key<R>(
         buf.push(':');
         buf.push_str(a);
         buf.push(':');
-        buf.push_str(b);
+        let _ = write!(buf, "{b}");
         f(&buf)
     })
 }

@@ -204,8 +204,11 @@ impl CoreLoop {
             collection,
             BM25_SCAN_MAX_HITS,
         );
-        let mut docs = match scan_result {
-            Ok(d) => d,
+        // Rendered to text here: `merge_fts_rows_from_score_map` below and the
+        // per-row surrogate lookup both operate on the hex storage key as a
+        // string, out of this unit's typed scope.
+        let mut docs: Vec<(String, Vec<u8>)> = match scan_result {
+            Ok(d) => d.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
             Err(e) => {
                 return self.response_error(
                     task,

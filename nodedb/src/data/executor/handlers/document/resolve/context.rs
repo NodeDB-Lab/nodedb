@@ -15,7 +15,7 @@ use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::{RowIdentity, surrogate_to_doc_id};
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 /// What a resolver returns: the decided mutations and the decided reply, or the
 /// error the live handler would have returned for the same input.
@@ -67,7 +67,7 @@ impl CoreLoop {
         &self,
         ctx: &DocResolveCtx,
         collection: &str,
-        row_key: &str,
+        row_key: &StorageKey,
     ) -> Result<Option<Vec<u8>>, ErrorCode> {
         self.doc_current_bytes(ctx.database_id, ctx.tid, collection, row_key)
     }
@@ -79,11 +79,11 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        row_key: &str,
+        row_key: &StorageKey,
     ) -> Result<Option<Vec<u8>>, ErrorCode> {
         let read = if self.is_bitemporal(database_id, tid, collection) {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, row_key)
+                .versioned_get_current(database_id, tid, collection, &row_key.to_string())
         } else {
             self.sparse.get(database_id, tid, collection, row_key)
         };
@@ -136,8 +136,8 @@ pub(super) fn delete_mutation(
 }
 
 /// The storage key for a row identity — the form every document reader uses.
-pub(super) fn row_key_of(surrogate: Surrogate) -> String {
-    surrogate_to_doc_id(surrogate)
+pub(super) fn row_key_of(surrogate: Surrogate) -> StorageKey {
+    StorageKey::for_surrogate(surrogate)
 }
 
 /// The `{"affected": N}` reply a write with no `RETURNING` clause returns.

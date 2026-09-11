@@ -67,25 +67,19 @@ pub(in crate::data::executor) fn sparse_body_to_msgpack<'a>(
 /// vector-primary sidecar stores the user's declared primary key, and its
 /// sparse key is the internal surrogate-hex, which must not displace it.
 ///
-/// `id` is the row's storage key. When it is a minted key, the client-visible
-/// identity is the surrogate's decimal string, not the hex storage key; a
-/// non-minted key (a user-supplied or DDL-declared primary key) passes
-/// through unchanged. Shared by the materializing scan and the streaming scan
-/// so both paths produce byte-identical output.
-///
-/// `id` comes off a store iterator as a plain `&str`, so this is one of the
-/// few sites that reinterprets that shape: a value that parses as 8 lowercase
-/// hex characters is a minted storage key, everything else is a legacy or
-/// user key taken verbatim.
+/// `key` is the row's storage key. The client-visible identity is its
+/// surrogate's decimal string, per [`StorageKey::to_identity`]. Shared by the
+/// materializing scan and the streaming scan so both paths produce
+/// byte-identical output.
 pub(in crate::data::executor) fn sparse_row_to_doc(
-    id: &str,
+    key: &nodedb_types::StorageKey,
     raw: &[u8],
     format: SparseBodyFormatRef<'_>,
 ) -> (String, Vec<u8>) {
-    let identity = crate::engine::document::store::identity_of(id);
+    let identity = key.to_identity();
     let mp = sparse_body_to_msgpack(raw, format);
     let mp = msgpack_scan::inject_str_field(&mp, "id", identity.as_str());
-    (id.to_string(), mp)
+    (key.to_string(), mp)
 }
 
 /// Convert a single row from a `DecodedColumn` to a `nodedb_types::value::Value`.

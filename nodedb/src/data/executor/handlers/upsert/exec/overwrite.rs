@@ -64,7 +64,8 @@ impl CoreLoop {
             current_bytes,
         } = ctx;
 
-        let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_identity = storage_key.to_identity();
         let document_identity = RowIdentity::from_user_key(document_id);
 
         // Decode existing document to nodedb_types::Value.
@@ -205,6 +206,7 @@ impl CoreLoop {
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: hook_ctx.resolved_targets,
             },
         ) {
             Ok(o) => o,
@@ -214,7 +216,7 @@ impl CoreLoop {
                 // that entry, which would then serve a body that never
                 // committed.
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return self.response_error(task, e);
             }
         };
@@ -235,7 +237,7 @@ impl CoreLoop {
             Ok(o) => o,
             Err(e) => {
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return self.response_error(task, e);
             }
         };
@@ -248,7 +250,7 @@ impl CoreLoop {
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
             self.doc_cache
-                .invalidate(database_id, tid, collection, row_key);
+                .invalidate(database_id, tid, collection, &storage_key);
             return self.response_error(task, e);
         }
 

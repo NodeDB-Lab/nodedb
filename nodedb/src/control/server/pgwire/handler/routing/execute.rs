@@ -103,6 +103,19 @@ impl NodeDbPgHandler {
                 )
                 .map_err(StatementSetupError::from)?;
 
+                // Period-lock reference rows are resolved here for the same
+                // reason as the materialized-sum targets just above, into the
+                // same plan slot.
+                crate::control::planner::period_lock::resolve_period_lock_targets(
+                    &self.state,
+                    &mut tasks,
+                    tenant_id,
+                    edge_database_id,
+                    crate::types::TraceId::ZERO,
+                )
+                .await
+                .map_err(StatementSetupError::from)?;
+
                 // The final task set must be authorized before any clone
                 // interception, orchestration, staging, or dispatch path can
                 // observe it. Descriptor admission follows this check so an

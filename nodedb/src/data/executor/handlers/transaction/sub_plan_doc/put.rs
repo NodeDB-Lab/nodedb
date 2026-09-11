@@ -70,6 +70,7 @@ impl CoreLoop {
         } = p;
         let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
         let row_key = row_key.as_str();
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let database_id = dummy_task.request.database_id.as_u64();
 
         // Pre-read the plain-table value: it decides insert-vs-update for the
@@ -94,7 +95,7 @@ impl CoreLoop {
         let folds_images = write_hook::folds_images(self, &hook_ctx);
         let prior_bytes = if chain.enabled() || folds_images {
             self.sparse
-                .get(database_id, tid, collection, row_key)
+                .get(database_id, tid, collection, &storage_key)
                 .ok()
                 .flatten()
         } else {
@@ -138,7 +139,7 @@ impl CoreLoop {
                 )
             } else {
                 self.sparse
-                    .exists_in_txn(&txn, database_id, tid, collection, row_key)
+                    .exists_in_txn(&txn, database_id, tid, collection, &storage_key)
             };
             let exists = match exists_result {
                 Ok(exists) => exists,
@@ -188,6 +189,7 @@ impl CoreLoop {
                 user_roles,
                 enforce: true,
                 wal_lsn: dummy_task.wal_lsn(),
+                resolved_targets: resolved_sum_targets,
             },
         ) {
             Ok(o) => o,
@@ -196,7 +198,14 @@ impl CoreLoop {
                 // after we mutated the chain head and, on the later rejections,
                 // after it had already cached the row. Reverse both so the
                 // aborted op leaves no trace, then propagate the typed error.
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return Err(e.into());
             }
         };
@@ -206,7 +215,14 @@ impl CoreLoop {
         // and drops `txn` uncommitted, so a rejected insert never leaves a head
         // behind on disk either.
         if let Err(e) = chain.persist_head(self, &txn) {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return Err(ErrorCode::from(e));
         }
 
@@ -232,7 +248,14 @@ impl CoreLoop {
         let enforcement = match write_hook::run(self, &txn, &hook_ctx, images) {
             Ok(outcome) => outcome,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return Err(ErrorCode::from(e));
             }
         };
@@ -248,7 +271,14 @@ impl CoreLoop {
         // inside an explicit transaction.
         if let Err(e) = self.settle_balanced_entries(database_id, tid, collection, balanced_entries)
         {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return Err(ErrorCode::from(e));
         }
 

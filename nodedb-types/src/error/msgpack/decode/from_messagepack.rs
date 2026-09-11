@@ -51,6 +51,15 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 let (collection,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::PeriodLocked { collection })
             }
+            TAG_PERIOD_LOCK_MISCONFIGURED => {
+                let (collection, ref_table, status_column) =
+                    read3_str_tolerant(reader, field_count)?;
+                Ok(ErrorDetails::PeriodLockMisconfigured {
+                    collection,
+                    ref_table,
+                    status_column,
+                })
+            }
             TAG_STATE_TRANSITION_VIOLATION => {
                 let (collection,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::StateTransitionViolation { collection })
@@ -763,6 +772,16 @@ mod tests {
             collection: "metrics".into(),
             engine: "columnar".into(),
             database: "clone_db".into(),
+        };
+        assert_eq!(roundtrip(&v), v);
+    }
+
+    #[test]
+    fn period_lock_misconfigured_roundtrip() {
+        let v = ErrorDetails::PeriodLockMisconfigured {
+            collection: "journal_entries".into(),
+            ref_table: "fiscal_periods".into(),
+            status_column: "status".into(),
         };
         assert_eq!(roundtrip(&v), v);
     }

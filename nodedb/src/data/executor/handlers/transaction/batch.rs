@@ -503,7 +503,7 @@ mod tests {
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
     use crate::data::executor::handlers::point::insert::PointInsertParams;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::{DatabaseId, TenantId};
     use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget};
     use nodedb_types::{QualifiedCollection, Surrogate};
@@ -562,7 +562,7 @@ mod tests {
                 DB,
                 TID,
                 TARGET,
-                &surrogate_to_doc_id(T1),
+                &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -581,7 +581,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)

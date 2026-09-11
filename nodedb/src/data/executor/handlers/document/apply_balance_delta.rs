@@ -35,7 +35,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::materialized_sum::rmw::BalanceRmw;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use nodedb_types::Surrogate;
 
 /// Dispatch-side arguments for [`CoreLoop::execute_apply_balance_delta`].
@@ -97,7 +96,7 @@ impl CoreLoop {
         };
 
         let database_id = task.request.database_id.as_u64();
-        let row_key = surrogate_to_doc_id(surrogate);
+        let row_key = nodedb_types::StorageKey::for_surrogate(surrogate);
 
         let txn = match self.sparse.begin_write() {
             Ok(txn) => txn,

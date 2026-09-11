@@ -75,7 +75,6 @@ impl CoreLoop {
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
-        let row_key = row_key.as_str();
         let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
         let document_identity = RowIdentity::from_user_key(document_id);
 
@@ -98,7 +97,7 @@ impl CoreLoop {
         }
 
         // A gone row reports `{"affected": 0}`, same as `execute_point_update`.
-        let Some(current_bytes) = self.doc_resolve_read(&ctx, collection, row_key)? else {
+        let Some(current_bytes) = self.doc_resolve_read(&ctx, collection, &row_key)? else {
             return Ok(DocumentResolveOutcome {
                 mutations: Vec::new(),
                 response_payload: affected_payload(0),
@@ -188,13 +187,12 @@ impl CoreLoop {
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
-        let row_key = row_key.as_str();
         let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
         let document_identity = RowIdentity::from_user_key(document_id);
 
         // A row that is already absent removes nothing, so there is no image for
         // the policy to restrict — the same admission `gate_point_delete` makes.
-        let Some(prior) = self.doc_resolve_read(&ctx, collection, row_key)? else {
+        let Some(prior) = self.doc_resolve_read(&ctx, collection, &row_key)? else {
             return Ok(DocumentResolveOutcome {
                 mutations: Vec::new(),
                 response_payload: resolved_response_payload(

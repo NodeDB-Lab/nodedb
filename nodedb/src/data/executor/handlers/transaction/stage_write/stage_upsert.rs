@@ -102,8 +102,8 @@ impl CoreLoop {
             Some(Staged::Tombstone) => Ok(None),
             None => {
                 let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
-                let row_key = surrogate_to_doc_id(ctx.surrogate);
                 if bitemporal {
+                    let row_key = surrogate_to_doc_id(ctx.surrogate);
                     self.sparse.versioned_get_current(
                         ctx.database_id,
                         ctx.tid,
@@ -111,8 +111,9 @@ impl CoreLoop {
                         row_key.as_str(),
                     )
                 } else {
+                    let storage_key = nodedb_types::StorageKey::for_surrogate(ctx.surrogate);
                     self.sparse
-                        .get(ctx.database_id, ctx.tid, ctx.collection, row_key.as_str())
+                        .get(ctx.database_id, ctx.tid, ctx.collection, &storage_key)
                 }
             }
         }

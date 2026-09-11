@@ -19,6 +19,9 @@ use crate::types::{DatabaseId, TenantId};
 pub(in crate::data::executor) struct ProjectedUpdateRow {
     /// Storage key (the surrogate hex).
     pub(in crate::data::executor) doc_id: String,
+    /// The same storage key, typed — parsed once here so consumers never
+    /// re-interpret `doc_id`'s shape.
+    pub(in crate::data::executor) storage_key: crate::engine::document::store::StorageKey,
     /// The row as stored before the update — the `old_value` of the emitted
     /// event and the old side of the secondary-index diff.
     pub(in crate::data::executor) current_bytes: Vec<u8>,
@@ -70,7 +73,14 @@ impl CoreLoop {
 
         let mut projected = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
-            let Some(current_bytes) = self.sparse.get(database_id, tid, collection, doc_id)? else {
+            // `doc_id` is a bare string from the settled apply set, several
+            // calls removed from any typed scan. A shape that fails to parse
+            // as a storage key is skipped the same as a row deleted between
+            // the match and this pass.
+            let Some(key) = crate::engine::document::store::StorageKey::parse(doc_id) else {
+                continue;
+            };
+            let Some(current_bytes) = self.sparse.get(database_id, tid, collection, &key)? else {
                 continue;
             };
 
@@ -176,6 +186,7 @@ impl CoreLoop {
 
             projected.push(ProjectedUpdateRow {
                 doc_id: doc_id.clone(),
+                storage_key: key,
                 current_bytes,
                 old_doc,
                 doc,

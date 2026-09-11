@@ -11,7 +11,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::vector_upsert::decode_payload_lowercased;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::TenantId;
 use nodedb_types::DatabaseId;
 
@@ -140,7 +139,7 @@ impl CoreLoop {
             .and_then(|c| c.get_surrogate(vector_id));
 
         if let Some(surrogate) = surrogate_opt {
-            let row_key = surrogate_to_doc_id(surrogate);
+            let row_key = nodedb_types::StorageKey::for_surrogate(surrogate);
             let fields =
                 match self
                     .sparse

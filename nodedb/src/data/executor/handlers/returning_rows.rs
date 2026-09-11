@@ -158,7 +158,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         spec: &ReturningSpec,
         rls_filters: &[u8],
-        row_key: &str,
+        row_key: &nodedb_types::StorageKey,
         sidecar: &[u8],
     ) -> Response {
         let (_id, mp) = sparse_row_to_doc(row_key, sidecar, SparseBodyFormatRef::VectorSidecar);

@@ -51,6 +51,11 @@ impl CoreLoop {
                     collection: &collection,
                     document_id: &document_id,
                 };
+                // The entry carries the surrogate directly, so the storage
+                // key is minted from it rather than re-parsed out of
+                // `document_id`'s text.
+                let storage_key =
+                    crate::engine::document::store::StorageKey::for_surrogate(surrogate);
                 if let Some(sys_from_ms) = bitemporal_sys_from_ms {
                     // Bitemporal op: never wrote the non-versioned table, so
                     // physically remove the appended version row (+ its index
@@ -61,12 +66,12 @@ impl CoreLoop {
                 } else {
                     let result = if let Some(old) = old_value {
                         self.sparse
-                            .put(database_id, tid, &collection, &document_id, &old)
+                            .put(database_id, tid, &collection, &storage_key, &old)
                             .map(|_| ())
                             .map_err(|e| e.to_string())
                     } else {
                         self.sparse
-                            .delete(database_id, tid, &collection, &document_id)
+                            .delete(database_id, tid, &collection, &storage_key)
                             .map(|_| ())
                             .map_err(|e| e.to_string())
                     };
@@ -119,7 +124,7 @@ impl CoreLoop {
                 // a stale hit would otherwise resurrect a rolled-back put; the
                 // worst case here is a cache miss.
                 self.doc_cache
-                    .invalidate(database_id, tid, &collection, &document_id);
+                    .invalidate(database_id, tid, &collection, &storage_key);
                 self.undo_chain_hash(database_id, tid, &collection, entry_index, chain_hash_prior)?;
                 Ok(())
             }
@@ -140,11 +145,16 @@ impl CoreLoop {
                     collection: &collection,
                     document_id: &document_id,
                 };
+                // The entry carries the surrogate directly, so the storage
+                // key is minted from it rather than re-parsed out of
+                // `document_id`'s text.
+                let storage_key =
+                    crate::engine::document::store::StorageKey::for_surrogate(surrogate);
                 if let Some(sys_from_ms) = bitemporal_sys_from_ms {
                     self.undo_bitemporal_write(ctx, sys_from_ms, &bitemporal_index_tuples)?;
                 } else {
                     self.sparse
-                        .put(database_id, tid, &collection, &document_id, &old_value)
+                        .put(database_id, tid, &collection, &storage_key, &old_value)
                         .map(|_| ())
                         .map_err(|e| {
                             error!(
@@ -175,7 +185,7 @@ impl CoreLoop {
                 // PutDocument branch): reversing a delete restores the row, so a
                 // stale post-delete cache entry must not linger.
                 self.doc_cache
-                    .invalidate(database_id, tid, &collection, &document_id);
+                    .invalidate(database_id, tid, &collection, &storage_key);
                 self.undo_chain_hash(database_id, tid, &collection, entry_index, chain_hash_prior)?;
                 Ok(())
             }
@@ -534,17 +544,26 @@ mod tests {
         assert!(!core.chain_hashes.contains_key(&key()));
     }
 
+    fn storage_key(surrogate: u32) -> crate::engine::document::store::StorageKey {
+        crate::engine::document::store::StorageKey::for_surrogate(nodedb_types::Surrogate::new(
+            surrogate,
+        ))
+    }
+
     #[test]
-    fn plain_put_undo_backward_compatible() {
+    fn plain_put_undo_restores_or_removes_the_surrogate_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
-        // Overwrite case: current holds "new", undo restores "old".
-        core.sparse.put(DB, TID, "c", "d1", b"new").unwrap();
+        // Overwrite case: current holds "new", undo restores "old". `undo`
+        // reads the row through the entry's `surrogate`, not `document_id`'s
+        // text, so the seeded row and the entry share one surrogate.
+        let key1 = storage_key(1);
+        core.sparse.put(DB, TID, "c", &key1, b"new").unwrap();
         let overwrite = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: "d1".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: key1.to_string(),
+            surrogate: key1.surrogate(),
             old_value: Some(b"old".to_vec()),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -554,16 +573,17 @@ mod tests {
         };
         core.apply_undo_document(DB, TID, 0, overwrite).unwrap();
         assert_eq!(
-            core.sparse.get(DB, TID, "c", "d1").unwrap(),
+            core.sparse.get(DB, TID, "c", &key1).unwrap(),
             Some(b"old".to_vec())
         );
 
         // Insert case: undo deletes the row.
-        core.sparse.put(DB, TID, "c", "d2", b"inserted").unwrap();
+        let key2 = storage_key(2);
+        core.sparse.put(DB, TID, "c", &key2, b"inserted").unwrap();
         let insert = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: "d2".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: key2.to_string(),
+            surrogate: key2.surrogate(),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -572,19 +592,20 @@ mod tests {
             chain_hash_prior: None,
         };
         core.apply_undo_document(DB, TID, 0, insert).unwrap();
-        assert!(core.sparse.get(DB, TID, "c", "d2").unwrap().is_none());
+        assert!(core.sparse.get(DB, TID, "c", &key2).unwrap().is_none());
     }
 
     #[test]
-    fn plain_delete_undo_backward_compatible() {
+    fn plain_delete_undo_reinserts_the_surrogate_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
         // Row was deleted by the forward op; undo re-inserts its prior value.
+        let key1 = storage_key(1);
         let entry = UndoEntry::DeleteDocument {
             collection: "c".into(),
-            document_id: "d1".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: key1.to_string(),
+            surrogate: key1.surrogate(),
             old_value: b"prior".to_vec(),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -593,7 +614,7 @@ mod tests {
         };
         core.apply_undo_document(DB, TID, 0, entry).unwrap();
         assert_eq!(
-            core.sparse.get(DB, TID, "c", "d1").unwrap(),
+            core.sparse.get(DB, TID, "c", &key1).unwrap(),
             Some(b"prior".to_vec())
         );
     }

@@ -95,6 +95,7 @@ impl CoreLoop {
                 collection,
                 value,
                 surrogate,
+                resolved_sum_targets,
                 ..
             }) = task.plan()
             else {
@@ -117,6 +118,7 @@ impl CoreLoop {
                         user_roles: &task.request.user_roles,
                         enforce: true,
                         wal_lsn: task.wal_lsn(),
+                        resolved_targets: resolved_sum_targets.as_slice(),
                     },
                 )
                 .map_err(|e| {
