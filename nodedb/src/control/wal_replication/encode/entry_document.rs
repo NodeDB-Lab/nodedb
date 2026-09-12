@@ -7,7 +7,7 @@
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
-use super::super::types::ReplicatedWrite;
+use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
 use super::document;
 use super::document::{SumFields, WireReturning};
 use super::entry::encode_returning;
@@ -223,7 +223,13 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             restart_identity,
             // See `PointPut`.
             resolved_sum_targets,
-        } => document::truncate(collection.as_str(), *restart_identity, resolved_sum_targets),
+            declared_primary_key,
+        } => document::truncate(
+            collection.as_str(),
+            *restart_identity,
+            resolved_sum_targets,
+            declared_primary_key.as_deref(),
+        ),
         // OLLP-prepared bulk plans route via the cross-shard Calvin path, not
         // single-shard Raft proposal.
         DocumentOp::BulkDelete { .. } | DocumentOp::BulkUpdate { .. } => return None,
@@ -245,15 +251,17 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             delta,
             join_column,
             join_value,
-        } => document::apply_balance_delta(
-            collection.as_str(),
+            declared_primary_key,
+        } => document::apply_balance_delta(BalanceDeltaFields {
+            collection: collection.as_str(),
             document_id,
-            surrogate.as_u32(),
+            surrogate: surrogate.as_u32(),
             column,
             delta,
             join_column,
             join_value,
-        ),
+            declared_primary_key: declared_primary_key.as_deref(),
+        }),
 
         // Not a write — reads / scans / index DDL-metadata / system ops.
         DocumentOp::ResolveWrite(_)

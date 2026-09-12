@@ -41,7 +41,7 @@ fn write_event(seq: u64, op: WriteOp, payload_bytes: Vec<u8>, is_delete: bool) -
         sequence: seq,
         collection: Arc::from("users"),
         op,
-        row_id: RowId::new("u-1"),
+        row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("u-1")),
         lsn: Lsn::new(seq * 10),
         database_id: DatabaseId::new(7),
         tenant_id: TenantId::new(1),

@@ -37,6 +37,8 @@ pub(in crate::data::executor) enum UndoEntry {
         /// The redb storage key. `.surrogate()` recovers the numeric surrogate
         /// FTS index rollback needs.
         document_id: nodedb_types::StorageKey,
+        /// The row's client identity, as the deferred event names it.
+        identity: nodedb_types::RowIdentity,
         /// `None` if the document didn't exist before (inserted); `Some(bytes)`
         /// if it was overwritten (updated).
         old_value: Option<Vec<u8>>,
@@ -68,6 +70,8 @@ pub(in crate::data::executor) enum UndoEntry {
         /// delete cascade removed this document's postings, and a
         /// rolled-back delete recomputes and re-inserts them under it.
         document_id: nodedb_types::StorageKey,
+        /// The row's client identity, as the deferred event names it.
+        identity: nodedb_types::RowIdentity,
         old_value: Vec<u8>,
         /// System-time key of the versioned tombstone row this op appended on a
         /// bitemporal collection. `None` = plain op → re-insert via the

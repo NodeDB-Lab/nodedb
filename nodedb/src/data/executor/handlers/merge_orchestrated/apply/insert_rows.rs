@@ -14,7 +14,7 @@ use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::StorageKey;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_types::Surrogate;
 
 use super::super::abort::MergeAbort;
@@ -35,6 +35,9 @@ pub(super) struct InsertRowsCtx<'a> {
     /// Source join value → Control-Plane-pre-assigned surrogate, verified
     /// against `inserts` by the caller before this arm runs.
     pub(super) surrogate_for: &'a HashMap<&'a str, u32>,
+    /// The target's declared `PRIMARY KEY` column, when it has one. Names
+    /// each row in its event and redo entry.
+    pub(super) declared_primary_key: Option<&'a str>,
 }
 
 /// Mutable accumulators the INSERT arm folds into. Owned by the caller for
@@ -70,6 +73,7 @@ impl CoreLoop {
             returning,
             resolved_sum_targets,
             surrogate_for,
+            declared_primary_key,
         } = ctx;
         let InsertRowsTally {
             affected,
@@ -100,8 +104,11 @@ impl CoreLoop {
                 }
             };
             let storage_key = StorageKey::for_surrogate(surrogate);
-            let row_key = storage_key.to_string();
-            applied_keys.push(row_key.clone());
+            applied_keys.push(storage_key.to_string());
+            // The identity INSERT minted for this row, from its MessagePack
+            // body: the declared primary key, else the decimal surrogate.
+            let row_identity =
+                RowIdentity::of_stored_row(&ins.body, declared_primary_key, storage_key);
             match self.apply_point_put(
                 txn,
                 PointPutParams {
@@ -158,6 +165,7 @@ impl CoreLoop {
                     if has_vectors {
                         write_set.push(WriteSetEntry {
                             surrogate: surrogate.as_u32(),
+                            identity: row_identity.clone(),
                             is_delete: false,
                             value: ins.body.clone(),
                             collection: None,
@@ -179,7 +187,7 @@ impl CoreLoop {
                             }
                         }
                     }
-                    put_events.push((row_key, ins.body.as_slice(), None));
+                    put_events.push((row_identity, ins.body.as_slice(), None));
                     *affected += 1;
                 }
                 Err(e) => {

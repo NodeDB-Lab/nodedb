@@ -34,7 +34,7 @@ fn make_write_event(seq: u64, lsn_val: u64) -> WriteEvent {
         sequence: seq,
         collection: Arc::from("test_collection"),
         op: WriteOp::Insert,
-        row_id: RowId::new("row-1"),
+        row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
         lsn: Lsn::new(lsn_val),
         database_id: DatabaseId::DEFAULT,
         tenant_id: TenantId::new(1),

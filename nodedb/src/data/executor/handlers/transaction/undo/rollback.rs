@@ -207,6 +207,7 @@ mod tests {
             UndoEntry::PutDocument {
                 collection: "c".into(),
                 document_id: d1,
+                identity: d1.to_identity(),
                 old_value: None,
                 bitemporal_sys_from_ms: Some(1_000),
                 bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -217,6 +218,7 @@ mod tests {
             UndoEntry::DeleteDocument {
                 collection: "c".into(),
                 document_id: d1,
+                identity: d1.to_identity(),
                 old_value: b"v1".to_vec(),
                 bitemporal_sys_from_ms: Some(2_000),
                 bitemporal_index_tuples: vec![("status".into(), "active".into())],

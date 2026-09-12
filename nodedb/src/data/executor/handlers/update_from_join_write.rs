@@ -5,12 +5,14 @@
 //! into its materialized-sum target and re-indexing its vectors.
 
 use nodedb_physical::physical_plan::ResolvedSumTarget;
+use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorReindex;
 use crate::data::executor::handlers::returning_doc;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
 
 use super::update_from_join_types::ResolvedUpdateRow;
@@ -35,7 +37,10 @@ pub(in crate::data::executor) struct WriteResolvedRowsCtx<'a> {
     pub target_collection: &'a str,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
     pub has_vectors: bool,
-    pub is_strict: bool,
+    /// The target collection's strict schema, when it stores Binary Tuples.
+    pub strict_schema: Option<&'a StrictSchema>,
+    /// The target collection's declared `PRIMARY KEY` column, when it has one.
+    pub declared_primary_key: Option<&'a str>,
     pub want_returning: bool,
 }
 
@@ -55,9 +60,11 @@ impl CoreLoop {
             target_collection,
             resolved_sum_targets,
             has_vectors,
-            is_strict,
+            strict_schema,
+            declared_primary_key,
             want_returning,
         } = ctx;
+        let is_strict = strict_schema.is_some();
         let database_id = task.request.database_id.as_u64();
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -180,7 +187,16 @@ impl CoreLoop {
                 // `collect_update_from_join_rows`; `emit_put_event` derives
                 // `WriteOp::Update` from the Some prior + Some new pair and
                 // handles strict->msgpack conversion on both sides.
-                let row_identity = storage_key.to_identity();
+                //
+                // The identity is the one INSERT minted: the declared primary
+                // key when the collection declares one, else the decimal
+                // surrogate. The redo entry below journals the same identity.
+                let row_identity = stored_row_identity(
+                    &updated_bytes,
+                    strict_schema,
+                    declared_primary_key,
+                    storage_key,
+                );
                 // `row_identity` is read again below for `RETURNING`'s `id`
                 // field, so the event-emit boundary gets a clone rather than
                 // the move.
@@ -212,6 +228,7 @@ impl CoreLoop {
                     }
                     write_set.push(WriteSetEntry {
                         surrogate: storage_key.surrogate().as_u32(),
+                        identity: row_identity.clone(),
                         is_delete: false,
                         value: updated_bytes,
                         collection: None,

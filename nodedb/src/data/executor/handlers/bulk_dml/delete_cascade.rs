@@ -8,10 +8,12 @@
 //! on failure — each step logs and continues rather than aborting a
 //! statement it cannot undo.
 
+use nodedb_types::columnar::StrictSchema;
 use tracing::warn;
 
 use crate::bridge::envelope::WriteSetEntry;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::{IndexPath, StorageKey};
 
@@ -27,6 +29,11 @@ pub(in crate::data::executor) struct BulkDeleteRowCascade<'a> {
     /// The row's pre-deletion bytes, as `sparse.delete` returned them —
     /// never re-read.
     pub deleted_bytes: &'a [u8],
+    /// The collection's strict schema, when it stores Binary Tuples. Decodes
+    /// `deleted_bytes` so the row's identity column is readable.
+    pub strict_schema: Option<&'a StrictSchema>,
+    /// The collection's declared `PRIMARY KEY` column, when it has one.
+    pub declared_primary_key: Option<&'a str>,
     pub has_vectors: bool,
     pub index_paths: &'a [IndexPath],
     /// The pre-deletion document, when the caller captured one (`RETURNING`
@@ -54,11 +61,23 @@ impl CoreLoop {
             doc_id,
             storage_key,
             deleted_bytes,
+            strict_schema,
+            declared_primary_key,
             has_vectors,
             index_paths,
             pre_delete_doc,
             returning,
         } = cascade;
+
+        // The identity INSERT minted for this row: its declared primary key
+        // when the collection declares one, else its decimal surrogate. The
+        // redo entry and the delete event both name the row by it.
+        let row_identity = stored_row_identity(
+            deleted_bytes,
+            strict_schema,
+            declared_primary_key,
+            storage_key,
+        );
 
         // Cascade: inverted index.
         let row_surrogate = storage_key.surrogate();
@@ -137,6 +156,7 @@ impl CoreLoop {
         if has_vectors {
             write_set.push(WriteSetEntry {
                 surrogate: row_surrogate.as_u32(),
+                identity: row_identity.clone(),
                 is_delete: true,
                 value: Vec::new(),
                 collection: None,
@@ -158,11 +178,10 @@ impl CoreLoop {
             collection,
             deleted_bytes,
         );
-        let event_identity = storage_key.to_identity();
         self.emit_document_delete_event(
             task,
             collection,
-            event_identity,
+            row_identity,
             Some(old_converted.as_deref().unwrap_or(deleted_bytes)),
         );
         if returning && let Some(doc) = pre_delete_doc {

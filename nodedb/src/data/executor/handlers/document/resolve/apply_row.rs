@@ -15,12 +15,14 @@ use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, W
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::StorageKey;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 /// One already-decided row write, as the apply loop hands it over.
 pub(super) struct ApplyResolvedPut<'a> {
     pub tid: u64,
     pub collection: &'a str,
+    /// The row's client identity, as `RETURNING` and CDC name it.
+    pub document_id: &'a str,
     pub surrogate: Surrogate,
     /// Pre-encode MessagePack body — the write path encodes the strict Binary
     /// Tuple from it.
@@ -50,6 +52,7 @@ impl CoreLoop {
         let ApplyResolvedPut {
             tid,
             collection,
+            document_id,
             surrogate,
             value,
             precondition,
@@ -57,6 +60,9 @@ impl CoreLoop {
         } = put;
         let database_id = task.request.database_id.as_u64();
         let storage_key = StorageKey::for_surrogate(surrogate);
+        // The resolve pass carried the identity INSERT minted for this row;
+        // the event and the redo entry both name the row by it.
+        let row_identity = RowIdentity::from_user_key(document_id);
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
         // HNSW insert appends rather than replaces, so the prior embedding
@@ -150,7 +156,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            storage_key.to_identity(),
+            row_identity.clone(),
             &stored_bytes,
             precondition,
         );
@@ -162,6 +168,7 @@ impl CoreLoop {
         if has_vectors {
             write_set.push(WriteSetEntry {
                 surrogate: surrogate.as_u32(),
+                identity: row_identity,
                 is_delete: false,
                 value: value.to_vec(),
                 collection: None,
@@ -255,7 +262,7 @@ impl CoreLoop {
             self.emit_document_delete_event(
                 task,
                 collection,
-                StorageKey::for_surrogate(surrogate).to_identity(),
+                RowIdentity::from_user_key(document_id),
                 Some(old_converted.as_deref().unwrap_or(prior_bytes)),
             );
         }

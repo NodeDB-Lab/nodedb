@@ -212,22 +212,14 @@ impl CoreLoop {
         task: &super::super::task::ExecutionTask,
         edge: GraphEdgeEvent<'_>,
     ) {
-        let row_id = crate::event::graph_cdc::edge_row_id(edge.src_id, edge.label, edge.dst_id);
-        let identity = crate::engine::document::store::RowIdentity::from_user_key(row_id);
+        let row_id = crate::event::types::RowId::edge(edge.src_id, edge.label, edge.dst_id);
         let (new_value, old_value): (Option<&[u8]>, Option<&[u8]>) =
             if matches!(edge.op, crate::event::WriteOp::Delete) {
                 (None, None)
             } else {
                 (edge.properties, None)
             };
-        self.emit_write_event(
-            task,
-            edge.collection,
-            edge.op,
-            identity,
-            new_value,
-            old_value,
-        );
+        self.emit_event_with_row_id(task, edge.collection, edge.op, row_id, new_value, old_value);
     }
 
     /// Set the Event Plane producer (called after open, before event loop).
@@ -235,7 +227,7 @@ impl CoreLoop {
         self.event_producer = Some(producer);
     }
 
-    /// Emit a write event to the Event Plane.
+    /// Emit a write event for one row to the Event Plane.
     ///
     /// Called after a successful write (PointPut, PointDelete, PointUpdate,
     /// BatchInsert, BulkDelete, atomic KV ops, etc.). The Data Plane NEVER
@@ -259,6 +251,29 @@ impl CoreLoop {
         new_value: Option<&[u8]>,
         old_value: Option<&[u8]>,
     ) {
+        self.emit_event_with_row_id(
+            task,
+            collection,
+            op,
+            crate::event::types::RowId::row(identity),
+            new_value,
+            old_value,
+        );
+    }
+
+    /// Emit a write event carrying any [`crate::event::types::RowId`].
+    ///
+    /// [`Self::emit_write_event`] is the entry point for single rows. Edge
+    /// events name an `(src, label, dst)` triple and call this directly.
+    pub(in crate::data::executor) fn emit_event_with_row_id(
+        &mut self,
+        task: &super::super::task::ExecutionTask,
+        collection: &str,
+        op: crate::event::WriteOp,
+        row_id: crate::event::types::RowId,
+        new_value: Option<&[u8]>,
+        old_value: Option<&[u8]>,
+    ) {
         let producer = match self.event_producer.as_mut() {
             Some(p) => p,
             None => return, // Event Plane not configured.
@@ -273,7 +288,7 @@ impl CoreLoop {
             sequence: self.event_sequence,
             collection: Arc::from(collection),
             op,
-            row_id: crate::event::types::RowId::new(identity.into_string()),
+            row_id,
             lsn: self.watermark,
             database_id: task.request.database_id,
             tenant_id: task.request.tenant_id,
@@ -307,7 +322,7 @@ impl CoreLoop {
             sequence: self.event_sequence,
             collection: Arc::from("_heartbeat"),
             op: crate::event::WriteOp::Heartbeat,
-            row_id: crate::event::types::RowId::new(""),
+            row_id: crate::event::types::RowId::Heartbeat,
             // watermark = last committed LSN. Correct for heartbeats: uncommitted
             // writes should NOT advance the Event Plane's watermark.
             lsn: self.watermark,

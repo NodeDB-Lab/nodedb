@@ -11,6 +11,7 @@ use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorR
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::{OllpPredictedEdge, ResolvedSumTarget, ReturningSpec};
@@ -365,7 +366,16 @@ impl CoreLoop {
             // Event Plane's WAL-replay bulk variants are aggregate
             // metadata reconstructed only when the live per-row events
             // were lost — the live path always emits per row.
-            let row_identity = storage_key.to_identity();
+            //
+            // The identity is the one INSERT minted: the declared primary
+            // key when the collection declares one, else the decimal
+            // surrogate. The redo entry below journals the same identity.
+            let row_identity = stored_row_identity(
+                &updated_bytes,
+                strict_schema.as_ref(),
+                declared_primary_key,
+                storage_key,
+            );
             // `row_identity` is read again below for `RETURNING`'s `id` field,
             // so the event-emit boundary gets a clone rather than the move.
             self.emit_put_event(
@@ -391,6 +401,7 @@ impl CoreLoop {
             if has_vectors {
                 write_set.push(WriteSetEntry {
                     surrogate: surrogate.as_u32(),
+                    identity: row_identity,
                     is_delete: false,
                     value: updated_bytes,
                     collection: None,

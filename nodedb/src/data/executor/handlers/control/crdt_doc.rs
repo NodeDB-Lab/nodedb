@@ -113,11 +113,14 @@ impl CoreLoop {
         let response = if let Some(bytes) = materialized {
             self.materialize_document_write(
                 task,
-                tenant_id.as_u64(),
-                collection,
-                surrogate,
-                &bytes,
-                true,
+                super::crdt_materialize::CrdtMaterializeWrite {
+                    tid: tenant_id.as_u64(),
+                    collection,
+                    document_id,
+                    surrogate,
+                    value: &bytes,
+                    index_text: true,
+                },
             );
             if let Some(spec) = returning {
                 // No strict schema: a CRDT row's stored body is whatever
@@ -267,7 +270,7 @@ impl CoreLoop {
             self.emit_document_delete_event(
                 task,
                 collection,
-                storage_key.to_identity(),
+                RowIdentity::from_user_key(document_id),
                 Some(old_converted.as_deref().unwrap_or(prior_bytes)),
             );
         }

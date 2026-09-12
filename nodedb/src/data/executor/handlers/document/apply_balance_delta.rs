@@ -52,6 +52,8 @@ pub(in crate::data::executor) struct ApplyBalanceDeltaParams<'a> {
     pub delta: &'a str,
     pub join_column: &'a str,
     pub join_value: &'a str,
+    /// The TARGET collection's declared `PRIMARY KEY` column, when it has one.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -69,6 +71,7 @@ impl CoreLoop {
             delta,
             join_column,
             join_value,
+            declared_primary_key,
         } = params;
         debug!(
             core = self.core_id,
@@ -115,6 +118,7 @@ impl CoreLoop {
                 join_column,
                 join_value,
                 wal_lsn: task.wal_lsn(),
+                target_declared_primary_key: declared_primary_key,
             },
         ) {
             Ok(write) => write,
@@ -145,6 +149,7 @@ impl CoreLoop {
         let mut response = self.response_affected(task, 1);
         response.write_set = vec![crate::bridge::envelope::WriteSetEntry {
             surrogate: write.surrogate.as_u32(),
+            identity: write.identity,
             is_delete: false,
             value: write.body,
             // Always `Some`: the row lives in the TARGET collection, and the

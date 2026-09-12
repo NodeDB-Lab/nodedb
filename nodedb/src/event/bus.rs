@@ -222,7 +222,7 @@ mod tests {
             sequence: seq,
             collection: Arc::from("test"),
             op: WriteOp::Insert,
-            row_id: RowId::new("row-1"),
+            row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
             lsn: Lsn::new(seq),
             database_id: DatabaseId::new(7),
             tenant_id: TenantId::new(1),

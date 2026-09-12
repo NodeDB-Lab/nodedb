@@ -45,6 +45,9 @@ pub(in crate::data::executor) struct BulkDeleteParams<'a> {
     /// Plane from its recon scan of the same predicate.
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
     pub ollp: OllpPrediction<'a>,
+    /// The collection's declared `PRIMARY KEY` column, when it has one. Names
+    /// each removed row in its redo entry and delete event.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -67,6 +70,7 @@ impl CoreLoop {
             rls_write_check,
             resolved_sum_targets,
             ollp,
+            declared_primary_key,
         } = params;
         let ollp_predicted_surrogates = ollp.surrogates;
         let ollp_predicted_edges = ollp.edges;
@@ -353,6 +357,8 @@ impl CoreLoop {
                         doc_id: doc_id.as_str(),
                         storage_key: *storage_key,
                         deleted_bytes: bytes,
+                        strict_schema: strict_schema.as_ref(),
+                        declared_primary_key,
                         has_vectors,
                         index_paths: &index_paths,
                         pre_delete_doc,

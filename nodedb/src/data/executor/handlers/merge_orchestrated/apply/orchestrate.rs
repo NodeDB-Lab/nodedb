@@ -133,6 +133,7 @@ impl CoreLoop {
                 has_vectors,
                 returning: params.returning.is_some(),
                 resolved_sum_targets: params.resolved_sum_targets,
+                declared_primary_key: params.declared_primary_key,
             },
             UpdateRowsTally {
                 affected: &mut affected,
@@ -159,6 +160,7 @@ impl CoreLoop {
                 returning: params.returning.is_some(),
                 resolved_sum_targets: params.resolved_sum_targets,
                 surrogate_for: &surrogate_for,
+                declared_primary_key: params.declared_primary_key,
             },
             InsertRowsTally {
                 affected: &mut affected,
@@ -210,8 +212,7 @@ impl CoreLoop {
         self.checkpoint_coordinator
             .mark_dirty("sparse", put_events.len());
 
-        for (row_key, body, prior) in &put_events {
-            let identity = crate::engine::document::store::identity_of(row_key);
+        for (identity, body, prior) in put_events {
             self.emit_put_event(
                 task,
                 tid,
@@ -234,6 +235,7 @@ impl CoreLoop {
                 has_vectors,
                 returning: params.returning.is_some(),
                 resolved_targets: params.resolved_sum_targets,
+                declared_primary_key: params.declared_primary_key,
             },
             MergeDeleteTally {
                 affected: &mut affected,

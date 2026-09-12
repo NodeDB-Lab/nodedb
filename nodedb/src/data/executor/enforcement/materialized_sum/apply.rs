@@ -70,7 +70,7 @@ use redb::WriteTransaction;
 use rust_decimal::Decimal;
 
 use nodedb_physical::physical_plan::MaterializedSumBinding;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::delta::fold_sum_deltas;
 use super::rmw::BalanceRmw;
@@ -87,6 +87,10 @@ pub(in crate::data::executor) struct TargetWrite {
     /// The target row's surrogate, so an undo entry addresses the same identity
     /// the forward write used.
     pub surrogate: Surrogate,
+    /// The target row's client identity: its declared primary key when the
+    /// target declares one, else its decimal surrogate. The redo entry and the
+    /// target row's event both name the row by it.
+    pub identity: RowIdentity,
     /// The MessagePack body this write handed to `apply_point_put` — NOT the
     /// bytes that reached storage.
     ///
@@ -248,6 +252,7 @@ impl CoreLoop {
                 join_column: &binding.join_column,
                 join_value,
                 wal_lsn: ctx.wal_lsn,
+                target_declared_primary_key: binding.declared_primary_key.as_deref(),
             },
         )
     }
@@ -347,6 +352,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -915,6 +921,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -937,7 +944,15 @@ mod tests {
 
         let resolved = resolved_onto_target(&[(ACCOUNT_A, SURROGATE_A), (ACCOUNT_B, SURROGATE_B)]);
         let task = make_default_task();
-        let response = core.execute_truncate(&task, TID, SOURCE, &resolved);
+        let response = core.execute_truncate(
+            &task,
+            TID,
+            crate::data::executor::handlers::truncate::TruncateParams {
+                collection: SOURCE,
+                resolved_sum_targets: &resolved,
+                declared_primary_key: None,
+            },
+        );
 
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
         assert_eq!(balance_of(&core, SURROGATE_A), "0");
@@ -1092,6 +1107,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -1170,6 +1186,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -1236,6 +1253,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 

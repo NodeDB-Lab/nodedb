@@ -430,6 +430,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             restart_identity: false,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         let before = plan.clone();
         assert!(inject(&mut plan, &store).is_ok());

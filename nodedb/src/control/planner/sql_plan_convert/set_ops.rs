@@ -71,6 +71,8 @@ pub(super) fn convert_truncate(
             // Filled in by the materialized-sum resolution pass, which recon-
             // scans the rows this TRUNCATE will remove.
             resolved_sum_targets: Vec::new(),
+            // Names the column each removed row's identity is read from.
+            declared_primary_key: super::dml::declared_primary_key_name(ctx, collection)?,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

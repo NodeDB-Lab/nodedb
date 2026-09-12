@@ -301,11 +301,13 @@ impl CoreLoop {
         // only writes the document; it no longer derives edges (which mis-homed
         // cross-shard edges by the document's vShard).
 
+        // The plan's `document_id` is the identity INSERT minted for this
+        // row, and the identity the WAL journals for it.
         self.emit_put_event(
             task,
             tid,
             collection,
-            storage_key.to_identity(),
+            document_identity.clone(),
             value,
             None,
         );
@@ -371,6 +373,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 

@@ -50,7 +50,7 @@ impl CoreLoop {
                 sequence: self.event_sequence,
                 collection: Arc::from(write.collection.as_str()),
                 op: write.op,
-                row_id: RowId::new(write.identity.as_str()),
+                row_id: RowId::row(write.identity),
                 lsn: self.watermark,
                 database_id,
                 tenant_id,

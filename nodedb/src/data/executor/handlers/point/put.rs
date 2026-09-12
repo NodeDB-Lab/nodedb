@@ -214,11 +214,13 @@ impl CoreLoop {
         // Emit write event to Event Plane. Insert vs Update is derived
         // from whether `prior` was present — a PointPut onto an existing
         // row is an Update from every downstream consumer's perspective.
+        // The plan's `document_id` is the row's client identity, and the
+        // identity the WAL journals for it.
         self.emit_put_event(
             task,
             tid,
             collection,
-            storage_key.to_identity(),
+            document_identity.clone(),
             value,
             prior.prior_value.as_deref(),
         );
@@ -279,6 +281,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 

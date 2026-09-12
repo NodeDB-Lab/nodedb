@@ -4,15 +4,13 @@
 //!
 //! Some write handlers mint no autocommit WAL redo of their own, so a
 //! vector-index rebuild at startup would resurrect a stale embedding. The Data
-//! Plane carries surrogate + post-image in [`Response::write_set`]; the
-//! Control Plane mints the durable redo here.
+//! Plane carries surrogate, client identity, and post-image in
+//! [`Response::write_set`]; the Control Plane mints the durable redo here.
 
 use crate::bridge::envelope::{PhysicalPlan, Response, Status, WriteSetEntry};
-use crate::engine::document::store::StorageKey;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
 use nodedb_physical::physical_plan::DocumentOp;
-use nodedb_types::Surrogate;
 
 use super::document::{encode_document_delete_record, encode_document_put_record};
 
@@ -54,8 +52,10 @@ pub fn plan_post_apply_redo(plan: &PhysicalPlan) -> Option<String> {
 }
 
 /// Append a document redo record for each write-set entry, returning the last
-/// allocated LSN. Each entry is keyed by `StorageKey::for_surrogate(surrogate)`
-/// so replay keys on the same identity. Called under the write-admission guard.
+/// allocated LSN. Each record journals `entry.identity` as its `document_id`
+/// and `entry.surrogate` in the `u32` slot, so the Event Plane replay names
+/// the row the way a live event does and the Data Plane replay keys on the
+/// surrogate. Called under the write-admission guard.
 pub fn append_write_set_redo(
     wal: &WalManager,
     tenant_id: TenantId,
@@ -67,7 +67,6 @@ pub fn append_write_set_redo(
     let mut last: Option<Lsn> = None;
     for entry in write_set {
         let entry_collection = entry.collection.as_deref().unwrap_or(collection);
-        let doc_id = StorageKey::for_surrogate(Surrogate::new(entry.surrogate)).to_string();
         // A cross-collection entry homes to a different vShard, so it's re-derived
         // per entry rather than reusing the caller-hoisted `vshard_id`.
         let entry_vshard_id = match &entry.collection {
@@ -75,12 +74,16 @@ pub fn append_write_set_redo(
             None => vshard_id,
         };
         let lsn = if entry.is_delete {
-            let record = encode_document_delete_record(entry_collection, &doc_id, entry.surrogate)?;
+            let record = encode_document_delete_record(
+                entry_collection,
+                entry.identity.as_str(),
+                entry.surrogate,
+            )?;
             wal.append_delete(tenant_id, entry_vshard_id, database_id, &record)?
         } else {
             let record = encode_document_put_record(
                 entry_collection,
-                &doc_id,
+                entry.identity.as_str(),
                 &entry.value,
                 entry.surrogate,
             )?;
@@ -119,8 +122,8 @@ pub fn mint_dispatch_local_redo(
 mod tests {
     use super::*;
     use nodedb_physical::physical_plan::ReturningSpec;
-    use nodedb_types::QualifiedCollection;
     use nodedb_types::sync::wire::SyncProvenance;
+    use nodedb_types::{QualifiedCollection, RowIdentity, Surrogate};
 
     fn open_wal(dir: &std::path::Path) -> WalManager {
         WalManager::open_for_testing(&dir.join("test.wal")).expect("open wal")
@@ -245,6 +248,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let entries = vec![WriteSetEntry {
             surrogate: 9,
+            identity: RowIdentity::for_surrogate(Surrogate::new(9)),
             is_delete: false,
             value: vec![1, 2, 3],
             collection: None,
@@ -273,8 +277,8 @@ mod tests {
             .expect("decode put payload");
         assert_eq!(collection, "docs");
         assert_eq!(
-            document_id,
-            StorageKey::for_surrogate(Surrogate::new(9)).to_string()
+            document_id, "9",
+            "a minted row journals its decimal surrogate"
         );
         assert_eq!(value, vec![1, 2, 3]);
         assert_eq!(surrogate, 9);
@@ -286,6 +290,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let entries = vec![WriteSetEntry {
             surrogate: 9,
+            identity: RowIdentity::for_surrogate(Surrogate::new(9)),
             is_delete: true,
             value: Vec::new(),
             collection: None,
@@ -307,10 +312,45 @@ mod tests {
                 .expect("decode delete payload");
         assert_eq!(collection, "docs");
         assert_eq!(
-            document_id,
-            StorageKey::for_surrogate(Surrogate::new(9)).to_string()
+            document_id, "9",
+            "a minted row journals its decimal surrogate"
         );
         assert_eq!(surrogate, 9);
+    }
+
+    #[test]
+    fn write_set_journals_declared_pk_identity_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let entries = vec![WriteSetEntry {
+            surrogate: 9,
+            identity: RowIdentity::from_user_key("order-1"),
+            is_delete: false,
+            value: vec![1, 2, 3],
+            collection: None,
+        }];
+
+        append_write_set_redo(
+            &wal,
+            TenantId::new(1),
+            VShardId::new(0),
+            DatabaseId::DEFAULT,
+            "docs",
+            &entries,
+        )
+        .expect("append");
+
+        let record = last_record_of_type(&wal, nodedb_wal::record::RecordType::Put);
+        let (_collection, document_id, _value, _prov, surrogate) =
+            zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>, u32)>(
+                &record.payload,
+            )
+            .expect("decode put payload");
+        assert_eq!(
+            document_id, "order-1",
+            "declared PK is journaled as written"
+        );
+        assert_eq!(surrogate, 9, "the surrogate slot still keys storage replay");
     }
 
     #[test]

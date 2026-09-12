@@ -208,6 +208,7 @@ mod tests {
         UndoEntry::PutDocument {
             collection: collection.to_string(),
             document_id: nodedb_types::StorageKey::for_surrogate(Surrogate::new(1)),
+            identity: nodedb_types::StorageKey::for_surrogate(Surrogate::new(1)).to_identity(),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -221,6 +222,7 @@ mod tests {
         UndoEntry::DeleteDocument {
             collection: collection.to_string(),
             document_id: nodedb_types::StorageKey::for_surrogate(Surrogate::new(2)),
+            identity: nodedb_types::StorageKey::for_surrogate(Surrogate::new(2)).to_identity(),
             old_value: Vec::new(),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),

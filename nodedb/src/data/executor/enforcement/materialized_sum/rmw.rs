@@ -26,7 +26,7 @@
 use redb::WriteTransaction;
 use rust_decimal::Decimal;
 
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::apply::TargetWrite;
 use super::delta::json_to_decimal;
@@ -56,6 +56,9 @@ pub(in crate::data::executor) struct BalanceRmw<'a> {
     /// Join value that resolved to `surrogate`, for the typed not-found error.
     pub join_value: &'a str,
     pub wal_lsn: Option<Lsn>,
+    /// The TARGET collection's declared `PRIMARY KEY` column, when it has
+    /// one. Names the target row in its event and redo entry.
+    pub target_declared_primary_key: Option<&'a str>,
 }
 
 impl BalanceRmw<'_> {
@@ -189,9 +192,15 @@ impl CoreLoop {
             }
         };
 
+        // The identity INSERT minted for the target row, read from the
+        // MessagePack body just written: the declared primary key when the
+        // target declares one, else the decimal surrogate.
+        let identity =
+            RowIdentity::of_stored_row(&body, params.target_declared_primary_key, storage_key);
         Ok(TargetWrite {
             collection: params.target_collection.to_string(),
             surrogate: params.surrogate,
+            identity,
             body,
             outcome,
         })

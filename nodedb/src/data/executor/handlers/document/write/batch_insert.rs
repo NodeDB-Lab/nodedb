@@ -145,13 +145,15 @@ impl CoreLoop {
         let has_vectors = self.collection_has_vectors(database_id, tid, collection)
             || self.collection_has_sparse(database_id, tid, collection);
 
-        // Row key + storage key for post-commit event emission and cache
+        // Row identity + storage key for post-commit event emission and cache
         // invalidation, captured as each row applies successfully; the value
         // bytes are re-borrowed from `documents` after commit rather than
         // cloned here. On any error we return early (dropping `txn`, which
         // rolls back every row applied so far).
-        let mut applied: Vec<(String, nodedb_types::StorageKey)> =
-            Vec::with_capacity(documents.len());
+        let mut applied: Vec<(
+            crate::engine::document::store::RowIdentity,
+            nodedb_types::StorageKey,
+        )> = Vec::with_capacity(documents.len());
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
         // Per-row secondary-index tuples (added ∪ removed ∪ bitemporal),
         // parallel to `applied`. Recorded into the per-index write-value
@@ -178,7 +180,10 @@ impl CoreLoop {
         for (i, (document_id, value)) in documents.iter().enumerate() {
             let surrogate = surrogates[i];
             let key = nodedb_types::StorageKey::for_surrogate(surrogate);
-            let row_key = key.to_string();
+            // The plan's `document_id` is the identity INSERT minted for this
+            // row: the declared primary key value, else the decimal surrogate.
+            let row_identity =
+                crate::engine::document::store::RowIdentity::from_user_key(document_id.as_str());
             // Every row of a batch insert is INSERT-shaped, so every row is a
             // chain link. The chain rewrites the BODY, so it runs before the
             // body is encoded and stored. The link covers the user-visible
@@ -187,9 +192,7 @@ impl CoreLoop {
             let chained = match chain.chain_insert(self, database_id, tid, document_id, value) {
                 Ok(chained) => chained,
                 Err(e) => {
-                    // `key` is `Copy`, so this costs nothing and `row_key`
-                    // stays borrowed by the parameters of the call this arm
-                    // is handling.
+                    // `key` is `Copy`, so this costs nothing.
                     failure = Some((key, e));
                     break;
                 }
@@ -234,9 +237,7 @@ impl CoreLoop {
             ) {
                 Ok(enforcement) => enforcement,
                 Err(e) => {
-                    // `key` is `Copy`, so this costs nothing and `row_key`
-                    // stays borrowed by the parameters of the call this arm
-                    // is handling.
+                    // `key` is `Copy`, so this costs nothing.
                     failure = Some((key, e));
                     break;
                 }
@@ -249,6 +250,7 @@ impl CoreLoop {
             if has_vectors {
                 write_set.push(WriteSetEntry {
                     surrogate: surrogate.as_u32(),
+                    identity: row_identity.clone(),
                     is_delete: false,
                     value: value.clone(),
                     collection: None,
@@ -260,7 +262,7 @@ impl CoreLoop {
                 tuples.extend(outcome.bitemporal_index_tuples);
                 row_index_tuples.push(tuples);
             }
-            applied.push((row_key, key));
+            applied.push((row_identity, key));
         }
 
         if let Some((failed_key, error)) = failure {
@@ -331,8 +333,7 @@ impl CoreLoop {
             m.record_document_insert();
         }
 
-        for (i, (_, key)) in applied.iter().enumerate() {
-            let identity = key.to_identity();
+        for (i, (identity, _)) in applied.into_iter().enumerate() {
             self.emit_put_event(task, tid, collection, identity, &documents[i].1, None);
         }
 
@@ -599,6 +600,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 

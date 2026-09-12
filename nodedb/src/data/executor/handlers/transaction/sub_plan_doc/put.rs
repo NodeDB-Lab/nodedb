@@ -293,6 +293,7 @@ impl CoreLoop {
             undo_log.push(UndoEntry::PutDocument {
                 collection: target.collection,
                 document_id: nodedb_types::StorageKey::for_surrogate(target.surrogate),
+                identity: target.identity,
                 old_value: target.outcome.prior_value,
                 bitemporal_sys_from_ms: target.outcome.bitemporal_sys_from_ms,
                 bitemporal_index_tuples: target.outcome.bitemporal_index_tuples,
@@ -320,6 +321,8 @@ impl CoreLoop {
         undo_log.push(UndoEntry::PutDocument {
             collection: collection.to_string(),
             document_id: storage_key,
+            // The plan's `document_id` is the row's client identity.
+            identity: nodedb_types::RowIdentity::from_user_key(document_id),
             old_value: outcome.prior_value,
             bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
             bitemporal_index_tuples: outcome.bitemporal_index_tuples,

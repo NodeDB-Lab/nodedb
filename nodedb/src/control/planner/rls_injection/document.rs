@@ -469,6 +469,7 @@ mod tests {
             ),
             restart_identity: false,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert_write_refused(inject(&mut plan, &store), "orders");
     }

@@ -10,30 +10,101 @@
 
 use std::sync::Arc;
 
+use nodedb_types::RowIdentity;
 use sonic_rs;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
-/// Identifies a row within a collection. Wraps the document/row ID string.
+/// The row an event names, as the client sees it.
 ///
-/// Separate from `DocumentId` (nodedb-types) because event row IDs are
-/// ephemeral references into the event payload, not owned document handles.
+/// A `Row` carries the same [`RowIdentity`] INSERT minted for the row: the
+/// declared `PRIMARY KEY` value when the collection declares one, else the
+/// decimal surrogate. The live emit path and WAL replay both build it from
+/// that identity, never from a storage key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RowId(pub Arc<str>);
+pub enum RowId {
+    /// A document, KV, or graph-node row.
+    Row(RowIdentity),
+    /// A KV batch op that names no single row.
+    Batch,
+    /// A graph edge, named by its endpoints and label. Boxed so every
+    /// event on the ring pays for one identity, not four strings.
+    Edge(Box<EdgeRowId>),
+    /// An idle heartbeat, which names no row.
+    Heartbeat,
+}
 
-impl RowId {
-    pub fn new(id: impl Into<Arc<str>>) -> Self {
-        Self(id.into())
+/// Text a [`RowId::Batch`] renders as.
+const BATCH_ROW_ID: &str = "_batch";
+
+/// A graph edge's `(src, label, dst)` identity with its composite text.
+///
+/// The text is what [`crate::event::graph_cdc::edge_row_id`] builds, rendered
+/// once at construction so `as_str` allocates nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EdgeRowId {
+    src: String,
+    label: String,
+    dst: String,
+    rendered: String,
+}
+
+impl EdgeRowId {
+    pub fn src(&self) -> &str {
+        &self.src
     }
 
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn dst(&self) -> &str {
+        &self.dst
+    }
+
+    /// The composite `src\u{1}label\u{1}dst` text.
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.rendered
+    }
+}
+
+impl RowId {
+    /// Name a single row by its client identity.
+    pub fn row(identity: RowIdentity) -> Self {
+        Self::Row(identity)
+    }
+
+    /// Name a graph edge by its `(src, label, dst)` triple.
+    pub fn edge(src: impl Into<String>, label: impl Into<String>, dst: impl Into<String>) -> Self {
+        let src = src.into();
+        let label = label.into();
+        let dst = dst.into();
+        let rendered = crate::event::graph_cdc::edge_row_id(&src, &label, &dst);
+        Self::Edge(Box::new(EdgeRowId {
+            src,
+            label,
+            dst,
+            rendered,
+        }))
+    }
+
+    /// The row id as text, without allocating.
+    ///
+    /// `Row` yields the identity text, `Batch` yields `"_batch"`, `Edge`
+    /// yields the rendered composite, and `Heartbeat` yields `""`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Row(identity) => identity.as_str(),
+            Self::Batch => BATCH_ROW_ID,
+            Self::Edge(edge) => edge.as_str(),
+            Self::Heartbeat => "",
+        }
     }
 }
 
 impl std::fmt::Display for RowId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -200,9 +271,38 @@ mod tests {
 
     #[test]
     fn row_id_display() {
-        let id = RowId::new("doc-123");
+        let id = RowId::row(RowIdentity::from_user_key("doc-123"));
         assert_eq!(id.as_str(), "doc-123");
         assert_eq!(id.to_string(), "doc-123");
+    }
+
+    #[test]
+    fn row_id_surrogate_identity_is_decimal() {
+        let id = RowId::row(RowIdentity::for_surrogate(nodedb_types::Surrogate::new(9)));
+        assert_eq!(id.as_str(), "9");
+    }
+
+    #[test]
+    fn row_id_batch_and_heartbeat_text() {
+        assert_eq!(RowId::Batch.as_str(), "_batch");
+        assert_eq!(RowId::Heartbeat.as_str(), "");
+    }
+
+    #[test]
+    fn row_id_edge_matches_graph_cdc_composition() {
+        let id = RowId::edge("a", "KNOWS", "b");
+        assert_eq!(
+            id.as_str(),
+            crate::event::graph_cdc::edge_row_id("a", "KNOWS", "b").as_str()
+        );
+        match id {
+            RowId::Edge(edge) => {
+                assert_eq!(edge.src(), "a");
+                assert_eq!(edge.label(), "KNOWS");
+                assert_eq!(edge.dst(), "b");
+            }
+            other => panic!("expected edge row id, got {other:?}"),
+        }
     }
 
     #[test]
@@ -226,7 +326,7 @@ mod tests {
             sequence: 1,
             collection: Arc::from("orders"),
             op: WriteOp::Insert,
-            row_id: RowId::new("order-1"),
+            row_id: RowId::row(RowIdentity::from_user_key("order-1")),
             lsn: Lsn::new(100),
             database_id: DatabaseId::DEFAULT,
             tenant_id: TenantId::new(1),

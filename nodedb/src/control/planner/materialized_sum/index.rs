@@ -115,6 +115,9 @@ impl MaterializedSumIndex {
                         target_column: def.target_column.clone(),
                         join_column: def.join_column.clone(),
                         value_expr: def.value_expr.clone(),
+                        // `target` is the collection the binding writes into,
+                        // so its declared key names the target row.
+                        declared_primary_key: target.declared_primary_key.clone(),
                     });
             }
         }

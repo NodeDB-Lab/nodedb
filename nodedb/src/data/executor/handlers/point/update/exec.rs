@@ -270,7 +270,7 @@ impl CoreLoop {
                             task,
                             tid,
                             collection,
-                            storage_key.to_identity(),
+                            document_identity.clone(),
                             &updated_bytes,
                             Some(&current_bytes),
                         );
@@ -316,6 +316,7 @@ impl CoreLoop {
                         if has_vectors {
                             response.write_set = vec![WriteSetEntry {
                                 surrogate: surrogate.as_u32(),
+                                identity: document_identity,
                                 is_delete: false,
                                 value: updated_bytes,
                                 collection: None,
@@ -378,6 +379,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 

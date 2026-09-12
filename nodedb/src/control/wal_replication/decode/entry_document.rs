@@ -6,7 +6,7 @@
 //! these variants.
 
 use super::super::decode_sync_engines::decode_returning;
-use super::super::types::{ReplicatedSumTarget, ReplicatedWrite};
+use super::super::types::{BalanceDeltaFields, ReplicatedSumTarget, ReplicatedWrite};
 use super::ctx::DecodeCtx;
 use super::document;
 use super::document::{PointInsertOptions, ReturningFields, UpsertExtras, WireSumResolution};
@@ -168,10 +168,12 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             restart_identity,
             resolved_sum_targets,
             resolved_sum_target_bindings,
+            declared_primary_key,
         } => Ok(document::truncate(
             collection,
             *restart_identity,
             &sums(resolved_sum_target_bindings, resolved_sum_targets),
+            declared_primary_key.clone(),
         )),
         ReplicatedWrite::BulkDml {
             collection,
@@ -216,15 +218,17 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             delta,
             join_column,
             join_value,
-        } => Ok(document::apply_balance_delta(
+            declared_primary_key,
+        } => Ok(document::apply_balance_delta(BalanceDeltaFields {
             collection,
             document_id,
-            *surrogate,
+            surrogate: *surrogate,
             column,
             delta,
             join_column,
             join_value,
-        )),
+            declared_primary_key: declared_primary_key.as_deref(),
+        })),
         ReplicatedWrite::DocumentResolvedWrite {
             mutations,
             response_payload,

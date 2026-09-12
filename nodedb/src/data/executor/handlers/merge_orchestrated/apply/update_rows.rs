@@ -12,6 +12,7 @@ use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::RowIdentity;
 
 use super::super::abort::MergeAbort;
 use super::super::apply_support::{MergePutEvent, record_put_index_undo, returning_doc};
@@ -29,6 +30,9 @@ pub(super) struct UpdateRowsCtx<'a> {
     /// Whether the statement carries a `RETURNING` projection.
     pub(super) returning: bool,
     pub(super) resolved_sum_targets: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
+    /// The target's declared `PRIMARY KEY` column, when it has one. Names
+    /// each row in its event and redo entry.
+    pub(super) declared_primary_key: Option<&'a str>,
 }
 
 /// Mutable accumulators the UPDATE arm folds into. Owned by the caller for
@@ -63,6 +67,7 @@ impl CoreLoop {
             has_vectors,
             returning,
             resolved_sum_targets,
+            declared_primary_key,
         } = ctx;
         let UpdateRowsTally {
             affected,
@@ -76,8 +81,10 @@ impl CoreLoop {
 
         for upd in updates {
             let surrogate = upd.key.surrogate();
-            let row_key = upd.key.to_string();
-            applied_keys.push(row_key.clone());
+            applied_keys.push(upd.key.to_string());
+            // The identity INSERT minted for this row, from its MessagePack
+            // body: the declared primary key, else the decimal surrogate.
+            let row_identity = RowIdentity::of_stored_row(&upd.body, declared_primary_key, upd.key);
             // `apply_point_put`'s vector step APPENDS (it never replaces),
             // so an in-place UPDATE must first soft-delete the surrogate's
             // prior embedding or the stale vector keeps scoring in KNN
@@ -155,6 +162,7 @@ impl CoreLoop {
                     if has_vectors {
                         write_set.push(WriteSetEntry {
                             surrogate: surrogate.as_u32(),
+                            identity: row_identity.clone(),
                             is_delete: false,
                             value: upd.body.clone(),
                             collection: None,
@@ -176,7 +184,7 @@ impl CoreLoop {
                             }
                         }
                     }
-                    put_events.push((row_key, upd.body.as_slice(), outcome.prior_value));
+                    put_events.push((row_identity, upd.body.as_slice(), outcome.prior_value));
                     *affected += 1;
                 }
                 Err(e) => {

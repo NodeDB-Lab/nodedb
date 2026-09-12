@@ -7,15 +7,15 @@
 use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
-use crate::engine::document::store::StorageKey;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 use super::plan::MergePlanActions;
 
 /// One committed Phase-A put captured for post-commit event emission:
-/// `(row_key, new stored body borrowed from the plan, prior stored value)`.
-/// The body borrows from the merge plan (owned for the whole apply) rather than
-/// being cloned.
-pub(super) type MergePutEvent<'a> = (String, &'a [u8], Option<Vec<u8>>);
+/// `(row identity, new stored body borrowed from the plan, prior stored value)`.
+/// The identity is the one INSERT minted for the row. The body borrows from
+/// the merge plan (owned for the whole apply) rather than being cloned.
+pub(super) type MergePutEvent<'a> = (RowIdentity, &'a [u8], Option<Vec<u8>>);
 
 /// Record the in-memory index mutations a successful
 /// [`crate::data::executor::core_loop::CoreLoop::apply_point_put`] performed as

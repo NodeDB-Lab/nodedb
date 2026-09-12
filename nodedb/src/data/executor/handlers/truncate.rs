@@ -2,14 +2,27 @@
 
 //! TRUNCATE and ESTIMATE_COUNT handlers.
 
+use nodedb_physical::physical_plan::{ResolvedSumTarget, StorageMode};
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::materialized_sum::divergence::SumTargetCheck;
 use crate::data::executor::enforcement::write_hook;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
+
+/// Borrowed arguments for [`CoreLoop::execute_truncate`].
+pub(in crate::data::executor) struct TruncateParams<'a> {
+    pub collection: &'a str,
+    /// Join-key VALUE → target row surrogate for every materialized-sum
+    /// target the removed rows contribute to, resolved on the Control Plane.
+    pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// The collection's declared `PRIMARY KEY` column, when it has one. Names
+    /// each removed row in its redo entry and delete event.
+    pub declared_primary_key: Option<&'a str>,
+}
 
 impl CoreLoop {
     /// TRUNCATE: delete all documents in a collection without filter scanning.
@@ -28,9 +41,13 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         tid: u64,
-        collection: &str,
-        resolved_sum_targets: &[nodedb_physical::physical_plan::ResolvedSumTarget],
+        params: TruncateParams<'_>,
     ) -> Response {
+        let TruncateParams {
+            collection,
+            resolved_sum_targets,
+            declared_primary_key,
+        } = params;
         debug!(core = self.core_id, %collection, "truncate");
 
         // Collect all document IDs in this collection.
@@ -80,6 +97,21 @@ impl CoreLoop {
         }
 
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
+
+        // The stored pre-image is a Binary Tuple on a strict collection and
+        // MessagePack otherwise. Hoisted once so each removed row's identity is
+        // read through the matching decoder.
+        let strict_schema = self
+            .doc_configs
+            .get(&(
+                crate::types::DatabaseId::new(database_id),
+                crate::types::TenantId::new(tid),
+                collection.to_string(),
+            ))
+            .and_then(|c| match &c.storage_mode {
+                StorageMode::Strict { schema } => Some(schema.clone()),
+                StorageMode::Schemaless => None,
+            });
 
         // BALANCED, decided over every row about to be removed and BEFORE the
         // first removal — each row below commits in its own transaction, so a
@@ -156,6 +188,16 @@ impl CoreLoop {
             write_set.extend(write_hook::target_write_set(&target_writes));
             if let Some(deleted_bytes) = deleted_bytes.as_deref() {
                 let surrogate = storage_key.surrogate();
+                // The identity INSERT minted for this row, read from the
+                // pre-image the delete returned: the declared primary key
+                // when the collection declares one, else the decimal
+                // surrogate. The redo entry and the delete event share it.
+                let row_identity = stored_row_identity(
+                    deleted_bytes,
+                    strict_schema.as_ref(),
+                    declared_primary_key,
+                    *storage_key,
+                );
                 if let Err(e) = self.inverted.remove_document(
                     database_id,
                     crate::types::TenantId::new(tid),
@@ -181,6 +223,7 @@ impl CoreLoop {
                     self.remove_document_vector_indexes(database_id, tid, collection, *storage_key);
                     write_set.push(WriteSetEntry {
                         surrogate: surrogate.as_u32(),
+                        identity: row_identity.clone(),
                         is_delete: true,
                         value: Vec::new(),
                         collection: None,
@@ -223,11 +266,10 @@ impl CoreLoop {
                     collection,
                     deleted_bytes,
                 );
-                let identity = storage_key.to_identity();
                 self.emit_document_delete_event(
                     task,
                     collection,
-                    identity,
+                    row_identity,
                     Some(old_converted.as_deref().unwrap_or(deleted_bytes)),
                 );
                 truncated += 1;

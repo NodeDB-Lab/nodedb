@@ -71,13 +71,14 @@ impl CoreLoop {
                     value,
                     precondition,
                     resolved_sum_targets,
-                    document_id: _,
+                    document_id,
                     pk_bytes: _,
                 } => self.apply_resolved_document_put(
                     task,
                     ApplyResolvedPut {
                         tid,
                         collection: collection.as_str(),
+                        document_id,
                         surrogate: *surrogate,
                         value,
                         precondition: precondition.as_deref(),

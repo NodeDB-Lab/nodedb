@@ -17,6 +17,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::RowIdentity;
 
 use super::apply_support::returning_doc;
 use super::plan::MergeDelete;
@@ -35,6 +36,9 @@ pub(super) struct MergeDeleteArms<'a> {
     pub(super) returning: bool,
     /// Join-key VALUE → target row surrogate, resolved on the Control Plane.
     pub(super) resolved_targets: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
+    /// The target's declared `PRIMARY KEY` column, when it has one. Names
+    /// each removed row in its event and redo entry.
+    pub(super) declared_primary_key: Option<&'a str>,
 }
 
 /// The statement-wide accumulators these arms contribute to, shared with the
@@ -63,6 +67,7 @@ impl CoreLoop {
             has_vectors,
             returning,
             resolved_targets,
+            declared_primary_key,
         } = arms;
         let MergeDeleteTally {
             affected,
@@ -73,6 +78,10 @@ impl CoreLoop {
         for del in deletes {
             let surrogate = del.key.surrogate();
             let row_key = del.key.to_string();
+            // The identity INSERT minted for this row, from the plan's
+            // captured MessagePack body: the declared primary key, else the
+            // decimal surrogate.
+            let row_identity = RowIdentity::of_stored_row(&del.body, declared_primary_key, del.key);
             // One write txn per arm: the removal and its index cascades
             // commit together, and a failing arm drops the txn
             // un-committed so it leaves nothing behind.
@@ -153,6 +162,7 @@ impl CoreLoop {
                         if has_vectors {
                             write_set.push(WriteSetEntry {
                                 surrogate: surrogate.as_u32(),
+                                identity: row_identity.clone(),
                                 is_delete: true,
                                 value: Vec::new(),
                                 collection: None,
@@ -162,7 +172,7 @@ impl CoreLoop {
                     self.emit_document_delete_event(
                         task,
                         collection,
-                        del.key.to_identity(),
+                        row_identity,
                         outcome.prior_value.as_deref(),
                     );
                 }

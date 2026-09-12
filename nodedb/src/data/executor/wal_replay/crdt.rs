@@ -305,7 +305,7 @@ impl CoreLoop {
                 }
             };
 
-            if let Some((_document_id, surrogate, Some(bytes))) = projection {
+            if let Some((document_id, surrogate, Some(bytes))) = projection {
                 let task = Self::replay_task(
                     tid,
                     database_id,
@@ -325,6 +325,7 @@ impl CoreLoop {
                     &task,
                     tid.as_u64(),
                     collection,
+                    document_id,
                     surrogate,
                     &bytes,
                 );

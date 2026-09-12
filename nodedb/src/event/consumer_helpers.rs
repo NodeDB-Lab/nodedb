@@ -310,7 +310,7 @@ mod tests {
             sequence: 1,
             collection: Arc::from("events"),
             op,
-            row_id: RowId::new("row-1"),
+            row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
             lsn: Lsn::new(1),
             database_id: DatabaseId::DEFAULT,
             tenant_id: TenantId::new(1),

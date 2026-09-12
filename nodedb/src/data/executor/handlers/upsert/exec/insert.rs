@@ -56,7 +56,8 @@ impl CoreLoop {
         } = ctx;
 
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_identity = storage_key.to_identity();
+        // The plan's `document_id` is the row's client identity: the write
+        // gate, the event, the redo entry, and `RETURNING` all name it.
         let document_identity = RowIdentity::from_user_key(document_id);
 
         // Insert: document doesn't exist, create new (same as PointPut).
@@ -67,7 +68,7 @@ impl CoreLoop {
         if let Err(e) = rls_write_gate::admit_stored_row(
             rls_write_check,
             value,
-            &row_identity,
+            &document_identity,
             None,
             tid,
             collection,
@@ -197,7 +198,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            row_identity,
+            document_identity.clone(),
             value,
             prior.prior_value.as_deref(),
         );
@@ -221,6 +222,7 @@ impl CoreLoop {
         if has_vectors {
             response.write_set = vec![WriteSetEntry {
                 surrogate: surrogate.as_u32(),
+                identity: document_identity,
                 is_delete: false,
                 value: value.to_vec(),
                 collection: None,

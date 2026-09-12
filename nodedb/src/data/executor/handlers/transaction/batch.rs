@@ -431,9 +431,8 @@ impl CoreLoop {
 
     /// Emit deferred trigger events for every write recorded in the
     /// committed transaction's undo log. `UndoEntry::{PutDocument,
-    /// DeleteDocument}.document_id` is the row's storage key, so a deferred
-    /// trigger converts it to the client-visible identity here — the same
-    /// conversion an immediate trigger sees via `emit_put_event` /
+    /// DeleteDocument}.identity` is the row's client identity, the same one
+    /// an immediate trigger sees via `emit_put_event` /
     /// `emit_document_delete_event`.
     fn emit_deferred_writes(&mut self, task: &ExecutionTask, undo_log: Vec<UndoEntry>) {
         use crate::data::executor::core_loop::deferred::DeferredWrite;
@@ -442,7 +441,7 @@ impl CoreLoop {
             .filter_map(|entry| match entry {
                 UndoEntry::PutDocument {
                     collection,
-                    document_id,
+                    identity,
                     old_value,
                     ..
                 } => Some(DeferredWrite {
@@ -452,19 +451,19 @@ impl CoreLoop {
                     } else {
                         crate::event::WriteOp::Insert
                     },
-                    identity: document_id.to_identity(),
+                    identity,
                     new_value: None,
                     old_value,
                 }),
                 UndoEntry::DeleteDocument {
                     collection,
-                    document_id,
+                    identity,
                     old_value,
                     ..
                 } => Some(DeferredWrite {
                     collection,
                     op: crate::event::WriteOp::Delete,
-                    identity: document_id.to_identity(),
+                    identity,
                     new_value: None,
                     old_value: Some(old_value),
                 }),
@@ -531,6 +530,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
