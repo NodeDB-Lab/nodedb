@@ -40,16 +40,16 @@ fn decode_batch_to_columns_rows(
     json_text: &str,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
-) -> (Vec<String>, Vec<Vec<Value>>) {
+) -> crate::Result<(Vec<String>, Vec<Vec<Value>>)> {
     match sonic_rs::from_str::<serde_json::Value>(json_text) {
         Ok(decoded) => {
-            let shaped = shape_decoded_rows(&decoded, projection, redaction);
-            to_native_columns_rows(&shaped)
+            let shaped = shape_decoded_rows(&decoded, projection, redaction)?;
+            Ok(to_native_columns_rows(&shaped))
         }
-        Err(_) => (
+        Err(_) => Ok((
             vec!["result".into()],
             vec![vec![Value::String(json_text.to_string())]],
-        ),
+        )),
     }
 }
 
@@ -106,7 +106,7 @@ pub(super) async fn emit_sql_stream(
             &json_text,
             projection.as_ref(),
             redaction.as_ref().map(|r| r.ctx(&state.redaction)),
-        );
+        )?;
         if batch_rows.is_empty() {
             continue;
         }

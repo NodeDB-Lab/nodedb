@@ -16,8 +16,8 @@ use nodedb_types::{Surrogate, SurrogateBitmap};
 
 /// Parse a sequence of `(doc_id, _bytes)` pairs into a `SurrogateBitmap`.
 ///
-/// Accepts 8-char lowercase-hex doc_ids produced by the document engine's
-/// `surrogate_to_doc_id` encoding. Non-conforming ids are skipped without error.
+/// Accepts 8-char lowercase-hex doc_ids produced by `StorageKey`'s `Display`
+/// impl. Non-conforming ids are skipped without error.
 pub(crate) fn collect_surrogates(docs: &[(String, Vec<u8>)]) -> SurrogateBitmap {
     let mut bm = SurrogateBitmap::new();
     for (doc_id, _) in docs {

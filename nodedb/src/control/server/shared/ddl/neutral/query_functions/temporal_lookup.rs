@@ -81,7 +81,7 @@ pub async fn temporal_lookup(
     // The raw document-scan codec wraps each row as `{"id": .., "data": {..}}`;
     // unwrap it so matching and redaction operate on the stored fields, not
     // the wire wrapper.
-    let docs = unwrap_scan_docs(docs);
+    let docs = unwrap_scan_docs(docs)?;
 
     // Find the row with latest time_column <= as_of for the given key.
     let mut best_doc: Option<&serde_json::Map<String, serde_json::Value>> = None;

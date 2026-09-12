@@ -10,7 +10,7 @@
 //! ## Surrogate re-derivation on replay
 //!
 //! The WAL payload stores the document key as the hex-encoded surrogate
-//! string produced by `surrogate_to_doc_id(surrogate)` (format `{:08x}`).
+//! string produced by `StorageKey`'s `Display` impl (format `{:08x}`).
 //! On replay we parse it back via `u32::from_str_radix(&doc_id, 16)` —
 //! the same conversion used by the scan / prefilter paths.  This does not
 //! require a catalog or surrogate-assigner round-trip: the 8-hex-char key

@@ -9,8 +9,8 @@
 //! flushed-segment surrogate sidecar) rather than the hex-doc-id keying
 //! [`super::merge::merge_overlay_into_scan`] uses — a columnar row has no
 //! separate document id, so [`super::super::stage_write::stage_columnar`]
-//! stages puts keyed by surrogate with `surrogate_to_doc_id` used only for
-//! the overlay's doc-id side-map. A base row with no recorded surrogate
+//! stages puts keyed by surrogate with `StorageKey::for_surrogate` used only
+//! for the overlay's doc-id side-map. A base row with no recorded surrogate
 //! (legacy segments predating the surrogate sidecar) cannot be resolved
 //! against the overlay and is left untouched.
 //!

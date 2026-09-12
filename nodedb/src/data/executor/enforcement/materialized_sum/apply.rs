@@ -52,8 +52,9 @@
 //! # Identity comes from the plan, never from a store probe
 //!
 //! Rows are keyed by an 8-hex surrogate
-//! ([`surrogate_to_doc_id`](crate::engine::document::store::surrogate_to_doc_id)),
-//! so a join-key VALUE is not a storage key. The Control Plane resolves each
+//! ([`StorageKey`](crate::engine::document::store::StorageKey), rendered via
+//! its `Display` impl), so a join-key VALUE is not a storage key. The
+//! Control Plane resolves each
 //! join value to its target row's surrogate at plan time and the resolution
 //! arrives on
 //! [`EnforcementCtx::resolved_targets`](crate::data::executor::enforcement::images::EnforcementCtx).
@@ -313,7 +314,7 @@ mod tests {
     use crate::data::executor::handlers::document::write::DocumentBatchInsertParams;
     use crate::data::executor::handlers::update_from_join::UpdateFromJoinParams;
     use crate::data::executor::strict_format;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::TenantId;
     use nodedb_physical::physical_plan::{ResolvedSumTarget, StorageMode, UpdateValue};
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
@@ -428,7 +429,7 @@ mod tests {
     /// worse — the row survives the statement and is unreadable to every strict
     /// reader afterwards.
     ///
-    /// The target row is seeded under `surrogate_to_doc_id`, the key every
+    /// The target row is seeded under its `StorageKey`, the key every
     /// reader of that collection uses. Seeding under the raw join VALUE would
     /// only prove that a lookup keyed by the same wrong value finds it.
     #[test]
@@ -984,7 +985,7 @@ mod tests {
 
         let rate = serde_json::json!({"rate_id": "r1", "amount": 80});
         let source_rows = vec![(
-            surrogate_to_doc_id(Surrogate(9)),
+            nodedb_types::StorageKey::for_surrogate(Surrogate(9)).to_string(),
             doc_format::encode_to_msgpack(&rate),
         )];
 
@@ -1030,13 +1031,13 @@ mod tests {
 
         let documents = vec![
             (
-                surrogate_to_doc_id(Surrogate(1)),
+                nodedb_types::StorageKey::for_surrogate(Surrogate(1)).to_string(),
                 doc_format::encode_to_msgpack(
                     &serde_json::json!({"account_id": ACCOUNT_A, "amount": 25}),
                 ),
             ),
             (
-                surrogate_to_doc_id(Surrogate(2)),
+                nodedb_types::StorageKey::for_surrogate(Surrogate(2)).to_string(),
                 doc_format::encode_to_msgpack(
                     &serde_json::json!({"account_id": ACCOUNT_A, "amount": 75}),
                 ),

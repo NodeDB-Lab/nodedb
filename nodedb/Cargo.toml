@@ -160,6 +160,9 @@ tikv-jemalloc-ctl = { workspace = true }
 # Random number generation (weighted pick, provably fair gacha)
 rand = { workspace = true }
 
+# Hex text for KV overlay keys and OTel trace/span ids
+hex = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # Named again here (same published version, unified by Cargo) so crash-harness
@@ -176,7 +179,6 @@ nodedb-test-support = { workspace = true }
 rcgen = { workspace = true }
 zerompk = { workspace = true }
 loro = { workspace = true }
-hex = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # io_uring for Data Plane batched I/O (columnar reads, WAL)

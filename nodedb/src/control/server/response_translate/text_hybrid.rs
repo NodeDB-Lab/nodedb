@@ -5,7 +5,7 @@
 //! search responses.
 //!
 //! `TextOp::Search` hits carry the standard `{id, data}` document-scan
-//! envelope, keyed by `surrogate_to_doc_id(surrogate)` hex — the document
+//! envelope, keyed by `StorageKey::for_surrogate(surrogate)` hex — the document
 //! body itself already carries the user's PK as an ordinary field (it was
 //! written verbatim from the user's INSERT), so the resolved value only
 //! needs injecting when the body has no `id` field of its own (a headless

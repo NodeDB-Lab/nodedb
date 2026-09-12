@@ -103,7 +103,7 @@ pub async fn verify_balance(
         .map_err(|e| err("22P02", &format!("invalid JSON in target scan: {e}")))?;
     // Unwrap the `{"id", "data"}` scan envelope so matching reads the stored
     // fields, not the wire wrapper.
-    let target_docs = unwrap_scan_docs(target_docs);
+    let target_docs = unwrap_scan_docs(target_docs)?;
 
     // Scan all source rows.
     let source_vshard =
@@ -143,7 +143,7 @@ pub async fn verify_balance(
         .map_err(|e| err("22P02", &format!("invalid JSON in source scan: {e}")))?;
     // Unwrap the `{"id", "data"}` scan envelope so matching and `value_expr`
     // evaluation read the stored fields, not the wire wrapper.
-    let source_docs = unwrap_scan_docs(source_docs);
+    let source_docs = unwrap_scan_docs(source_docs)?;
 
     // For each target row, recompute balance from source rows.
     let mut discrepancies = 0u64;

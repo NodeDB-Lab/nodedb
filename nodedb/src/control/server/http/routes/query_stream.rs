@@ -191,11 +191,20 @@ pub(super) fn ndjson_body_stream(
             // `{"id": …, "id_1": …}` rather than collapsing to one cell.
             // Only re-borrows the once-resolved inputs, so the very first
             // batch is redacted under the same policy as the last.
-            let shaped = shape_decoded_rows(
+            let shaped = match shape_decoded_rows(
                 &value,
                 projection.as_ref(),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
-            );
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    // In-band error line, matching the malformed-batch path
+                    // above: the HTTP body itself never errors.
+                    let line = format!("{}\n", serde_json::json!({ "error": format!("{e}") }));
+                    yield Ok(Bytes::from(line));
+                    return;
+                }
+            };
             for row in shaped.rows {
                 if emitted >= limit {
                     break;

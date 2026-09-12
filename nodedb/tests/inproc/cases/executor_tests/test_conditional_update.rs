@@ -27,7 +27,7 @@ fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
 
 /// Hash a string PK to a deterministic non-zero surrogate so each test
 /// row lands on its own substrate key. The data plane keys redb rows by
-/// `surrogate_to_doc_id(surrogate)`; with a wired catalog the assigner
+/// `StorageKey::for_surrogate(surrogate)`; with a wired catalog the assigner
 /// guarantees a stable injection, but executor-direct fixtures bypass
 /// the catalog and have to thread their own bindings.
 fn surrogate_for(id: &str) -> nodedb_types::Surrogate {

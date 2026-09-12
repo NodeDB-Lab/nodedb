@@ -228,7 +228,14 @@ pub(crate) fn streaming_shaped_response(
                 &value,
                 Some(&schema_out),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
-            );
+            )
+            .map_err(|e| {
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "XX000".to_owned(),
+                    format!("failed to shape streamed batch: {e}"),
+                )))
+            })?;
             for row in &shaped.rows {
                 if emitted >= limit {
                     break;
@@ -332,11 +339,20 @@ pub(crate) async fn streaming_star_response(
         ));
     }
 
-    let shaped = shape_decoded_rows(
+    let shaped = match shape_decoded_rows(
         &serde_json::Value::Array(values),
         None,
         redaction.as_ref().map(|r| r.ctx(&state.redaction)),
-    );
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return single_pgwire_error(PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "XX000".to_owned(),
+                format!("failed to shape streamed batch: {e}"),
+            ))));
+        }
+    };
     // `SELECT *` derives its columns from the rows and has no client-requested
     // per-column formats, so it always renders text.
     let (response, _notice) = shaped_query_response(shaped, &[]);

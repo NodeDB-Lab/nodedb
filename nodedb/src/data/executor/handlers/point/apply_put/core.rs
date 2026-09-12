@@ -334,7 +334,7 @@ mod tests {
     use crate::data::executor::handlers::point::apply_put::PointPutParams;
     use crate::data::executor::handlers::point::put::PointPutExec;
     use crate::data::executor::task::ExecutionTask;
-    use crate::engine::document::store::surrogate_to_doc_id;
+    use crate::engine::document::store::StorageKey;
     use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
     use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
@@ -362,6 +362,10 @@ mod tests {
         txn.delete_table(DOC_LENGTHS).unwrap();
         txn.open_table(POISONED_DOC_LENGTHS).unwrap();
         txn.commit().unwrap();
+    }
+
+    fn row_key() -> String {
+        StorageKey::for_surrogate(SURROGATE).to_string()
     }
 
     fn point_put_task(row_key: &str) -> ExecutionTask {
@@ -410,7 +414,7 @@ mod tests {
     fn healthy_index_commits_the_row_and_indexes_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
 
         let task = point_put_task(&row_key);
         let resp = core.execute_point_put(
@@ -442,7 +446,7 @@ mod tests {
     fn index_failure_rejects_the_write_and_leaves_no_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
         poison_inverted_index(&core);
 
         let task = point_put_task(&row_key);
@@ -487,7 +491,7 @@ mod tests {
     fn apply_point_put_propagates_index_failure_instead_of_absorbing_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
         poison_inverted_index(&core);
 
         let txn = core.sparse.begin_write().unwrap();
@@ -528,7 +532,7 @@ mod tests {
     fn index_text_disabled_is_unaffected_by_a_broken_index() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
         poison_inverted_index(&core);
 
         let txn = core.sparse.begin_write().unwrap();

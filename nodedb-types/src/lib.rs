@@ -120,8 +120,8 @@ pub use quota::{
 pub use result::{QueryResult, SearchResult, SubGraph};
 pub use rls_write_check::{RlsWriteCheck, WriteGateDecision};
 pub use row_identity::{
-    DEFAULT_IDENTITY_COLUMN, HEADLESS_SENTINEL_PREFIX, RowIdentity, StorageKey,
-    doc_id_to_surrogate, extract_pk_value, identity_of, surrogate_to_doc_id, value_to_pk_string,
+    DEFAULT_IDENTITY_COLUMN, HEADLESS_SENTINEL_PREFIX, RowIdentity, StorageKey, extract_pk_value,
+    value_to_pk_string,
 };
 pub use sparse_vector::{SparseVector, SparseVectorError};
 pub use sql_quote::{quote_ident, quote_literal};

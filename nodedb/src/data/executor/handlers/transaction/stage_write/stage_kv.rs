@@ -19,11 +19,7 @@ use crate::types::TxnId;
 
 /// Lowercase-hex encode a raw KV key. [`unhex_key`] is the inverse.
 fn hex_key(key: &[u8]) -> String {
-    let mut s = String::with_capacity(key.len() * 2);
-    for b in key {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    hex::encode(key)
 }
 
 /// The overlay identity of a KV row: its raw key, hex encoded, taken
@@ -36,17 +32,7 @@ pub(in crate::data::executor) fn kv_row_identity(raw_key: &[u8]) -> RowIdentity 
 /// Decode a lowercase-hex KV overlay doc-id back to raw key bytes, the
 /// inverse of [`hex_key`]. Returns `None` for malformed hex.
 pub(in crate::data::executor) fn unhex_key(s: &str) -> Option<Vec<u8>> {
-    let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for &[hi_byte, lo_byte] in bytes.as_chunks::<2>().0 {
-        let hi = (hi_byte as char).to_digit(16)?;
-        let lo = (lo_byte as char).to_digit(16)?;
-        out.push(((hi << 4) | lo) as u8);
-    }
-    Some(out)
+    hex::decode(s).ok()
 }
 
 impl CoreLoop {

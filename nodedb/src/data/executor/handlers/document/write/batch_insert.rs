@@ -392,11 +392,11 @@ mod tests {
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::doc_format;
     use crate::data::executor::task::ExecutionTask;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
     use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, ResolvedSumTarget};
-    use nodedb_types::Surrogate;
+    use nodedb_types::{StorageKey, Surrogate};
     use std::time::{Duration, Instant};
 
     const TID: u64 = 1;
@@ -675,8 +675,14 @@ mod tests {
         let mut core = sum_seeded_core(dir.path());
 
         let documents = vec![
-            (surrogate_to_doc_id(Surrogate(1)), sum_entry(SUM_A1, 25)),
-            (surrogate_to_doc_id(Surrogate(2)), sum_entry(SUM_A1, 75)),
+            (
+                StorageKey::for_surrogate(Surrogate(1)).to_string(),
+                sum_entry(SUM_A1, 25),
+            ),
+            (
+                StorageKey::for_surrogate(Surrogate(2)).to_string(),
+                sum_entry(SUM_A1, 75),
+            ),
         ];
         let surrogates = vec![Surrogate(1), Surrogate(2)];
         let resolved = vec![ResolvedSumTarget::new(SUM_TARGET, SUM_A1, SUM_T1)];

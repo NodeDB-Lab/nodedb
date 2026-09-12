@@ -310,7 +310,7 @@ mod tests {
     }
 
     fn row_key() -> String {
-        crate::engine::document::store::surrogate_to_doc_id(Surrogate::new(1))
+        key(1).to_string()
     }
 
     fn parity_spatial_key() -> (nodedb_types::DatabaseId, TenantId, String, String) {

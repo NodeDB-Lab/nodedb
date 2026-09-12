@@ -150,40 +150,6 @@ impl std::fmt::Display for RowIdentity {
     }
 }
 
-/// Format a surrogate as the 8-character zero-padded lowercase hex string
-/// used as the document's redb key.
-///
-/// Thin wrapper over [`StorageKey::for_surrogate`], kept because 242
-/// call sites across the workspace hold the result as a plain `String`
-/// (redb key params, msgpack field injection, WAL replay) rather than a
-/// `StorageKey`. Converting all of them is a separate ripple from this one.
-/// One allocation: the `Display` format.
-pub fn surrogate_to_doc_id(surrogate: Surrogate) -> String {
-    StorageKey::for_surrogate(surrogate).to_string()
-}
-
-/// Parse a hex-encoded document storage key back to a `Surrogate`.
-///
-/// Returns `None` if the key is not exactly 8 lowercase hex characters —
-/// this handles legacy non-surrogate document IDs gracefully.
-///
-/// Thin wrapper over [`StorageKey::parse`], kept for the same reason as
-/// [`surrogate_to_doc_id`]: 35 call sites hold a plain `&str` doc ID.
-/// Allocation-free.
-pub fn doc_id_to_surrogate(doc_id: &str) -> Option<Surrogate> {
-    StorageKey::parse(doc_id).map(|key| key.surrogate())
-}
-
-/// The client-visible identity of a row stored under `doc_id`.
-///
-/// A minted key renders its surrogate in decimal. Any other key is a user's
-/// own value and passes through verbatim.
-pub fn identity_of(doc_id: &str) -> RowIdentity {
-    StorageKey::parse(doc_id)
-        .map(|key| key.to_identity())
-        .unwrap_or_else(|| RowIdentity::from_user_key(doc_id))
-}
-
 /// Extract the stringified value of `field` from a MessagePack row body.
 ///
 /// Returns `None` when the body is not an object, lacks `field`, or the
@@ -312,12 +278,13 @@ mod tests {
     }
 
     #[test]
-    fn identity_of_minted_key_is_decimal() {
-        assert_eq!(identity_of("0000002a").as_str(), "42");
-    }
-
-    #[test]
-    fn identity_of_user_key_passes_through() {
-        assert_eq!(identity_of("user-declared-id").as_str(), "user-declared-id");
+    fn parse_none_yields_user_key_identity() {
+        assert_eq!(
+            StorageKey::parse("user-declared-id")
+                .map(|key| key.to_identity())
+                .unwrap_or_else(|| RowIdentity::from_user_key("user-declared-id"))
+                .as_str(),
+            "user-declared-id"
+        );
     }
 }

@@ -287,7 +287,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
     /// graph's `(DatabaseId::DEFAULT, TenantId::new(1), "col")`.
     ///
     /// `csr` resolves a bound node name to its surrogate; the document is then
-    /// fetched at `surrogate_to_doc_id(surrogate)`, mirroring the real keying.
+    /// fetched at `StorageKey::for_surrogate(surrogate)`, mirroring the real keying.
     pub(crate) fn props_for<'a>(sparse: &'a SparseEngine, csr: &'a CsrIndex) -> PropertyLookup<'a> {
         PropertyLookup {
             sparse,
@@ -885,7 +885,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             make_csr(&[("alice", "KNOWS", "carol"), ("bob", "KNOWS", "dave")]);
         let (sparse, _sdir) = make_sparse();
         // alice/bob share their surrogate with their stored document (the real
-        // keying): node → surrogate → surrogate_to_doc_id → sparse.
+        // keying): node → surrogate → StorageKey → sparse.
         csr.set_node_surrogate("alice", nodedb_types::Surrogate::new(1));
         csr.set_node_surrogate("bob", nodedb_types::Surrogate::new(2));
         let props = props_for(&sparse, &csr);

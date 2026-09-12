@@ -130,7 +130,7 @@ impl CsrIndex {
     ///
     /// A graph node and its same-pk document share one global surrogate, so this
     /// is the bridge from a MATCH binding's node name to the document storage key
-    /// (`surrogate_to_doc_id`) used to fetch the node's properties.
+    /// (`StorageKey::for_surrogate`) used to fetch the node's properties.
     pub fn node_surrogate(&self, node: &str) -> Option<nodedb_types::Surrogate> {
         let &local_id = self.node_to_id.get(node)?;
         let raw = self.node_surrogate_raw(local_id);

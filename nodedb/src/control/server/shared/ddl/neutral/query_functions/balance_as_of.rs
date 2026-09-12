@@ -153,7 +153,7 @@ pub async fn balance_as_of(
         .map_err(|e| err("22P02", &format!("invalid JSON in source scan: {e}")))?;
     // Unwrap the `{"id", "data"}` scan envelope so matching and `value_expr`
     // evaluation read the stored fields, not the wire wrapper.
-    let source_docs = unwrap_scan_docs(source_docs);
+    let source_docs = unwrap_scan_docs(source_docs)?;
 
     // Sum value_expr for source rows where join_column = key AND created_at > as_of.
     let mut recent_sum = rust_decimal::Decimal::ZERO;

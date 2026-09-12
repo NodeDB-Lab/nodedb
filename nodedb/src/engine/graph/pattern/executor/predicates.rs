@@ -15,11 +15,11 @@ use crate::engine::sparse::btree::SparseEngine;
 ///
 /// A graph node's properties live as a document in the sparse engine. The
 /// document is NOT keyed by the user-visible node-id string — it is keyed by
-/// `surrogate_to_doc_id(surrogate)`, the fixed-width hex form of the row's
-/// global surrogate. A graph node and its same-pk document share one surrogate
-/// (the CSR node surrogate is set from the edge surrogate allocated by the same
-/// pk-keyed allocator), so the fetch chain is:
-/// `node name → Surrogate (via `csr`) → surrogate_to_doc_id → sparse.get`.
+/// `StorageKey::for_surrogate(surrogate)`, the fixed-width hex form of the
+/// row's global surrogate. A graph node and its same-pk document share one
+/// surrogate (the CSR node surrogate is set from the edge surrogate
+/// allocated by the same pk-keyed allocator), so the fetch chain is:
+/// `node name → Surrogate (via `csr`) → StorageKey → sparse.get`.
 ///
 /// The CSR/graph is keyed per `(database_id, tenant_id)` only, so the collection
 /// holding the document comes from the MATCH query's `IN '<collection>'`
@@ -237,7 +237,7 @@ fn coerce_literal(expected: &str) -> nodedb_types::Value {
 /// The document is keyed by the node's GLOBAL SURROGATE, not by the node-id
 /// string. We resolve `node_id → Surrogate` through the CSR (a graph node and
 /// its same-pk document share one surrogate), derive the redb storage key via
-/// `surrogate_to_doc_id`, then fetch. A node that is unknown to the partition
+/// `StorageKey::for_surrogate`, then fetch. A node that is unknown to the partition
 /// or has no surrogate set (the ZERO sentinel) is treated as having no
 /// document → `Ok(None)`.
 ///

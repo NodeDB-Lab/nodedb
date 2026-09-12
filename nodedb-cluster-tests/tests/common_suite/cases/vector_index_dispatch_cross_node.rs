@@ -288,11 +288,14 @@ async fn search_probe(node: &TestClusterNode, query: Vec<f32>) -> Result<Vec<u32
     let Ok(Value::Array(items)) = nodedb_types::value_from_msgpack(payload) else {
         return Err(format!("undecodable hits payload {payload:02x?}"));
     };
+    // A bound vector hit carries its storage key as `id`.
     Ok(items
         .iter()
         .filter_map(|hit| match hit {
             Value::Object(map) => match map.get("id") {
-                Some(Value::Integer(id)) => Some(*id as u32),
+                Some(Value::String(key)) => {
+                    nodedb_types::StorageKey::parse(key).map(|k| k.surrogate().as_u32())
+                }
                 _ => None,
             },
             _ => None,

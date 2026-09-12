@@ -106,7 +106,7 @@ pub async fn convert_currency_lookup(
         .map_err(|e| err("22P02", &format!("invalid JSON in rate table scan: {e}")))?;
     // Unwrap the `{"id", "data"}` scan envelope so matching reads the stored
     // fields, not the wire wrapper.
-    let docs = unwrap_scan_docs(docs);
+    let docs = unwrap_scan_docs(docs)?;
 
     // Find latest row where key matches and time <= as_of.
     let mut best_rate: Option<rust_decimal::Decimal> = None;

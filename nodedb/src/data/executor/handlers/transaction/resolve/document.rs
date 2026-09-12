@@ -16,7 +16,7 @@
 //! * A staged tombstone ([`Staged::Tombstone`]) → `RecordType::Delete`,
 //!   `(collection, document_id, Option<SyncProvenance>, surrogate)`. The redo
 //!   delete shape carries the surrogate (unlike the autocommit delete shape)
-//!   because replay keys redb by `surrogate_to_doc_id(surrogate)`.
+//!   because replay keys redb by `StorageKey::for_surrogate(surrogate)`.
 //!
 //! ## Stored form vs replay input
 //!

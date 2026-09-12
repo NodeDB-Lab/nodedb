@@ -384,11 +384,11 @@ mod tests {
     };
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
     use nodedb_types::sync::wire::SyncProvenance;
-    use nodedb_types::{QualifiedCollection, RowIdentity, Surrogate};
+    use nodedb_types::{QualifiedCollection, RowIdentity, StorageKey, Surrogate};
 
     use crate::data::executor::handlers::graph::EdgePutParams;
     use crate::data::executor::strict_format;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
 
     use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
@@ -448,6 +448,10 @@ mod tests {
 
     fn coll_key(coll: &str) -> (DatabaseId, TenantId, String) {
         (DatabaseId::DEFAULT, TenantId::new(TID), coll.to_string())
+    }
+
+    fn storage_key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
     }
 
     /// Decode the `RedoRecord` bytes carried in a resolve response payload.
@@ -754,7 +758,7 @@ mod tests {
         let txn = TxnId::new(41);
         let task = make_stage_task(txn);
         let surrogate = 5u32;
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         // Seed a base row directly into the scan-visible sparse store.
         core.sparse
@@ -810,7 +814,7 @@ mod tests {
         let task = make_stage_task(txn);
 
         for s in [1u32, 2u32] {
-            let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(s));
+            let row_key = storage_key(s);
             core.sparse
                 .put(
                     DatabaseId::DEFAULT.as_u64(),
@@ -869,7 +873,7 @@ mod tests {
         let task = make_stage_task(txn);
 
         for s in [1u32, 2u32] {
-            let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(s));
+            let row_key = storage_key(s);
             core.sparse
                 .put(
                     DatabaseId::DEFAULT.as_u64(),
@@ -974,7 +978,7 @@ mod tests {
         .expect("redo replay must succeed");
 
         for s in [1u32, 2u32] {
-            let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(s));
+            let row_key = storage_key(s);
             let stored = dst
                 .sparse
                 .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
@@ -1407,7 +1411,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(20);
         let surrogate = 7u32;
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         src.txn_overlay_mut(txn).insert_put(
             coll_key("sdocs"),
@@ -1457,7 +1461,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(21);
         let surrogate = 3u32;
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         let body = schemaless_body("alice");
 
         src.txn_overlay_mut(txn).insert_put(
@@ -1494,7 +1498,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(22);
         let surrogate = 11u32;
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         src.txn_overlay_mut(txn).insert_tombstone(
             coll_key("notes"),
@@ -1595,7 +1599,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(23);
         let surrogate = 1u32;
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         // Seed a base document row, then stage a DIFFERENT body for it.
         let seed = wrap_redo(&RedoRecord {
@@ -1653,7 +1657,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(24);
         let doc_surrogate = 5u32;
-        let doc_row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(doc_surrogate));
+        let doc_row_key = storage_key(doc_surrogate);
 
         {
             let overlay = src.txn_overlay_mut(txn);
@@ -2080,7 +2084,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(35);
         let doc_surrogate = 6u32;
-        let doc_row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(doc_surrogate));
+        let doc_row_key = storage_key(doc_surrogate);
 
         {
             let overlay = src.txn_overlay_mut(txn);
@@ -2952,7 +2956,7 @@ mod tests {
     /// R-tree entry id for a surrogate, mirroring `execute_spatial_insert`'s
     /// `fnv1a_hash(doc_id.as_bytes())` keying.
     fn spatial_entry_id(surrogate: u32) -> u64 {
-        let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let doc_id = storage_key(surrogate).to_string();
         crate::util::fnv1a_hash(doc_id.as_bytes())
     }
 
@@ -3005,7 +3009,7 @@ mod tests {
             dst.spatial_doc_map.contains_key(&doc_map_key),
             "surrogate -> doc-id reverse map must be rebuilt"
         );
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         assert!(
             dst.sparse
                 .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
@@ -3072,7 +3076,7 @@ mod tests {
             0,
             "redo delete must remove the R-tree entry"
         );
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         assert!(
             dst.sparse
                 .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
@@ -3136,7 +3140,7 @@ mod tests {
             !core.spatial_indexes.contains_key(&key),
             "resolve must not mutate the base spatial R-tree"
         );
-        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         assert!(
             core.sparse
                 .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
