@@ -227,7 +227,7 @@ fn reset_error(_: ReplayError) -> ApiError {
 }
 
 fn change_json(event: &SequencedChangeEvent) -> serde_json::Value {
-    serde_json::json!({ "operation": event.operation.as_str(), "document_id": event.document_id, "timestamp_ms": event.timestamp_ms, "lsn": event.lsn.as_u64(), "collection": event.collection, "cursor": event.cursor().to_string() })
+    serde_json::json!({ "operation": event.operation.as_str(), "document_id": event.document_id.as_str(), "timestamp_ms": event.timestamp_ms, "lsn": event.lsn.as_u64(), "collection": event.collection, "cursor": event.cursor().to_string() })
 }
 
 fn format_sse_event(event: &SequencedChangeEvent) -> Event {

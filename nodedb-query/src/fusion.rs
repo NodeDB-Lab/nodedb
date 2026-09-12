@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+use std::hash::Hash;
+
 /// Reciprocal Rank Fusion (RRF) for combining ranked results from multiple engines.
 ///
 /// RRF is used when a query hits multiple engines (e.g., vector similarity +
@@ -12,10 +15,13 @@
 pub const DEFAULT_RRF_K: f64 = 60.0;
 
 /// A scored result from a single engine.
+///
+/// `K` is the key the engine ranks under. It defaults to `String` for
+/// callers whose key is opaque text.
 #[derive(Debug, Clone)]
-pub struct RankedResult {
+pub struct RankedResult<K = String> {
     /// Document identifier (engine-specific).
-    pub document_id: String,
+    pub document_id: K,
     /// Rank within the engine's result list (0-based).
     pub rank: usize,
     /// Original score from the engine (for diagnostics).
@@ -26,38 +32,23 @@ pub struct RankedResult {
 
 /// A fused result after RRF combination.
 #[derive(Debug, Clone)]
-pub struct FusedResult {
-    pub document_id: String,
+pub struct FusedResult<K = String> {
+    pub document_id: K,
     pub rrf_score: f64,
     /// Per-engine contributions for explainability.
     pub contributions: Vec<(&'static str, f64)>,
 }
 
-/// Fuse multiple ranked result lists using Reciprocal Rank Fusion.
+/// Sum each key's contributions, sort by RRF score, and cut to `top_k`.
 ///
-/// Each inner Vec is a ranked list from one engine (ordered by relevance).
-/// Returns the top_k fused results sorted by RRF score (descending).
-pub fn reciprocal_rank_fusion(
-    ranked_lists: &[Vec<RankedResult>],
-    k: Option<f64>,
+/// The tie-break on `document_id` is what makes the output deterministic:
+/// RRF produces many equal scores and the score map iterates in arbitrary
+/// order, so a unique secondary key gives a total order.
+fn finish_fusion<K: Clone + Eq + Hash + Ord>(
+    scores: HashMap<K, Vec<(&'static str, f64)>>,
     top_k: usize,
-) -> Vec<FusedResult> {
-    let k = k.unwrap_or(DEFAULT_RRF_K);
-
-    let mut scores: std::collections::HashMap<String, Vec<(&'static str, f64)>> =
-        std::collections::HashMap::new();
-
-    for list in ranked_lists {
-        for result in list {
-            let contribution = 1.0 / (k + result.rank as f64 + 1.0);
-            scores
-                .entry(result.document_id.clone())
-                .or_default()
-                .push((result.source, contribution));
-        }
-    }
-
-    let mut fused: Vec<FusedResult> = scores
+) -> Vec<FusedResult<K>> {
+    let mut fused: Vec<FusedResult<K>> = scores
         .into_iter()
         .map(|(doc_id, contributions)| {
             let rrf_score = contributions.iter().map(|(_, s)| s).sum();
@@ -73,14 +64,36 @@ pub fn reciprocal_rank_fusion(
         b.rrf_score
             .partial_cmp(&a.rrf_score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            // Deterministic tie-break: RRF produces many equal scores, and the
-            // score map iterates in nondeterministic order, so without a stable
-            // secondary key the output ranking varies run-to-run. document_id
-            // is unique, giving a total deterministic order.
             .then_with(|| a.document_id.cmp(&b.document_id))
     });
     fused.truncate(top_k);
     fused
+}
+
+/// Fuse multiple ranked result lists using Reciprocal Rank Fusion.
+///
+/// Each inner Vec is a ranked list from one engine (ordered by relevance).
+/// Returns the top_k fused results sorted by RRF score (descending).
+pub fn reciprocal_rank_fusion<K: Clone + Eq + Hash + Ord>(
+    ranked_lists: &[Vec<RankedResult<K>>],
+    k: Option<f64>,
+    top_k: usize,
+) -> Vec<FusedResult<K>> {
+    let k = k.unwrap_or(DEFAULT_RRF_K);
+
+    let mut scores: HashMap<K, Vec<(&'static str, f64)>> = HashMap::new();
+
+    for list in ranked_lists {
+        for result in list {
+            let contribution = 1.0 / (k + result.rank as f64 + 1.0);
+            scores
+                .entry(result.document_id.clone())
+                .or_default()
+                .push((result.source, contribution));
+        }
+    }
+
+    finish_fusion(scores, top_k)
 }
 
 /// Fuse ranked lists with per-list **linear weights**.
@@ -97,12 +110,12 @@ pub fn reciprocal_rank_fusion(
 /// # Panics
 ///
 /// Panics if `weights.len() != ranked_lists.len()`.
-pub fn reciprocal_rank_fusion_linear(
-    ranked_lists: &[Vec<RankedResult>],
+pub fn reciprocal_rank_fusion_linear<K: Clone + Eq + Hash + Ord>(
+    ranked_lists: &[Vec<RankedResult<K>>],
     k: Option<f64>,
     weights: &[f64],
     top_k: usize,
-) -> Vec<FusedResult> {
+) -> Vec<FusedResult<K>> {
     assert_eq!(
         ranked_lists.len(),
         weights.len(),
@@ -110,8 +123,7 @@ pub fn reciprocal_rank_fusion_linear(
     );
     let k = k.unwrap_or(DEFAULT_RRF_K);
 
-    let mut scores: std::collections::HashMap<String, Vec<(&'static str, f64)>> =
-        std::collections::HashMap::new();
+    let mut scores: HashMap<K, Vec<(&'static str, f64)>> = HashMap::new();
 
     for (list_idx, list) in ranked_lists.iter().enumerate() {
         let w = weights[list_idx];
@@ -124,27 +136,7 @@ pub fn reciprocal_rank_fusion_linear(
         }
     }
 
-    let mut fused: Vec<FusedResult> = scores
-        .into_iter()
-        .map(|(doc_id, contributions)| {
-            let rrf_score = contributions.iter().map(|(_, s)| s).sum();
-            FusedResult {
-                document_id: doc_id,
-                rrf_score,
-                contributions,
-            }
-        })
-        .collect();
-
-    fused.sort_unstable_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // Deterministic tie-break by unique document_id (see note above).
-            .then_with(|| a.document_id.cmp(&b.document_id))
-    });
-    fused.truncate(top_k);
-    fused
+    finish_fusion(scores, top_k)
 }
 
 /// Fuse ranked lists with per-list k-constants for weighted influence.
@@ -155,19 +147,18 @@ pub fn reciprocal_rank_fusion_linear(
 /// # Panics
 ///
 /// Panics if `k_per_list.len() != ranked_lists.len()`.
-pub fn reciprocal_rank_fusion_weighted(
-    ranked_lists: &[Vec<RankedResult>],
+pub fn reciprocal_rank_fusion_weighted<K: Clone + Eq + Hash + Ord>(
+    ranked_lists: &[Vec<RankedResult<K>>],
     k_per_list: &[f64],
     top_k: usize,
-) -> Vec<FusedResult> {
+) -> Vec<FusedResult<K>> {
     assert_eq!(
         ranked_lists.len(),
         k_per_list.len(),
         "k_per_list length must match ranked_lists length"
     );
 
-    let mut scores: std::collections::HashMap<String, Vec<(&'static str, f64)>> =
-        std::collections::HashMap::new();
+    let mut scores: HashMap<K, Vec<(&'static str, f64)>> = HashMap::new();
 
     for (list_idx, list) in ranked_lists.iter().enumerate() {
         let k = k_per_list[list_idx];
@@ -180,27 +171,7 @@ pub fn reciprocal_rank_fusion_weighted(
         }
     }
 
-    let mut fused: Vec<FusedResult> = scores
-        .into_iter()
-        .map(|(doc_id, contributions)| {
-            let rrf_score = contributions.iter().map(|(_, s)| s).sum();
-            FusedResult {
-                document_id: doc_id,
-                rrf_score,
-                contributions,
-            }
-        })
-        .collect();
-
-    fused.sort_unstable_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            // Deterministic tie-break by unique document_id (see note above).
-            .then_with(|| a.document_id.cmp(&b.document_id))
-    });
-    fused.truncate(top_k);
-    fused
+    finish_fusion(scores, top_k)
 }
 
 #[cfg(test)]
@@ -236,6 +207,29 @@ mod tests {
         let top2_ids: Vec<&str> = fused[..2].iter().map(|f| f.document_id.as_str()).collect();
         assert!(top2_ids.contains(&"d1"));
         assert!(top2_ids.contains(&"d2"));
+    }
+
+    /// A non-`String` key fuses the same way: the key type is the caller's.
+    #[test]
+    fn typed_key_fuses_and_tie_breaks_on_ord() {
+        let make = |ids: &[u32], source: &'static str| -> Vec<RankedResult<u32>> {
+            ids.iter()
+                .enumerate()
+                .map(|(rank, &id)| RankedResult {
+                    document_id: id,
+                    rank,
+                    score: 0.0,
+                    source,
+                })
+                .collect()
+        };
+        let a = make(&[7, 3], "a");
+        let b = make(&[3, 9], "b");
+        let fused = reciprocal_rank_fusion(&[a, b], None, 10);
+        assert_eq!(fused[0].document_id, 3);
+        // 7 and 9 each rank #1 in one list, so they tie; `Ord` breaks it.
+        assert_eq!(fused[1].document_id, 7);
+        assert_eq!(fused[2].document_id, 9);
     }
 
     #[test]
@@ -283,8 +277,8 @@ mod tests {
 
     #[test]
     fn empty() {
-        assert!(reciprocal_rank_fusion(&[], None, 10).is_empty());
-        assert!(reciprocal_rank_fusion_linear(&[], None, &[], 10).is_empty());
-        assert!(reciprocal_rank_fusion_weighted(&[], &[], 10).is_empty());
+        assert!(reciprocal_rank_fusion::<String>(&[], None, 10).is_empty());
+        assert!(reciprocal_rank_fusion_linear::<String>(&[], None, &[], 10).is_empty());
+        assert!(reciprocal_rank_fusion_weighted::<String>(&[], &[], 10).is_empty());
     }
 }

@@ -164,6 +164,7 @@ mod tests {
     use super::*;
     use crate::control::change_stream::{ChangeEvent, ChangeOperation, ChangeStream};
     use crate::types::{DatabaseId, Lsn, TenantId};
+    use nodedb_types::RowIdentity;
 
     #[test]
     fn live_subscription_store_and_check() {
@@ -210,7 +211,7 @@ mod tests {
             lsn: Lsn::new(1),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "o42".into(),
+            document_id: RowIdentity::from_user_key("o42"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 0,
             after: None,
@@ -244,7 +245,7 @@ mod tests {
             lsn: Lsn::new(1),
             tenant_id: TenantId::new(1),
             collection: "users".into(),
-            document_id: "u1".into(),
+            document_id: RowIdentity::from_user_key("u1"),
             operation: ChangeOperation::Update,
             timestamp_ms: 0,
             after: None,
@@ -290,7 +291,7 @@ mod tests {
                     lsn,
                     tenant_id: TenantId::new(1),
                     collection: "orders".into(),
-                    document_id: document_id.into(),
+                    document_id: RowIdentity::from_user_key(document_id),
                     operation: ChangeOperation::Insert,
                     timestamp_ms: 1,
                     after: None,
@@ -338,7 +339,7 @@ mod tests {
                 lsn,
                 tenant_id: TenantId::new(1),
                 collection: "orders".into(),
-                document_id: document_id.into(),
+                document_id: RowIdentity::from_user_key(document_id),
                 operation: ChangeOperation::Insert,
                 timestamp_ms: 1,
                 after: None,
@@ -356,7 +357,7 @@ mod tests {
             lsn: Lsn::new(3),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "later-order".into(),
+            document_id: RowIdentity::from_user_key("later-order"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1,
             after: None,
@@ -389,7 +390,7 @@ mod tests {
                 lsn,
                 tenant_id: TenantId::new(1),
                 collection: "orders".into(),
-                document_id: "lagged-order".into(),
+                document_id: RowIdentity::from_user_key("lagged-order"),
                 operation: ChangeOperation::Insert,
                 timestamp_ms: 1,
                 after: None,
@@ -399,7 +400,7 @@ mod tests {
             lsn: Lsn::new(3),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "healthy-order".into(),
+            document_id: RowIdentity::from_user_key("healthy-order"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1,
             after: None,
@@ -444,7 +445,7 @@ mod tests {
                     lsn: Lsn::new(1),
                     tenant_id: TenantId::new(1),
                     collection: "orders".into(),
-                    document_id: "order".into(),
+                    document_id: RowIdentity::from_user_key("order"),
                     operation: ChangeOperation::Insert,
                     timestamp_ms: 1,
                     after: None,
@@ -496,7 +497,7 @@ mod tests {
                 lsn: Lsn::new(3),
                 tenant_id: TenantId::new(1),
                 collection: "orders".into(),
-                document_id: "old-database-order".into(),
+                document_id: RowIdentity::from_user_key("old-database-order"),
                 operation: ChangeOperation::Insert,
                 timestamp_ms: 1,
                 after: None,

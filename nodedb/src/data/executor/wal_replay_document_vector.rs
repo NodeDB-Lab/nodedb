@@ -86,6 +86,8 @@ impl CoreLoop {
             // earlier `Put` rebuilt. KV / other-engine deletes decode to a
             // different shape and are skipped by the strict tuple decode.
             if is_delete {
+                // Replay keys the row by its surrogate; the record's text
+                // `document_id` is the client key and stays unread.
                 let Ok((collection, _document_id, _prov, surrogate_u32)) =
                     zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(payload)
                 else {
@@ -265,6 +267,8 @@ fn is_kv_put_record(payload: &[u8]) -> bool {
 /// `String` where the document value's `Vec<u8>` is) fail both decodes and
 /// return `None`.
 fn decode_document_put(payload: &[u8]) -> Option<(String, Vec<u8>, Surrogate)> {
+    // Replay keys the row by its surrogate; the record's text `document_id`
+    // is the client key and stays unread.
     if let Ok((collection, _document_id, value, _prov, surrogate_u32)) =
         zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>, u32)>(payload)
     {

@@ -26,17 +26,25 @@
 //! The graph leg's RYOW is a separate concern and is deliberately not touched
 //! here — the triple handler still reads committed graph state.
 
+use std::collections::HashMap;
+
 use nodedb_fts::posting::TextSearchResult;
 use nodedb_types::{Surrogate, SurrogateBitmap};
 
+use super::hybrid_key::HybridFusionKey;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{FtsMergeParams, VectorMergeParams};
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::engine::vector::DistanceMetric;
 use crate::engine::vector::SearchResult;
 use crate::engine::vector::collection::VectorCollection;
 use crate::query::fusion::RankedResult;
 use crate::types::{DatabaseId, TenantId, TxnId};
+
+/// The two RRF-ready legs of a hybrid search, keyed on one fusion key space.
+pub(in crate::data::executor) type HybridRankedLegs = (
+    Vec<RankedResult<HybridFusionKey>>,
+    Vec<RankedResult<HybridFusionKey>>,
+);
 
 /// Scope for one hybrid overlay splice: the active transaction, its
 /// `(database, tenant, collection)` target, the vector and text query inputs,
@@ -62,33 +70,35 @@ impl CoreLoop {
     /// `text_results` (base BM25 hits). This reuses the exact single-source
     /// overlay merges to re-score the staged puts and drop the staged
     /// tombstones, then emits `(vector_ranked, text_ranked)` keyed by
-    /// surrogate-hex doc-id — the shared RRF key space the caller fuses on.
+    /// [`HybridFusionKey`], the shared RRF key space the caller fuses on.
     pub(in crate::data::executor) fn hybrid_ranked_with_overlay(
         &self,
         params: HybridOverlayParams<'_>,
         vector_results: &[SearchResult],
         vector_collection: Option<&VectorCollection>,
         text_results: &[TextSearchResult],
-    ) -> crate::Result<(Vec<RankedResult>, Vec<RankedResult>)> {
+    ) -> crate::Result<HybridRankedLegs> {
         // Base committed legs, in the shape each single-source overlay merge
         // consumes: vector hits carry the surrogate-resolved id, text scores
         // carry the FTS surrogate + score + fuzzy flag.
         let mut vector_hits: Vec<_> = vector_results
             .iter()
-            .map(|r| {
-                let mut hit =
-                    super::vector_search::build_search_hit(vector_collection, r.id, r.distance);
-                // Pin the committed-path fusion doc_id now (surrogate hex, or
-                // the `__local_{id}` sentinel for a headless row) so a headless
-                // base hit's raw local id is never later misread as a global
-                // surrogate. Staged hits added by the merge carry `doc_id:
-                // None` and fall back to their (real) surrogate when the ranked
-                // list is built below — matching the autocommit branch exactly.
-                hit.doc_id = Some(super::vector_search::vector_leg_doc_id(
-                    vector_collection,
-                    r.id,
-                ));
-                hit
+            .map(|r| super::vector_search::build_search_hit(vector_collection, r.id, r.distance))
+            .collect();
+        // Pin each base hit's fusion key by its `id` before the merge runs. A
+        // headless base hit carries a raw local id in `id`, so without this
+        // pin the ranked list below would misread it as a global surrogate.
+        // The merge updates a same-id hit in place, so the pinned key still
+        // names the row after a staged put; staged hits the merge adds carry
+        // no pin and resolve to their (real) surrogate.
+        let base_keys: HashMap<u32, HybridFusionKey> = vector_results
+            .iter()
+            .zip(vector_hits.iter())
+            .map(|(r, hit)| {
+                (
+                    hit.id,
+                    super::vector_search::vector_leg_key(vector_collection, r.id),
+                )
             })
             .collect();
         let mut text_scored: Vec<(Surrogate, f32, bool)> = text_results
@@ -151,20 +161,19 @@ impl CoreLoop {
             &mut text_scored,
         )?;
 
-        // Rebuild the RRF-ready ranked lists from the merged legs. Both keys are
-        // surrogate-hex doc-ids so the vector and text legs fuse on one key
-        // space (matching the committed-only construction in the handlers).
+        // Rebuild the RRF-ready ranked lists from the merged legs. Both legs
+        // key on `HybridFusionKey`, matching the committed-only construction
+        // in the handlers.
         let vector_ranked = vector_hits
             .iter()
             .enumerate()
             .map(|(rank, hit)| RankedResult {
-                // Base hits carry their committed-path doc_id (surrogate hex or
-                // `__local_` sentinel); staged hits added by the merge have
-                // `doc_id: None` and resolve to their real surrogate.
-                document_id: hit
-                    .doc_id
-                    .clone()
-                    .unwrap_or_else(|| surrogate_to_doc_id(Surrogate::new(hit.id))),
+                // A base hit keeps its pinned key; a staged hit the merge added
+                // carries a real surrogate in `id`.
+                document_id: base_keys
+                    .get(&hit.id)
+                    .copied()
+                    .unwrap_or_else(|| HybridFusionKey::for_surrogate(Surrogate::new(hit.id))),
                 rank,
                 score: hit.distance,
                 source: "vector",
@@ -174,7 +183,7 @@ impl CoreLoop {
             .iter()
             .enumerate()
             .map(|(rank, (surrogate, score, _fuzzy))| RankedResult {
-                document_id: surrogate_to_doc_id(*surrogate),
+                document_id: HybridFusionKey::for_surrogate(*surrogate),
                 rank,
                 score: *score,
                 source: "text",

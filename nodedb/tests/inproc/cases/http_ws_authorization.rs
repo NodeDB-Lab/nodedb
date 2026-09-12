@@ -13,6 +13,7 @@ use nodedb::control::security::identity::Role;
 use nodedb::control::state::SharedState;
 use nodedb::types::{DatabaseId, Lsn, TenantId};
 use nodedb_test_support::pgwire_harness::TestServer;
+use nodedb_types::RowIdentity;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Message, http};
 
@@ -217,7 +218,7 @@ async fn ws_resume_session_id_is_not_shared_across_authenticated_identities() {
             lsn,
             tenant_id,
             collection: "orders".into(),
-            document_id: document_id.into(),
+            document_id: RowIdentity::from_user_key(document_id),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1_000,
             after: None,

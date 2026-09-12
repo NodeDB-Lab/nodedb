@@ -52,7 +52,7 @@ impl From<&ChangeEvent> for ChangeNotification {
     fn from(e: &ChangeEvent) -> Self {
         Self {
             event: e.operation.as_str().to_string(),
-            doc_id: e.document_id.clone(),
+            doc_id: e.document_id.to_string(),
             collection: e.collection.clone(),
             lsn: e.lsn.as_u64(),
             timestamp_ms: e.timestamp_ms,
@@ -189,7 +189,7 @@ mod tests {
             lsn: Lsn::new(1),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "o1".into(),
+            document_id: nodedb_types::RowIdentity::from_user_key("o1"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 0,
             after: None,
@@ -206,7 +206,7 @@ mod tests {
             lsn: Lsn::new(42),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "o1".into(),
+            document_id: nodedb_types::RowIdentity::from_user_key("o1"),
             operation: ChangeOperation::Update,
             timestamp_ms: 12345,
             after: None,

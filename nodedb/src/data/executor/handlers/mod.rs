@@ -31,6 +31,7 @@ pub mod graph_stats;
 pub mod graph_temporal;
 pub mod graph_wcc;
 pub(super) mod grouping_sets_exec;
+pub mod hybrid_key;
 pub mod hybrid_overlay;
 pub mod join;
 pub mod kv;

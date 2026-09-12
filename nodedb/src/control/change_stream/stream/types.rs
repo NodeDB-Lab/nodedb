@@ -2,6 +2,8 @@
 
 use std::ops::Deref;
 
+use nodedb_types::RowIdentity;
+
 use crate::types::{DatabaseId, Lsn, TenantId};
 
 use super::ChangeCursor;
@@ -12,7 +14,9 @@ pub struct ChangeEvent {
     pub lsn: Lsn,
     pub tenant_id: TenantId,
     pub collection: String,
-    pub document_id: String,
+    /// The identity a subscriber addresses the changed row by. A batch or
+    /// predicate write carries `"*"`: every row in the collection.
+    pub document_id: RowIdentity,
     pub operation: ChangeOperation,
     pub timestamp_ms: u64,
     pub after: Option<serde_json::Value>,

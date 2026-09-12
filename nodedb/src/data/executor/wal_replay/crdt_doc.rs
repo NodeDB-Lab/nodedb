@@ -19,7 +19,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::CrdtDocOpWalRecord;
 use nodedb_physical::physical_plan::CrdtOp;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 impl CoreLoop {
     /// Try to decode `record` as a `RecordType::CrdtDocOp` record and, if it is
@@ -78,7 +78,12 @@ impl CoreLoop {
 
         // The task carries the real intent so a handler that starts reading the
         // plan cannot silently degrade to a no-op (mirrors `try_replay_crdt_list`).
-        let (collection, document_id, response) = match &payload {
+        //
+        // The record's `document_id` is the CRDT document's client key and its
+        // `surrogate` a raw `u32`; both become typed here, at the decode
+        // boundary. `CrdtOp` and the handler params still carry the key as
+        // text, so the identity is rendered at each dispatch call.
+        let (collection, document_id, response) = match payload {
             CrdtDocOpWalRecord::Upsert {
                 collection,
                 document_id,
@@ -86,12 +91,14 @@ impl CoreLoop {
                 fields_json,
                 partial,
             } => {
+                let document_id = RowIdentity::from_user_key(document_id);
+                let surrogate = Surrogate::new(surrogate);
                 let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                     collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                    document_id: document_id.clone(),
+                    document_id: document_id.clone().into_string(),
                     fields_json: fields_json.clone(),
-                    surrogate: Surrogate::new(*surrogate),
-                    partial: *partial,
+                    surrogate,
+                    partial,
                     returning: None,
                     rls_filters: Vec::new(),
                 });
@@ -100,11 +107,11 @@ impl CoreLoop {
                 let response = self.execute_crdt_doc_upsert(
                     &task,
                     crate::data::executor::handlers::control::crdt_doc::CrdtDocUpsert {
-                        collection,
-                        document_id,
-                        fields_json,
-                        surrogate: Surrogate::new(*surrogate),
-                        partial: *partial,
+                        collection: &collection,
+                        document_id: document_id.as_str(),
+                        fields_json: &fields_json,
+                        surrogate,
+                        partial,
                         returning: None,
                         rls_filters: &[],
                     },
@@ -116,10 +123,12 @@ impl CoreLoop {
                 document_id,
                 surrogate,
             } => {
+                let document_id = RowIdentity::from_user_key(document_id);
+                let surrogate = Surrogate::new(surrogate);
                 let plan = PhysicalPlan::Crdt(CrdtOp::DocDelete {
                     collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                    document_id: document_id.clone(),
-                    surrogate: Surrogate::new(*surrogate),
+                    document_id: document_id.clone().into_string(),
+                    surrogate,
                     returning: None,
                     rls_filters: Vec::new(),
                 });
@@ -128,9 +137,9 @@ impl CoreLoop {
                 let response = self.execute_crdt_doc_delete(
                     &task,
                     crate::data::executor::handlers::control::crdt_doc::CrdtDocDelete {
-                        collection,
-                        document_id,
-                        surrogate: Surrogate::new(*surrogate),
+                        collection: &collection,
+                        document_id: document_id.as_str(),
+                        surrogate,
                         returning: None,
                         rls_filters: &[],
                     },

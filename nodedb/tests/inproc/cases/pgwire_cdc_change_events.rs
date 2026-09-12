@@ -89,7 +89,7 @@ async fn pgwire_sql_dml_publishes_change_events() {
             "{what}: change event carries the wrong operation kind"
         );
         assert!(
-            !event.document_id.is_empty(),
+            !event.document_id.as_str().is_empty(),
             "{what}: change event carries no document identity"
         );
     }

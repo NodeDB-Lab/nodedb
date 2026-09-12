@@ -5,21 +5,37 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::change_stream::ChangeOperation;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::{
     ArrayOp, ClusterArrayOp, ColumnarOp, CrdtOp, DocumentOp, DocumentResolvedMutation, KvOp,
     KvResolvedMutation, MetaOp, TimeseriesOp, VectorOp,
 };
+use nodedb_types::{RowIdentity, StorageKey};
+
+/// One row change a plan yields: `(collection, row identity, op)`.
+pub(super) type WriteChangeMeta = (String, RowIdentity, ChangeOperation);
+
+/// The identity a batch or predicate write reports: every row in the
+/// collection, not one addressable row. A subscriber sees `"*"`.
+fn every_row() -> RowIdentity {
+    RowIdentity::from_user_key("*")
+}
+
+/// A KV row's identity is its key bytes, rendered as text for the subscriber.
+fn kv_identity(key: &[u8]) -> RowIdentity {
+    RowIdentity::from_user_key(String::from_utf8_lossy(key))
+}
 
 /// Extract write metadata from a physical plan for change event publishing.
 ///
-/// One `(collection, document_id, op)` tuple per row change; empty for reads/DDL.
+/// One `(collection, identity, op)` tuple per row change; empty for reads/DDL.
+/// The identity is the one a CDC subscriber addresses the row by: the
+/// user-facing primary key, the KV key bytes, or the decimal surrogate.
 /// Exhaustive over [`PhysicalPlan`] — no catch-all — so a new variant is a compile error.
 pub(super) fn extract_write_metadata(
     plan: &PhysicalPlan,
     _tenant_id: TenantId,
-) -> Vec<(String, String, ChangeOperation)> {
+) -> Vec<WriteChangeMeta> {
     match plan {
         PhysicalPlan::Document(DocumentOp::PointPut {
             collection,
@@ -27,7 +43,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Document(DocumentOp::PointDelete {
@@ -36,7 +52,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Delete,
         )],
         PhysicalPlan::Document(DocumentOp::PointUpdate {
@@ -45,7 +61,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Update,
         )],
         // `PointInsert` is plain SQL INSERT; distinct from `PointPut` (unconditional
@@ -56,7 +72,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Document(DocumentOp::Upsert {
@@ -65,33 +81,33 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Document(DocumentOp::BatchInsert { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Insert)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
         PhysicalPlan::Document(DocumentOp::InsertSelect {
             target_collection, ..
         }) => vec![(
             target_collection.to_string(),
-            "*".into(),
+            every_row(),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Document(DocumentOp::BulkUpdate { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Update)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
         PhysicalPlan::Document(DocumentOp::BulkDelete { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Delete)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Delete)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
             target_collection, ..
         }) => vec![(
             target_collection.to_string(),
-            "*".into(),
+            every_row(),
             ChangeOperation::Update,
         )],
         // MERGE mixes INSERT/UPDATE/DELETE per arm; not individually addressable, so
@@ -100,7 +116,7 @@ pub(super) fn extract_write_metadata(
             target_collection, ..
         }) => vec![(
             target_collection.to_string(),
-            "*".into(),
+            every_row(),
             ChangeOperation::Update,
         )],
         // Reports one event per mutation, naming every row touched — never collapses to "*".
@@ -117,7 +133,7 @@ pub(super) fn extract_write_metadata(
                 };
                 (
                     mutation.collection().to_string(),
-                    mutation.document_id().to_string(),
+                    RowIdentity::from_user_key(mutation.document_id().to_string()),
                     operation,
                 )
             })
@@ -128,7 +144,7 @@ pub(super) fn extract_write_metadata(
         // Batch write; document_id="*" indicates a batch. High-cardinality metrics
         // would flood the bus otherwise — subscribe via collection_filter.
         PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Insert)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
         // TimeseriesOp::Scan is a read — no row changed.
         PhysicalPlan::Timeseries(_) => Vec::new(),
@@ -147,16 +163,16 @@ pub(super) fn extract_write_metadata(
             collection, key, ..
         }) => vec![(
             collection.to_string(),
-            String::from_utf8_lossy(key).into_owned(),
+            kv_identity(key),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Kv(KvOp::Delete { collection, .. })
         // Predicate keys are decided in the Data Plane, so this reports one event with "*".
         | PhysicalPlan::Kv(KvOp::PredicateDelete { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Delete)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         PhysicalPlan::Kv(KvOp::PredicateUpdate { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Update)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
         PhysicalPlan::Kv(KvOp::FieldSet {
             collection, key, ..
@@ -180,19 +196,19 @@ pub(super) fn extract_write_metadata(
             collection, key, ..
         }) => vec![(
             collection.to_string(),
-            String::from_utf8_lossy(key).into_owned(),
+            kv_identity(key),
             ChangeOperation::Update,
         )],
         PhysicalPlan::Kv(KvOp::BatchPut { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Insert)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
         PhysicalPlan::Kv(KvOp::Truncate { collection }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Delete)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Debits + credits two keys in the same collection; not individually addressable,
         // so reported as one event with document_id="*" like other batch ops.
         PhysicalPlan::Kv(KvOp::Transfer { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Update)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
         // Spans two collections (delete source, insert dest) — the only write here
         // that can't be a single tuple, so it reports two.
@@ -205,12 +221,12 @@ pub(super) fn extract_write_metadata(
         }) => vec![
             (
                 source_collection.to_string(),
-                String::from_utf8_lossy(item_key).into_owned(),
+                kv_identity(item_key),
                 ChangeOperation::Delete,
             ),
             (
                 dest_collection.to_string(),
-                String::from_utf8_lossy(dest_key).into_owned(),
+                kv_identity(dest_key),
                 ChangeOperation::Insert,
             ),
         ],
@@ -232,7 +248,7 @@ pub(super) fn extract_write_metadata(
                 };
                 (
                     mutation.collection().to_string(),
-                    String::from_utf8_lossy(mutation.key()).into_owned(),
+                    kv_identity(mutation.key()),
                     operation,
                 )
             })
@@ -243,20 +259,20 @@ pub(super) fn extract_write_metadata(
 
         // `spatial` rows are stored via the same `ColumnarOp` path as `columnar`.
         PhysicalPlan::Columnar(ColumnarOp::Insert { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Insert)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
         PhysicalPlan::Columnar(ColumnarOp::Update { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Update)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
         PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Delete)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Resolved-row-set form of the same UPDATE/DELETE — same CDC event as above.
         PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Update)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
         PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Delete)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Scan / MaterializeScan are reads — no row changed.
         PhysicalPlan::Columnar(_) => Vec::new(),
@@ -264,10 +280,10 @@ pub(super) fn extract_write_metadata(
         // Array cells are data-bearing rows, not an index — need CDC.
         // `array_id.name` is the user-visible collection name.
         PhysicalPlan::Array(ArrayOp::Put { array_id, .. }) => {
-            vec![(array_id.name.clone(), "*".into(), ChangeOperation::Insert)]
+            vec![(array_id.name.clone(), every_row(), ChangeOperation::Insert)]
         }
         PhysicalPlan::Array(ArrayOp::Delete { array_id, .. }) => {
-            vec![(array_id.name.clone(), "*".into(), ChangeOperation::Delete)]
+            vec![(array_id.name.clone(), every_row(), ChangeOperation::Delete)]
         }
         // Remaining ArrayOp variants are reads or maintenance — no user-data row changed.
         PhysicalPlan::Array(_) => Vec::new(),
@@ -278,13 +294,14 @@ pub(super) fn extract_write_metadata(
 
         // Vector is normally a Document secondary index — publishing here would duplicate.
         // `DirectUpsert` is the exception: the sole write for a vector-primary collection.
+        // The row carries no user key, so its identity is the decimal surrogate.
         PhysicalPlan::Vector(VectorOp::DirectUpsert {
             collection,
             surrogate,
             ..
         }) => vec![(
             collection.to_string(),
-            surrogate_to_doc_id(*surrogate),
+            StorageKey::for_surrogate(*surrogate).to_identity(),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Vector(_) => Vec::new(),
@@ -303,7 +320,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Crdt(CrdtOp::ListInsert {
@@ -312,7 +329,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Insert,
         )],
         PhysicalPlan::Crdt(CrdtOp::ListDelete {
@@ -321,7 +338,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Delete,
         )],
         PhysicalPlan::Crdt(CrdtOp::ListMove {
@@ -335,12 +352,12 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Update,
         )],
         // Collection-wide snapshot import: no single document identity.
         PhysicalPlan::Crdt(CrdtOp::ImportSnapshot { collection, .. }) => {
-            vec![(collection.to_string(), "*".into(), ChangeOperation::Update)]
+            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
         // Full replace = Insert, partial update = Update.
         PhysicalPlan::Crdt(CrdtOp::DocUpsert {
@@ -350,7 +367,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             if *partial {
                 ChangeOperation::Update
             } else {
@@ -363,7 +380,7 @@ pub(super) fn extract_write_metadata(
             ..
         }) => vec![(
             collection.to_string(),
-            document_id.clone(),
+            RowIdentity::from_user_key(document_id.clone()),
             ChangeOperation::Delete,
         )],
         // Remaining CrdtOp variants are reads, history maintenance, or config/DDL.
@@ -389,15 +406,13 @@ pub(super) fn extract_write_metadata(
 /// Map a `ClusterArrayOp` to its CDC change metadata. Shared by the
 /// `PhysicalPlan::ClusterArray` arm and `publish_cluster_array_change_events`,
 /// which holds the op by reference to avoid cloning the write batch.
-pub(crate) fn cluster_array_change_meta(
-    op: &ClusterArrayOp,
-) -> Vec<(String, String, ChangeOperation)> {
+pub(crate) fn cluster_array_change_meta(op: &ClusterArrayOp) -> Vec<WriteChangeMeta> {
     match op {
         ClusterArrayOp::Put { array_id, .. } => {
-            vec![(array_id.name.clone(), "*".into(), ChangeOperation::Insert)]
+            vec![(array_id.name.clone(), every_row(), ChangeOperation::Insert)]
         }
         ClusterArrayOp::Delete { array_id, .. } => {
-            vec![(array_id.name.clone(), "*".into(), ChangeOperation::Delete)]
+            vec![(array_id.name.clone(), every_row(), ChangeOperation::Delete)]
         }
         // Slice/Agg are reads — no row changed.
         ClusterArrayOp::Slice { .. } | ClusterArrayOp::Agg { .. } => Vec::new(),
@@ -446,8 +461,16 @@ mod tests {
         assert_eq!(
             meta,
             vec![
-                ("users".into(), "u1".into(), ChangeOperation::Insert),
-                ("users".into(), "u2".into(), ChangeOperation::Delete),
+                (
+                    "users".into(),
+                    RowIdentity::from_user_key("u1"),
+                    ChangeOperation::Insert
+                ),
+                (
+                    "users".into(),
+                    RowIdentity::from_user_key("u2"),
+                    ChangeOperation::Delete
+                ),
             ]
         );
     }
@@ -471,11 +494,7 @@ mod tests {
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(
             meta,
-            vec![(
-                "metrics".to_string(),
-                "*".to_string(),
-                ChangeOperation::Insert
-            )]
+            vec![("metrics".to_string(), every_row(), ChangeOperation::Insert)]
         );
     }
 
@@ -489,11 +508,7 @@ mod tests {
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(
             meta,
-            vec![(
-                "metrics".to_string(),
-                "*".to_string(),
-                ChangeOperation::Delete
-            )]
+            vec![("metrics".to_string(), every_row(), ChangeOperation::Delete)]
         );
     }
 
@@ -508,11 +523,7 @@ mod tests {
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(
             meta,
-            vec![(
-                "genome".to_string(),
-                "*".to_string(),
-                ChangeOperation::Insert
-            )]
+            vec![("genome".to_string(), every_row(), ChangeOperation::Insert)]
         );
     }
 
@@ -527,11 +538,7 @@ mod tests {
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(
             meta,
-            vec![(
-                "genome".to_string(),
-                "*".to_string(),
-                ChangeOperation::Delete
-            )]
+            vec![("genome".to_string(), every_row(), ChangeOperation::Delete)]
         );
     }
 
@@ -547,11 +554,7 @@ mod tests {
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(
             meta,
-            vec![(
-                "genome".to_string(),
-                "*".to_string(),
-                ChangeOperation::Insert
-            )]
+            vec![("genome".to_string(), every_row(), ChangeOperation::Insert)]
         );
     }
 
@@ -567,11 +570,7 @@ mod tests {
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(
             meta,
-            vec![(
-                "genome".to_string(),
-                "*".to_string(),
-                ChangeOperation::Delete
-            )]
+            vec![("genome".to_string(), every_row(), ChangeOperation::Delete)]
         );
     }
 
@@ -634,13 +633,13 @@ mod tests {
             rls_filters: Vec::new(),
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
-        // The row id is the document storage key, so a consumer can address
-        // the row the event describes.
+        // The row id is the client identity of the row, the decimal
+        // surrogate, so a consumer can address the row the event describes.
         assert_eq!(
             meta,
             vec![(
                 "embeddings".to_string(),
-                "0000002a".to_string(),
+                RowIdentity::from_user_key("42"),
                 ChangeOperation::Insert
             )]
         );
@@ -675,7 +674,7 @@ mod tests {
             meta,
             vec![(
                 "users".to_string(),
-                "u1".to_string(),
+                RowIdentity::from_user_key("u1"),
                 ChangeOperation::Insert
             )]
         );
@@ -698,12 +697,12 @@ mod tests {
             vec![
                 (
                     "inventory_a".to_string(),
-                    "sword".to_string(),
+                    RowIdentity::from_user_key("sword"),
                     ChangeOperation::Delete
                 ),
                 (
                     "inventory_b".to_string(),
-                    "sword".to_string(),
+                    RowIdentity::from_user_key("sword"),
                     ChangeOperation::Insert
                 ),
             ]

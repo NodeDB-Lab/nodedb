@@ -11,6 +11,7 @@ use std::time::Duration;
 use super::helpers::{TENANT_A, TENANT_B};
 use nodedb::control::change_stream::{ChangeEvent, ChangeOperation, ChangeStream, ReplayStart};
 use nodedb::types::{Lsn, TenantId};
+use nodedb_types::RowIdentity;
 
 /// A subscription scoped to Tenant B must never deliver Tenant A's events,
 /// even when both tenants write to the same collection.
@@ -25,7 +26,7 @@ async fn cdc_tenant_b_subscription_rejects_tenant_a_events() {
     for i in 0..5u64 {
         stream.publish(ChangeEvent {
             collection: "orders".into(),
-            document_id: format!("a_order_{i}"),
+            document_id: RowIdentity::from_user_key(format!("a_order_{i}")),
             operation: ChangeOperation::Insert,
             timestamp_ms: (i + 1) * 1000,
             tenant_id: TenantId::new(TENANT_A),
@@ -37,7 +38,7 @@ async fn cdc_tenant_b_subscription_rejects_tenant_a_events() {
     // Publish one event for Tenant B.
     stream.publish(ChangeEvent {
         collection: "orders".into(),
-        document_id: "b_order_1".into(),
+        document_id: RowIdentity::from_user_key("b_order_1"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 10_000,
         tenant_id: TenantId::new(TENANT_B),
@@ -57,7 +58,8 @@ async fn cdc_tenant_b_subscription_rejects_tenant_a_events() {
         "First event delivered to Tenant B subscription must belong to Tenant B"
     );
     assert_eq!(
-        received.document_id, "b_order_1",
+        received.document_id.as_str(),
+        "b_order_1",
         "Received wrong document_id: expected b_order_1, got {}",
         received.document_id
     );
@@ -81,7 +83,7 @@ async fn cdc_unfiltered_subscription_receives_all_tenants() {
 
     stream.publish(ChangeEvent {
         collection: "events".into(),
-        document_id: "e_a".into(),
+        document_id: RowIdentity::from_user_key("e_a"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 1000,
         tenant_id: TenantId::new(TENANT_A),
@@ -90,7 +92,7 @@ async fn cdc_unfiltered_subscription_receives_all_tenants() {
     });
     stream.publish(ChangeEvent {
         collection: "events".into(),
-        document_id: "e_b".into(),
+        document_id: RowIdentity::from_user_key("e_b"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 2000,
         tenant_id: TenantId::new(TENANT_B),
@@ -129,7 +131,7 @@ fn cdc_query_changes_scopes_the_requested_tenant_before_limit() {
     for (lsn, document_id) in [(Lsn::new(1), "l_b_1"), (Lsn::new(2), "l_b_2")] {
         stream.publish(ChangeEvent {
             collection: "logs".into(),
-            document_id: document_id.into(),
+            document_id: RowIdentity::from_user_key(document_id),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1_000,
             tenant_id: TenantId::new(TENANT_B),
@@ -139,7 +141,7 @@ fn cdc_query_changes_scopes_the_requested_tenant_before_limit() {
     }
     stream.publish(ChangeEvent {
         collection: "logs".into(),
-        document_id: "l_a".into(),
+        document_id: RowIdentity::from_user_key("l_a"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 1_000,
         tenant_id: TenantId::new(TENANT_A),
@@ -163,5 +165,5 @@ fn cdc_query_changes_scopes_the_requested_tenant_before_limit() {
         "tenant filtering must precede limit so Tenant A receives its matching event"
     );
     assert_eq!(a_events[0].tenant_id, TenantId::new(TENANT_A));
-    assert_eq!(a_events[0].document_id, "l_a");
+    assert_eq!(a_events[0].document_id.as_str(), "l_a");
 }

@@ -19,7 +19,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::CrdtListOpWalRecord;
 use nodedb_physical::physical_plan::CrdtOp;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 /// Narrow a WAL-logged `u64` list position to the `usize` the live
 /// `execute_crdt_list_*` handlers take. Returns `None` (with the record
@@ -114,7 +114,12 @@ impl CoreLoop {
         // variant — no `Option<u64>` + `unwrap_or(0)` fallback. A record
         // whose position doesn't fit `usize` is refused (`Some(0)`, logged),
         // never silently replayed at position 0.
-        let (collection, document_id, list_path, response) = match &payload {
+        //
+        // The record's `document_id` is the CRDT document's client key and
+        // becomes a `RowIdentity` here, at the decode boundary. `CrdtOp` and
+        // the list handlers still take the key as text, so the identity is
+        // rendered at each dispatch call.
+        let (collection, document_id, list_path, response) = match payload {
             CrdtListOpWalRecord::Insert {
                 collection,
                 document_id,
@@ -122,12 +127,13 @@ impl CoreLoop {
                 index,
                 fields_json,
             } => {
-                let Some(index) = wal_list_index(core_id, record_lsn, "index", *index) else {
+                let Some(index) = wal_list_index(core_id, record_lsn, "index", index) else {
                     return Some(0);
                 };
+                let document_id = RowIdentity::from_user_key(document_id);
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListInsert {
                     collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                    document_id: document_id.clone(),
+                    document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     index,
                     fields_json: fields_json.clone(),
@@ -137,11 +143,11 @@ impl CoreLoop {
                     Self::replay_task(tid, database_id, vshard, plan, Some(Lsn::new(record_lsn)));
                 let response = self.execute_crdt_list_insert(
                     &task,
-                    collection,
-                    document_id,
-                    list_path,
+                    &collection,
+                    document_id.as_str(),
+                    &list_path,
                     index,
-                    fields_json,
+                    &fields_json,
                 );
                 (collection, document_id, list_path, response)
             }
@@ -151,20 +157,26 @@ impl CoreLoop {
                 list_path,
                 index,
             } => {
-                let Some(index) = wal_list_index(core_id, record_lsn, "index", *index) else {
+                let Some(index) = wal_list_index(core_id, record_lsn, "index", index) else {
                     return Some(0);
                 };
+                let document_id = RowIdentity::from_user_key(document_id);
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListDelete {
                     collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                    document_id: document_id.clone(),
+                    document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     index,
                     surrogate: Surrogate::ZERO,
                 });
                 let task =
                     Self::replay_task(tid, database_id, vshard, plan, Some(Lsn::new(record_lsn)));
-                let response =
-                    self.execute_crdt_list_delete(&task, collection, document_id, list_path, index);
+                let response = self.execute_crdt_list_delete(
+                    &task,
+                    &collection,
+                    document_id.as_str(),
+                    &list_path,
+                    index,
+                );
                 (collection, document_id, list_path, response)
             }
             CrdtListOpWalRecord::Move {
@@ -175,17 +187,18 @@ impl CoreLoop {
                 to_index,
             } => {
                 let Some(from_index) =
-                    wal_list_index(core_id, record_lsn, "from_index", *from_index)
+                    wal_list_index(core_id, record_lsn, "from_index", from_index)
                 else {
                     return Some(0);
                 };
-                let Some(to_index) = wal_list_index(core_id, record_lsn, "to_index", *to_index)
+                let Some(to_index) = wal_list_index(core_id, record_lsn, "to_index", to_index)
                 else {
                     return Some(0);
                 };
+                let document_id = RowIdentity::from_user_key(document_id);
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListMove {
                     collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                    document_id: document_id.clone(),
+                    document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     from_index,
                     to_index,
@@ -195,9 +208,9 @@ impl CoreLoop {
                     Self::replay_task(tid, database_id, vshard, plan, Some(Lsn::new(record_lsn)));
                 let response = self.execute_crdt_list_move(
                     &task,
-                    collection,
-                    document_id,
-                    list_path,
+                    &collection,
+                    document_id.as_str(),
+                    &list_path,
                     from_index,
                     to_index,
                 );

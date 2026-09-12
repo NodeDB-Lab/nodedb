@@ -7,21 +7,25 @@
 //! 2. BM25 full-text search from the inverted index — top-K by score.
 //! 3. Graph BFS from `graph_seed_id` up to `graph_depth` hops — scored by hop distance.
 //! 4. All three ranked lists are fused via `reciprocal_rank_fusion_weighted` with
-//!    per-source k-constants `(vector_k, text_k, graph_k)`.
+//!    per-source k-constants `(vector_k, text_k, graph_k)`. Every leg keys on
+//!    [`HybridFusionKey`], so a graph node fuses with the vector and text hits
+//!    for the same row through its surrogate.
 //! 5. Final top-K fused results are materialised with per-source rank diagnostics.
 
 use tracing::debug;
 
 use nodedb_fts::FtsSearchParams;
 use nodedb_fts::posting::QueryMode;
+use nodedb_types::Surrogate;
 
+use super::hybrid_key::HybridFusionKey;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::graph_expansion::{GraphExpansionParams, GraphSeeds};
-use crate::data::executor::handlers::graph_rag::graph_nodes_to_ranked_results;
 use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::edge_store::Direction;
+use crate::query::fusion::{FusedResult, RankedResult, reciprocal_rank_fusion_weighted};
 
 /// Parameters for [`CoreLoop::execute_hybrid_search_triple`].
 pub(in crate::data::executor) struct HybridSearchTripleParams<'a> {
@@ -133,7 +137,6 @@ impl CoreLoop {
             .unwrap_or_default();
 
         // 3. Graph BFS from seed node.
-        let edge_label_owned = graph_edge_label.map(str::to_string);
         // The seed is named by the query itself, so it resolves to a surrogate
         // once; the walk then runs in the same identity currency as the vector
         // and text legs it will be fused with.
@@ -148,11 +151,7 @@ impl CoreLoop {
                 / self.query_tuning.bfs_bytes_per_node,
             collection,
         });
-        let (graph_expanded, hop_distances) = (expansion.names, expansion.distances);
-
         // 4. Build ranked lists.
-        use crate::query::fusion::{RankedResult, reciprocal_rank_fusion_weighted};
-        let _ = edge_label_owned; // consumed above
 
         // Inside a transaction, read-your-own-writes: the vector and text legs
         // must also observe this transaction's staged document writes, folded
@@ -160,7 +159,7 @@ impl CoreLoop {
         // vector/FTS overlay merges). The graph leg's RYOW is a separate
         // concern and is not folded in here. Outside a transaction the
         // committed-only construction below runs unchanged.
-        let (vector_ranked, text_ranked): (Vec<RankedResult>, Vec<RankedResult>) =
+        let (vector_ranked, text_ranked): super::hybrid_overlay::HybridRankedLegs =
             if let Some(txn_id) = task.request.txn_id {
                 match self.hybrid_ranked_with_overlay(
                     super::hybrid_overlay::HybridOverlayParams {
@@ -181,25 +180,22 @@ impl CoreLoop {
                     Err(e) => return self.response_error(task, e),
                 }
             } else {
-                let vector_ranked: Vec<RankedResult> = vector_results
+                let vector_ranked: Vec<RankedResult<HybridFusionKey>> = vector_results
                     .iter()
                     .enumerate()
                     .map(|(rank, r)| RankedResult {
-                        document_id: super::vector_search::vector_leg_doc_id(
-                            vector_collection,
-                            r.id,
-                        ),
+                        document_id: super::vector_search::vector_leg_key(vector_collection, r.id),
                         rank,
                         score: r.distance,
                         source: "vector",
                     })
                     .collect();
 
-                let text_ranked: Vec<RankedResult> = text_results
+                let text_ranked: Vec<RankedResult<HybridFusionKey>> = text_results
                     .iter()
                     .enumerate()
                     .map(|(rank, r)| RankedResult {
-                        document_id: crate::engine::document::store::surrogate_to_doc_id(r.doc_id),
+                        document_id: HybridFusionKey::for_surrogate(r.doc_id),
                         rank,
                         score: r.score,
                         source: "text",
@@ -208,7 +204,7 @@ impl CoreLoop {
                 (vector_ranked, text_ranked)
             };
 
-        let graph_ranked = graph_nodes_to_ranked_results(&graph_expanded, &hop_distances);
+        let graph_ranked = graph_reached_to_ranked_keys(&expansion.reached);
 
         let (k_vector, k_text, k_graph) = rrf_k;
         let fused = reciprocal_rank_fusion_weighted(
@@ -228,16 +224,17 @@ impl CoreLoop {
         // plain document map share the same map header, so the bytes cannot
         // answer it.
         let body_format = self.sparse_body_format(task.request.database_id, tenant_id, collection);
-        let results: Vec<_> = fused
+        // The fused key is rendered once per row here, at the response
+        // envelope; it is the only place the key becomes text.
+        let rendered: Vec<(String, &FusedResult<HybridFusionKey>)> = fused
             .iter()
             .filter(|f| {
                 if rls_filters.is_empty() {
                     return true;
                 }
-                // `document_id` is a fused-result string several hops from any
-                // scan; a shape that fails to parse as a storage key is
-                // treated the same as a row the lookup below could not find.
-                let Some(key) = nodedb_types::StorageKey::parse(&f.document_id) else {
+                // A headless hit has no stored row to check the policy against,
+                // so it is treated the same as a row the lookup cannot find.
+                let Some(key) = f.document_id.storage_key() else {
                     return false;
                 };
                 match self
@@ -252,17 +249,20 @@ impl CoreLoop {
                     _ => false,
                 }
             })
-            .map(|f| {
+            .map(|f| (f.document_id.to_string(), f))
+            .collect();
+        let results: Vec<_> = rendered
+            .iter()
+            .map(|(doc_id, f)| {
                 let vector_rank = vector_results.iter().position(|r| {
-                    super::vector_search::vector_leg_doc_id(vector_collection, r.id)
-                        == f.document_id
+                    super::vector_search::vector_leg_key(vector_collection, r.id) == f.document_id
                 });
-                let text_rank = text_results.iter().position(|r| {
-                    crate::engine::document::store::surrogate_to_doc_id(r.doc_id) == f.document_id
-                });
+                let text_rank = text_results
+                    .iter()
+                    .position(|r| HybridFusionKey::for_surrogate(r.doc_id) == f.document_id);
 
                 super::super::response_codec::HybridSearchHit {
-                    doc_id: &f.document_id,
+                    doc_id,
                     score_field: score_alias.unwrap_or("rrf_score"),
                     rrf_score: f.rrf_score,
                     vector_rank,
@@ -283,5 +283,54 @@ impl CoreLoop {
                 },
             ),
         }
+    }
+}
+
+/// Rank the surrogate-bound nodes an expansion reached by hop distance, keyed
+/// on [`HybridFusionKey`] so they fuse with the vector and text legs.
+///
+/// Ties on hop distance break on the surrogate, so the rank order is
+/// deterministic. Nodes without a surrogate never enter the list: they have
+/// no cross-engine identity to fuse on.
+fn graph_reached_to_ranked_keys(
+    reached: &[(Surrogate, usize)],
+) -> Vec<RankedResult<HybridFusionKey>> {
+    let mut sorted: Vec<(Surrogate, usize)> = reached.to_vec();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    sorted
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (surrogate, hop_dist))| RankedResult {
+            document_id: HybridFusionKey::for_surrogate(surrogate),
+            rank,
+            score: hop_dist as f32,
+            source: "graph",
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_leg_ranks_by_hop_then_surrogate() {
+        let reached = [
+            (Surrogate::new(9), 2),
+            (Surrogate::new(4), 1),
+            (Surrogate::new(2), 1),
+        ];
+        let ranked = graph_reached_to_ranked_keys(&reached);
+        let keys: Vec<HybridFusionKey> = ranked.iter().map(|r| r.document_id).collect();
+        assert_eq!(
+            keys,
+            vec![
+                HybridFusionKey::for_surrogate(Surrogate::new(2)),
+                HybridFusionKey::for_surrogate(Surrogate::new(4)),
+                HybridFusionKey::for_surrogate(Surrogate::new(9)),
+            ]
+        );
+        assert_eq!(ranked[0].rank, 0);
+        assert_eq!(ranked[2].score, 2.0);
     }
 }

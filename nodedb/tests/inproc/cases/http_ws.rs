@@ -23,6 +23,7 @@ use nodedb::control::security::catalog::DatabaseDescriptor;
 use nodedb::control::state::SharedState;
 use nodedb::types::{DatabaseId, Lsn, TenantId};
 use nodedb::wal::WalManager;
+use nodedb_types::RowIdentity;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Message, http};
 
@@ -161,7 +162,7 @@ fn publish_change(srv: &TestServer, lsn: u64, document_id: &str) {
         lsn: Lsn::new(lsn),
         tenant_id: TenantId::new(1),
         collection: "orders".into(),
-        document_id: document_id.into(),
+        document_id: RowIdentity::from_user_key(document_id),
         operation: ChangeOperation::Insert,
         timestamp_ms: 1_000,
         after: None,
@@ -378,7 +379,7 @@ async fn ws_auth_replay_isolates_events_by_selected_database() {
                 lsn,
                 tenant_id: TenantId::new(1),
                 collection: "orders".into(),
-                document_id: document_id.into(),
+                document_id: RowIdentity::from_user_key(document_id),
                 operation: ChangeOperation::Insert,
                 timestamp_ms: 1_000,
                 after: None,
@@ -446,7 +447,9 @@ async fn ws_live_lag_never_silently_skips_events() {
             lsn: Lsn::new(10_000 + sequence),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: format!("lagged-order-{sequence}-{document_suffix}"),
+            document_id: RowIdentity::from_user_key(format!(
+                "lagged-order-{sequence}-{document_suffix}"
+            )),
             operation: ChangeOperation::Insert,
             timestamp_ms: 10_000,
             after: None,

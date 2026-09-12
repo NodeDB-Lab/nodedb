@@ -12,6 +12,7 @@
 
 use nodedb_fts::FtsSearchParams;
 use nodedb_fts::posting::QueryMode;
+use nodedb_types::RowIdentity;
 use tracing::debug;
 
 use crate::bridge::envelope::Response;
@@ -125,7 +126,7 @@ impl CoreLoop {
 
         let (vector_k, text_k, graph_k) = rrf_k;
 
-        let vector_list: Vec<RankedResult> = vector_scores
+        let vector_list: Vec<RankedResult<RowIdentity>> = vector_scores
             .iter()
             .map(|(node_id, (rank, dist))| RankedResult {
                 document_id: node_id.clone(),
@@ -135,20 +136,19 @@ impl CoreLoop {
             })
             .collect();
 
-        let text_list: Vec<RankedResult> = text_results
+        let text_list: Vec<RankedResult<RowIdentity>> = text_results
             .iter()
             .enumerate()
             .map(|(rank, r)| RankedResult {
-                document_id: crate::engine::document::store::RowIdentity::for_surrogate(r.doc_id)
-                    .as_str()
-                    .to_string(),
+                document_id: RowIdentity::for_surrogate(r.doc_id),
                 rank,
                 score: r.score,
                 source: "text",
             })
             .collect();
 
-        let graph_list = graph_nodes_to_ranked_results(&expanded_nodes, &hop_distances);
+        let graph_expanded_count = expanded_nodes.len();
+        let graph_list = graph_nodes_to_ranked_results(expanded_nodes, &hop_distances);
 
         let fused = reciprocal_rank_fusion_weighted(
             &[vector_list, text_list, graph_list],
@@ -163,7 +163,7 @@ impl CoreLoop {
                 vector_scores: &vector_scores,
                 hop_distances: &hop_distances,
                 vector_candidate_count: vector_results.len(),
-                graph_expanded_count: expanded_nodes.len(),
+                graph_expanded_count,
                 bfs_truncated,
                 graph_unaddressable: unaddressable,
                 op_name: "graph rag fusion triple",

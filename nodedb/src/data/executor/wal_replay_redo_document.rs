@@ -133,9 +133,11 @@ impl CoreLoop {
                     i64,
                 );
                 type PlainPut = (String, String, Vec<u8>, Option<SyncProvenance>, u32);
+                // Replay keys the row by its surrogate; the record's text
+                // `document_id` is the client key and stays unread.
                 let decoded = zerompk::from_msgpack::<BitemporalPut>(&record.payload)
                     .map(
-                        |(collection, _doc_id, value, _prov, surrogate, sys, vf, vu)| {
+                        |(collection, _document_id, value, _prov, surrogate, sys, vf, vu)| {
                             (
                                 collection,
                                 value,
@@ -150,7 +152,7 @@ impl CoreLoop {
                     )
                     .or_else(|_| {
                         zerompk::from_msgpack::<PlainPut>(&record.payload).map(
-                            |(collection, _doc_id, value, _prov, surrogate)| {
+                            |(collection, _document_id, value, _prov, surrogate)| {
                                 (collection, value, surrogate, None)
                             },
                         )
@@ -190,6 +192,8 @@ impl CoreLoop {
                     );
                 }
             } else {
+                // Replay keys the row by its surrogate; the record's text
+                // `document_id` is the client key and stays unread.
                 let Ok((collection, _document_id, _prov, surrogate_u32)) =
                     zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(
                         &record.payload,

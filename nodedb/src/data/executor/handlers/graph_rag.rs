@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 use nodedb_vector::SearchResult;
 use tracing::{debug, warn};
 
@@ -34,19 +34,20 @@ use crate::query::fusion::{FusedResult, RankedResult, reciprocal_rank_fusion_wei
 ///
 /// - `Vec<SearchResult>` is the raw HNSW output, for reporting candidate counts.
 /// - `HashMap` maps each hit's *reporting key* to `(rank, distance)`. That key
-///   is what RRF fuses on and what the response returns, so it has to be a name.
+///   is what RRF fuses on and what the response returns: the client-visible
+///   identity of the row.
 /// - `Vec<Surrogate>` is the same hits in the identity currency, ready to seed
 ///   graph expansion with no translation.
 type VectorNodeScores = (
     Vec<SearchResult>,
-    HashMap<String, (usize, f32)>,
+    HashMap<RowIdentity, (usize, f32)>,
     Vec<Surrogate>,
 );
 
 /// Parameters for `build_rag_response`.
 pub(in crate::data::executor) struct RagResponseParams<'a> {
-    pub fused: &'a [FusedResult],
-    pub vector_scores: &'a HashMap<String, (usize, f32)>,
+    pub fused: &'a [FusedResult<RowIdentity>],
+    pub vector_scores: &'a HashMap<RowIdentity, (usize, f32)>,
     pub hop_distances: &'a HashMap<String, usize>,
     pub vector_candidate_count: usize,
     pub graph_expanded_count: usize,
@@ -131,7 +132,7 @@ impl CoreLoop {
 
         let (vector_k, graph_k) = rrf_k;
 
-        let vector_list: Vec<RankedResult> = vector_scores
+        let vector_list: Vec<RankedResult<RowIdentity>> = vector_scores
             .iter()
             .map(|(node_id, (rank, dist))| RankedResult {
                 document_id: node_id.clone(),
@@ -141,7 +142,8 @@ impl CoreLoop {
             })
             .collect();
 
-        let graph_list = graph_nodes_to_ranked_results(&expanded_nodes, &hop_distances);
+        let graph_expanded_count = expanded_nodes.len();
+        let graph_list = graph_nodes_to_ranked_results(expanded_nodes, &hop_distances);
 
         let fused = reciprocal_rank_fusion_weighted(
             &[vector_list, graph_list],
@@ -156,7 +158,7 @@ impl CoreLoop {
                 vector_scores: &vector_scores,
                 hop_distances: &hop_distances,
                 vector_candidate_count: vector_results.len(),
-                graph_expanded_count: expanded_nodes.len(),
+                graph_expanded_count,
                 bfs_truncated,
                 graph_unaddressable: unaddressable,
                 op_name: "graph rag fusion",
@@ -207,7 +209,7 @@ impl CoreLoop {
         // sentinel could match nothing and leaked an internal index id into
         // the response's `node_id`.
         let csr = self.csr_partition(database_id, tenant_id);
-        let mut vector_scores: HashMap<String, (usize, f32)> = HashMap::new();
+        let mut vector_scores: HashMap<RowIdentity, (usize, f32)> = HashMap::new();
         let mut seeds: Vec<Surrogate> = Vec::with_capacity(vector_results.len());
         for (rank, result) in vector_results.iter().enumerate() {
             let surrogate = index.get_surrogate(result.id);
@@ -217,17 +219,13 @@ impl CoreLoop {
             let key = match surrogate {
                 Some(s) => csr
                     .and_then(|c| c.node_id_for_surrogate(s))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
-                        crate::engine::document::store::RowIdentity::for_surrogate(s)
-                            .as_str()
-                            .to_string()
-                    }),
+                    .map(RowIdentity::from_user_key)
+                    .unwrap_or_else(|| RowIdentity::for_surrogate(s)),
                 // No surrogate at all: the vector entry predates surrogate
                 // plumbing, so it has no cross-engine identity. It still ranks
                 // in the vector leg under a key that deliberately matches
                 // nothing else.
-                None => format!("__unbound_{}", result.id),
+                None => RowIdentity::from_user_key(format!("__unbound_{}", result.id)),
             };
             vector_scores.insert(key, (rank, result.distance));
         }
@@ -250,12 +248,13 @@ impl CoreLoop {
             .map(|f| {
                 let (vector_rank, vector_distance) = p
                     .vector_scores
-                    .get(f.document_id.as_str())
+                    .get(&f.document_id)
                     .map(|(rank, dist)| (Some(*rank), Some(*dist)))
                     .unwrap_or((None, None));
                 let hop_distance = p.hop_distances.get(f.document_id.as_str()).copied();
                 GraphRagResult {
-                    node_id: f.document_id.clone(),
+                    // The identity is rendered here, at the response envelope.
+                    node_id: f.document_id.clone().into_string(),
                     rrf_score: f.rrf_score,
                     vector_rank,
                     vector_distance,
@@ -292,29 +291,28 @@ impl CoreLoop {
 
 /// Sort expanded graph nodes by hop distance and convert to `RankedResult` list.
 ///
-/// Used by 2-source GraphRAG, 3-source GraphRAG triple, and 3-source hybrid
-/// text search to avoid duplicating the sort-and-rank pattern.
+/// A graph node name is the row's client identity, so the list keys on
+/// `RowIdentity`. Used by 2-source GraphRAG and 3-source GraphRAG triple.
 pub(super) fn graph_nodes_to_ranked_results(
-    expanded_nodes: &[String],
+    expanded_nodes: Vec<String>,
     hop_distances: &HashMap<String, usize>,
-) -> Vec<RankedResult> {
-    let mut sorted: Vec<(&str, usize)> = expanded_nodes
-        .iter()
+) -> Vec<RankedResult<RowIdentity>> {
+    // Takes `expanded_nodes` by value so the name moves straight into
+    // `RowIdentity` below instead of being copied from a borrow.
+    let mut sorted: Vec<(String, usize)> = expanded_nodes
+        .into_iter()
         .map(|node| {
-            let dist = hop_distances
-                .get(node.as_str())
-                .copied()
-                .unwrap_or(usize::MAX);
-            (node.as_str(), dist)
+            let dist = hop_distances.get(&node).copied().unwrap_or(usize::MAX);
+            (node, dist)
         })
         .collect();
-    sorted.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+    sorted.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
     sorted
         .into_iter()
         .enumerate()
         .map(|(rank, (node_id, hop_dist))| RankedResult {
-            document_id: node_id.to_string(),
+            document_id: RowIdentity::from_user_key(node_id),
             rank,
             score: hop_dist as f32,
             source: "graph",
