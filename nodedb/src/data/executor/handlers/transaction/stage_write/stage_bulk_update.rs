@@ -14,6 +14,7 @@
 //! replay remains the sole durable apply.
 
 use nodedb_physical::physical_plan::UpdateValue;
+use nodedb_types::StorageKey;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
@@ -109,14 +110,14 @@ impl CoreLoop {
         // appends overlay-only rows that now match.
         {
             // `merge_overlay_into_scan` takes an infallible
-            // `Fn(&str, &[u8]) -> bool` predicate, so a division/modulo-by-
-            // zero is captured via this `Cell` side-channel and checked once
+            // `Fn(&StorageKey, &[u8]) -> bool` predicate, so a division/modulo-
+            // by-zero is captured via this `Cell` side-channel and checked once
             // the merge returns.
             let raw_matches =
                 self.strict_aware_matcher(database_id.as_u64(), tid, collection, &filters);
             let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
                 std::cell::Cell::new(None);
-            let matches = |doc_id: &str, body: &[u8]| match raw_matches(doc_id, body) {
+            let matches = |row_key: &StorageKey, body: &[u8]| match raw_matches(row_key, body) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -131,9 +132,7 @@ impl CoreLoop {
 
         let mut affected = 0u64;
         for (row_key, current_body) in &rows {
-            let Ok(surrogate) = u32::from_str_radix(row_key, 16) else {
-                continue;
-            };
+            let surrogate = row_key.surrogate().as_u32();
             let new_body = match self.stage_apply_update(
                 database_id.as_u64(),
                 tid,
@@ -149,7 +148,7 @@ impl CoreLoop {
             // policy. A rejected row fails the statement rather than being
             // skipped: skipping would under-report `affected` while the rest of
             // the predicate's matches were still rewritten.
-            let identity = crate::engine::document::store::identity_of(row_key);
+            let identity = row_key.to_identity();
             if let Err(e) = self.stage_admit_write(
                 rls_write_check,
                 &new_body,
@@ -160,9 +159,13 @@ impl CoreLoop {
             ) {
                 return self.response_error(task, e);
             }
-            if let Err(e) =
-                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, row_key, new_body)
-            {
+            if let Err(e) = self.stage_bulk_put_capped(
+                txn_id,
+                &coll_key,
+                surrogate,
+                &row_key.to_string(),
+                new_body,
+            ) {
                 return self.response_error(task, e);
             }
             affected += 1;
@@ -191,14 +194,14 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         filters: &[ScanFilter],
-    ) -> Result<Vec<(String, Vec<u8>)>, Response> {
+    ) -> Result<Vec<(StorageKey, Vec<u8>)>, Response> {
         let matching_ids = self
             .scan_matching_documents(database_id, tid, collection, filters)
             .map_err(|e| self.response_error(task, e))?;
-        let mut rows: Vec<(String, Vec<u8>)> = Vec::with_capacity(matching_ids.len());
+        let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::with_capacity(matching_ids.len());
         for key in matching_ids {
             if let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, &key) {
-                rows.push((key.to_string(), bytes));
+                rows.push((key, bytes));
             }
         }
         Ok(rows)

@@ -2,9 +2,9 @@
 
 //! Document collection scan handler.
 
+use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
-use super::fetch_types::parse_fetched_key;
 use super::projection::{apply_projection, apply_projection_msgpack};
 use super::{DocFetchParams, DocScanMode};
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -15,21 +15,6 @@ use crate::data::executor::response_codec::DocumentRow;
 use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::data::executor::task::ExecutionTask;
-
-/// Shape one fetched row into `(identity, standard msgpack body)`.
-///
-/// The id reaches this handler as rendered storage-key text several calls
-/// removed from the scan that produced it: `document_scan_fetch` unifies every
-/// source — current, `AS OF`, bitemporal — to `(String, Vec<u8>)`.
-fn fetched_row_to_doc(
-    collection: &str,
-    id: &str,
-    body: &[u8],
-    body_format: SparseBodyFormatRef<'_>,
-) -> crate::Result<(String, Vec<u8>)> {
-    let key = parse_fetched_key(collection, id)?;
-    Ok(sparse_row_to_doc(&key, body, body_format))
-}
 
 /// Parameters for [`CoreLoop::execute_document_scan`].
 pub(in crate::data::executor) struct DocumentScanParams<'a> {
@@ -194,19 +179,19 @@ impl CoreLoop {
                         collection.to_string(),
                     );
                     // `merge_overlay_into_scan` takes an infallible
-                    // `Fn(&str, &[u8]) -> bool` predicate, so a
+                    // `Fn(&StorageKey, &[u8]) -> bool` predicate, so a
                     // division/modulo-by-zero is captured via this `Cell`
                     // side-channel and checked once the merge returns.
                     let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
                         std::cell::Cell::new(None);
-                    let matches = |doc_id: &str, value: &[u8]| -> bool {
+                    let matches = |row_key: &StorageKey, value: &[u8]| -> bool {
                         if filter_predicates.is_empty() {
                             return true;
                         }
                         match crate::data::executor::core_loop::filter_match::matches_with_resolved_schema(
                             effective_schema.as_ref(),
                             &filter_predicates,
-                            doc_id,
+                            row_key,
                             value,
                         ) {
                             Ok(b) => b,
@@ -229,39 +214,50 @@ impl CoreLoop {
                 // row-bounded; one whose rows are reordered or deduplicated
                 // downstream had to gather the whole collection and is bounded
                 // here instead.
-                if (limit == usize::MAX || !sort_keys.is_empty() || distinct)
-                    && crate::data::executor::handlers::scan_budget::scan_bytes_exceeded(
-                        &filtered,
+                if limit == usize::MAX || !sort_keys.is_empty() || distinct {
+                    // Rendering to text happens downstream (once, per
+                    // `sparse_row_to_doc`); a `StorageKey` always renders to
+                    // exactly 8 hex characters, so the id contribution to the
+                    // budget is that fixed width rather than a render.
+                    let total_bytes = filtered.iter().fold(0usize, |acc, (_, value)| {
+                        acc.saturating_add(value.len()).saturating_add(8)
+                    });
+                    if crate::data::executor::handlers::scan_budget::budget_exceeded(
+                        total_bytes,
                         scan_budget_bytes,
-                    )
-                {
-                    return self.response_error(task, ErrorCode::ResourcesExhausted);
+                    ) {
+                        return self.response_error(task, ErrorCode::ResourcesExhausted);
+                    }
                 }
 
                 if let Some(pf) = prefilter {
-                    filtered.retain(|(doc_id, _)| {
-                        match crate::engine::document::store::doc_id_to_surrogate(doc_id) {
-                            Some(surrogate) => pf.contains(surrogate),
-                            None => false,
-                        }
-                    });
+                    filtered.retain(|(key, _)| pf.contains(key.surrogate()));
                 }
 
                 // Strict collections may store binary tuples. Sort and projection
                 // operate on msgpack, so normalize binary tuples here — through
                 // the shared converter, which leaves an already-msgpack body
                 // borrowed and so costs nothing on the schemaless path.
-                let filtered = if !sort_keys.is_empty() || !projection.is_empty() {
-                    match filtered
+                // Every stage past this point that reads fields (sort, window,
+                // projection, DISTINCT on a strict body) needs the normalized
+                // shape, so it is produced once here. A scan that reaches the
+                // client untouched keeps the stored bytes and renders only the
+                // envelope id.
+                let normalizes = !sort_keys.is_empty()
+                    || !projection.is_empty()
+                    || !computed_cols.is_empty()
+                    || !window_specs.is_empty()
+                    || effective_schema.is_some();
+                let filtered: Vec<(String, Vec<u8>)> = if normalizes {
+                    filtered
                         .into_iter()
-                        .map(|(id, bytes)| fetched_row_to_doc(collection, &id, &bytes, body_format))
-                        .collect::<crate::Result<Vec<_>>>()
-                    {
-                        Ok(rows) => rows,
-                        Err(e) => return self.response_error(task, e),
-                    }
+                        .map(|(key, bytes)| sparse_row_to_doc(&key, &bytes, body_format))
+                        .collect()
                 } else {
                     filtered
+                        .into_iter()
+                        .map(|(key, body)| (key.to_string(), body))
+                        .collect()
                 };
 
                 let sorted = if sort_keys.is_empty() {
@@ -305,9 +301,7 @@ impl CoreLoop {
                     // `SELECT DISTINCT category`. Project first, then dedupe.
                     let projected_rows: Vec<_> = match sorted
                         .into_iter()
-                        .map(|(doc_id, val)| {
-                            let (doc_id, mp) =
-                                fetched_row_to_doc(collection, &doc_id, &val, body_format)?;
+                        .map(|(doc_id, mp)| {
                             let projected =
                                 apply_projection_msgpack(&mp, &computed_cols, projection)?;
                             Ok((doc_id, projected))
@@ -331,14 +325,9 @@ impl CoreLoop {
                 }
 
                 if !window_specs.is_empty() {
-                    // Route through `sparse_row_to_doc`, like every sibling
-                    // branch, so a schemaless row with no `id` field carries
-                    // its storage-key identity into the window computation.
                     let mut decoded_rows: Vec<(String, serde_json::Value)> = match sorted
                         .into_iter()
-                        .map(|(id, val)| {
-                            let (doc_id, mp) =
-                                fetched_row_to_doc(collection, &id, &val, body_format)?;
+                        .map(|(doc_id, mp)| {
                             crate::data::executor::doc_format::decode_document(&mp)
                                 .map(|doc| (doc_id, doc))
                         })
@@ -391,9 +380,7 @@ impl CoreLoop {
                         // row, not the raw document.
                         let projected_rows: Vec<_> = match sorted
                             .into_iter()
-                            .map(|(doc_id, value)| {
-                                let (doc_id, mp) =
-                                    fetched_row_to_doc(collection, &doc_id, &value, body_format)?;
+                            .map(|(doc_id, mp)| {
                                 let projected =
                                     apply_projection_msgpack(&mp, &computed_cols, projection)?;
                                 Ok((doc_id, projected))

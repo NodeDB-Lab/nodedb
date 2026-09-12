@@ -31,14 +31,14 @@
 
 use std::collections::HashSet;
 
-use nodedb_types::Surrogate;
 use nodedb_types::columnar::StrictSchema;
+use nodedb_types::{StorageKey, Surrogate};
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
-use crate::engine::document::store::{extract_index_values, surrogate_to_doc_id};
+use crate::engine::document::store::extract_index_values;
 use crate::engine::kv::current_ms;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
@@ -74,17 +74,17 @@ pub(in crate::data::executor) struct IndexOverlayMergeParams<'a> {
 }
 
 impl CoreLoop {
-    /// Merge the overlay for `txn_id` into `rows` (base scan `(hex_row_key,
+    /// Merge the overlay for `txn_id` into `rows` (base scan `(StorageKey,
     /// body)` pairs). `matches` is the SAME predicate the base scan applied,
-    /// evaluated on a stored row's `(doc_id, body)` (Binary Tuple for strict,
+    /// evaluated on a stored row's `(row_key, body)` (Binary Tuple for strict,
     /// MessagePack for schemaless). No-op when the transaction has no overlay
     /// entries.
     pub(in crate::data::executor) fn merge_overlay_into_scan(
         &self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
-        rows: &mut Vec<(String, Vec<u8>)>,
-        matches: &dyn Fn(&str, &[u8]) -> bool,
+        rows: &mut Vec<(StorageKey, Vec<u8>)>,
+        matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
     ) {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -95,22 +95,13 @@ impl CoreLoop {
         // Surrogates already represented in the base result. Additions consult
         // this to avoid re-adding a row that base already carries (or that the
         // retain pass has just superseded in place).
-        let mut seen: HashSet<u32> = rows
-            .iter()
-            .filter_map(|(k, _)| {
-                crate::engine::document::store::doc_id_to_surrogate(k).map(|s| s.as_u32())
-            })
-            .collect();
+        let mut seen: HashSet<u32> = rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
 
         // Base-minus-superseded: a single in-place pass. Drop tombstoned rows,
         // replace put-superseded bodies and re-check the predicate, keep the
         // rest untouched.
         rows.retain_mut(|(row_key, body)| {
-            let Some(surrogate) =
-                crate::engine::document::store::doc_id_to_surrogate(row_key).map(|s| s.as_u32())
-            else {
-                return true;
-            };
+            let surrogate = row_key.surrogate().as_u32();
             match overlay.get(coll_key, surrogate) {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(staged_body)) => {
@@ -129,9 +120,9 @@ impl CoreLoop {
             }
             match staged {
                 Staged::Put(body) => {
-                    let hex_id = surrogate_to_doc_id(Surrogate::new(surrogate));
-                    if matches(&hex_id, body) {
-                        rows.push((hex_id, body.clone()));
+                    let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
+                    if matches(&key, body) {
+                        rows.push((key, body.clone()));
                         seen.insert(surrogate);
                     }
                 }
@@ -243,19 +234,18 @@ impl CoreLoop {
     /// own current-version + tombstone-aware semantics.
     ///
     /// Identity note: `DocumentEngine::index_lookup` returns each match's
-    /// storage key, which is the hex surrogate (`surrogate_to_doc_id`), NOT
-    /// the user-visible primary key — the secondary index stores the row's
-    /// hex-surrogate storage key as its document_id component. So this path
-    /// keys the overlay by surrogate exactly like `merge_overlay_into_scan`:
-    /// parse each base doc_id as hex to a surrogate, consult
-    /// `overlay.get(coll_key, surrogate)`, and append additions as
-    /// `surrogate_to_doc_id(..)` hex — the same identity the base list and the
-    /// handler's body fetch use. (The overlay's `doc_id_to_surrogate` map is
-    /// keyed by the PK, so `get_by_doc_id` would never match a hex key here.)
+    /// `StorageKey`, NOT the user-visible primary key — the secondary index
+    /// stores the row's storage key as its document_id component. So this
+    /// path keys the overlay by surrogate exactly like
+    /// `merge_overlay_into_scan`: read each base `StorageKey`'s surrogate,
+    /// consult `overlay.get(coll_key, surrogate)`, and append additions as
+    /// `StorageKey`s — the same identity the base list and the handler's
+    /// body fetch use. (The overlay's `doc_id_to_surrogate` map is keyed by
+    /// the PK, so `get_by_doc_id` would never match a storage key here.)
     pub(in crate::data::executor) fn merge_overlay_into_index_lookup(
         &self,
         params: IndexOverlayMergeParams<'_>,
-        doc_ids: &mut Vec<String>,
+        doc_ids: &mut Vec<StorageKey>,
         decode: &dyn Fn(&[u8]) -> crate::Result<Option<serde_json::Value>>,
     ) -> crate::Result<()> {
         let IndexOverlayMergeParams {
@@ -315,11 +305,11 @@ impl CoreLoop {
         // passes finish.
         let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
             std::cell::Cell::new(None);
-        let residual_matches = |doc_id: &str, body: &[u8]| -> bool {
+        let residual_matches = |row_key: &StorageKey, body: &[u8]| -> bool {
             if residual.is_empty() {
                 return true;
             }
-            match matches_with_resolved_schema(strict_schema, residual, doc_id, body) {
+            match matches_with_resolved_schema(strict_schema, residual, row_key, body) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -328,26 +318,17 @@ impl CoreLoop {
             }
         };
 
-        // Base doc IDs are hex surrogates; track their surrogates so additions
-        // don't re-append a row the base index lookup already returned.
-        let mut seen: HashSet<u32> = doc_ids
-            .iter()
-            .filter_map(|id| {
-                crate::engine::document::store::doc_id_to_surrogate(id).map(|s| s.as_u32())
-            })
-            .collect();
+        // Base doc IDs' surrogates, so additions don't re-append a row the
+        // base index lookup already returned.
+        let mut seen: HashSet<u32> = doc_ids.iter().map(|id| id.surrogate().as_u32()).collect();
 
-        // Base-minus-superseded: resolve each base hex doc_id to its surrogate
-        // and consult the overlay. A tombstone drops it; a staged put re-checks
-        // whether the new body still equals the lookup value (an update may
-        // have moved the row off the indexed value); no overlay entry — or an
-        // unparseable key — keeps it as-is.
+        // Base-minus-superseded: resolve each base storage key to its
+        // surrogate and consult the overlay. A tombstone drops it; a staged
+        // put re-checks whether the new body still equals the lookup value
+        // (an update may have moved the row off the indexed value); no
+        // overlay entry keeps it as-is.
         doc_ids.retain(|doc_id| {
-            let Some(surrogate) =
-                crate::engine::document::store::doc_id_to_surrogate(doc_id).map(|s| s.as_u32())
-            else {
-                return true;
-            };
+            let surrogate = doc_id.surrogate().as_u32();
             match overlay.get(coll_key, surrogate) {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(body)) => value_matches(body) && residual_matches(doc_id, body),
@@ -356,18 +337,17 @@ impl CoreLoop {
         });
 
         // Overlay additions: staged puts for surrogates the base lookup did
-        // not return, appended as hex `surrogate_to_doc_id(..)` when their
-        // staged body matches the lookup value — this surfaces a staged insert
-        // or an update-into-the-value.
+        // not return, appended when their staged body matches the lookup
+        // value — this surfaces a staged insert or an update-into-the-value.
         for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
             if seen.contains(&surrogate) {
                 continue;
             }
             match staged {
                 Staged::Put(body) => {
-                    let hex_id = surrogate_to_doc_id(Surrogate::new(surrogate));
-                    if value_matches(body) && residual_matches(&hex_id, body) {
-                        doc_ids.push(hex_id);
+                    let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
+                    if value_matches(body) && residual_matches(&key, body) {
+                        doc_ids.push(key);
                         seen.insert(surrogate);
                     }
                 }
@@ -390,26 +370,24 @@ impl CoreLoop {
     /// a row that was added by the merge (a staged insert/update) or whose
     /// base body was superseded by a staged update has no correct body in base
     /// storage — the staged `Put` bytes are the only current representation.
-    /// `doc_id` is the hex-surrogate storage key the index lookup returned, so
-    /// the overlay is consulted by surrogate (`get`), matching the identity
-    /// the merge used — `get_by_doc_id` is keyed by the PK and would not match.
+    /// `doc_id` is the storage key the index lookup returned, so the overlay
+    /// is consulted by surrogate (`get`), matching the identity the merge
+    /// used — `get_by_doc_id` is keyed by the PK and would not match.
     /// Returns `None` for a staged tombstone. Falls back to the lazy `base`
     /// closure (skipped whenever the overlay already has the answer) when the
-    /// key is unparseable or the surrogate has no staged mutation.
+    /// surrogate has no staged mutation.
     pub(in crate::data::executor) fn overlay_or_base_body(
         &self,
         txn_id: Option<TxnId>,
         coll_key: &(DatabaseId, TenantId, String),
-        doc_id: &str,
+        doc_id: &StorageKey,
         base: impl FnOnce() -> crate::Result<Option<Vec<u8>>>,
     ) -> crate::Result<Option<Vec<u8>>> {
         if let Some(txn_id) = txn_id {
             // Read-your-own-writes refreshes the lease (see the reaper).
             self.touch_overlay(txn_id);
-            if let Some(overlay) = self.txn_overlays.get(&txn_id)
-                && let Some(surrogate) =
-                    crate::engine::document::store::doc_id_to_surrogate(doc_id).map(|s| s.as_u32())
-            {
+            if let Some(overlay) = self.txn_overlays.get(&txn_id) {
+                let surrogate = doc_id.surrogate().as_u32();
                 match overlay.get(coll_key, surrogate) {
                     Some(Staged::Put(body)) => return Ok(Some(body.clone())),
                     Some(Staged::Tombstone) => return Ok(None),

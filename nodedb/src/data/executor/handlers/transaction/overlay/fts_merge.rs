@@ -34,7 +34,7 @@ use nodedb_types::Surrogate;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{Staged, TxnOverlay};
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Scope + tuning for one FTS overlay merge: the transaction, the
@@ -318,7 +318,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn merge_fts_rows_from_score_map(
         &self,
         params: FtsMergeParams<'_>,
-        rows: &mut Vec<(String, Vec<u8>)>,
+        rows: &mut Vec<(StorageKey, Vec<u8>)>,
         score_map: &HashMap<Surrogate, f32>,
     ) {
         let FtsMergeParams {
@@ -335,15 +335,11 @@ impl CoreLoop {
             return;
         };
 
-        let mut seen: std::collections::HashSet<u32> = rows
-            .iter()
-            .filter_map(|(k, _)| u32::from_str_radix(k, 16).ok())
-            .collect();
+        let mut seen: std::collections::HashSet<u32> =
+            rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
 
         rows.retain_mut(|(row_key, body)| {
-            let Ok(surrogate) = u32::from_str_radix(row_key, 16) else {
-                return true;
-            };
+            let surrogate = row_key.surrogate().as_u32();
             match overlay.get(&coll_key, surrogate) {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(staged_body)) => {
@@ -361,7 +357,10 @@ impl CoreLoop {
             if let Staged::Put(body) = staged
                 && score_map.contains_key(&Surrogate::new(surrogate))
             {
-                rows.push((surrogate_to_doc_id(Surrogate::new(surrogate)), body.clone()));
+                rows.push((
+                    StorageKey::for_surrogate(Surrogate::new(surrogate)),
+                    body.clone(),
+                ));
                 seen.insert(surrogate);
             }
         }

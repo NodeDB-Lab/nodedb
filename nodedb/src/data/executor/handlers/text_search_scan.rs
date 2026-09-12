@@ -8,6 +8,7 @@ use tracing::debug;
 
 use nodedb_fts::FtsSearchParams;
 use nodedb_fts::posting::QueryMode;
+use nodedb_types::StorageKey;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 
@@ -204,11 +205,8 @@ impl CoreLoop {
             collection,
             BM25_SCAN_MAX_HITS,
         );
-        // Rendered to text here: `merge_fts_rows_from_score_map` below and the
-        // per-row surrogate lookup both operate on the hex storage key as a
-        // string, out of this unit's typed scope.
-        let mut docs: Vec<(String, Vec<u8>)> = match scan_result {
-            Ok(d) => d.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        let mut docs: Vec<(StorageKey, Vec<u8>)> = match scan_result {
+            Ok(d) => d,
             Err(e) => {
                 return self.response_error(
                     task,
@@ -243,15 +241,14 @@ impl CoreLoop {
         }
 
         let mut rows: Vec<DocumentRow> = Vec::with_capacity(docs.len());
-        for (hex_key, bytes) in &docs {
+        for (key, bytes) in &docs {
             let mut value = match decode_scanned_document(bytes, format.as_format_ref()) {
                 Ok(v) => v,
                 Err(e) => return self.response_error(task, e),
             };
             // Inject score into the document object.
             if let serde_json::Value::Object(ref mut map) = value {
-                let score = crate::engine::document::store::doc_id_to_surrogate(hex_key)
-                    .and_then(|s| score_map.get(&s).copied());
+                let score = score_map.get(&key.surrogate()).copied();
                 match score {
                     Some(s) => {
                         map.insert(
@@ -268,7 +265,7 @@ impl CoreLoop {
                 }
             }
             rows.push(DocumentRow {
-                id: hex_key.clone(),
+                id: key.to_string(),
                 data: value,
             });
         }

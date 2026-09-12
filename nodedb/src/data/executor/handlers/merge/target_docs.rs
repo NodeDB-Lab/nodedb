@@ -9,9 +9,11 @@
 //! identical target set or the classification they agree on is meaningless, so
 //! there is exactly one place that decides what "the target" is.
 
+use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::engine::sparse::btree::tables::{KeyedTable, invalid_storage_key_err};
 
 impl CoreLoop {
     /// Collect every target row as `(doc_id, stored_bytes)` from a consistent
@@ -24,10 +26,10 @@ impl CoreLoop {
     /// row, a staged put replaces the base body, and a staged put absent from
     /// base is appended — so an in-transaction MERGE resolved at COMMIT sees rows
     /// staged by earlier statements in the same transaction. The `doc_id` this
-    /// produces is the hex surrogate, matching the overlay's surrogate keying, so
-    /// staged and base bodies (same canonical stored form — Binary Tuple for a
-    /// strict target, MessagePack for a schemaless one) are merged like-for-like
-    /// and decoded identically downstream by `decode_target`.
+    /// produces is the storage key's text, matching the overlay's surrogate
+    /// keying, so staged and base bodies (same canonical stored form — Binary
+    /// Tuple for a strict target, MessagePack for a schemaless one) are merged
+    /// like-for-like and decoded identically downstream by `decode_target`.
     pub(in crate::data::executor) fn collect_target_docs(
         &self,
         database_id: u64,
@@ -53,13 +55,16 @@ impl CoreLoop {
                 detail: format!("open table: {e}"),
             })?;
 
-        let mut docs = Vec::new();
+        let mut docs: Vec<(StorageKey, Vec<u8>)> = Vec::new();
         if let Ok(range) = table.range(prefix.as_str()..end.as_str()) {
             for entry in range.flatten() {
                 let key = entry.0.value();
                 let bytes = entry.1.value().to_vec();
-                if let Some(doc_id) = key.strip_prefix(&prefix) {
-                    docs.push((doc_id.to_string(), bytes));
+                if let Some(rest) = key.strip_prefix(&prefix) {
+                    let storage_key = StorageKey::parse(rest).ok_or_else(|| {
+                        invalid_storage_key_err(KeyedTable::Documents, collection, rest)
+                    })?;
+                    docs.push((storage_key, bytes));
                 }
             }
         }
@@ -76,6 +81,9 @@ impl CoreLoop {
             );
             self.merge_overlay_into_scan(txn_id, &coll_key, &mut docs, &|_, _| true);
         }
-        Ok(docs)
+        Ok(docs
+            .into_iter()
+            .map(|(key, body)| (key.to_string(), body))
+            .collect())
     }
 }

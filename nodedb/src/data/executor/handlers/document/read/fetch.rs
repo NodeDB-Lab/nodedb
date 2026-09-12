@@ -29,7 +29,7 @@ use super::fetch_types::FetchedRows;
 use super::{DocFetchParams, DocScanMode};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
-use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
+use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::sparse_body_format::{SparseBodyFormat, SparseBodyFormatRef};
 use crate::data::executor::task::ExecutionTask;
 
@@ -77,7 +77,7 @@ impl CoreLoop {
                     |doc_id: &StorageKey, body: &[u8]| match matches_with_resolved_schema(
                         strict_schema,
                         filter_predicates,
-                        &doc_id.to_string(),
+                        doc_id,
                         body,
                     ) {
                         Ok(b) => b,
@@ -114,7 +114,7 @@ impl CoreLoop {
                             SparseBodyFormatRef::from_schema(strict_schema),
                         )
                         .into_owned();
-                        (doc_id.to_string(), mp)
+                        (doc_id, mp)
                     })
                     .collect();
                 Ok(FetchedRows {
@@ -134,7 +134,7 @@ impl CoreLoop {
                     |doc_id: &StorageKey, body: &[u8]| match matches_with_resolved_schema(
                         strict_schema,
                         filter_predicates,
-                        &doc_id.to_string(),
+                        doc_id,
                         body,
                     ) {
                         Ok(b) => b,
@@ -158,7 +158,7 @@ impl CoreLoop {
                 if let Some(e) = predicate_err.take() {
                     return Err(crate::Error::from(e));
                 }
-                let mut rows: Vec<(String, Vec<u8>)> = Vec::with_capacity(raw.len());
+                let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::with_capacity(raw.len());
                 for row in raw {
                     let msgpack_body = match strict_schema {
                         Some(schema) => strict_audit_body(&row.body, schema)?,
@@ -170,7 +170,7 @@ impl CoreLoop {
                         row.valid_from_ms,
                         row.valid_until_ms,
                     )?;
-                    rows.push((row.doc_id.to_string(), with_ts));
+                    rows.push((row.doc_id, with_ts));
                 }
                 Ok(FetchedRows {
                     rows,
@@ -231,7 +231,7 @@ impl CoreLoop {
         // side-channel and checked once every branch below returns, rather
         // than silently folded away.
         let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-        let matches = |doc_id: &str, value: &[u8]| -> bool {
+        let matches = |key: &StorageKey, value: &[u8]| -> bool {
             if filter_predicates.is_empty() {
                 return true;
             }
@@ -246,7 +246,7 @@ impl CoreLoop {
             } else {
                 value
             };
-            match matches_with_resolved_schema(strict_schema, filter_predicates, doc_id, value) {
+            match matches_with_resolved_schema(strict_schema, filter_predicates, key, value) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -254,10 +254,6 @@ impl CoreLoop {
                 }
             }
         };
-        // `scan_documents_filtered` and `versioned_scan_as_of` hand the
-        // predicate a typed `StorageKey`; `matches` still takes the row's
-        // storage key as text, so this renders it once per candidate row.
-        let matches_by_key = |key: &StorageKey, value: &[u8]| matches(&key.to_string(), value);
 
         let rows: Vec<(StorageKey, Vec<u8>)> = if filter_predicates.is_empty() {
             if bitemporal {
@@ -298,7 +294,7 @@ impl CoreLoop {
                     valid_at_ms: None,
                     limit: fetch_limit,
                 },
-                &matches_by_key,
+                &matches,
                 &stop,
             )?
         } else {
@@ -307,7 +303,7 @@ impl CoreLoop {
                 tid,
                 collection,
                 fetch_limit,
-                &matches_by_key,
+                &matches,
                 &stop,
             )?
         };
@@ -323,17 +319,20 @@ impl CoreLoop {
         // columns, projection, DISTINCT — sees the same standard-msgpack shape
         // it sees for every other collection. Without it the tagged values pass
         // through untouched and reach the client as `[4,"alice"]`. The key
-        // stays typed from the scan above, so this needs no re-parse.
-        let rows: Vec<(String, Vec<u8>)> = if is_vector_sidecar {
+        // stays typed; the row's envelope id is rendered once downstream.
+        let rows: Vec<(StorageKey, Vec<u8>)> = if is_vector_sidecar {
             rows.into_iter()
                 .map(|(key, body)| {
-                    sparse_row_to_doc(&key, &body, SparseBodyFormatRef::VectorSidecar)
+                    let (_, mp) = crate::data::executor::scan_normalize::sparse_row_to_doc(
+                        &key,
+                        &body,
+                        SparseBodyFormatRef::VectorSidecar,
+                    );
+                    (key, mp)
                 })
                 .collect()
         } else {
-            rows.into_iter()
-                .map(|(key, body)| (key.to_string(), body))
-                .collect()
+            rows
         };
 
         Ok(FetchedRows {

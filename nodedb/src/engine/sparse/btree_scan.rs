@@ -238,7 +238,7 @@ impl SparseEngine {
         tenant_id: u64,
         collection: &str,
         field: &str,
-        doc_ids: &std::collections::HashSet<String>,
+        doc_ids: &std::collections::HashSet<StorageKey>,
     ) -> crate::Result<Vec<(String, usize)>> {
         let prefix = format!(
             "{}{field}:",
@@ -264,7 +264,10 @@ impl SparseEngine {
             {
                 let value = &rest[..colon_pos];
                 let doc_id = &rest[colon_pos + 1..];
-                if doc_ids.contains(doc_id) {
+                let doc_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                    invalid_storage_key_err(KeyedTable::Indexes, collection, doc_id)
+                })?;
+                if doc_ids.contains(&doc_key) {
                     *groups.entry(value.to_string()).or_default() += 1;
                 }
             }

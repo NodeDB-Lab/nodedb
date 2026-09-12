@@ -13,6 +13,7 @@
 //! Non-bitemporal collections keep the byte-identical plain
 //! `range_scan` + `sparse.get` path.
 
+use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -72,8 +73,7 @@ impl CoreLoop {
             tid,
         );
         match doc_engine.index_lookup(collection, path, value, bitemporal) {
-            Ok(doc_ids) => {
-                let mut doc_ids: Vec<String> = doc_ids.into_iter().map(|k| k.to_string()).collect();
+            Ok(mut doc_ids) => {
                 if let Some(txn_id) = task.request.txn_id {
                     let config_key = (
                         task.request.database_id,
@@ -110,6 +110,7 @@ impl CoreLoop {
                         return self.response_error(task, e);
                     }
                 }
+                let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
                 let payload = serde_json::json!(doc_ids);
                 match sonic_rs::to_vec(&payload) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
@@ -176,9 +177,9 @@ impl CoreLoop {
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let doc_engine =
             crate::engine::document::store::DocumentEngine::new(&self.sparse, database_id, tid);
-        let mut doc_ids: Vec<String> =
+        let mut doc_ids: Vec<StorageKey> =
             match doc_engine.index_lookup(collection, path, value, bitemporal) {
-                Ok(ids) => ids.into_iter().map(|k| k.to_string()).collect(),
+                Ok(ids) => ids,
                 Err(e) => {
                     return self.response_error(
                         task,
@@ -272,20 +273,11 @@ impl CoreLoop {
             // the staged `Put` bytes and only falls back to a base fetch
             // when the overlay has nothing staged for this surrogate.
             let fetched = self.overlay_or_base_body(task.request.txn_id, &coll_key, doc_id, || {
-                // `doc_id` is an index-lookup result, not a scan of DOCUMENTS
-                // itself; a shape that fails to parse as a storage key names
-                // no row in that table, matching what a lookup on the
-                // unparsed key would already have found.
-                match nodedb_types::StorageKey::parse(doc_id) {
-                    Some(key) => {
-                        if bitemporal {
-                            self.sparse
-                                .versioned_get_current(database_id, tid, collection, &key)
-                        } else {
-                            self.sparse.get(database_id, tid, collection, &key)
-                        }
-                    }
-                    None => Ok(None),
+                if bitemporal {
+                    self.sparse
+                        .versioned_get_current(database_id, tid, collection, doc_id)
+                } else {
+                    self.sparse.get(database_id, tid, collection, doc_id)
                 }
             });
             match fetched {
@@ -321,7 +313,7 @@ impl CoreLoop {
                     } else {
                         bytes
                     };
-                    rows.push((doc_id.clone(), payload));
+                    rows.push((doc_id.to_string(), payload));
                 }
                 Ok(None) => {
                     // Index entry pointed at a deleted doc — skip, don't

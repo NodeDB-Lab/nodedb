@@ -14,6 +14,7 @@
 //! evaluate strict predicates identically.
 
 use nodedb_query::EvalError;
+use nodedb_types::StorageKey;
 use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::scan_filter::ScanFilter;
@@ -38,18 +39,17 @@ use super::CoreLoop;
 /// the behavior-flip rule applies: the query fails instead of the row being
 /// silently excluded.
 ///
-/// `doc_id` is the row's storage key. A schemaless collection with no
+/// `row_key` is the row's storage key. A schemaless collection with no
 /// declared `id` field carries its identity only in that key, never in the
 /// body, so the body is matched with `id` injected — the same injection
 /// [`super::super::row_shape::sparse_row_to_doc`] applies to a materialized
 /// row, so `WHERE id ...` sees the identity a reader of the same row sees. A
-/// minted key injects the client-visible decimal identity, not the hex
-/// storage key. A strict row already surfaces `id` as a real tuple column, so
-/// no injection runs on that arm.
+/// strict row already surfaces `id` as a real tuple column, so no injection
+/// runs on that arm.
 pub(in crate::data::executor) fn matches_with_resolved_schema(
     strict_schema: Option<&StrictSchema>,
     filters: &[ScanFilter],
-    doc_id: &str,
+    row_key: &StorageKey,
     body: &[u8],
 ) -> Result<bool, EvalError> {
     match strict_schema {
@@ -58,10 +58,7 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
             None => Ok(false),
         },
         None => {
-            // `doc_id` comes straight off a store iterator, so only a `&str`
-            // is available here, not a `StorageKey`. A value that fails to
-            // parse as a minted key is a legacy or user key, taken verbatim.
-            let identity = crate::engine::document::store::identity_of(doc_id);
+            let identity = row_key.to_identity();
             let with_id =
                 nodedb_query::msgpack_scan::inject_str_field(body, "id", identity.as_str());
             ScanFilter::all_match_binary(filters, &with_id)
@@ -96,18 +93,18 @@ impl CoreLoop {
         })
     }
 
-    /// Build a reusable `Fn(&str, &[u8]) -> Result<bool, EvalError>` closure
-    /// evaluating `filters` against a stored row's `(doc_id, body)`,
+    /// Build a reusable `Fn(&StorageKey, &[u8]) -> Result<bool, EvalError>`
+    /// closure evaluating `filters` against a stored row's `(row_key, body)`,
     /// resolving `collection`'s strict schema ONCE up front (not per row) and
     /// capturing it in the closure. Suitable for a hot per-row scan loop
     /// directly, or as the fallible half of a Cell-wrapping call pattern —
     /// [`CoreLoop::merge_overlay_into_scan`] actually expects an
-    /// *infallible* `&dyn Fn(&str, &[u8]) -> bool`, not this function's own
-    /// `Result`-returning output, so callers that feed it into that merge
-    /// wrap the closure this function returns in a second, infallible one
-    /// that stashes any `Err` into a local `Cell<Option<EvalError>>` and
-    /// checks it once the merge call returns — see
-    /// `stage_bulk_delete.rs`/`stage_bulk_update.rs`'s `raw_matches` /
+    /// *infallible* `&dyn Fn(&StorageKey, &[u8]) -> bool`, not this
+    /// function's own `Result`-returning output, so callers that feed it
+    /// into that merge wrap the closure this function returns in a second,
+    /// infallible one that stashes any `Err` into a local
+    /// `Cell<Option<EvalError>>` and checks it once the merge call returns —
+    /// see `stage_bulk_delete.rs`/`stage_bulk_update.rs`'s `raw_matches` /
     /// `matches` pair for the exact pattern.
     pub(in crate::data::executor) fn strict_aware_matcher<'a>(
         &self,
@@ -115,10 +112,10 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         filters: &'a [ScanFilter],
-    ) -> impl Fn(&str, &[u8]) -> Result<bool, EvalError> + 'a {
+    ) -> impl Fn(&StorageKey, &[u8]) -> Result<bool, EvalError> + 'a {
         let strict_schema = self.resolve_strict_schema(database_id, tid, collection);
-        move |doc_id: &str, body: &[u8]| {
-            matches_with_resolved_schema(strict_schema.as_ref(), filters, doc_id, body)
+        move |row_key: &StorageKey, body: &[u8]| {
+            matches_with_resolved_schema(strict_schema.as_ref(), filters, row_key, body)
         }
     }
 }

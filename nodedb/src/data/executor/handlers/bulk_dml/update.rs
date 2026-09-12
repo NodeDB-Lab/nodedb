@@ -337,30 +337,26 @@ impl CoreLoop {
                 &updated_bytes,
             );
             // Record the committed row's write version against its
-            // surrogate + collection. Parsed once and reused below
-            // for the write-set entry (the row's doc_id is the
-            // hex-encoded surrogate storage key either way).
-            let row_surrogate = crate::engine::document::store::doc_id_to_surrogate(doc_id);
-            if let Some(surrogate) = row_surrogate {
-                self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
-                // Re-index the row's vectors from the new body
-                // (soft-delete the old HNSW node + insert the new
-                // one, keyed by the stable surrogate). No-op unless
-                // the collection has a vector field (gated above).
-                if has_vectors
-                    && let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
-                        database_id,
-                        tid,
-                        collection,
-                        row_key: doc_id,
-                        surrogate,
-                        new_body: &updated_bytes,
-                        is_strict: strict_schema.is_some(),
-                        has_vectors,
-                    })
-                {
-                    return self.response_error(task, e);
-                }
+            // surrogate + collection.
+            let surrogate = storage_key.surrogate();
+            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+            // Re-index the row's vectors from the new body (soft-delete the
+            // old HNSW node + insert the new one, keyed by the stable
+            // surrogate). No-op unless the collection has a vector field
+            // (gated above).
+            if has_vectors
+                && let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
+                    database_id,
+                    tid,
+                    collection,
+                    row_key: doc_id,
+                    surrogate,
+                    new_body: &updated_bytes,
+                    is_strict: strict_schema.is_some(),
+                    has_vectors,
+                })
+            {
+                return self.response_error(task, e);
             }
             // Emit an update event per affected row to the Event Plane,
             // so AFTER-UPDATE triggers and CDC/change-stream consumers
@@ -398,9 +394,8 @@ impl CoreLoop {
             // Carry the surrogate + post-image back for a post-apply
             // `Put` redo. `updated_bytes` is moved as its last use;
             // gated on `has_vectors` so a non-vector collection pays
-            // nothing. Keyed by the row's surrogate parsed from its
-            // doc_id (the hex-encoded surrogate storage key).
-            if has_vectors && let Some(surrogate) = row_surrogate {
+            // nothing.
+            if has_vectors {
                 write_set.push(WriteSetEntry {
                     surrogate: surrogate.as_u32(),
                     is_delete: false,

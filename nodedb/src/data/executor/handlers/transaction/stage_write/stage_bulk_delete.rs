@@ -12,6 +12,8 @@
 //! indexes, graph edges) run only at COMMIT replay through the real apply
 //! path, exactly as a staged point delete defers its cascade today.
 
+use nodedb_types::StorageKey;
+
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -85,14 +87,14 @@ impl CoreLoop {
 
         {
             // `merge_overlay_into_scan` takes an infallible
-            // `Fn(&str, &[u8]) -> bool` predicate, so a division/modulo-by-
-            // zero is captured via this `Cell` side-channel and checked once
+            // `Fn(&StorageKey, &[u8]) -> bool` predicate, so a division/modulo-
+            // by-zero is captured via this `Cell` side-channel and checked once
             // the merge returns.
             let raw_matches =
                 self.strict_aware_matcher(database_id.as_u64(), tid, collection, &filters);
             let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
                 std::cell::Cell::new(None);
-            let matches = |doc_id: &str, body: &[u8]| match raw_matches(doc_id, body) {
+            let matches = |row_key: &StorageKey, body: &[u8]| match raw_matches(row_key, body) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -115,7 +117,7 @@ impl CoreLoop {
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
             for (row_key, body) in &rows {
-                let identity = crate::engine::document::store::identity_of(row_key);
+                let identity = row_key.to_identity();
                 if let Err(e) = self.stage_admit_write(
                     rls_write_check,
                     body,
@@ -131,11 +133,12 @@ impl CoreLoop {
 
         let mut affected = 0u64;
         for (row_key, _body) in &rows {
-            let Ok(surrogate) = u32::from_str_radix(row_key, 16) else {
-                continue;
-            };
-            self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key.clone(), surrogate, row_key);
+            let surrogate = row_key.surrogate().as_u32();
+            self.txn_overlay_mut(txn_id).insert_tombstone(
+                coll_key.clone(),
+                surrogate,
+                &row_key.to_string(),
+            );
             affected += 1;
         }
 

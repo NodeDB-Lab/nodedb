@@ -42,19 +42,20 @@ impl CoreLoop {
         let mut ids = Vec::new();
         if let Ok(range) = table.range(prefix.as_str()..end.as_str()) {
             for entry in range.flatten() {
-                let key = entry.0.value();
+                let full_key = entry.0.value();
                 let value_bytes = entry.1.value();
-                if let Some(doc_id) = key.strip_prefix(&prefix)
-                    && matches(doc_id, value_bytes)?
-                {
-                    let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
-                        crate::engine::sparse::btree::invalid_storage_key_err(
-                            crate::engine::sparse::btree::KeyedTable::Documents,
-                            collection,
-                            doc_id,
-                        )
-                    })?;
-                    ids.push(doc_id);
+                let Some(rest) = full_key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let key = StorageKey::parse(rest).ok_or_else(|| {
+                    crate::engine::sparse::btree::invalid_storage_key_err(
+                        crate::engine::sparse::btree::KeyedTable::Documents,
+                        collection,
+                        rest,
+                    )
+                })?;
+                if matches(&key, value_bytes)? {
+                    ids.push(key);
                 }
             }
         }

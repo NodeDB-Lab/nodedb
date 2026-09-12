@@ -170,7 +170,7 @@ impl CoreLoop {
         // version. A statement that goes over its deadline mid-scan stops here
         // and the check below turns the short result into an error.
         let deadline = crate::data::executor::deadline::DeadlineCheck::for_task(task);
-        let scanned = match self.sparse.versioned_scan_as_of(
+        let mut scanned = match self.sparse.versioned_scan_as_of(
             crate::engine::sparse::btree_versioned::VersionedScanParams {
                 database_id: task.request.database_id.as_u64(),
                 tenant: tid,
@@ -194,28 +194,6 @@ impl CoreLoop {
             }
         };
 
-        // `merge_overlay_into_scan` operates on hex-rendered keys — the same
-        // text shape the base (non-versioned) scan path carries — so the
-        // typed keys from the versioned scan render once here at the
-        // boundary, and the predicate re-parses back to a `StorageKey` per
-        // candidate row.
-        let mut scanned: Vec<(String, Vec<u8>)> = scanned
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-        let predicate_str =
-            |doc_id: &str, body: &[u8]| match nodedb_types::StorageKey::parse(doc_id) {
-                Some(key) => predicate(&key, body),
-                None => {
-                    decode_err.set(Some(crate::engine::sparse::btree::invalid_storage_key_err(
-                        crate::engine::sparse::btree::KeyedTable::DocumentsVersioned,
-                        collection,
-                        doc_id,
-                    )));
-                    false
-                }
-            };
-
         // Read-your-own-writes: fold this transaction's staging overlay onto
         // the current-version base result, using the SAME range predicate on
         // the raw stored bodies (staged strict bodies are Binary Tuples, like
@@ -228,7 +206,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection.to_string(),
             );
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut scanned, &predicate_str);
+            self.merge_overlay_into_scan(txn_id, &coll_key, &mut scanned, &predicate);
         }
 
         // Both passes above run the same predicate; check the side-channel once,
@@ -258,7 +236,7 @@ impl CoreLoop {
                 },
                 None => body,
             };
-            rows.push((id, mp));
+            rows.push((id.to_string(), mp));
         }
 
         // Sort ascending by `field` and cap at `limit` — the same ordering the

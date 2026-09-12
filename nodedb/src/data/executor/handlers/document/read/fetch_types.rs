@@ -48,23 +48,9 @@ pub(in crate::data::executor) struct DocFetchParams<'a> {
     pub full_fetch: bool,
 }
 
-/// Parse a fetched row's id back into the storage key it was minted as.
-///
-/// Every row a document fetch produces is keyed by a rendered surrogate, so
-/// a shape that fails to parse names a fetch-pipeline bug, never a row to
-/// skip.
-pub(super) fn parse_fetched_key(collection: &str, id: &str) -> crate::Result<StorageKey> {
-    StorageKey::parse(id).ok_or_else(|| crate::Error::Storage {
-        engine: "sparse".into(),
-        detail: format!(
-            "collection '{collection}' fetched a row whose id is not a valid storage key: '{id}'"
-        ),
-    })
-}
-
 /// Raw rows plus the schema the downstream should decode them with.
 pub(in crate::data::executor) struct FetchedRows {
-    pub rows: Vec<(String, Vec<u8>)>,
+    pub rows: Vec<(StorageKey, Vec<u8>)>,
     pub effective_schema: Option<StrictSchema>,
     /// The statement's deadline passed while the storage scan was running, so
     /// `rows` holds an arbitrary prefix of the answer. The caller MUST fail the
