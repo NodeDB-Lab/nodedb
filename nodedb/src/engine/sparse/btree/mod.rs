@@ -12,5 +12,5 @@ pub mod tables;
 pub use engine::SparseEngine;
 pub(crate) use keys::coll_prefix;
 pub(in crate::engine::sparse) use keys::{tenant_prefix, with_tenant_key4};
-pub(crate) use tables::{DOCUMENTS, invalid_storage_key_err};
+pub(crate) use tables::{DOCUMENTS, KeyedTable, invalid_storage_key_err};
 pub(in crate::engine::sparse) use tables::{INDEXES, redb_err};

@@ -42,7 +42,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::bulk_dml::scan::ollp_predicted_doc_ids;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Loudly reject a Calvin bulk predicate plan that reached overlay staging
@@ -176,7 +175,6 @@ impl CoreLoop {
         predicted_sorted.sort_unstable();
 
         for surrogate in predicted_sorted {
-            let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
             let storage_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
             // Current body: overlay wins over base (read-your-own-writes),
@@ -195,7 +193,7 @@ impl CoreLoop {
                             database_id.as_u64(),
                             tid,
                             collection,
-                            &doc_id,
+                            &storage_key,
                         )
                     } else {
                         self.sparse
@@ -219,7 +217,7 @@ impl CoreLoop {
             )?;
             // Decide the staged post-image against the write policy: this is
             // the row the Calvin flush will install.
-            let identity = crate::engine::document::store::identity_of(&doc_id);
+            let identity = storage_key.to_identity();
             self.stage_admit_write(
                 rls_write_check,
                 &new_body,
@@ -228,6 +226,8 @@ impl CoreLoop {
                 tid,
                 collection,
             )?;
+            // The overlay's doc-id side map is keyed by text.
+            let doc_id = storage_key.to_string();
             self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &doc_id, new_body)?;
         }
         Ok(())

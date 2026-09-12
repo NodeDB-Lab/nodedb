@@ -31,7 +31,6 @@ impl CoreLoop {
     pub(super) fn stage_pk_present(
         &self,
         ctx: &StageCtx<'_>,
-        row_key: &str,
         storage_key: &StorageKey,
         bitemporal: bool,
         overlay: OverlayPk,
@@ -51,7 +50,7 @@ impl CoreLoop {
                         ctx.database_id,
                         ctx.tid,
                         ctx.collection,
-                        row_key,
+                        storage_key,
                     )?
                 } else {
                     self.sparse.exists_in_txn(

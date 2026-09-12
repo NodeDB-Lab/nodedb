@@ -35,7 +35,6 @@ use crate::data::executor::doc_format;
 use crate::data::executor::handlers::document::read::decode::decode_scanned_document;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{DatabaseId, Lsn, TenantId};
 
 /// Everything one balance move needs, independent of which transaction it lands
@@ -90,7 +89,9 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: &BalanceRmw<'_>,
     ) -> crate::Result<TargetWrite> {
-        let document_id = surrogate_to_doc_id(params.surrogate);
+        let storage_key = nodedb_types::StorageKey::for_surrogate(params.surrogate);
+        // `PointPutParams` still carries the document id as text.
+        let document_id = storage_key.to_string();
 
         // The TARGET collection's encoding is resolved from `doc_configs`, not
         // assumed: the target is a different collection from the source and may
@@ -116,8 +117,7 @@ impl CoreLoop {
             });
         }
 
-        let Some(old_bytes) = self.read_balance_row(txn, params, &document_id, params.surrogate)?
-        else {
+        let Some(old_bytes) = self.read_balance_row(txn, params, &storage_key)? else {
             return Err(params.target_not_found());
         };
 
@@ -183,7 +183,7 @@ impl CoreLoop {
                     params.database_id,
                     params.tid,
                     params.target_collection,
-                    &nodedb_types::StorageKey::for_surrogate(params.surrogate),
+                    &storage_key,
                 );
                 return Err(e);
             }
@@ -191,7 +191,6 @@ impl CoreLoop {
 
         Ok(TargetWrite {
             collection: params.target_collection.to_string(),
-            document_id,
             surrogate: params.surrogate,
             body,
             outcome,
@@ -208,24 +207,22 @@ impl CoreLoop {
         &self,
         txn: &WriteTransaction,
         params: &BalanceRmw<'_>,
-        document_id: &str,
-        surrogate: Surrogate,
+        storage_key: &nodedb_types::StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         if self.is_bitemporal(params.database_id, params.tid, params.target_collection) {
             self.sparse.versioned_get_current(
                 params.database_id,
                 params.tid,
                 params.target_collection,
-                document_id,
+                storage_key,
             )
         } else {
-            let key = nodedb_types::StorageKey::for_surrogate(surrogate);
             self.sparse.get_in_txn(
                 txn,
                 params.database_id,
                 params.tid,
                 params.target_collection,
-                &key,
+                storage_key,
             )
         }
     }

@@ -106,15 +106,17 @@ impl CoreLoop {
         // Predicate: decode each current body, extract `field`, keep in-range
         // rows. `extract_index_values(_, field, false)` yields the scalar
         // string form for the path (0 or 1 value for a non-array field).
-        // The scan API's predicate is `Fn(&str, &[u8]) -> bool`, so an
+        // The scan API's predicate is `Fn(&StorageKey, &[u8]) -> bool`, so an
         // undecodable body is captured through this `Cell` side-channel and
         // checked once the scan finishes. Returning `false` and moving on
         // would drop the row from the answer with nothing anywhere saying a
         // row was dropped, which reads to the client as a smaller — but
         // correct-looking — result set.
         let decode_err: std::cell::Cell<Option<crate::Error>> = std::cell::Cell::new(None);
-        let predicate = |doc_id: &str, body: &[u8]| match decode_body(body, strict_schema.as_ref())
-        {
+        let predicate = |doc_id: &nodedb_types::StorageKey, body: &[u8]| match decode_body(
+            body,
+            strict_schema.as_ref(),
+        ) {
             Err(e) => {
                 decode_err.set(Some(e));
                 false
@@ -140,7 +142,7 @@ impl CoreLoop {
                     Some(filters) => match nodedb_types::json_msgpack::json_to_msgpack(&doc) {
                         Ok(mp) => {
                             let mp = if strict_schema.is_none() {
-                                let identity = crate::engine::document::store::identity_of(doc_id);
+                                let identity = doc_id.to_identity();
                                 nodedb_query::msgpack_scan::inject_str_field(
                                     &mp,
                                     "id",
@@ -168,7 +170,7 @@ impl CoreLoop {
         // version. A statement that goes over its deadline mid-scan stops here
         // and the check below turns the short result into an error.
         let deadline = crate::data::executor::deadline::DeadlineCheck::for_task(task);
-        let mut scanned = match self.sparse.versioned_scan_as_of(
+        let scanned = match self.sparse.versioned_scan_as_of(
             crate::engine::sparse::btree_versioned::VersionedScanParams {
                 database_id: task.request.database_id.as_u64(),
                 tenant: tid,
@@ -192,6 +194,28 @@ impl CoreLoop {
             }
         };
 
+        // `merge_overlay_into_scan` operates on hex-rendered keys — the same
+        // text shape the base (non-versioned) scan path carries — so the
+        // typed keys from the versioned scan render once here at the
+        // boundary, and the predicate re-parses back to a `StorageKey` per
+        // candidate row.
+        let mut scanned: Vec<(String, Vec<u8>)> = scanned
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let predicate_str =
+            |doc_id: &str, body: &[u8]| match nodedb_types::StorageKey::parse(doc_id) {
+                Some(key) => predicate(&key, body),
+                None => {
+                    decode_err.set(Some(crate::engine::sparse::btree::invalid_storage_key_err(
+                        crate::engine::sparse::btree::KeyedTable::DocumentsVersioned,
+                        collection,
+                        doc_id,
+                    )));
+                    false
+                }
+            };
+
         // Read-your-own-writes: fold this transaction's staging overlay onto
         // the current-version base result, using the SAME range predicate on
         // the raw stored bodies (staged strict bodies are Binary Tuples, like
@@ -204,7 +228,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection.to_string(),
             );
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut scanned, &predicate);
+            self.merge_overlay_into_scan(txn_id, &coll_key, &mut scanned, &predicate_str);
         }
 
         // Both passes above run the same predicate; check the side-channel once,

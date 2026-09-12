@@ -84,11 +84,8 @@ use crate::types::DatabaseId;
 pub(in crate::data::executor) struct TargetWrite {
     /// Target collection name.
     pub collection: String,
-    /// Storage key of the target row — the hex-encoded surrogate.
-    pub document_id: String,
     /// The target row's surrogate, so an undo entry addresses the same identity
-    /// the forward write used. The old code had no surrogate to record and
-    /// pushed `Surrogate::ZERO`.
+    /// the forward write used.
     pub surrogate: Surrogate,
     /// The MessagePack body this write handed to `apply_point_put` — NOT the
     /// bytes that reached storage.

@@ -114,11 +114,11 @@ impl CoreLoop {
         // per branch. Gates the live HNSW re-index + the post-apply redo
         // write-set below; a non-vector collection pays neither.
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
+        let key = nodedb_types::StorageKey::for_surrogate(surrogate);
         let existing = if bitemporal {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, row_key)
+                .versioned_get_current(database_id, tid, collection, &key)
         } else {
-            let key = nodedb_types::StorageKey::for_surrogate(surrogate);
             self.sparse.get(database_id, tid, collection, &key)
         };
 

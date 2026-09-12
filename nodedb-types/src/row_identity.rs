@@ -30,7 +30,7 @@ use crate::Surrogate;
 /// Fixed-width lowercase hex, so lexicographic order matches surrogate order
 /// and a range scan iterates rows in surrogate order with no extra index.
 /// Internal: a storage key never reaches a client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StorageKey(Surrogate);
 
 impl StorageKey {

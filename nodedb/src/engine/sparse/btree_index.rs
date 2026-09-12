@@ -10,7 +10,7 @@ use redb::{ReadableDatabase, ReadableTable, WriteTransaction};
 use tracing::debug;
 
 use super::btree::{
-    DOCUMENTS, INDEXES, SparseEngine, coll_prefix, invalid_storage_key_err, redb_err,
+    DOCUMENTS, INDEXES, KeyedTable, SparseEngine, coll_prefix, invalid_storage_key_err, redb_err,
 };
 
 /// Identifies a single secondary-index entry for an in-txn mutation.
@@ -433,8 +433,9 @@ impl SparseEngine {
             {
                 let value = &rest[..colon_pos];
                 let doc_id = &rest[colon_pos + 1..];
-                let doc_id = StorageKey::parse(doc_id)
-                    .ok_or_else(|| invalid_storage_key_err("INDEXES", collection, doc_id))?;
+                let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
+                    invalid_storage_key_err(KeyedTable::Indexes, collection, doc_id)
+                })?;
                 results.push((doc_id, value.to_string()));
             }
         }

@@ -101,7 +101,7 @@ impl CoreLoop {
                 .is_some_and(|config| !config.index_paths.is_empty());
         let old_value = if bitemporal {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, document_id)?
+                .versioned_get_current(database_id, tid, collection, &storage_key)?
         } else if need_old {
             self.sparse
                 .get(database_id, tid, collection, &storage_key)?
@@ -147,7 +147,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    doc_id: document_id,
+                    doc_id: &storage_key,
                     sys_from_ms,
                     valid_from_ms,
                     valid_until_ms,

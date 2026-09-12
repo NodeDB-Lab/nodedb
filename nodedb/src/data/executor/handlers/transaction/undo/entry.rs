@@ -34,10 +34,9 @@ pub(in crate::data::executor) enum UndoEntry {
     /// Undo a PointPut by deleting the document (or restoring the old value).
     PutDocument {
         collection: String,
-        /// Hex-encoded surrogate (the redb storage key).
-        document_id: String,
-        /// Numeric surrogate for FTS index rollback.
-        surrogate: nodedb_types::Surrogate,
+        /// The redb storage key. `.surrogate()` recovers the numeric surrogate
+        /// FTS index rollback needs.
+        document_id: nodedb_types::StorageKey,
         /// `None` if the document didn't exist before (inserted); `Some(bytes)`
         /// if it was overwritten (updated).
         old_value: Option<Vec<u8>>,
@@ -64,12 +63,11 @@ pub(in crate::data::executor) enum UndoEntry {
     /// Undo a PointDelete by re-inserting the document.
     DeleteDocument {
         collection: String,
-        /// Hex-encoded surrogate (the redb storage key).
-        document_id: String,
-        /// Numeric surrogate for FTS inverted-index rollback re-indexing. The
-        /// forward delete cascade removed this document's postings; a rolled-back
-        /// delete recomputes and re-inserts them under this surrogate.
-        surrogate: nodedb_types::Surrogate,
+        /// The redb storage key. `.surrogate()` recovers the numeric surrogate
+        /// the FTS inverted-index rollback re-indexes under: the forward
+        /// delete cascade removed this document's postings, and a
+        /// rolled-back delete recomputes and re-inserts them under it.
+        document_id: nodedb_types::StorageKey,
         old_value: Vec<u8>,
         /// System-time key of the versioned tombstone row this op appended on a
         /// bitemporal collection. `None` = plain op → re-insert via the

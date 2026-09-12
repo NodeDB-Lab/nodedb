@@ -135,7 +135,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    row_key,
+                    &storage_key,
                 )
             } else {
                 self.sparse
@@ -294,8 +294,7 @@ impl CoreLoop {
         for target in target_writes {
             undo_log.push(UndoEntry::PutDocument {
                 collection: target.collection,
-                document_id: target.document_id,
-                surrogate: target.surrogate,
+                document_id: nodedb_types::StorageKey::for_surrogate(target.surrogate),
                 old_value: target.outcome.prior_value,
                 bitemporal_sys_from_ms: target.outcome.bitemporal_sys_from_ms,
                 bitemporal_index_tuples: target.outcome.bitemporal_index_tuples,
@@ -322,8 +321,7 @@ impl CoreLoop {
 
         undo_log.push(UndoEntry::PutDocument {
             collection: collection.to_string(),
-            document_id: row_key.to_string(),
-            surrogate,
+            document_id: storage_key,
             old_value: outcome.prior_value,
             bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
             bitemporal_index_tuples: outcome.bitemporal_index_tuples,

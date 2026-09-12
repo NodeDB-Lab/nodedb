@@ -138,7 +138,7 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let get_result = if bitemporal {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, row_key)
+                .versioned_get_current(database_id, tid, collection, &storage_key)
         } else {
             self.sparse.get(database_id, tid, collection, &storage_key)
         };

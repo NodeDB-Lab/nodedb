@@ -6,6 +6,7 @@
 //! return `Err((entry_index, detail))` on fatal failure so the caller can
 //! escalate to a typed `RollbackFailed` response.
 
+use nodedb_types::StorageKey;
 use tracing::error;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -19,7 +20,7 @@ pub(super) struct UndoDocumentContext<'a> {
     pub tid: u64,
     pub entry_index: usize,
     pub collection: &'a str,
-    pub document_id: &'a str,
+    pub document_id: &'a StorageKey,
 }
 
 impl CoreLoop {
@@ -36,7 +37,6 @@ impl CoreLoop {
             UndoEntry::PutDocument {
                 collection,
                 document_id,
-                surrogate,
                 old_value,
                 bitemporal_sys_from_ms,
                 bitemporal_index_tuples,
@@ -51,11 +51,8 @@ impl CoreLoop {
                     collection: &collection,
                     document_id: &document_id,
                 };
-                // The entry carries the surrogate directly, so the storage
-                // key is minted from it rather than re-parsed out of
-                // `document_id`'s text.
-                let storage_key =
-                    crate::engine::document::store::StorageKey::for_surrogate(surrogate);
+                let storage_key = document_id;
+                let surrogate = document_id.surrogate();
                 if let Some(sys_from_ms) = bitemporal_sys_from_ms {
                     // Bitemporal op: never wrote the non-versioned table, so
                     // physically remove the appended version row (+ its index
@@ -94,12 +91,7 @@ impl CoreLoop {
                 // restore the stale entries this put removed. Empty on the
                 // bitemporal path (its index reversal happened in
                 // `undo_bitemporal_write` above), so this is a no-op there.
-                self.undo_secondary_index(
-                    ctx,
-                    &storage_key,
-                    &secondary_index_added,
-                    &secondary_index_removed,
-                )?;
+                self.undo_secondary_index(ctx, &secondary_index_added, &secondary_index_removed)?;
                 // Revert inverted index: remove the postings this rolled-back
                 // put wrote. FATAL on failure — a rollback that leaves stale FTS
                 // postings behind is the same silent-partial-success corruption
@@ -136,7 +128,6 @@ impl CoreLoop {
             UndoEntry::DeleteDocument {
                 collection,
                 document_id,
-                surrogate,
                 old_value,
                 bitemporal_sys_from_ms,
                 bitemporal_index_tuples,
@@ -150,11 +141,8 @@ impl CoreLoop {
                     collection: &collection,
                     document_id: &document_id,
                 };
-                // The entry carries the surrogate directly, so the storage
-                // key is minted from it rather than re-parsed out of
-                // `document_id`'s text.
-                let storage_key =
-                    crate::engine::document::store::StorageKey::for_surrogate(surrogate);
+                let storage_key = document_id;
+                let surrogate = document_id.surrogate();
                 if let Some(sys_from_ms) = bitemporal_sys_from_ms {
                     self.undo_bitemporal_write(ctx, sys_from_ms, &bitemporal_index_tuples)?;
                 } else {
@@ -179,7 +167,7 @@ impl CoreLoop {
                 // Restore the plain secondary-index entries the forward delete
                 // cascade removed. Empty on the bitemporal path (no plain
                 // INDEXES entries there), so this is a no-op for it.
-                self.undo_secondary_index(ctx, &storage_key, &[], &secondary_index_tuples)?;
+                self.undo_secondary_index(ctx, &[], &secondary_index_tuples)?;
                 // Re-index the restored document into the full-text inverted
                 // index. The forward delete cascade removed its postings
                 // unconditionally, so a rollback that restored the row but not
@@ -238,6 +226,8 @@ impl CoreLoop {
         self.sparse
             .versioned_remove_in_txn(&txn, database_id, tid, collection, document_id, sys_from_ms)
             .map_err(|e| map_err("version remove", e.to_string()))?;
+        // INDEXES_VERSIONED still keys on the storage key as text.
+        let doc_id_str = document_id.to_string();
         for (field, value) in index_tuples {
             self.sparse
                 .versioned_index_remove_in_txn(
@@ -248,7 +238,7 @@ impl CoreLoop {
                         coll: collection,
                         field,
                         value,
-                        doc_id: document_id,
+                        doc_id: &doc_id_str,
                         sys_from_ms,
                     },
                 )
@@ -269,7 +259,6 @@ impl CoreLoop {
     fn undo_secondary_index(
         &self,
         ctx: UndoDocumentContext<'_>,
-        storage_key: &crate::engine::document::store::StorageKey,
         to_remove: &[(String, String)],
         to_restore: &[(String, String)],
     ) -> Result<(), (usize, String)> {
@@ -296,12 +285,12 @@ impl CoreLoop {
         };
         for (field, value) in to_remove {
             self.sparse
-                .index_remove(database_id, tid, collection, field, value, storage_key)
+                .index_remove(database_id, tid, collection, field, value, document_id)
                 .map_err(|e| map_err("remove", e.to_string()))?;
         }
         for (field, value) in to_restore {
             self.sparse
-                .index_put(database_id, tid, collection, field, value, storage_key)
+                .index_put(database_id, tid, collection, field, value, document_id)
                 .map_err(|e| map_err("restore", e.to_string()))?;
         }
         Ok(())
@@ -370,9 +359,13 @@ mod tests {
     const DB: u64 = 0;
     const TID: u64 = 1;
 
+    fn storage_key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(nodedb_types::Surrogate::new(surrogate))
+    }
+
     fn seed_version(
         core: &crate::data::executor::core_loop::CoreLoop,
-        doc: &str,
+        doc: u32,
         t: i64,
         body: &[u8],
     ) {
@@ -381,7 +374,7 @@ mod tests {
                 database_id: DB,
                 tenant: TID,
                 coll: "c",
-                doc_id: doc,
+                doc_id: &storage_key(doc),
                 sys_from_ms: t,
                 valid_from_ms: 0,
                 valid_until_ms: i64::MAX,
@@ -390,7 +383,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_index(core: &crate::data::executor::core_loop::CoreLoop, doc: &str, t: i64) {
+    fn seed_index(core: &crate::data::executor::core_loop::CoreLoop, doc: u32, t: i64) {
         core.sparse
             .versioned_index_put(VersionedIndexEntry {
                 database_id: DB,
@@ -398,7 +391,7 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: doc,
+                doc_id: &storage_key(doc).to_string(),
                 sys_from_ms: t,
             })
             .unwrap();
@@ -416,21 +409,21 @@ mod tests {
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
         let t = 1_000;
-        seed_version(&core, "d1", t, b"v1");
-        seed_index(&core, "d1", t);
+        let d1 = storage_key(1);
+        seed_version(&core, 1, t, b"v1");
+        seed_index(&core, 1, t);
 
         assert!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(index_lookup(&core), vec!["d1".to_string()]);
+        assert_eq!(index_lookup(&core), vec![d1.to_string()]);
 
         let entry = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: "d1".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: d1,
             old_value: None,
             bitemporal_sys_from_ms: Some(t),
             bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -442,7 +435,7 @@ mod tests {
 
         assert!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap()
                 .is_none(),
             "version row must be physically gone"
@@ -456,10 +449,11 @@ mod tests {
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
         // Live version at T1, then a tombstone at T2 (plus an index tombstone).
-        seed_version(&core, "d1", 1_000, b"v1");
-        seed_index(&core, "d1", 1_000);
+        let d1 = storage_key(1);
+        seed_version(&core, 1, 1_000, b"v1");
+        seed_index(&core, 1, 1_000);
         core.sparse
-            .versioned_tombstone(DB, TID, "c", "d1", 2_000)
+            .versioned_tombstone(DB, TID, "c", &d1, 2_000)
             .unwrap();
         core.sparse
             .versioned_index_tombstone(VersionedIndexEntry {
@@ -468,7 +462,7 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: "d1",
+                doc_id: &d1.to_string(),
                 sys_from_ms: 2_000,
             })
             .unwrap();
@@ -476,15 +470,14 @@ mod tests {
         // Tombstone hides the row.
         assert!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap()
                 .is_none()
         );
 
         let entry = UndoEntry::DeleteDocument {
             collection: "c".into(),
-            document_id: "d1".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: d1,
             old_value: b"v1".to_vec(),
             bitemporal_sys_from_ms: Some(2_000),
             bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -496,11 +489,11 @@ mod tests {
         // Removing the tombstone restores the prior live version as current.
         assert_eq!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap(),
             Some(b"v1".to_vec())
         );
-        assert_eq!(index_lookup(&core), vec!["d1".to_string()]);
+        assert_eq!(index_lookup(&core), vec![d1.to_string()]);
     }
 
     #[test]
@@ -519,8 +512,7 @@ mod tests {
         core.chain_hashes.insert(key(), "h1".into());
         let restore = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: "nonexistent".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: storage_key(0),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -537,8 +529,7 @@ mod tests {
         // Genesis case: undo removes the key entirely.
         let genesis = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: "nonexistent".into(),
-            surrogate: nodedb_types::Surrogate::ZERO,
+            document_id: storage_key(0),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -550,26 +541,19 @@ mod tests {
         assert!(!core.chain_hashes.contains_key(&key()));
     }
 
-    fn storage_key(surrogate: u32) -> crate::engine::document::store::StorageKey {
-        crate::engine::document::store::StorageKey::for_surrogate(nodedb_types::Surrogate::new(
-            surrogate,
-        ))
-    }
-
     #[test]
     fn plain_put_undo_restores_or_removes_the_surrogate_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
         // Overwrite case: current holds "new", undo restores "old". `undo`
-        // reads the row through the entry's `surrogate`, not `document_id`'s
-        // text, so the seeded row and the entry share one surrogate.
+        // reads the row through the entry's storage key, so the seeded row
+        // and the entry share one surrogate.
         let key1 = storage_key(1);
         core.sparse.put(DB, TID, "c", &key1, b"new").unwrap();
         let overwrite = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: key1.to_string(),
-            surrogate: key1.surrogate(),
+            document_id: key1,
             old_value: Some(b"old".to_vec()),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -588,8 +572,7 @@ mod tests {
         core.sparse.put(DB, TID, "c", &key2, b"inserted").unwrap();
         let insert = UndoEntry::PutDocument {
             collection: "c".into(),
-            document_id: key2.to_string(),
-            surrogate: key2.surrogate(),
+            document_id: key2,
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -610,8 +593,7 @@ mod tests {
         let key1 = storage_key(1);
         let entry = UndoEntry::DeleteDocument {
             collection: "c".into(),
-            document_id: key1.to_string(),
-            surrogate: key1.surrogate(),
+            document_id: key1,
             old_value: b"prior".to_vec(),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),

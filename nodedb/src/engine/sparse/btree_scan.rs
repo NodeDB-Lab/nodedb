@@ -7,7 +7,8 @@ use redb::{ReadableDatabase, ReadableTable};
 use tracing::debug;
 
 use super::btree::{
-    DOCUMENTS, INDEXES, SparseEngine, coll_prefix, invalid_storage_key_err, redb_err, tenant_prefix,
+    DOCUMENTS, INDEXES, KeyedTable, SparseEngine, coll_prefix, invalid_storage_key_err, redb_err,
+    tenant_prefix,
 };
 
 impl SparseEngine {
@@ -43,8 +44,9 @@ impl SparseEngine {
             let key = entry.0.value();
             // Extract document_id from key format "{database_id}:{tenant}:{collection}:{doc_id}"
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
-            let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
             let value = entry.1.value().to_vec();
             results.push((storage_key, value));
         }
@@ -99,8 +101,9 @@ impl SparseEngine {
             let key = entry.0.value();
             // Extract document_id from key format "{database_id}:{tenant}:{collection}:{doc_id}"
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
-            let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
             let value = entry.1.value();
             f(&storage_key, value)?;
             count += 1;
@@ -151,8 +154,9 @@ impl SparseEngine {
             let entry = entry.map_err(|e| redb_err("doc entry", e))?;
             let key = entry.0.value();
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
-            let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
             let value = entry.1.value().to_vec();
             chunk.push((storage_key, value));
             total += 1;
@@ -330,8 +334,9 @@ impl SparseEngine {
             let value_bytes = entry.1.value();
             let key = entry.0.value();
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
-            let storage_key = StorageKey::parse(doc_id)
-                .ok_or_else(|| invalid_storage_key_err("DOCUMENTS", collection, doc_id))?;
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
 
             // Evaluate predicate on raw bytes — skip allocation if no match.
             if !predicate(&storage_key, value_bytes) {

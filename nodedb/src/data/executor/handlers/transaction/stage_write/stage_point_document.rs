@@ -36,17 +36,10 @@ impl CoreLoop {
         if_absent: bool,
     ) -> Response {
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let row_key = storage_key.to_string();
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
 
         let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(
-            ctx,
-            row_key.as_str(),
-            &storage_key,
-            bitemporal,
-            overlay_pk,
-        ) {
+        let present = match self.stage_pk_present(ctx, &storage_key, bitemporal, overlay_pk) {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -98,16 +91,9 @@ impl CoreLoop {
         // and an earlier statement in this transaction may already have
         // tombstoned it.
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let row_key = storage_key.to_string();
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
         let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(
-            ctx,
-            row_key.as_str(),
-            &storage_key,
-            bitemporal,
-            overlay_pk,
-        ) {
+        let present = match self.stage_pk_present(ctx, &storage_key, bitemporal, overlay_pk) {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -161,7 +147,6 @@ impl CoreLoop {
             ctx.collection.to_string(),
         );
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let row_key = storage_key.to_string();
 
         // Reject direct updates to generated columns (matches the durable path).
         if let Some(config) = self.doc_configs.get(&config_key)
@@ -188,7 +173,7 @@ impl CoreLoop {
                         ctx.database_id,
                         ctx.tid,
                         ctx.collection,
-                        row_key.as_str(),
+                        &storage_key,
                     )
                 } else {
                     self.sparse

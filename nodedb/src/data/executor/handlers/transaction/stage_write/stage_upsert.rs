@@ -22,7 +22,6 @@ use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::handlers::upsert::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::response_codec;
 use crate::data::executor::strict_format;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::TenantId;
 
 impl CoreLoop {
@@ -102,16 +101,15 @@ impl CoreLoop {
             Some(Staged::Tombstone) => Ok(None),
             None => {
                 let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
+                let storage_key = nodedb_types::StorageKey::for_surrogate(ctx.surrogate);
                 if bitemporal {
-                    let row_key = surrogate_to_doc_id(ctx.surrogate);
                     self.sparse.versioned_get_current(
                         ctx.database_id,
                         ctx.tid,
                         ctx.collection,
-                        row_key.as_str(),
+                        &storage_key,
                     )
                 } else {
-                    let storage_key = nodedb_types::StorageKey::for_surrogate(ctx.surrogate);
                     self.sparse
                         .get(ctx.database_id, ctx.tid, ctx.collection, &storage_key)
                 }

@@ -57,7 +57,7 @@ fn update_via_put_creates_new_version_and_preserves_old() {
 
     // History at t_mid still sees v=1.
     let body = sparse
-        .versioned_get_as_of(0, 1, "c", &key(1).to_string(), Some(t_mid), None)
+        .versioned_get_as_of(0, 1, "c", &key(1), Some(t_mid), None)
         .unwrap()
         .expect("historical version");
     let rmpv_val = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
@@ -83,7 +83,7 @@ fn delete_appends_tombstone_but_prior_version_still_visible_as_of() {
 
     // Historical read at t_before_delete: still Alice.
     let body = sparse
-        .versioned_get_as_of(0, 1, "c", &key(1).to_string(), Some(t_before_delete), None)
+        .versioned_get_as_of(0, 1, "c", &key(1), Some(t_before_delete), None)
         .unwrap()
         .expect("pre-delete version still reachable");
     let rmpv_val = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
@@ -105,7 +105,7 @@ fn ten_sequential_updates_produce_ten_reachable_versions() {
     }
     for (cutoff, expected) in &cutoffs {
         let body = sparse
-            .versioned_get_as_of(0, 1, "c", &key(1).to_string(), Some(*cutoff), None)
+            .versioned_get_as_of(0, 1, "c", &key(1), Some(*cutoff), None)
             .unwrap()
             .unwrap_or_else(|| panic!("missing version at cutoff {cutoff}"));
         let rmpv_val = rmpv::decode::read_value(&mut body.as_slice()).unwrap();

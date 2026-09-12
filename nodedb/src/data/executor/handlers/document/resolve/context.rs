@@ -83,7 +83,7 @@ impl CoreLoop {
     ) -> Result<Option<Vec<u8>>, ErrorCode> {
         let read = if self.is_bitemporal(database_id, tid, collection) {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, &row_key.to_string())
+                .versioned_get_current(database_id, tid, collection, row_key)
         } else {
             self.sparse.get(database_id, tid, collection, row_key)
         };

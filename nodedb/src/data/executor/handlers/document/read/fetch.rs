@@ -26,7 +26,7 @@ use nodedb_types::StorageKey;
 
 use super::audit_body::{inject_temporal_columns, strict_audit_body};
 use super::fetch_types::FetchedRows;
-use super::{DocFetchParams, DocScanMode, parse_fetched_key};
+use super::{DocFetchParams, DocScanMode};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
@@ -68,24 +68,24 @@ impl CoreLoop {
                 // msgpack) operates uniformly, then hand it downstream with no
                 // schema (bodies are already normalized).
                 // `versioned_scan_as_of` takes an infallible
-                // `Fn(&str, &[u8]) -> bool` predicate (a storage-engine
-                // primitive out of scope for this fix), so a
+                // `Fn(&StorageKey, &[u8]) -> bool` predicate, so a
                 // division/modulo-by-zero is captured via this `Cell`
                 // side-channel and checked once the scan returns, rather
                 // than silently folded away.
                 let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-                let predicate = |doc_id: &str, body: &[u8]| match matches_with_resolved_schema(
-                    strict_schema,
-                    filter_predicates,
-                    doc_id,
-                    body,
-                ) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        predicate_err.set(Some(e));
-                        false
-                    }
-                };
+                let predicate =
+                    |doc_id: &StorageKey, body: &[u8]| match matches_with_resolved_schema(
+                        strict_schema,
+                        filter_predicates,
+                        &doc_id.to_string(),
+                        body,
+                    ) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            predicate_err.set(Some(e));
+                            false
+                        }
+                    };
                 let raw = self.sparse.versioned_scan_as_of(
                     crate::engine::sparse::btree_versioned::VersionedScanParams {
                         database_id: task.request.database_id.as_u64(),
@@ -114,7 +114,7 @@ impl CoreLoop {
                             SparseBodyFormatRef::from_schema(strict_schema),
                         )
                         .into_owned();
-                        (doc_id, mp)
+                        (doc_id.to_string(), mp)
                     })
                     .collect();
                 Ok(FetchedRows {
@@ -130,18 +130,19 @@ impl CoreLoop {
                 // so a user can `SELECT` / `ORDER BY` / project on them.
                 // See the `AsOf` arm above for the `Cell` side-channel rationale.
                 let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-                let predicate = |doc_id: &str, body: &[u8]| match matches_with_resolved_schema(
-                    strict_schema,
-                    filter_predicates,
-                    doc_id,
-                    body,
-                ) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        predicate_err.set(Some(e));
-                        false
-                    }
-                };
+                let predicate =
+                    |doc_id: &StorageKey, body: &[u8]| match matches_with_resolved_schema(
+                        strict_schema,
+                        filter_predicates,
+                        &doc_id.to_string(),
+                        body,
+                    ) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            predicate_err.set(Some(e));
+                            false
+                        }
+                    };
                 let raw = self.sparse.versioned_scan_all(
                     crate::engine::sparse::btree_versioned::VersionedScanParams {
                         database_id: task.request.database_id.as_u64(),
@@ -169,7 +170,7 @@ impl CoreLoop {
                         row.valid_from_ms,
                         row.valid_until_ms,
                     )?;
-                    rows.push((row.doc_id, with_ts));
+                    rows.push((row.doc_id.to_string(), with_ts));
                 }
                 Ok(FetchedRows {
                     rows,
@@ -225,12 +226,10 @@ impl CoreLoop {
             SparseBodyFormat::VectorSidecar
         );
 
-        // `scan_documents_filtered`/`versioned_scan_as_of`
-        // take an infallible `Fn(&str, &[u8]) -> bool` predicate (a
-        // storage-engine primitive out of scope for this fix), so a
-        // division/modulo-by-zero is captured via this `Cell` side-channel
-        // and checked once every branch below returns, rather than silently
-        // folded away.
+        // `scan_documents_filtered`/`versioned_scan_as_of` take an infallible
+        // predicate, so a division/modulo-by-zero is captured via this `Cell`
+        // side-channel and checked once every branch below returns, rather
+        // than silently folded away.
         let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
         let matches = |doc_id: &str, value: &[u8]| -> bool {
             if filter_predicates.is_empty() {
@@ -255,37 +254,25 @@ impl CoreLoop {
                 }
             }
         };
-        // `scan_documents_filtered` hands the predicate a typed `StorageKey`;
-        // `matches` (and `versioned_scan_as_of`'s predicate) still take the
-        // row's storage key as text, so this renders it once per candidate row.
+        // `scan_documents_filtered` and `versioned_scan_as_of` hand the
+        // predicate a typed `StorageKey`; `matches` still takes the row's
+        // storage key as text, so this renders it once per candidate row.
         let matches_by_key = |key: &StorageKey, value: &[u8]| matches(&key.to_string(), value);
-
-        // `versioned_scan_as_of` hands back a rendered storage key, parsed
-        // back ONCE here rather than carried as text and re-parsed later. A
-        // shape that fails to parse names a fetch-pipeline bug, not a row to
-        // skip.
-        let parse_row_key = |id: String, body: Vec<u8>| -> crate::Result<(StorageKey, Vec<u8>)> {
-            Ok((parse_fetched_key(collection, &id)?, body))
-        };
 
         let rows: Vec<(StorageKey, Vec<u8>)> = if filter_predicates.is_empty() {
             if bitemporal {
-                self.sparse
-                    .versioned_scan_as_of(
-                        crate::engine::sparse::btree_versioned::VersionedScanParams {
-                            database_id,
-                            tenant: tid,
-                            coll: collection,
-                            sys_cutoff_ms: None,
-                            valid_at_ms: None,
-                            limit: fetch_limit,
-                        },
-                        &|_, _| true,
-                        &stop,
-                    )?
-                    .into_iter()
-                    .map(|(id, body)| parse_row_key(id, body))
-                    .collect::<crate::Result<Vec<_>>>()?
+                self.sparse.versioned_scan_as_of(
+                    crate::engine::sparse::btree_versioned::VersionedScanParams {
+                        database_id,
+                        tenant: tid,
+                        coll: collection,
+                        sys_cutoff_ms: None,
+                        valid_at_ms: None,
+                        limit: fetch_limit,
+                    },
+                    &|_: &StorageKey, _: &[u8]| true,
+                    &stop,
+                )?
             } else {
                 // Routed through the filtered scan with an always-true
                 // predicate rather than `scan_documents`: the unfiltered full
@@ -302,22 +289,18 @@ impl CoreLoop {
                 )?
             }
         } else if bitemporal {
-            self.sparse
-                .versioned_scan_as_of(
-                    crate::engine::sparse::btree_versioned::VersionedScanParams {
-                        database_id,
-                        tenant: tid,
-                        coll: collection,
-                        sys_cutoff_ms: None,
-                        valid_at_ms: None,
-                        limit: fetch_limit,
-                    },
-                    &matches,
-                    &stop,
-                )?
-                .into_iter()
-                .map(|(id, body)| parse_row_key(id, body))
-                .collect::<crate::Result<Vec<_>>>()?
+            self.sparse.versioned_scan_as_of(
+                crate::engine::sparse::btree_versioned::VersionedScanParams {
+                    database_id,
+                    tenant: tid,
+                    coll: collection,
+                    sys_cutoff_ms: None,
+                    valid_at_ms: None,
+                    limit: fetch_limit,
+                },
+                &matches_by_key,
+                &stop,
+            )?
         } else {
             self.sparse.scan_documents_filtered(
                 database_id,

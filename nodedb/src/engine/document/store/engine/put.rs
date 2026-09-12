@@ -39,9 +39,6 @@ impl<'a> DocumentEngine<'a> {
         msgpack_bytes: &[u8],
     ) -> crate::Result<()> {
         let bitemporal = self.is_bitemporal(collection);
-        // The versioned table and the INDEXES table both take the storage
-        // key as text; rendered once here at the boundary.
-        let doc_id_str = doc_id.to_string();
 
         if bitemporal {
             let sys_from = wall_now_ms();
@@ -50,7 +47,7 @@ impl<'a> DocumentEngine<'a> {
                     database_id: self.database_id,
                     tenant: self.tenant_id,
                     coll: collection,
-                    doc_id: &doc_id_str,
+                    doc_id,
                     sys_from_ms: sys_from,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
@@ -69,6 +66,8 @@ impl<'a> DocumentEngine<'a> {
         if let Some(config) = self.configs.get(collection)
             && let Ok(value) = crate::util::bounded_msgpack::read_value(msgpack_bytes)
         {
+            // INDEXES_VERSIONED still keys on the storage key as text.
+            let doc_id_str = doc_id.to_string();
             for index_path in &config.index_paths {
                 let values =
                     extract_index_values_rmpv(&value, &index_path.path, index_path.is_array);

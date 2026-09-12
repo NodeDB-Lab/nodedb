@@ -272,18 +272,20 @@ impl CoreLoop {
             // the staged `Put` bytes and only falls back to a base fetch
             // when the overlay has nothing staged for this surrogate.
             let fetched = self.overlay_or_base_body(task.request.txn_id, &coll_key, doc_id, || {
-                if bitemporal {
-                    self.sparse
-                        .versioned_get_current(database_id, tid, collection, doc_id)
-                } else {
-                    // `doc_id` is an index-lookup result, not a scan of
-                    // DOCUMENTS itself; a shape that fails to parse as a
-                    // storage key names no row in that table, matching what
-                    // a lookup on the unparsed key would already have found.
-                    match nodedb_types::StorageKey::parse(doc_id) {
-                        Some(key) => self.sparse.get(database_id, tid, collection, &key),
-                        None => Ok(None),
+                // `doc_id` is an index-lookup result, not a scan of DOCUMENTS
+                // itself; a shape that fails to parse as a storage key names
+                // no row in that table, matching what a lookup on the
+                // unparsed key would already have found.
+                match nodedb_types::StorageKey::parse(doc_id) {
+                    Some(key) => {
+                        if bitemporal {
+                            self.sparse
+                                .versioned_get_current(database_id, tid, collection, &key)
+                        } else {
+                            self.sparse.get(database_id, tid, collection, &key)
+                        }
                     }
+                    None => Ok(None),
                 }
             });
             match fetched {

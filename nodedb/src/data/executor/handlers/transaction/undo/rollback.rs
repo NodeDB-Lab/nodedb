@@ -118,13 +118,17 @@ mod tests {
     const DB: u64 = 0;
     const TID: u64 = 1;
 
-    fn seed_version(core: &CoreLoop, doc: &str, t: i64, body: &[u8]) {
+    fn key(surrogate: u32) -> nodedb_types::StorageKey {
+        nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
+    fn seed_version(core: &CoreLoop, doc: u32, t: i64, body: &[u8]) {
         core.sparse
             .versioned_put(VersionedPut {
                 database_id: DB,
                 tenant: TID,
                 coll: "c",
-                doc_id: doc,
+                doc_id: &key(doc),
                 sys_from_ms: t,
                 valid_from_ms: 0,
                 valid_until_ms: i64::MAX,
@@ -133,7 +137,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_index(core: &CoreLoop, doc: &str, t: i64) {
+    fn seed_index(core: &CoreLoop, doc: u32, t: i64) {
         core.sparse
             .versioned_index_put(VersionedIndexEntry {
                 database_id: DB,
@@ -141,7 +145,7 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: doc,
+                doc_id: &key(doc).to_string(),
                 sys_from_ms: t,
             })
             .unwrap();
@@ -163,20 +167,21 @@ mod tests {
     fn rollback_undo_log_restores_pre_txn_state_for_bitemporal_put_then_delete() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let d1 = key(1);
 
-        // Pre-txn state: nothing exists for "d1".
+        // Pre-txn state: nothing exists for `d1`.
         assert!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap()
                 .is_none()
         );
 
         // Forward tx: PUT at t=1000, then DELETE (tombstone) at t=2000.
-        seed_version(&core, "d1", 1_000, b"v1");
-        seed_index(&core, "d1", 1_000);
+        seed_version(&core, 1, 1_000, b"v1");
+        seed_index(&core, 1, 1_000);
         core.sparse
-            .versioned_tombstone(DB, TID, "c", "d1", 2_000)
+            .versioned_tombstone(DB, TID, "c", &d1, 2_000)
             .unwrap();
         core.sparse
             .versioned_index_tombstone(VersionedIndexEntry {
@@ -185,7 +190,7 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: "d1",
+                doc_id: &d1.to_string(),
                 sys_from_ms: 2_000,
             })
             .unwrap();
@@ -193,7 +198,7 @@ mod tests {
         // Sanity: the forward tx did delete the row (as observed mid-tx).
         assert!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap()
                 .is_none()
         );
@@ -201,8 +206,7 @@ mod tests {
         let undo_log = vec![
             UndoEntry::PutDocument {
                 collection: "c".into(),
-                document_id: "d1".into(),
-                surrogate: nodedb_types::Surrogate::ZERO,
+                document_id: d1,
                 old_value: None,
                 bitemporal_sys_from_ms: Some(1_000),
                 bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -212,8 +216,7 @@ mod tests {
             },
             UndoEntry::DeleteDocument {
                 collection: "c".into(),
-                document_id: "d1".into(),
-                surrogate: nodedb_types::Surrogate::ZERO,
+                document_id: d1,
                 old_value: b"v1".to_vec(),
                 bitemporal_sys_from_ms: Some(2_000),
                 bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -230,7 +233,7 @@ mod tests {
         // Pre-txn state restored: no current version, no index entry.
         assert!(
             core.sparse
-                .versioned_get_current(DB, TID, "c", "d1")
+                .versioned_get_current(DB, TID, "c", &d1)
                 .unwrap()
                 .is_none(),
             "aborted bitemporal put+delete must leave no current version behind"

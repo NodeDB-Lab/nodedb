@@ -34,10 +34,9 @@ pub(in crate::data::executor) struct PointUpdatePersist<'a> {
     pub(in crate::data::executor) database_id: u64,
     pub(in crate::data::executor) tid: u64,
     pub(in crate::data::executor) collection: &'a str,
-    /// Storage key (the surrogate hex).
+    /// Storage key (the surrogate hex), rendered — used in error messages.
     pub(in crate::data::executor) row_key: &'a str,
-    /// The same storage key, typed — passed alongside `row_key` because the
-    /// versioned-table methods below still take the rendered text.
+    /// The same storage key, typed — what every storage call below takes.
     pub(in crate::data::executor) storage_key: &'a crate::engine::document::store::StorageKey,
     /// The row as it was before this update — the old side of the index diff,
     /// and the pre-image every folded constraint subtracts.
@@ -129,7 +128,7 @@ impl CoreLoop {
                         database_id,
                         tid,
                         collection,
-                        doc_id: row_key,
+                        doc_id: storage_key,
                         sys_from_ms,
                         valid_from_ms: i64::MIN,
                         valid_until_ms: i64::MAX,
@@ -154,7 +153,7 @@ impl CoreLoop {
                             database_id,
                             tenant: tid,
                             coll: collection,
-                            doc_id: row_key,
+                            doc_id: storage_key,
                             sys_from_ms,
                             valid_from_ms: i64::MIN,
                             valid_until_ms: i64::MAX,

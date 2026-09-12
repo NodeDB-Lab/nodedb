@@ -12,15 +12,12 @@ use crate::engine::document::store::extract::extract_index_values_rmpv;
 
 impl<'a> DocumentEngine<'a> {
     pub fn delete(&self, collection: &str, doc_id: &StorageKey) -> crate::Result<bool> {
-        // The versioned table and the INDEXES table both take the storage
-        // key as text; rendered once here at the boundary.
-        let doc_id_str = doc_id.to_string();
         if self.is_bitemporal(collection) {
             let prior_body = self.sparse.versioned_get_current(
                 self.database_id,
                 self.tenant_id,
                 collection,
-                &doc_id_str,
+                doc_id,
             )?;
             let Some(body) = prior_body else {
                 return Ok(false);
@@ -30,12 +27,14 @@ impl<'a> DocumentEngine<'a> {
                 self.database_id,
                 self.tenant_id,
                 collection,
-                &doc_id_str,
+                doc_id,
                 sys_from,
             )?;
             if let Some(config) = self.configs.get(collection)
                 && let Ok(rmpv_val) = crate::util::bounded_msgpack::read_value(&body)
             {
+                // INDEXES_VERSIONED still keys on the storage key as text.
+                let doc_id_str = doc_id.to_string();
                 for index_path in &config.index_paths {
                     for v in
                         extract_index_values_rmpv(&rmpv_val, &index_path.path, index_path.is_array)

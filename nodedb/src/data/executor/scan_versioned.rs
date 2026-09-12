@@ -34,7 +34,7 @@ impl CoreLoop {
                 valid_at_ms: None,
                 limit,
             },
-            &|_, _| true,
+            &|_: &nodedb_types::StorageKey, _: &[u8]| true,
             // No task in scope: this helper serves callers that supply their
             // own bound (an explicit `limit`), so no deadline cuts it short.
             &crate::engine::sparse::scan_stop::never_stop,
@@ -46,16 +46,7 @@ impl CoreLoop {
         );
 
         let mut normalized = Vec::with_capacity(docs.len());
-        for (id, raw) in docs {
-            // The versioned table keys every row by the same surrogate hex
-            // as the plain table; a shape that fails to parse is a violated
-            // storage invariant, not a legacy row to skip.
-            let key = nodedb_types::StorageKey::parse(&id).ok_or_else(|| crate::Error::Storage {
-                engine: "sparse".into(),
-                detail: format!(
-                    "collection '{collection}' has a versioned row whose key is not a valid storage key: '{id}'"
-                ),
-            })?;
+        for (key, raw) in docs {
             normalized.push(sparse_row_to_doc(&key, &raw, format.as_format_ref()));
         }
         Ok(normalized)

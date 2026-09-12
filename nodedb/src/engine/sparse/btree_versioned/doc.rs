@@ -2,6 +2,7 @@
 
 //! Document-level operations on the versioned document table.
 
+use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use super::key::{doc_prefix, doc_prefix_end, versioned_doc_key};
@@ -16,7 +17,7 @@ use crate::engine::sparse::btree::{SparseEngine, redb_err};
 /// raw envelope sentinels (`i64::MIN` / `i64::MAX` when unbounded) so the
 /// handler can surface them uniformly across engines.
 pub struct VersionedRow {
-    pub doc_id: String,
+    pub doc_id: StorageKey,
     pub system_from_ms: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
@@ -49,7 +50,7 @@ impl SparseEngine {
     /// Append one version. Always creates a new key; never overwrites an
     /// earlier version at the same `sys_from_ms`.
     pub fn versioned_put(&self, p: VersionedPut<'_>) -> crate::Result<()> {
-        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from_ms)?;
+        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from_ms);
         let val = encode_value(TAG_LIVE, p.valid_from_ms, p.valid_until_ms, p.body);
         let txn = self
             .db
@@ -76,7 +77,7 @@ impl SparseEngine {
         txn: &redb::WriteTransaction,
         p: VersionedPut<'_>,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from_ms)?;
+        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from_ms);
         let val = encode_value(TAG_LIVE, p.valid_from_ms, p.valid_until_ms, p.body);
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
@@ -92,10 +93,10 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
         sys_from_ms: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms)?;
+        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms);
         let val = encode_value(TAG_TOMBSTONE, 0, 0, &[]);
         let txn = self
             .db
@@ -119,10 +120,10 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
         sys_from_ms: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms)?;
+        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms);
         let val = encode_value(TAG_TOMBSTONE, 0, 0, &[]);
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
@@ -144,10 +145,10 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
         sys_from_ms: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms)?;
+        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms);
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
@@ -166,7 +167,7 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
     ) -> crate::Result<bool> {
         let lo = doc_prefix(database_id, tenant, coll, doc_id);
         let hi = doc_prefix_end(database_id, tenant, coll, doc_id);
@@ -196,7 +197,7 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
     ) -> crate::Result<usize> {
         let lo = doc_prefix(database_id, tenant, coll, doc_id);
         let hi = doc_prefix_end(database_id, tenant, coll, doc_id);
@@ -233,13 +234,13 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
         sys_cutoff_ms: Option<i64>,
         valid_at_ms: Option<i64>,
     ) -> crate::Result<Option<Vec<u8>>> {
         let lo = doc_prefix(database_id, tenant, coll, doc_id);
         let hi = match sys_cutoff_ms {
-            Some(ms) => versioned_doc_key(database_id, tenant, coll, doc_id, ms)?,
+            Some(ms) => versioned_doc_key(database_id, tenant, coll, doc_id, ms),
             None => doc_prefix_end(database_id, tenant, coll, doc_id),
         };
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
@@ -285,7 +286,7 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        doc_id: &str,
+        doc_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         self.versioned_get_as_of(database_id, tenant, coll, doc_id, None, None)
     }
@@ -302,12 +303,16 @@ mod tests {
         (engine, dir)
     }
 
-    fn put(e: &SparseEngine, coll: &str, id: &str, sys_from: i64, body: &[u8]) {
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(nodedb_types::Surrogate::new(surrogate))
+    }
+
+    fn put(e: &SparseEngine, coll: &str, id: u32, sys_from: i64, body: &[u8]) {
         e.versioned_put(VersionedPut {
             database_id: 1,
             tenant: 1,
             coll,
-            doc_id: id,
+            doc_id: &key(id),
             sys_from_ms: sys_from,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
@@ -319,7 +324,7 @@ mod tests {
     fn put_valid(
         e: &SparseEngine,
         coll: &str,
-        id: &str,
+        id: u32,
         sys_from: i64,
         valid_from: i64,
         valid_until: i64,
@@ -329,7 +334,7 @@ mod tests {
             database_id: 1,
             tenant: 1,
             coll,
-            doc_id: id,
+            doc_id: &key(id),
             sys_from_ms: sys_from,
             valid_from_ms: valid_from,
             valid_until_ms: valid_until,
@@ -341,31 +346,31 @@ mod tests {
     #[test]
     fn put_and_read_current() {
         let (e, _d) = open_temp();
-        put(&e, "users", "u1", 100, b"v1");
-        let got = e.versioned_get_current(1, 1, "users", "u1").unwrap();
+        put(&e, "users", 1, 100, b"v1");
+        let got = e.versioned_get_current(1, 1, "users", &key(1)).unwrap();
         assert_eq!(got.as_deref(), Some(b"v1" as &[u8]));
     }
 
     #[test]
     fn ceiling_picks_newest_le_cutoff() {
         let (e, _d) = open_temp();
-        put(&e, "c", "k", 100, b"a");
-        put(&e, "c", "k", 200, b"b");
-        put(&e, "c", "k", 300, b"c");
+        put(&e, "c", 1, 100, b"a");
+        put(&e, "c", 1, 200, b"b");
+        put(&e, "c", 1, 300, b"c");
         assert_eq!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(150), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(150), None)
                 .unwrap()
                 .as_deref(),
             Some(b"a" as &[u8])
         );
         assert_eq!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(250), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(250), None)
                 .unwrap()
                 .as_deref(),
             Some(b"b" as &[u8])
         );
         assert_eq!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(400), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(400), None)
                 .unwrap()
                 .as_deref(),
             Some(b"c" as &[u8])
@@ -375,9 +380,9 @@ mod tests {
     #[test]
     fn ceiling_before_first_version_is_none() {
         let (e, _d) = open_temp();
-        put(&e, "c", "k", 200, b"x");
+        put(&e, "c", 1, 200, b"x");
         assert!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(100), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(100), None)
                 .unwrap()
                 .is_none()
         );
@@ -386,16 +391,16 @@ mod tests {
     #[test]
     fn tombstone_hides_row_at_and_after_cutoff() {
         let (e, _d) = open_temp();
-        put(&e, "c", "k", 100, b"x");
-        e.versioned_tombstone(1, 1, "c", "k", 200).unwrap();
+        put(&e, "c", 1, 100, b"x");
+        e.versioned_tombstone(1, 1, "c", &key(1), 200).unwrap();
         assert_eq!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(150), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(150), None)
                 .unwrap()
                 .as_deref(),
             Some(b"x" as &[u8])
         );
         assert!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(250), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(250), None)
                 .unwrap()
                 .is_none()
         );
@@ -404,22 +409,22 @@ mod tests {
     #[test]
     fn valid_time_predicate_skips_out_of_window_versions() {
         let (e, _d) = open_temp();
-        put_valid(&e, "c", "k", 10, 0, 100, b"v1");
-        put_valid(&e, "c", "k", 20, 200, 300, b"v2");
+        put_valid(&e, "c", 1, 10, 0, 100, b"v1");
+        put_valid(&e, "c", 1, 20, 200, 300, b"v2");
         // valid-time hole at 150: neither version applies.
         assert!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(10_000), Some(150))
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(10_000), Some(150))
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(10_000), Some(50))
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(10_000), Some(50))
                 .unwrap()
                 .as_deref(),
             Some(b"v1" as &[u8])
         );
         assert_eq!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(10_000), Some(250))
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(10_000), Some(250))
                 .unwrap()
                 .as_deref(),
             Some(b"v2" as &[u8])
@@ -429,12 +434,12 @@ mod tests {
     #[test]
     fn gdpr_erase_preserves_history_structure_but_hides_body() {
         let (e, _d) = open_temp();
-        put(&e, "c", "k", 100, b"pii");
-        put(&e, "c", "k", 200, b"more-pii");
-        let n = e.versioned_gdpr_erase(1, 1, "c", "k").unwrap();
+        put(&e, "c", 1, 100, b"pii");
+        put(&e, "c", 1, 200, b"more-pii");
+        let n = e.versioned_gdpr_erase(1, 1, "c", &key(1)).unwrap();
         assert_eq!(n, 2);
         assert!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(150), None)
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(150), None)
                 .unwrap()
                 .is_none()
         );
@@ -443,9 +448,9 @@ mod tests {
     #[test]
     fn scan_returns_latest_per_doc_id() {
         let (e, _d) = open_temp();
-        put(&e, "c", "a", 100, b"a1");
-        put(&e, "c", "a", 200, b"a2");
-        put(&e, "c", "b", 150, b"b1");
+        put(&e, "c", 1, 100, b"a1");
+        put(&e, "c", 1, 200, b"a2");
+        put(&e, "c", 2, 150, b"b1");
         let all = e
             .versioned_scan_as_of(
                 VersionedScanParams {
@@ -456,24 +461,28 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &str, _: &[u8]| true,
+                &|_: &StorageKey, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
-        let map: std::collections::HashMap<_, _> = all.into_iter().collect();
-        assert_eq!(map.get("a").map(|v| v.as_slice()), Some(b"a2" as &[u8]));
-        assert_eq!(map.get("b").map(|v| v.as_slice()), Some(b"b1" as &[u8]));
+        let find = |id: StorageKey| {
+            all.iter()
+                .find(|(k, _)| *k == id)
+                .map(|(_, v)| v.as_slice())
+        };
+        assert_eq!(find(key(1)), Some(b"a2" as &[u8]));
+        assert_eq!(find(key(2)), Some(b"b1" as &[u8]));
     }
 
     #[test]
     fn scan_all_returns_every_version_in_system_time_order() {
         let (e, _d) = open_temp();
         // One document updated three times under different system times.
-        put(&e, "c", "a", 100, b"a1");
-        put(&e, "c", "a", 200, b"a2");
-        put(&e, "c", "a", 300, b"a3");
+        put(&e, "c", 1, 100, b"a1");
+        put(&e, "c", 1, 200, b"a2");
+        put(&e, "c", 1, 300, b"a3");
         // A second document interleaved by system time.
-        put(&e, "c", "b", 150, b"b1");
+        put(&e, "c", 2, 150, b"b1");
 
         let all = e
             .versioned_scan_all(
@@ -485,7 +494,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &str, _: &[u8]| true,
+                &|_: &StorageKey, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -495,19 +504,19 @@ mod tests {
         let times: Vec<i64> = all.iter().map(|r| r.system_from_ms).collect();
         assert_eq!(times, vec![100, 150, 200, 300]);
         // System-time and body line up per version.
-        let row_of = |r: &VersionedRow| (r.doc_id.clone(), r.system_from_ms, r.body.clone());
-        assert_eq!(row_of(&all[0]), ("a".to_string(), 100, b"a1".to_vec()));
-        assert_eq!(row_of(&all[1]), ("b".to_string(), 150, b"b1".to_vec()));
-        assert_eq!(row_of(&all[2]), ("a".to_string(), 200, b"a2".to_vec()));
-        assert_eq!(row_of(&all[3]), ("a".to_string(), 300, b"a3".to_vec()));
+        let row_of = |r: &VersionedRow| (r.doc_id, r.system_from_ms, r.body.clone());
+        assert_eq!(row_of(&all[0]), (key(1), 100, b"a1".to_vec()));
+        assert_eq!(row_of(&all[1]), (key(2), 150, b"b1".to_vec()));
+        assert_eq!(row_of(&all[2]), (key(1), 200, b"a2".to_vec()));
+        assert_eq!(row_of(&all[3]), (key(1), 300, b"a3".to_vec()));
     }
 
     #[test]
     fn scan_all_skips_tombstoned_versions() {
         let (e, _d) = open_temp();
-        put(&e, "c", "a", 100, b"a1");
-        e.versioned_tombstone(1, 1, "c", "a", 200).unwrap();
-        put(&e, "c", "a", 300, b"a3");
+        put(&e, "c", 1, 100, b"a1");
+        e.versioned_tombstone(1, 1, "c", &key(1), 200).unwrap();
+        put(&e, "c", 1, 300, b"a3");
         let all = e
             .versioned_scan_all(
                 VersionedScanParams {
@@ -518,7 +527,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &str, _: &[u8]| true,
+                &|_: &StorageKey, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -535,10 +544,11 @@ mod tests {
         // counts MATCHING versions — not raw scanned rows.
         let (e, _d) = open_temp();
         for i in 0..10i64 {
-            put(&e, "c", "a", 100 + i, format!("v{i}").as_bytes());
+            put(&e, "c", 1, 100 + i, format!("v{i}").as_bytes());
         }
         // Match only odd-suffixed bodies: v1, v3, v5, v7, v9.
-        let odd = |_: &str, body: &[u8]| body.last().map(|b| (b - b'0') % 2 == 1).unwrap_or(false);
+        let odd =
+            |_: &StorageKey, body: &[u8]| body.last().map(|b| (b - b'0') % 2 == 1).unwrap_or(false);
 
         let rows = e
             .versioned_scan_all(
@@ -570,11 +580,11 @@ mod tests {
         // early-stop must count matching documents, so a selective filter cannot
         // make the scan return fewer rows than exist.
         let (e, _d) = open_temp();
-        for (i, id) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
-            put(&e, "c", id, 100 + i as i64, format!("x{i}").as_bytes());
+        for (i, id) in [1u32, 2, 3, 4, 5, 6].iter().enumerate() {
+            put(&e, "c", *id, 100 + i as i64, format!("x{i}").as_bytes());
         }
-        // Match only even-suffixed bodies: x0 (a), x2 (c), x4 (e).
-        let even = |_: &str, body: &[u8]| {
+        // Match only even-suffixed bodies: x0 (id 1), x2 (id 3), x4 (id 5).
+        let even = |_: &StorageKey, body: &[u8]| {
             body.last()
                 .map(|b| (b - b'0').is_multiple_of(2))
                 .unwrap_or(false)
@@ -611,8 +621,8 @@ mod tests {
     #[test]
     fn scan_as_of_hides_tombstoned_rows() {
         let (e, _d) = open_temp();
-        put(&e, "c", "a", 100, b"a1");
-        e.versioned_tombstone(1, 1, "c", "a", 200).unwrap();
+        put(&e, "c", 1, 100, b"a1");
+        e.versioned_tombstone(1, 1, "c", &key(1), 200).unwrap();
         let at_150 = e
             .versioned_scan_as_of(
                 VersionedScanParams {
@@ -623,7 +633,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &str, _: &[u8]| true,
+                &|_: &StorageKey, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -638,7 +648,7 @@ mod tests {
                     valid_at_ms: None,
                     limit: 100,
                 },
-                &|_: &str, _: &[u8]| true,
+                &|_: &StorageKey, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -648,20 +658,26 @@ mod tests {
     #[test]
     fn versioned_remove_in_txn_deletes_the_version() {
         let (e, _d) = open_temp();
-        put(&e, "c", "k", 100, b"v1");
+        put(&e, "c", 1, 100, b"v1");
         assert_eq!(
-            e.versioned_get_current(1, 1, "c", "k").unwrap().as_deref(),
+            e.versioned_get_current(1, 1, "c", &key(1))
+                .unwrap()
+                .as_deref(),
             Some(b"v1" as &[u8])
         );
 
         let txn = e.db.begin_write().unwrap();
-        e.versioned_remove_in_txn(&txn, 1, 1, "c", "k", 100)
+        e.versioned_remove_in_txn(&txn, 1, 1, "c", &key(1), 100)
             .unwrap();
         txn.commit().unwrap();
 
-        assert!(e.versioned_get_current(1, 1, "c", "k").unwrap().is_none());
         assert!(
-            e.versioned_get_as_of(1, 1, "c", "k", Some(100), None)
+            e.versioned_get_current(1, 1, "c", &key(1))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            e.versioned_get_as_of(1, 1, "c", &key(1), Some(100), None)
                 .unwrap()
                 .is_none()
         );
@@ -671,24 +687,8 @@ mod tests {
     fn versioned_remove_in_txn_on_missing_key_is_ok() {
         let (e, _d) = open_temp();
         let txn = e.db.begin_write().unwrap();
-        let r = e.versioned_remove_in_txn(&txn, 1, 1, "c", "does-not-exist", 999);
+        let r = e.versioned_remove_in_txn(&txn, 1, 1, "c", &key(999), 999);
         assert!(r.is_ok());
         txn.commit().unwrap();
-    }
-
-    #[test]
-    fn nul_in_doc_id_is_rejected() {
-        let (e, _d) = open_temp();
-        let r = e.versioned_put(VersionedPut {
-            database_id: 1,
-            tenant: 1,
-            coll: "c",
-            doc_id: "a\x00b",
-            sys_from_ms: 100,
-            valid_from_ms: 0,
-            valid_until_ms: i64::MAX,
-            body: b"x",
-        });
-        assert!(r.is_err());
     }
 }

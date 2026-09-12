@@ -279,11 +279,9 @@ impl CoreLoop {
         }
         let database_id = task.request.database_id.as_u64();
         let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
-        let row_key = row_key.as_str();
         let stored = if self.is_bitemporal(database_id, tid, collection) {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, row_key)?
+                .versioned_get_current(database_id, tid, collection, &storage_key)?
         } else {
             self.sparse
                 .get(database_id, tid, collection, &storage_key)?

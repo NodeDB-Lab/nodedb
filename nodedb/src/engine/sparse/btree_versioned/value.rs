@@ -2,6 +2,8 @@
 
 //! Versioned payload format: `[tag:u8][valid_from_ms:i64 LE][valid_until_ms:i64 LE][body...]`.
 
+use nodedb_types::StorageKey;
+
 use super::key::format_sys_from;
 
 pub const TAG_LIVE: u8 = 0x00;
@@ -66,7 +68,7 @@ pub struct VersionedPut<'a> {
     pub database_id: u64,
     pub tenant: u64,
     pub coll: &'a str,
-    pub doc_id: &'a str,
+    pub doc_id: &'a StorageKey,
     pub sys_from_ms: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,

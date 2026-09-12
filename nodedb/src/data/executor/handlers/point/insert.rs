@@ -67,7 +67,6 @@ impl CoreLoop {
         } = p;
         let storage_key = StorageKey::for_surrogate(surrogate);
         let row_key = storage_key.to_string();
-        let row_key = row_key.as_str();
         let document_identity = RowIdentity::from_user_key(document_id);
         debug!(
             core = self.core_id,
@@ -111,8 +110,13 @@ impl CoreLoop {
         // and schemaless collections alike (see `dml::convert_insert`).
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let exists_result = if bitemporal {
-            self.sparse
-                .versioned_exists_current_in_txn(&txn, database_id, tid, collection, row_key)
+            self.sparse.versioned_exists_current_in_txn(
+                &txn,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            )
         } else {
             self.sparse
                 .exists_in_txn(&txn, database_id, tid, collection, &storage_key)
@@ -168,7 +172,7 @@ impl CoreLoop {
                 database_id: task.request.database_id.as_u64(),
                 tid,
                 collection,
-                document_id: row_key,
+                document_id: &row_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,

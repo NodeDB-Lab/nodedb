@@ -452,7 +452,7 @@ impl CoreLoop {
                     } else {
                         crate::event::WriteOp::Insert
                     },
-                    identity: crate::engine::document::store::identity_of(&document_id),
+                    identity: document_id.to_identity(),
                     new_value: None,
                     old_value,
                 }),
@@ -464,7 +464,7 @@ impl CoreLoop {
                 } => Some(DeferredWrite {
                     collection,
                     op: crate::event::WriteOp::Delete,
-                    identity: crate::engine::document::store::identity_of(&document_id),
+                    identity: document_id.to_identity(),
                     new_value: None,
                     old_value: Some(old_value),
                 }),

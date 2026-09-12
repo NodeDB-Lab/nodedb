@@ -77,7 +77,7 @@ fn bitemporal_multiple_puts_retain_history_via_versioned_get_as_of() {
 
     // A cutoff before the second write should surface v=1.
     let body = sparse
-        .versioned_get_as_of(0, 1, "c", &key(1).to_string(), Some(t_mid), None)
+        .versioned_get_as_of(0, 1, "c", &key(1), Some(t_mid), None)
         .unwrap()
         .expect("version at cutoff");
     let val: serde_json::Value = {
@@ -112,7 +112,7 @@ fn non_bitemporal_collection_uses_legacy_storage() {
                 valid_at_ms: None,
                 limit: 100,
             },
-            &|_: &str, _: &[u8]| true,
+            &|_: &nodedb_types::StorageKey, _: &[u8]| true,
             &nodedb::engine::sparse::scan_stop::never_stop,
         )
         .unwrap();

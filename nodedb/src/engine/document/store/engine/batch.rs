@@ -90,7 +90,7 @@ impl<'a> DocumentEngine<'a> {
                 .map(|id| {
                     StorageKey::parse(&id).ok_or_else(|| {
                         crate::engine::sparse::btree::invalid_storage_key_err(
-                            "INDEXES_VERSIONED",
+                            crate::engine::sparse::btree::KeyedTable::IndexesVersioned,
                             collection,
                             &id,
                         )
@@ -121,7 +121,9 @@ impl<'a> DocumentEngine<'a> {
                 if key.starts_with(&expected_prefix) {
                     let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
                         crate::engine::sparse::btree::invalid_storage_key_err(
-                            "INDEXES", collection, doc_id,
+                            crate::engine::sparse::btree::KeyedTable::Indexes,
+                            collection,
+                            doc_id,
                         )
                     })?;
                     doc_ids.push(doc_id);

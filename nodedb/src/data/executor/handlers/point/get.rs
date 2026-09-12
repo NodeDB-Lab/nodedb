@@ -8,7 +8,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use nodedb_types::Surrogate;
 
 pub(in crate::data::executor) struct PointGetParams<'a> {
@@ -39,8 +38,6 @@ impl CoreLoop {
             system_as_of_ms,
             valid_at_ms,
         } = p;
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
         let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
         debug!(
             core = self.core_id,
@@ -75,7 +72,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                row_key,
+                &storage_key,
                 system_as_of_ms,
                 valid_at_ms,
             ) {
@@ -107,7 +104,7 @@ impl CoreLoop {
             } else {
                 let res = if bitemporal {
                     self.sparse
-                        .versioned_get_current(database_id, tid, collection, row_key)
+                        .versioned_get_current(database_id, tid, collection, &storage_key)
                 } else {
                     self.sparse.get(database_id, tid, collection, &storage_key)
                 };

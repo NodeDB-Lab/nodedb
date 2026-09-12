@@ -49,7 +49,7 @@ impl CoreLoop {
                 {
                     let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
                         crate::engine::sparse::btree::invalid_storage_key_err(
-                            "DOCUMENTS",
+                            crate::engine::sparse::btree::KeyedTable::Documents,
                             collection,
                             doc_id,
                         )

@@ -163,9 +163,9 @@ impl CoreLoop {
         let mut bitemporal_sys_from_ms: Option<i64> = None;
         let mut bitemporal_index_tuples: Vec<(String, String)> = Vec::new();
         let prior = if bitemporal {
-            let prior = self
-                .sparse
-                .versioned_get_current(database_id, tid, collection, row_key)?;
+            let prior =
+                self.sparse
+                    .versioned_get_current(database_id, tid, collection, &storage_key)?;
             if let Some(ref body) = prior {
                 if enforce && let Some(config) = self.doc_configs.get(&config_key) {
                     run_delete_enforcement(
@@ -185,7 +185,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    row_key,
+                    &storage_key,
                     sys_from,
                 )?;
                 // Index tombstones: reflect every current value so
