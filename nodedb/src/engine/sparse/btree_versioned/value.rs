@@ -85,7 +85,7 @@ pub struct VersionedIndexEntry<'a> {
     pub coll: &'a str,
     pub field: &'a str,
     pub value: &'a str,
-    pub doc_id: &'a str,
+    pub doc_id: &'a StorageKey,
     pub sys_from_ms: i64,
 }
 

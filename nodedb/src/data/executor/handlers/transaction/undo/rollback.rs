@@ -145,13 +145,13 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: &key(doc).to_string(),
+                doc_id: &key(doc),
                 sys_from_ms: t,
             })
             .unwrap();
     }
 
-    fn index_lookup(core: &CoreLoop) -> Vec<String> {
+    fn index_lookup(core: &CoreLoop) -> Vec<nodedb_types::StorageKey> {
         core.sparse
             .versioned_index_lookup_as_of(DB, TID, "c", "status", "active", None)
             .unwrap()
@@ -190,7 +190,7 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: &d1.to_string(),
+                doc_id: &d1,
                 sys_from_ms: 2_000,
             })
             .unwrap();

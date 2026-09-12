@@ -138,13 +138,13 @@ fn secondary_index_reflects_each_version_independently() {
     let ids_a_mid = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "a@x.com", Some(t_mid))
         .unwrap();
-    assert_eq!(ids_a_mid, vec![key(1).to_string()]);
+    assert_eq!(ids_a_mid, vec![key(1)]);
 
     // Current: "b@x.com" → u1.
     let ids_b_now = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "b@x.com", None)
         .unwrap();
-    assert_eq!(ids_b_now, vec![key(1).to_string()]);
+    assert_eq!(ids_b_now, vec![key(1)]);
 
     // After delete → no current entry for b@x.com either.
     engine.delete("c", &key(1)).unwrap();
@@ -156,7 +156,7 @@ fn secondary_index_reflects_each_version_independently() {
     let ids_a_still = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "a@x.com", Some(t_mid))
         .unwrap();
-    assert_eq!(ids_a_still, vec![key(1).to_string()]);
+    assert_eq!(ids_a_still, vec![key(1)]);
 }
 
 #[test]

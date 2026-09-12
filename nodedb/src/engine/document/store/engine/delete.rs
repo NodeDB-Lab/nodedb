@@ -33,8 +33,6 @@ impl<'a> DocumentEngine<'a> {
             if let Some(config) = self.configs.get(collection)
                 && let Ok(rmpv_val) = crate::util::bounded_msgpack::read_value(&body)
             {
-                // INDEXES_VERSIONED still keys on the storage key as text.
-                let doc_id_str = doc_id.to_string();
                 for index_path in &config.index_paths {
                     for v in
                         extract_index_values_rmpv(&rmpv_val, &index_path.path, index_path.is_array)
@@ -46,7 +44,7 @@ impl<'a> DocumentEngine<'a> {
                                 coll: collection,
                                 field: &index_path.path,
                                 value: &v,
-                                doc_id: &doc_id_str,
+                                doc_id,
                                 sys_from_ms: sys_from,
                             },
                         )?;

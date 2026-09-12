@@ -5,11 +5,12 @@
 //! Index key: `"{database_id}:{tenant}:{coll}:{field}:{value}:{doc_id}\x00{sys_from:020}"`.
 //! Value: single byte (`0x00` live, `0xFF` tombstone).
 
+use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use super::key::format_sys_from;
 use super::value::{TAG_LIVE, TAG_TOMBSTONE, VersionedIndexEntry};
-use crate::engine::sparse::btree::{SparseEngine, redb_err};
+use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
 
 /// Keys carry the leading `{database_id}:` component.
 pub(crate) const INDEXES_VERSIONED: TableDefinition<&str, &[u8]> =
@@ -37,11 +38,6 @@ impl SparseEngine {
         txn: &redb::WriteTransaction,
         e: VersionedIndexEntry<'_>,
     ) -> crate::Result<()> {
-        if e.doc_id.as_bytes().contains(&0) {
-            return Err(crate::Error::BadRequest {
-                detail: "document id may not contain NUL byte".into(),
-            });
-        }
         let key = e.redb_key();
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
@@ -119,7 +115,7 @@ impl SparseEngine {
         field: &str,
         value: &str,
         sys_cutoff_ms: Option<i64>,
-    ) -> crate::Result<Vec<String>> {
+    ) -> crate::Result<Vec<StorageKey>> {
         let lo = format!("{database_id}:{tenant}:{coll}:{field}:{value}:");
         // `:` = 0x3A, next byte `;` = 0x3B gives a clean exclusive bound.
         let hi = format!("{database_id}:{tenant}:{coll}:{field}:{value};");
@@ -133,9 +129,9 @@ impl SparseEngine {
             .range(lo.as_str()..hi.as_str())
             .map_err(|e| redb_err("range", e))?;
 
-        // Group by doc_id; keep newest-in-window tag per doc.
-        let mut out = Vec::new();
-        let mut current_id: Option<String> = None;
+        // Group by doc_id; keep newest-in-window tag per group.
+        let mut out: Vec<StorageKey> = Vec::new();
+        let mut current_id: Option<StorageKey> = None;
         let mut best: Option<(i64, u8)> = None;
 
         for r in range {
@@ -144,9 +140,11 @@ impl SparseEngine {
             let Some(rest) = key_str.strip_prefix(lo.as_str()) else {
                 continue;
             };
-            let Some((doc_id, suffix)) = rest.rsplit_once('\x00') else {
+            let Some((seg, suffix)) = rest.rsplit_once('\x00') else {
                 continue;
             };
+            let doc_id = StorageKey::parse(seg)
+                .ok_or_else(|| invalid_storage_key_err(KeyedTable::IndexesVersioned, coll, seg))?;
             if let Some(ref c) = cutoff_key
                 && suffix > c.as_str()
             {
@@ -157,14 +155,14 @@ impl SparseEngine {
             };
             let tag = v.value().first().copied().unwrap_or(TAG_TOMBSTONE);
 
-            if current_id.as_deref() != Some(doc_id) {
-                if let Some(prev) = current_id.as_ref()
+            if current_id != Some(doc_id) {
+                if let Some(prev_id) = current_id
                     && let Some((_, t)) = best
                     && t == TAG_LIVE
                 {
-                    out.push(prev.clone());
+                    out.push(prev_id);
                 }
-                current_id = Some(doc_id.to_string());
+                current_id = Some(doc_id);
                 best = None;
             }
             best = Some(match best.take() {
@@ -172,11 +170,11 @@ impl SparseEngine {
                 _ => (sf, tag),
             });
         }
-        if let Some(prev) = current_id
+        if let Some(doc_id) = current_id
             && let Some((_, t)) = best
             && t == TAG_LIVE
         {
-            out.push(prev);
+            out.push(doc_id);
         }
         Ok(out)
     }
@@ -184,6 +182,8 @@ impl SparseEngine {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use super::*;
 
     fn open_temp() -> (SparseEngine, tempfile::TempDir) {
@@ -192,11 +192,15 @@ mod tests {
         (engine, dir)
     }
 
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
     fn idx_entry<'a>(
         coll: &'a str,
         field: &'a str,
         value: &'a str,
-        doc_id: &'a str,
+        doc_id: &'a StorageKey,
         sys_from_ms: i64,
     ) -> VersionedIndexEntry<'a> {
         VersionedIndexEntry {
@@ -213,17 +217,19 @@ mod tests {
     #[test]
     fn index_lookup_honors_cutoff_and_tombstone() {
         let (e, _d) = open_temp();
-        e.versioned_index_put(idx_entry("c", "email", "a@x", "u1", 100))
+        let u1 = key(1);
+        let u2 = key(2);
+        e.versioned_index_put(idx_entry("c", "email", "a@x", &u1, 100))
             .unwrap();
-        e.versioned_index_put(idx_entry("c", "email", "a@x", "u2", 150))
+        e.versioned_index_put(idx_entry("c", "email", "a@x", &u2, 150))
             .unwrap();
-        e.versioned_index_tombstone(idx_entry("c", "email", "a@x", "u1", 200))
+        e.versioned_index_tombstone(idx_entry("c", "email", "a@x", &u1, 200))
             .unwrap();
 
         let at_120 = e
             .versioned_index_lookup_as_of(1, 1, "c", "email", "a@x", Some(120))
             .unwrap();
-        assert_eq!(at_120, vec!["u1"]);
+        assert_eq!(at_120, vec![u1]);
 
         let at_175 = e
             .versioned_index_lookup_as_of(1, 1, "c", "email", "a@x", Some(175))
@@ -233,21 +239,22 @@ mod tests {
         let at_250 = e
             .versioned_index_lookup_as_of(1, 1, "c", "email", "a@x", Some(250))
             .unwrap();
-        assert_eq!(at_250, vec!["u2"]);
+        assert_eq!(at_250, vec![u2]);
     }
 
     #[test]
     fn versioned_index_remove_in_txn_removes_entry() {
         let (e, _d) = open_temp();
-        e.versioned_index_put(idx_entry("c", "email", "a@x", "u1", 100))
+        let u1 = key(1);
+        e.versioned_index_put(idx_entry("c", "email", "a@x", &u1, 100))
             .unwrap();
         let before = e
             .versioned_index_lookup_as_of(1, 1, "c", "email", "a@x", Some(150))
             .unwrap();
-        assert_eq!(before, vec!["u1"]);
+        assert_eq!(before, vec![u1]);
 
         let txn = e.db.begin_write().unwrap();
-        e.versioned_index_remove_in_txn(&txn, idx_entry("c", "email", "a@x", "u1", 100))
+        e.versioned_index_remove_in_txn(&txn, idx_entry("c", "email", "a@x", &u1, 100))
             .unwrap();
         txn.commit().unwrap();
 
@@ -260,9 +267,10 @@ mod tests {
     #[test]
     fn versioned_index_remove_in_txn_on_missing_key_is_ok() {
         let (e, _d) = open_temp();
+        let u9 = key(9);
         let txn = e.db.begin_write().unwrap();
         let r =
-            e.versioned_index_remove_in_txn(&txn, idx_entry("c", "email", "nobody@x", "u9", 999));
+            e.versioned_index_remove_in_txn(&txn, idx_entry("c", "email", "nobody@x", &u9, 999));
         assert!(r.is_ok());
         txn.commit().unwrap();
     }

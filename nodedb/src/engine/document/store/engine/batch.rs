@@ -76,27 +76,14 @@ impl<'a> DocumentEngine<'a> {
         bitemporal: bool,
     ) -> crate::Result<Vec<StorageKey>> {
         if bitemporal {
-            // The versioned index still yields text, so this parses at the boundary.
-            let ids = self.sparse.versioned_index_lookup_as_of(
+            return self.sparse.versioned_index_lookup_as_of(
                 self.database_id,
                 self.tenant_id,
                 collection,
                 path,
                 value,
                 None,
-            )?;
-            return ids
-                .into_iter()
-                .map(|id| {
-                    StorageKey::parse(&id).ok_or_else(|| {
-                        crate::engine::sparse::btree::invalid_storage_key_err(
-                            crate::engine::sparse::btree::KeyedTable::IndexesVersioned,
-                            collection,
-                            &id,
-                        )
-                    })
-                })
-                .collect();
+            );
         }
         let prefix_with_value = format!("{value}:");
         let results =

@@ -269,7 +269,7 @@ impl CoreLoop {
                                 coll: collection,
                                 field: &path.path,
                                 value: &value,
-                                doc_id: document_id,
+                                doc_id: &storage_key,
                                 sys_from_ms,
                             },
                         )?;

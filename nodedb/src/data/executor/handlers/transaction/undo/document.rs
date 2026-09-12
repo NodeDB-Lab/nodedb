@@ -226,8 +226,6 @@ impl CoreLoop {
         self.sparse
             .versioned_remove_in_txn(&txn, database_id, tid, collection, document_id, sys_from_ms)
             .map_err(|e| map_err("version remove", e.to_string()))?;
-        // INDEXES_VERSIONED still keys on the storage key as text.
-        let doc_id_str = document_id.to_string();
         for (field, value) in index_tuples {
             self.sparse
                 .versioned_index_remove_in_txn(
@@ -238,7 +236,7 @@ impl CoreLoop {
                         coll: collection,
                         field,
                         value,
-                        doc_id: &doc_id_str,
+                        doc_id: document_id,
                         sys_from_ms,
                     },
                 )
@@ -391,13 +389,13 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: &storage_key(doc).to_string(),
+                doc_id: &storage_key(doc),
                 sys_from_ms: t,
             })
             .unwrap();
     }
 
-    fn index_lookup(core: &crate::data::executor::core_loop::CoreLoop) -> Vec<String> {
+    fn index_lookup(core: &crate::data::executor::core_loop::CoreLoop) -> Vec<StorageKey> {
         core.sparse
             .versioned_index_lookup_as_of(DB, TID, "c", "status", "active", None)
             .unwrap()
@@ -419,7 +417,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(index_lookup(&core), vec![d1.to_string()]);
+        assert_eq!(index_lookup(&core), vec![d1]);
 
         let entry = UndoEntry::PutDocument {
             collection: "c".into(),
@@ -462,7 +460,7 @@ mod tests {
                 coll: "c",
                 field: "status",
                 value: "active",
-                doc_id: &d1.to_string(),
+                doc_id: &d1,
                 sys_from_ms: 2_000,
             })
             .unwrap();
@@ -493,7 +491,7 @@ mod tests {
                 .unwrap(),
             Some(b"v1".to_vec())
         );
-        assert_eq!(index_lookup(&core), vec![d1.to_string()]);
+        assert_eq!(index_lookup(&core), vec![d1]);
     }
 
     #[test]
