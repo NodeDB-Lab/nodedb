@@ -12,7 +12,6 @@ pub(in crate::data::executor) struct VectorIndexPutParams<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub storage_key: crate::engine::document::store::StorageKey,
-    pub surrogate: nodedb_types::Surrogate,
     pub value: &'a [u8],
     pub wal_lsn: u64,
 }
@@ -28,21 +27,21 @@ pub(in crate::data::executor) struct VectorIndexDelta {
     pub vector_id: u32,
     pub collection: String,
     pub field: String,
-    pub doc_id: String,
+    pub doc_id: crate::engine::document::store::StorageKey,
 }
 
 /// Inputs to `remove_then_insert_vector_field`, the shared per-field
 /// remove-before-insert tail of `apply_point_put_vector_indexes`'s strict and
 /// schemaless arms, once each has resolved its own `index_key` and extracted
-/// `floats` for `field_name`.
+/// `floats` for `field_name`. `storage_key` carries the row's surrogate: call
+/// `storage_key.surrogate()` rather than threading a second surrogate field.
 pub(super) struct VectorFieldInsert<'a> {
     pub(super) database_id: u64,
     pub(super) tid: u64,
     pub(super) index_key: (nodedb_types::DatabaseId, crate::types::TenantId, String),
     pub(super) collection: &'a str,
     pub(super) field_name: &'a str,
-    pub(super) document_id: &'a str,
+    pub(super) storage_key: crate::engine::document::store::StorageKey,
     pub(super) floats: Vec<f32>,
-    pub(super) surrogate: nodedb_types::Surrogate,
     pub(super) wal_lsn: u64,
 }

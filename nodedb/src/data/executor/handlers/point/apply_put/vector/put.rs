@@ -39,14 +39,9 @@ impl CoreLoop {
             tid,
             collection,
             storage_key,
-            surrogate,
             value,
             wal_lsn,
         } = params;
-        // Rendered once here — `vector_doc_map` and its undo entries are
-        // keyed by text.
-        let document_id = storage_key.to_string();
-        let document_id = document_id.as_str();
         let mut inserts: Vec<VectorIndexDelta> = Vec::new();
 
         // Vector index: if the strict schema declares Vector(dim) columns,
@@ -103,9 +98,8 @@ impl CoreLoop {
                         index_key,
                         collection,
                         field_name,
-                        document_id,
+                        storage_key,
                         floats,
-                        surrogate,
                         wal_lsn,
                     }) {
                         inserts.push(delta);
@@ -186,9 +180,8 @@ impl CoreLoop {
                         index_key: store_key,
                         collection,
                         field_name,
-                        document_id,
+                        storage_key,
                         floats,
-                        surrogate,
                         wal_lsn,
                     }) {
                         inserts.push(delta);
@@ -259,9 +252,8 @@ impl CoreLoop {
             index_key,
             collection,
             field_name,
-            document_id,
+            storage_key,
             floats,
-            surrogate,
             wal_lsn,
         } = params;
         let _ = self.remove_document_vector_index_field(
@@ -269,10 +261,10 @@ impl CoreLoop {
             tid,
             collection,
             field_name,
-            document_id,
+            storage_key,
         );
         let coll = self.vector_collections.get_mut(&index_key)?;
-        let vector_id = coll.insert_with_surrogate(floats, surrogate);
+        let vector_id = coll.insert_with_surrogate(floats, storage_key.surrogate());
         coll.note_checkpoint_lsn(wal_lsn);
         self.vector_doc_map.insert(
             (
@@ -280,7 +272,7 @@ impl CoreLoop {
                 index_key.1,
                 collection.to_string(),
                 field_name.to_string(),
-                document_id.to_string(),
+                storage_key,
             ),
             vector_id,
         );
@@ -289,7 +281,7 @@ impl CoreLoop {
             vector_id,
             collection: collection.to_string(),
             field: field_name.to_string(),
-            doc_id: document_id.to_string(),
+            doc_id: storage_key,
         })
     }
 }
@@ -416,7 +408,6 @@ mod tests {
             tid,
             collection,
             storage_key,
-            surrogate,
             value: &first,
             wal_lsn: 0,
         })
@@ -428,7 +419,6 @@ mod tests {
             tid,
             collection,
             storage_key,
-            surrogate,
             value: &second,
             wal_lsn: 0,
         })
@@ -475,7 +465,6 @@ mod tests {
             tid,
             collection,
             storage_key,
-            surrogate,
             value: &doc,
             wal_lsn: 0,
         })
@@ -528,7 +517,6 @@ mod tests {
             tid,
             collection,
             storage_key,
-            surrogate,
             value: &body,
             wal_lsn: 0,
         })
@@ -569,7 +557,6 @@ mod tests {
                 tid,
                 collection,
                 storage_key,
-                surrogate,
                 value: &body,
                 wal_lsn: 0,
             });

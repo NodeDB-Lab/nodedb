@@ -10,10 +10,12 @@
 
 /// The three resolved arms of a MERGE, decoded from the Data-Plane RESOLVE
 /// pass. `updates` / `deletes` carry the EXISTING target row's storage key
-/// (`doc_id`), its registered `surrogate` (`None` only for a legacy
-/// non-surrogate-keyed row — unreachable for any surrogate-keyed collection),
-/// and the arm's resolved body (post-image for updates, the deleted row for
-/// deletes so its PK can be extracted). `inserts` carry `(join_key, body)`.
+/// (`doc_id`) and its registered `surrogate` — always present on `updates`
+/// (every matched row is storage-keyed); `None` on `deletes` only for a
+/// legacy non-surrogate-keyed row, unreachable for any surrogate-keyed
+/// collection — and the arm's resolved body (post-image for updates, the
+/// deleted row for deletes so its PK can be extracted). `inserts` carry
+/// `(join_key, body)`.
 ///
 /// An UPDATE arm additionally carries the target row's PRE-image as a fourth
 /// element. A materialized-sum delta is the DIFFERENCE between the two images
@@ -34,7 +36,7 @@ pub(crate) fn decode_resolve(payload: &[u8]) -> crate::Result<ResolvedMergeArms>
         return Ok(ResolvedMergeArms::default());
     }
     type Wire = (
-        Vec<(String, Option<u32>, Vec<u8>, Vec<u8>)>,
+        Vec<crate::query::ResolvedUpdateRowWire>,
         Vec<(String, Option<u32>, Vec<u8>)>,
         Vec<(String, Vec<u8>)>,
     );

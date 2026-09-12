@@ -17,11 +17,8 @@ use crate::types::{DatabaseId, TenantId};
 
 /// One matched row and everything the apply loop needs to land it.
 pub(in crate::data::executor) struct ProjectedUpdateRow {
-    /// Storage key (the surrogate hex).
-    pub(in crate::data::executor) doc_id: String,
-    /// The same storage key, typed — parsed once here so consumers never
-    /// re-interpret `doc_id`'s shape.
-    pub(in crate::data::executor) storage_key: crate::engine::document::store::StorageKey,
+    /// The row's storage key.
+    pub(in crate::data::executor) key: crate::engine::document::store::StorageKey,
     /// The row as stored before the update — the `old_value` of the emitted
     /// event and the old side of the secondary-index diff.
     pub(in crate::data::executor) current_bytes: Vec<u8>,
@@ -178,8 +175,7 @@ impl CoreLoop {
             };
 
             projected.push(ProjectedUpdateRow {
-                doc_id: doc_id_owned,
-                storage_key: *key,
+                key: *key,
                 current_bytes,
                 old_doc,
                 doc,

@@ -30,7 +30,7 @@ pub(super) fn record_put_index_undo(undo_log: &mut Vec<UndoEntry>, outcome: &mut
             vector_id: d.vector_id,
             collection: d.collection,
             field: d.field,
-            doc_id: d.doc_id,
+            doc_id: Some(d.doc_id),
         });
     }
     for (key, entry_id) in std::mem::take(&mut outcome.spatial_inserts) {

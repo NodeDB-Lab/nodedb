@@ -7,6 +7,7 @@ use nodedb_types::columnar::{ColumnType, ColumnarSchema};
 use nodedb_types::value::Value;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -60,11 +61,12 @@ impl CoreLoop {
             // document twice. Mirrors `apply_point_put_spatial`'s use of
             // the same helper; the removed tuples aren't needed here
             // since this insert path has no transactional undo to feed.
+            let spatial_entry_id = SpatialEntryId::from_user_id(&doc_id);
             let _ = self.remove_document_spatial_indexes(
                 db_id.as_u64(),
                 tid.as_u64(),
                 collection,
-                &doc_id,
+                spatial_entry_id,
             );
             for &col_idx in &geom_cols {
                 let col_def = &schema.columns[col_idx];
@@ -86,7 +88,7 @@ impl CoreLoop {
                 };
                 let bbox = nodedb_types::bbox::geometry_bbox(&geom);
                 let index_key = (db_id, tid, collection.to_string(), col_def.name.clone());
-                let entry_id = crate::util::fnv1a_hash(doc_id.as_bytes());
+                let entry_id = spatial_entry_id.as_u64();
                 let memory = nodedb_mem::ScopedMemory::new(
                     self.governor.clone(),
                     db_id,

@@ -11,6 +11,37 @@ use crate::data::executor::doc_format;
 use crate::data::executor::spatial_key::SpatialIndexKey;
 use crate::engine::document::store::StorageKey;
 
+/// Entry id of one row in a spatial R-tree: `fnv1a_hash` of the row's identity text.
+///
+/// A document row hashes its rendered storage key; a columnar row hashes its
+/// `id` column value. The put side and the remove side both construct this
+/// through the matching constructor, so they can never hash the row's
+/// identity differently and silently miss each other's entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(in crate::data::executor) struct SpatialEntryId(u64);
+
+impl SpatialEntryId {
+    /// A document row: the rendered storage key.
+    pub fn from_storage_key(key: StorageKey) -> Self {
+        Self::from_rendered(&key.to_string())
+    }
+
+    /// A document row whose storage key is already rendered — avoids a
+    /// second `to_string()` when the caller already holds the text.
+    pub fn from_rendered(rendered_key: &str) -> Self {
+        Self(crate::util::fnv1a_hash(rendered_key.as_bytes()))
+    }
+
+    /// A columnar row: its `id` column value.
+    pub fn from_user_id(id: &str) -> Self {
+        Self(crate::util::fnv1a_hash(id.as_bytes()))
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 impl CoreLoop {
     /// Spatial R-tree + columnar ingest side-effect: parse geometry fields,
     /// insert into the per-field R-tree, maintain the reverse entry→doc map,
@@ -40,6 +71,7 @@ impl CoreLoop {
         // Rendered once here; every reverse-map / hash use below shares it.
         let document_id = storage_key.to_string();
         let document_id = document_id.as_str();
+        let spatial_entry_id = SpatialEntryId::from_rendered(document_id);
         let mut inserts = Vec::new();
         // Re-indexing a document must REPLACE, not append: `RTree::insert`
         // blindly pushes a fresh entry even when one with this `entry_id`
@@ -49,7 +81,8 @@ impl CoreLoop {
         // this document first (idempotent — a no-op on a genuine first insert).
         // The removed tuples are discarded here, mirroring the vector put path:
         // only the new inserts are captured for transactional undo.
-        let _ = self.remove_document_spatial_indexes(database_id, tid, collection, document_id);
+        let _ =
+            self.remove_document_spatial_indexes(database_id, tid, collection, spatial_entry_id);
         // Spatial index: detect geometry fields and insert into R-tree.
         // Tries to parse each field as a GeoJSON Geometry — either a native
         // JSON object (schemaless document writes, e.g.
@@ -88,7 +121,7 @@ impl CoreLoop {
                     let db_id = nodedb_types::DatabaseId::new(database_id);
                     let tid_id = crate::types::TenantId::new(tid);
                     let spatial_key = (db_id, tid_id, collection.to_string(), field_name.clone());
-                    let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
+                    let entry_id = spatial_entry_id.as_u64();
                     let memory = nodedb_mem::ScopedMemory::new(
                         self.governor.clone(),
                         db_id,
@@ -127,11 +160,11 @@ impl CoreLoop {
 
     /// Remove every R-tree entry (and its paired `spatial_doc_map` reverse
     /// entry) this document produced across all of the collection's per-field
-    /// spatial indexes, keyed by `fnv1a_hash(document_id)` — the same hash the
-    /// insert path uses. Shared by the PointDelete cascade (which orphans the
-    /// geometry of a removed row) and `apply_point_put_spatial` (which must
-    /// clear a document's prior geometry before re-inserting, since
-    /// `RTree::insert` appends rather than replaces).
+    /// spatial indexes, keyed by `entry_id` — the same [`SpatialEntryId`] the
+    /// insert path constructs. Shared by the PointDelete cascade (which
+    /// orphans the geometry of a removed row) and `apply_point_put_spatial`
+    /// (which must clear a document's prior geometry before re-inserting,
+    /// since `RTree::insert` appends rather than replaces).
     ///
     /// The bbox is read BEFORE the R-tree `delete` (which does not return the
     /// removed geometry) so a transactional caller can push
@@ -144,10 +177,10 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        document_id: &str,
+        entry_id: SpatialEntryId,
     ) -> Vec<(SpatialIndexKey, u64, nodedb_types::BoundingBox, String)> {
         let mut spatial_deletes = Vec::new();
-        let entry_id = crate::util::fnv1a_hash(document_id.as_bytes());
+        let entry_id = entry_id.as_u64();
         let db_id = nodedb_types::DatabaseId::new(database_id);
         let tid_id = crate::types::TenantId::new(tid);
         let spatial_fields: Vec<String> = self

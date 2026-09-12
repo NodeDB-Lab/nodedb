@@ -21,27 +21,14 @@
 //! the same [`super::vector::resolve_surrogate_pk`] catalog call the vector
 //! translator uses.
 
-use nodedb_types::{DatabaseId, Surrogate, TenantId};
+use nodedb_types::{DatabaseId, TenantId};
 use serde_json::Value as JsonValue;
 
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec::decode_payload_to_json;
 
+use super::hit_key::parse_surrogate_hex;
 use super::vector::resolve_surrogate_pk;
-
-/// A `__local_<id>` doc_id is the vector leg's sentinel for a hit with no
-/// surrogate binding (see `vector_leg_doc_id`) — it never corresponds to a
-/// real surrogate and must not be parsed as hex.
-const HEADLESS_SENTINEL_PREFIX: &str = "__local_";
-
-/// Decode a `doc_id` candidate string into a surrogate, rejecting the
-/// headless sentinel and any non-hex value.
-fn parse_surrogate_hex(candidate: &str) -> Option<Surrogate> {
-    if candidate.starts_with(HEADLESS_SENTINEL_PREFIX) {
-        return None;
-    }
-    u32::from_str_radix(candidate, 16).ok().map(Surrogate::new)
-}
 
 /// Decode the DP-side JSON/msgpack array of `TextOp::Search` /
 /// `PhraseSearch`-shaped hits (`{id: <surrogate hex>, data: {...}}`), and for

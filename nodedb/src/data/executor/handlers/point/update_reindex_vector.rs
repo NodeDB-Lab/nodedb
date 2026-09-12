@@ -107,7 +107,6 @@ impl CoreLoop {
             tid: p.tid,
             collection: p.collection,
             storage_key: p.storage_key,
-            surrogate: p.storage_key.surrogate(),
             value: mp,
             wal_lsn: 0,
         })?;

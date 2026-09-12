@@ -34,6 +34,11 @@ use crate::{Surrogate, Value};
 /// `PRIMARY KEY`. INSERT and every stored-row identity derivation use it.
 pub const DEFAULT_IDENTITY_COLUMN: &str = "id";
 
+/// Prefix of a rendered key for a row with no surrogate binding, used by both
+/// planes: the Data Plane's `HybridFusionKey::Headless` and the Control
+/// Plane's hybrid response decoders that must recognize the same sentinel.
+pub const HEADLESS_SENTINEL_PREFIX: &str = "__local_";
+
 /// The redb key a document row is stored under.
 ///
 /// Fixed-width lowercase hex, so lexicographic order matches surrogate order

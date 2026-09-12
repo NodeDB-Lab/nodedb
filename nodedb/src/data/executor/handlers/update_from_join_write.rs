@@ -74,33 +74,11 @@ impl CoreLoop {
 
         for row in rows {
             let ResolvedUpdateRow {
-                doc_id,
-                surrogate: row_surrogate,
+                key: storage_key,
                 body: updated_bytes,
                 old_body,
                 mut doc,
             } = row;
-
-            // `put_in_txn` addresses DOCUMENTS rows by `StorageKey` only, and
-            // the workspace carries no on-disk-format compatibility burden
-            // for a row shape that predates surrogate keying, so a row whose
-            // `doc_id` does not parse as one is refused rather than written
-            // through a raw string key.
-            let storage_key = match crate::engine::document::store::StorageKey::parse(&doc_id) {
-                Some(key) => key,
-                None => {
-                    return Err(self.response_error(
-                        task,
-                        crate::Error::Storage {
-                            engine: "document".into(),
-                            detail: format!(
-                                "UPDATE ... FROM target row '{doc_id}' in \
-                                 '{target_collection}' has no surrogate storage key"
-                            ),
-                        },
-                    ));
-                }
-            };
 
             // Period lock, both images — matching `execute_point_update`: a
             // closed period must reject an edit to a row it already holds,
@@ -202,7 +180,7 @@ impl CoreLoop {
                 // `collect_update_from_join_rows`; `emit_put_event` derives
                 // `WriteOp::Update` from the Some prior + Some new pair and
                 // handles strict->msgpack conversion on both sides.
-                let row_identity = crate::engine::document::store::identity_of(&doc_id);
+                let row_identity = storage_key.to_identity();
                 // `row_identity` is read again below for `RETURNING`'s `id`
                 // field, so the event-emit boundary gets a clone rather than
                 // the move.
@@ -220,7 +198,7 @@ impl CoreLoop {
                 // post-apply `Put` redo (`updated_bytes` is moved as its last
                 // use). Both are no-ops unless the collection has a vector
                 // field, so a non-vector collection pays nothing.
-                if has_vectors && let Some(surrogate) = row_surrogate {
+                if has_vectors {
                     if let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
                         database_id,
                         tid,
@@ -233,7 +211,7 @@ impl CoreLoop {
                         return Err(self.response_error(task, e));
                     }
                     write_set.push(WriteSetEntry {
-                        surrogate: surrogate.as_u32(),
+                        surrogate: storage_key.surrogate().as_u32(),
                         is_delete: false,
                         value: updated_bytes,
                         collection: None,

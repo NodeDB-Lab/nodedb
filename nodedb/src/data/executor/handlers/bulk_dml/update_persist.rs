@@ -52,7 +52,7 @@ impl CoreLoop {
         // Hoisted before the transaction opens: the images below borrow them,
         // and a collection that declares no image-folding enforcement must not
         // pay for the fold at all.
-        let doc_id = p.doc_id.to_string();
+        let doc_id = *p.storage_key;
         // Copies of the borrows, not of the documents: they outlive `p`'s move
         // into the reindex below because they borrow the caller's images, not
         // the params struct.

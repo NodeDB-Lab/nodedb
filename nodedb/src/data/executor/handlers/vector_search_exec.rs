@@ -13,7 +13,6 @@ use super::vector_search_ann::{ResolvedAnnOptions, apply_ann_options, quantizati
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use nodedb_types::Surrogate;
 
 /// Parameters for [`CoreLoop::search_ivf`].
 struct SearchIvfParams<'a> {
@@ -34,7 +33,8 @@ impl CoreLoop {
     /// (the Control Plane evaluates the predicate against `body`) and by
     /// the slow-path SELECT (the Control Plane response translator flattens
     /// the body's fields into the hit JSON so payload columns surface to
-    /// the client). When `attach == false` the hit is returned unchanged.
+    /// the client). When `attach == false`, or the hit carries no surrogate
+    /// binding, the hit is returned unchanged.
     ///
     /// The bytes are normalized to a standard msgpack map through the shared
     /// sparse-body normalizer, resolved from the collection's registered kind.
@@ -54,7 +54,9 @@ impl CoreLoop {
         if !attach {
             return hit;
         }
-        let key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(hit.id));
+        let Some(key) = hit.id.storage_key() else {
+            return hit;
+        };
         if let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, &key) {
             let format = self.sparse_body_format(
                 crate::types::DatabaseId::new(database_id),
@@ -408,8 +410,13 @@ impl CoreLoop {
             .collect();
 
         if let Some(surrogate_bm) = filter_bitmap {
-            // Bitmap is a set of surrogates; hit.id is now the surrogate.
-            hits.retain(|h| surrogate_bm.0.contains(h.id));
+            // Bitmap is a set of surrogates: keep only bound hits whose
+            // surrogate is in the bitmap. A headless hit has none, so it
+            // never survives a surrogate-bitmap filter.
+            hits.retain(|h| {
+                h.id.storage_key()
+                    .is_some_and(|key| surrogate_bm.contains(key.surrogate()))
+            });
         }
         if !rls_filters.is_empty() {
             // CP-side translator runs the predicate; DP only attaches body.

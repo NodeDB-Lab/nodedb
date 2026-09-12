@@ -297,8 +297,8 @@ impl CoreLoop {
                 Err(e) => return self.response_error(task, e),
             };
             wire.push((
-                r.doc_id,
-                r.surrogate.map(|s| s.as_u32()),
+                r.key.to_string(),
+                r.key.surrogate().as_u32(),
                 doc_format::encode_resolved_wire_body(&r.doc),
                 doc_format::encode_resolved_wire_body(&old_doc),
             ));

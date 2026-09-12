@@ -26,8 +26,6 @@
 //! The graph leg's RYOW is a separate concern and is deliberately not touched
 //! here — the triple handler still reads committed graph state.
 
-use std::collections::HashMap;
-
 use nodedb_fts::posting::TextSearchResult;
 use nodedb_types::{Surrogate, SurrogateBitmap};
 
@@ -84,22 +82,6 @@ impl CoreLoop {
         let mut vector_hits: Vec<_> = vector_results
             .iter()
             .map(|r| super::vector_search::build_search_hit(vector_collection, r.id, r.distance))
-            .collect();
-        // Pin each base hit's fusion key by its `id` before the merge runs. A
-        // headless base hit carries a raw local id in `id`, so without this
-        // pin the ranked list below would misread it as a global surrogate.
-        // The merge updates a same-id hit in place, so the pinned key still
-        // names the row after a staged put; staged hits the merge adds carry
-        // no pin and resolve to their (real) surrogate.
-        let base_keys: HashMap<u32, HybridFusionKey> = vector_results
-            .iter()
-            .zip(vector_hits.iter())
-            .map(|(r, hit)| {
-                (
-                    hit.id,
-                    super::vector_search::vector_leg_key(vector_collection, r.id),
-                )
-            })
             .collect();
         let mut text_scored: Vec<(Surrogate, f32, bool)> = text_results
             .iter()
@@ -168,12 +150,7 @@ impl CoreLoop {
             .iter()
             .enumerate()
             .map(|(rank, hit)| RankedResult {
-                // A base hit keeps its pinned key; a staged hit the merge added
-                // carries a real surrogate in `id`.
-                document_id: base_keys
-                    .get(&hit.id)
-                    .copied()
-                    .unwrap_or_else(|| HybridFusionKey::for_surrogate(Surrogate::new(hit.id))),
+                document_id: hit.id,
                 rank,
                 score: hit.distance,
                 source: "vector",

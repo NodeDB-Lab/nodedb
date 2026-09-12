@@ -303,7 +303,6 @@ impl CoreLoop {
                 tid,
                 collection,
                 storage_key,
-                surrogate,
                 value,
                 wal_lsn: wal_lsn.map(|l| l.as_u64()).unwrap_or(0),
             },

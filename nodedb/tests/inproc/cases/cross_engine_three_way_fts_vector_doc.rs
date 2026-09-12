@@ -112,13 +112,14 @@ fn parse_json(payload: &[u8]) -> serde_json::Value {
 }
 
 /// Extract surrogate u32 values from a vector search response.
-/// Vector hits encode the surrogate as `id: u32`.
+/// A bound vector hit encodes `id` as its storage key.
 fn extract_vector_surrogates(payload: &[u8]) -> Vec<u32> {
     parse_json(payload)
         .as_array()
         .unwrap_or(&vec![])
         .iter()
-        .filter_map(|h| h.get("id").and_then(|v| v.as_u64()).map(|n| n as u32))
+        .filter_map(|h| h.get("id").and_then(|v| v.as_str()))
+        .filter_map(|key| nodedb_types::StorageKey::parse(key).map(|k| k.surrogate().as_u32()))
         .collect()
 }
 

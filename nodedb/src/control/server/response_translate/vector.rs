@@ -2,11 +2,13 @@
 
 //! Surrogate → user-PK translation for vector search responses.
 //!
-//! The Data Plane emits each hit's `id` as the bound `Surrogate.as_u32()`
-//! (or the local node id for headless rows) and leaves `doc_id` as
-//! `None`. The Control Plane runs this translator at the response
-//! boundary so pgwire / HTTP / native clients still see human-readable
-//! document identifiers without the engine ever consulting the catalog.
+//! The Data Plane emits each hit's `id` as its `HybridFusionKey` wire
+//! string: the hex storage key of a bound row's surrogate, or the
+//! `__local_<id>` sentinel for a headless row (no surrogate binding). It
+//! leaves `doc_id` as `None`. The Control Plane runs this translator at the
+//! response boundary so pgwire / HTTP / native clients still see
+//! human-readable document identifiers without the engine ever consulting
+//! the catalog.
 //!
 //! Behaviour:
 //!  - non-msgpack payloads (already JSON, empty, or non-array) round-
@@ -23,13 +25,16 @@ use nodedb_types::Surrogate;
 use nodedb_types::TenantId;
 use serde::{Deserialize, Serialize};
 
+use super::hit_key::parse_surrogate_hex;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::control::state::SharedState;
 
 #[derive(Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[msgpack(map)]
 struct Hit {
-    id: u32,
+    /// The `HybridFusionKey` wire string: a hex storage key, or the
+    /// `__local_<id>` sentinel for a headless (surrogate-less) row.
+    id: String,
     distance: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     doc_id: Option<String>,
@@ -129,13 +134,13 @@ pub fn translate_vector_search_payload(
         if hit.doc_id.is_some() {
             continue;
         }
-        if let Some(pk) = resolve_surrogate_pk(
-            state,
-            database_id,
-            tenant_id,
-            collection,
-            Surrogate::new(hit.id),
-        ) {
+        // A headless hit (no surrogate binding) has no PK to resolve; leave
+        // it untouched exactly as `text_hybrid.rs` does for the same sentinel.
+        let Some(surrogate) = parse_surrogate_hex(&hit.id) else {
+            continue;
+        };
+        if let Some(pk) = resolve_surrogate_pk(state, database_id, tenant_id, collection, surrogate)
+        {
             hit.doc_id = Some(pk);
         }
     }
@@ -170,17 +175,24 @@ pub fn translate_vector_search_payload(
                     obj.insert(k, v);
                 }
             }
-            // Fall back to catalog-resolved doc_id or raw surrogate when
-            // the body didn't provide an "id" field (e.g. skip_payload_fetch).
+            // A storage key never reaches a client: a bound hit's client
+            // identity is its surrogate's decimal string; a headless hit has
+            // no surrogate, so the sentinel is the only identity it carries.
+            let identity = match parse_surrogate_hex(&h.id) {
+                Some(surrogate) => surrogate.as_u32().to_string(),
+                None => h.id.clone(),
+            };
+            // Fall back to catalog-resolved doc_id or the decimal identity
+            // when the body didn't provide an "id" field (e.g. skip_payload_fetch).
             if !obj.contains_key("id") {
                 if let Some(ref doc) = h.doc_id {
                     obj.insert("id".into(), serde_json::json!(doc));
                 } else {
-                    obj.insert("id".into(), serde_json::json!(h.id));
+                    obj.insert("id".into(), serde_json::json!(identity));
                 }
             }
             // Always expose internal surrogate for debugging / join use.
-            obj.insert("_surrogate".into(), serde_json::json!(h.id));
+            obj.insert("_surrogate".into(), serde_json::json!(identity));
             obj
         })
         .collect();

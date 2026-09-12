@@ -11,16 +11,12 @@ use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::control::maintenance::clone_materializer::{dispatch_local, read_all_source_rows};
 use crate::control::state::SharedState;
 use crate::control::target_identity::{
-    bare_collection_name, derive_document_id, require_surrogate, resolve_target_pk,
+    bare_collection_name, derive_document_id, resolve_target_pk,
 };
+use crate::query::ResolvedUpdateRowWire;
 use crate::types::VShardId;
 use nodedb_physical::physical_plan::DocumentOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
-
-/// One resolved UPDATE row: `(doc_id, surrogate — None only for legacy rows,
-/// post-image body, pre-image body)`. Pre-image lets the Control Plane resolve
-/// both sides of a materialized-sum join-key rewrite.
-pub(crate) type ResolvedUpdateArm = (String, Option<u32>, Vec<u8>, Vec<u8>);
 
 /// Resolve one in-transaction `UpdateFromJoin` task into the concrete,
 /// surrogate-carrying `PointPut` tasks its matched target rows expand to.
@@ -92,8 +88,10 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
         .await?;
 
     let mut out: Vec<PhysicalTask> = Vec::with_capacity(resolved.len());
-    for (doc_id, surrogate_u32, body, _old_body) in resolved {
-        let surrogate = require_surrogate(surrogate_u32, &doc_id, "UPDATE ... FROM")?;
+    for (_doc_id, surrogate_u32, body, _old_body) in resolved {
+        // The wire surrogate is never absent: every matched `UPDATE ... FROM`
+        // row is a storage-keyed row.
+        let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
         let document_id = derive_document_id(&target_pk, &body, surrogate);
         let pk_bytes = document_id.clone().into_bytes();
         out.push(PhysicalTask {
@@ -125,7 +123,7 @@ async fn resolve_update_rows(
     state: &SharedState,
     tenant_id: TenantId,
     task: &PhysicalTask,
-) -> crate::Result<Vec<ResolvedUpdateArm>> {
+) -> crate::Result<Vec<ResolvedUpdateRowWire>> {
     let PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
         target_collection,
         source_collection,
@@ -198,9 +196,11 @@ async fn resolve_update_rows(
     decode_resolved_update_rows(&resolve_resp.payload)
 }
 
-/// Decode the RESOLVE pass payload (a msgpack `Vec<(doc_id, Option<surrogate>,
-/// post_image_body)>`; see `encode_resolved_update_rows`).
-pub(crate) fn decode_resolved_update_rows(payload: &[u8]) -> crate::Result<Vec<ResolvedUpdateArm>> {
+/// Decode the RESOLVE pass payload (a msgpack `Vec<ResolvedUpdateRowWire>`;
+/// see `encode_resolved_update_rows`).
+pub(crate) fn decode_resolved_update_rows(
+    payload: &[u8],
+) -> crate::Result<Vec<ResolvedUpdateRowWire>> {
     if payload.is_empty() {
         return Ok(Vec::new());
     }

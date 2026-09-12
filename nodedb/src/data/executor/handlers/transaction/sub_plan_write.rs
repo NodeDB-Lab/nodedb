@@ -100,15 +100,15 @@ impl CoreLoop {
         }
         // This is the direct primary-vector write path (VectorOp), not
         // the document auto-index cascade — it never populates
-        // `vector_doc_map` (that reverse map is keyed by document id,
-        // which this path doesn't have). Empty `doc_id` tells
+        // `vector_doc_map` (that reverse map is keyed by storage key,
+        // which this path doesn't have). `None` `doc_id` tells
         // `apply_undo_vector` to skip the `vector_doc_map` mutation.
         undo_log.push(UndoEntry::InsertVector {
             index_key,
             vector_id,
             collection: collection.to_string(),
             field: field_name.to_string(),
-            doc_id: String::new(),
+            doc_id: None,
         });
         Ok(self.response_ok(dummy_task))
     }
@@ -128,14 +128,14 @@ impl CoreLoop {
             && index.delete(vector_id)
         {
             // Same direct primary-vector path as `VectorOp::Insert`
-            // above — no `vector_doc_map` entry to restore, so an
-            // empty `doc_id` skips that mutation in `apply_undo_vector`.
+            // above — no `vector_doc_map` entry to restore, so a
+            // `None` `doc_id` skips that mutation in `apply_undo_vector`.
             undo_log.push(UndoEntry::DeleteVector {
                 index_key,
                 vector_id,
                 collection: collection.to_string(),
                 field: String::new(),
-                doc_id: String::new(),
+                doc_id: None,
             });
         }
         self.response_ok(dummy_task)

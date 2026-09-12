@@ -93,11 +93,13 @@ pub(in crate::data::executor) enum UndoEntry {
     InsertVector {
         index_key: (nodedb_types::DatabaseId, TenantId, String),
         vector_id: u32,
-        /// Collection, field, and doc id — the `vector_doc_map` key
+        /// Collection, field, and storage key — the `vector_doc_map` key
         /// components the forward insert wrote, needed to remove them.
+        /// `None` marks the direct primary-vector write path
+        /// (`PhysicalPlan::Vector`), which never populates `vector_doc_map`.
         collection: String,
         field: String,
-        doc_id: String,
+        doc_id: Option<nodedb_types::StorageKey>,
     },
     /// Undo a VectorDelete by un-deleting (clearing tombstone) and restoring
     /// the `vector_doc_map` entry the forward delete removed — mirroring
@@ -108,11 +110,13 @@ pub(in crate::data::executor) enum UndoEntry {
     DeleteVector {
         index_key: (nodedb_types::DatabaseId, TenantId, String),
         vector_id: u32,
-        /// Collection, field, and doc id — the `vector_doc_map` key
+        /// Collection, field, and storage key — the `vector_doc_map` key
         /// components the forward delete removed, needed to restore them.
+        /// `None` marks the direct primary-vector write path
+        /// (`PhysicalPlan::Vector`), which never populates `vector_doc_map`.
         collection: String,
         field: String,
-        doc_id: String,
+        doc_id: Option<nodedb_types::StorageKey>,
     },
     /// Undo a spatial R-tree insert by removing the entry from the per-field
     /// R-tree and deleting its reverse `spatial_doc_map` record.

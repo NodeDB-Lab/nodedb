@@ -34,8 +34,6 @@ pub(in crate::data::executor) struct PointUpdatePersist<'a> {
     pub(in crate::data::executor) database_id: u64,
     pub(in crate::data::executor) tid: u64,
     pub(in crate::data::executor) collection: &'a str,
-    /// Storage key (the surrogate hex), rendered — used in error messages.
-    pub(in crate::data::executor) row_key: &'a str,
     /// The same storage key, typed — what every storage call below takes.
     pub(in crate::data::executor) storage_key: &'a crate::engine::document::store::StorageKey,
     /// The row as it was before this update — the old side of the index diff,
@@ -70,7 +68,6 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            row_key,
             storage_key,
             current_bytes,
             updated_bytes,
@@ -142,7 +139,7 @@ impl CoreLoop {
                     engine: "sparse".into(),
                     detail: format!(
                         "bitemporal update: document failed to decode for \
-                         versioned-index diff (collection {collection}, id {row_key}): {e}"
+                         versioned-index diff (collection {collection}, id {storage_key}): {e}"
                     ),
                 }),
                 None => self
@@ -200,7 +197,6 @@ impl CoreLoop {
                         database_id,
                         tid,
                         collection,
-                        doc_id: row_key,
                         storage_key,
                         new_body: updated_bytes,
                         index_paths: &index_paths,
@@ -219,7 +215,7 @@ impl CoreLoop {
                         engine: "sparse".into(),
                         detail: format!(
                             "non-bitemporal update: document failed to decode for \
-                             secondary-index diff (collection {collection}, id {row_key}): {e}"
+                             secondary-index diff (collection {collection}, id {storage_key}): {e}"
                         ),
                     })
                 }

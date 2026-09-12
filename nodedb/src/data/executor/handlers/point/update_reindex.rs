@@ -43,8 +43,6 @@ pub(in crate::data::executor) struct NonbitemporalUpdateReindex<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub doc_id: &'a str,
-    /// The same storage key, typed — `put_in_txn` below takes it directly.
     pub storage_key: &'a crate::engine::document::store::StorageKey,
     /// New stored bytes for the primary document row.
     pub new_body: &'a [u8],

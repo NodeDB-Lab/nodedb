@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use nodedb_types::{PayloadAtom, Surrogate, SurrogateBitmap, value::Value};
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::hybrid_key::HybridFusionKey;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::response_codec::VectorSearchHit;
 use crate::engine::vector::distance::DistanceMetric;
@@ -148,7 +149,7 @@ fn value_as_f64(v: &Value) -> Option<f64> {
 
 /// After a `Vec::remove(idx)` shifts every later element left by one, shift
 /// every recorded index greater than `idx` in `seen` to match.
-fn reindex_after_removal(seen: &mut HashMap<u32, usize>, removed_idx: usize) {
+fn reindex_after_removal(seen: &mut HashMap<HybridFusionKey, usize>, removed_idx: usize) {
     for idx in seen.values_mut() {
         if *idx > removed_idx {
             *idx -= 1;
@@ -199,16 +200,17 @@ impl CoreLoop {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
         if let Some(overlay) = self.txn_overlays.get(&txn_id) {
-            let mut seen: HashMap<u32, usize> = hits
+            let mut seen: HashMap<HybridFusionKey, usize> = hits
                 .iter()
                 .enumerate()
                 .map(|(idx, h)| (h.id, idx))
                 .collect();
 
             for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
+                let key = HybridFusionKey::for_surrogate(Surrogate::new(surrogate));
                 match staged {
                     Staged::Tombstone => {
-                        if let Some(idx) = seen.remove(&surrogate) {
+                        if let Some(idx) = seen.remove(&key) {
                             hits.remove(idx);
                             reindex_after_removal(&mut seen, idx);
                         }
@@ -230,7 +232,7 @@ impl CoreLoop {
                                 .iter()
                                 .all(|atom| payload_atom_matches(atom, &doc));
                         if !passes_filter_bitmap || !passes_payload {
-                            if let Some(idx) = seen.remove(&surrogate) {
+                            if let Some(idx) = seen.remove(&key) {
                                 hits.remove(idx);
                                 reindex_after_removal(&mut seen, idx);
                             }
@@ -238,15 +240,15 @@ impl CoreLoop {
                         }
 
                         let dist = nodedb_vector::distance::distance(query_vector, &vector, metric);
-                        match seen.get(&surrogate).copied() {
+                        match seen.get(&key).copied() {
                             Some(idx) => {
                                 hits[idx].distance = dist;
                                 hits[idx].body = Some(body.clone());
                             }
                             None => {
-                                seen.insert(surrogate, hits.len());
+                                seen.insert(key, hits.len());
                                 hits.push(VectorSearchHit {
-                                    id: surrogate,
+                                    id: key,
                                     distance: dist,
                                     doc_id: None,
                                     body: Some(body.clone()),

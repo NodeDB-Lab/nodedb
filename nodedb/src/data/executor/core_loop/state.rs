@@ -136,13 +136,21 @@ pub struct CoreLoop {
         std::collections::HashMap<(DatabaseId, TenantId, String, String, u64), String>,
 
     /// Reverse map from an indexed document to the HNSW vector ID it produced,
-    /// keyed by (DatabaseId, TenantId, collection, field, doc_id). `doc_id` is
-    /// the hex-encoded surrogate row key (matching the key `apply_point_put`
-    /// indexes under). Populated on every vector index insert; consulted by
+    /// keyed by (DatabaseId, TenantId, collection, field, storage key). The
+    /// storage key matches the key `apply_point_put` indexes the row under.
+    /// Populated on every vector index insert; consulted by
     /// `apply_point_delete` to soft-delete the orphaned vector when its owning
     /// document is removed.
-    pub(in crate::data::executor) vector_doc_map:
-        std::collections::HashMap<(DatabaseId, TenantId, String, String, String), u32>,
+    pub(in crate::data::executor) vector_doc_map: std::collections::HashMap<
+        (
+            DatabaseId,
+            TenantId,
+            String,
+            String,
+            nodedb_types::StorageKey,
+        ),
+        u32,
+    >,
 
     /// Base data directory for this core (used for sort spill temp files).
     pub(in crate::data::executor) data_dir: std::path::PathBuf,

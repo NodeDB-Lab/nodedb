@@ -2,8 +2,8 @@
 
 //! Vector search parameter types and shared helper functions.
 //!
-//! DP emits each hit's `id` as the bound `Surrogate.as_u32()` (or the
-//! local node id if the row is headless / pre-surrogate). `doc_id` is
+//! DP emits each hit's `id` as its `HybridFusionKey`: `Bound` when the local
+//! HNSW node resolves to a surrogate, `Headless` otherwise. `doc_id` is
 //! always `None` from DP; the Control Plane fills it via the catalog
 //! at the response boundary.
 
@@ -16,20 +16,17 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::vector::collection::VectorCollection;
 use crate::engine::vector::distance::DistanceMetric;
 
-/// Build a search hit from raw search result data. `id` is the bound
-/// surrogate when present, else the local node id (so headless rows
+/// Build a search hit from raw search result data. `id` is the
+/// `HybridFusionKey` the local HNSW node resolves to: `Bound` to its
+/// surrogate's storage key when present, else `Headless` (so headless rows
 /// still round-trip).
 pub(super) fn build_search_hit(
     collection: Option<&VectorCollection>,
     local_id: u32,
     distance: f32,
 ) -> super::super::response_codec::VectorSearchHit {
-    let id = collection
-        .and_then(|c| c.get_surrogate(local_id))
-        .map(|s| s.as_u32())
-        .unwrap_or(local_id);
     super::super::response_codec::VectorSearchHit {
-        id,
+        id: vector_leg_key(collection, local_id),
         distance,
         doc_id: None,
         body: None,

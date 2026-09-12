@@ -11,10 +11,12 @@
 
 use serde::Serialize;
 
+use crate::data::executor::handlers::hybrid_key::HybridFusionKey;
+
 #[derive(Serialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[msgpack(map)]
 pub(in crate::data::executor) struct VectorSearchHit {
-    pub id: u32,
+    pub id: HybridFusionKey,
     pub distance: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_id: Option<String>,
@@ -194,13 +196,13 @@ mod tests {
     fn encode_vector_hits() {
         let hits = vec![
             VectorSearchHit {
-                id: 1,
+                id: HybridFusionKey::for_surrogate(nodedb_types::Surrogate::new(1)),
                 distance: 0.5,
                 doc_id: None,
                 body: None,
             },
             VectorSearchHit {
-                id: 2,
+                id: HybridFusionKey::for_surrogate(nodedb_types::Surrogate::new(2)),
                 distance: 0.8,
                 doc_id: None,
                 body: None,

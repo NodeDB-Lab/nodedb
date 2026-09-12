@@ -226,14 +226,12 @@ impl CoreLoop {
         }
         for row in projected {
             let ProjectedUpdateRow {
-                doc_id,
-                storage_key,
+                key: storage_key,
                 current_bytes,
                 old_doc: old_doc_json,
                 mut doc,
                 updated_bytes,
             } = row;
-            let doc_id = doc_id.as_str();
             // Period lock, both images — matching `execute_point_update`: a
             // closed period must reject an edit to a row it already holds,
             // and must reject an edit that assigns the period column into it.
@@ -284,7 +282,6 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    doc_id,
                     storage_key: &storage_key,
                     new_body: &updated_bytes,
                     index_paths: &index_paths,
@@ -368,10 +365,7 @@ impl CoreLoop {
             // Event Plane's WAL-replay bulk variants are aggregate
             // metadata reconstructed only when the live per-row events
             // were lost — the live path always emits per row.
-            // `doc_id` is the surrogate hex storage key. A value that fails
-            // to parse as a minted key is a legacy or user key, taken
-            // verbatim.
-            let row_identity = crate::engine::document::store::identity_of(doc_id);
+            let row_identity = storage_key.to_identity();
             // `row_identity` is read again below for `RETURNING`'s `id` field,
             // so the event-emit boundary gets a clone rather than the move.
             self.emit_put_event(

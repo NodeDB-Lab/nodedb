@@ -92,7 +92,7 @@ impl CoreLoop {
                         vector_id: d.vector_id,
                         collection: d.collection,
                         field: d.field,
-                        doc_id: d.doc_id,
+                        doc_id: Some(d.doc_id),
                     });
                 }
             }

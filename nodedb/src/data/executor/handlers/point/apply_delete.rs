@@ -16,6 +16,7 @@ use crate::data::executor::enforcement::{append_only, period_lock, retention};
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 use nodedb_types::Surrogate;
 
+use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
 use crate::data::executor::handlers::point::apply_put::VectorIndexDelta;
 use crate::data::executor::handlers::point::apply_put::map_enforcement_error;
 use crate::data::executor::spatial_key::SpatialIndexKey;
@@ -145,8 +146,6 @@ impl CoreLoop {
         let _ = user_roles;
 
         let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
-        let row_key = row_key.as_str();
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -372,13 +371,16 @@ impl CoreLoop {
         // the spatial cascade below are captured so a transactional caller can
         // reverse them.
         let mut mark_node_deleted_capture: Option<String> = None;
-        // The put path hashes the hex-surrogate storage key (== `row_key`) as
-        // the R-tree entry id, so the shared removal hashes the same key to
-        // find and drop every per-field entry + reverse-map pair for this
-        // document. Captures each removed `(skey, entry_id, bbox, doc)` for
-        // reversible undo.
-        let spatial_deletes =
-            self.remove_document_spatial_indexes(database_id, tid, collection, row_key);
+        // The put path hashes the same storage key via `SpatialEntryId`, so
+        // the shared removal hashes the same key to find and drop every
+        // per-field entry + reverse-map pair for this document. Captures
+        // each removed `(skey, entry_id, bbox, doc)` for reversible undo.
+        let spatial_deletes = self.remove_document_spatial_indexes(
+            database_id,
+            tid,
+            collection,
+            SpatialEntryId::from_storage_key(storage_key),
+        );
 
         // Record deletion for edge referential integrity. Capture the id
         // for undo ONLY when this call newly marked it — un-marking a node

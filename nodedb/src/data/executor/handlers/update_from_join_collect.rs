@@ -218,8 +218,7 @@ impl CoreLoop {
             // reindex and the expanded `PointPut`'s identity (RESOLVE path)
             // both need it, so it's carried through rather than re-parsed.
             rows.push(ResolvedUpdateRow {
-                doc_id: key.to_string(),
-                surrogate: Some(key.surrogate()),
+                key,
                 body: updated_bytes,
                 old_body: current_bytes,
                 doc: target_doc,

@@ -154,7 +154,8 @@ fn extract_vector_surrogates(payload: &[u8]) -> Vec<u32> {
         .as_array()
         .unwrap_or(&vec![])
         .iter()
-        .filter_map(|h| h.get("id").and_then(|v| v.as_u64()).map(|n| n as u32))
+        .filter_map(|h| h.get("id").and_then(|v| v.as_str()))
+        .filter_map(|key| nodedb_types::StorageKey::parse(key).map(|k| k.surrogate().as_u32()))
         .collect()
 }
 

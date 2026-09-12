@@ -106,8 +106,7 @@ impl CoreLoop {
         let mut returned_docs: Vec<serde_json::Value> = Vec::new();
         for row in projected {
             let ProjectedUpdateRow {
-                doc_id,
-                storage_key,
+                key: storage_key,
                 current_bytes,
                 old_doc: _,
                 doc,
@@ -117,9 +116,10 @@ impl CoreLoop {
             // `execute_bulk_update` decides it — on the same JSON document.
             rls_write_gate::admit_row(rls_write_check, &doc, tid, collection)
                 .map_err(ErrorCode::from)?;
-            // The projection stage already parsed `doc_id` as a storage key,
-            // so its surrogate identity is always available here.
             let surrogate = storage_key.surrogate();
+            // Rendered once here — `ResolvedPut::document_id` is the one `&str`
+            // API downstream that still needs the storage key as text.
+            let doc_id = storage_key.to_string();
             mutations.push(put_mutation(ResolvedPut {
                 collection,
                 document_id: &doc_id,

@@ -167,7 +167,6 @@ impl CoreLoop {
                     tid: tenant_id,
                     collection: &collection,
                     storage_key,
-                    surrogate,
                     value: &value,
                     wal_lsn: record_lsn,
                 },

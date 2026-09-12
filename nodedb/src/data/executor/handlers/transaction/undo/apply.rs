@@ -35,11 +35,11 @@ impl CoreLoop {
                     // Reverse the forward insert's `vector_doc_map` write —
                     // without this a rolled-back insert leaves a stale
                     // doc→vector_id mapping behind (unbounded leak), mirroring
-                    // `apply_undo_spatial`'s `spatial_doc_map.remove`. Empty
+                    // `apply_undo_spatial`'s `spatial_doc_map.remove`. `None`
                     // `doc_id` marks the direct primary-vector write path
                     // (`PhysicalPlan::Vector`), which never populates
                     // `vector_doc_map` — skip the mutation for that path.
-                    if !doc_id.is_empty() {
+                    if let Some(doc_id) = doc_id {
                         self.vector_doc_map.remove(&(
                             index_key.0,
                             index_key.1,
@@ -78,10 +78,10 @@ impl CoreLoop {
                     // doc→vector reverse lookup missing, so a later delete of
                     // the same document can never find (and soft-delete) its
                     // vector: a permanent orphan. Mirrors
-                    // `apply_undo_spatial`'s `spatial_doc_map.insert`. Empty
+                    // `apply_undo_spatial`'s `spatial_doc_map.insert`. `None`
                     // `doc_id` marks the direct primary-vector write path,
                     // which never populates `vector_doc_map` — skip it there.
-                    if !doc_id.is_empty() {
+                    if let Some(doc_id) = doc_id {
                         self.vector_doc_map.insert(
                             (index_key.0, index_key.1, collection, field, doc_id),
                             vector_id,
@@ -910,14 +910,20 @@ mod tests {
         crate::data::executor::core_loop::CoreLoop::vector_index_key(DB, TID, "c", "emb")
     }
 
-    fn vector_doc_key() -> (nodedb_types::DatabaseId, TenantId, String, String, String) {
+    fn vector_doc_key() -> (
+        nodedb_types::DatabaseId,
+        TenantId,
+        String,
+        String,
+        nodedb_types::StorageKey,
+    ) {
         let key = vector_index_key();
         (
             key.0,
             key.1,
             "c".to_string(),
             "emb".to_string(),
-            "d1".to_string(),
+            nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(1)),
         )
     }
 
@@ -949,7 +955,7 @@ mod tests {
             vector_id,
             collection: "c".to_string(),
             field: "emb".to_string(),
-            doc_id: "d1".to_string(),
+            doc_id: Some(vector_doc_key().4),
         };
         core.apply_undo_vector(TID, 0, undo).unwrap();
 
@@ -988,7 +994,7 @@ mod tests {
             vector_id,
             collection: "c".to_string(),
             field: "emb".to_string(),
-            doc_id: "d1".to_string(),
+            doc_id: Some(vector_doc_key().4),
         };
         core.apply_undo_vector(TID, 0, undo).unwrap();
 

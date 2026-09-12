@@ -68,8 +68,6 @@ impl CoreLoop {
             declared_primary_key,
         } = params;
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
-        let row_key = row_key.as_str();
         let document_identity = RowIdentity::from_user_key(document_id);
         debug!(
             core = self.core_id,
@@ -230,7 +228,6 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    row_key,
                     storage_key: &storage_key,
                     current_bytes: &current_bytes,
                     updated_bytes: &updated_bytes,

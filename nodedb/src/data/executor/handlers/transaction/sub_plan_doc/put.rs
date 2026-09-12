@@ -306,7 +306,7 @@ impl CoreLoop {
                     vector_id: delta.vector_id,
                     collection: delta.collection,
                     field: delta.field,
-                    doc_id: delta.doc_id,
+                    doc_id: Some(delta.doc_id),
                 });
             }
             for (key, entry_id) in target.outcome.spatial_inserts {
@@ -338,7 +338,7 @@ impl CoreLoop {
                 vector_id: delta.vector_id,
                 collection: delta.collection,
                 field: delta.field,
-                doc_id: delta.doc_id,
+                doc_id: Some(delta.doc_id),
             });
         }
 
