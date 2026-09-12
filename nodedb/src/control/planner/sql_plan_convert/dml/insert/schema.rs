@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+pub(crate) use nodedb_types::DEFAULT_IDENTITY_COLUMN;
 use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 
 /// Build a `ColumnarSchema` from raw catalog column-type strings.
@@ -23,10 +24,6 @@ use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 /// `bootstrap::data_plane::load_columnar_schema_seed`, which pre-registers
 /// each columnar-family collection's real schema before WAL replay so a
 /// fresh `MutationEngine` never falls back to type-lossy inference.
-/// The identity column a columnar-family collection carries when its DDL
-/// declares no `PRIMARY KEY`. The planner resolves the same name.
-pub(crate) const DEFAULT_IDENTITY_COLUMN: &str = "id";
-
 pub(crate) fn build_columnar_schema(
     column_schema: &[(String, String)],
     identity_column: &str,

@@ -4,8 +4,8 @@
 //! assignment for a row written on its behalf (mirrors the plain-`INSERT`
 //! identity path).
 
+use nodedb_types::CollectionType;
 use nodedb_types::columnar::DocumentMode;
-use nodedb_types::{CollectionType, Value};
 
 use crate::control::security::catalog::StoredCollection;
 
@@ -48,7 +48,7 @@ pub(crate) fn resolve_target_pk(
             name: target
                 .declared_primary_key
                 .clone()
-                .unwrap_or_else(|| "id".to_string()),
+                .unwrap_or_else(|| nodedb_types::DEFAULT_IDENTITY_COLUMN.to_string()),
             declared: target.declared_primary_key.is_some(),
         }),
         CollectionType::KeyValue(_) | CollectionType::Columnar(_) => Err(crate::Error::PlanError {
@@ -57,26 +57,5 @@ pub(crate) fn resolve_target_pk(
                 target.name
             ),
         }),
-    }
-}
-
-/// Extract a stringified primary-key value from a MessagePack row body.
-pub(super) fn extract_pk_value(body: &[u8], field: &str) -> Option<String> {
-    let Value::Object(obj) = nodedb_types::value_from_msgpack(body).ok()? else {
-        return None;
-    };
-    value_to_pk_string(obj.get(field)?)
-}
-
-/// Stringify a scalar value into its primary-key byte form (mirrors the
-/// `sql_value_to_string` convention used by the plain-INSERT identity path).
-fn value_to_pk_string(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Integer(n) => Some(n.to_string()),
-        Value::Float(f) => Some(f.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Decimal(d) => Some(d.to_string()),
-        _ => None,
     }
 }

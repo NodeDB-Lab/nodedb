@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
+use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
@@ -127,13 +128,13 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.clone(),
             );
-            let mut puts: Vec<(String, u32)> = match self.txn_overlays.get(&txn_id) {
+            let mut puts: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
                 Some(overlay) => overlay
                     .iter_doc_entries_for_collection(&coll_key)
                     .filter_map(|(doc_id, staged)| match staged {
                         Staged::Put(_) => overlay
                             .surrogate_for_doc_id(&coll_key, doc_id)
-                            .map(|surrogate| (doc_id.to_string(), surrogate)),
+                            .map(|surrogate| (doc_id, surrogate)),
                         Staged::Tombstone => None,
                     })
                     .collect(),
@@ -381,10 +382,9 @@ mod tests {
         ArrayOp, ColumnarInsertIntent, ColumnarOp, DocumentOp, GraphOp, KvOp, MetaOp,
         ReturningColumns, ReturningSpec, StorageMode, TimeseriesOp, UpdateValue, VectorOp,
     };
-    use nodedb_types::QualifiedCollection;
-    use nodedb_types::Surrogate;
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
     use nodedb_types::sync::wire::SyncProvenance;
+    use nodedb_types::{QualifiedCollection, RowIdentity, Surrogate};
 
     use crate::data::executor::handlers::graph::EdgePutParams;
     use crate::data::executor::strict_format;
@@ -394,7 +394,7 @@ mod tests {
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
     use crate::data::executor::core_loop::CoreLoop;
     use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
-    use crate::data::executor::handlers::transaction::stage_write::hex_key;
+    use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
     use crate::data::executor::task::ExecutionTask;
     use crate::types::{
         DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, TxnId, VShardId,
@@ -511,7 +511,7 @@ mod tests {
         let overlay_bytes = match core
             .txn_overlays
             .get(&txn)
-            .and_then(|o| o.get_by_doc_id(&coll_key("counters"), &hex_key(b"c")))
+            .and_then(|o| o.get_by_doc_id(&coll_key("counters"), &kv_row_identity(b"c")))
             .expect("staged incr present")
         {
             Staged::Put(v) => v.clone(),
@@ -548,11 +548,16 @@ mod tests {
         let expire_at = 1_700_000_000_000u64;
         {
             let overlay = core.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("sessions"), 7, &hex_key(b"s1"), b"v1".to_vec());
+            overlay.insert_put(
+                coll_key("sessions"),
+                7,
+                &kv_row_identity(b"s1"),
+                b"v1".to_vec(),
+            );
             overlay.set_ttl(
                 coll_key("sessions"),
                 7,
-                &hex_key(b"s1"),
+                &kv_row_identity(b"s1"),
                 StagedTtl::ExpireAt(expire_at),
             );
         }
@@ -586,8 +591,12 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(3);
 
-        core.txn_overlay_mut(txn)
-            .insert_put(coll_key("kvc"), 9, &hex_key(b"k9"), b"body".to_vec());
+        core.txn_overlay_mut(txn).insert_put(
+            coll_key("kvc"),
+            9,
+            &kv_row_identity(b"k9"),
+            b"body".to_vec(),
+        );
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
         let redo = decode_redo(&resp);
@@ -610,7 +619,7 @@ mod tests {
         let txn = TxnId::new(4);
 
         core.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("kvc"), 11, &hex_key(b"gone"));
+            .insert_tombstone(coll_key("kvc"), 11, &kv_row_identity(b"gone"));
 
         let resp = core.execute_resolve_txn(
             &task,
@@ -660,7 +669,7 @@ mod tests {
         core.txn_overlay_mut(txn).insert_put(
             coll_key("kvc"),
             1,
-            &hex_key(b"k"),
+            &kv_row_identity(b"k"),
             b"staged".to_vec(),
         );
 
@@ -683,8 +692,11 @@ mod tests {
 
         // A DELETE ... RETURNING stages like any other point delete: the overlay
         // holds a tombstone, and resolve serializes it from there.
-        core.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("notes"), surrogate, "gone");
+        core.txn_overlay_mut(txn).insert_tombstone(
+            coll_key("notes"),
+            surrogate,
+            &RowIdentity::from_user_key("gone"),
+        );
 
         let doc_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
@@ -880,6 +892,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
 
         let resp = core.execute_stage_write(&task, TID, &plan);
@@ -913,8 +926,18 @@ mod tests {
         // leaves them; a RETURNING clause does not change the overlay contents.
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("notes"), 1, "u1", schemaless_body("bob"));
-            overlay.insert_put(coll_key("notes"), 2, "u2", schemaless_body("bob"));
+            overlay.insert_put(
+                coll_key("notes"),
+                1,
+                &RowIdentity::from_user_key("u1"),
+                schemaless_body("bob"),
+            );
+            overlay.insert_put(
+                coll_key("notes"),
+                2,
+                &RowIdentity::from_user_key("u2"),
+                schemaless_body("bob"),
+            );
         }
 
         // Serializes the staged post-images from the overlay.
@@ -1389,7 +1412,7 @@ mod tests {
         src.txn_overlay_mut(txn).insert_put(
             coll_key("sdocs"),
             surrogate,
-            "row1",
+            &RowIdentity::from_user_key("row1"),
             strict_tuple(surrogate as i64, "elephant"),
         );
 
@@ -1437,8 +1460,12 @@ mod tests {
         let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         let body = schemaless_body("alice");
 
-        src.txn_overlay_mut(txn)
-            .insert_put(coll_key("notes"), surrogate, "userpk", body.clone());
+        src.txn_overlay_mut(txn).insert_put(
+            coll_key("notes"),
+            surrogate,
+            &RowIdentity::from_user_key("userpk"),
+            body.clone(),
+        );
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("notes")]);
         let redo = decode_redo(&resp);
@@ -1469,8 +1496,11 @@ mod tests {
         let surrogate = 11u32;
         let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
-        src.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("notes"), surrogate, "gone");
+        src.txn_overlay_mut(txn).insert_tombstone(
+            coll_key("notes"),
+            surrogate,
+            &RowIdentity::from_user_key("gone"),
+        );
 
         let delete_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
@@ -1598,7 +1628,7 @@ mod tests {
         core.txn_overlay_mut(txn).insert_put(
             coll_key("notes"),
             surrogate,
-            "userpk",
+            &RowIdentity::from_user_key("userpk"),
             schemaless_body("staged"),
         );
 
@@ -1627,11 +1657,11 @@ mod tests {
 
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
+            overlay.insert_put(coll_key("kvc"), 1, &kv_row_identity(b"k"), b"V".to_vec());
             overlay.insert_put(
                 coll_key("notes"),
                 doc_surrogate,
-                "userpk",
+                &RowIdentity::from_user_key("userpk"),
                 schemaless_body("bob"),
             );
         }
@@ -1685,14 +1715,19 @@ mod tests {
         let expire_at = crate::engine::kv::current_ms() + 3_600_000;
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("kvc"), 1, &hex_key(b"live"), b"V".to_vec());
+            overlay.insert_put(coll_key("kvc"), 1, &kv_row_identity(b"live"), b"V".to_vec());
             overlay.set_ttl(
                 coll_key("kvc"),
                 1,
-                &hex_key(b"live"),
+                &kv_row_identity(b"live"),
                 StagedTtl::ExpireAt(expire_at),
             );
-            overlay.insert_put(coll_key("kvc"), 2, &hex_key(b"plain"), b"P".to_vec());
+            overlay.insert_put(
+                coll_key("kvc"),
+                2,
+                &kv_row_identity(b"plain"),
+                b"P".to_vec(),
+            );
         }
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
@@ -2052,7 +2087,7 @@ mod tests {
             overlay.insert_put(
                 coll_key("notes"),
                 doc_surrogate,
-                "userpk",
+                &RowIdentity::from_user_key("userpk"),
                 schemaless_body("carol"),
             );
         }
@@ -2779,8 +2814,12 @@ mod tests {
         let txn = TxnId::new(47);
 
         // Stage the KV write into the overlay (overlay-driven serializer).
-        src.txn_overlay_mut(txn)
-            .insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
+        src.txn_overlay_mut(txn).insert_put(
+            coll_key("kvc"),
+            1,
+            &kv_row_identity(b"k"),
+            b"V".to_vec(),
+        );
 
         let mut row = std::collections::HashMap::new();
         row.insert("a".to_string(), nodedb_types::Value::Integer(7));
@@ -3114,8 +3153,12 @@ mod tests {
         let txn = TxnId::new(44);
         let surrogate = 13u32;
 
-        src.txn_overlay_mut(txn)
-            .insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
+        src.txn_overlay_mut(txn).insert_put(
+            coll_key("kvc"),
+            1,
+            &kv_row_identity(b"k"),
+            b"V".to_vec(),
+        );
 
         let plans = [
             kv_write_plan("kvc"),

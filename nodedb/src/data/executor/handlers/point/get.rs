@@ -8,7 +8,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
 use crate::data::executor::task::ExecutionTask;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 pub(in crate::data::executor) struct PointGetParams<'a> {
     pub tid: u64,
@@ -87,9 +87,13 @@ impl CoreLoop {
                     );
                 }
             }
-        } else if let Some(overlay_data) =
-            self.overlay_point_lookup(task, tid, collection, document_id, surrogate)
-        {
+        } else if let Some(overlay_data) = self.overlay_point_lookup(
+            task,
+            tid,
+            collection,
+            &RowIdentity::from_user_key(document_id),
+            surrogate,
+        ) {
             match overlay_data {
                 Ok(data) => data,
                 Err(response) => return response,

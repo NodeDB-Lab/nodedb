@@ -4,9 +4,9 @@
 //! collection on behalf of another operation, and validate that a matched
 //! existing row carries a registered surrogate.
 
-use nodedb_types::Surrogate;
+use nodedb_types::{Surrogate, extract_pk_value};
 
-use super::pk::{TargetPk, extract_pk_value};
+use super::pk::TargetPk;
 use crate::engine::document::store::RowIdentity;
 
 /// The user-visible primary key (`document_id`) for a row written on this

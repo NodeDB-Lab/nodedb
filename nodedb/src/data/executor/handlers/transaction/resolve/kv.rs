@@ -28,12 +28,13 @@
 //! ## Determinism
 //!
 //! The overlay keys slots by surrogate in a `HashMap`, so entries are collected
-//! into a `BTreeMap` keyed by the overlay doc-id (lowercase-hex of the KV key)
-//! before emitting. Two replicas resolving the same transaction produce
+//! into a `BTreeMap` keyed by the row's identity (`kv_row_identity` of the KV
+//! key) before emitting. Two replicas resolving the same transaction produce
 //! byte-identical redo ops.
 
 use std::collections::BTreeMap;
 
+use nodedb_types::RowIdentity;
 use nodedb_wal::record::RecordType;
 
 use crate::control::server::wal_dispatch_kv::encode::encode_kv_put;
@@ -55,18 +56,18 @@ pub(super) fn serialize_kv_collection(
     collection: &str,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
-    let mut entries: BTreeMap<String, &Staged> = BTreeMap::new();
+    let mut entries: BTreeMap<&RowIdentity, &Staged> = BTreeMap::new();
     for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
-        entries.insert(doc_id.to_string(), staged);
+        entries.insert(doc_id, staged);
     }
 
     for (doc_id, staged) in entries {
-        let key = unhex_key(&doc_id).ok_or_else(|| crate::Error::Internal {
+        let key = unhex_key(doc_id.as_str()).ok_or_else(|| crate::Error::Internal {
             detail: format!("kv resolve: overlay doc-id '{doc_id}' is not valid hex"),
         })?;
         match staged {
             Staged::Put(value) => {
-                let expire_at_ms = match overlay.get_ttl_by_doc_id(coll_key, &doc_id) {
+                let expire_at_ms = match overlay.get_ttl_by_doc_id(coll_key, doc_id) {
                     Some(StagedTtl::ExpireAt(ms)) => Some(ms),
                     Some(StagedTtl::Persist) | None => None,
                 };
@@ -77,7 +78,7 @@ pub(super) fn serialize_kv_collection(
                 // this entry through, which is not a shape to paper over.
                 let surrogate =
                     overlay
-                        .surrogate_for_doc_id(coll_key, &doc_id)
+                        .surrogate_for_doc_id(coll_key, doc_id)
                         .ok_or_else(|| crate::Error::Internal {
                             detail: format!(
                                 "kv resolve: overlay has no surrogate for staged doc-id '{doc_id}'"

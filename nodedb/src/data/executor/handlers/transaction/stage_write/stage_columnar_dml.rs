@@ -43,9 +43,9 @@
 //! handlers resolve their matching set, so the in-transaction view matches the
 //! post-commit view.
 
-use nodedb_types::Surrogate;
 use nodedb_types::columnar::ColumnarSchema;
 use nodedb_types::value::Value;
+use nodedb_types::{RowIdentity, Surrogate, value_to_pk_string};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
@@ -55,8 +55,24 @@ use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
 use crate::data::executor::handlers::transaction::overlay::ColumnarOverlayMergeParams;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{TenantId, TxnId};
+
+/// The client identity of a columnar row: the schema's primary-key value
+/// when the row carries one that stringifies, else the decimal surrogate.
+pub(super) fn columnar_row_identity(
+    schema: &ColumnarSchema,
+    row: &[Value],
+    surrogate: u32,
+) -> RowIdentity {
+    schema
+        .columns
+        .iter()
+        .position(|c| c.primary_key)
+        .and_then(|idx| row.get(idx))
+        .and_then(value_to_pk_string)
+        .map(RowIdentity::from_user_key)
+        .unwrap_or_else(|| RowIdentity::for_surrogate(Surrogate::new(surrogate)))
+}
 
 /// Routing identity + payload for one staged columnar predicate `DELETE`.
 pub(in crate::data::executor) struct StageColumnarDeleteParams<'a> {
@@ -109,6 +125,11 @@ impl CoreLoop {
             collection.to_string(),
         );
 
+        let schema = match self.columnar_engine_schema(task, tid, collection) {
+            Ok(s) => s,
+            Err(resp) => return resp,
+        };
+
         let affected_rows =
             match self.columnar_txn_matching_rows(task, tid, txn_id, collection, filter_bytes) {
                 Ok(rows) => rows,
@@ -121,28 +142,22 @@ impl CoreLoop {
         if !matches!(
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
+        ) && let Err(response) = self.stage_admit_columnar_rows(
+            task,
+            rls_write_check,
+            affected_rows.iter().map(|(_, row)| row.as_slice()),
+            &schema,
+            tid,
+            collection,
         ) {
-            let schema = match self.columnar_engine_schema(task, tid, collection) {
-                Ok(s) => s,
-                Err(resp) => return resp,
-            };
-            if let Err(response) = self.stage_admit_columnar_rows(
-                task,
-                rls_write_check,
-                affected_rows.iter().map(|(_, row)| row.as_slice()),
-                &schema,
-                tid,
-                collection,
-            ) {
-                return response;
-            }
+            return response;
         }
 
         let affected = affected_rows.len();
-        for (surrogate, _row) in affected_rows {
-            let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+        for (surrogate, row) in affected_rows {
+            let identity = columnar_row_identity(&schema, &row, surrogate);
             self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key.clone(), surrogate, &doc_id);
+                .insert_tombstone(coll_key.clone(), surrogate, &identity);
         }
 
         self.stage_columnar_dml_response(task, affected)
@@ -214,6 +229,7 @@ impl CoreLoop {
         }
 
         for (surrogate, new_row) in new_rows {
+            let identity = columnar_row_identity(&schema, &new_row, surrogate);
             let body = match nodedb_types::value_to_msgpack(&Value::Array(new_row)) {
                 Ok(b) => b,
                 Err(e) => {
@@ -225,8 +241,8 @@ impl CoreLoop {
                     );
                 }
             };
-            let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
-            if let Err(e) = self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &doc_id, body)
+            if let Err(e) =
+                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, body)
             {
                 return self.response_error(task, e);
             }

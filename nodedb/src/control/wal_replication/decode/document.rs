@@ -356,6 +356,8 @@ pub(super) fn bulk_dml(
             // No predicate on replay — see `point_delete`.
             rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             resolved_sum_targets,
+            // Read off the record — see `point_update`.
+            declared_primary_key,
         })
     }
 }
@@ -586,6 +588,7 @@ mod tests {
                 "acc-1",
                 Surrogate::new(4242),
             )],
+            declared_primary_key: Some("sku".to_string()),
         });
         let bytes = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &bulk)
             .expect("encode must not error")
@@ -597,16 +600,24 @@ mod tests {
         match decoded {
             PhysicalPlan::Document(DocumentOp::BulkDelete {
                 resolved_sum_targets,
+                declared_primary_key,
                 ..
-            }) => assert_eq!(
-                resolved_sum_targets,
-                vec![ResolvedSumTarget::new(
-                    "accounts",
-                    "acc-1",
-                    Surrogate::new(4242)
-                )],
-                "a replica re-derives which rows matched, never which target they credit"
-            ),
+            }) => {
+                assert_eq!(
+                    resolved_sum_targets,
+                    vec![ResolvedSumTarget::new(
+                        "accounts",
+                        "acc-1",
+                        Surrogate::new(4242)
+                    )],
+                    "a replica re-derives which rows matched, never which target they credit"
+                );
+                assert_eq!(
+                    declared_primary_key.as_deref(),
+                    Some("sku"),
+                    "the declared primary key travels on the record"
+                );
+            }
             other => panic!("expected BulkDelete, got {other:?}"),
         }
     }

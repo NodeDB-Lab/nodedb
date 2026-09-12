@@ -415,6 +415,8 @@ pub(crate) fn build_bulk_delete(
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         // Filled in by the materialized-sum resolution pass.
         resolved_sum_targets: Vec::new(),
+        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
+        declared_primary_key: declared_primary_key(ctx, collection)?,
     }))
 }
 

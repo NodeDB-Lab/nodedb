@@ -34,6 +34,7 @@ mod stage_spatial;
 mod stage_timeseries;
 mod stage_upsert;
 
+pub(in crate::data::executor) use body::stored_row_identity;
 pub(in crate::data::executor) use context::StageCtx;
 pub(in crate::data::executor) use stage_bulk_delete::StageBulkDeleteParams;
 pub(in crate::data::executor) use stage_bulk_update::StageBulkUpdateParams;
@@ -45,6 +46,6 @@ pub(in crate::data::executor) use stage_columnar_resolved_dml::{
     StageColumnarResolvedDeleteParams, StageColumnarResolvedUpdateParams,
 };
 pub(in crate::data::executor) use stage_graph::GRAPH_LABEL_COLL_KEY;
-pub(in crate::data::executor) use stage_kv::{hex_key, unhex_key};
+pub(in crate::data::executor) use stage_kv::{kv_row_identity, unhex_key};
 pub(in crate::data::executor) use stage_spatial::StageSpatialInsertParams;
 pub(in crate::data::executor) use stage_timeseries::StageTimeseriesInsertParams;

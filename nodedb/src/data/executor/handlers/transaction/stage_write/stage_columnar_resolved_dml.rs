@@ -38,15 +38,28 @@ use std::collections::HashMap;
 
 use nodedb_columnar::pk_index::encode_pk;
 use nodedb_query::scan_filter::FilterOp;
-use nodedb_types::Surrogate;
 use nodedb_types::value::Value;
+use nodedb_types::{RowIdentity, value_to_pk_string};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{TenantId, TxnId};
+
+/// The client identity of a resolved columnar row: its shipped primary-key
+/// value. The PK is mandatory on the resolved variants, so a value with no
+/// primary-key string form is a plan error, never a fallback.
+fn resolved_pk_identity(collection: &str, pk: &Value) -> crate::Result<RowIdentity> {
+    value_to_pk_string(pk)
+        .map(RowIdentity::from_user_key)
+        .ok_or_else(|| crate::Error::PlanError {
+            detail: format!(
+                "columnar resolved DML on '{collection}': primary key value {pk:?} has no \
+                 primary-key string form"
+            ),
+        })
+}
 
 /// Routing identity + payload for a staged columnar `ResolvedUpdate`.
 pub(in crate::data::executor) struct StageColumnarResolvedUpdateParams<'a> {
@@ -131,10 +144,14 @@ impl CoreLoop {
         for (surrogate, row) in &matched {
             by_pk.insert(encode_pk(&row[pk_idx]), *surrogate);
         }
-        let mut resolved: Vec<(u32, &Vec<Value>)> = Vec::with_capacity(rows.len());
+        let mut resolved: Vec<(u32, RowIdentity, &Vec<Value>)> = Vec::with_capacity(rows.len());
         for (pk, new_row) in rows {
+            let identity = match resolved_pk_identity(collection, pk) {
+                Ok(identity) => identity,
+                Err(e) => return self.response_error(task, e),
+            };
             match by_pk.get(&encode_pk(pk)) {
-                Some(surrogate) => resolved.push((*surrogate, new_row)),
+                Some(surrogate) => resolved.push((*surrogate, identity, new_row)),
                 None => return self.response_error(task, ErrorCode::OllpRetryRequired),
             }
         }
@@ -144,7 +161,7 @@ impl CoreLoop {
         if let Err(response) = self.stage_admit_columnar_rows(
             task,
             rls_write_check,
-            resolved.iter().map(|(_, row)| row.as_slice()),
+            resolved.iter().map(|(_, _, row)| row.as_slice()),
             &schema,
             tid,
             collection,
@@ -153,7 +170,7 @@ impl CoreLoop {
         }
 
         let affected = resolved.len();
-        for (surrogate, new_row) in resolved {
+        for (surrogate, identity, new_row) in resolved {
             let body = match nodedb_types::value_to_msgpack(&Value::Array(new_row.clone())) {
                 Ok(b) => b,
                 Err(e) => {
@@ -165,8 +182,8 @@ impl CoreLoop {
                     );
                 }
             };
-            let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
-            if let Err(e) = self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &doc_id, body)
+            if let Err(e) =
+                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, body)
             {
                 return self.response_error(task, e);
             }
@@ -233,19 +250,22 @@ impl CoreLoop {
 
         // Drift check BEFORE tombstoning anything: every shipped PK must
         // resolve to a surrogate in the current in-transaction view.
-        let mut surrogates: Vec<u32> = Vec::with_capacity(pks.len());
+        let mut surrogates: Vec<(u32, RowIdentity)> = Vec::with_capacity(pks.len());
         for pk in pks {
+            let identity = match resolved_pk_identity(collection, pk) {
+                Ok(identity) => identity,
+                Err(e) => return self.response_error(task, e),
+            };
             match by_pk.get(&encode_pk(pk)) {
-                Some(surrogate) => surrogates.push(*surrogate),
+                Some(surrogate) => surrogates.push((*surrogate, identity)),
                 None => return self.response_error(task, ErrorCode::OllpRetryRequired),
             }
         }
 
         let affected = surrogates.len();
-        for surrogate in surrogates {
-            let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+        for (surrogate, identity) in surrogates {
             self.txn_overlay_mut(txn_id)
-                .insert_tombstone(coll_key.clone(), surrogate, &doc_id);
+                .insert_tombstone(coll_key.clone(), surrogate, &identity);
         }
 
         self.stage_columnar_dml_response(task, affected)

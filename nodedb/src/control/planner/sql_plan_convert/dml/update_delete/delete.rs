@@ -115,6 +115,10 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
         });
     }
 
+    // A predicate delete stages each removed row under its client identity,
+    // read from the declared `PRIMARY KEY` column when the DDL names one.
+    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection)?;
+
     // Edge-bearing gate: a PK-equality delete on a collection with implicit
     // edges must not lower to a static `PointDelete` — that bypasses OLLP
     // and leaks the edge. Route as `BulkDelete` instead so the edge-bearing
@@ -138,6 +142,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 // Filled in by the materialized-sum resolution pass, which
                 // recon-scans the rows this predicate matches.
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,
@@ -201,6 +206,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 // Filled in by the materialized-sum resolution pass, which
                 // recon-scans the rows this predicate matches.
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,

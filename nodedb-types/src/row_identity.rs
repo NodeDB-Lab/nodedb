@@ -23,7 +23,16 @@
 //! 8-hex-character shape (a primary key `deadbeef` parses as a storage key),
 //! so a loose `String` cannot tell them apart. `StorageKey::parse` is the
 //! only place that shape gets reinterpreted as a surrogate.
-use crate::Surrogate;
+//!
+//! The identity rule INSERT applies lives here too, so both planes derive a
+//! stored row's identity the same way: [`DEFAULT_IDENTITY_COLUMN`],
+//! [`extract_pk_value`], [`value_to_pk_string`], and
+//! [`RowIdentity::of_stored_row`].
+use crate::{Surrogate, Value};
+
+/// The column that carries a row's identity when the DDL declares no
+/// `PRIMARY KEY`. INSERT and every stored-row identity derivation use it.
+pub const DEFAULT_IDENTITY_COLUMN: &str = "id";
 
 /// The redb key a document row is stored under.
 ///
@@ -83,13 +92,29 @@ impl std::fmt::Display for StorageKey {
 ///
 /// A minted row renders its surrogate in decimal. A row with a declared
 /// `PRIMARY KEY` carries the user's own value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RowIdentity(String);
 
 impl RowIdentity {
     /// The decimal identity of a minted row.
     pub fn for_surrogate(surrogate: Surrogate) -> Self {
         Self(surrogate.as_u32().to_string())
+    }
+
+    /// The identity INSERT mints for a row, applied to a stored body.
+    ///
+    /// The identity column is `declared_primary_key`, else
+    /// [`DEFAULT_IDENTITY_COLUMN`]. A body carrying that column yields its
+    /// value. A body without it yields the decimal surrogate of `key`.
+    pub fn of_stored_row(
+        body: &[u8],
+        declared_primary_key: Option<&str>,
+        key: StorageKey,
+    ) -> RowIdentity {
+        let column = declared_primary_key.unwrap_or(DEFAULT_IDENTITY_COLUMN);
+        extract_pk_value(body, column)
+            .map(RowIdentity::from_user_key)
+            .unwrap_or_else(|| key.to_identity())
     }
 
     /// Wrap a declared or client-supplied key as the row's identity.
@@ -154,9 +179,87 @@ pub fn identity_of(doc_id: &str) -> RowIdentity {
         .unwrap_or_else(|| RowIdentity::from_user_key(doc_id))
 }
 
+/// Extract the stringified value of `field` from a MessagePack row body.
+///
+/// Returns `None` when the body is not an object, lacks `field`, or the
+/// value has no primary-key string form.
+pub fn extract_pk_value(body: &[u8], field: &str) -> Option<String> {
+    let Value::Object(obj) = crate::value_from_msgpack(body).ok()? else {
+        return None;
+    };
+    value_to_pk_string(obj.get(field)?)
+}
+
+/// Stringify a scalar value into its primary-key form.
+///
+/// Matches the `sql_value_to_string` convention of the INSERT identity
+/// path. Non-scalar values have no primary-key form and yield `None`.
+pub fn value_to_pk_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Integer(n) => Some(n.to_string()),
+        Value::Float(f) => Some(f.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Decimal(d) => Some(d.to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn body(fields: &[(&str, Value)]) -> Vec<u8> {
+        let mut obj = std::collections::HashMap::new();
+        for (name, value) in fields {
+            obj.insert((*name).to_string(), value.clone());
+        }
+        crate::value_to_msgpack(&Value::Object(obj)).expect("encode msgpack")
+    }
+
+    #[test]
+    fn of_stored_row_uses_declared_primary_key() {
+        let key = StorageKey::for_surrogate(Surrogate::new(9));
+        let body = body(&[
+            ("id", Value::String("ignored".into())),
+            ("sku", Value::Integer(42)),
+        ]);
+        assert_eq!(
+            RowIdentity::of_stored_row(&body, Some("sku"), key).as_str(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn of_stored_row_falls_back_to_id_column() {
+        let key = StorageKey::for_surrogate(Surrogate::new(9));
+        let body = body(&[("id", Value::String("user-1".into()))]);
+        assert_eq!(
+            RowIdentity::of_stored_row(&body, None, key).as_str(),
+            "user-1"
+        );
+    }
+
+    #[test]
+    fn of_stored_row_without_identity_column_is_decimal_surrogate() {
+        let key = StorageKey::for_surrogate(Surrogate::new(9));
+        let body = body(&[("name", Value::String("x".into()))]);
+        assert_eq!(RowIdentity::of_stored_row(&body, None, key).as_str(), "9");
+        assert_eq!(
+            RowIdentity::of_stored_row(&body, Some("sku"), key).as_str(),
+            "9"
+        );
+    }
+
+    #[test]
+    fn value_to_pk_string_rejects_non_scalars() {
+        assert_eq!(value_to_pk_string(&Value::Array(Vec::new())), None);
+        assert_eq!(value_to_pk_string(&Value::Null), None);
+        assert_eq!(
+            value_to_pk_string(&Value::Bool(true)).as_deref(),
+            Some("true")
+        );
+    }
 
     #[test]
     fn formats_zero_padded_lowercase() {

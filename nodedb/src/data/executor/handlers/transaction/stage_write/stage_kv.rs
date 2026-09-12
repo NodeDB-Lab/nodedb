@@ -2,12 +2,12 @@
 
 //! Statement-time staging for KV point puts: `Put`, `Insert`,
 //! `InsertIfAbsent`. Sibling files stage the rest of the fourteen
-//! stageable `KvOp`s. A KV row's overlay doc-id is the lowercase-hex
-//! encoding of its raw key ([`hex_key`]), applied symmetrically here and
-//! in the read-merge paths.
+//! stageable `KvOp`s. A KV row's overlay identity is
+//! [`kv_row_identity`] of its raw key, applied symmetrically here and in
+//! the read-merge paths.
 
 use nodedb_physical::physical_plan::KvOp;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::Response;
@@ -17,15 +17,20 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
 use crate::types::TxnId;
 
-/// Lowercase-hex encode a raw KV key for use as the overlay's doc-id.
-/// Applied symmetrically here (stage) and in the read-merge paths that
-/// resolve a KV key back to its overlay entry.
-pub(in crate::data::executor) fn hex_key(key: &[u8]) -> String {
+/// Lowercase-hex encode a raw KV key. [`unhex_key`] is the inverse.
+fn hex_key(key: &[u8]) -> String {
     let mut s = String::with_capacity(key.len() * 2);
     for b in key {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// The overlay identity of a KV row: its raw key, hex encoded, taken
+/// verbatim. Every KV staging writer and read-merge reader builds the
+/// identity through this one function.
+pub(in crate::data::executor) fn kv_row_identity(raw_key: &[u8]) -> RowIdentity {
+    RowIdentity::from_user_key(hex_key(raw_key))
 }
 
 /// Decode a lowercase-hex KV overlay doc-id back to raw key bytes, the
@@ -179,8 +184,8 @@ impl CoreLoop {
         }
     }
 
-    /// Build the shared [`StageCtx`] routing bundle for a KV write, keying
-    /// the overlay's doc-id by [`hex_key`] rather than a document primary key.
+    /// Build the shared [`StageCtx`] routing bundle for a KV write, keyed by
+    /// [`kv_row_identity`] rather than a document primary key.
     fn kv_stage_ctx<'a>(
         &self,
         task: &'a ExecutionTask,
@@ -190,9 +195,14 @@ impl CoreLoop {
         key: &[u8],
         surrogate: Surrogate,
     ) -> StageCtx<'a> {
-        // `StageCtx.document_id` is `Cow<str>` so a KV row's overlay doc-id
-        // can be an owned hex string here, with no borrow from `task`.
-        StageCtx::new(task, tid, txn_id, collection, hex_key(key), surrogate)
+        StageCtx::new(
+            task,
+            tid,
+            txn_id,
+            collection,
+            kv_row_identity(key),
+            surrogate,
+        )
     }
 
     // ── Put: upsert, no existence check ─────────────────────────────────────

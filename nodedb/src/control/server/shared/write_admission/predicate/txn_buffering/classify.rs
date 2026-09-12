@@ -632,6 +632,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             // BulkUpdate / BulkDelete: OLLP surrogate set present — the
             // Calvin-routed, not-buffered case.
@@ -656,6 +657,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             // BulkUpdate / BulkDelete: OLLP edge set present, surrogates None —
             // the other half of the `Some` guard.
@@ -690,6 +692,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             PhysicalPlan::Document(DocumentOp::MaterializeScan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

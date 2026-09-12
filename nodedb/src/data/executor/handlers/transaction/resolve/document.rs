@@ -42,12 +42,12 @@
 //! ## Determinism
 //!
 //! The overlay keys slots by surrogate in a `HashMap`, so entries are collected
-//! into a `BTreeMap` keyed by the overlay doc-id (the user primary key) before
-//! emitting. Two replicas resolving the same transaction produce byte-identical
-//! redo ops.
+//! into a `BTreeMap` keyed by the row's client identity before emitting. Two
+//! replicas resolving the same transaction produce byte-identical redo ops.
 
 use std::collections::BTreeMap;
 
+use nodedb_types::RowIdentity;
 use nodedb_types::columnar::StrictSchema;
 use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_wal::record::RecordType;
@@ -71,7 +71,7 @@ pub(super) fn serialize_document_collection(
     strict_schema: Option<&StrictSchema>,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
-    let mut entries: BTreeMap<String, (u32, &Staged)> = BTreeMap::new();
+    let mut entries: BTreeMap<&RowIdentity, (u32, &Staged)> = BTreeMap::new();
     for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
         let surrogate = overlay
             .surrogate_for_doc_id(coll_key, doc_id)
@@ -80,7 +80,7 @@ pub(super) fn serialize_document_collection(
                     "document resolve: staged doc-id '{doc_id}' has no bound surrogate"
                 ),
             })?;
-        entries.insert(doc_id.to_string(), (surrogate, staged));
+        entries.insert(doc_id, (surrogate, staged));
     }
 
     for (doc_id, (surrogate, staged)) in entries {
@@ -191,12 +191,16 @@ mod tests {
         zerompk::to_msgpack_vec(&Value::Object(obj)).expect("encode msgpack")
     }
 
+    fn id(text: &str) -> RowIdentity {
+        RowIdentity::from_user_key(text)
+    }
+
     #[test]
     fn strict_put_emits_msgpack_not_binary_tuple() {
         let schema = strict_schema();
         let tuple = strict_tuple(7, "elephant");
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("docs"), 7, "row1", tuple.clone());
+        overlay.insert_put(coll_key("docs"), 7, &id("row1"), tuple.clone());
 
         let mut ops = Vec::new();
         serialize_document_collection(&overlay, &coll_key("docs"), "docs", Some(&schema), &mut ops)
@@ -233,7 +237,7 @@ mod tests {
     fn schemaless_put_emits_body_verbatim() {
         let body = schemaless_body("alice");
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("notes"), 3, "userpk", body.clone());
+        overlay.insert_put(coll_key("notes"), 3, &id("userpk"), body.clone());
 
         let mut ops = Vec::new();
         serialize_document_collection(&overlay, &coll_key("notes"), "notes", None, &mut ops)
@@ -252,7 +256,7 @@ mod tests {
     #[test]
     fn tombstone_emits_delete_carrying_surrogate() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_tombstone(coll_key("notes"), 11, "gone");
+        overlay.insert_tombstone(coll_key("notes"), 11, &id("gone"));
 
         let mut ops = Vec::new();
         serialize_document_collection(&overlay, &coll_key("notes"), "notes", None, &mut ops)
@@ -272,9 +276,9 @@ mod tests {
     #[test]
     fn entries_emit_in_deterministic_doc_id_order() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(coll_key("notes"), 30, "c", schemaless_body("c"));
-        overlay.insert_put(coll_key("notes"), 10, "a", schemaless_body("a"));
-        overlay.insert_put(coll_key("notes"), 20, "b", schemaless_body("b"));
+        overlay.insert_put(coll_key("notes"), 30, &id("c"), schemaless_body("c"));
+        overlay.insert_put(coll_key("notes"), 10, &id("a"), schemaless_body("a"));
+        overlay.insert_put(coll_key("notes"), 20, &id("b"), schemaless_body("b"));
 
         let mut ops = Vec::new();
         serialize_document_collection(&overlay, &coll_key("notes"), "notes", None, &mut ops)

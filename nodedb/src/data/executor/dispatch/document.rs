@@ -281,6 +281,9 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                // Read only by overlay staging; a durable delete removes rows
+                // by storage key.
+                declared_primary_key: _,
             } => self.execute_bulk_delete(
                 task,
                 tid,

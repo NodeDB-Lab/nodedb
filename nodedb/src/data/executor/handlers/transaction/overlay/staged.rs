@@ -9,12 +9,15 @@
 //!
 //! Keying rationale: the real storage key for a document is the SURROGATE
 //! (`u32`) — `apply_point_put` keys `sparse.versioned_put_in_txn` by
-//! surrogate. `doc_id_to_surrogate` lets later units resolve a doc_id to a
-//! staged surrogate for not-yet-persisted inserts (a doc_id that has no
-//! durable surrogate yet because the insert itself is only staged).
+//! surrogate. `doc_id_to_surrogate` resolves a row's client identity
+//! ([`RowIdentity`]) to its staged surrogate, so a not-yet-persisted insert
+//! is found by the identity a point read carries. A KV row's identity is
+//! its raw key, hex encoded, taken verbatim (`stage_kv::kv_row_identity`).
 
 use std::cell::Cell;
 use std::collections::HashMap;
+
+use nodedb_types::RowIdentity;
 
 use crate::types::{DatabaseId, TenantId};
 
@@ -70,10 +73,10 @@ pub struct BitemporalStamp {
 pub struct CollectionOverlay {
     /// Staged mutation per surrogate — the authoritative storage key.
     by_surrogate: HashMap<u32, Staged>,
-    /// Resolves a doc_id to its staged surrogate, for inserts that have not
-    /// yet been made durable (and therefore have no other way to be looked
-    /// up by doc_id).
-    doc_id_to_surrogate: HashMap<String, u32>,
+    /// Resolves a row's client identity to its staged surrogate, for inserts
+    /// that have not yet been made durable (and therefore have no other way
+    /// to be looked up by identity).
+    doc_id_to_surrogate: HashMap<RowIdentity, u32>,
     /// Staged KV TTL delta per surrogate — sibling to `by_surrogate`, never
     /// consulted by non-KV engines. See [`StagedTtl`].
     ttl_by_surrogate: HashMap<u32, StagedTtl>,
@@ -104,7 +107,7 @@ impl CollectionOverlay {
 struct OverlayUndo {
     coll_key: (DatabaseId, TenantId, String),
     surrogate: u32,
-    doc_id: String,
+    doc_id: RowIdentity,
     /// Prior `by_surrogate` entry, or `None` if the slot was absent.
     prev_value: Option<Staged>,
     /// Prior `ttl_by_surrogate` entry, or `None` if absent.
@@ -167,7 +170,7 @@ impl TxnOverlay {
         &mut self,
         coll_key: &(DatabaseId, TenantId, String),
         surrogate: u32,
-        doc_id: &str,
+        doc_id: &RowIdentity,
     ) {
         let (prev_value, prev_ttl, prev_doc_binding) = match self.collections.get(coll_key) {
             Some(overlay) => (
@@ -180,7 +183,7 @@ impl TxnOverlay {
         self.journal.push(OverlayUndo {
             coll_key: coll_key.clone(),
             surrogate,
-            doc_id: doc_id.to_string(),
+            doc_id: doc_id.clone(),
             prev_value,
             prev_ttl,
             prev_doc_binding,
@@ -192,7 +195,7 @@ impl TxnOverlay {
         &mut self,
         coll_key: (DatabaseId, TenantId, String),
         surrogate: u32,
-        doc_id: &str,
+        doc_id: &RowIdentity,
         body: Vec<u8>,
     ) {
         self.record_undo(&coll_key, surrogate, doc_id);
@@ -200,7 +203,7 @@ impl TxnOverlay {
         overlay.by_surrogate.insert(surrogate, Staged::Put(body));
         overlay
             .doc_id_to_surrogate
-            .insert(doc_id.to_string(), surrogate);
+            .insert(doc_id.clone(), surrogate);
     }
 
     /// Stage a tombstone (delete) for `surrogate` in the given collection.
@@ -208,14 +211,14 @@ impl TxnOverlay {
         &mut self,
         coll_key: (DatabaseId, TenantId, String),
         surrogate: u32,
-        doc_id: &str,
+        doc_id: &RowIdentity,
     ) {
         self.record_undo(&coll_key, surrogate, doc_id);
         let overlay = self.collections.entry(coll_key).or_default();
         overlay.by_surrogate.insert(surrogate, Staged::Tombstone);
         overlay
             .doc_id_to_surrogate
-            .insert(doc_id.to_string(), surrogate);
+            .insert(doc_id.clone(), surrogate);
     }
 
     /// Look up the staged mutation for `surrogate` in the given collection.
@@ -234,7 +237,7 @@ impl TxnOverlay {
     pub fn get_by_doc_id(
         &self,
         coll_key: &(DatabaseId, TenantId, String),
-        doc_id: &str,
+        doc_id: &RowIdentity,
     ) -> Option<&Staged> {
         let overlay = self.collections.get(coll_key)?;
         let surrogate = overlay.doc_id_to_surrogate.get(doc_id)?;
@@ -247,7 +250,7 @@ impl TxnOverlay {
     pub fn surrogate_for_doc_id(
         &self,
         coll_key: &(DatabaseId, TenantId, String),
-        doc_id: &str,
+        doc_id: &RowIdentity,
     ) -> Option<u32> {
         self.collections
             .get(coll_key)?
@@ -260,12 +263,12 @@ impl TxnOverlay {
     /// given collection, binding `doc_id` to `surrogate` the same way
     /// `insert_put` / `insert_tombstone` do — a `GetTtl` (or a later
     /// `Expire`/`Persist`/`Incr` in the same transaction) resolves the same
-    /// slot by hex-encoded KV key.
+    /// slot by the KV row's identity.
     pub fn set_ttl(
         &mut self,
         coll_key: (DatabaseId, TenantId, String),
         surrogate: u32,
-        doc_id: &str,
+        doc_id: &RowIdentity,
         ttl: StagedTtl,
     ) {
         self.record_undo(&coll_key, surrogate, doc_id);
@@ -273,7 +276,7 @@ impl TxnOverlay {
         overlay.ttl_by_surrogate.insert(surrogate, ttl);
         overlay
             .doc_id_to_surrogate
-            .insert(doc_id.to_string(), surrogate);
+            .insert(doc_id.clone(), surrogate);
     }
 
     /// Current length of the overlay undo journal — the savepoint marker a
@@ -346,7 +349,7 @@ impl TxnOverlay {
     pub fn get_ttl_by_doc_id(
         &self,
         coll_key: &(DatabaseId, TenantId, String),
-        doc_id: &str,
+        doc_id: &RowIdentity,
     ) -> Option<StagedTtl> {
         let overlay = self.collections.get(coll_key)?;
         let surrogate = overlay.doc_id_to_surrogate.get(doc_id)?;
@@ -409,17 +412,16 @@ impl TxnOverlay {
             .flat_map(|overlay| overlay.by_surrogate.iter().map(|(k, v)| (*k, v)))
     }
 
-    /// Iterate all staged `(doc_id, Staged)` pairs for a collection.
+    /// Iterate all staged `(identity, Staged)` pairs for a collection.
     ///
     /// Unlike [`iter_for_collection`](Self::iter_for_collection) (keyed by
     /// surrogate, the Document scan's row identity), this is keyed by the
-    /// overlay's doc-id -- the identity a KV scan merge needs, since a KV
-    /// row's scan identity is its raw key bytes (hex-encoded into the
-    /// doc-id), not a surrogate.
+    /// row's client identity -- the identity a KV scan merge needs, since a
+    /// KV row's scan identity is its raw key bytes, not a surrogate.
     pub fn iter_doc_entries_for_collection<'a>(
         &'a self,
         coll_key: &(DatabaseId, TenantId, String),
-    ) -> impl Iterator<Item = (&'a str, &'a Staged)> {
+    ) -> impl Iterator<Item = (&'a RowIdentity, &'a Staged)> {
         self.collections
             .get(coll_key)
             .into_iter()
@@ -431,7 +433,7 @@ impl TxnOverlay {
                         overlay
                             .by_surrogate
                             .get(surrogate)
-                            .map(|staged| (doc_id.as_str(), staged))
+                            .map(|staged| (doc_id, staged))
                     })
             })
     }
@@ -474,6 +476,10 @@ mod tests {
         (DatabaseId::new(1), TenantId::new(1), coll.to_string())
     }
 
+    fn id(text: &str) -> RowIdentity {
+        RowIdentity::from_user_key(text)
+    }
+
     #[test]
     fn empty_overlay_has_no_entries() {
         let overlay = TxnOverlay::new();
@@ -481,14 +487,14 @@ mod tests {
         assert_eq!(overlay.len(), 0);
         assert_eq!(overlay.memory_size_estimate(), 0);
         assert!(overlay.get(&key("users"), 1).is_none());
-        assert!(overlay.get_by_doc_id(&key("users"), "abc").is_none());
+        assert!(overlay.get_by_doc_id(&key("users"), &id("abc")).is_none());
         assert_eq!(overlay.iter_for_collection(&key("users")).count(), 0);
     }
 
     #[test]
     fn insert_put_and_lookup() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_put(key("users"), 7, "doc-1", vec![1, 2, 3]);
+        overlay.insert_put(key("users"), 7, &id("doc-1"), vec![1, 2, 3]);
 
         assert!(!overlay.is_empty());
         assert_eq!(overlay.len(), 1);
@@ -498,7 +504,7 @@ mod tests {
             Some(&Staged::Put(vec![1, 2, 3]))
         );
         assert_eq!(
-            overlay.get_by_doc_id(&key("users"), "doc-1"),
+            overlay.get_by_doc_id(&key("users"), &id("doc-1")),
             Some(&Staged::Put(vec![1, 2, 3]))
         );
         let collected: Vec<_> = overlay.iter_for_collection(&key("users")).collect();
@@ -508,10 +514,49 @@ mod tests {
     #[test]
     fn insert_tombstone_and_lookup() {
         let mut overlay = TxnOverlay::new();
-        overlay.insert_tombstone(key("users"), 9, "doc-2");
+        overlay.insert_tombstone(key("users"), 9, &id("doc-2"));
 
         assert_eq!(overlay.get(&key("users"), 9), Some(&Staged::Tombstone));
         assert_eq!(overlay.memory_size_estimate(), 0);
+    }
+
+    #[test]
+    fn bulk_staged_row_is_found_by_the_point_get_identity() {
+        // A bulk path keys the row by `RowIdentity::of_stored_row`. A point
+        // get carries the plan's resolved identity: the `id` column value.
+        // Both must land on the same overlay slot.
+        let mut body_obj = HashMap::new();
+        body_obj.insert(
+            "id".to_string(),
+            nodedb_types::Value::String("user-7".into()),
+        );
+        body_obj.insert(
+            "name".to_string(),
+            nodedb_types::Value::String("ann".into()),
+        );
+        let body = nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(body_obj))
+            .expect("encode msgpack");
+        let storage_key = nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(7));
+        let bulk_identity = RowIdentity::of_stored_row(&body, None, storage_key);
+
+        let mut overlay = TxnOverlay::new();
+        overlay.insert_put(key("users"), 7, &bulk_identity, body.clone());
+
+        let point_get_identity = RowIdentity::from_user_key("user-7");
+        assert_eq!(
+            overlay.get_by_doc_id(&key("users"), &point_get_identity),
+            Some(&Staged::Put(body))
+        );
+        assert_eq!(
+            overlay.surrogate_for_doc_id(&key("users"), &point_get_identity),
+            Some(7)
+        );
+        assert!(
+            overlay
+                .get_by_doc_id(&key("users"), &storage_key.to_identity())
+                .is_none(),
+            "a row carrying an `id` column is never keyed by its surrogate"
+        );
     }
 
     // ── KV TTL delta (`StagedTtl`) ──────────────────────────────────────
@@ -531,14 +576,14 @@ mod tests {
     #[test]
     fn set_ttl_and_get_ttl_round_trip() {
         let mut overlay = TxnOverlay::new();
-        overlay.set_ttl(key("cache"), 3, "6b6579", StagedTtl::ExpireAt(5_000));
+        overlay.set_ttl(key("cache"), 3, &id("6b6579"), StagedTtl::ExpireAt(5_000));
 
         assert_eq!(
             overlay.get_ttl(&key("cache"), 3),
             Some(StagedTtl::ExpireAt(5_000))
         );
         assert_eq!(
-            overlay.get_ttl_by_doc_id(&key("cache"), "6b6579"),
+            overlay.get_ttl_by_doc_id(&key("cache"), &id("6b6579")),
             Some(StagedTtl::ExpireAt(5_000))
         );
     }
@@ -546,8 +591,8 @@ mod tests {
     #[test]
     fn set_ttl_persist_overrides_prior_expire() {
         let mut overlay = TxnOverlay::new();
-        overlay.set_ttl(key("cache"), 3, "6b6579", StagedTtl::ExpireAt(5_000));
-        overlay.set_ttl(key("cache"), 3, "6b6579", StagedTtl::Persist);
+        overlay.set_ttl(key("cache"), 3, &id("6b6579"), StagedTtl::ExpireAt(5_000));
+        overlay.set_ttl(key("cache"), 3, &id("6b6579"), StagedTtl::Persist);
 
         assert_eq!(overlay.get_ttl(&key("cache"), 3), Some(StagedTtl::Persist));
     }
@@ -556,7 +601,10 @@ mod tests {
     fn get_ttl_none_when_nothing_staged() {
         let overlay = TxnOverlay::new();
         assert_eq!(overlay.get_ttl(&key("cache"), 3), None);
-        assert_eq!(overlay.get_ttl_by_doc_id(&key("cache"), "6b6579"), None);
+        assert_eq!(
+            overlay.get_ttl_by_doc_id(&key("cache"), &id("6b6579")),
+            None
+        );
     }
 
     #[test]
@@ -565,11 +613,15 @@ mod tests {
         // (only a base row exists) must still resolve by doc_id -- `set_ttl`
         // binds `doc_id_to_surrogate` itself, independent of `insert_put`.
         let mut overlay = TxnOverlay::new();
-        overlay.set_ttl(key("cache"), 42, "6b6579", StagedTtl::ExpireAt(9_999));
+        overlay.set_ttl(key("cache"), 42, &id("6b6579"), StagedTtl::ExpireAt(9_999));
 
-        assert!(overlay.get_by_doc_id(&key("cache"), "6b6579").is_none());
+        assert!(
+            overlay
+                .get_by_doc_id(&key("cache"), &id("6b6579"))
+                .is_none()
+        );
         assert_eq!(
-            overlay.get_ttl_by_doc_id(&key("cache"), "6b6579"),
+            overlay.get_ttl_by_doc_id(&key("cache"), &id("6b6579")),
             Some(StagedTtl::ExpireAt(9_999))
         );
     }
@@ -577,7 +629,7 @@ mod tests {
     #[test]
     fn ttl_delta_is_per_collection() {
         let mut overlay = TxnOverlay::new();
-        overlay.set_ttl(key("a"), 1, "6b", StagedTtl::ExpireAt(1_000));
+        overlay.set_ttl(key("a"), 1, &id("6b"), StagedTtl::ExpireAt(1_000));
         assert_eq!(overlay.get_ttl(&key("b"), 1), None);
     }
 
@@ -586,10 +638,10 @@ mod tests {
         let mut overlay = TxnOverlay::new();
         let retained = key("retained");
         let post_marker = key("post_marker");
-        overlay.insert_put(retained.clone(), 7, "stable", vec![1, 2, 3]);
+        overlay.insert_put(retained.clone(), 7, &id("stable"), vec![1, 2, 3]);
         let marker = overlay.journal_len();
 
-        overlay.insert_put(post_marker.clone(), 9, "temporary", vec![4, 5]);
+        overlay.insert_put(post_marker.clone(), 9, &id("temporary"), vec![4, 5]);
         overlay.rollback_to(marker);
 
         assert!(
@@ -603,7 +655,7 @@ mod tests {
             "the pre-savepoint body must remain byte-exact"
         );
         assert_eq!(
-            overlay.get_by_doc_id(&retained, "stable"),
+            overlay.get_by_doc_id(&retained, &id("stable")),
             Some(&Staged::Put(vec![1, 2, 3]))
         );
         assert_eq!(overlay.journal_len(), marker);

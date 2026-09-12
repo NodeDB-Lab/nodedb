@@ -14,8 +14,9 @@
 //! replay remains the sole durable apply.
 
 use nodedb_physical::physical_plan::UpdateValue;
-use nodedb_types::StorageKey;
+use nodedb_types::{RowIdentity, StorageKey};
 
+use super::body::stored_row_identity;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -130,6 +131,7 @@ impl CoreLoop {
             }
         }
 
+        let strict_schema = self.resolve_strict_schema(database_id.as_u64(), tid, collection);
         let mut affected = 0u64;
         for (row_key, current_body) in &rows {
             let surrogate = row_key.surrogate().as_u32();
@@ -148,7 +150,12 @@ impl CoreLoop {
             // policy. A rejected row fails the statement rather than being
             // skipped: skipping would under-report `affected` while the rest of
             // the predicate's matches were still rewritten.
-            let identity = row_key.to_identity();
+            let identity = stored_row_identity(
+                &new_body,
+                strict_schema.as_ref(),
+                declared_primary_key,
+                *row_key,
+            );
             if let Err(e) = self.stage_admit_write(
                 rls_write_check,
                 &new_body,
@@ -159,13 +166,9 @@ impl CoreLoop {
             ) {
                 return self.response_error(task, e);
             }
-            if let Err(e) = self.stage_bulk_put_capped(
-                txn_id,
-                &coll_key,
-                surrogate,
-                &row_key.to_string(),
-                new_body,
-            ) {
+            if let Err(e) =
+                self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, new_body)
+            {
                 return self.response_error(task, e);
             }
             affected += 1;
@@ -220,7 +223,7 @@ impl CoreLoop {
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         surrogate: u32,
-        doc_id: &str,
+        doc_id: &RowIdentity,
         body: Vec<u8>,
     ) -> crate::Result<()> {
         let current = self

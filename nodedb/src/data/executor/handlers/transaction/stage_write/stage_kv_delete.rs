@@ -25,7 +25,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
 use crate::types::TxnId;
 
-use super::stage_kv::hex_key;
+use super::stage_kv::kv_row_identity;
 
 impl CoreLoop {
     /// Tombstone every present key in the overlay, after deciding each row it
@@ -42,7 +42,7 @@ impl CoreLoop {
         let did = task.request.database_id;
         let mut deleted = 0usize;
         for key in keys {
-            let doc_id = hex_key(key);
+            let doc_id = kv_row_identity(key);
             let coll_key = (
                 did,
                 crate::types::TenantId::new(tid),
@@ -116,9 +116,7 @@ impl CoreLoop {
                     && let Err(e) = self.stage_admit_write(
                         rls_write_check,
                         &body,
-                        &crate::engine::document::store::RowIdentity::from_user_key(
-                            doc_id.as_str(),
-                        ),
+                        &doc_id,
                         did.as_u64(),
                         tid,
                         collection,

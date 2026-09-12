@@ -274,6 +274,7 @@ mod tests {
                 rls_filters: vec![],
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
             }),
             post_set_op: nodedb_physical::physical_task::PostSetOp::None,
             txn_id: None,

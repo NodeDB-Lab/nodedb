@@ -32,7 +32,7 @@
 use std::collections::HashSet;
 
 use nodedb_types::columnar::StrictSchema;
-use nodedb_types::{StorageKey, Surrogate};
+use nodedb_types::{RowIdentity, StorageKey, Surrogate};
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -138,8 +138,8 @@ impl CoreLoop {
     /// Unlike [`merge_overlay_into_scan`](Self::merge_overlay_into_scan),
     /// whose row identity is the Document scan's hex-surrogate row key, a
     /// KV row's scan identity is its raw key bytes -- so this merges by
-    /// [`hex_key`](super::super::stage_write::hex_key) identity instead,
-    /// via [`TxnOverlay::iter_doc_entries_for_collection`] and
+    /// [`kv_row_identity`](super::super::stage_write::kv_row_identity)
+    /// instead, via [`TxnOverlay::iter_doc_entries_for_collection`] and
     /// [`unhex_key`](super::super::stage_write::unhex_key) to recover the
     /// raw key bytes for a staged addition. `matches` is the SAME predicate
     /// the base KV scan applied, evaluated on the value bytes.
@@ -156,13 +156,13 @@ impl CoreLoop {
             return;
         };
 
-        let mut seen: HashSet<String> = rows
+        let mut seen: HashSet<RowIdentity> = rows
             .iter()
-            .map(|(key, _)| super::super::stage_write::hex_key(key))
+            .map(|(key, _)| super::super::stage_write::kv_row_identity(key))
             .collect();
 
         let now_ms = current_ms();
-        let staged_expired = |doc_id: &str| -> bool {
+        let staged_expired = |doc_id: &RowIdentity| -> bool {
             matches!(
                 overlay.get_ttl_by_doc_id(coll_key, doc_id),
                 Some(StagedTtl::ExpireAt(t)) if t <= now_ms
@@ -170,7 +170,7 @@ impl CoreLoop {
         };
 
         rows.retain_mut(|(key, value)| {
-            let doc_id = super::super::stage_write::hex_key(key);
+            let doc_id = super::super::stage_write::kv_row_identity(key);
             // A staged EXPIRE with an already-past instant hides the row from
             // an in-transaction scan -- independent of whether the row's
             // VALUE was also staged this transaction (an `Expire` on a
@@ -196,10 +196,10 @@ impl CoreLoop {
             if let Staged::Put(value) = staged
                 && !staged_expired(doc_id)
                 && matches(value)
-                && let Some(key) = super::super::stage_write::unhex_key(doc_id)
+                && let Some(key) = super::super::stage_write::unhex_key(doc_id.as_str())
             {
                 rows.push((key, value.clone()));
-                seen.insert(doc_id.to_string());
+                seen.insert(doc_id.clone());
             }
         }
     }

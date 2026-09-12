@@ -14,6 +14,7 @@
 
 use nodedb_types::StorageKey;
 
+use super::body::stored_row_identity;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -32,6 +33,9 @@ pub(in crate::data::executor) struct StageBulkDeleteParams<'a> {
     /// Compiled RLS write policy gating each matched row's removal, decided
     /// against its pre-deletion image.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// Declared `PRIMARY KEY` column of the collection, `None` otherwise.
+    /// Names the column each removed row's identity is read from.
+    pub declared_primary_key: Option<&'a str>,
 }
 
 impl CoreLoop {
@@ -50,6 +54,7 @@ impl CoreLoop {
             collection,
             filter_bytes,
             rls_write_check,
+            declared_primary_key,
         } = params;
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
@@ -112,16 +117,31 @@ impl CoreLoop {
         // it already hidden from the rest of the transaction. Each row's
         // current BASE ∪ OVERLAY body is the pre-deletion image the policy
         // decides — the only image a delete has.
+        // Each row's identity is read from the pre-image the delete removes,
+        // by the same rule INSERT minted it with.
+        let strict_schema = self.resolve_strict_schema(database_id.as_u64(), tid, collection);
+        let identified: Vec<(StorageKey, nodedb_types::RowIdentity, &Vec<u8>)> = rows
+            .iter()
+            .map(|(row_key, body)| {
+                let identity = stored_row_identity(
+                    body,
+                    strict_schema.as_ref(),
+                    declared_primary_key,
+                    *row_key,
+                );
+                (*row_key, identity, body)
+            })
+            .collect();
+
         if !matches!(
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
-            for (row_key, body) in &rows {
-                let identity = row_key.to_identity();
+            for (_, identity, body) in &identified {
                 if let Err(e) = self.stage_admit_write(
                     rls_write_check,
                     body,
-                    &identity,
+                    identity,
                     database_id.as_u64(),
                     tid,
                     collection,
@@ -132,13 +152,10 @@ impl CoreLoop {
         }
 
         let mut affected = 0u64;
-        for (row_key, _body) in &rows {
+        for (row_key, identity, _body) in &identified {
             let surrogate = row_key.surrogate().as_u32();
-            self.txn_overlay_mut(txn_id).insert_tombstone(
-                coll_key.clone(),
-                surrogate,
-                &row_key.to_string(),
-            );
+            self.txn_overlay_mut(txn_id)
+                .insert_tombstone(coll_key.clone(), surrogate, identity);
             affected += 1;
         }
 

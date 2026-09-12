@@ -25,8 +25,8 @@
 //! plan is still replayed through `execute_spatial_insert` /
 //! `execute_spatial_delete` inside the COMMIT `TransactionBatch`.
 
-use nodedb_types::Surrogate;
 use nodedb_types::geometry::Geometry;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -88,7 +88,14 @@ impl CoreLoop {
             }
         };
 
-        let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+        let ctx = StageCtx::new(
+            task,
+            tid,
+            txn_id,
+            collection,
+            RowIdentity::for_surrogate(surrogate),
+            surrogate,
+        );
         if let Err(e) = self.stage_put_capped(&ctx, body) {
             return self.response_error(task, e);
         }
@@ -105,8 +112,14 @@ impl CoreLoop {
         collection: &str,
         surrogate: Surrogate,
     ) -> Response {
-        let doc_id = surrogate_to_doc_id(surrogate);
-        let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+        let ctx = StageCtx::new(
+            task,
+            tid,
+            txn_id,
+            collection,
+            RowIdentity::for_surrogate(surrogate),
+            surrogate,
+        );
         self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
             ctx.coll_key.clone(),
             ctx.surrogate.0,

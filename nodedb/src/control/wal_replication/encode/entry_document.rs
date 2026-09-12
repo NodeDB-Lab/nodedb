@@ -147,12 +147,16 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             rls_write_check: _,
             // See `PointPut`. Matches are re-derived by every replica; target identity is not.
             resolved_sum_targets,
+            // Carried on the record so a staged replay keys each removed row
+            // by its identity — see `decode/document.rs`.
+            declared_primary_key,
         } => document::bulk_delete(
             collection.as_str(),
             filters,
             resolved_sum_targets,
             encode_returning(returning),
             rls_filters,
+            declared_primary_key.as_deref(),
         ),
         DocumentOp::BulkUpdate {
             collection,

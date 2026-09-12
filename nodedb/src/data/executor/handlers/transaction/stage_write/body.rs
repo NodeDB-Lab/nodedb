@@ -11,13 +11,35 @@
 //! configured).
 
 use nodedb_physical::physical_plan::{StorageMode, UpdateValue};
-use nodedb_types::Surrogate;
+use nodedb_types::columnar::StrictSchema;
+use nodedb_types::{RowIdentity, StorageKey, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::generated;
 use crate::data::executor::handlers::merge_helpers::check_declared_pk_not_null;
 use crate::data::executor::{doc_format, strict_format};
 use crate::types::TenantId;
+
+/// The client identity of a stored row, by the rule INSERT mints it with.
+///
+/// A schemaless body is MessagePack and is read as is. A strict body is a
+/// Binary Tuple and is decoded through `strict_schema` first. A strict body
+/// that fails to decode carries no readable identity column and yields the
+/// decimal surrogate.
+pub(in crate::data::executor) fn stored_row_identity(
+    body: &[u8],
+    strict_schema: Option<&StrictSchema>,
+    declared_primary_key: Option<&str>,
+    key: StorageKey,
+) -> RowIdentity {
+    match strict_schema {
+        Some(schema) => match strict_format::binary_tuple_to_msgpack(body, schema) {
+            Some(msgpack) => RowIdentity::of_stored_row(&msgpack, declared_primary_key, key),
+            None => key.to_identity(),
+        },
+        None => RowIdentity::of_stored_row(body, declared_primary_key, key),
+    }
+}
 
 impl CoreLoop {
     /// Encode a PointPut / PointInsert body into its stored form, mirroring
