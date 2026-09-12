@@ -107,7 +107,6 @@ impl CoreLoop {
     ) {
         let database_id = task.request.database_id.as_u64();
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
 
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
@@ -123,7 +122,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key.as_str(),
+                storage_key,
                 surrogate,
                 value,
                 index_text,

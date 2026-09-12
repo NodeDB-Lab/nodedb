@@ -66,7 +66,6 @@ impl CoreLoop {
             deferred_sum_targets,
         } = p;
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
         let document_identity = RowIdentity::from_user_key(document_id);
         debug!(
             core = self.core_id,
@@ -172,7 +171,7 @@ impl CoreLoop {
                 database_id: task.request.database_id.as_u64(),
                 tid,
                 collection,
-                document_id: &row_key,
+                storage_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,

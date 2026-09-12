@@ -12,7 +12,6 @@ use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 
 use super::super::abort::MergeAbort;
 use super::super::apply_support::{MergePutEvent, record_put_index_undo, returning_doc};
@@ -76,115 +75,70 @@ impl CoreLoop {
         } = tally;
 
         for upd in updates {
-            match upd.surrogate {
-                Some(surrogate) => {
-                    let row_key = surrogate_to_doc_id(surrogate);
-                    applied_keys.push(row_key.clone());
-                    // `apply_point_put`'s vector step APPENDS (it never replaces),
-                    // so an in-place UPDATE must first soft-delete the surrogate's
-                    // prior embedding or the stale vector keeps scoring in KNN
-                    // search. Push each removal as a `DeleteVector` undo BEFORE the
-                    // put's `InsertVector` undos so an abort undeletes the old
-                    // vector after removing the new one (reverse order).
-                    if has_vectors {
-                        for d in self.remove_document_vector_indexes(
-                            database_id,
-                            tid,
-                            collection,
-                            &row_key,
-                        ) {
-                            undo_log.push(UndoEntry::DeleteVector {
-                                index_key: d.index_key,
-                                vector_id: d.vector_id,
-                                collection: d.collection,
-                                field: d.field,
-                                doc_id: d.doc_id,
-                            });
-                        }
-                    }
-                    match self.apply_point_put(
+            let surrogate = upd.key.surrogate();
+            let row_key = upd.key.to_string();
+            applied_keys.push(row_key.clone());
+            // `apply_point_put`'s vector step APPENDS (it never replaces),
+            // so an in-place UPDATE must first soft-delete the surrogate's
+            // prior embedding or the stale vector keeps scoring in KNN
+            // search. Push each removal as a `DeleteVector` undo BEFORE the
+            // put's `InsertVector` undos so an abort undeletes the old
+            // vector after removing the new one (reverse order).
+            if has_vectors {
+                for d in self.remove_document_vector_indexes(database_id, tid, collection, upd.key)
+                {
+                    undo_log.push(UndoEntry::DeleteVector {
+                        index_key: d.index_key,
+                        vector_id: d.vector_id,
+                        collection: d.collection,
+                        field: d.field,
+                        doc_id: d.doc_id,
+                    });
+                }
+            }
+            match self.apply_point_put(
+                txn,
+                PointPutParams {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key: upd.key,
+                    surrogate,
+                    value: &upd.body,
+                    index_text: true,
+                    user_roles: &task.request.user_roles,
+                    enforce: true,
+                    wal_lsn: task.wal_lsn(),
+                    resolved_targets: resolved_sum_targets,
+                },
+            ) {
+                Ok(mut outcome) => {
+                    record_put_index_undo(undo_log, &mut outcome);
+                    // The arm's materialized-sum delta is folded inside
+                    // the SAME transaction the arm's row lands in, so a
+                    // moved total rolls back with the row that moved it.
+                    // Both images come from the plan: the classifier held
+                    // the pre-image already, so nothing is re-read.
+                    match write_hook::run(
+                        self,
                         txn,
-                        PointPutParams {
+                        &write_hook::HookCtx {
                             database_id,
                             tid,
                             collection,
-                            document_id: &row_key,
-                            surrogate,
-                            value: &upd.body,
-                            index_text: true,
-                            user_roles: &task.request.user_roles,
-                            enforce: true,
-                            wal_lsn: task.wal_lsn(),
                             resolved_targets: resolved_sum_targets,
+                            deferred_sum_targets: &[],
+                            wal_lsn: task.wal_lsn(),
+                        },
+                        write_hook::WriteImages::Update {
+                            old: write_hook::ImageBody::Submitted(&upd.old_body),
+                            new: write_hook::ImageBody::Submitted(&upd.body),
                         },
                     ) {
-                        Ok(mut outcome) => {
-                            record_put_index_undo(undo_log, &mut outcome);
-                            // The arm's materialized-sum delta is folded inside
-                            // the SAME transaction the arm's row lands in, so a
-                            // moved total rolls back with the row that moved it.
-                            // Both images come from the plan: the classifier held
-                            // the pre-image already, so nothing is re-read.
-                            match write_hook::run(
-                                self,
-                                txn,
-                                &write_hook::HookCtx {
-                                    database_id,
-                                    tid,
-                                    collection,
-                                    resolved_targets: resolved_sum_targets,
-                                    deferred_sum_targets: &[],
-                                    wal_lsn: task.wal_lsn(),
-                                },
-                                write_hook::WriteImages::Update {
-                                    old: write_hook::ImageBody::Submitted(&upd.old_body),
-                                    new: write_hook::ImageBody::Submitted(&upd.body),
-                                },
-                            ) {
-                                Ok(enforcement) => {
-                                    write_set.extend(write_hook::target_write_set(
-                                        &enforcement.target_writes,
-                                    ));
-                                    balanced_entries.extend(enforcement.balanced_entries);
-                                }
-                                Err(e) => {
-                                    return Err(self.abort_merge_apply(MergeAbort {
-                                        task,
-                                        database_id,
-                                        tid,
-                                        collection,
-                                        applied_keys: applied_keys.as_slice(),
-                                        undo_log: std::mem::take(undo_log),
-                                        err: e.into(),
-                                    }));
-                                }
-                            }
-                            if has_vectors {
-                                write_set.push(WriteSetEntry {
-                                    surrogate: surrogate.as_u32(),
-                                    is_delete: false,
-                                    value: upd.body.clone(),
-                                    collection: None,
-                                });
-                            }
-                            if returning {
-                                match returning_doc(&upd.body, &row_key) {
-                                    Ok(doc) => returned_docs.push(doc),
-                                    Err(e) => {
-                                        return Err(self.abort_merge_apply(MergeAbort {
-                                            task,
-                                            database_id,
-                                            tid,
-                                            collection,
-                                            applied_keys: applied_keys.as_slice(),
-                                            undo_log: std::mem::take(undo_log),
-                                            err: e.into(),
-                                        }));
-                                    }
-                                }
-                            }
-                            put_events.push((row_key, upd.body.as_slice(), outcome.prior_value));
-                            *affected += 1;
+                        Ok(enforcement) => {
+                            write_set
+                                .extend(write_hook::target_write_set(&enforcement.target_writes));
+                            balanced_entries.extend(enforcement.balanced_entries);
                         }
                         Err(e) => {
                             return Err(self.abort_merge_apply(MergeAbort {
@@ -198,14 +152,34 @@ impl CoreLoop {
                             }));
                         }
                     }
+                    if has_vectors {
+                        write_set.push(WriteSetEntry {
+                            surrogate: surrogate.as_u32(),
+                            is_delete: false,
+                            value: upd.body.clone(),
+                            collection: None,
+                        });
+                    }
+                    if returning {
+                        match returning_doc(&upd.body, &upd.key) {
+                            Ok(doc) => returned_docs.push(doc),
+                            Err(e) => {
+                                return Err(self.abort_merge_apply(MergeAbort {
+                                    task,
+                                    database_id,
+                                    tid,
+                                    collection,
+                                    applied_keys: applied_keys.as_slice(),
+                                    undo_log: std::mem::take(undo_log),
+                                    err: e.into(),
+                                }));
+                            }
+                        }
+                    }
+                    put_events.push((row_key, upd.body.as_slice(), outcome.prior_value));
+                    *affected += 1;
                 }
-                None => {
-                    // A target row whose `doc_id` does not parse as a storage
-                    // key: `put_in_txn` addresses DOCUMENTS rows by
-                    // `StorageKey` only, and the workspace carries no
-                    // on-disk-format compatibility burden for a row shape
-                    // that predates surrogate keying, so this arm is refused
-                    // rather than written through a raw string key.
+                Err(e) => {
                     return Err(self.abort_merge_apply(MergeAbort {
                         task,
                         database_id,
@@ -213,15 +187,7 @@ impl CoreLoop {
                         collection,
                         applied_keys: applied_keys.as_slice(),
                         undo_log: std::mem::take(undo_log),
-                        err: crate::Error::Storage {
-                            engine: "document".into(),
-                            detail: format!(
-                                "MERGE UPDATE target row '{}' in '{collection}' has no \
-                                 surrogate storage key",
-                                upd.doc_id
-                            ),
-                        }
-                        .into(),
+                        err: e.into(),
                     }));
                 }
             }

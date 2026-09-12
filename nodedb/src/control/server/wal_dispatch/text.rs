@@ -36,7 +36,8 @@ pub(crate) fn wal_append_text_op(
             text,
             provenance,
         } => {
-            let doc_id = crate::engine::document::store::surrogate_to_doc_id(*surrogate);
+            let doc_id =
+                crate::engine::document::store::StorageKey::for_surrogate(*surrogate).to_string();
             let prov = provenance.clone().unwrap_or_default();
             let payload =
                 nodedb_wal::record::FtsIndexPayload::new(prov, collection.as_str(), &doc_id, text);
@@ -53,7 +54,8 @@ pub(crate) fn wal_append_text_op(
             surrogate,
             provenance,
         } => {
-            let doc_id = crate::engine::document::store::surrogate_to_doc_id(*surrogate);
+            let doc_id =
+                crate::engine::document::store::StorageKey::for_surrogate(*surrogate).to_string();
             let prov = provenance.clone().unwrap_or_default();
             let payload =
                 nodedb_wal::record::FtsDeletePayload::new(prov, collection.as_str(), &doc_id);

@@ -25,18 +25,18 @@ impl CoreLoop {
     /// folds the transaction's staging overlay: a staged tombstone hides its base
     /// row, a staged put replaces the base body, and a staged put absent from
     /// base is appended — so an in-transaction MERGE resolved at COMMIT sees rows
-    /// staged by earlier statements in the same transaction. The `doc_id` this
-    /// produces is the storage key's text, matching the overlay's surrogate
-    /// keying, so staged and base bodies (same canonical stored form — Binary
-    /// Tuple for a strict target, MessagePack for a schemaless one) are merged
-    /// like-for-like and decoded identically downstream by `decode_target`.
+    /// staged by earlier statements in the same transaction. The `StorageKey`
+    /// this produces matches the overlay's surrogate keying, so staged and
+    /// base bodies (same canonical stored form — Binary Tuple for a strict
+    /// target, MessagePack for a schemaless one) are merged like-for-like and
+    /// decoded identically downstream by `decode_target`.
     pub(in crate::data::executor) fn collect_target_docs(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
         txn_id: Option<crate::types::TxnId>,
-    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+    ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
         let prefix = crate::engine::sparse::btree::coll_prefix(database_id, tid, collection);
         let end = format!("{prefix}\u{ffff}");
 
@@ -81,9 +81,6 @@ impl CoreLoop {
             );
             self.merge_overlay_into_scan(txn_id, &coll_key, &mut docs, &|_, _| true);
         }
-        Ok(docs
-            .into_iter()
-            .map(|(key, body)| (key.to_string(), body))
-            .collect())
+        Ok(docs)
     }
 }

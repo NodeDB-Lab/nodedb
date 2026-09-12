@@ -12,7 +12,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook::HookCtx;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 use nodedb_types::Surrogate;
 
@@ -68,8 +67,6 @@ impl CoreLoop {
             rls_filters,
             resolved_sum_targets,
         } = params;
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
         debug!(
             core = self.core_id,
             %collection,
@@ -130,7 +127,6 @@ impl CoreLoop {
                     collection,
                     document_id,
                     surrogate,
-                    row_key,
                     value,
                     on_conflict_updates,
                     rls_write_check,
@@ -150,7 +146,6 @@ impl CoreLoop {
                     collection,
                     document_id,
                     surrogate,
-                    row_key,
                     value,
                     rls_write_check,
                     returning,

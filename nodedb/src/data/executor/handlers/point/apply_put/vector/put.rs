@@ -38,11 +38,15 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            document_id,
+            storage_key,
             surrogate,
             value,
             wal_lsn,
         } = params;
+        // Rendered once here — `vector_doc_map` and its undo entries are
+        // keyed by text.
+        let document_id = storage_key.to_string();
+        let document_id = document_id.as_str();
         let mut inserts: Vec<VectorIndexDelta> = Vec::new();
 
         // Vector index: if the strict schema declares Vector(dim) columns,
@@ -402,7 +406,7 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let surrogate = Surrogate::new(1);
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
 
         register_bare_field(core, db_id, tid, collection);
 
@@ -411,7 +415,7 @@ mod tests {
             database_id: db_id,
             tid,
             collection,
-            document_id: &row_key,
+            storage_key,
             surrogate,
             value: &first,
             wal_lsn: 0,
@@ -423,7 +427,7 @@ mod tests {
             database_id: db_id,
             tid,
             collection,
-            document_id: &row_key,
+            storage_key,
             surrogate,
             value: &second,
             wal_lsn: 0,
@@ -457,7 +461,7 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let surrogate = Surrogate::new(1);
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
 
         register_named_field(core, db_id, tid, collection, "embedding");
         register_named_field(core, db_id, tid, collection, "title_vec");
@@ -470,7 +474,7 @@ mod tests {
             database_id: db_id,
             tid,
             collection,
-            document_id: &row_key,
+            storage_key,
             surrogate,
             value: &doc,
             wal_lsn: 0,
@@ -506,7 +510,7 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let surrogate = Surrogate::new(1);
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
 
         register_bare_field(core, db_id, tid, collection);
 
@@ -523,7 +527,7 @@ mod tests {
             database_id: db_id,
             tid,
             collection,
-            document_id: &row_key,
+            storage_key,
             surrogate,
             value: &body,
             wal_lsn: 0,
@@ -549,7 +553,7 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let surrogate = Surrogate::new(1);
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
 
         register_bare_field(core, db_id, tid, collection);
 
@@ -564,7 +568,7 @@ mod tests {
                 database_id: db_id,
                 tid,
                 collection,
-                document_id: &row_key,
+                storage_key,
                 surrogate,
                 value: &body,
                 wal_lsn: 0,

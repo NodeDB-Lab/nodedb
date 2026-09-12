@@ -49,8 +49,6 @@ impl CoreLoop {
             resolved_sum_targets,
         } = params;
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
-        let row_key = row_key.as_str();
         let document_identity = RowIdentity::from_user_key(document_id);
         debug!(core = self.core_id, %collection, %document_id, "point put");
 
@@ -102,7 +100,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,

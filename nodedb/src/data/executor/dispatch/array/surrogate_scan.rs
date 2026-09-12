@@ -18,7 +18,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec::encode_raw_document_rows;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     pub(in crate::data::executor) fn dispatch_array_surrogate_bitmap_scan(
@@ -99,7 +99,7 @@ impl CoreLoop {
                 if sur.as_u32() == 0 {
                     continue;
                 }
-                let hex = surrogate_to_doc_id(*sur);
+                let hex = StorageKey::for_surrogate(*sur).to_string();
                 // Empty msgpack map as the row body — the consumer
                 // (`collect_surrogates`) only reads `id`.
                 rows.push((hex, vec![0x80]));

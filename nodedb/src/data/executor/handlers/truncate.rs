@@ -178,7 +178,7 @@ impl CoreLoop {
                 // the leaked vector keeps scoring in KNN search in the same
                 // process (mirrors `execute_bulk_delete`'s vector cascade).
                 if has_vectors {
-                    self.remove_document_vector_indexes(database_id, tid, collection, &doc_id);
+                    self.remove_document_vector_indexes(database_id, tid, collection, *storage_key);
                     write_set.push(WriteSetEntry {
                         surrogate: surrogate.as_u32(),
                         is_delete: true,

@@ -17,15 +17,16 @@
 //! with insert and delete.
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::engine::document::store::StorageKey;
 
 /// Inputs for [`CoreLoop::update_reindex_sparse_indexes`].
 pub(in crate::data::executor) struct UpdateSparseReindex<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    /// Hex-surrogate storage key (matches the sparse-index doc-id keying used
-    /// by the put and delete paths).
-    pub row_key: &'a str,
+    /// Storage key (matches the sparse-index doc-id keying used by the put
+    /// and delete paths).
+    pub storage_key: StorageKey,
     /// The freshly-written stored body (Binary Tuple for strict, MessagePack
     /// for schemaless). Decoded storage-mode-aware to extract the new literal.
     pub new_body: &'a [u8],
@@ -64,7 +65,7 @@ impl CoreLoop {
         // clears the `SparseVector` field must not leave the stale literal
         // searchable, and the re-insert below only re-adds fields present in
         // the new body.
-        self.remove_document_sparse_indexes(p.database_id, p.tid, p.collection, p.row_key);
+        self.remove_document_sparse_indexes(p.database_id, p.tid, p.collection, p.storage_key);
 
         // Re-extract from the new body via the exact put-time path. Sparse
         // extraction reads MessagePack; strict bodies are stored as Binary
@@ -93,7 +94,7 @@ impl CoreLoop {
             p.new_body
         };
 
-        self.apply_point_put_sparse_indexes(p.database_id, p.tid, p.collection, p.row_key, mp);
+        self.apply_point_put_sparse_indexes(p.database_id, p.tid, p.collection, p.storage_key, mp);
         Ok(())
     }
 }

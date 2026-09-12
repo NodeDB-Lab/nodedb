@@ -24,8 +24,8 @@
 //! * DELETE — `(collection, document_id, Option<SyncProvenance>, surrogate)`.
 //!   The autocommit delete shape `(collection, document_id, prov)` omits the
 //!   surrogate; replay needs it (the redb storage key is
-//!   `surrogate_to_doc_id(surrogate)`, and the delete cascade keys on it), so
-//!   the redo shape appends it as a fourth element.
+//!   `StorageKey::for_surrogate(surrogate)`, and the delete cascade keys on
+//!   it), so the redo shape appends it as a fourth element.
 //!
 //! ## Idempotency
 //!
@@ -76,7 +76,7 @@ use super::handlers::point::apply_delete::PointDeleteParams;
 use super::handlers::point::apply_put::PointPutParams;
 use super::handlers::transaction::overlay::BitemporalStamp;
 use crate::data::executor::core_loop::write_index::KeyRepr;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Replay reconstituted document `Put` / `Delete` redo sub-records.
@@ -239,7 +239,7 @@ impl CoreLoop {
         record_lsn: u64,
     ) -> bool {
         let surrogate = Surrogate::new(surrogate_u32);
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {
@@ -258,7 +258,7 @@ impl CoreLoop {
                 database_id,
                 tid: tenant_id,
                 collection,
-                document_id: row_key.as_str(),
+                storage_key,
                 surrogate,
                 value,
                 index_text: true,
@@ -308,7 +308,8 @@ impl CoreLoop {
         surrogate_u32: u32,
     ) -> bool {
         let surrogate = Surrogate::new(surrogate_u32);
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {

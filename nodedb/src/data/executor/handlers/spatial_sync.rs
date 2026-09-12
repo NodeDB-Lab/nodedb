@@ -13,8 +13,8 @@
 //! This matches the direct `INSERT INTO ... VALUES (ST_GeomFromText(...))`
 //! path so cross-engine prefilter (roaring-bitmap intersect against the
 //! surrogate space) just works — `spatial_doc_map` stores the same
-//! 8-char hex string that `surrogate_to_doc_id(surrogate)` produces, which
-//! is what the scan path parses via `u32::from_str_radix(doc_id, 16)`.
+//! 8-char hex string that `StorageKey::for_surrogate(surrogate)` produces,
+//! which is what the scan path parses via `u32::from_str_radix(doc_id, 16)`.
 //!
 //! ## Document-store parity
 //!
@@ -31,7 +31,7 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::sync_gate::{SyncAdmit, ack_status_from_admit};
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::engine::spatial::{RTree, RTreeEntry};
 use crate::types::TenantId;
 use crate::util::fnv1a_hash;
@@ -80,7 +80,7 @@ impl CoreLoop {
             geometry,
             provenance,
         } = args;
-        let doc_id = surrogate_to_doc_id(surrogate);
+        let doc_id = StorageKey::for_surrogate(surrogate).to_string();
 
         debug!(
             core = self.core_id,
@@ -222,7 +222,7 @@ impl CoreLoop {
         surrogate: Surrogate,
         provenance: Option<&SyncProvenance>,
     ) -> Response {
-        let doc_id = surrogate_to_doc_id(surrogate);
+        let doc_id = StorageKey::for_surrogate(surrogate).to_string();
 
         debug!(
             core = self.core_id,

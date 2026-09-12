@@ -99,7 +99,8 @@ impl CoreLoop {
 
             let mut rebuilt = 0usize;
             for (surrogate, value) in docs {
-                let doc_id = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+                let storage_key =
+                    crate::engine::document::store::StorageKey::for_surrogate(surrogate);
                 // Same as WAL replay: the document is already durable, so a
                 // width mismatch from before the forward-path check existed is
                 // reported and skipped rather than aborting the rebuild.
@@ -107,7 +108,7 @@ impl CoreLoop {
                     database_id: db,
                     tid: tenant_id,
                     collection: &collection,
-                    document_id: &doc_id,
+                    storage_key,
                     surrogate,
                     value: &value,
                     wal_lsn: 0,

@@ -33,7 +33,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::spatial_sync::geometry_to_value;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::types::TxnId;
 
 /// Inputs for [`CoreLoop::stage_spatial_insert`].
@@ -66,7 +66,7 @@ impl CoreLoop {
             geometry,
         } = params;
 
-        let doc_id = surrogate_to_doc_id(surrogate);
+        let doc_id = StorageKey::for_surrogate(surrogate).to_string();
 
         let mut doc_map = std::collections::HashMap::new();
         doc_map.insert(field.to_string(), geometry_to_value(geometry));

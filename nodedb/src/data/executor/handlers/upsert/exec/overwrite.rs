@@ -22,7 +22,6 @@ pub(super) struct OverwriteCtx<'a> {
     pub collection: &'a str,
     pub document_id: &'a str,
     pub surrogate: Surrogate,
-    pub row_key: &'a str,
     pub value: &'a [u8],
     pub on_conflict_updates: &'a [(String, nodedb_physical::physical_plan::UpdateValue)],
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
@@ -51,7 +50,6 @@ impl CoreLoop {
             collection,
             document_id,
             surrogate,
-            row_key,
             value,
             on_conflict_updates,
             rls_write_check,
@@ -172,7 +170,7 @@ impl CoreLoop {
         // the write below puts the new one in — otherwise KNN keeps
         // scoring both. No-op when `has_vectors` is false.
         if has_vectors {
-            self.remove_document_vector_indexes(database_id, tid, collection, row_key);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
         }
 
         // One transaction for the body, every index that describes it,
@@ -199,7 +197,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: &merged_body,
                 index_text: true,

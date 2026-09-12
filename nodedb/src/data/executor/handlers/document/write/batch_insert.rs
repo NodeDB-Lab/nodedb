@@ -201,7 +201,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    document_id: &row_key,
+                    storage_key: key,
                     surrogate,
                     value: effective_value,
                     index_text: true,

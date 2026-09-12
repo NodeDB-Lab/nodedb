@@ -42,7 +42,7 @@ use crate::data::executor::handlers::spatial_refine::{
     apply_predicate, extract_geometry, project_doc,
 };
 use crate::data::executor::handlers::transaction::overlay::Staged;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Inputs for [`CoreLoop::merge_overlay_into_spatial_scan`].
@@ -187,7 +187,7 @@ impl CoreLoop {
                             return true;
                         }
                     }
-                    let doc_id = surrogate_to_doc_id(Surrogate(raw));
+                    let doc_id = StorageKey::for_surrogate(Surrogate(raw)).to_string();
                     *row = project_doc(&doc, &doc_id, projection);
                     true
                 }
@@ -215,7 +215,7 @@ impl CoreLoop {
             if !row_matches(&doc)? {
                 continue;
             }
-            let doc_id = surrogate_to_doc_id(Surrogate(surrogate));
+            let doc_id = StorageKey::for_surrogate(Surrogate(surrogate)).to_string();
             results.push(project_doc(&doc, &doc_id, projection));
             seen.insert(surrogate);
         }

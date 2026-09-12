@@ -82,10 +82,6 @@ mod tests {
         zerompk::to_msgpack_vec(&Value::Object(obj)).unwrap()
     }
 
-    fn row_key() -> String {
-        crate::engine::document::store::surrogate_to_doc_id(Surrogate::new(1))
-    }
-
     /// Autocommit PUT via `apply_point_put` inside a self-owned redb txn (mirrors
     /// `execute_point_put`).
     fn autocommit_put(core: &mut CoreLoop) {
@@ -98,7 +94,9 @@ mod tests {
                 database_id: DB,
                 tid: TID,
                 collection: COLL,
-                document_id: &row_key(),
+                storage_key: crate::engine::document::store::StorageKey::for_surrogate(
+                    Surrogate::new(1),
+                ),
                 surrogate: Surrogate::new(1),
                 value: &value,
                 index_text: true,

@@ -411,7 +411,9 @@ mod tests {
                 database_id: DB,
                 tid: TID,
                 collection: COLL,
-                document_id: &row_key(),
+                storage_key: crate::engine::document::store::StorageKey::for_surrogate(
+                    Surrogate::new(1),
+                ),
                 surrogate: Surrogate::new(1),
                 value: &value,
                 index_text: true,

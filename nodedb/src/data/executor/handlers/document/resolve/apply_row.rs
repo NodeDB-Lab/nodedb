@@ -57,14 +57,12 @@ impl CoreLoop {
         } = put;
         let database_id = task.request.database_id.as_u64();
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
-        let row_key = row_key.as_str();
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
         // HNSW insert appends rather than replaces, so the prior embedding
         // must come out first or KNN keeps scoring both.
         if has_vectors && precondition.is_some() {
-            self.remove_document_vector_indexes(database_id, tid, collection, row_key);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
         }
 
         let txn = self.sparse.begin_write().map_err(ErrorCode::from)?;
@@ -74,7 +72,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value,
                 index_text: true,

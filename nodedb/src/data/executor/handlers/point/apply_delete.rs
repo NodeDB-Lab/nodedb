@@ -144,9 +144,9 @@ impl CoreLoop {
         } = params;
         let _ = user_roles;
 
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
         let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
+        let row_key = row_key.as_str();
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -401,13 +401,13 @@ impl CoreLoop {
         // looked up by its exact key rather than scanning the whole map on
         // every delete. Shared with the PointUpdate re-index path.
         let vector_deletes =
-            self.remove_document_vector_indexes(database_id, tid, collection, row_key);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
 
         // Sparse inverted-index cleanup, mirroring the dense-vector cascade
         // above: drop this document's sparse posting entries under the same hex
         // surrogate row key the put path indexed them by. A no-op unless the
         // strict schema declares a `SparseVector` column.
-        self.remove_document_sparse_indexes(database_id, tid, collection, row_key);
+        self.remove_document_sparse_indexes(database_id, tid, collection, storage_key);
 
         // Invalidate document cache.
         self.doc_cache

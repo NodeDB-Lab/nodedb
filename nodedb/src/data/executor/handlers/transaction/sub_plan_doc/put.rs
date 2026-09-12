@@ -68,8 +68,6 @@ impl CoreLoop {
             resolved_sum_targets,
             deferred_sum_targets,
         } = p;
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
         let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let database_id = dummy_task.request.database_id.as_u64();
 
@@ -182,7 +180,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,

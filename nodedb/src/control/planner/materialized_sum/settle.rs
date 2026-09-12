@@ -71,7 +71,7 @@ use nodedb_types::id::TxnId;
 use crate::control::server::shared::session::read_set::{
     EngineTag, ReadKey, ReadOrigin, ReadSetEntry,
 };
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::query::{sum_target_is_co_resident, sum_target_vshard};
 use crate::types::{DatabaseId, KeyRepr, Lsn, TenantId};
 
@@ -231,7 +231,7 @@ pub(super) fn balance_task(spec: BalanceTaskSpec<'_>) -> PhysicalTask {
                 spec.database_id,
                 &spec.binding.target_collection,
             ),
-            document_id: surrogate_to_doc_id(spec.surrogate),
+            document_id: StorageKey::for_surrogate(spec.surrogate).to_string(),
             surrogate: spec.surrogate,
             column: spec.binding.target_column.clone(),
             // The exact decimal, as a string: the balance is stored as one for

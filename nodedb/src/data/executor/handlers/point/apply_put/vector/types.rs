@@ -11,7 +11,7 @@ pub(in crate::data::executor) struct VectorIndexPutParams<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub document_id: &'a str,
+    pub storage_key: crate::engine::document::store::StorageKey,
     pub surrogate: nodedb_types::Surrogate,
     pub value: &'a [u8],
     pub wal_lsn: u64,

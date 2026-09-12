@@ -97,7 +97,8 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
         // (same as what the DP uses for storage). We encode the original
         // doc_id (the Lite-side external key) into the WAL payload so replay
         // can re-derive the surrogate via the same assigner.
-        let surrogate_hex = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let surrogate_hex =
+            crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_string();
         let fts_index_payload = nodedb_wal::record::FtsIndexPayload::new(
             prov.clone(),
             &collection,
@@ -152,7 +153,8 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
             &collection,
         )?;
 
-        let surrogate_hex = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let surrogate_hex =
+            crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_string();
         let fts_delete_payload =
             nodedb_wal::record::FtsDeletePayload::new(prov.clone(), &collection, &surrogate_hex);
         let wal_lsn = wal_append_fts_delete(

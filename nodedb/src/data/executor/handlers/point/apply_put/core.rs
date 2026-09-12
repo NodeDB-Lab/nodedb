@@ -36,7 +36,7 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            document_id,
+            storage_key,
             surrogate,
             value,
             index_text,
@@ -45,8 +45,6 @@ impl CoreLoop {
             wal_lsn,
             resolved_targets,
         } = params;
-        // `surrogate` IS the storage key: no parse, no failure arm.
-        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
@@ -191,7 +189,7 @@ impl CoreLoop {
                     // Recorded here, at the detection site — an fsync'd
                     // report survives a restart, unlike a log line.
                     crate::diag::fts_index_update_failed(&e, collection, surrogate.as_u32());
-                    warn!(core = self.core_id, %collection, %document_id, error = %e, "inverted index update failed; rejecting the write");
+                    warn!(core = self.core_id, %collection, %storage_key, error = %e, "inverted index update failed; rejecting the write");
                     return Err(e);
                 }
             }
@@ -298,20 +296,20 @@ impl CoreLoop {
         }
 
         let spatial_inserts =
-            self.apply_point_put_spatial(database_id, tid, collection, document_id, value);
+            self.apply_point_put_spatial(database_id, tid, collection, storage_key, value);
         let vector_inserts = self.apply_point_put_vector_indexes(
             crate::data::executor::handlers::point::apply_put::VectorIndexPutParams {
                 database_id,
                 tid,
                 collection,
-                document_id,
+                storage_key,
                 surrogate,
                 value,
                 wal_lsn: wal_lsn.map(|l| l.as_u64()).unwrap_or(0),
             },
         )?;
         // No-op unless the strict schema declares a `SparseVector` column.
-        self.apply_point_put_sparse_indexes(database_id, tid, collection, document_id, value);
+        self.apply_point_put_sparse_indexes(database_id, tid, collection, storage_key, value);
 
         Ok(PointPutOutcome {
             prior_value: prior,
@@ -500,7 +498,7 @@ mod tests {
                 database_id: DatabaseId::DEFAULT.as_u64(),
                 tid: TID,
                 collection: COLL,
-                document_id: &row_key,
+                storage_key: crate::engine::document::store::StorageKey::for_surrogate(SURROGATE),
                 surrogate: SURROGATE,
                 value: BODY,
                 index_text: true,
@@ -541,7 +539,7 @@ mod tests {
                 database_id: DatabaseId::DEFAULT.as_u64(),
                 tid: TID,
                 collection: COLL,
-                document_id: &row_key,
+                storage_key: crate::engine::document::store::StorageKey::for_surrogate(SURROGATE),
                 surrogate: SURROGATE,
                 value: BODY,
                 index_text: false,

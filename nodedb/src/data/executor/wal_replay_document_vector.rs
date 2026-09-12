@@ -36,7 +36,7 @@ use nodedb_wal::record::RecordType;
 
 use super::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Replay document `Put` records to rebuild secondary vector indexes,
@@ -101,8 +101,13 @@ impl CoreLoop {
                     continue;
                 }
                 let database_id = record.header.database_id;
-                let row_key = surrogate_to_doc_id(Surrogate::new(surrogate_u32));
-                self.remove_document_vector_indexes(database_id, tenant_id, &collection, &row_key);
+                let storage_key = StorageKey::for_surrogate(Surrogate::new(surrogate_u32));
+                self.remove_document_vector_indexes(
+                    database_id,
+                    tenant_id,
+                    &collection,
+                    storage_key,
+                );
                 let record_lsn = record.header.lsn;
                 self.note_replay_write_lsn(
                     database_id,
@@ -145,9 +150,10 @@ impl CoreLoop {
 
             let database_id = record.header.database_id;
             // Live inserts key the vector reverse-map on the hex surrogate row
-            // key (`surrogate_to_doc_id`), not the user PK; reproduce that here
-            // so a later delete can still find and soft-delete the node.
-            let row_key = surrogate_to_doc_id(surrogate);
+            // key (`StorageKey::for_surrogate`), not the user PK; reproduce
+            // that here so a later delete can still find and soft-delete the
+            // node.
+            let storage_key = StorageKey::for_surrogate(surrogate);
             // The forward path rejects a width mismatch before the write is
             // acknowledged, so one can only appear here for a record journalled
             // before that check existed. It is already durable — refusing to
@@ -158,7 +164,7 @@ impl CoreLoop {
                     database_id,
                     tid: tenant_id,
                     collection: &collection,
-                    document_id: &row_key,
+                    storage_key,
                     surrogate,
                     value: &value,
                     wal_lsn: record_lsn,

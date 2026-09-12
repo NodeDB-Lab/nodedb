@@ -103,7 +103,7 @@ impl CoreLoop {
             };
             let tid = task.request.tenant_id.as_u64();
             let db_id = task.request.database_id.as_u64();
-            let row_key = crate::engine::document::store::surrogate_to_doc_id(*surrogate);
+            let storage_key = crate::engine::document::store::StorageKey::for_surrogate(*surrogate);
             results.push(
                 self.apply_point_put(
                     &txn,
@@ -111,7 +111,7 @@ impl CoreLoop {
                         database_id: db_id,
                         tid,
                         collection: collection.as_str(),
-                        document_id: &row_key,
+                        storage_key,
                         surrogate: *surrogate,
                         value,
                         index_text: true,

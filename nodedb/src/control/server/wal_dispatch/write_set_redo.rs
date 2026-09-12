@@ -8,7 +8,7 @@
 //! Control Plane mints the durable redo here.
 
 use crate::bridge::envelope::{PhysicalPlan, Response, Status, WriteSetEntry};
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
 use nodedb_physical::physical_plan::DocumentOp;
@@ -54,8 +54,8 @@ pub fn plan_post_apply_redo(plan: &PhysicalPlan) -> Option<String> {
 }
 
 /// Append a document redo record for each write-set entry, returning the last
-/// allocated LSN. Each entry is keyed by `surrogate_to_doc_id(surrogate)` so
-/// replay keys on the same identity. Called under the write-admission guard.
+/// allocated LSN. Each entry is keyed by `StorageKey::for_surrogate(surrogate)`
+/// so replay keys on the same identity. Called under the write-admission guard.
 pub fn append_write_set_redo(
     wal: &WalManager,
     tenant_id: TenantId,
@@ -67,7 +67,7 @@ pub fn append_write_set_redo(
     let mut last: Option<Lsn> = None;
     for entry in write_set {
         let entry_collection = entry.collection.as_deref().unwrap_or(collection);
-        let doc_id = surrogate_to_doc_id(Surrogate::new(entry.surrogate));
+        let doc_id = StorageKey::for_surrogate(Surrogate::new(entry.surrogate)).to_string();
         // A cross-collection entry homes to a different vShard, so it's re-derived
         // per entry rather than reusing the caller-hoisted `vshard_id`.
         let entry_vshard_id = match &entry.collection {
@@ -272,7 +272,10 @@ mod tests {
             )
             .expect("decode put payload");
         assert_eq!(collection, "docs");
-        assert_eq!(document_id, surrogate_to_doc_id(Surrogate::new(9)));
+        assert_eq!(
+            document_id,
+            StorageKey::for_surrogate(Surrogate::new(9)).to_string()
+        );
         assert_eq!(value, vec![1, 2, 3]);
         assert_eq!(surrogate, 9);
     }
@@ -303,7 +306,10 @@ mod tests {
             zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(&record.payload)
                 .expect("decode delete payload");
         assert_eq!(collection, "docs");
-        assert_eq!(document_id, surrogate_to_doc_id(Surrogate::new(9)));
+        assert_eq!(
+            document_id,
+            StorageKey::for_surrogate(Surrogate::new(9)).to_string()
+        );
         assert_eq!(surrogate, 9);
     }
 

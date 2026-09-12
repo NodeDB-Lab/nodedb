@@ -90,7 +90,7 @@ impl CoreLoop {
         params: &BalanceRmw<'_>,
     ) -> crate::Result<TargetWrite> {
         let storage_key = nodedb_types::StorageKey::for_surrogate(params.surrogate);
-        // `PointPutParams` still carries the document id as text.
+        // Rendered once, for the not-an-object error message below.
         let document_id = storage_key.to_string();
 
         // The TARGET collection's encoding is resolved from `doc_configs`, not
@@ -157,7 +157,7 @@ impl CoreLoop {
                 database_id: params.database_id,
                 tid: params.tid,
                 collection: params.target_collection,
-                document_id: &document_id,
+                storage_key,
                 surrogate: params.surrogate,
                 value: &body,
                 index_text: true,

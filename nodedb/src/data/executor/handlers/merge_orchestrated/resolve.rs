@@ -46,8 +46,8 @@ impl CoreLoop {
             .into_iter()
             .map(|u| {
                 (
-                    u.doc_id,
-                    u.surrogate.map(|s| s.as_u32()),
+                    u.key.to_string(),
+                    Some(u.key.surrogate().as_u32()),
                     u.body,
                     u.old_body,
                 )
@@ -56,7 +56,7 @@ impl CoreLoop {
         let deletes: Vec<(String, Option<u32>, Vec<u8>)> = plan
             .deletes
             .into_iter()
-            .map(|d| (d.doc_id, d.surrogate.map(|s| s.as_u32()), d.body))
+            .map(|d| (d.key.to_string(), Some(d.key.surrogate().as_u32()), d.body))
             .collect();
         let inserts: Vec<(String, Vec<u8>)> = plan
             .inserts

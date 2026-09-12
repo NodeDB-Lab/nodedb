@@ -9,6 +9,7 @@
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::spatial_key::SpatialIndexKey;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Spatial R-tree + columnar ingest side-effect: parse geometry fields,
@@ -25,7 +26,7 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        document_id: &str,
+        storage_key: StorageKey,
         value: &[u8],
     ) -> Vec<(
         (
@@ -36,6 +37,9 @@ impl CoreLoop {
         ),
         u64,
     )> {
+        // Rendered once here; every reverse-map / hash use below shares it.
+        let document_id = storage_key.to_string();
+        let document_id = document_id.as_str();
         let mut inserts = Vec::new();
         // Re-indexing a document must REPLACE, not append: `RTree::insert`
         // blindly pushes a fresh entry even when one with this `entry_id`

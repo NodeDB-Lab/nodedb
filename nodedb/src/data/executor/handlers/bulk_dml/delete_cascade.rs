@@ -106,7 +106,7 @@ impl CoreLoop {
         // soft-delete those nodes and drop the reverse-map entry, or the
         // leaked vector keeps scoring in KNN search in the same process.
         if has_vectors {
-            self.remove_document_vector_indexes(database_id, tid, collection, doc_id);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
         }
         self.doc_cache.invalidate(
             task.request.database_id.as_u64(),

@@ -7,6 +7,7 @@
 use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::engine::document::store::StorageKey;
 
 use super::plan::MergePlanActions;
 
@@ -68,14 +69,10 @@ pub(super) fn gate_merge_arms(
     let doc_arms = plan
         .updates
         .iter()
-        .map(|u| (u.body.as_slice(), u.doc_id.as_str()))
-        .chain(
-            plan.deletes
-                .iter()
-                .map(|d| (d.body.as_slice(), d.doc_id.as_str())),
-        );
-    for (body, doc_id) in doc_arms {
-        let identity = crate::engine::document::store::identity_of(doc_id);
+        .map(|u| (u.body.as_slice(), u.key))
+        .chain(plan.deletes.iter().map(|d| (d.body.as_slice(), d.key)));
+    for (body, key) in doc_arms {
+        let identity = key.to_identity();
         rls_write_gate::admit_stored_row(rls_write_check, body, &identity, None, tid, collection)?;
     }
     for insert in &plan.inserts {
@@ -97,15 +94,15 @@ pub(super) fn gate_merge_arms(
 /// reads. Same shape the point and bulk DML RETURNING paths emit, so a MERGE
 /// row projects identically.
 ///
-/// `doc_id` is the row's storage key, every caller's `MergeUpdate::doc_id`,
-/// `MergeDelete::doc_id`, or a minted insert key from `surrogate_to_doc_id`.
-/// This function converts it to the client-visible identity before decoding.
+/// `key` is the row's storage key: every caller's `MergeUpdate::key`,
+/// `MergeDelete::key`, or a freshly minted insert key. This function converts
+/// it to the client-visible identity before decoding.
 ///
 /// The schema argument is `None` unconditionally: a merge plan's captured
 /// bodies are MessagePack for BOTH storage modes (`collect_merge_plan` decodes
 /// a strict target's Binary Tuple and re-encodes the resolved row before the
 /// apply pass ever sees it), so the strict decoder would have nothing to read.
-pub(super) fn returning_doc(body: &[u8], doc_id: &str) -> crate::Result<serde_json::Value> {
-    let identity = crate::engine::document::store::identity_of(doc_id);
+pub(super) fn returning_doc(body: &[u8], key: &StorageKey) -> crate::Result<serde_json::Value> {
+    let identity = key.to_identity();
     super::super::returning_doc::from_stored(body, &identity, None)
 }

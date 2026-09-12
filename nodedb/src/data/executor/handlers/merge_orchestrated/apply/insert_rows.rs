@@ -14,7 +14,7 @@ use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use nodedb_types::Surrogate;
 
 use super::super::abort::MergeAbort;
@@ -99,7 +99,8 @@ impl CoreLoop {
                     }));
                 }
             };
-            let row_key = surrogate_to_doc_id(surrogate);
+            let storage_key = StorageKey::for_surrogate(surrogate);
+            let row_key = storage_key.to_string();
             applied_keys.push(row_key.clone());
             match self.apply_point_put(
                 txn,
@@ -107,7 +108,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    document_id: &row_key,
+                    storage_key,
                     surrogate,
                     value: &ins.body,
                     index_text: true,
@@ -163,7 +164,7 @@ impl CoreLoop {
                         });
                     }
                     if returning {
-                        match returning_doc(&ins.body, &row_key) {
+                        match returning_doc(&ins.body, &storage_key) {
                             Ok(doc) => returned_docs.push(doc),
                             Err(e) => {
                                 return Err(self.abort_merge_apply(MergeAbort {

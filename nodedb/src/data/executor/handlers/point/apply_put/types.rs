@@ -7,6 +7,7 @@ use nodedb_types::Surrogate;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::spatial_key::SpatialIndexKey;
+use crate::engine::document::store::StorageKey;
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 
 /// Parameters for [`CoreLoop::apply_point_put`](crate::data::executor::core_loop::CoreLoop::apply_point_put).
@@ -14,7 +15,7 @@ pub(in crate::data::executor) struct PointPutParams<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub document_id: &'a str,
+    pub storage_key: StorageKey,
     pub surrogate: Surrogate,
     pub value: &'a [u8],
     /// Whether to index the document's text into the inverted BM25 index.

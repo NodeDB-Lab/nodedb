@@ -3,6 +3,7 @@
 //! Soft-delete a document's prior vector nodes, per field or whole-document.
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::engine::document::store::StorageKey;
 
 use super::types::VectorIndexDelta;
 
@@ -64,7 +65,7 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        row_key: &str,
+        storage_key: StorageKey,
     ) -> Vec<VectorIndexDelta> {
         let strict_fields = self.strict_vector_fields(database_id, tid, collection);
         let candidate_fields: Vec<String> = if !strict_fields.is_empty() {
@@ -73,13 +74,18 @@ impl CoreLoop {
             self.schemaless_vector_field_names(database_id, tid, collection)
         };
         let mut vector_deletes = Vec::with_capacity(candidate_fields.len());
+        if candidate_fields.is_empty() {
+            return vector_deletes;
+        }
+        // The vector reverse map keys nodes by the rendered storage key.
+        let row_key = storage_key.to_string();
         for field in candidate_fields {
             if let Some(delta) = self.remove_document_vector_index_field(
                 database_id,
                 tid,
                 collection,
                 &field,
-                row_key,
+                &row_key,
             ) {
                 vector_deletes.push(delta);
             }
