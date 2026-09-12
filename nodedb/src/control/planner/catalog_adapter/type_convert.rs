@@ -132,7 +132,7 @@ pub(super) fn convert_collection_type(
             } else {
                 EngineType::Columnar
             };
-            let pk_name = "id";
+            let pk_name = crate::control::planner::sql_plan_convert::dml::DEFAULT_IDENTITY_COLUMN;
             // If the DDL declared its own `id` field, the synthetic primary key
             // adopts that declared type and is client-supplied — an explicit
             // `id INT PRIMARY KEY` must stay INT rather than being dropped in

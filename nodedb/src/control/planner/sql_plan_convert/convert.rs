@@ -193,15 +193,30 @@ impl ConvertContext {
             .unwrap_or(nodedb_types::Surrogate::ZERO))
     }
 
-    /// Allocate a new surrogate only while producing executable work.
-    /// Metadata plans use a zero placeholder because no fresh identity exists.
-    pub fn fresh_surrogate(&self, collection: &str) -> crate::Result<nodedb_types::Surrogate> {
+    /// Allocate a new surrogate and its bound identity string, only while
+    /// producing executable work.
+    ///
+    /// A metadata plan, or a plan with no wired assigner, returns a
+    /// `Surrogate::ZERO` placeholder paired with its rendered identity, via
+    /// [`RowIdentity::for_surrogate`](crate::engine::document::store::RowIdentity::for_surrogate),
+    /// the same type the allocator renders through.
+    pub fn fresh_surrogate(
+        &self,
+        collection: &str,
+    ) -> crate::Result<(nodedb_types::Surrogate, String)> {
+        let placeholder = || {
+            let zero = nodedb_types::Surrogate::ZERO;
+            Ok((
+                zero,
+                crate::engine::document::store::RowIdentity::for_surrogate(zero).into_string(),
+            ))
+        };
         if self.is_metadata() {
-            return Ok(nodedb_types::Surrogate::ZERO);
+            return placeholder();
         }
         match self.surrogate_assigner.as_ref() {
             Some(assigner) => assigner.assign_fresh(self.database_id, self.tenant_id, collection),
-            None => Ok(nodedb_types::Surrogate::ZERO),
+            None => placeholder(),
         }
     }
 
@@ -340,7 +355,7 @@ mod tests {
                 .as_u32(),
             0
         );
-        assert_eq!(metadata.fresh_surrogate("users").unwrap().as_u32(), 0);
+        assert_eq!(metadata.fresh_surrogate("users").unwrap().0.as_u32(), 0);
         assert_eq!(
             assigner
                 .lookup(DatabaseId::DEFAULT, TenantId::new(1), "users", b"new-user")

@@ -19,7 +19,7 @@ use crate::control::state::SharedState;
 use crate::control::target_identity::{
     TargetPk, assign_target_surrogate, bare_collection_name, resolve_target_pk,
 };
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 /// Resolved, per-statement copy context shared across every scanned page.
 pub(crate) struct CopySpec {
@@ -125,7 +125,11 @@ pub(crate) fn assign_page_rows(
             &spec.target_pk,
             &value,
         )?;
-        out.push((surrogate_to_doc_id(surrogate), value, surrogate));
+        out.push((
+            StorageKey::for_surrogate(surrogate).to_string(),
+            value,
+            surrogate,
+        ));
         *remaining -= 1;
     }
     Ok(out)

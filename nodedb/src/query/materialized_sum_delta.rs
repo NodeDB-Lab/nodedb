@@ -107,6 +107,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 

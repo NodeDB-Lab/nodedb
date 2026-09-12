@@ -305,7 +305,7 @@ impl CoreLoop {
                 }
             };
 
-            if let Some((_document_id, surrogate, Some(bytes))) = projection {
+            if let Some((document_id, surrogate, Some(bytes))) = projection {
                 let task = Self::replay_task(
                     tid,
                     database_id,
@@ -325,6 +325,7 @@ impl CoreLoop {
                     &task,
                     tid.as_u64(),
                     collection,
+                    document_id,
                     surrogate,
                     &bytes,
                 );
@@ -667,8 +668,9 @@ mod crdt_replay_tests {
             Some(&LoroValue::String("retry".into())),
             "stale fenced record must be a no-op while matching retry applies"
         );
-        let sparse_key =
-            crate::engine::document::store::surrogate_to_doc_id(nodedb_types::Surrogate::new(1));
+        let sparse_key = crate::engine::document::store::StorageKey::for_surrogate(
+            nodedb_types::Surrogate::new(1),
+        );
         assert!(
             h.core
                 .sparse

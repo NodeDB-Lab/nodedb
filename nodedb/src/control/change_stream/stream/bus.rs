@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use nodedb_types::RowIdentity;
 use tracing::{debug, trace, warn};
 
 use crate::types::{DatabaseId, Lsn, TenantId};
@@ -237,7 +238,8 @@ impl ChangeStream {
                 lsn: Lsn::new(msg.lsn),
                 tenant_id: TenantId::new(msg.tenant_id),
                 collection: msg.collection.clone(),
-                document_id: msg.document_id.clone(),
+                // The wire carries the identity as text; wrap it verbatim.
+                document_id: RowIdentity::from_user_key(msg.document_id.clone()),
                 operation,
                 timestamp_ms: msg.timestamp_ms,
                 after: None,
@@ -288,7 +290,7 @@ pub fn broadcast_notify_to_cluster(
         tenant_id: event.tenant_id.as_u64(),
         database_id: database_id.as_u64(),
         collection: event.collection.clone(),
-        document_id: event.document_id.clone(),
+        document_id: event.document_id.to_string(),
         operation: event.operation.as_str().to_string(),
         timestamp_ms: event.timestamp_ms,
         lsn: event.lsn.as_u64(),
@@ -340,7 +342,7 @@ mod tests {
             lsn: Lsn::new(lsn),
             tenant_id: TenantId::new(tenant),
             collection: "orders".into(),
-            document_id: document.into(),
+            document_id: RowIdentity::from_user_key(document),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1,
             after: None,
@@ -362,7 +364,7 @@ mod tests {
                 8,
             )
             .unwrap_or_else(|_| panic!());
-        assert_eq!(next.events[0].document_id, "second");
+        assert_eq!(next.events[0].document_id.as_str(), "second");
     }
     #[test]
     fn duplicate_lsn_events_paginate() {
@@ -380,7 +382,7 @@ mod tests {
                 1,
             )
             .unwrap_or_else(|_| panic!());
-        assert_eq!(next.events[0].document_id, "b");
+        assert_eq!(next.events[0].document_id.as_str(), "b");
     }
     #[test]
     fn evicted_and_wrong_epoch_cursors_expire() {
@@ -415,7 +417,7 @@ mod tests {
         let result = stream
             .query_changes(TenantId::new(1), None, ReplayStart::Timestamp(0), 1)
             .unwrap_or_else(|_| panic!());
-        assert_eq!(result.events[0].document_id, "mine");
+        assert_eq!(result.events[0].document_id.as_str(), "mine");
     }
 
     #[tokio::test]
@@ -436,9 +438,9 @@ mod tests {
                 1,
             )
             .unwrap_or_else(|_| panic!());
-        assert_eq!(result.events[0].document_id, "database-a");
+        assert_eq!(result.events[0].document_id.as_str(), "database-a");
         let received = subscription.recv_sequenced().await.unwrap();
-        assert_eq!(received.document_id, "database-a");
+        assert_eq!(received.document_id.as_str(), "database-a");
     }
 
     #[test]

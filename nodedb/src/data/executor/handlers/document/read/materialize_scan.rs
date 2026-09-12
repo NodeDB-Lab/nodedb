@@ -9,14 +9,15 @@
 //! filter naming `id` sees the same identity the read paths produce.
 //! Payload: `[next_cursor: bin, entries: [[doc_id, surrogate, value], ...]]`.
 
+use nodedb_types::StorageKey;
+use redb::{ReadableDatabase, ReadableTable};
+
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::doc_id_to_surrogate;
-use crate::engine::sparse::btree::DOCUMENTS;
+use crate::engine::sparse::btree::{DOCUMENTS, KeyedTable, invalid_storage_key_err};
 use crate::types::{DatabaseId, TenantId};
-use redb::{ReadableDatabase, ReadableTable};
 
 impl CoreLoop {
     /// Execute a cursor-paginated raw document scan for the clone materializer.
@@ -94,8 +95,8 @@ impl CoreLoop {
         // callers (`txn_id == None`) keep cursor-paginated base-only behavior.
         let txn_id = task.request.txn_id;
 
-        let mut entries: Vec<(String, u32, Vec<u8>)> = Vec::with_capacity(count.min(256));
-        let mut last_doc_id = String::new();
+        let mut entries: Vec<(StorageKey, Vec<u8>)> = Vec::with_capacity(count.min(256));
+        let mut last_key: Option<StorageKey> = None;
 
         for row in range {
             if txn_id.is_none() && entries.len() >= count {
@@ -112,23 +113,21 @@ impl CoreLoop {
                     );
                 }
             };
-            let full_key = row.0.value().to_string();
-            let doc_id = full_key
-                .strip_prefix(&prefix)
-                .unwrap_or(&full_key)
-                .to_string();
-            let value = row.1.value().to_vec();
-
-            let surrogate = match doc_id_to_surrogate(&doc_id) {
-                Some(s) => s.as_u32(),
+            let full_key = row.0.value();
+            let rest = full_key.strip_prefix(&prefix).unwrap_or(full_key);
+            let key = match StorageKey::parse(rest) {
+                Some(key) => key,
                 None => {
-                    // Skip non-surrogate keys (legacy or corrupted rows).
-                    continue;
+                    return self.response_error(
+                        task,
+                        invalid_storage_key_err(KeyedTable::Documents, collection, rest),
+                    );
                 }
             };
+            let value = row.1.value().to_vec();
 
-            last_doc_id.clone_from(&doc_id);
-            entries.push((doc_id, surrogate, value));
+            last_key = Some(key);
+            entries.push((key, value));
         }
 
         // Fold the staging overlay into the base set: a staged tombstone
@@ -140,24 +139,16 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.to_string(),
             );
-            let mut rows: Vec<(String, Vec<u8>)> = entries
-                .into_iter()
-                .map(|(doc_id, _surrogate, value)| (doc_id, value))
-                .collect();
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &|_, _| true);
-            entries = rows
-                .into_iter()
-                .filter_map(|(doc_id, value)| {
-                    doc_id_to_surrogate(&doc_id).map(|s| (doc_id, s.as_u32(), value))
-                })
-                .collect();
+            self.merge_overlay_into_scan(txn_id, &coll_key, &mut entries, &|_, _| true);
             // The whole set is returned in one response; the scan is complete.
             Vec::new()
         } else if entries.len() < count {
             // Next-cursor is the last doc_id_hex seen; empty = scan complete.
             Vec::new()
         } else {
-            last_doc_id.into_bytes()
+            last_key
+                .map(|k| k.to_string().into_bytes())
+                .unwrap_or_default()
         };
 
         // Normalize every body to standard msgpack and inject its `id` here —
@@ -167,16 +158,16 @@ impl CoreLoop {
         let body_format =
             self.sparse_body_format(task.request.database_id, TenantId::new(tid), collection);
         let format_ref = body_format.as_format_ref();
-        for entry in &mut entries {
-            let (_, normalized) = sparse_row_to_doc(&entry.0, &entry.2, format_ref);
-            entry.2 = normalized;
+        for (key, value) in &mut entries {
+            let (_, normalized) = sparse_row_to_doc(key, value, format_ref);
+            *value = normalized;
         }
 
         // Encode response: [next_cursor: bin, entries: [[str, u32, bin], ...]]
         let mut payload = Vec::with_capacity(
             entries
                 .iter()
-                .map(|(d, _, v)| d.len() + 4 + v.len() + 12)
+                .map(|(_, v)| 8 + 4 + v.len() + 12)
                 .sum::<usize>()
                 + next_cursor.len()
                 + 16,
@@ -184,10 +175,10 @@ impl CoreLoop {
         nodedb_query::msgpack_scan::write_array_header(&mut payload, 2);
         write_bin(&mut payload, &next_cursor);
         nodedb_query::msgpack_scan::write_array_header(&mut payload, entries.len());
-        for (doc_id, surrogate, value) in &entries {
+        for (key, value) in &entries {
             nodedb_query::msgpack_scan::write_array_header(&mut payload, 3);
-            write_str(&mut payload, doc_id.as_bytes());
-            write_u32(&mut payload, *surrogate);
+            write_str(&mut payload, key.to_string().as_bytes());
+            write_u32(&mut payload, key.surrogate().as_u32());
             write_bin(&mut payload, value);
         }
 

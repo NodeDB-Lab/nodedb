@@ -13,8 +13,10 @@ use tracing::warn;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::{append_only, period_lock, retention};
+use nodedb_physical::physical_plan::ResolvedSumTarget;
 use nodedb_types::Surrogate;
 
+use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
 use crate::data::executor::handlers::point::apply_put::VectorIndexDelta;
 use crate::data::executor::handlers::point::apply_put::map_enforcement_error;
 use crate::data::executor::spatial_key::SpatialIndexKey;
@@ -38,6 +40,11 @@ pub(in crate::data::executor) struct PointDeleteParams<'a> {
     /// deletes (e.g. CRDT-sync materialization) whose admission already
     /// happened on their origin replica.
     pub enforce: bool,
+    /// `(target collection, join-key value)` → target row surrogate, resolved
+    /// on the Control Plane at plan time — read by period-lock enforcement to
+    /// find its reference row. Empty for `enforce: false` callers, which
+    /// never read it.
+    pub resolved_targets: &'a [ResolvedSumTarget],
 }
 
 /// Capture of the mutations an [`CoreLoop::apply_point_delete`] performed, so
@@ -134,11 +141,11 @@ impl CoreLoop {
             surrogate,
             user_roles,
             enforce,
+            resolved_targets,
         } = params;
         let _ = user_roles;
 
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -155,9 +162,9 @@ impl CoreLoop {
         let mut bitemporal_sys_from_ms: Option<i64> = None;
         let mut bitemporal_index_tuples: Vec<(String, String)> = Vec::new();
         let prior = if bitemporal {
-            let prior = self
-                .sparse
-                .versioned_get_current(database_id, tid, collection, row_key)?;
+            let prior =
+                self.sparse
+                    .versioned_get_current(database_id, tid, collection, &storage_key)?;
             if let Some(ref body) = prior {
                 if enforce && let Some(config) = self.doc_configs.get(&config_key) {
                     run_delete_enforcement(
@@ -167,6 +174,7 @@ impl CoreLoop {
                         collection,
                         config,
                         Some(body),
+                        resolved_targets,
                     )?;
                 }
                 let sys_from = self.bitemporal_now_ms();
@@ -176,7 +184,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    row_key,
+                    &storage_key,
                     sys_from,
                 )?;
                 // Index tombstones: reflect every current value so
@@ -211,7 +219,7 @@ impl CoreLoop {
                                     coll: collection,
                                     field: &path.path,
                                     value: &value,
-                                    doc_id: row_key,
+                                    doc_id: &storage_key,
                                     sys_from_ms: sys_from,
                                 },
                             )?;
@@ -223,7 +231,9 @@ impl CoreLoop {
             prior
         } else {
             if enforce && let Some(config) = self.doc_configs.get(&config_key) {
-                let old_value = self.sparse.get(database_id, tid, collection, row_key)?;
+                let old_value = self
+                    .sparse
+                    .get(database_id, tid, collection, &storage_key)?;
                 run_delete_enforcement(
                     &self.sparse,
                     database_id,
@@ -231,10 +241,11 @@ impl CoreLoop {
                     collection,
                     config,
                     old_value.as_deref(),
+                    resolved_targets,
                 )?;
             }
             self.sparse
-                .delete_in_txn(txn, database_id, tid, collection, row_key)?
+                .delete_in_txn(txn, database_id, tid, collection, &storage_key)?
         };
 
         // Capture the plain secondary-index `(field, value)` tuples this
@@ -313,7 +324,7 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            row_key,
+            &storage_key,
         ) {
             warn!(core = self.core_id, %collection, %document_id, error = %e, "secondary index cascade failed; rejecting the delete");
             return Err(e);
@@ -360,13 +371,16 @@ impl CoreLoop {
         // the spatial cascade below are captured so a transactional caller can
         // reverse them.
         let mut mark_node_deleted_capture: Option<String> = None;
-        // The put path hashes the hex-surrogate storage key (== `row_key`) as
-        // the R-tree entry id, so the shared removal hashes the same key to
-        // find and drop every per-field entry + reverse-map pair for this
-        // document. Captures each removed `(skey, entry_id, bbox, doc)` for
-        // reversible undo.
-        let spatial_deletes =
-            self.remove_document_spatial_indexes(database_id, tid, collection, row_key);
+        // The put path hashes the same storage key via `SpatialEntryId`, so
+        // the shared removal hashes the same key to find and drop every
+        // per-field entry + reverse-map pair for this document. Captures
+        // each removed `(skey, entry_id, bbox, doc)` for reversible undo.
+        let spatial_deletes = self.remove_document_spatial_indexes(
+            database_id,
+            tid,
+            collection,
+            SpatialEntryId::from_storage_key(storage_key),
+        );
 
         // Record deletion for edge referential integrity. Capture the id
         // for undo ONLY when this call newly marked it — un-marking a node
@@ -389,17 +403,17 @@ impl CoreLoop {
         // looked up by its exact key rather than scanning the whole map on
         // every delete. Shared with the PointUpdate re-index path.
         let vector_deletes =
-            self.remove_document_vector_indexes(database_id, tid, collection, row_key);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
 
         // Sparse inverted-index cleanup, mirroring the dense-vector cascade
         // above: drop this document's sparse posting entries under the same hex
         // surrogate row key the put path indexed them by. A no-op unless the
         // strict schema declares a `SparseVector` column.
-        self.remove_document_sparse_indexes(database_id, tid, collection, row_key);
+        self.remove_document_sparse_indexes(database_id, tid, collection, storage_key);
 
         // Invalidate document cache.
         self.doc_cache
-            .invalidate(database_id, tid, collection, row_key);
+            .invalidate(database_id, tid, collection, &storage_key);
 
         // Invalidate aggregate cache — a delete changes count(*) for this
         // collection. Only needed when a row was actually removed.
@@ -431,14 +445,23 @@ fn run_delete_enforcement(
     collection: &str,
     config: &crate::engine::document::store::CollectionConfig,
     old_value: Option<&[u8]>,
+    resolved_targets: &[ResolvedSumTarget],
 ) -> crate::Result<()> {
     append_only::check_point_delete(collection, &config.enforcement)
         .map_err(map_enforcement_error)?;
     if let Some(ref pl) = config.enforcement.period_lock
         && let Some(old_bytes) = old_value
     {
-        period_lock::check_period_lock(sparse, database_id, tid, collection, old_bytes, pl)
-            .map_err(map_enforcement_error)?;
+        period_lock::check_period_lock(
+            sparse,
+            database_id,
+            tid,
+            collection,
+            old_bytes,
+            pl,
+            resolved_targets,
+        )
+        .map_err(map_enforcement_error)?;
     }
     let created_at = old_value.and_then(retention::extract_created_at_secs);
     retention::check_delete_allowed(collection, &config.enforcement, created_at)

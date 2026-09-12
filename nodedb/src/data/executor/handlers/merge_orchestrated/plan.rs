@@ -9,11 +9,10 @@ use std::collections::HashSet;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::doc_format::encode_resolved_wire_body as encode_doc_body;
-use crate::engine::document::store::doc_id_to_surrogate;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind as MergeClauseKindOp,
 };
-use nodedb_types::Surrogate;
 
 use super::super::merge::MergeParams;
 use super::super::merge_helpers::{
@@ -22,11 +21,8 @@ use super::super::merge_helpers::{
 
 /// A matched / not-matched-by-source UPDATE arm resolved to a rewrite.
 pub(super) struct MergeUpdate {
-    /// Existing target storage key (the surrogate hex).
-    pub(super) doc_id: String,
-    /// The row's registered surrogate, parsed from `doc_id`. `None` only for
-    /// legacy non-surrogate rows that predate surrogate-keyed storage.
-    pub(super) surrogate: Option<Surrogate>,
+    /// Existing target row's storage key.
+    pub(super) key: StorageKey,
     /// Post-update document as MessagePack (pre-strict-encoding).
     pub(super) body: Vec<u8>,
     /// The target row as it stood BEFORE the arm, as MessagePack. An UPDATE
@@ -37,8 +33,7 @@ pub(super) struct MergeUpdate {
 
 /// A matched / not-matched-by-source DELETE arm resolved to a removal.
 pub(super) struct MergeDelete {
-    pub(super) doc_id: String,
-    pub(super) surrogate: Option<Surrogate>,
+    pub(super) key: StorageKey,
     /// The deleted target row as MessagePack, so the Control-Plane expander can
     /// extract its primary key when rewriting the delete into a concrete
     /// `PointDelete` for an in-transaction MERGE at COMMIT.
@@ -66,12 +61,13 @@ pub(super) struct MergePlanActions {
 /// duplicate of a row that already exists.
 ///
 /// A schemaless collection with no declared `id` field carries its identity
-/// only in `doc_id` (the storage key), never in the body — so a MERGE arm's
-/// `AND id ...` condition, matched by [`find_arm`], must see the identity
-/// injected here. A strict row already surfaces `id` as a real tuple column,
-/// so injection only runs on the schemaless arm.
+/// only in the row's storage key, never in the body — so a MERGE arm's
+/// `AND id ...` condition, matched by [`find_arm`], must see the row's
+/// client-visible identity injected here, never the raw storage key. A
+/// strict row already surfaces `id` as a real tuple column, so injection
+/// only runs on the schemaless arm.
 fn decode_target(
-    doc_id: &str,
+    identity: &RowIdentity,
     bytes: &[u8],
     strict_schema: &Option<nodedb_types::columnar::StrictSchema>,
 ) -> crate::Result<serde_json::Value> {
@@ -86,7 +82,7 @@ fn decode_target(
     {
         obj.insert(
             "id".to_string(),
-            serde_json::Value::String(doc_id.to_string()),
+            serde_json::Value::String(identity.as_str().to_string()),
         );
     }
     Ok(doc)
@@ -122,13 +118,14 @@ impl CoreLoop {
         // matching the legacy walk's `&serde_json::Value::Null`.
         let null_source = serde_json::Value::Null;
 
-        for (doc_id, bytes) in &target_docs {
-            let target_doc = decode_target(doc_id, bytes, &strict_schema)?;
+        for (key, bytes) in &target_docs {
+            let key = *key;
+            let identity = key.to_identity();
+            let target_doc = decode_target(&identity, bytes, &strict_schema)?;
             let join_val = target_doc
                 .get(params.target_join_col)
                 .map(json_to_str)
                 .unwrap_or_default();
-            let surrogate = doc_id_to_surrogate(doc_id);
 
             let (arm_kind, source_doc): (MergeClauseKindOp, &serde_json::Value) =
                 if let Some(source_doc) = source_map.get(&join_val) {
@@ -166,15 +163,13 @@ impl CoreLoop {
                             pk,
                         )?;
                         updates.push(MergeUpdate {
-                            doc_id: doc_id.clone(),
-                            surrogate,
+                            key,
                             body: encode_doc_body(&updated),
                             old_body: encode_doc_body(&target_doc),
                         });
                     }
                     MergeActionOp::Delete => deletes.push(MergeDelete {
-                        doc_id: doc_id.clone(),
-                        surrogate,
+                        key,
                         body: encode_doc_body(&target_doc),
                     }),
                     // INSERT is not a target-row arm; DoNothing is a no-op.

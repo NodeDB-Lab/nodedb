@@ -8,6 +8,7 @@
 //! the cross-engine regression gate that catches a future refactor
 //! where only some engines honor the scoped purge.
 
+use nodedb::engine::document::store::StorageKey;
 use nodedb::engine::kv::{KvEngine, KvPutParams};
 use nodedb::engine::sparse::btree::SparseEngine;
 use nodedb::engine::sparse::inverted::InvertedIndex;
@@ -25,16 +26,20 @@ fn open_sparse() -> (tempfile::TempDir, SparseEngine) {
     (tmp, sparse)
 }
 
+fn key(n: u32) -> StorageKey {
+    StorageKey::for_surrogate(Surrogate::new(n))
+}
+
 #[test]
 fn sparse_engine_purge_leaves_no_documents_for_collection() {
     let (_tmp, sparse) = open_sparse();
     let doc_bytes = b"{\"k\":1}".to_vec();
-    sparse.put(DB, TENANT, "keep", "d1", &doc_bytes).unwrap();
+    sparse.put(DB, TENANT, "keep", &key(1), &doc_bytes).unwrap();
     sparse
-        .put(DB, TENANT, "purge_me", "d1", &doc_bytes)
+        .put(DB, TENANT, "purge_me", &key(1), &doc_bytes)
         .unwrap();
     sparse
-        .put(DB, TENANT, "purge_me", "d2", &doc_bytes)
+        .put(DB, TENANT, "purge_me", &key(2), &doc_bytes)
         .unwrap();
 
     let (docs_removed, _idx_removed) = sparse
@@ -42,23 +47,33 @@ fn sparse_engine_purge_leaves_no_documents_for_collection() {
         .unwrap();
     assert_eq!(docs_removed, 2);
 
-    assert!(sparse.get(DB, TENANT, "purge_me", "d1").unwrap().is_none());
-    assert!(sparse.get(DB, TENANT, "purge_me", "d2").unwrap().is_none());
-    assert!(sparse.get(DB, TENANT, "keep", "d1").unwrap().is_some());
+    assert!(
+        sparse
+            .get(DB, TENANT, "purge_me", &key(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sparse
+            .get(DB, TENANT, "purge_me", &key(2))
+            .unwrap()
+            .is_none()
+    );
+    assert!(sparse.get(DB, TENANT, "keep", &key(1)).unwrap().is_some());
 }
 
 #[test]
 fn sparse_engine_cross_tenant_isolation() {
     let (_tmp, sparse) = open_sparse();
     let doc_bytes = b"{\"k\":1}".to_vec();
-    sparse.put(DB, 1, "docs", "d1", &doc_bytes).unwrap();
-    sparse.put(DB, 2, "docs", "d1", &doc_bytes).unwrap();
+    sparse.put(DB, 1, "docs", &key(1), &doc_bytes).unwrap();
+    sparse.put(DB, 2, "docs", &key(1), &doc_bytes).unwrap();
 
     let (removed, _) = sparse.delete_all_for_collection(DB, 1, "docs").unwrap();
     assert_eq!(removed, 1);
-    assert!(sparse.get(DB, 1, "docs", "d1").unwrap().is_none());
+    assert!(sparse.get(DB, 1, "docs", &key(1)).unwrap().is_none());
     assert!(
-        sparse.get(DB, 2, "docs", "d1").unwrap().is_some(),
+        sparse.get(DB, 2, "docs", &key(1)).unwrap().is_some(),
         "tenant 2's same-named collection must survive tenant 1's purge"
     );
 }

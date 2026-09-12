@@ -14,6 +14,7 @@
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::HashMap;
 
+use nodedb_types::StorageKey;
 use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::scan_filter::ScanFilter;
@@ -22,6 +23,7 @@ use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema
 use crate::data::executor::doc_format;
 use crate::data::executor::handlers::update_from_join_source_map::json_value_to_string;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::sparse::btree::{KeyedTable, invalid_storage_key_err};
 use crate::types::{DatabaseId, TenantId, TxnId};
 use nodedb_physical::physical_plan::UpdateValue;
 
@@ -104,7 +106,7 @@ impl CoreLoop {
         })?;
 
         let mut rows: Vec<ResolvedUpdateRow> = Vec::new();
-        for (doc_id, current_bytes) in target_rows {
+        for (key, current_bytes) in target_rows {
             // A row the statement matched but cannot decode fails the
             // statement. Skipping it leaves the row untouched under a smaller
             // affected count that reports success.
@@ -113,12 +115,13 @@ impl CoreLoop {
                     .ok_or_else(|| {
                         crate::diag::strict_row_undecodable(
                             target_collection,
-                            &doc_id,
+                            &key.to_string(),
                             "update_from_join_collect",
                         );
+                        let identity = key.to_identity();
                         super::super::strict_format::undecodable_strict_row(
                             target_collection,
-                            &doc_id,
+                            identity.as_str(),
                         )
                     })?
             } else {
@@ -157,7 +160,7 @@ impl CoreLoop {
                             .map_err(|e| crate::Error::Serialization {
                                 format: "msgpack".into(),
                                 detail: format!(
-                                    "literal assigned to \"{field}\" for document \"{doc_id}\" \
+                                    "literal assigned to \"{field}\" for document \"{key}\" \
                                      of collection \"{target_collection}\" does not decode: {e}"
                                 ),
                             })?,
@@ -211,13 +214,11 @@ impl CoreLoop {
                 doc_format::encode_to_msgpack(&target_doc)
             };
 
-            // The storage key is the hex-encoded surrogate on a surrogate-keyed
-            // row; parse it once here for the reindex + write-set (write path)
-            // and the expanded `PointPut`'s identity (RESOLVE path).
-            let surrogate = crate::engine::document::store::doc_id_to_surrogate(&doc_id);
+            // The storage key came typed off the target scan; the write-set
+            // reindex and the expanded `PointPut`'s identity (RESOLVE path)
+            // both need it, so it's carried through rather than re-parsed.
             rows.push(ResolvedUpdateRow {
-                doc_id,
-                surrogate,
+                key,
                 body: updated_bytes,
                 old_body: current_bytes,
                 doc: target_doc,
@@ -238,7 +239,10 @@ impl CoreLoop {
     /// strict-aware matcher), and a staged put absent from base is appended when
     /// it passes the filters. `None` (autocommit) returns the base-filtered rows
     /// unchanged — byte-identical to the pre-staging behavior.
-    fn scan_target_rows(&self, args: ScanTargetRows<'_>) -> crate::Result<Vec<(String, Vec<u8>)>> {
+    fn scan_target_rows(
+        &self,
+        args: ScanTargetRows<'_>,
+    ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
         let ScanTargetRows {
             database_id,
             tid,
@@ -266,26 +270,25 @@ impl CoreLoop {
                 detail: format!("open table: {e}"),
             })?;
 
-        let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::new();
         if let Ok(range) = table.range(prefix.as_str()..end.as_str()) {
             for entry in range.flatten() {
-                let key = entry.0.value();
+                let full_key = entry.0.value();
                 let value_bytes = entry.1.value();
-                let Some(doc_id) = key.strip_prefix(&prefix) else {
+                let Some(rest) = full_key.strip_prefix(&prefix) else {
                     continue;
                 };
+                let key = StorageKey::parse(rest).ok_or_else(|| {
+                    invalid_storage_key_err(KeyedTable::Documents, target_collection, rest)
+                })?;
                 // Goes through the same primitive the overlay half below uses,
                 // so a schemaless row with no `id` field matches `WHERE id
                 // ...` here exactly as it does once staged.
-                let matches = matches_with_resolved_schema(
-                    strict_schema,
-                    target_filters,
-                    doc_id,
-                    value_bytes,
-                )
-                .map_err(crate::Error::from)?;
+                let matches =
+                    matches_with_resolved_schema(strict_schema, target_filters, &key, value_bytes)
+                        .map_err(crate::Error::from)?;
                 if matches {
-                    rows.push((doc_id.to_string(), value_bytes.to_vec()));
+                    rows.push((key, value_bytes.to_vec()));
                 }
             }
         }
@@ -298,14 +301,14 @@ impl CoreLoop {
         // dropped, exactly as for a base row.
         if let Some(txn_id) = txn_id {
             // `merge_overlay_into_scan` takes an infallible
-            // `Fn(&str, &[u8]) -> bool` predicate, so a division/modulo-by-
-            // zero is captured via this `Cell` side-channel and checked once
+            // `Fn(&StorageKey, &[u8]) -> bool` predicate, so a division/modulo-
+            // by-zero is captured via this `Cell` side-channel and checked once
             // the merge returns.
             let raw_matches =
                 self.strict_aware_matcher(database_id, tid, target_collection, target_filters);
             let predicate_err: std::cell::Cell<Option<nodedb_query::EvalError>> =
                 std::cell::Cell::new(None);
-            let matches = |doc_id: &str, body: &[u8]| match raw_matches(doc_id, body) {
+            let matches = |row_key: &StorageKey, body: &[u8]| match raw_matches(row_key, body) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));

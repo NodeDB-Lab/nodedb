@@ -5,12 +5,14 @@
 //! into its materialized-sum target and re-indexing its vectors.
 
 use nodedb_physical::physical_plan::ResolvedSumTarget;
+use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorReindex;
 use crate::data::executor::handlers::returning_doc;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
 
 use super::update_from_join_types::ResolvedUpdateRow;
@@ -35,7 +37,10 @@ pub(in crate::data::executor) struct WriteResolvedRowsCtx<'a> {
     pub target_collection: &'a str,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
     pub has_vectors: bool,
-    pub is_strict: bool,
+    /// The target collection's strict schema, when it stores Binary Tuples.
+    pub strict_schema: Option<&'a StrictSchema>,
+    /// The target collection's declared `PRIMARY KEY` column, when it has one.
+    pub declared_primary_key: Option<&'a str>,
     pub want_returning: bool,
 }
 
@@ -55,10 +60,17 @@ impl CoreLoop {
             target_collection,
             resolved_sum_targets,
             has_vectors,
-            is_strict,
+            strict_schema,
+            declared_primary_key,
             want_returning,
         } = ctx;
+        let is_strict = strict_schema.is_some();
         let database_id = task.request.database_id.as_u64();
+        let config_key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            target_collection.to_string(),
+        );
         let mut affected = 0u64;
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
         let mut returned_docs: Vec<serde_json::Value> = if want_returning {
@@ -69,12 +81,41 @@ impl CoreLoop {
 
         for row in rows {
             let ResolvedUpdateRow {
-                doc_id,
-                surrogate: row_surrogate,
+                key: storage_key,
                 body: updated_bytes,
                 old_body,
                 mut doc,
             } = row;
+
+            // Period lock, both images — matching `execute_point_update`: a
+            // closed period must reject an edit to a row it already holds,
+            // and must reject an edit that assigns the period column into it.
+            if let Some(config) = self.doc_configs.get(&config_key)
+                && let Some(ref pl) = config.enforcement.period_lock
+            {
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    target_collection,
+                    &old_body,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return Err(self.response_error(task, e));
+                }
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    target_collection,
+                    &updated_bytes,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return Err(self.response_error(task, e));
+                }
+            }
 
             // The row's body and the materialized-sum delta it owes share ONE
             // transaction. `ResolvedUpdateRow` already carries BOTH images —
@@ -89,7 +130,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 target_collection,
-                &doc_id,
+                &storage_key,
                 &updated_bytes,
             );
             if stored.is_ok() {
@@ -131,8 +172,13 @@ impl CoreLoop {
                 // collection — this statement's redo describes only the rows of
                 // `target_collection` it rewrote.
                 write_set.extend(write_hook::target_write_set(&target_writes));
-                self.doc_cache
-                    .put(database_id, tid, target_collection, &doc_id, &updated_bytes);
+                self.doc_cache.put(
+                    database_id,
+                    tid,
+                    target_collection,
+                    &storage_key,
+                    &updated_bytes,
+                );
                 // Emit an update event per affected row to the Event Plane, so
                 // AFTER-UPDATE triggers and CDC/change-stream consumers see
                 // each row `UPDATE ... FROM` touched — mirroring
@@ -141,11 +187,24 @@ impl CoreLoop {
                 // `collect_update_from_join_rows`; `emit_put_event` derives
                 // `WriteOp::Update` from the Some prior + Some new pair and
                 // handles strict->msgpack conversion on both sides.
+                //
+                // The identity is the one INSERT minted: the declared primary
+                // key when the collection declares one, else the decimal
+                // surrogate. The redo entry below journals the same identity.
+                let row_identity = stored_row_identity(
+                    &updated_bytes,
+                    strict_schema,
+                    declared_primary_key,
+                    storage_key,
+                );
+                // `row_identity` is read again below for `RETURNING`'s `id`
+                // field, so the event-emit boundary gets a clone rather than
+                // the move.
                 self.emit_put_event(
                     task,
                     tid,
                     target_collection,
-                    &doc_id,
+                    row_identity.clone(),
                     &updated_bytes,
                     Some(&old_body),
                 );
@@ -155,13 +214,12 @@ impl CoreLoop {
                 // post-apply `Put` redo (`updated_bytes` is moved as its last
                 // use). Both are no-ops unless the collection has a vector
                 // field, so a non-vector collection pays nothing.
-                if has_vectors && let Some(surrogate) = row_surrogate {
+                if has_vectors {
                     if let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
                         database_id,
                         tid,
                         collection: target_collection,
-                        row_key: &doc_id,
-                        surrogate,
+                        storage_key,
                         new_body: &updated_bytes,
                         is_strict,
                         has_vectors,
@@ -169,7 +227,8 @@ impl CoreLoop {
                         return Err(self.response_error(task, e));
                     }
                     write_set.push(WriteSetEntry {
-                        surrogate: surrogate.as_u32(),
+                        surrogate: storage_key.surrogate().as_u32(),
+                        identity: row_identity.clone(),
                         is_delete: false,
                         value: updated_bytes,
                         collection: None,
@@ -177,11 +236,10 @@ impl CoreLoop {
                 }
                 affected += 1;
                 if want_returning {
-                    // `doc_id` is the surrogate hex storage key, which only
-                    // stands in as `id` for a row that declares no primary key
-                    // of its own — overwriting a declared key would return a
-                    // value the client never wrote.
-                    returning_doc::attach_row_id(&mut doc, &doc_id);
+                    // `row_identity` only stands in as `id` for a row that
+                    // declares no primary key of its own — overwriting a
+                    // declared key would return a value the client never wrote.
+                    returning_doc::attach_row_id(&mut doc, &row_identity);
                     returned_docs.push(doc);
                 }
             }

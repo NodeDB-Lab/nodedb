@@ -42,13 +42,13 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use nodedb_physical::physical_plan::StorageMode;
-    use nodedb_types::Surrogate;
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
+    use nodedb_types::{StorageKey, Surrogate};
     use nodedb_wal::{RecordType, TombstoneSet, WalRecord, WalRecordArgs};
 
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::strict_format;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::{DatabaseId, TenantId};
 
     const DB: u64 = 0;
@@ -75,7 +75,7 @@ mod tests {
     fn put_record(surrogate: u32) -> WalRecord {
         let payload = zerompk::to_msgpack_vec(&(
             COLL.to_string(),
-            surrogate_to_doc_id(Surrogate::new(surrogate)),
+            StorageKey::for_surrogate(Surrogate::new(surrogate)).to_string(),
             doc_bytes(),
             Option::<nodedb_types::sync::wire::SyncProvenance>::None,
             surrogate,
@@ -112,7 +112,7 @@ mod tests {
                 DB,
                 TID,
                 COLL,
-                &surrogate_to_doc_id(Surrogate::new(surrogate)),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .unwrap()
             .expect("document should have been replayed");
@@ -153,7 +153,7 @@ mod tests {
                 DB,
                 TID,
                 COLL,
-                &surrogate_to_doc_id(Surrogate::new(surrogate)),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .unwrap()
             .expect("document should have been replayed");

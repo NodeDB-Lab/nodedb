@@ -301,6 +301,20 @@ pub(crate) async fn handle_direct_op(
             return error_to_native(seq, &e);
         }
 
+        // Period-lock reference rows, resolved into the same plan slot as the
+        // materialized-sum targets just above.
+        if let Err(e) = crate::control::planner::period_lock::resolve_period_lock_targets(
+            ctx.state,
+            &mut tasks,
+            tenant_id,
+            ctx.database_id(),
+            TraceId::ZERO,
+        )
+        .await
+        {
+            return error_to_native(seq, &e);
+        }
+
         // The expanded set is the dispatch authorization boundary.
         let authorized_tasks =
             match crate::control::server::shared::authorization::authorize_task_set(

@@ -18,7 +18,7 @@ use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec, StorageMode, UpdateValue};
 use nodedb_types::Surrogate;
 
@@ -67,8 +67,8 @@ impl CoreLoop {
             resolved_sum_targets,
             declared_primary_key,
         } = params;
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let document_identity = RowIdentity::from_user_key(document_id);
         debug!(
             core = self.core_id,
             %collection,
@@ -136,12 +136,35 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let get_result = if bitemporal {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, row_key)
+                .versioned_get_current(database_id, tid, collection, &storage_key)
         } else {
-            self.sparse.get(database_id, tid, collection, row_key)
+            self.sparse.get(database_id, tid, collection, &storage_key)
         };
         match get_result {
             Ok(Some(current_bytes)) => {
+                // A period lock gates both images of an update: the PRE-image,
+                // because a closed period must reject any edit to a row it
+                // already holds, and the POST-image, because the update may
+                // itself assign the period column into a closed period. Put
+                // and delete each check the one image they have; update has
+                // both, and skipping either admits a write put and delete
+                // both refuse.
+                if let Some(config) = self.doc_configs.get(&config_key)
+                    && let Some(ref pl) = config.enforcement.period_lock
+                    && let Err(e) =
+                        crate::data::executor::enforcement::period_lock::check_period_lock(
+                            &self.sparse,
+                            database_id,
+                            tid,
+                            collection,
+                            &current_bytes,
+                            pl,
+                            resolved_sum_targets,
+                        )
+                {
+                    return self.response_error(task, e);
+                }
+
                 let has_generated = self.doc_configs.get(&config_key).is_some_and(|c| {
                     !c.enforcement.generated_columns.is_empty()
                         && crate::data::executor::handlers::generated::needs_recomputation(
@@ -165,6 +188,25 @@ impl CoreLoop {
                     Err(e) => return self.response_error(task, e),
                 };
 
+                // The POST-image half of the period-lock check: refuses an
+                // update that assigns the period column into a closed period,
+                // even when the pre-image lived in an open one.
+                if let Some(config) = self.doc_configs.get(&config_key)
+                    && let Some(ref pl) = config.enforcement.period_lock
+                    && let Err(e) =
+                        crate::data::executor::enforcement::period_lock::check_period_lock(
+                            &self.sparse,
+                            database_id,
+                            tid,
+                            collection,
+                            &updated_bytes,
+                            pl,
+                            resolved_sum_targets,
+                        )
+                {
+                    return self.response_error(task, e);
+                }
+
                 // Gate the persist on the collection's write policy, decided
                 // against the post-update image the row will actually hold.
                 // Placed after the generated columns are recomputed — a policy
@@ -173,7 +215,7 @@ impl CoreLoop {
                 if let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
                     &updated_bytes,
-                    document_id,
+                    &document_identity,
                     strict_schema.as_ref(),
                     tid,
                     collection,
@@ -186,7 +228,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    row_key,
+                    storage_key: &storage_key,
                     current_bytes: &current_bytes,
                     updated_bytes: &updated_bytes,
                     bitemporal,
@@ -200,7 +242,7 @@ impl CoreLoop {
                             task.request.database_id.as_u64(),
                             tid,
                             collection,
-                            row_key,
+                            &storage_key,
                             &updated_bytes,
                         );
 
@@ -210,8 +252,7 @@ impl CoreLoop {
                                 database_id,
                                 tid,
                                 collection,
-                                row_key,
-                                surrogate,
+                                storage_key,
                                 new_body: &updated_bytes,
                                 is_strict,
                                 has_vectors,
@@ -229,7 +270,7 @@ impl CoreLoop {
                             task,
                             tid,
                             collection,
-                            row_key,
+                            document_identity.clone(),
                             &updated_bytes,
                             Some(&current_bytes),
                         );
@@ -249,7 +290,7 @@ impl CoreLoop {
                             // as `id` when the row declares none of its own.
                             let doc = match returning_doc::from_stored(
                                 &updated_bytes,
-                                document_id,
+                                &document_identity,
                                 strict_schema.as_ref(),
                             ) {
                                 Ok(doc) => doc,
@@ -275,6 +316,7 @@ impl CoreLoop {
                         if has_vectors {
                             response.write_set = vec![WriteSetEntry {
                                 surrogate: surrogate.as_u32(),
+                                identity: document_identity,
                                 is_delete: false,
                                 value: updated_bytes,
                                 collection: None,
@@ -309,7 +351,7 @@ mod tests {
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
     use crate::data::executor::handlers::point::insert::PointInsertParams;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::{DatabaseId, TenantId};
 
     const DB: u64 = 0;
@@ -337,6 +379,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -373,7 +416,7 @@ mod tests {
                     DB,
                     TID,
                     TARGET,
-                    &surrogate_to_doc_id(surrogate),
+                    &nodedb_types::StorageKey::for_surrogate(surrogate),
                     &doc_format::encode_to_msgpack(&seed),
                 )
                 .expect("seed target row");
@@ -393,7 +436,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)
@@ -566,7 +614,12 @@ mod tests {
 
         let stored = core
             .sparse
-            .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(91)))
+            .get(
+                DB,
+                TID,
+                SOURCE,
+                &nodedb_types::StorageKey::for_surrogate(Surrogate(91)),
+            )
             .expect("read back")
             .expect("row must exist");
         let doc = doc_format::decode_document(&stored).expect("decode");

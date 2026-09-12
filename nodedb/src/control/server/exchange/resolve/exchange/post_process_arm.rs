@@ -12,6 +12,7 @@ use crate::control::server::exchange::gather::{
     GatherOutcome, finalize_aggregate, gather_all_vshards,
 };
 use crate::control::server::exchange::resolve::capture::DistributedReadCapture;
+use crate::control::server::response_translate::hit_key::parse_surrogate_hex;
 use crate::control::server::response_translate::vector::resolve_surrogate_pk;
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec::{
@@ -210,23 +211,10 @@ pub(super) async fn resolve_post_process(
                 nodedb_types::Surrogate::new(surrogate),
             )
         }),
-        HitShape::Hybrid => {
-            flatten_hybrid_hits_to_relational_rows(&merged, |hex| {
-                // `__local_<id>` is the headless-vector-leg sentinel; it
-                // is not a real surrogate and must not be parsed as hex.
-                if hex.starts_with("__local_") {
-                    return None;
-                }
-                let surrogate = u32::from_str_radix(hex, 16).ok()?;
-                resolve_surrogate_pk(
-                    state,
-                    database_id,
-                    tenant_id,
-                    &coll,
-                    nodedb_types::Surrogate::new(surrogate),
-                )
-            })
-        }
+        HitShape::Hybrid => flatten_hybrid_hits_to_relational_rows(&merged, |key| {
+            let surrogate = parse_surrogate_hex(key)?;
+            resolve_surrogate_pk(state, database_id, tenant_id, &coll, surrogate)
+        }),
         HitShape::None => flatten_to_relational_rows(&merged),
     };
     Ok(Resolved::Plan(Box::new(PhysicalPlan::Query(

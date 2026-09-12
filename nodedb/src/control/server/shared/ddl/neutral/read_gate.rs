@@ -45,8 +45,11 @@ use super::super::result::DdlError;
 
 /// SQLSTATE for a denied RBAC check.
 const INSUFFICIENT_PRIVILEGE: &str = "42501";
-/// SQLSTATE for a policy this delivery shape cannot express.
+/// SQLSTATE for a policy this delivery shape cannot express, or a feature
+/// the collection's engine does not carry.
 const FEATURE_NOT_SUPPORTED: &str = "0A000";
+/// SQLSTATE for a collection the catalog does not hold.
+const UNDEFINED_TABLE: &str = "42P01";
 
 fn gate_err(sqlstate: &str, message: impl Into<String>) -> DdlError {
     DdlError::new(sqlstate, message)
@@ -166,6 +169,39 @@ impl<'a> CollectionReadGate<'a> {
             };
             gate_err(sqlstate, error.to_string())
         })
+    }
+
+    /// Fail closed unless `collection` is a document collection.
+    ///
+    /// For handlers that hand-build a `DocumentOp::Scan` over a caller-named
+    /// collection: the document scan reads the sparse store only, so a KV or
+    /// columnar-family collection answers with no rows. `what` names the
+    /// feature in the refusal.
+    pub fn require_document_engine(&self, collection: &str, what: &str) -> Result<(), DdlError> {
+        let stored = self
+            .state
+            .credentials
+            .catalog()
+            .get_collection(
+                self.scope.database_id(),
+                self.tenant_id().as_u64(),
+                collection,
+            )
+            .map_err(|e| gate_err("XX000", e.to_string()))?;
+        match stored {
+            None => Err(gate_err(
+                UNDEFINED_TABLE,
+                format!("{what}: collection '{collection}' does not exist"),
+            )),
+            Some(stored) if stored.collection_type.is_document() => Ok(()),
+            Some(stored) => Err(gate_err(
+                FEATURE_NOT_SUPPORTED,
+                format!(
+                    "{what} reads document collections; '{collection}' is a {} collection",
+                    stored.collection_type.as_str()
+                ),
+            )),
+        }
     }
 
     /// Fail closed when a read policy exists on `collection`.

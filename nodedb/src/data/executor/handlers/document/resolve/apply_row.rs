@@ -15,12 +15,14 @@ use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, W
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 /// One already-decided row write, as the apply loop hands it over.
 pub(super) struct ApplyResolvedPut<'a> {
     pub tid: u64,
     pub collection: &'a str,
+    /// The row's client identity, as `RETURNING` and CDC name it.
+    pub document_id: &'a str,
     pub surrogate: Surrogate,
     /// Pre-encode MessagePack body — the write path encodes the strict Binary
     /// Tuple from it.
@@ -50,20 +52,23 @@ impl CoreLoop {
         let ApplyResolvedPut {
             tid,
             collection,
+            document_id,
             surrogate,
             value,
             precondition,
             resolved_sum_targets,
         } = put;
         let database_id = task.request.database_id.as_u64();
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        // The resolve pass carried the identity INSERT minted for this row;
+        // the event and the redo entry both name the row by it.
+        let row_identity = RowIdentity::from_user_key(document_id);
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
         // HNSW insert appends rather than replaces, so the prior embedding
         // must come out first or KNN keeps scoring both.
         if has_vectors && precondition.is_some() {
-            self.remove_document_vector_indexes(database_id, tid, collection, row_key);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
         }
 
         let txn = self.sparse.begin_write().map_err(ErrorCode::from)?;
@@ -73,20 +78,21 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value,
                 index_text: true,
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: resolved_sum_targets,
             },
         ) {
             Ok(outcome) => outcome,
             Err(e) => {
                 // Dropping `txn` reverses the write but not the cache entry.
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return Err(ErrorCode::from(e));
             }
         };
@@ -112,7 +118,7 @@ impl CoreLoop {
             Ok(enforcement) => enforcement,
             Err(e) => {
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return Err(ErrorCode::from(e));
             }
         };
@@ -122,7 +128,7 @@ impl CoreLoop {
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
             self.doc_cache
-                .invalidate(database_id, tid, collection, row_key);
+                .invalidate(database_id, tid, collection, &storage_key);
             return Err(ErrorCode::from(e));
         }
 
@@ -146,7 +152,14 @@ impl CoreLoop {
         }
 
         let stored_bytes = outcome.stored_value;
-        self.emit_put_event(task, tid, collection, row_key, &stored_bytes, precondition);
+        self.emit_put_event(
+            task,
+            tid,
+            collection,
+            row_identity.clone(),
+            &stored_bytes,
+            precondition,
+        );
         self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
 
         let mut write_set = Vec::new();
@@ -155,6 +168,7 @@ impl CoreLoop {
         if has_vectors {
             write_set.push(WriteSetEntry {
                 surrogate: surrogate.as_u32(),
+                identity: row_identity,
                 is_delete: false,
                 value: value.to_vec(),
                 collection: None,
@@ -193,6 +207,7 @@ impl CoreLoop {
                     surrogate,
                     user_roles: &task.request.user_roles,
                     enforce: true,
+                    resolved_targets: resolved_sum_targets,
                 },
             )
             .map_err(ErrorCode::from)?;
@@ -244,12 +259,10 @@ impl CoreLoop {
             }
             let old_converted =
                 self.resolve_event_payload(database_id, tid, collection, prior_bytes);
-            self.emit_write_event(
+            self.emit_document_delete_event(
                 task,
                 collection,
-                crate::event::WriteOp::Delete,
-                document_id,
-                None,
+                RowIdentity::from_user_key(document_id),
                 Some(old_converted.as_deref().unwrap_or(prior_bytes)),
             );
         }

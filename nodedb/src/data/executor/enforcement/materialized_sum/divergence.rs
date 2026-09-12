@@ -145,16 +145,16 @@ impl CoreLoop {
     pub(in crate::data::executor) fn sum_targets_diverged_for_ids(
         &self,
         check: &SumTargetCheck<'_>,
-        doc_ids: &[String],
+        doc_ids: &[nodedb_types::StorageKey],
     ) -> bool {
         if !self.ollp_is_group_leader || !self.declares_materialized_sums(check) {
             return false;
         }
         let mut rows: Vec<serde_json::Value> = Vec::with_capacity(doc_ids.len());
-        for doc_id in doc_ids {
+        for key in doc_ids {
             let Ok(Some(bytes)) =
                 self.sparse
-                    .get(check.database_id, check.tid, check.collection, doc_id)
+                    .get(check.database_id, check.tid, check.collection, key)
             else {
                 continue;
             };

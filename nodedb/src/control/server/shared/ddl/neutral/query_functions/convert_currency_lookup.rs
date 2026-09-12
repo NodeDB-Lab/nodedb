@@ -65,6 +65,7 @@ pub async fn convert_currency_lookup(
     // so a redaction rule on that column is refused rather than answered with a
     // figure derived from a value the caller may not see.
     let gate = CollectionReadGate::open(state, identity, database_id, &rate_table)?;
+    gate.require_document_engine(&rate_table, "CONVERT_CURRENCY")?;
     gate.refuse_if_field_redacted(&rate_table, &rate_column, "the converted amount")?;
 
     // Build the composite key: "{from}/{to}" for the rate table lookup.
@@ -105,7 +106,7 @@ pub async fn convert_currency_lookup(
         .map_err(|e| err("22P02", &format!("invalid JSON in rate table scan: {e}")))?;
     // Unwrap the `{"id", "data"}` scan envelope so matching reads the stored
     // fields, not the wire wrapper.
-    let docs = unwrap_scan_docs(docs);
+    let docs = unwrap_scan_docs(docs)?;
 
     // Find latest row where key matches and time <= as_of.
     let mut best_rate: Option<rust_decimal::Decimal> = None;

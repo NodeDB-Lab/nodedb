@@ -81,7 +81,7 @@ impl CoreLoop {
                     task,
                     collection,
                     crate::event::WriteOp::Update,
-                    &key_str,
+                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
                     Some(&new_bytes),
                     None,
                 );
@@ -169,7 +169,7 @@ impl CoreLoop {
                     task,
                     collection,
                     crate::event::WriteOp::Update,
-                    &key_str,
+                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
                     Some(&new_bytes),
                     None,
                 );
@@ -262,7 +262,7 @@ impl CoreLoop {
                 task,
                 collection,
                 crate::event::WriteOp::Update,
-                &key_str,
+                crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
                 Some(new_value),
                 None,
             );
@@ -342,7 +342,7 @@ impl CoreLoop {
             task,
             collection,
             crate::event::WriteOp::Update,
-            &key_str,
+            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
             Some(new_value),
             old.as_deref(),
         );

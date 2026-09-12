@@ -11,6 +11,7 @@ use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorR
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::{OllpPredictedEdge, ResolvedSumTarget, ReturningSpec};
@@ -226,13 +227,41 @@ impl CoreLoop {
         }
         for row in projected {
             let ProjectedUpdateRow {
-                doc_id,
+                key: storage_key,
                 current_bytes,
                 old_doc: old_doc_json,
                 mut doc,
                 updated_bytes,
             } = row;
-            let doc_id = doc_id.as_str();
+            // Period lock, both images — matching `execute_point_update`: a
+            // closed period must reject an edit to a row it already holds,
+            // and must reject an edit that assigns the period column into it.
+            if let Some(config) = self.doc_configs.get(&config_key)
+                && let Some(ref pl) = config.enforcement.period_lock
+            {
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    collection,
+                    &current_bytes,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return self.response_error(task, e);
+                }
+                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
+                    &self.sparse,
+                    database_id,
+                    tid,
+                    collection,
+                    &updated_bytes,
+                    pl,
+                    resolved_sum_targets,
+                ) {
+                    return self.response_error(task, e);
+                }
+            }
             // Gate the persist on the collection's write policy, decided
             // against this row's post-update image — `doc` already has
             // the assignments and any regenerated columns applied, so it
@@ -254,7 +283,7 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    doc_id,
+                    storage_key: &storage_key,
                     new_body: &updated_bytes,
                     index_paths: &index_paths,
                     old_doc: &old_doc_json,
@@ -302,34 +331,29 @@ impl CoreLoop {
                 task.request.database_id.as_u64(),
                 tid,
                 collection,
-                doc_id,
+                &storage_key,
                 &updated_bytes,
             );
             // Record the committed row's write version against its
-            // surrogate + collection. Parsed once and reused below
-            // for the write-set entry (the row's doc_id is the
-            // hex-encoded surrogate storage key either way).
-            let row_surrogate = crate::engine::document::store::doc_id_to_surrogate(doc_id);
-            if let Some(surrogate) = row_surrogate {
-                self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
-                // Re-index the row's vectors from the new body
-                // (soft-delete the old HNSW node + insert the new
-                // one, keyed by the stable surrogate). No-op unless
-                // the collection has a vector field (gated above).
-                if has_vectors
-                    && let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
-                        database_id,
-                        tid,
-                        collection,
-                        row_key: doc_id,
-                        surrogate,
-                        new_body: &updated_bytes,
-                        is_strict: strict_schema.is_some(),
-                        has_vectors,
-                    })
-                {
-                    return self.response_error(task, e);
-                }
+            // surrogate + collection.
+            let surrogate = storage_key.surrogate();
+            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+            // Re-index the row's vectors from the new body (soft-delete the
+            // old HNSW node + insert the new one, keyed by the stable
+            // surrogate). No-op unless the collection has a vector field
+            // (gated above).
+            if has_vectors
+                && let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key,
+                    new_body: &updated_bytes,
+                    is_strict: strict_schema.is_some(),
+                    has_vectors,
+                })
+            {
+                return self.response_error(task, e);
             }
             // Emit an update event per affected row to the Event Plane,
             // so AFTER-UPDATE triggers and CDC/change-stream consumers
@@ -342,31 +366,42 @@ impl CoreLoop {
             // Event Plane's WAL-replay bulk variants are aggregate
             // metadata reconstructed only when the live per-row events
             // were lost — the live path always emits per row.
+            //
+            // The identity is the one INSERT minted: the declared primary
+            // key when the collection declares one, else the decimal
+            // surrogate. The redo entry below journals the same identity.
+            let row_identity = stored_row_identity(
+                &updated_bytes,
+                strict_schema.as_ref(),
+                declared_primary_key,
+                storage_key,
+            );
+            // `row_identity` is read again below for `RETURNING`'s `id` field,
+            // so the event-emit boundary gets a clone rather than the move.
             self.emit_put_event(
                 task,
                 tid,
                 collection,
-                doc_id,
+                row_identity.clone(),
                 &updated_bytes,
                 Some(&current_bytes),
             );
             affected += 1;
             if returning.is_some() {
-                // `doc_id` is the surrogate hex storage key, which only
-                // stands in as `id` for a row that declares no primary
-                // key of its own — overwriting a declared key would
-                // return a value the client never wrote.
-                returning_doc::attach_row_id(&mut doc, doc_id);
+                // `row_identity` only stands in as `id` for a row that
+                // declares no primary key of its own — overwriting a
+                // declared key would return a value the client never wrote.
+                returning_doc::attach_row_id(&mut doc, &row_identity);
                 returned_docs.push(doc);
             }
             // Carry the surrogate + post-image back for a post-apply
             // `Put` redo. `updated_bytes` is moved as its last use;
             // gated on `has_vectors` so a non-vector collection pays
-            // nothing. Keyed by the row's surrogate parsed from its
-            // doc_id (the hex-encoded surrogate storage key).
-            if has_vectors && let Some(surrogate) = row_surrogate {
+            // nothing.
+            if has_vectors {
                 write_set.push(WriteSetEntry {
                     surrogate: surrogate.as_u32(),
+                    identity: row_identity,
                     is_delete: false,
                     value: updated_bytes,
                     collection: None,

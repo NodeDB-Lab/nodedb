@@ -8,6 +8,7 @@
 use super::helpers::{TENANT_A, TENANT_B};
 use nodedb::control::change_stream::{ChangeEvent, ChangeOperation, ChangeStream, ReplayStart};
 use nodedb::types::{Lsn, TenantId};
+use nodedb_types::RowIdentity;
 
 #[test]
 fn cdc_stream_isolated_between_tenants() {
@@ -19,7 +20,7 @@ fn cdc_stream_isolated_between_tenants() {
     // Publish a change event for Tenant A on "orders".
     stream.publish(ChangeEvent {
         collection: "orders".into(),
-        document_id: "order_1".into(),
+        document_id: RowIdentity::from_user_key("order_1"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 1000,
         tenant_id: TenantId::new(TENANT_A),
@@ -30,7 +31,7 @@ fn cdc_stream_isolated_between_tenants() {
     // Publish a change event for Tenant B on "orders".
     stream.publish(ChangeEvent {
         collection: "orders".into(),
-        document_id: "order_2".into(),
+        document_id: RowIdentity::from_user_key("order_2"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 2000,
         tenant_id: TenantId::new(TENANT_B),
@@ -60,10 +61,10 @@ fn cdc_stream_isolated_between_tenants() {
 
     assert_eq!(a_events.len(), 1);
     assert_eq!(a_events[0].tenant_id, TenantId::new(TENANT_A));
-    assert_eq!(a_events[0].document_id, "order_1");
+    assert_eq!(a_events[0].document_id.as_str(), "order_1");
     assert_eq!(b_events.len(), 1);
     assert_eq!(b_events[0].tenant_id, TenantId::new(TENANT_B));
-    assert_eq!(b_events[0].document_id, "order_2");
+    assert_eq!(b_events[0].document_id.as_str(), "order_2");
 }
 
 #[test]
@@ -74,7 +75,7 @@ fn cdc_opaque_cursor_keeps_same_millisecond_events_pageable() {
     for (lsn, document_id) in [(1, "first"), (2, "second"), (3, "third")] {
         stream.publish(ChangeEvent {
             collection: "orders".into(),
-            document_id: document_id.into(),
+            document_id: RowIdentity::from_user_key(document_id),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1_000,
             tenant_id,
@@ -87,7 +88,7 @@ fn cdc_opaque_cursor_keeps_same_millisecond_events_pageable() {
         .query_changes(tenant_id, Some("orders"), ReplayStart::Timestamp(0), 1)
         .expect("timestamp replay cannot expire");
     assert_eq!(first_page.events.len(), 1);
-    assert_eq!(first_page.events[0].document_id, "first");
+    assert_eq!(first_page.events[0].document_id.as_str(), "first");
 
     let second_page = stream
         .query_changes(
@@ -98,7 +99,7 @@ fn cdc_opaque_cursor_keeps_same_millisecond_events_pageable() {
         )
         .expect("fresh cursor must resume");
     assert_eq!(second_page.events.len(), 1);
-    assert_eq!(second_page.events[0].document_id, "second");
+    assert_eq!(second_page.events[0].document_id.as_str(), "second");
 }
 
 #[test]
@@ -108,7 +109,7 @@ fn cdc_different_collections_isolated() {
     // Same tenant, different collections.
     stream.publish(ChangeEvent {
         collection: "orders".into(),
-        document_id: "o1".into(),
+        document_id: RowIdentity::from_user_key("o1"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 1000,
         tenant_id: TenantId::new(TENANT_A),
@@ -117,7 +118,7 @@ fn cdc_different_collections_isolated() {
     });
     stream.publish(ChangeEvent {
         collection: "users".into(),
-        document_id: "u1".into(),
+        document_id: RowIdentity::from_user_key("u1"),
         operation: ChangeOperation::Insert,
         timestamp_ms: 2000,
         tenant_id: TenantId::new(TENANT_A),

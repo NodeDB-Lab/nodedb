@@ -34,7 +34,7 @@ impl CoreLoop {
                 valid_at_ms: None,
                 limit,
             },
-            &|_, _| true,
+            &|_: &nodedb_types::StorageKey, _: &[u8]| true,
             // No task in scope: this helper serves callers that supply their
             // own bound (an explicit `limit`), so no deadline cuts it short.
             &crate::engine::sparse::scan_stop::never_stop,
@@ -46,8 +46,8 @@ impl CoreLoop {
         );
 
         let mut normalized = Vec::with_capacity(docs.len());
-        for (id, raw) in docs {
-            normalized.push(sparse_row_to_doc(&id, &raw, format.as_format_ref()));
+        for (key, raw) in docs {
+            normalized.push(sparse_row_to_doc(&key, &raw, format.as_format_ref()));
         }
         Ok(normalized)
     }

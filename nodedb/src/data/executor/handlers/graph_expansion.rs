@@ -45,12 +45,16 @@ pub(in crate::data::executor) struct GraphExpansionParams<'a> {
 
 /// Reached nodes, in both currencies.
 ///
-/// `reached` is the surrogate set — the form that intersects with another
-/// engine's candidates. `names` / `distances` are the same nodes resolved for
-/// ranking and for the response, produced by a single pass at the end.
+/// `reached` is the surrogate-bound subset with hop distances — the form that
+/// fuses with another engine's candidates on the storage key. `names` /
+/// `distances` are every reached node resolved by name, for ranking by name
+/// and for the response. Both come from a single pass at the end.
 pub(in crate::data::executor) struct GraphExpansion {
     pub names: Vec<String>,
     pub distances: HashMap<String, usize>,
+    /// `(surrogate, hop distance)` for each reached node that carries a
+    /// surrogate. Nodes counted in `unaddressable` are absent here.
+    pub reached: Vec<(Surrogate, usize)>,
     pub truncated: bool,
     /// Reached nodes that carry no surrogate, so they are traversed *through*
     /// but can never intersect another engine's candidates. Carried to the
@@ -89,6 +93,7 @@ impl CoreLoop {
             return GraphExpansion {
                 names: Vec::new(),
                 distances: HashMap::new(),
+                reached: Vec::new(),
                 truncated: false,
                 unaddressable: 0,
             };
@@ -153,6 +158,7 @@ impl CoreLoop {
     ) -> GraphExpansion {
         let mut names = Vec::with_capacity(hops.distances.len());
         let mut distances = HashMap::with_capacity(hops.distances.len());
+        let mut reached = Vec::with_capacity(hops.reached.len() as usize);
         for &(local, depth) in &hops.distances {
             // Local ids come from this partition's own walk, so the name lookup
             // is total; skipping rather than unwrapping keeps a torn index from
@@ -161,10 +167,16 @@ impl CoreLoop {
                 names.push(name.to_string());
                 distances.insert(name.to_string(), depth);
             }
+            // `node_surrogate_raw` yields the ZERO sentinel for an unbound node.
+            let raw = partition.node_surrogate_raw(local);
+            if raw != 0 {
+                reached.push((Surrogate::new(raw), depth));
+            }
         }
         GraphExpansion {
             names,
             distances,
+            reached,
             truncated: hops.truncated,
             unaddressable: hops.unaddressable,
         }

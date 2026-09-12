@@ -17,8 +17,8 @@ use crate::types::{DatabaseId, TenantId};
 
 /// One matched row and everything the apply loop needs to land it.
 pub(in crate::data::executor) struct ProjectedUpdateRow {
-    /// Storage key (the surrogate hex).
-    pub(in crate::data::executor) doc_id: String,
+    /// The row's storage key.
+    pub(in crate::data::executor) key: crate::engine::document::store::StorageKey,
     /// The row as stored before the update — the `old_value` of the emitted
     /// event and the old side of the secondary-index diff.
     pub(in crate::data::executor) current_bytes: Vec<u8>,
@@ -36,7 +36,7 @@ pub(in crate::data::executor) struct ProjectUpdateRows<'a> {
     pub(in crate::data::executor) tid: u64,
     pub(in crate::data::executor) collection: &'a str,
     /// The settled apply set, in statement order.
-    pub(in crate::data::executor) doc_ids: &'a [String],
+    pub(in crate::data::executor) doc_ids: &'a [crate::engine::document::store::StorageKey],
     pub(in crate::data::executor) updates: &'a [(String, UpdateValue)],
     /// `Some` for a strict collection, whose bodies are Binary Tuples.
     pub(in crate::data::executor) strict_schema: Option<&'a StrictSchema>,
@@ -69,8 +69,10 @@ impl CoreLoop {
         );
 
         let mut projected = Vec::with_capacity(doc_ids.len());
-        for doc_id in doc_ids {
-            let Some(current_bytes) = self.sparse.get(database_id, tid, collection, doc_id)? else {
+        for key in doc_ids {
+            let doc_id_owned = key.to_string();
+            let doc_id = doc_id_owned.as_str();
+            let Some(current_bytes) = self.sparse.get(database_id, tid, collection, key)? else {
                 continue;
             };
 
@@ -87,13 +89,23 @@ impl CoreLoop {
                 )
                 .ok_or_else(|| {
                     crate::diag::strict_row_undecodable(collection, doc_id, "bulk_update_project");
-                    crate::data::executor::strict_format::undecodable_strict_row(collection, doc_id)
+                    let identity = key.to_identity();
+                    crate::data::executor::strict_format::undecodable_strict_row(
+                        collection,
+                        identity.as_str(),
+                    )
                 })?,
-                None => crate::data::executor::handlers::returning_doc::from_stored(
-                    &current_bytes,
-                    doc_id,
-                    None,
-                )?,
+                None => {
+                    // `key` is the storage key from the apply set. The
+                    // decoded document's `id` is the row's client-visible
+                    // identity, not the storage key.
+                    let identity = key.to_identity();
+                    crate::data::executor::handlers::returning_doc::from_stored(
+                        &current_bytes,
+                        &identity,
+                        None,
+                    )?
+                }
             };
 
             // Feeds the secondary-index SET diff for values the UPDATE drops.
@@ -163,7 +175,7 @@ impl CoreLoop {
             };
 
             projected.push(ProjectedUpdateRow {
-                doc_id: doc_id.clone(),
+                key: *key,
                 current_bytes,
                 old_doc,
                 doc,

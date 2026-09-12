@@ -22,7 +22,7 @@
 //! `"{database_id}:{tenant_id}:{collection}"`. A separate table is what makes
 //! collision with a document row structurally impossible — document rows live
 //! in `DOCUMENTS` under `"{database_id}:{tenant_id}:{collection}:{document_id}"`
-//! where `document_id` is the 8-hex surrogate (`surrogate_to_doc_id`). Storing
+//! where `document_id` is the 8-hex surrogate rendered via `StorageKey`. Storing
 //! the head as a sentinel row inside `DOCUMENTS` would be worse than a
 //! collision risk: every document scan is a prefix range over that table and
 //! would return the head as if it were a row.

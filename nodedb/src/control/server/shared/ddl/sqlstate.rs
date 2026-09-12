@@ -96,6 +96,19 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::PERIOD_LOCKED,
             format!("period locked: writes rejected on {collection}"),
         ),
+        ErrorCode::PeriodLockMisconfigured {
+            collection,
+            ref_table,
+            status_column,
+            row_identity,
+        } => (
+            "ERROR",
+            sqlstate::PERIOD_LOCK_MISCONFIGURED,
+            format!(
+                "period lock on {collection} misconfigured: reference table \
+                 '{ref_table}' row '{row_identity}' has no column '{status_column}'"
+            ),
+        ),
         ErrorCode::RetentionViolation { collection } => (
             "ERROR",
             sqlstate::RETENTION_VIOLATION,

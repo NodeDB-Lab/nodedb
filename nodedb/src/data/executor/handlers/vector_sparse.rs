@@ -144,21 +144,23 @@ impl CoreLoop {
         let results = crate::engine::vector::sparse::search::dot_product_topk(index, &query, top_k);
 
         // Convert to VectorSearchHit. The sparse index keys documents by their
-        // hex surrogate `doc_id`; emit that surrogate as the hit `id` and leave
-        // `doc_id` unset, exactly like the dense vector search — the Control-Plane
-        // response translator (`translate_vector_search_payload`) then resolves
-        // the surrogate back to the user PK for the projection. Fall back to the
-        // index's internal id only if a `doc_id` is somehow not a hex surrogate.
+        // hex surrogate `doc_id`; emit that surrogate's storage key as the hit
+        // `id` and leave `doc_id` unset, exactly like the dense vector search —
+        // the Control-Plane response translator (`translate_vector_search_payload`)
+        // then resolves the surrogate back to the user PK for the projection.
+        // Fall back to `Headless(internal_id)` only if `doc_id` is somehow not
+        // a hex surrogate.
         let hits: Vec<super::super::response_codec::VectorSearchHit> = results
             .iter()
             .map(|r| {
-                let surrogate = r
+                let id = r
                     .doc_id
                     .as_deref()
-                    .and_then(|d| u32::from_str_radix(d, 16).ok())
-                    .unwrap_or(r.internal_id);
+                    .and_then(nodedb_types::StorageKey::parse)
+                    .map(super::hybrid_key::HybridFusionKey::Bound)
+                    .unwrap_or(super::hybrid_key::HybridFusionKey::Headless(r.internal_id));
                 super::super::response_codec::VectorSearchHit {
-                    id: surrogate,
+                    id,
                     distance: r.score,
                     doc_id: None,
                     body: None,

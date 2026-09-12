@@ -14,7 +14,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::unique::{
     UniqueCheck, check_unique_constraints,
 };
-use crate::engine::document::store::{CollectionConfig, extract_index_values};
+use crate::engine::document::store::{CollectionConfig, StorageKey, extract_index_values};
 
 /// The overlay's verdict on a primary key within the current transaction.
 pub(super) enum OverlayPk {
@@ -30,10 +30,8 @@ impl CoreLoop {
     /// True when the primary key is present under BASE ∪ OVERLAY semantics.
     pub(super) fn stage_pk_present(
         &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        row_key: &str,
+        ctx: &StageCtx<'_>,
+        storage_key: &StorageKey,
         bitemporal: bool,
         overlay: OverlayPk,
     ) -> crate::Result<bool> {
@@ -49,14 +47,19 @@ impl CoreLoop {
                 let exists = if bitemporal {
                     self.sparse.versioned_exists_current_in_txn(
                         &txn,
-                        database_id,
-                        tid,
-                        collection,
-                        row_key,
+                        ctx.database_id,
+                        ctx.tid,
+                        ctx.collection,
+                        storage_key,
                     )?
                 } else {
-                    self.sparse
-                        .exists_in_txn(&txn, database_id, tid, collection, row_key)?
+                    self.sparse.exists_in_txn(
+                        &txn,
+                        ctx.database_id,
+                        ctx.tid,
+                        ctx.collection,
+                        storage_key,
+                    )?
                 };
                 drop(txn);
                 Ok(exists)
@@ -76,13 +79,16 @@ impl CoreLoop {
     ) -> crate::Result<()> {
         let collection = ctx.collection;
         // BASE: another durable row already owning one of the unique values.
+        // The row's own index entries are keyed by its storage key. The
+        // self-match exclusion compares that key, not the plan's document id.
+        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
         check_unique_constraints(UniqueCheck {
             sparse: &self.sparse,
             database_id: ctx.database_id,
             tid: ctx.tid,
             collection,
             doc: incoming_doc,
-            document_id: &ctx.document_id,
+            document_id: &storage_key,
             paths: &config.index_paths,
             bitemporal: config.bitemporal,
         })?;

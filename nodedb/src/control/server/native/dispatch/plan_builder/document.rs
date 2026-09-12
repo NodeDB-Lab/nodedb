@@ -20,7 +20,7 @@ pub(crate) fn build_point_get(
     collection: &str,
 ) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
-    match collection_type(ctx, collection) {
+    match collection_type(ctx, collection)? {
         Some(CollectionType::KeyValue(_)) => Ok(PhysicalPlan::Kv(KvOp::Get {
             collection: QualifiedCollection::new(ctx.database_id(), collection),
             key: doc_id.into_bytes(),
@@ -66,7 +66,7 @@ pub(crate) fn build_point_put(
 ) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
     let value = fields.data.clone().unwrap_or_default();
-    match collection_type(ctx, collection) {
+    match collection_type(ctx, collection)? {
         Some(CollectionType::KeyValue(_)) => {
             let key = doc_id.into_bytes();
             let surrogate = ctx.state.surrogate_assigner.assign(
@@ -135,7 +135,7 @@ pub(crate) fn build_point_delete(
     collection: &str,
 ) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
-    match collection_type(ctx, collection) {
+    match collection_type(ctx, collection)? {
         Some(CollectionType::KeyValue(_)) => Ok(PhysicalPlan::Kv(KvOp::Delete {
             collection: QualifiedCollection::new(ctx.database_id(), collection),
             keys: vec![doc_id.into_bytes()],
@@ -284,11 +284,26 @@ pub(crate) fn build_update(
     }))
 }
 
+/// A collection scan, routed by the collection's engine like the point ops
+/// above: a document scan reads the sparse store only, so every other engine
+/// takes its own scan builder. A spatial collection's plain scan is the
+/// columnar scan; the geometry query is `SpatialScan`.
 pub(crate) fn build_scan(
     ctx: &DispatchCtx<'_>,
     fields: &TextFields,
     collection: &str,
 ) -> crate::Result<PhysicalPlan> {
+    match collection_type(ctx, collection)? {
+        Some(CollectionType::KeyValue(_)) => return super::kv::build_scan(ctx, fields, collection),
+        Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
+            return super::timeseries::build_scan(ctx, fields, collection);
+        }
+        Some(CollectionType::Columnar(ColumnarProfile::Plain))
+        | Some(CollectionType::Columnar(ColumnarProfile::Spatial { .. })) => {
+            return super::columnar::build_scan(ctx, fields, collection);
+        }
+        Some(CollectionType::Document(_)) | None => {}
+    }
     let limit = fields.limit.unwrap_or(1000) as usize;
     let filters = fields.filters.clone().unwrap_or_default();
     Ok(PhysicalPlan::Document(DocumentOp::Scan {
@@ -400,6 +415,8 @@ pub(crate) fn build_bulk_delete(
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         // Filled in by the materialized-sum resolution pass.
         resolved_sum_targets: Vec::new(),
+        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
+        declared_primary_key: declared_primary_key(ctx, collection)?,
     }))
 }
 
@@ -412,6 +429,8 @@ pub(crate) fn build_truncate(
         restart_identity: false,
         // Filled in by the materialized-sum resolution pass.
         resolved_sum_targets: Vec::new(),
+        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
+        declared_primary_key: declared_primary_key(ctx, collection)?,
     }))
 }
 

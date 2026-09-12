@@ -12,7 +12,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook::HookCtx;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 use nodedb_types::Surrogate;
 
@@ -68,8 +67,6 @@ impl CoreLoop {
             rls_filters,
             resolved_sum_targets,
         } = params;
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
         debug!(
             core = self.core_id,
             %collection,
@@ -114,11 +111,12 @@ impl CoreLoop {
         // per branch. Gates the live HNSW re-index + the post-apply redo
         // write-set below; a non-vector collection pays neither.
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
+        let key = nodedb_types::StorageKey::for_surrogate(surrogate);
         let existing = if bitemporal {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, row_key)
+                .versioned_get_current(database_id, tid, collection, &key)
         } else {
-            self.sparse.get(database_id, tid, collection, row_key)
+            self.sparse.get(database_id, tid, collection, &key)
         };
 
         match existing {
@@ -129,7 +127,6 @@ impl CoreLoop {
                     collection,
                     document_id,
                     surrogate,
-                    row_key,
                     value,
                     on_conflict_updates,
                     rls_write_check,
@@ -149,7 +146,6 @@ impl CoreLoop {
                     collection,
                     document_id,
                     surrogate,
-                    row_key,
                     value,
                     rls_write_check,
                     returning,
@@ -203,6 +199,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -234,7 +231,7 @@ mod tests {
                 DB,
                 TID,
                 TARGET,
-                &surrogate_to_doc_id(T1),
+                &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -253,7 +250,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)

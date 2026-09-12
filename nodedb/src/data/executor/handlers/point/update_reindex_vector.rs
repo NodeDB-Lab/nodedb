@@ -19,17 +19,16 @@
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::VectorIndexPutParams;
-use nodedb_types::Surrogate;
+use crate::engine::document::store::StorageKey;
 
 /// Inputs for [`CoreLoop::update_reindex_vector_indexes`].
 pub(in crate::data::executor) struct UpdateVectorReindex<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    /// Hex-surrogate storage key (matches the `vector_doc_map` keying used by
-    /// the put and delete paths).
-    pub row_key: &'a str,
-    pub surrogate: Surrogate,
+    /// The row's storage key, matching the `vector_doc_map` keying used by the
+    /// put and delete paths.
+    pub storage_key: StorageKey,
     /// The freshly-written stored body (Binary Tuple for strict, MessagePack
     /// for schemaless). Decoded storage-mode-aware to extract the new vectors.
     pub new_body: &'a [u8],
@@ -69,7 +68,7 @@ impl CoreLoop {
         // entries) before re-inserting: `insert_with_surrogate` appends a new
         // node rather than replacing, so skipping this would leave the stale
         // embedding searchable alongside the new one.
-        self.remove_document_vector_indexes(p.database_id, p.tid, p.collection, p.row_key);
+        self.remove_document_vector_indexes(p.database_id, p.tid, p.collection, p.storage_key);
 
         // Re-extract vectors from the new body via the exact put-time path.
         // Vector extraction reads MessagePack; strict bodies are stored as
@@ -107,8 +106,7 @@ impl CoreLoop {
             database_id: p.database_id,
             tid: p.tid,
             collection: p.collection,
-            document_id: p.row_key,
-            surrogate: p.surrogate,
+            storage_key: p.storage_key,
             value: mp,
             wal_lsn: 0,
         })?;

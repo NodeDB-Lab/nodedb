@@ -2,28 +2,26 @@
 
 //! Shared helpers used across per-engine plan builders.
 
-use nodedb_types::DatabaseId;
 use nodedb_types::protocol::TextFields;
 
 use super::super::DispatchCtx;
 
 /// Single catalog lookup returning the collection's storage type.
 ///
-/// Returns `None` when: no catalog available, collection not found,
-/// or catalog read error. Callers treat `None` as "default to document".
+/// `Ok(None)` means the catalog holds no such collection; callers treat that
+/// as "default to document". A catalog read error propagates.
 pub(in crate::control::server::native::dispatch) fn collection_type(
     ctx: &DispatchCtx<'_>,
     collection: &str,
-) -> Option<nodedb_types::CollectionType> {
+) -> crate::Result<Option<nodedb_types::CollectionType>> {
     let catalog = ctx.state.credentials.catalog();
-    let coll = catalog
+    Ok(catalog
         .get_collection(
-            DatabaseId::DEFAULT,
+            ctx.database_id(),
             ctx.identity.tenant_id.as_u64(),
             collection,
-        )
-        .ok()??;
-    Some(coll.collection_type.clone())
+        )?
+        .map(|coll| coll.collection_type))
 }
 
 /// `collection`'s DDL-declared `PRIMARY KEY` column name, for the apply-time

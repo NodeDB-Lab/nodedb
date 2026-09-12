@@ -8,7 +8,7 @@
 
 use super::ctx::{DecodeCtx, bind_or_lookup};
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::wal_replication::types::ReplicatedSumTarget;
+use crate::control::wal_replication::types::{BalanceDeltaFields, ReplicatedSumTarget};
 use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget, ReturningSpec, UpdateValue};
 
 /// A decoded RETURNING projection spec plus the read filters gating it.
@@ -356,6 +356,8 @@ pub(super) fn bulk_dml(
             // No predicate on replay — see `point_delete`.
             rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             resolved_sum_targets,
+            // Read off the record — see `point_update`.
+            declared_primary_key,
         })
     }
 }
@@ -366,12 +368,14 @@ pub(super) fn truncate(
     collection: &str,
     restart_identity: bool,
     resolved_sum_targets: &WireSumResolution<'_>,
+    declared_primary_key: Option<String>,
 ) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::Truncate {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         restart_identity,
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
+        declared_primary_key,
     })
 }
 
@@ -397,23 +401,16 @@ pub(super) fn insert_select(
 
 /// Reconstruct an `ApplyBalanceDelta` plan. No surrogate binding: the document
 /// id here IS the hex surrogate, not a primary key. Idempotent like `KvIncr`.
-pub(super) fn apply_balance_delta(
-    collection: &str,
-    document_id: &str,
-    surrogate: u32,
-    column: &str,
-    delta: &str,
-    join_column: &str,
-    join_value: &str,
-) -> PhysicalPlan {
+pub(super) fn apply_balance_delta(fields: BalanceDeltaFields<'_>) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
-        document_id: document_id.to_owned(),
-        surrogate: nodedb_types::Surrogate::new(surrogate),
-        column: column.to_owned(),
-        delta: delta.to_owned(),
-        join_column: join_column.to_owned(),
-        join_value: join_value.to_owned(),
+        collection: nodedb_types::QualifiedCollection::from_stored(fields.collection.to_owned()),
+        document_id: fields.document_id.to_owned(),
+        surrogate: nodedb_types::Surrogate::new(fields.surrogate),
+        column: fields.column.to_owned(),
+        delta: fields.delta.to_owned(),
+        join_column: fields.join_column.to_owned(),
+        join_value: fields.join_value.to_owned(),
+        declared_primary_key: fields.declared_primary_key.map(str::to_owned),
     })
 }
 
@@ -586,6 +583,7 @@ mod tests {
                 "acc-1",
                 Surrogate::new(4242),
             )],
+            declared_primary_key: Some("sku".to_string()),
         });
         let bytes = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &bulk)
             .expect("encode must not error")
@@ -597,16 +595,24 @@ mod tests {
         match decoded {
             PhysicalPlan::Document(DocumentOp::BulkDelete {
                 resolved_sum_targets,
+                declared_primary_key,
                 ..
-            }) => assert_eq!(
-                resolved_sum_targets,
-                vec![ResolvedSumTarget::new(
-                    "accounts",
-                    "acc-1",
-                    Surrogate::new(4242)
-                )],
-                "a replica re-derives which rows matched, never which target they credit"
-            ),
+            }) => {
+                assert_eq!(
+                    resolved_sum_targets,
+                    vec![ResolvedSumTarget::new(
+                        "accounts",
+                        "acc-1",
+                        Surrogate::new(4242)
+                    )],
+                    "a replica re-derives which rows matched, never which target they credit"
+                );
+                assert_eq!(
+                    declared_primary_key.as_deref(),
+                    Some("sku"),
+                    "the declared primary key travels on the record"
+                );
+            }
             other => panic!("expected BulkDelete, got {other:?}"),
         }
     }
@@ -777,6 +783,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             restart_identity: true,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: Some("sku".to_string()),
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -789,10 +796,16 @@ mod tests {
             PhysicalPlan::Document(DocumentOp::Truncate {
                 collection,
                 restart_identity,
-                ..
+                resolved_sum_targets: _,
+                declared_primary_key,
             }) => {
                 assert_eq!(collection.as_str(), "docs");
                 assert!(restart_identity, "restart_identity must round-trip");
+                assert_eq!(
+                    declared_primary_key.as_deref(),
+                    Some("sku"),
+                    "declared_primary_key must round-trip"
+                );
             }
             other => panic!("expected Document(Truncate), got {other:?}"),
         }

@@ -78,6 +78,17 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         ErrorCode::PeriodLocked { collection } => {
             NodeDbError::period_locked(collection, "writes rejected")
         }
+        ErrorCode::PeriodLockMisconfigured {
+            collection,
+            ref_table,
+            status_column,
+            row_identity,
+        } => NodeDbError::period_lock_misconfigured(
+            collection,
+            ref_table,
+            status_column,
+            row_identity,
+        ),
         ErrorCode::RetentionViolation { collection } => {
             NodeDbError::retention_violation(collection, "retention period has not expired")
         }

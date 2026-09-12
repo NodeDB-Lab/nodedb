@@ -25,7 +25,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::handlers::generated;
 use crate::data::executor::handlers::transaction::overlay::Staged;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::types::TenantId;
 
 impl CoreLoop {
@@ -35,18 +35,11 @@ impl CoreLoop {
         value: &[u8],
         if_absent: bool,
     ) -> Response {
-        let row_key = surrogate_to_doc_id(ctx.surrogate);
+        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
 
         let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(
-            ctx.database_id,
-            ctx.tid,
-            ctx.collection,
-            row_key.as_str(),
-            bitemporal,
-            overlay_pk,
-        ) {
+        let present = match self.stage_pk_present(ctx, &storage_key, bitemporal, overlay_pk) {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -97,17 +90,10 @@ impl CoreLoop {
         // still exists (a surrogate outlives its row so a re-insert keeps it),
         // and an earlier statement in this transaction may already have
         // tombstoned it.
-        let row_key = surrogate_to_doc_id(ctx.surrogate);
+        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
         let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(
-            ctx.database_id,
-            ctx.tid,
-            ctx.collection,
-            row_key.as_str(),
-            bitemporal,
-            overlay_pk,
-        ) {
+        let present = match self.stage_pk_present(ctx, &storage_key, bitemporal, overlay_pk) {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -130,7 +116,7 @@ impl CoreLoop {
                 && let Err(e) = self.stage_admit_write(
                     rls_write_check,
                     &body,
-                    row_key.as_str(),
+                    &storage_key.to_identity(),
                     ctx.database_id,
                     ctx.tid,
                     ctx.collection,
@@ -160,7 +146,7 @@ impl CoreLoop {
             TenantId::new(ctx.tid),
             ctx.collection.to_string(),
         );
-        let row_key = surrogate_to_doc_id(ctx.surrogate);
+        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
 
         // Reject direct updates to generated columns (matches the durable path).
         if let Some(config) = self.doc_configs.get(&config_key)
@@ -187,11 +173,11 @@ impl CoreLoop {
                         ctx.database_id,
                         ctx.tid,
                         ctx.collection,
-                        row_key.as_str(),
+                        &storage_key,
                     )
                 } else {
                     self.sparse
-                        .get(ctx.database_id, ctx.tid, ctx.collection, row_key.as_str())
+                        .get(ctx.database_id, ctx.tid, ctx.collection, &storage_key)
                 };
                 match read {
                     Ok(Some(bytes)) => bytes,
@@ -218,7 +204,7 @@ impl CoreLoop {
         if let Err(e) = self.stage_admit_write(
             rls_write_check,
             &body,
-            row_key.as_str(),
+            &storage_key.to_identity(),
             ctx.database_id,
             ctx.tid,
             ctx.collection,

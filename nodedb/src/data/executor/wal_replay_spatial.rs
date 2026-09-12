@@ -10,7 +10,7 @@
 //! ## Surrogate re-derivation on replay
 //!
 //! The WAL payload `doc_id` field holds the hex-encoded surrogate produced by
-//! `surrogate_to_doc_id(surrogate)` (format `{:08x}`).  On replay we parse it
+//! `StorageKey`'s `Display` impl (format `{:08x}`). On replay we parse it
 //! back via `u32::from_str_radix(&doc_id, 16)` — no catalog round-trip needed.
 //!
 //! ## Geometry decode on replay
@@ -370,8 +370,8 @@ mod tests {
         }
     }
 
-    fn doc_id() -> String {
-        format!("{SURROGATE:08x}")
+    fn storage_key() -> nodedb_types::StorageKey {
+        nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(SURROGATE))
     }
 
     fn point(x: f64, y: f64) -> Geometry {
@@ -404,7 +404,7 @@ mod tests {
             SyncProvenance::default(),
             COLLECTION,
             FIELD,
-            doc_id(),
+            storage_key().to_string(),
             geometry_bytes,
         )
         .to_bytes()
@@ -417,7 +417,7 @@ mod tests {
             SyncProvenance::default(),
             COLLECTION,
             FIELD,
-            doc_id(),
+            storage_key().to_string(),
         )
         .to_bytes()
         .expect("encode SpatialDeletePayload");
@@ -440,7 +440,7 @@ mod tests {
     fn spatial_state(core: &CoreLoop) -> (usize, Option<String>, Option<nodedb_types::Value>) {
         let db = DatabaseId::new(DB);
         let tid = TenantId::new(TENANT);
-        let entry_id = fnv1a_hash(doc_id().as_bytes());
+        let entry_id = fnv1a_hash(storage_key().to_string().as_bytes());
         let entries = core
             .spatial_indexes
             .get(&(db, tid, COLLECTION.to_string(), FIELD.to_string()))
@@ -452,7 +452,7 @@ mod tests {
             .cloned();
         let body = core
             .sparse
-            .get(DB, TENANT, COLLECTION, &doc_id())
+            .get(DB, TENANT, COLLECTION, &storage_key())
             .expect("sparse read")
             .map(|bytes| nodedb_types::value_from_msgpack(&bytes).expect("decode body"));
         (entries, mapped, body)
@@ -471,7 +471,10 @@ mod tests {
         replay(&mut h.core, &record);
         let after_first = spatial_state(&h.core);
         assert_eq!(after_first.0, 1, "one geometry indexed");
-        assert_eq!(after_first.1.as_deref(), Some(doc_id().as_str()));
+        assert_eq!(
+            after_first.1.as_deref(),
+            Some(storage_key().to_string().as_str())
+        );
         assert!(after_first.2.is_some(), "the document body must be written");
 
         replay(&mut h.core, &record);

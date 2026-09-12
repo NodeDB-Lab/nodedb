@@ -13,6 +13,7 @@
 //! (`resolve/entry.rs`).
 
 use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan, TimeseriesOp};
+use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
@@ -68,7 +69,7 @@ impl CoreLoop {
                     tid,
                     txn_id,
                     collection.as_str(),
-                    document_id,
+                    RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
                 let resp = self.stage_point_insert(&ctx, value, *if_absent);
@@ -86,7 +87,7 @@ impl CoreLoop {
                     tid,
                     txn_id,
                     collection.as_str(),
-                    document_id,
+                    RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
                 let resp = self.stage_point_put(&ctx, value);
@@ -104,7 +105,7 @@ impl CoreLoop {
                     tid,
                     txn_id,
                     collection.as_str(),
-                    document_id,
+                    RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
                 let resp = self.stage_point_delete(&ctx, rls_write_check);
@@ -124,7 +125,7 @@ impl CoreLoop {
                     tid,
                     txn_id,
                     collection.as_str(),
-                    document_id,
+                    RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
                 let resp = self.stage_point_update(
@@ -149,7 +150,7 @@ impl CoreLoop {
                     tid,
                     txn_id,
                     collection.as_str(),
-                    document_id,
+                    RowIdentity::from_user_key(document_id.as_str()),
                     *surrogate,
                 );
                 let resp =
@@ -160,16 +161,18 @@ impl CoreLoop {
                 collection,
                 ollp_predicted_surrogates,
                 rls_write_check,
+                declared_primary_key,
                 ..
             }) => self
-                .stage_calvin_bulk_delete(
+                .stage_calvin_bulk_delete(super::calvin_overlay_stage_bulk::CalvinBulkDeleteStage {
                     task,
                     tid,
                     txn_id,
-                    collection.as_str(),
-                    ollp_predicted_surrogates.as_deref(),
+                    collection: collection.as_str(),
+                    ollp_predicted_surrogates: ollp_predicted_surrogates.as_deref(),
                     rls_write_check,
-                )
+                    declared_primary_key: declared_primary_key.as_deref(),
+                })
                 .map_err(ErrorCode::from),
             PhysicalPlan::Document(DocumentOp::BulkUpdate {
                 collection,

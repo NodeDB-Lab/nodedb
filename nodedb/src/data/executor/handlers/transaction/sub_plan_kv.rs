@@ -167,7 +167,11 @@ impl CoreLoop {
             };
 
             match intent {
-                ColumnarInsertIntent::InsertIfAbsent => {
+                // `InsertUnique` never displaces a prior row. A real
+                // conflict fails the statement before this undo entry is
+                // used. On the success path it matches `InsertIfAbsent`:
+                // record the new PK only when nothing occupies it.
+                ColumnarInsertIntent::InsertIfAbsent | ColumnarInsertIntent::InsertUnique => {
                     if !engine.pk_index().contains(&pk_bytes) {
                         inserted_pks.push(pk_bytes);
                     }

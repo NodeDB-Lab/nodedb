@@ -5,10 +5,13 @@
 //! Index key format: `"{database_id}:{tenant_id}:{collection}:{field}:{value}:{document_id}"`.
 //! Extracted from `btree.rs` — document CRUD stays there, index ops live here.
 
+use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, WriteTransaction};
 use tracing::debug;
 
-use super::btree::{DOCUMENTS, INDEXES, SparseEngine, coll_prefix, redb_err};
+use super::btree::{
+    DOCUMENTS, INDEXES, KeyedTable, SparseEngine, coll_prefix, invalid_storage_key_err, redb_err,
+};
 
 /// Identifies a single secondary-index entry for an in-txn mutation.
 ///
@@ -21,7 +24,7 @@ pub struct IndexEntryTxn<'a> {
     pub collection: &'a str,
     pub field: &'a str,
     pub value: &'a str,
-    pub document_id: &'a str,
+    pub document_id: &'a StorageKey,
 }
 
 /// Parameters for [`SparseEngine::range_scan`].
@@ -46,7 +49,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<()> {
         let write_txn = self
             .db
@@ -79,7 +82,7 @@ impl SparseEngine {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<()> {
         let prefix = coll_prefix(database_id, tenant_id, collection);
         let end = format!("{prefix}\u{ffff}");
@@ -231,7 +234,7 @@ impl SparseEngine {
         collection: &str,
         field: &str,
         value: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<()> {
         super::btree::with_tenant_key4(
             database_id,
@@ -368,7 +371,7 @@ impl SparseEngine {
         collection: &str,
         field: &str,
         value: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> crate::Result<()> {
         super::btree::with_tenant_key4(
             database_id,
@@ -402,7 +405,7 @@ impl SparseEngine {
         collection: &str,
         field: &str,
         limit: usize,
-    ) -> crate::Result<Vec<(String, String)>> {
+    ) -> crate::Result<Vec<(StorageKey, String)>> {
         let prefix = format!(
             "{}{field}:",
             coll_prefix(database_id, tenant_id, collection)
@@ -430,7 +433,10 @@ impl SparseEngine {
             {
                 let value = &rest[..colon_pos];
                 let doc_id = &rest[colon_pos + 1..];
-                results.push((doc_id.to_string(), value.to_string()));
+                let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
+                    invalid_storage_key_err(KeyedTable::Indexes, collection, doc_id)
+                })?;
+                results.push((doc_id, value.to_string()));
             }
         }
 
@@ -494,6 +500,8 @@ pub fn index_key_for(entry: IndexEntryTxn<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use super::*;
 
     fn open_temp() -> (SparseEngine, tempfile::TempDir) {
@@ -502,13 +510,25 @@ mod tests {
         (engine, dir)
     }
 
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
     #[test]
     fn range_scan_with_index() {
         let (engine, _dir) = open_temp();
-        engine.index_put(0, 1, "users", "age", "025", "u1").unwrap();
-        engine.index_put(0, 1, "users", "age", "030", "u2").unwrap();
-        engine.index_put(0, 1, "users", "age", "035", "u3").unwrap();
-        engine.index_put(0, 1, "users", "age", "040", "u4").unwrap();
+        engine
+            .index_put(0, 1, "users", "age", "025", &key(1))
+            .unwrap();
+        engine
+            .index_put(0, 1, "users", "age", "030", &key(2))
+            .unwrap();
+        engine
+            .index_put(0, 1, "users", "age", "035", &key(3))
+            .unwrap();
+        engine
+            .index_put(0, 1, "users", "age", "040", &key(4))
+            .unwrap();
         let results = engine
             .range_scan(RangeScanParams {
                 database_id: 0,
@@ -527,13 +547,17 @@ mod tests {
     fn delete_index_entries_for_field() {
         let (engine, _dir) = open_temp();
         engine
-            .index_put(0, 1, "users", "email", "alice@example.com", "u1")
+            .index_put(0, 1, "users", "email", "alice@example.com", &key(1))
             .unwrap();
         engine
-            .index_put(0, 1, "users", "email", "bob@example.com", "u2")
+            .index_put(0, 1, "users", "email", "bob@example.com", &key(2))
             .unwrap();
-        engine.index_put(0, 1, "users", "age", "30", "u1").unwrap();
-        engine.index_put(0, 1, "users", "age", "25", "u2").unwrap();
+        engine
+            .index_put(0, 1, "users", "age", "30", &key(1))
+            .unwrap();
+        engine
+            .index_put(0, 1, "users", "age", "25", &key(2))
+            .unwrap();
         let removed = engine
             .delete_index_entries_for_field(0, 1, "users", "email")
             .unwrap();

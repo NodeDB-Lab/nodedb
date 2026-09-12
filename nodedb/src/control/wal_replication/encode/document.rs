@@ -5,7 +5,7 @@
 //! A document write that maintains a derived total carries the join-key →
 //! target-surrogate resolution, copied onto the record so no applier re-derives it.
 
-use super::super::types::{ReplicatedSumTarget, ReplicatedWrite};
+use super::super::types::{BalanceDeltaFields, ReplicatedSumTarget, ReplicatedWrite};
 use nodedb_physical::physical_plan::{DocumentResolvedMutation, ResolvedSumTarget, UpdateValue};
 use nodedb_types::Surrogate;
 
@@ -193,12 +193,14 @@ pub(super) fn truncate(
     collection: &str,
     restart_identity: bool,
     resolved_sum_targets: &[ResolvedSumTarget],
+    declared_primary_key: Option<&str>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::DocTruncate {
         collection: collection.to_owned(),
         restart_identity,
         resolved_sum_targets: wire_targets(resolved_sum_targets),
         resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        declared_primary_key: declared_primary_key.map(str::to_owned),
     }
 }
 
@@ -211,6 +213,7 @@ pub(super) fn bulk_delete(
     resolved_sum_targets: &[ResolvedSumTarget],
     returning: Option<Vec<u8>>,
     rls_filters: &[u8],
+    declared_primary_key: Option<&str>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::BulkDml {
         collection: collection.to_owned(),
@@ -221,7 +224,7 @@ pub(super) fn bulk_delete(
         resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
-        declared_primary_key: None,
+        declared_primary_key: declared_primary_key.map(str::to_owned),
     }
 }
 
@@ -319,22 +322,15 @@ pub(super) fn resolved_write(
 /// Replicates as the delta it is, modelled on `KvIncr`: each replica applies it
 /// once in log order onto its own prior balance. The decimal travels as a
 /// string because `f64` is lossy past 15 significant digits.
-pub(super) fn apply_balance_delta(
-    collection: &str,
-    document_id: &str,
-    surrogate: u32,
-    column: &str,
-    delta: &str,
-    join_column: &str,
-    join_value: &str,
-) -> ReplicatedWrite {
+pub(super) fn apply_balance_delta(fields: BalanceDeltaFields<'_>) -> ReplicatedWrite {
     ReplicatedWrite::ApplyBalanceDelta {
-        collection: collection.to_owned(),
-        document_id: document_id.to_owned(),
-        surrogate,
-        column: column.to_owned(),
-        delta: delta.to_owned(),
-        join_column: join_column.to_owned(),
-        join_value: join_value.to_owned(),
+        collection: fields.collection.to_owned(),
+        document_id: fields.document_id.to_owned(),
+        surrogate: fields.surrogate,
+        column: fields.column.to_owned(),
+        delta: fields.delta.to_owned(),
+        join_column: fields.join_column.to_owned(),
+        join_value: fields.join_value.to_owned(),
+        declared_primary_key: fields.declared_primary_key.map(str::to_owned),
     }
 }

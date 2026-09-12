@@ -131,6 +131,7 @@ impl CoreLoop {
 
         // 3. Build ranked lists for weighted RRF.
         // Higher weight → lower k → steeper rank discount → more influence.
+        use super::hybrid_key::HybridFusionKey;
         use crate::query::fusion::{RankedResult, reciprocal_rank_fusion_weighted};
 
         let base_k = 60.0_f64;
@@ -145,17 +146,16 @@ impl CoreLoop {
             base_k * 100.0
         };
 
-        // Translate vector local-hnsw IDs to surrogate-hex doc_ids so the
-        // vector and text legs share the same RRF key space. Headless rows
-        // (no surrogate binding) fall back to a non-fusable sentinel —
-        // they cannot match any FTS doc_id, which is the correct behavior.
+        // Both legs key on `HybridFusionKey` so they fuse on one key space.
+        // A headless vector row (no surrogate binding) is `Headless` and
+        // cannot match any FTS hit, which is the correct behavior.
         //
         // Inside a transaction, read-your-own-writes: the vector and text legs
         // must also observe this transaction's staged document writes, folded
         // in via the shared overlay splice (which reuses the single-source
         // vector/FTS overlay merges). Outside a transaction the committed-only
         // construction below runs unchanged.
-        let (vector_ranked, text_ranked): (Vec<RankedResult>, Vec<RankedResult>) =
+        let (vector_ranked, text_ranked): super::hybrid_overlay::HybridRankedLegs =
             if let Some(txn_id) = task.request.txn_id {
                 match self.hybrid_ranked_with_overlay(
                     super::hybrid_overlay::HybridOverlayParams {
@@ -176,25 +176,22 @@ impl CoreLoop {
                     Err(e) => return self.response_error(task, e),
                 }
             } else {
-                let vector_ranked: Vec<RankedResult> = vector_results
+                let vector_ranked: Vec<RankedResult<HybridFusionKey>> = vector_results
                     .iter()
                     .enumerate()
                     .map(|(rank, r)| RankedResult {
-                        document_id: super::vector_search::vector_leg_doc_id(
-                            vector_collection,
-                            r.id,
-                        ),
+                        document_id: super::vector_search::vector_leg_key(vector_collection, r.id),
                         rank,
                         score: r.distance,
                         source: "vector",
                     })
                     .collect();
 
-                let text_ranked: Vec<RankedResult> = text_results
+                let text_ranked: Vec<RankedResult<HybridFusionKey>> = text_results
                     .iter()
                     .enumerate()
                     .map(|(rank, r)| RankedResult {
-                        document_id: crate::engine::document::store::surrogate_to_doc_id(r.doc_id),
+                        document_id: HybridFusionKey::for_surrogate(r.doc_id),
                         rank,
                         score: r.score,
                         source: "text",
@@ -220,18 +217,23 @@ impl CoreLoop {
         // the collection's registered kind — a tagged map and a plain document
         // map share the same map header, so the bytes cannot answer it.
         let body_format = self.sparse_body_format(task.request.database_id, tenant_id, collection);
-        let results: Vec<_> = fused
+        // The fused key is rendered once per row here, at the response
+        // envelope; it is the only place the key becomes text.
+        let rendered: Vec<(String, &crate::query::fusion::FusedResult<HybridFusionKey>)> = fused
             .iter()
             .filter(|f| {
                 if rls_filters.is_empty() {
                     return true;
                 }
-                match self.sparse.get(
-                    task.request.database_id.as_u64(),
-                    tid,
-                    collection,
-                    &f.document_id,
-                ) {
+                // A headless hit has no stored row to check the policy against,
+                // so it is treated the same as a row the lookup cannot find.
+                let Some(key) = f.document_id.storage_key() else {
+                    return false;
+                };
+                match self
+                    .sparse
+                    .get(task.request.database_id.as_u64(), tid, collection, &key)
+                {
                     Ok(Some(bytes)) => {
                         let normalized =
                             sparse_body_to_msgpack(&bytes, body_format.as_format_ref());
@@ -240,20 +242,20 @@ impl CoreLoop {
                     _ => false,
                 }
             })
-            .map(|f| {
+            .map(|f| (f.document_id.to_string(), f))
+            .collect();
+        let results: Vec<_> = rendered
+            .iter()
+            .map(|(doc_id, f)| {
                 let vector_rank = vector_results.iter().position(|r| {
-                    let doc_id = vector_collection
-                        .and_then(|c| c.get_surrogate(r.id))
-                        .map(crate::engine::document::store::surrogate_to_doc_id)
-                        .unwrap_or_else(|| format!("__local_{}", r.id));
-                    doc_id == f.document_id
+                    super::vector_search::vector_leg_key(vector_collection, r.id) == f.document_id
                 });
-                let text_rank = text_results.iter().position(|r| {
-                    crate::engine::document::store::surrogate_to_doc_id(r.doc_id) == f.document_id
-                });
+                let text_rank = text_results
+                    .iter()
+                    .position(|r| HybridFusionKey::for_surrogate(r.doc_id) == f.document_id);
 
                 super::super::response_codec::HybridSearchHit {
-                    doc_id: &f.document_id,
+                    doc_id,
                     score_field: score_alias.unwrap_or("rrf_score"),
                     rrf_score: f.rrf_score,
                     vector_rank,

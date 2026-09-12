@@ -8,8 +8,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 pub(in crate::data::executor) struct PointGetParams<'a> {
     pub tid: u64,
@@ -39,8 +38,7 @@ impl CoreLoop {
             system_as_of_ms,
             valid_at_ms,
         } = p;
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
         debug!(
             core = self.core_id,
             %collection,
@@ -74,7 +72,7 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                row_key,
+                &storage_key,
                 system_as_of_ms,
                 valid_at_ms,
             ) {
@@ -89,9 +87,13 @@ impl CoreLoop {
                     );
                 }
             }
-        } else if let Some(overlay_data) =
-            self.overlay_point_lookup(task, tid, collection, document_id, surrogate)
-        {
+        } else if let Some(overlay_data) = self.overlay_point_lookup(
+            task,
+            tid,
+            collection,
+            &RowIdentity::from_user_key(document_id),
+            surrogate,
+        ) {
             match overlay_data {
                 Ok(data) => data,
                 Err(response) => return response,
@@ -99,21 +101,21 @@ impl CoreLoop {
         } else {
             let cached = self
                 .doc_cache
-                .get(database_id, tid, collection, row_key)
+                .get(database_id, tid, collection, &storage_key)
                 .map(|v| v.to_vec());
             if let Some(data) = cached {
                 data
             } else {
                 let res = if bitemporal {
                     self.sparse
-                        .versioned_get_current(database_id, tid, collection, row_key)
+                        .versioned_get_current(database_id, tid, collection, &storage_key)
                 } else {
-                    self.sparse.get(database_id, tid, collection, row_key)
+                    self.sparse.get(database_id, tid, collection, &storage_key)
                 };
                 match res {
                     Ok(Some(data)) => {
                         self.doc_cache
-                            .put(database_id, tid, collection, row_key, &data);
+                            .put(database_id, tid, collection, &storage_key, &data);
                         data
                     }
                     Ok(None) => return self.response_with_payload(task, Vec::new()),
@@ -149,7 +151,8 @@ impl CoreLoop {
         let transcoded = {
             let normalized = sparse_body_to_msgpack(&data, body_format.as_format_ref());
             if !rls_filters.is_empty() {
-                let (_, gated) = sparse_row_to_doc(document_id, &data, body_format.as_format_ref());
+                let (_, gated) =
+                    sparse_row_to_doc(&storage_key, &data, body_format.as_format_ref());
                 if !super::super::rls_eval::rls_check_msgpack_bytes(rls_filters, &gated) {
                     return self.response_with_payload(task, Vec::new());
                 }

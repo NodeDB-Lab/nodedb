@@ -409,7 +409,9 @@ mod tests {
             sequence: 1,
             collection: Arc::from("odd\"; DROP TABLE audit; --"),
             op: WriteOp::Insert,
-            row_id: RowId::new("doc'; DELETE FROM audit; --"),
+            row_id: RowId::row(nodedb_types::RowIdentity::from_user_key(
+                "doc'; DELETE FROM audit; --",
+            )),
             lsn: Lsn::new(1),
             database_id: DatabaseId::DEFAULT,
             tenant_id: TenantId::new(1),

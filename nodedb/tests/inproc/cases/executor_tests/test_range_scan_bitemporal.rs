@@ -224,7 +224,7 @@ fn schemaless_bitemporal_update_moves_row_in_range() {
     seed_four(&mut ctx, "events");
 
     // The versioned row identity is the SURROGATE (a PointPut keys its
-    // version by `surrogate_to_doc_id(surrogate)`), so an UPDATE must reuse
+    // version by `StorageKey::for_surrogate(surrogate)`), so an UPDATE must reuse
     // the row's original surrogate to append a new version of the SAME row —
     // a fresh surrogate would create a distinct row instead of superseding.
     // Seed surrogates are 1..4 for d1..d4.

@@ -124,7 +124,7 @@ impl CoreLoop {
         // identity only in the storage key, never in the body, so the row
         // image must inject it before any predicate runs — otherwise
         // `id IS NULL` and RETURNING rows both lose the identity.
-        let to_msgpack = |doc_id: &str, value: &[u8]| -> Vec<u8> {
+        let to_msgpack = |doc_id: &nodedb_types::StorageKey, value: &[u8]| -> Vec<u8> {
             crate::data::executor::scan_normalize::sparse_row_to_doc(
                 doc_id,
                 value,
@@ -268,7 +268,7 @@ impl CoreLoop {
                     let key = if distinct {
                         nodedb_types::msgpack_to_json_string(&mp).unwrap_or_default()
                     } else {
-                        doc_id.clone()
+                        doc_id.to_string()
                     };
                     if !distinct || seen_keys.insert(key) {
                         new_rows.push(mp);

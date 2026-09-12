@@ -10,6 +10,7 @@
 //! the dense-vector path needs.
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Strict-schema `SparseVector` column names declared on `collection`, or
@@ -77,15 +78,15 @@ impl CoreLoop {
     /// Sparse inverted-index side-effect: for every declared `SparseVector`
     /// column, extract its string literal from the document body, parse it, and
     /// upsert it into the corresponding `SparseInvertedIndex` keyed by
-    /// `document_id`.
+    /// `storage_key`'s rendered text.
     ///
-    /// `document_id` is the hex-surrogate storage `row_key` — the SAME id the
-    /// delete path (`remove_document_sparse_indexes`) and the engine handler
+    /// `storage_key` is the SAME id the delete path
+    /// (`remove_document_sparse_indexes`) and the engine handler
     /// (`execute_sparse_insert` / `execute_sparse_search`) key on, so a search
     /// reads back exactly what this write wrote. The index `insert` is an
     /// upsert (it removes the doc's prior entries first), so a second put for
-    /// the same `document_id` replaces rather than duplicates. A missing field,
-    /// a non-string value, or an unparseable literal is skipped — mirroring the
+    /// the same key replaces rather than duplicates. A missing field, a
+    /// non-string value, or an unparseable literal is skipped — mirroring the
     /// dense-vector path's silent skip of malformed fields.
     ///
     /// No-op (byte-identical to a collection without sparse columns) when
@@ -95,7 +96,7 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        document_id: &str,
+        storage_key: StorageKey,
         value: &[u8],
     ) {
         let sparse_fields = self.strict_sparse_fields(database_id, tid, collection);
@@ -109,6 +110,8 @@ impl CoreLoop {
             return;
         };
 
+        // Rendered once here — the inverted index is keyed by text.
+        let document_id = storage_key.to_string();
         for field in &sparse_fields {
             let Some(nodedb_types::Value::String(literal)) = obj.get(field) else {
                 continue;
@@ -117,7 +120,7 @@ impl CoreLoop {
                 continue;
             };
             self.get_or_create_sparse_index(database_id, tid, collection, field)
-                .insert(document_id, &sv);
+                .insert(&document_id, &sv);
             // Sparse indexes are in-memory with no redb store behind them; the
             // checkpoint that persists them fires only on a dirty mark, exactly
             // as the standalone `execute_sparse_insert` handler flags it.
@@ -125,24 +128,28 @@ impl CoreLoop {
         }
     }
 
-    /// Drop every sparse-index posting entry a document produced, keyed by its
-    /// hex-surrogate storage `row_key`. Shared by the PointDelete cascade
-    /// (which orphans a removed row's sparse entries) and the PointUpdate
-    /// re-index (which clears the old literal before inserting the new one).
-    /// Mirrors `remove_document_vector_indexes`. No-op when the collection
-    /// declares no sparse columns.
+    /// Drop every sparse-index posting entry a document produced. Shared by
+    /// the PointDelete cascade (which orphans a removed row's sparse entries)
+    /// and the PointUpdate re-index (which clears the old literal before
+    /// inserting the new one). Mirrors `remove_document_vector_indexes`.
+    /// No-op when the collection declares no sparse columns.
     pub(in crate::data::executor) fn remove_document_sparse_indexes(
         &mut self,
         database_id: u64,
         tid: u64,
         collection: &str,
-        row_key: &str,
+        storage_key: StorageKey,
     ) {
         let sparse_fields = self.strict_sparse_fields(database_id, tid, collection);
+        if sparse_fields.is_empty() {
+            return;
+        }
+        // The sparse index keys postings by the rendered storage key.
+        let row_key = storage_key.to_string();
         for field in &sparse_fields {
             if self
                 .get_or_create_sparse_index(database_id, tid, collection, field)
-                .delete(row_key)
+                .delete(&row_key)
             {
                 self.checkpoint_coordinator.mark_dirty("vector", 1);
             }
@@ -154,7 +161,7 @@ impl CoreLoop {
 mod tests {
     use super::*;
     use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
     use nodedb_physical::physical_plan::StorageMode;
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
@@ -238,12 +245,17 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let field = "terms";
-        let row_key = surrogate_to_doc_id(Surrogate::new(1));
 
         register_strict_sparse(core, tid, collection, field);
 
         let doc = doc_with_sparse(field, "{3:0.5, 7:1.5}");
-        core.apply_point_put_sparse_indexes(db, tid, collection, &row_key, &doc);
+        core.apply_point_put_sparse_indexes(
+            db,
+            tid,
+            collection,
+            StorageKey::for_surrogate(Surrogate::new(1)),
+            &doc,
+        );
 
         assert_eq!(
             doc_count(core, db, tid, collection, field),
@@ -263,7 +275,6 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let field = "terms";
-        let row_key = surrogate_to_doc_id(Surrogate::new(1));
 
         register_strict_sparse(core, tid, collection, field);
 
@@ -271,14 +282,14 @@ mod tests {
             db,
             tid,
             collection,
-            &row_key,
+            StorageKey::for_surrogate(Surrogate::new(1)),
             &doc_with_sparse(field, "{3:0.5, 7:1.5}"),
         );
         core.apply_point_put_sparse_indexes(
             db,
             tid,
             collection,
-            &row_key,
+            StorageKey::for_surrogate(Surrogate::new(1)),
             &doc_with_sparse(field, "{1:0.9}"),
         );
 
@@ -300,7 +311,6 @@ mod tests {
         let tid = 1u64;
         let collection = "docs";
         let field = "terms";
-        let row_key = surrogate_to_doc_id(Surrogate::new(1));
 
         register_strict_sparse(core, tid, collection, field);
 
@@ -308,12 +318,17 @@ mod tests {
             db,
             tid,
             collection,
-            &row_key,
+            StorageKey::for_surrogate(Surrogate::new(1)),
             &doc_with_sparse(field, "{3:0.5, 7:1.5}"),
         );
         assert_eq!(doc_count(core, db, tid, collection, field), 1);
 
-        core.remove_document_sparse_indexes(db, tid, collection, &row_key);
+        core.remove_document_sparse_indexes(
+            db,
+            tid,
+            collection,
+            StorageKey::for_surrogate(Surrogate::new(1)),
+        );
         assert_eq!(
             doc_count(core, db, tid, collection, field),
             0,
@@ -331,7 +346,6 @@ mod tests {
         let db = 0u64;
         let tid = 1u64;
         let collection = "plain";
-        let row_key = surrogate_to_doc_id(Surrogate::new(1));
 
         // No strict sparse schema registered.
         assert!(!core.collection_has_sparse(
@@ -344,7 +358,7 @@ mod tests {
             db,
             tid,
             collection,
-            &row_key,
+            StorageKey::for_surrogate(Surrogate::new(1)),
             &doc_with_sparse("terms", "{3:0.5}"),
         );
 

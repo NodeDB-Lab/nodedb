@@ -9,10 +9,10 @@
 //! plan is still replayed through `execute_columnar_insert` inside the
 //! COMMIT `TransactionBatch`, which remains the sole durable apply.
 //!
-//! Row identity: a columnar row has no separate primary document id — it is
-//! surrogate-identified. The overlay's doc-id side-map therefore uses
-//! `surrogate_to_doc_id` (hex), matching the identity `execute_columnar_scan`
-//! uses for its own rows (`scan_memtable_rows_with_surrogates`).
+//! Row identity: the overlay's identity side-map holds the row's primary-key
+//! value when the schema declares one, else the decimal surrogate
+//! (`columnar_row_identity`). The overlay slot itself is the surrogate,
+//! matching `execute_columnar_scan` (`scan_memtable_rows_with_surrogates`).
 //!
 //! Row body encoding: each row's schema-ordered `Vec<Value>` is wrapped as a
 //! `Value::Array` and encoded via `nodedb_types::value_to_msgpack` — decoded
@@ -48,11 +48,11 @@ use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 use nodedb_types::value::Value;
 
 use super::context::StageCtx;
+use super::stage_columnar_dml::columnar_row_identity;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_write::ndb_field_to_value;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{TenantId, TxnId};
 
 /// Inputs for [`CoreLoop::stage_columnar_insert`]. Bundled because the raw
@@ -259,6 +259,7 @@ impl CoreLoop {
 
         let mut staged = 0usize;
         for (surrogate, values) in resolved {
+            let identity = columnar_row_identity(&schema, &values, surrogate.as_u32());
             let body = match nodedb_types::value_to_msgpack(&Value::Array(values)) {
                 Ok(b) => b,
                 Err(e) => {
@@ -271,8 +272,7 @@ impl CoreLoop {
                 }
             };
 
-            let doc_id = surrogate_to_doc_id(surrogate);
-            let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+            let ctx = StageCtx::new(task, tid, txn_id, collection, identity, surrogate);
             if let Err(e) = self.stage_put_capped(&ctx, body) {
                 return self.response_error(task, e);
             }

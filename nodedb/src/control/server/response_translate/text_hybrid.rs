@@ -5,7 +5,7 @@
 //! search responses.
 //!
 //! `TextOp::Search` hits carry the standard `{id, data}` document-scan
-//! envelope, keyed by `surrogate_to_doc_id(surrogate)` hex — the document
+//! envelope, keyed by `StorageKey::for_surrogate(surrogate)` hex — the document
 //! body itself already carries the user's PK as an ordinary field (it was
 //! written verbatim from the user's INSERT), so the resolved value only
 //! needs injecting when the body has no `id` field of its own (a headless
@@ -21,27 +21,14 @@
 //! the same [`super::vector::resolve_surrogate_pk`] catalog call the vector
 //! translator uses.
 
-use nodedb_types::{DatabaseId, Surrogate, TenantId};
+use nodedb_types::{DatabaseId, TenantId};
 use serde_json::Value as JsonValue;
 
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec::decode_payload_to_json;
 
+use super::hit_key::parse_surrogate_hex;
 use super::vector::resolve_surrogate_pk;
-
-/// A `__local_<id>` doc_id is the vector leg's sentinel for a hit with no
-/// surrogate binding (see `vector_leg_doc_id`) — it never corresponds to a
-/// real surrogate and must not be parsed as hex.
-const HEADLESS_SENTINEL_PREFIX: &str = "__local_";
-
-/// Decode a `doc_id` candidate string into a surrogate, rejecting the
-/// headless sentinel and any non-hex value.
-fn parse_surrogate_hex(candidate: &str) -> Option<Surrogate> {
-    if candidate.starts_with(HEADLESS_SENTINEL_PREFIX) {
-        return None;
-    }
-    u32::from_str_radix(candidate, 16).ok().map(Surrogate::new)
-}
 
 /// Decode the DP-side JSON/msgpack array of `TextOp::Search` /
 /// `PhraseSearch`-shaped hits (`{id: <surrogate hex>, data: {...}}`), and for
@@ -100,11 +87,11 @@ pub fn translate_text_search_payload(
 /// (`{doc_id: <surrogate hex or __local_ sentinel>, <score alias>: f64,
 /// vector_rank?, text_rank?}`), resolve each row's `doc_id` surrogate to the
 /// user PK via the catalog, and inject it as `id` — the field name every
-/// `SELECT id` projection looks up. `doc_id` itself is left in place (mirrors
-/// the vector translator's `_surrogate` debug field). A `__local_` sentinel
-/// or an unresolved surrogate is left untouched: no `id` field is added, so
-/// the projection reads NULL rather than a fabricated PK. On any decode
-/// failure the payload is returned unchanged.
+/// `SELECT id` projection looks up. A storage key must never reach a client,
+/// so `doc_id` itself is rewritten to the row's identity too: the catalog PK
+/// when one is declared, else the surrogate's decimal string. A `__local_`
+/// sentinel (no surrogate binding) passes through untouched in both fields.
+/// On any decode failure the payload is returned unchanged.
 pub fn translate_hybrid_search_payload(
     payload: &[u8],
     state: &SharedState,
@@ -131,10 +118,10 @@ pub fn translate_hybrid_search_payload(
         let Some(surrogate) = parse_surrogate_hex(&hex_id) else {
             continue;
         };
-        if let Some(pk) = resolve_surrogate_pk(state, database_id, tenant_id, collection, surrogate)
-        {
-            map.insert("id".to_string(), JsonValue::String(pk));
-        }
+        let identity = resolve_surrogate_pk(state, database_id, tenant_id, collection, surrogate)
+            .unwrap_or_else(|| surrogate.as_u32().to_string());
+        map.insert("id".to_string(), JsonValue::String(identity.clone()));
+        map.insert("doc_id".to_string(), JsonValue::String(identity));
     }
 
     match sonic_rs::to_string(&JsonValue::Array(rows)) {

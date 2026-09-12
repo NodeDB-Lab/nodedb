@@ -32,8 +32,9 @@ pub use quota::{
     quota_scope_replay_aborted, scope_quota_not_installed,
 };
 pub use recovery::{
-    batch_insert_without_surrogates, fts_index_update_failed, replay_record_unapplied,
-    strict_row_undecodable, wal_archival_failed_truncation_held, write_acked_without_durability,
+    batch_insert_without_surrogates, fts_index_update_failed, orphaned_index_entry_after_delete,
+    replay_record_unapplied, strict_row_undecodable, wal_archival_failed_truncation_held,
+    write_acked_without_durability,
 };
 pub use retention::retention_autowire_orphaned;
 pub use shared::entry_kind;

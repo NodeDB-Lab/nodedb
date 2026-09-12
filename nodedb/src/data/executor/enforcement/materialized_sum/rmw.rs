@@ -26,7 +26,7 @@
 use redb::WriteTransaction;
 use rust_decimal::Decimal;
 
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::apply::TargetWrite;
 use super::delta::json_to_decimal;
@@ -35,7 +35,6 @@ use crate::data::executor::doc_format;
 use crate::data::executor::handlers::document::read::decode::decode_scanned_document;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{DatabaseId, Lsn, TenantId};
 
 /// Everything one balance move needs, independent of which transaction it lands
@@ -57,6 +56,9 @@ pub(in crate::data::executor) struct BalanceRmw<'a> {
     /// Join value that resolved to `surrogate`, for the typed not-found error.
     pub join_value: &'a str,
     pub wal_lsn: Option<Lsn>,
+    /// The TARGET collection's declared `PRIMARY KEY` column, when it has
+    /// one. Names the target row in its event and redo entry.
+    pub target_declared_primary_key: Option<&'a str>,
 }
 
 impl BalanceRmw<'_> {
@@ -90,7 +92,9 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: &BalanceRmw<'_>,
     ) -> crate::Result<TargetWrite> {
-        let document_id = surrogate_to_doc_id(params.surrogate);
+        let storage_key = nodedb_types::StorageKey::for_surrogate(params.surrogate);
+        // Rendered once, for the not-an-object error message below.
+        let document_id = storage_key.to_string();
 
         // The TARGET collection's encoding is resolved from `doc_configs`, not
         // assumed: the target is a different collection from the source and may
@@ -116,7 +120,7 @@ impl CoreLoop {
             });
         }
 
-        let Some(old_bytes) = self.read_balance_row(txn, params, &document_id)? else {
+        let Some(old_bytes) = self.read_balance_row(txn, params, &storage_key)? else {
             return Err(params.target_not_found());
         };
 
@@ -156,7 +160,7 @@ impl CoreLoop {
                 database_id: params.database_id,
                 tid: params.tid,
                 collection: params.target_collection,
-                document_id: &document_id,
+                storage_key,
                 surrogate: params.surrogate,
                 value: &body,
                 index_text: true,
@@ -169,6 +173,7 @@ impl CoreLoop {
                 user_roles: &[],
                 enforce: false,
                 wal_lsn: params.wal_lsn,
+                resolved_targets: &[],
             },
         );
         let outcome = match put {
@@ -181,16 +186,21 @@ impl CoreLoop {
                     params.database_id,
                     params.tid,
                     params.target_collection,
-                    &document_id,
+                    &storage_key,
                 );
                 return Err(e);
             }
         };
 
+        // The identity INSERT minted for the target row, read from the
+        // MessagePack body just written: the declared primary key when the
+        // target declares one, else the decimal surrogate.
+        let identity =
+            RowIdentity::of_stored_row(&body, params.target_declared_primary_key, storage_key);
         Ok(TargetWrite {
             collection: params.target_collection.to_string(),
-            document_id,
             surrogate: params.surrogate,
+            identity,
             body,
             outcome,
         })
@@ -206,14 +216,14 @@ impl CoreLoop {
         &self,
         txn: &WriteTransaction,
         params: &BalanceRmw<'_>,
-        document_id: &str,
+        storage_key: &nodedb_types::StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
         if self.is_bitemporal(params.database_id, params.tid, params.target_collection) {
             self.sparse.versioned_get_current(
                 params.database_id,
                 params.tid,
                 params.target_collection,
-                document_id,
+                storage_key,
             )
         } else {
             self.sparse.get_in_txn(
@@ -221,7 +231,7 @@ impl CoreLoop {
                 params.database_id,
                 params.tid,
                 params.target_collection,
-                document_id,
+                storage_key,
             )
         }
     }

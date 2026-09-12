@@ -24,6 +24,8 @@
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 
+use nodedb_types::StorageKey;
+
 /// Composite cache key: `(database_id, tenant_id, collection, document_id)`.
 ///
 /// Same `(tenant_id, collection, document_id)` in two different databases are
@@ -137,7 +139,7 @@ impl DocCache {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) -> Option<&[u8]> {
         let key = Self::make_key(database_id, tenant_id, collection, document_id);
         match self
@@ -162,7 +164,7 @@ impl DocCache {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
         value: &[u8],
     ) {
         let key = Self::make_key(database_id, tenant_id, collection, document_id);
@@ -238,7 +240,7 @@ impl DocCache {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &StorageKey,
     ) {
         let key = Self::make_key(database_id, tenant_id, collection, document_id);
         let removed = self
@@ -322,7 +324,12 @@ impl DocCache {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    fn make_key(database_id: u64, tenant_id: u64, collection: &str, document_id: &str) -> CacheKey {
+    fn make_key(
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+        document_id: &StorageKey,
+    ) -> CacheKey {
         CacheKey {
             database_id,
             tenant_id,
@@ -376,50 +383,62 @@ impl DocCache {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use super::*;
+
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
 
     // ── Basic API ─────────────────────────────────────────────────────────────
 
     #[test]
     fn basic_put_get() {
         let mut cache = DocCache::new(16);
-        cache.put(0, 1, "users", "u1", b"alice");
-        assert_eq!(cache.get(0, 1, "users", "u1"), Some(b"alice".as_slice()));
-        assert_eq!(cache.get(0, 1, "users", "u2"), None);
+        cache.put(0, 1, "users", &key(1), b"alice");
+        assert_eq!(cache.get(0, 1, "users", &key(1)), Some(b"alice".as_slice()));
+        assert_eq!(cache.get(0, 1, "users", &key(2)), None);
     }
 
     #[test]
     fn overwrite_updates_value() {
         let mut cache = DocCache::new(16);
-        cache.put(0, 1, "users", "u1", b"alice");
-        cache.put(0, 1, "users", "u1", b"ALICE");
-        assert_eq!(cache.get(0, 1, "users", "u1"), Some(b"ALICE".as_slice()));
+        cache.put(0, 1, "users", &key(1), b"alice");
+        cache.put(0, 1, "users", &key(1), b"ALICE");
+        assert_eq!(cache.get(0, 1, "users", &key(1)), Some(b"ALICE".as_slice()));
     }
 
     #[test]
     fn invalidate_removes_entry() {
         let mut cache = DocCache::new(16);
-        cache.put(0, 1, "users", "u1", b"alice");
-        cache.invalidate(0, 1, "users", "u1");
-        assert_eq!(cache.get(0, 1, "users", "u1"), None);
+        cache.put(0, 1, "users", &key(1), b"alice");
+        cache.invalidate(0, 1, "users", &key(1));
+        assert_eq!(cache.get(0, 1, "users", &key(1)), None);
     }
 
     #[test]
     fn tenant_isolation() {
         let mut cache = DocCache::new(16);
-        cache.put(0, 1, "users", "u1", b"tenant1");
-        cache.put(0, 2, "users", "u1", b"tenant2");
-        assert_eq!(cache.get(0, 1, "users", "u1"), Some(b"tenant1".as_slice()));
-        assert_eq!(cache.get(0, 2, "users", "u1"), Some(b"tenant2".as_slice()));
+        cache.put(0, 1, "users", &key(1), b"tenant1");
+        cache.put(0, 2, "users", &key(1), b"tenant2");
+        assert_eq!(
+            cache.get(0, 1, "users", &key(1)),
+            Some(b"tenant1".as_slice())
+        );
+        assert_eq!(
+            cache.get(0, 2, "users", &key(1)),
+            Some(b"tenant2".as_slice())
+        );
     }
 
     #[test]
     fn hit_rate_tracking() {
         let mut cache = DocCache::new(16);
-        cache.put(0, 1, "c", "a", b"1");
-        cache.get(0, 1, "c", "a"); // hit
-        cache.get(0, 1, "c", "a"); // hit
-        cache.get(0, 1, "c", "b"); // miss
+        cache.put(0, 1, "c", &key(1), b"1");
+        cache.get(0, 1, "c", &key(1)); // hit
+        cache.get(0, 1, "c", &key(1)); // hit
+        cache.get(0, 1, "c", &key(2)); // miss
         assert!((cache.hit_rate() - 0.6667).abs() < 0.01);
         assert_eq!(cache.total_lookups(), 3);
     }
@@ -429,10 +448,10 @@ mod tests {
     #[test]
     fn cache_key_uniqueness_across_databases() {
         let mut cache = DocCache::new(16);
-        cache.put(1, 5, "col", "doc", b"db1");
-        cache.put(2, 5, "col", "doc", b"db2");
-        assert_eq!(cache.get(1, 5, "col", "doc"), Some(b"db1".as_slice()));
-        assert_eq!(cache.get(2, 5, "col", "doc"), Some(b"db2".as_slice()));
+        cache.put(1, 5, "col", &key(1), b"db1");
+        cache.put(2, 5, "col", &key(1), b"db2");
+        assert_eq!(cache.get(1, 5, "col", &key(1)), Some(b"db1".as_slice()));
+        assert_eq!(cache.get(2, 5, "col", &key(1)), Some(b"db2".as_slice()));
     }
 
     // ── Weighted eviction ─────────────────────────────────────────────────
@@ -447,10 +466,10 @@ mod tests {
         cache.set_database_weight(2, 1);
 
         for i in 0..4u32 {
-            cache.put(1, 1, "c", &format!("db1-{i}"), b"v");
+            cache.put(1, 1, "c", &key(i), b"v");
         }
         for i in 0..4u32 {
-            cache.put(2, 1, "c", &format!("db2-{i}"), b"v");
+            cache.put(2, 1, "c", &key(1000 + i), b"v");
         }
         assert_eq!(cache.len(), 8);
 
@@ -458,11 +477,11 @@ mod tests {
         // Since DB1 gets more new inserts, DB1's overshoot grows first and it
         // gets evicted. DB2 should retain all 4 entries.
         for i in 4..8u32 {
-            cache.put(1, 1, "c", &format!("db1-{i}"), b"v");
+            cache.put(1, 1, "c", &key(i), b"v");
         }
 
         let db2_resident: usize = (0..4u32)
-            .filter(|i| cache.get(2, 1, "c", &format!("db2-{i}")).is_some())
+            .filter(|i| cache.get(2, 1, "c", &key(1000 + i)).is_some())
             .count();
         assert_eq!(
             db2_resident, 4,
@@ -480,22 +499,22 @@ mod tests {
 
         // Fill with 5 DB1 and 5 DB2 entries.
         for i in 0..5u32 {
-            cache.put(1, 1, "c", &format!("a{i}"), b"v");
-            cache.put(2, 1, "c", &format!("b{i}"), b"v");
+            cache.put(1, 1, "c", &key(i), b"v");
+            cache.put(2, 1, "c", &key(1000 + i), b"v");
         }
         assert_eq!(cache.len(), capacity);
 
         // Add 5 more DB1 entries to trigger eviction. DB2 (weight=4) should
         // retain more entries than DB1 (weight=1).
         for i in 5..10u32 {
-            cache.put(1, 1, "c", &format!("a{i}"), b"v");
+            cache.put(1, 1, "c", &key(i), b"v");
         }
 
         let db1_count = (0..10u32)
-            .filter(|i| cache.get(1, 1, "c", &format!("a{i}")).is_some())
+            .filter(|i| cache.get(1, 1, "c", &key(*i)).is_some())
             .count();
         let db2_count = (0..5u32)
-            .filter(|i| cache.get(2, 1, "c", &format!("b{i}")).is_some())
+            .filter(|i| cache.get(2, 1, "c", &key(1000 + i)).is_some())
             .count();
         assert!(
             db2_count > db1_count,
@@ -506,26 +525,26 @@ mod tests {
     #[test]
     fn evict_collection_removes_correct_entries() {
         let mut cache = DocCache::new(16);
-        cache.put(1, 1, "col_a", "d1", b"1");
-        cache.put(1, 1, "col_b", "d1", b"2");
-        cache.put(2, 1, "col_a", "d1", b"3");
+        cache.put(1, 1, "col_a", &key(1), b"1");
+        cache.put(1, 1, "col_b", &key(1), b"2");
+        cache.put(2, 1, "col_a", &key(1), b"3");
 
         cache.evict_collection(1, 1, "col_a");
-        assert_eq!(cache.get(1, 1, "col_a", "d1"), None);
-        assert_eq!(cache.get(1, 1, "col_b", "d1"), Some(b"2".as_slice()));
-        assert_eq!(cache.get(2, 1, "col_a", "d1"), Some(b"3".as_slice()));
+        assert_eq!(cache.get(1, 1, "col_a", &key(1)), None);
+        assert_eq!(cache.get(1, 1, "col_b", &key(1)), Some(b"2".as_slice()));
+        assert_eq!(cache.get(2, 1, "col_a", &key(1)), Some(b"3".as_slice()));
     }
 
     #[test]
     fn evict_tenant_removes_correct_entries() {
         let mut cache = DocCache::new(16);
-        cache.put(1, 1, "col", "d1", b"t1");
-        cache.put(1, 2, "col", "d1", b"t2");
-        cache.put(2, 1, "col", "d1", b"db2");
+        cache.put(1, 1, "col", &key(1), b"t1");
+        cache.put(1, 2, "col", &key(1), b"t2");
+        cache.put(2, 1, "col", &key(1), b"db2");
 
         cache.evict_tenant(1, 1);
-        assert_eq!(cache.get(1, 1, "col", "d1"), None);
-        assert_eq!(cache.get(1, 2, "col", "d1"), Some(b"t2".as_slice()));
-        assert_eq!(cache.get(2, 1, "col", "d1"), Some(b"db2".as_slice()));
+        assert_eq!(cache.get(1, 1, "col", &key(1)), None);
+        assert_eq!(cache.get(1, 2, "col", &key(1)), Some(b"t2".as_slice()));
+        assert_eq!(cache.get(2, 1, "col", &key(1)), Some(b"db2".as_slice()));
     }
 }

@@ -224,6 +224,19 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
         ddl_err(sqlstate, message)
     })?;
 
+    crate::control::planner::period_lock::resolve_period_lock_targets(
+        state,
+        &mut tasks,
+        tenant_id,
+        database_id,
+        TraceId::ZERO,
+    )
+    .await
+    .map_err(|error| {
+        let (_, sqlstate, message) = error_to_sqlstate(&error);
+        ddl_err(sqlstate, message)
+    })?;
+
     let authorized_tasks = authorize_final_task_set(state, identity, &tasks)?;
     // Admission follows final authorization so an implicit-edge target denied
     // by policy does not consume a descriptor lease. The scope remains live

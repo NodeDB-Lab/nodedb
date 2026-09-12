@@ -25,15 +25,15 @@
 //! plan is still replayed through `execute_spatial_insert` /
 //! `execute_spatial_delete` inside the COMMIT `TransactionBatch`.
 
-use nodedb_types::Surrogate;
 use nodedb_types::geometry::Geometry;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::spatial_sync::geometry_to_value;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 use crate::types::TxnId;
 
 /// Inputs for [`CoreLoop::stage_spatial_insert`].
@@ -66,7 +66,7 @@ impl CoreLoop {
             geometry,
         } = params;
 
-        let doc_id = surrogate_to_doc_id(surrogate);
+        let doc_id = StorageKey::for_surrogate(surrogate).to_string();
 
         let mut doc_map = std::collections::HashMap::new();
         doc_map.insert(field.to_string(), geometry_to_value(geometry));
@@ -88,7 +88,14 @@ impl CoreLoop {
             }
         };
 
-        let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+        let ctx = StageCtx::new(
+            task,
+            tid,
+            txn_id,
+            collection,
+            RowIdentity::for_surrogate(surrogate),
+            surrogate,
+        );
         if let Err(e) = self.stage_put_capped(&ctx, body) {
             return self.response_error(task, e);
         }
@@ -105,8 +112,14 @@ impl CoreLoop {
         collection: &str,
         surrogate: Surrogate,
     ) -> Response {
-        let doc_id = surrogate_to_doc_id(surrogate);
-        let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+        let ctx = StageCtx::new(
+            task,
+            tid,
+            txn_id,
+            collection,
+            RowIdentity::for_surrogate(surrogate),
+            surrogate,
+        );
         self.txn_overlay_mut(ctx.txn_id).insert_tombstone(
             ctx.coll_key.clone(),
             ctx.surrogate.0,

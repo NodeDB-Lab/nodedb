@@ -42,6 +42,11 @@ pub enum ColumnarInsertIntent {
     /// assignments (with `EXCLUDED.col` bound to the incoming row), and
     /// writes the merged result.
     Put,
+    /// Plain `INSERT` on a collection whose `PRIMARY KEY` is declared on a
+    /// natural key column (not `id` / `document_id`). Duplicate PK refuses
+    /// the row with `RejectedConstraint` (SQLSTATE 23505) instead of the
+    /// `Insert` tombstone-and-append behavior above.
+    InsertUnique,
 }
 
 /// Base columnar physical operations.

@@ -298,7 +298,7 @@ impl CoreLoop {
         let hits: Vec<super::super::response_codec::VectorSearchHit> = scored_docs
             .iter()
             .map(|(s, score)| super::super::response_codec::VectorSearchHit {
-                id: s.as_u32(),
+                id: super::hybrid_key::HybridFusionKey::for_surrogate(*s),
                 distance: *score,
                 doc_id: None,
                 body: None,

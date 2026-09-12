@@ -494,6 +494,7 @@ mod routing_agreement_tests {
             delta: "25".to_owned(),
             join_column: "account_id".to_owned(),
             join_value: "acc-1".to_owned(),
+            declared_primary_key: None,
         })
     }
 

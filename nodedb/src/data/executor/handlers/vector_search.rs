@@ -2,8 +2,8 @@
 
 //! Vector search parameter types and shared helper functions.
 //!
-//! DP emits each hit's `id` as the bound `Surrogate.as_u32()` (or the
-//! local node id if the row is headless / pre-surrogate). `doc_id` is
+//! DP emits each hit's `id` as its `HybridFusionKey`: `Bound` when the local
+//! HNSW node resolves to a surrogate, `Headless` otherwise. `doc_id` is
 //! always `None` from DP; the Control Plane fills it via the catalog
 //! at the response boundary.
 
@@ -16,41 +16,39 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::vector::collection::VectorCollection;
 use crate::engine::vector::distance::DistanceMetric;
 
-/// Build a search hit from raw search result data. `id` is the bound
-/// surrogate when present, else the local node id (so headless rows
+/// Build a search hit from raw search result data. `id` is the
+/// `HybridFusionKey` the local HNSW node resolves to: `Bound` to its
+/// surrogate's storage key when present, else `Headless` (so headless rows
 /// still round-trip).
 pub(super) fn build_search_hit(
     collection: Option<&VectorCollection>,
     local_id: u32,
     distance: f32,
 ) -> super::super::response_codec::VectorSearchHit {
-    let id = collection
-        .and_then(|c| c.get_surrogate(local_id))
-        .map(|s| s.as_u32())
-        .unwrap_or(local_id);
     super::super::response_codec::VectorSearchHit {
-        id,
+        id: vector_leg_key(collection, local_id),
         distance,
         doc_id: None,
         body: None,
     }
 }
 
-/// Derive the RRF-fusion `document_id` for one vector-search leg hit, exactly
-/// as the committed hybrid path does: a hit whose local HNSW id resolves to a
-/// bound surrogate becomes that surrogate's hex doc_id (the shared key space
-/// the text leg also uses), while a headless hit (no surrogate binding)
-/// becomes the `__local_{id}` sentinel — a value that cannot fuse with any
-/// real FTS doc_id, the correct behavior for a row that carries no
-/// cross-engine identity. Shared by the autocommit hybrid / triple handlers
-/// and the transaction-overlay splice so both paths produce identical,
-/// non-spurious fusion keys (a headless local id is never misread as a global
-/// surrogate).
-pub(super) fn vector_leg_doc_id(collection: Option<&VectorCollection>, local_id: u32) -> String {
+/// The RRF-fusion key of one vector-search leg hit.
+///
+/// A hit whose local HNSW id resolves to a bound surrogate fuses under that
+/// surrogate's storage key, the key space the text and graph legs use. A
+/// headless hit (no surrogate binding) is `HybridFusionKey::Headless`: it
+/// fuses with nothing, so a local id is never misread as a global surrogate.
+/// Shared by the autocommit hybrid / triple handlers and the
+/// transaction-overlay splice so both paths derive identical keys.
+pub(super) fn vector_leg_key(
+    collection: Option<&VectorCollection>,
+    local_id: u32,
+) -> super::hybrid_key::HybridFusionKey {
     collection
         .and_then(|c| c.get_surrogate(local_id))
-        .map(crate::engine::document::store::surrogate_to_doc_id)
-        .unwrap_or_else(|| format!("__local_{local_id}"))
+        .map(super::hybrid_key::HybridFusionKey::for_surrogate)
+        .unwrap_or(super::hybrid_key::HybridFusionKey::Headless(local_id))
 }
 
 /// Translate a `SurrogateBitmap` (keyed by global surrogate IDs) into a
@@ -160,7 +158,8 @@ mod tests {
     use crate::engine::vector::collection::VectorCollection;
     use crate::engine::vector::hnsw::HnswParams;
 
-    use super::{surrogate_bitmap_to_global_ids, vector_leg_doc_id};
+    use super::super::hybrid_key::HybridFusionKey;
+    use super::{surrogate_bitmap_to_global_ids, vector_leg_key};
 
     /// Build a `VectorCollection` with `n` vectors of dimension 1.
     /// Vector `i` is `[i as f32]` and is bound to `Surrogate(i as u32 + 1)`
@@ -266,32 +265,31 @@ mod tests {
         }
     }
 
-    /// The hybrid-fusion doc_id derivation must emit the `__local_` sentinel
-    /// for a headless vector hit (no surrogate binding) and the surrogate hex
-    /// for a bound hit — so a headless row's raw local id is never misread as a
-    /// global surrogate and can never spuriously fuse with a real FTS doc_id.
-    /// This is the single shared helper both the committed hybrid path and the
-    /// transaction-overlay splice use, so parity is guaranteed by construction.
+    /// The hybrid-fusion key derivation must yield `Headless` for a vector hit
+    /// with no surrogate binding and `Bound` for a bound hit. A headless row's
+    /// raw local id is never misread as a global surrogate, so it can never
+    /// fuse with a real FTS hit. This is the single shared helper both the
+    /// committed hybrid path and the transaction-overlay splice use.
     #[test]
-    fn vector_leg_doc_id_headless_emits_local_sentinel_bound_emits_surrogate() {
-        // No collection at all → always the sentinel.
-        assert_eq!(vector_leg_doc_id(None, 7), "__local_7");
+    fn vector_leg_key_headless_emits_sentinel_bound_emits_surrogate() {
+        // No collection at all → always headless.
+        assert_eq!(vector_leg_key(None, 7), HybridFusionKey::Headless(7));
 
         let coll = make_collection_with_surrogates(3);
-        // Local id 0 is bound to Surrogate(1): resolves to a real hex doc_id
-        // (never the sentinel).
-        let bound = vector_leg_doc_id(Some(&coll), 0);
+        // Local id 0 is bound to Surrogate(1): resolves to that surrogate's
+        // storage key (never the sentinel).
+        let bound = vector_leg_key(Some(&coll), 0);
         assert_eq!(
             bound,
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate(1)),
-            "a bound hit must resolve to its surrogate's hex doc_id"
+            HybridFusionKey::for_surrogate(Surrogate(1)),
+            "a bound hit must resolve to its surrogate's storage key"
         );
-        assert!(
-            !bound.starts_with("__local_"),
-            "a bound hit must never emit the headless sentinel: {bound}"
+        assert_eq!(bound.to_string(), "00000001");
+        // A local id with no surrogate binding in this collection → headless.
+        assert_eq!(
+            vector_leg_key(Some(&coll), 999),
+            HybridFusionKey::Headless(999)
         );
-        // A local id with no surrogate binding in this collection → sentinel.
-        assert_eq!(vector_leg_doc_id(Some(&coll), 999), "__local_999");
     }
 
     #[test]

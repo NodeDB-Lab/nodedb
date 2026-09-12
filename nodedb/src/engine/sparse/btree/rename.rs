@@ -139,6 +139,8 @@ impl SparseEngine {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::{StorageKey, Surrogate};
+
     use super::*;
 
     fn open_temp() -> (SparseEngine, tempfile::TempDir) {
@@ -147,13 +149,17 @@ mod tests {
         (engine, dir)
     }
 
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
     /// Renaming a collection moves its chain head with its rows. Leaving the head
     /// under the old name would restart the renamed collection at genesis while
     /// its already-chained rows travelled to the new name.
     #[test]
     fn rename_moves_the_chain_head() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "ledger", "0000002a", b"row").unwrap();
+        engine.put(0, 1, "ledger", &key(42), b"row").unwrap();
         engine.put_chain_head(0, 1, "ledger", "h1").unwrap();
 
         engine

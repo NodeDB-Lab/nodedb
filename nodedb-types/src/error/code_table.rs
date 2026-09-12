@@ -57,6 +57,11 @@ error_code_table! {
     APPEND_ONLY_VIOLATION => AppendOnlyViolation { collection: String::new() },
     BALANCE_VIOLATION => BalanceViolation { collection: String::new() },
     PERIOD_LOCKED => PeriodLocked { collection: String::new() },
+    PERIOD_LOCK_MISCONFIGURED => PeriodLockMisconfigured {
+        collection: String::new(),
+        ref_table: String::new(),
+        status_column: String::new(),
+    },
     STATE_TRANSITION_VIOLATION => StateTransitionViolation { collection: String::new() },
     TRANSITION_CHECK_VIOLATION => TransitionCheckViolation { collection: String::new() },
     TYPE_GUARD_VIOLATION => TypeGuardViolation { collection: String::new() },

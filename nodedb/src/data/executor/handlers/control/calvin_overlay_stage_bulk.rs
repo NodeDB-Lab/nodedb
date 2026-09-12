@@ -41,9 +41,24 @@ use nodedb_types::Surrogate;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::bulk_dml::scan::ollp_predicted_doc_ids;
 use crate::data::executor::handlers::transaction::overlay::Staged;
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::{DatabaseId, TenantId, TxnId};
+
+/// Borrowed inputs for [`CoreLoop::stage_calvin_bulk_delete`], grouped so the
+/// method stays within the argument-count limit.
+pub(in crate::data::executor) struct CalvinBulkDeleteStage<'a> {
+    pub task: &'a ExecutionTask,
+    pub tid: u64,
+    pub txn_id: TxnId,
+    pub collection: &'a str,
+    pub ollp_predicted_surrogates: Option<&'a [u32]>,
+    /// Compiled RLS write policy deciding each removed row's pre-image.
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The collection's DDL-declared primary key, when it has one. Names the
+    /// column each removed row's identity is read from.
+    pub declared_primary_key: Option<&'a str>,
+}
 
 /// Loudly reject a Calvin bulk predicate plan that reached overlay staging
 /// without a predicted surrogate set. A Calvin-reachable bulk plan always
@@ -83,25 +98,46 @@ impl CoreLoop {
     /// uses to derive `apply_ids`. NOT a live predicate rescan.
     pub(in crate::data::executor) fn stage_calvin_bulk_delete(
         &mut self,
-        task: &ExecutionTask,
-        tid: u64,
-        txn_id: TxnId,
-        collection: &str,
-        ollp_predicted_surrogates: Option<&[u32]>,
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        params: CalvinBulkDeleteStage<'_>,
     ) -> crate::Result<()> {
+        let CalvinBulkDeleteStage {
+            task,
+            tid,
+            txn_id,
+            collection,
+            ollp_predicted_surrogates,
+            rls_write_check,
+            declared_primary_key,
+        } = params;
         let Some(predicted) = ollp_predicted_surrogates else {
             return Err(missing_prediction_error(collection));
         };
-        let coll_key: (DatabaseId, TenantId, String) = (
-            task.request.database_id,
-            TenantId::new(tid),
-            collection.to_string(),
-        );
+        let database_id = task.request.database_id;
+        let coll_key: (DatabaseId, TenantId, String) =
+            (database_id, TenantId::new(tid), collection.to_string());
 
         let mut predicted_sorted: Vec<u32> = predicted.to_vec();
         predicted_sorted.sort_unstable();
         let doc_ids = ollp_predicted_doc_ids(predicted);
+
+        // Each row's identity is read once from its current body, by the rule
+        // INSERT minted it with. A row with no current body removes nothing;
+        // its tombstone is keyed by the decimal surrogate.
+        let strict_schema = self.resolve_strict_schema(database_id.as_u64(), tid, collection);
+        let mut rows: Vec<(u32, nodedb_types::RowIdentity, Option<Vec<u8>>)> =
+            Vec::with_capacity(doc_ids.len());
+        for (surrogate, doc_id) in predicted_sorted.into_iter().zip(doc_ids) {
+            let body = self
+                .sparse
+                .get(database_id.as_u64(), tid, collection, &doc_id)?;
+            let identity = match &body {
+                Some(body) => {
+                    stored_row_identity(body, strict_schema.as_ref(), declared_primary_key, doc_id)
+                }
+                None => doc_id.to_identity(),
+            };
+            rows.push((surrogate, identity, body));
+        }
 
         // Decide every predicted row's pre-deletion image against the write
         // policy BEFORE any tombstone is staged, so a rejected row cannot leave
@@ -111,16 +147,13 @@ impl CoreLoop {
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
-            for doc_id in &doc_ids {
-                if let Some(body) =
-                    self.sparse
-                        .get(task.request.database_id.as_u64(), tid, collection, doc_id)?
-                {
+            for (_, identity, body) in &rows {
+                if let Some(body) = body {
                     self.stage_admit_write(
                         rls_write_check,
-                        &body,
-                        doc_id,
-                        task.request.database_id.as_u64(),
+                        body,
+                        identity,
+                        database_id.as_u64(),
                         tid,
                         collection,
                     )?;
@@ -129,8 +162,8 @@ impl CoreLoop {
         }
 
         let overlay = self.txn_overlay_mut(txn_id);
-        for (surrogate, doc_id) in predicted_sorted.into_iter().zip(doc_ids) {
-            overlay.insert_tombstone(coll_key.clone(), surrogate, &doc_id);
+        for (surrogate, identity, _body) in &rows {
+            overlay.insert_tombstone(coll_key.clone(), *surrogate, identity);
         }
         Ok(())
     }
@@ -173,9 +206,10 @@ impl CoreLoop {
 
         let mut predicted_sorted: Vec<u32> = predicted.to_vec();
         predicted_sorted.sort_unstable();
+        let strict_schema = self.resolve_strict_schema(database_id.as_u64(), tid, collection);
 
         for surrogate in predicted_sorted {
-            let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+            let storage_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
 
             // Current body: overlay wins over base (read-your-own-writes),
             // mirroring `stage_point_update`'s exact overlay-then-base read.
@@ -193,11 +227,11 @@ impl CoreLoop {
                             database_id.as_u64(),
                             tid,
                             collection,
-                            &doc_id,
+                            &storage_key,
                         )
                     } else {
                         self.sparse
-                            .get(database_id.as_u64(), tid, collection, &doc_id)
+                            .get(database_id.as_u64(), tid, collection, &storage_key)
                     };
                     match read {
                         Ok(Some(bytes)) => bytes,
@@ -217,15 +251,21 @@ impl CoreLoop {
             )?;
             // Decide the staged post-image against the write policy: this is
             // the row the Calvin flush will install.
+            let identity = stored_row_identity(
+                &new_body,
+                strict_schema.as_ref(),
+                declared_primary_key,
+                storage_key,
+            );
             self.stage_admit_write(
                 rls_write_check,
                 &new_body,
-                &doc_id,
+                &identity,
                 database_id.as_u64(),
                 tid,
                 collection,
             )?;
-            self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &doc_id, new_body)?;
+            self.stage_bulk_put_capped(txn_id, &coll_key, surrogate, &identity, new_body)?;
         }
         Ok(())
     }

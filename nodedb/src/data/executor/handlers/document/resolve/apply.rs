@@ -16,7 +16,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Handle `DocumentOp::ResolvedWrite`: check every precondition, apply every
@@ -50,7 +50,9 @@ impl CoreLoop {
                 && let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
                     value,
-                    document_id,
+                    &crate::engine::document::store::RowIdentity::from_user_key(
+                        document_id.as_str(),
+                    ),
                     None,
                     tid,
                     collection.as_str(),
@@ -69,13 +71,14 @@ impl CoreLoop {
                     value,
                     precondition,
                     resolved_sum_targets,
-                    document_id: _,
+                    document_id,
                     pk_bytes: _,
                 } => self.apply_resolved_document_put(
                     task,
                     ApplyResolvedPut {
                         tid,
                         collection: collection.as_str(),
+                        document_id,
                         surrogate: *surrogate,
                         value,
                         precondition: precondition.as_deref(),
@@ -122,13 +125,9 @@ impl CoreLoop {
     ) -> Result<(), ErrorCode> {
         let database_id = task.request.database_id.as_u64();
         for mutation in mutations {
-            let row_key = surrogate_to_doc_id(mutation.surrogate());
-            let current = self.doc_current_bytes(
-                database_id,
-                tid,
-                mutation.collection().as_str(),
-                row_key.as_str(),
-            )?;
+            let row_key = StorageKey::for_surrogate(mutation.surrogate());
+            let current =
+                self.doc_current_bytes(database_id, tid, mutation.collection().as_str(), &row_key)?;
             if current.as_deref() != mutation.precondition() {
                 return Err(ErrorCode::OllpRetryRequired);
             }

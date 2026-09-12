@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::engine::document::store::StorageKey;
 use crate::engine::document::store::config::CollectionConfig;
 use crate::engine::sparse::btree::SparseEngine;
 
@@ -73,7 +74,7 @@ impl<'a> DocumentEngine<'a> {
         path: &str,
         value: &str,
         bitemporal: bool,
-    ) -> crate::Result<Vec<String>> {
+    ) -> crate::Result<Vec<StorageKey>> {
         if bitemporal {
             return self.sparse.versioned_index_lookup_as_of(
                 self.database_id,
@@ -105,7 +106,14 @@ impl<'a> DocumentEngine<'a> {
                     self.database_id, self.tenant_id
                 );
                 if key.starts_with(&expected_prefix) {
-                    doc_ids.push(doc_id.to_string());
+                    let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
+                        crate::engine::sparse::btree::invalid_storage_key_err(
+                            crate::engine::sparse::btree::KeyedTable::Indexes,
+                            collection,
+                            doc_id,
+                        )
+                    })?;
+                    doc_ids.push(doc_id);
                 }
             }
         }
@@ -115,6 +123,8 @@ impl<'a> DocumentEngine<'a> {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use crate::engine::document::store::extract::json_to_msgpack;
 
     use super::*;
@@ -123,6 +133,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = SparseEngine::open(&dir.path().join("doc.redb")).unwrap();
         (engine, dir)
+    }
+
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
     }
 
     #[test]
@@ -135,14 +149,14 @@ mod tests {
         doc_engine
             .put(
                 "users",
-                "u1",
+                &key(1),
                 &serde_json::json!({"name": "Alice", "email": "alice@example.com"}),
             )
             .unwrap();
         doc_engine
             .put(
                 "users",
-                "u2",
+                &key(2),
                 &serde_json::json!({"name": "Bob", "email": "bob@example.com"}),
             )
             .unwrap();
@@ -150,7 +164,7 @@ mod tests {
         let results = doc_engine
             .index_lookup("users", "$.email", "alice@example.com", false)
             .unwrap();
-        assert_eq!(results, vec!["u1"]);
+        assert_eq!(results, vec![key(1)]);
     }
 
     #[test]
@@ -163,7 +177,7 @@ mod tests {
         doc_engine
             .put(
                 "users",
-                "u1",
+                &key(1),
                 &serde_json::json!({"name": "Alice", "tags": ["admin", "editor"]}),
             )
             .unwrap();
@@ -171,12 +185,12 @@ mod tests {
         let results = doc_engine
             .index_lookup("users", "$.tags", "admin", false)
             .unwrap();
-        assert_eq!(results, vec!["u1"]);
+        assert_eq!(results, vec![key(1)]);
 
         let results = doc_engine
             .index_lookup("users", "$.tags", "editor", false)
             .unwrap();
-        assert_eq!(results, vec!["u1"]);
+        assert_eq!(results, vec![key(1)]);
     }
 
     #[test]
@@ -189,7 +203,7 @@ mod tests {
         doc_engine
             .put(
                 "docs",
-                "d1",
+                &key(1),
                 &serde_json::json!({"title": "Hello", "metadata": {"lang": "en"}}),
             )
             .unwrap();
@@ -197,7 +211,7 @@ mod tests {
         let results = doc_engine
             .index_lookup("docs", "$.metadata.lang", "en", false)
             .unwrap();
-        assert_eq!(results, vec!["d1"]);
+        assert_eq!(results, vec![key(1)]);
     }
 
     #[test]
@@ -212,11 +226,11 @@ mod tests {
         let mut buf = Vec::new();
         rmpv::encode::write_value(&mut buf, &rmpv_val).unwrap();
 
-        doc_engine.put_raw("items", "i1", &buf).unwrap();
+        doc_engine.put_raw("items", &key(1), &buf).unwrap();
 
         let results = doc_engine
             .index_lookup("items", "$.category", "tools", false)
             .unwrap();
-        assert_eq!(results, vec!["i1"]);
+        assert_eq!(results, vec![key(1)]);
     }
 }

@@ -102,6 +102,17 @@ impl ToMessagePack for ErrorDetails {
             ErrorDetails::PeriodLocked { collection } => {
                 write1(writer, TAG_PERIOD_LOCKED, collection)
             }
+            ErrorDetails::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+            } => write3(
+                writer,
+                TAG_PERIOD_LOCK_MISCONFIGURED,
+                collection,
+                ref_table,
+                status_column,
+            ),
             ErrorDetails::StateTransitionViolation { collection } => {
                 write1(writer, TAG_STATE_TRANSITION_VIOLATION, collection)
             }

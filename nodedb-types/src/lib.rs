@@ -52,6 +52,7 @@ pub mod pg_compat;
 pub mod protocol;
 pub mod result;
 pub mod rls_write_check;
+pub mod row_identity;
 pub mod sparse_vector;
 pub mod sql_quote;
 pub mod surrogate;
@@ -118,6 +119,10 @@ pub use quota::{
 };
 pub use result::{QueryResult, SearchResult, SubGraph};
 pub use rls_write_check::{RlsWriteCheck, WriteGateDecision};
+pub use row_identity::{
+    DEFAULT_IDENTITY_COLUMN, HEADLESS_SENTINEL_PREFIX, RowIdentity, StorageKey, extract_pk_value,
+    value_to_pk_string,
+};
 pub use sparse_vector::{SparseVector, SparseVectorError};
 pub use sql_quote::{quote_ident, quote_literal};
 pub use surrogate::Surrogate;

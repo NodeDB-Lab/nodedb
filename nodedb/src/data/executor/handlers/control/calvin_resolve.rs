@@ -98,7 +98,6 @@ mod tests {
     use crate::bridge::envelope::{Admission, ExemptReason, Priority, Request, Status};
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::handlers::control::calvin::CalvinExecCtx;
-    use crate::engine::document::store::surrogate_to_doc_id;
     use crate::types::{DatabaseId, RequestId, TenantId, TraceId, VShardId};
     use crate::wal::RedoRecord;
 
@@ -172,6 +171,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         })
     }
 
@@ -198,7 +198,7 @@ mod tests {
     /// pre-existing state the predicate-write staging tests below apply
     /// their predicted surrogate set against.
     fn seed_row(core: &mut CoreLoop, collection: &str, surrogate: u32, field: &str, val: &str) {
-        let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let doc_id = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         let body = crate::data::executor::doc_format::canonicalize_document_for_storage(
             &doc_value(field, val),
         );

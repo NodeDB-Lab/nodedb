@@ -13,6 +13,7 @@
 //! Non-bitemporal collections keep the byte-identical plain
 //! `range_scan` + `sparse.get` path.
 
+use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -109,6 +110,7 @@ impl CoreLoop {
                         return self.response_error(task, e);
                     }
                 }
+                let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
                 let payload = serde_json::json!(doc_ids);
                 match sonic_rs::to_vec(&payload) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
@@ -175,17 +177,18 @@ impl CoreLoop {
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let doc_engine =
             crate::engine::document::store::DocumentEngine::new(&self.sparse, database_id, tid);
-        let mut doc_ids = match doc_engine.index_lookup(collection, path, value, bitemporal) {
-            Ok(ids) => ids,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("indexed fetch: {e}"),
-                    },
-                );
-            }
-        };
+        let mut doc_ids: Vec<StorageKey> =
+            match doc_engine.index_lookup(collection, path, value, bitemporal) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("indexed fetch: {e}"),
+                        },
+                    );
+                }
+            };
 
         // Strict collections store Binary Tuple bytes; the response codec
         // expects msgpack maps. Decode-then-encode here so cross-engine
@@ -310,7 +313,7 @@ impl CoreLoop {
                     } else {
                         bytes
                     };
-                    rows.push((doc_id.clone(), payload));
+                    rows.push((doc_id.to_string(), payload));
                 }
                 Ok(None) => {
                     // Index entry pointed at a deleted doc — skip, don't

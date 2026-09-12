@@ -11,6 +11,7 @@ use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::upsert::merge::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::StrictSchema;
 
@@ -21,7 +22,6 @@ pub(super) struct OverwriteCtx<'a> {
     pub collection: &'a str,
     pub document_id: &'a str,
     pub surrogate: Surrogate,
-    pub row_key: &'a str,
     pub value: &'a [u8],
     pub on_conflict_updates: &'a [(String, nodedb_physical::physical_plan::UpdateValue)],
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
@@ -50,7 +50,6 @@ impl CoreLoop {
             collection,
             document_id,
             surrogate,
-            row_key,
             value,
             on_conflict_updates,
             rls_write_check,
@@ -62,6 +61,11 @@ impl CoreLoop {
             strict_schema,
             current_bytes,
         } = ctx;
+
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        // The plan's `document_id` is the row's client identity: the write
+        // gate, the event, the redo entry, and `RETURNING` all name it.
+        let document_identity = RowIdentity::from_user_key(document_id);
 
         // Decode existing document to nodedb_types::Value.
         let existing_val = if let Some(schema) = strict_schema {
@@ -153,7 +157,7 @@ impl CoreLoop {
         if let Err(e) = rls_write_gate::admit_stored_row(
             rls_write_check,
             &merged_body,
-            row_key,
+            &document_identity,
             None,
             tid,
             collection,
@@ -167,7 +171,7 @@ impl CoreLoop {
         // the write below puts the new one in — otherwise KNN keeps
         // scoring both. No-op when `has_vectors` is false.
         if has_vectors {
-            self.remove_document_vector_indexes(database_id, tid, collection, row_key);
+            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
         }
 
         // One transaction for the body, every index that describes it,
@@ -194,13 +198,14 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: &merged_body,
                 index_text: true,
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: hook_ctx.resolved_targets,
             },
         ) {
             Ok(o) => o,
@@ -210,7 +215,7 @@ impl CoreLoop {
                 // that entry, which would then serve a body that never
                 // committed.
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return self.response_error(task, e);
             }
         };
@@ -231,7 +236,7 @@ impl CoreLoop {
             Ok(o) => o,
             Err(e) => {
                 self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+                    .invalidate(database_id, tid, collection, &storage_key);
                 return self.response_error(task, e);
             }
         };
@@ -244,7 +249,7 @@ impl CoreLoop {
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
             self.doc_cache
-                .invalidate(database_id, tid, collection, row_key);
+                .invalidate(database_id, tid, collection, &storage_key);
             return self.response_error(task, e);
         }
 
@@ -265,7 +270,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            row_key,
+            document_identity.clone(),
             &stored_bytes,
             Some(&current_bytes),
         );
@@ -285,13 +290,14 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 strict_schema,
-                &[(document_id, stored_bytes.as_slice())],
+                &[(&document_identity, stored_bytes.as_slice())],
             ),
             None => self.response_affected(task, 1),
         };
         if has_vectors {
             response.write_set = vec![WriteSetEntry {
                 surrogate: surrogate.as_u32(),
+                identity: document_identity,
                 is_delete: false,
                 value: merged_body,
                 collection: None,

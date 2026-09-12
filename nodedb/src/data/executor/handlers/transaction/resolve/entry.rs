@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
+use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
@@ -127,13 +128,13 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.clone(),
             );
-            let mut puts: Vec<(String, u32)> = match self.txn_overlays.get(&txn_id) {
+            let mut puts: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
                 Some(overlay) => overlay
                     .iter_doc_entries_for_collection(&coll_key)
                     .filter_map(|(doc_id, staged)| match staged {
                         Staged::Put(_) => overlay
                             .surrogate_for_doc_id(&coll_key, doc_id)
-                            .map(|surrogate| (doc_id.to_string(), surrogate)),
+                            .map(|surrogate| (doc_id, surrogate)),
                         Staged::Tombstone => None,
                     })
                     .collect(),
@@ -381,20 +382,19 @@ mod tests {
         ArrayOp, ColumnarInsertIntent, ColumnarOp, DocumentOp, GraphOp, KvOp, MetaOp,
         ReturningColumns, ReturningSpec, StorageMode, TimeseriesOp, UpdateValue, VectorOp,
     };
-    use nodedb_types::QualifiedCollection;
-    use nodedb_types::Surrogate;
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
     use nodedb_types::sync::wire::SyncProvenance;
+    use nodedb_types::{QualifiedCollection, RowIdentity, StorageKey, Surrogate};
 
     use crate::data::executor::handlers::graph::EdgePutParams;
     use crate::data::executor::strict_format;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
 
     use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
     use crate::data::executor::core_loop::CoreLoop;
     use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
-    use crate::data::executor::handlers::transaction::stage_write::hex_key;
+    use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
     use crate::data::executor::task::ExecutionTask;
     use crate::types::{
         DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, TxnId, VShardId,
@@ -448,6 +448,10 @@ mod tests {
 
     fn coll_key(coll: &str) -> (DatabaseId, TenantId, String) {
         (DatabaseId::DEFAULT, TenantId::new(TID), coll.to_string())
+    }
+
+    fn storage_key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
     }
 
     /// Decode the `RedoRecord` bytes carried in a resolve response payload.
@@ -511,7 +515,7 @@ mod tests {
         let overlay_bytes = match core
             .txn_overlays
             .get(&txn)
-            .and_then(|o| o.get_by_doc_id(&coll_key("counters"), &hex_key(b"c")))
+            .and_then(|o| o.get_by_doc_id(&coll_key("counters"), &kv_row_identity(b"c")))
             .expect("staged incr present")
         {
             Staged::Put(v) => v.clone(),
@@ -548,11 +552,16 @@ mod tests {
         let expire_at = 1_700_000_000_000u64;
         {
             let overlay = core.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("sessions"), 7, &hex_key(b"s1"), b"v1".to_vec());
+            overlay.insert_put(
+                coll_key("sessions"),
+                7,
+                &kv_row_identity(b"s1"),
+                b"v1".to_vec(),
+            );
             overlay.set_ttl(
                 coll_key("sessions"),
                 7,
-                &hex_key(b"s1"),
+                &kv_row_identity(b"s1"),
                 StagedTtl::ExpireAt(expire_at),
             );
         }
@@ -586,8 +595,12 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(3);
 
-        core.txn_overlay_mut(txn)
-            .insert_put(coll_key("kvc"), 9, &hex_key(b"k9"), b"body".to_vec());
+        core.txn_overlay_mut(txn).insert_put(
+            coll_key("kvc"),
+            9,
+            &kv_row_identity(b"k9"),
+            b"body".to_vec(),
+        );
 
         let resp = core.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
         let redo = decode_redo(&resp);
@@ -610,7 +623,7 @@ mod tests {
         let txn = TxnId::new(4);
 
         core.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("kvc"), 11, &hex_key(b"gone"));
+            .insert_tombstone(coll_key("kvc"), 11, &kv_row_identity(b"gone"));
 
         let resp = core.execute_resolve_txn(
             &task,
@@ -660,7 +673,7 @@ mod tests {
         core.txn_overlay_mut(txn).insert_put(
             coll_key("kvc"),
             1,
-            &hex_key(b"k"),
+            &kv_row_identity(b"k"),
             b"staged".to_vec(),
         );
 
@@ -683,8 +696,11 @@ mod tests {
 
         // A DELETE ... RETURNING stages like any other point delete: the overlay
         // holds a tombstone, and resolve serializes it from there.
-        core.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("notes"), surrogate, "gone");
+        core.txn_overlay_mut(txn).insert_tombstone(
+            coll_key("notes"),
+            surrogate,
+            &RowIdentity::from_user_key("gone"),
+        );
 
         let doc_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
@@ -742,7 +758,7 @@ mod tests {
         let txn = TxnId::new(41);
         let task = make_stage_task(txn);
         let surrogate = 5u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         // Seed a base row directly into the scan-visible sparse store.
         core.sparse
@@ -750,14 +766,14 @@ mod tests {
                 DatabaseId::DEFAULT.as_u64(),
                 TID,
                 "notes",
-                row_key.as_str(),
+                &row_key,
                 &schemaless_body("alice"),
             )
             .expect("seed base row");
 
         let plan = PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
-            document_id: row_key.as_str().to_string(),
+            document_id: row_key.to_string(),
             surrogate: Surrogate::new(surrogate),
             pk_bytes: Vec::new(),
             updates: vec![("name".to_string(), literal_str("bob"))],
@@ -798,13 +814,13 @@ mod tests {
         let task = make_stage_task(txn);
 
         for s in [1u32, 2u32] {
-            let row_key = surrogate_to_doc_id(Surrogate::new(s));
+            let row_key = storage_key(s);
             core.sparse
                 .put(
                     DatabaseId::DEFAULT.as_u64(),
                     TID,
                     "notes",
-                    row_key.as_str(),
+                    &row_key,
                     &schemaless_body("old"),
                 )
                 .expect("seed base row");
@@ -857,13 +873,13 @@ mod tests {
         let task = make_stage_task(txn);
 
         for s in [1u32, 2u32] {
-            let row_key = surrogate_to_doc_id(Surrogate::new(s));
+            let row_key = storage_key(s);
             core.sparse
                 .put(
                     DatabaseId::DEFAULT.as_u64(),
                     TID,
                     "notes",
-                    row_key.as_str(),
+                    &row_key,
                     &schemaless_body("doomed"),
                 )
                 .expect("seed base row");
@@ -880,6 +896,7 @@ mod tests {
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
 
         let resp = core.execute_stage_write(&task, TID, &plan);
@@ -913,8 +930,18 @@ mod tests {
         // leaves them; a RETURNING clause does not change the overlay contents.
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("notes"), 1, "u1", schemaless_body("bob"));
-            overlay.insert_put(coll_key("notes"), 2, "u2", schemaless_body("bob"));
+            overlay.insert_put(
+                coll_key("notes"),
+                1,
+                &RowIdentity::from_user_key("u1"),
+                schemaless_body("bob"),
+            );
+            overlay.insert_put(
+                coll_key("notes"),
+                2,
+                &RowIdentity::from_user_key("u2"),
+                schemaless_body("bob"),
+            );
         }
 
         // Serializes the staged post-images from the overlay.
@@ -951,10 +978,10 @@ mod tests {
         .expect("redo replay must succeed");
 
         for s in [1u32, 2u32] {
-            let row_key = surrogate_to_doc_id(Surrogate::new(s));
+            let row_key = storage_key(s);
             let stored = dst
                 .sparse
-                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
                 .expect("get")
                 .expect("updated row must replay from resolve output");
             assert_eq!(
@@ -1384,12 +1411,12 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(20);
         let surrogate = 7u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         src.txn_overlay_mut(txn).insert_put(
             coll_key("sdocs"),
             surrogate,
-            "row1",
+            &RowIdentity::from_user_key("row1"),
             strict_tuple(surrogate as i64, "elephant"),
         );
 
@@ -1411,7 +1438,7 @@ mod tests {
 
         let stored = dst
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "sdocs", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "sdocs", &row_key)
             .expect("get")
             .expect("strict document row must be restored from redo replay");
         let decoded = strict_format::binary_tuple_to_value(&stored, &strict_schema())
@@ -1434,11 +1461,15 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(21);
         let surrogate = 3u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         let body = schemaless_body("alice");
 
-        src.txn_overlay_mut(txn)
-            .insert_put(coll_key("notes"), surrogate, "userpk", body.clone());
+        src.txn_overlay_mut(txn).insert_put(
+            coll_key("notes"),
+            surrogate,
+            &RowIdentity::from_user_key("userpk"),
+            body.clone(),
+        );
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[doc_put_plan("notes")]);
         let redo = decode_redo(&resp);
@@ -1455,7 +1486,7 @@ mod tests {
 
         let stored = dst
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get")
             .expect("schemaless document row must replay");
         assert_eq!(stored, body, "schemaless body round-trips verbatim");
@@ -1467,10 +1498,13 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(22);
         let surrogate = 11u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
-        src.txn_overlay_mut(txn)
-            .insert_tombstone(coll_key("notes"), surrogate, "gone");
+        src.txn_overlay_mut(txn).insert_tombstone(
+            coll_key("notes"),
+            surrogate,
+            &RowIdentity::from_user_key("gone"),
+        );
 
         let delete_plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
@@ -1519,7 +1553,7 @@ mod tests {
         .expect("redo replay must succeed");
         assert!(
             dst.sparse
-                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
                 .expect("get")
                 .is_some(),
             "row seeded"
@@ -1534,7 +1568,7 @@ mod tests {
         .expect("redo replay must succeed");
         assert!(
             dst.sparse
-                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
                 .expect("get")
                 .is_none(),
             "redo delete must remove the document row"
@@ -1565,7 +1599,7 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(23);
         let surrogate = 1u32;
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
 
         // Seed a base document row, then stage a DIFFERENT body for it.
         let seed = wrap_redo(&RedoRecord {
@@ -1591,14 +1625,14 @@ mod tests {
         .expect("redo replay must succeed");
         let before = core
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get");
         assert_eq!(before.as_deref(), Some(schemaless_body("base").as_slice()));
 
         core.txn_overlay_mut(txn).insert_put(
             coll_key("notes"),
             surrogate,
-            "userpk",
+            &RowIdentity::from_user_key("userpk"),
             schemaless_body("staged"),
         );
 
@@ -1608,7 +1642,7 @@ mod tests {
         // Base is untouched: resolve reads the overlay only, never writes base.
         let after = core
             .sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", row_key.as_str())
+            .get(DatabaseId::DEFAULT.as_u64(), TID, "notes", &row_key)
             .expect("get");
         assert_eq!(
             after.as_deref(),
@@ -1623,15 +1657,15 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(24);
         let doc_surrogate = 5u32;
-        let doc_row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
+        let doc_row_key = storage_key(doc_surrogate);
 
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
+            overlay.insert_put(coll_key("kvc"), 1, &kv_row_identity(b"k"), b"V".to_vec());
             overlay.insert_put(
                 coll_key("notes"),
                 doc_surrogate,
-                "userpk",
+                &RowIdentity::from_user_key("userpk"),
                 schemaless_body("bob"),
             );
         }
@@ -1667,7 +1701,7 @@ mod tests {
         );
         assert!(
             dst.sparse
-                .get(db, TID, "notes", doc_row_key.as_str())
+                .get(db, TID, "notes", &doc_row_key)
                 .expect("get")
                 .is_some(),
             "document sub-record must replay"
@@ -1685,14 +1719,19 @@ mod tests {
         let expire_at = crate::engine::kv::current_ms() + 3_600_000;
         {
             let overlay = src.txn_overlay_mut(txn);
-            overlay.insert_put(coll_key("kvc"), 1, &hex_key(b"live"), b"V".to_vec());
+            overlay.insert_put(coll_key("kvc"), 1, &kv_row_identity(b"live"), b"V".to_vec());
             overlay.set_ttl(
                 coll_key("kvc"),
                 1,
-                &hex_key(b"live"),
+                &kv_row_identity(b"live"),
                 StagedTtl::ExpireAt(expire_at),
             );
-            overlay.insert_put(coll_key("kvc"), 2, &hex_key(b"plain"), b"P".to_vec());
+            overlay.insert_put(
+                coll_key("kvc"),
+                2,
+                &kv_row_identity(b"plain"),
+                b"P".to_vec(),
+            );
         }
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[kv_write_plan("kvc")]);
@@ -2045,14 +2084,14 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(35);
         let doc_surrogate = 6u32;
-        let doc_row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
+        let doc_row_key = storage_key(doc_surrogate);
 
         {
             let overlay = src.txn_overlay_mut(txn);
             overlay.insert_put(
                 coll_key("notes"),
                 doc_surrogate,
-                "userpk",
+                &RowIdentity::from_user_key("userpk"),
                 schemaless_body("carol"),
             );
         }
@@ -2091,7 +2130,7 @@ mod tests {
         assert!(
             dst_core
                 .sparse
-                .get(db, TID, "notes", doc_row_key.as_str())
+                .get(db, TID, "notes", &doc_row_key)
                 .expect("get")
                 .is_some(),
             "document sub-record must replay"
@@ -2779,8 +2818,12 @@ mod tests {
         let txn = TxnId::new(47);
 
         // Stage the KV write into the overlay (overlay-driven serializer).
-        src.txn_overlay_mut(txn)
-            .insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
+        src.txn_overlay_mut(txn).insert_put(
+            coll_key("kvc"),
+            1,
+            &kv_row_identity(b"k"),
+            b"V".to_vec(),
+        );
 
         let mut row = std::collections::HashMap::new();
         row.insert("a".to_string(), nodedb_types::Value::Integer(7));
@@ -2913,7 +2956,7 @@ mod tests {
     /// R-tree entry id for a surrogate, mirroring `execute_spatial_insert`'s
     /// `fnv1a_hash(doc_id.as_bytes())` keying.
     fn spatial_entry_id(surrogate: u32) -> u64 {
-        let doc_id = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let doc_id = storage_key(surrogate).to_string();
         crate::util::fnv1a_hash(doc_id.as_bytes())
     }
 
@@ -2966,15 +3009,10 @@ mod tests {
             dst.spatial_doc_map.contains_key(&doc_map_key),
             "surrogate -> doc-id reverse map must be rebuilt"
         );
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         assert!(
             dst.sparse
-                .get(
-                    DatabaseId::DEFAULT.as_u64(),
-                    TID,
-                    "places",
-                    row_key.as_str()
-                )
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
                 .expect("get")
                 .is_some(),
             "sparse geometry document must be rebuilt by replay"
@@ -3038,15 +3076,10 @@ mod tests {
             0,
             "redo delete must remove the R-tree entry"
         );
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         assert!(
             dst.sparse
-                .get(
-                    DatabaseId::DEFAULT.as_u64(),
-                    TID,
-                    "places",
-                    row_key.as_str()
-                )
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
                 .expect("get")
                 .is_none(),
             "redo delete must remove the sparse geometry document"
@@ -3107,15 +3140,10 @@ mod tests {
             !core.spatial_indexes.contains_key(&key),
             "resolve must not mutate the base spatial R-tree"
         );
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
+        let row_key = storage_key(surrogate);
         assert!(
             core.sparse
-                .get(
-                    DatabaseId::DEFAULT.as_u64(),
-                    TID,
-                    "places",
-                    row_key.as_str()
-                )
+                .get(DatabaseId::DEFAULT.as_u64(), TID, "places", &row_key)
                 .expect("get")
                 .is_none(),
             "resolve must not mutate the base sparse store"
@@ -3129,8 +3157,12 @@ mod tests {
         let txn = TxnId::new(44);
         let surrogate = 13u32;
 
-        src.txn_overlay_mut(txn)
-            .insert_put(coll_key("kvc"), 1, &hex_key(b"k"), b"V".to_vec());
+        src.txn_overlay_mut(txn).insert_put(
+            coll_key("kvc"),
+            1,
+            &kv_row_identity(b"k"),
+            b"V".to_vec(),
+        );
 
         let plans = [
             kv_write_plan("kvc"),

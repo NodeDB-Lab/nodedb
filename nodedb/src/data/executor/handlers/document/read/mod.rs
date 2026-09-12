@@ -6,6 +6,9 @@ mod audit_body;
 pub mod decode;
 pub mod emit;
 pub mod fetch;
+mod fetch_types;
 pub mod materialize_scan;
 pub mod projection;
 pub mod scan;
+
+pub(in crate::data::executor) use fetch_types::{DocFetchParams, DocScanMode};

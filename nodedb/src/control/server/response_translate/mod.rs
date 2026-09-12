@@ -4,6 +4,7 @@
 //! payloads with catalog-resolved fields (e.g. surrogate → user PK).
 
 pub mod dispatch;
+pub mod hit_key;
 pub mod text_hybrid;
 pub mod vector;
 

@@ -116,7 +116,7 @@ pub fn show_changes(
             );
             row.insert(
                 "document_id".to_string(),
-                JsonValue::String(change.document_id.clone()),
+                JsonValue::String(change.document_id.to_string()),
             );
             row.insert(
                 "timestamp_ms".to_string(),
@@ -153,6 +153,7 @@ mod tests {
     use crate::control::security::identity::{AuthMethod, DatabaseSet, Role};
     use crate::types::{Lsn, TenantId};
     use crate::wal::WalManager;
+    use nodedb_types::RowIdentity;
 
     fn test_state() -> (tempfile::TempDir, Arc<SharedState>) {
         let dir = tempfile::tempdir().expect("create test directory");
@@ -184,7 +185,7 @@ mod tests {
             lsn: Lsn::new(1),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "hidden-order".into(),
+            document_id: RowIdentity::from_user_key("hidden-order"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1,
             after: None,
@@ -216,7 +217,7 @@ mod tests {
                     lsn,
                     tenant_id: TenantId::new(1),
                     collection: "orders".into(),
-                    document_id: document_id.into(),
+                    document_id: RowIdentity::from_user_key(document_id),
                     operation: ChangeOperation::Insert,
                     timestamp_ms: 1,
                     after: None,
@@ -263,7 +264,7 @@ mod tests {
             lsn: Lsn::new(1),
             tenant_id: TenantId::new(1),
             collection: "orders".into(),
-            document_id: "tenant-1-order".into(),
+            document_id: RowIdentity::from_user_key("tenant-1-order"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1,
             after: None,
@@ -272,7 +273,7 @@ mod tests {
             lsn: Lsn::new(2),
             tenant_id: TenantId::new(2),
             collection: "orders".into(),
-            document_id: "tenant-2-order".into(),
+            document_id: RowIdentity::from_user_key("tenant-2-order"),
             operation: ChangeOperation::Insert,
             timestamp_ms: 1,
             after: None,

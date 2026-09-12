@@ -234,7 +234,8 @@ impl CoreLoop {
                 target_collection,
                 resolved_sum_targets,
                 has_vectors,
-                is_strict: strict_schema.is_some(),
+                strict_schema: strict_schema.as_ref(),
+                declared_primary_key,
                 want_returning: returning.is_some(),
             },
             rows,
@@ -297,8 +298,8 @@ impl CoreLoop {
                 Err(e) => return self.response_error(task, e),
             };
             wire.push((
-                r.doc_id,
-                r.surrogate.map(|s| s.as_u32()),
+                r.key.to_string(),
+                r.key.surrogate().as_u32(),
                 doc_format::encode_resolved_wire_body(&r.doc),
                 doc_format::encode_resolved_wire_body(&old_doc),
             ));

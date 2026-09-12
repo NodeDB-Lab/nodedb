@@ -2,40 +2,36 @@
 
 //! Key layout for the versioned document and index tables.
 
+use nodedb_types::StorageKey;
+
 /// 20-digit zero-pad for i64 lexicographic ordering under reverse-scan.
 pub fn format_sys_from(sys_from_ms: i64) -> String {
     format!("{sys_from_ms:020}")
 }
 
-/// Build a versioned document key. Returns an error if `doc_id` contains
-/// a NUL byte — NUL is reserved as the version separator.
+/// Build a versioned document key.
 pub fn versioned_doc_key(
     database_id: u64,
     tenant: u64,
     coll: &str,
-    doc_id: &str,
+    doc_id: &StorageKey,
     sys_from_ms: i64,
-) -> crate::Result<String> {
-    if doc_id.as_bytes().contains(&0) {
-        return Err(crate::Error::BadRequest {
-            detail: "document id may not contain NUL byte".into(),
-        });
-    }
-    Ok(format!(
+) -> String {
+    format!(
         "{database_id}:{tenant}:{coll}:{doc_id}\x00{}",
         format_sys_from(sys_from_ms)
-    ))
+    )
 }
 
 /// Prefix matching every version of a single doc_id — used by reverse-scan.
-pub fn doc_prefix(database_id: u64, tenant: u64, coll: &str, doc_id: &str) -> String {
+pub fn doc_prefix(database_id: u64, tenant: u64, coll: &str, doc_id: &StorageKey) -> String {
     format!("{database_id}:{tenant}:{coll}:{doc_id}\x00")
 }
 
 /// Upper-bound exclusive companion of [`doc_prefix`]: because `\x00` is
 /// the minimum byte, `\x01` is the next-greater separator and bounds all
 /// suffixes for this doc_id cleanly.
-pub fn doc_prefix_end(database_id: u64, tenant: u64, coll: &str, doc_id: &str) -> String {
+pub fn doc_prefix_end(database_id: u64, tenant: u64, coll: &str, doc_id: &StorageKey) -> String {
     format!("{database_id}:{tenant}:{coll}:{doc_id}\x01")
 }
 
@@ -70,19 +66,4 @@ pub fn tenant_prefix_end(database_id: u64, tenant: u64) -> String {
 pub fn parse_sys_from(key: &str) -> Option<i64> {
     let (_, suffix) = key.rsplit_once('\x00')?;
     suffix.parse().ok()
-}
-
-/// Extract `doc_id` slice from a versioned key (between the
-/// `{database_id}:{tenant}:{coll}:` and `\x00` boundaries). Returns the whole
-/// remainder when parsing fails.
-pub fn parse_doc_id<'a>(
-    key: &'a str,
-    database_id: u64,
-    tenant: u64,
-    coll: &str,
-) -> Option<&'a str> {
-    let prefix = format!("{database_id}:{tenant}:{coll}:");
-    let rest = key.strip_prefix(&prefix)?;
-    let (id, _) = rest.rsplit_once('\x00')?;
-    Some(id)
 }

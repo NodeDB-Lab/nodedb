@@ -106,15 +106,17 @@ impl CoreLoop {
         // Predicate: decode each current body, extract `field`, keep in-range
         // rows. `extract_index_values(_, field, false)` yields the scalar
         // string form for the path (0 or 1 value for a non-array field).
-        // The scan API's predicate is `Fn(&str, &[u8]) -> bool`, so an
+        // The scan API's predicate is `Fn(&StorageKey, &[u8]) -> bool`, so an
         // undecodable body is captured through this `Cell` side-channel and
         // checked once the scan finishes. Returning `false` and moving on
         // would drop the row from the answer with nothing anywhere saying a
         // row was dropped, which reads to the client as a smaller — but
         // correct-looking — result set.
         let decode_err: std::cell::Cell<Option<crate::Error>> = std::cell::Cell::new(None);
-        let predicate = |doc_id: &str, body: &[u8]| match decode_body(body, strict_schema.as_ref())
-        {
+        let predicate = |doc_id: &nodedb_types::StorageKey, body: &[u8]| match decode_body(
+            body,
+            strict_schema.as_ref(),
+        ) {
             Err(e) => {
                 decode_err.set(Some(e));
                 false
@@ -134,13 +136,18 @@ impl CoreLoop {
                     // the same encoding every other RLS site filters on — a
                     // strict body is a Binary Tuple until it is decoded here.
                     // A schemaless row's identity lives only in its storage
-                    // key when its body carries no `id` field, so it is
-                    // injected before the RLS check, matching what a reader
-                    // of the same row sees.
+                    // key when its body carries no `id` field, so the
+                    // client-visible identity is injected before the RLS
+                    // check, matching what a reader of the same row sees.
                     Some(filters) => match nodedb_types::json_msgpack::json_to_msgpack(&doc) {
                         Ok(mp) => {
                             let mp = if strict_schema.is_none() {
-                                nodedb_query::msgpack_scan::inject_str_field(&mp, "id", doc_id)
+                                let identity = doc_id.to_identity();
+                                nodedb_query::msgpack_scan::inject_str_field(
+                                    &mp,
+                                    "id",
+                                    identity.as_str(),
+                                )
                             } else {
                                 mp
                             };
@@ -229,7 +236,7 @@ impl CoreLoop {
                 },
                 None => body,
             };
-            rows.push((id, mp));
+            rows.push((id.to_string(), mp));
         }
 
         // Sort ascending by `field` and cap at `limit` — the same ordering the

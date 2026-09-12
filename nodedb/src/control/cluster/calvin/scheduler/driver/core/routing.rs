@@ -547,6 +547,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             restart_identity: false,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         let want = collection_vshard("docs").as_u32();
         assert_eq!(vshards_of(&plan), vec![want]);
@@ -565,6 +566,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, &collection),
             restart_identity: false,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         let expected = collection_vshard_in_database(DatabaseId::new(7), &collection);
         match plan_vshard_in_database(&plan, DatabaseId::new(7)) {

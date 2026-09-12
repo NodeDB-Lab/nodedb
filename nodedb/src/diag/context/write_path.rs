@@ -128,6 +128,57 @@ impl DomainContext for BatchInsertWithoutSurrogates<'_> {
     }
 }
 
+/// A committed DELETE's post-commit cascade failed to remove one row's
+/// entry from a secondary structure. The row's own transaction already
+/// committed, so this failure cannot roll it back — the row is gone from
+/// the primary store, but its entry survives in the named index.
+pub(in crate::diag) struct OrphanedIndexEntryAfterDelete<'a> {
+    /// Collection the deleted row belonged to.
+    pub collection: &'a str,
+    /// Which cascaded structure the entry was left behind in
+    /// (`"inverted"`, `"secondary"`, `"graph_edge"`).
+    pub index_kind: &'static str,
+    /// Stable class of the failure, as the index layer described it.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for OrphanedIndexEntryAfterDelete<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.orphaned_index_entry_after_delete"
+    }
+
+    fn grouping_key(&self) -> String {
+        // Collection + index kind + error class name the bug; the deleted
+        // row's id is the occurrence, or a bulk delete over many rows would
+        // file one report per row instead of one growing report.
+        format!(
+            "collection={};index={};cause={}",
+            self.collection, self.index_kind, self.error_class
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "collection": self.collection,
+            "index_kind": self.index_kind,
+            "error_class": self.error_class,
+            "why_fatal": "the row's DELETE already committed by the time this cascade \
+                          step runs, so the failure cannot be rolled back — the row is \
+                          gone from the primary store, but the named index still carries \
+                          an entry that points at nothing. A stale inverted-index posting \
+                          scores a deleted row in full-text search, a stale secondary-index \
+                          entry returns a document that no longer exists, and a stale graph \
+                          edge traverses to a removed node",
+            "operator_action": "read the error class: a transient cause (redb contention, \
+                                 a full disk) clears on its own, and the orphaned entry is \
+                                 pruned the next time the collection's index is rebuilt or \
+                                 compacted; a structural cause (corrupt or type-mismatched \
+                                 index table) will orphan every subsequent delete on this \
+                                 collection until the index is rebuilt",
+        })
+    }
+}
+
 /// A stored Binary Tuple that does not decode against its collection's
 /// strict schema. The bytes on disk are wrong, so the statement that read
 /// them is refused rather than applied over a partial row set.

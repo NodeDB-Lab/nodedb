@@ -89,6 +89,17 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 Self::BalanceViolation { collection, detail }
             }
             ErrorCode::PeriodLocked { collection } => Self::PeriodLocked { collection },
+            ErrorCode::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+                row_identity,
+            } => Self::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+                row_identity,
+            },
             ErrorCode::RetentionViolation { collection } => Self::RetentionViolation { collection },
             ErrorCode::LegalHoldActive { collection } => Self::LegalHoldActive { collection },
             ErrorCode::StateTransitionViolation { collection, detail } => {
@@ -171,6 +182,17 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                 Self::BalanceViolation { collection, detail }
             }
             DataPlaneErrorCode::PeriodLocked { collection } => Self::PeriodLocked { collection },
+            DataPlaneErrorCode::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+                row_identity,
+            } => Self::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+                row_identity,
+            },
             DataPlaneErrorCode::RetentionViolation { collection } => {
                 Self::RetentionViolation { collection }
             }

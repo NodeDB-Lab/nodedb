@@ -34,10 +34,11 @@ pub(in crate::data::executor) enum UndoEntry {
     /// Undo a PointPut by deleting the document (or restoring the old value).
     PutDocument {
         collection: String,
-        /// Hex-encoded surrogate (the redb storage key).
-        document_id: String,
-        /// Numeric surrogate for FTS index rollback.
-        surrogate: nodedb_types::Surrogate,
+        /// The redb storage key. `.surrogate()` recovers the numeric surrogate
+        /// FTS index rollback needs.
+        document_id: nodedb_types::StorageKey,
+        /// The row's client identity, as the deferred event names it.
+        identity: nodedb_types::RowIdentity,
         /// `None` if the document didn't exist before (inserted); `Some(bytes)`
         /// if it was overwritten (updated).
         old_value: Option<Vec<u8>>,
@@ -64,12 +65,13 @@ pub(in crate::data::executor) enum UndoEntry {
     /// Undo a PointDelete by re-inserting the document.
     DeleteDocument {
         collection: String,
-        /// Hex-encoded surrogate (the redb storage key).
-        document_id: String,
-        /// Numeric surrogate for FTS inverted-index rollback re-indexing. The
-        /// forward delete cascade removed this document's postings; a rolled-back
-        /// delete recomputes and re-inserts them under this surrogate.
-        surrogate: nodedb_types::Surrogate,
+        /// The redb storage key. `.surrogate()` recovers the numeric surrogate
+        /// the FTS inverted-index rollback re-indexes under: the forward
+        /// delete cascade removed this document's postings, and a
+        /// rolled-back delete recomputes and re-inserts them under it.
+        document_id: nodedb_types::StorageKey,
+        /// The row's client identity, as the deferred event names it.
+        identity: nodedb_types::RowIdentity,
         old_value: Vec<u8>,
         /// System-time key of the versioned tombstone row this op appended on a
         /// bitemporal collection. `None` = plain op → re-insert via the
@@ -95,11 +97,13 @@ pub(in crate::data::executor) enum UndoEntry {
     InsertVector {
         index_key: (nodedb_types::DatabaseId, TenantId, String),
         vector_id: u32,
-        /// Collection, field, and doc id — the `vector_doc_map` key
+        /// Collection, field, and storage key — the `vector_doc_map` key
         /// components the forward insert wrote, needed to remove them.
+        /// `None` marks the direct primary-vector write path
+        /// (`PhysicalPlan::Vector`), which never populates `vector_doc_map`.
         collection: String,
         field: String,
-        doc_id: String,
+        doc_id: Option<nodedb_types::StorageKey>,
     },
     /// Undo a VectorDelete by un-deleting (clearing tombstone) and restoring
     /// the `vector_doc_map` entry the forward delete removed — mirroring
@@ -110,11 +114,13 @@ pub(in crate::data::executor) enum UndoEntry {
     DeleteVector {
         index_key: (nodedb_types::DatabaseId, TenantId, String),
         vector_id: u32,
-        /// Collection, field, and doc id — the `vector_doc_map` key
+        /// Collection, field, and storage key — the `vector_doc_map` key
         /// components the forward delete removed, needed to restore them.
+        /// `None` marks the direct primary-vector write path
+        /// (`PhysicalPlan::Vector`), which never populates `vector_doc_map`.
         collection: String,
         field: String,
-        doc_id: String,
+        doc_id: Option<nodedb_types::StorageKey>,
     },
     /// Undo a spatial R-tree insert by removing the entry from the per-field
     /// R-tree and deleting its reverse `spatial_doc_map` record.

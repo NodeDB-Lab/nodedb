@@ -89,12 +89,12 @@ pub fn single_result(value: &str) -> Vec<DdlResult> {
 /// pgwire/HTTP row shaper applies — so there is exactly one definition of
 /// "unwrap a scan envelope" in the tree. Rows that are not `{id, data}`
 /// wrapped (already-flat producers) pass through unchanged.
-pub fn unwrap_scan_docs(docs: Vec<JsonValue>) -> Vec<Map<String, JsonValue>> {
+pub fn unwrap_scan_docs(docs: Vec<JsonValue>) -> Result<Vec<Map<String, JsonValue>>, DdlError> {
     let mut out = Vec::with_capacity(docs.len());
     for doc in docs {
-        push_flat_rows(doc, &mut out);
+        push_flat_rows(doc, &mut out).map_err(|e| err("XX000", &e.to_string()))?;
     }
-    out
+    Ok(out)
 }
 
 /// Unwrap a `DocumentOp::Scan` envelope while also returning the row's wire

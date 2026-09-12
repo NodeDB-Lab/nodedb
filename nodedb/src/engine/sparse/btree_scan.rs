@@ -2,10 +2,14 @@
 
 //! Table scanning and import/export methods for `SparseEngine`.
 
+use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable};
 use tracing::debug;
 
-use super::btree::{DOCUMENTS, INDEXES, SparseEngine, coll_prefix, redb_err, tenant_prefix};
+use super::btree::{
+    DOCUMENTS, INDEXES, KeyedTable, SparseEngine, coll_prefix, invalid_storage_key_err, redb_err,
+    tenant_prefix,
+};
 
 impl SparseEngine {
     /// Scan documents in a collection (reads DOCUMENTS table, not INDEXES).
@@ -18,7 +22,7 @@ impl SparseEngine {
         tenant_id: u64,
         collection: &str,
         limit: usize,
-    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+    ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
         let prefix = coll_prefix(database_id, tenant_id, collection);
         let end = format!("{prefix}\u{ffff}");
 
@@ -37,11 +41,14 @@ impl SparseEngine {
                 break;
             }
             let entry = entry.map_err(|e| redb_err("doc entry", e))?;
-            let key = entry.0.value().to_string();
+            let key = entry.0.value();
             // Extract document_id from key format "{database_id}:{tenant}:{collection}:{doc_id}"
-            let doc_id = key.strip_prefix(&prefix).unwrap_or(&key).to_string();
+            let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
             let value = entry.1.value().to_vec();
-            results.push((doc_id, value));
+            results.push((storage_key, value));
         }
 
         debug!(collection, count = results.len(), "document scan");
@@ -71,7 +78,7 @@ impl SparseEngine {
         mut f: F,
     ) -> crate::Result<()>
     where
-        F: FnMut(&str, &[u8]) -> crate::Result<()>,
+        F: FnMut(&StorageKey, &[u8]) -> crate::Result<()>,
     {
         let prefix = coll_prefix(database_id, tenant_id, collection);
         let end = format!("{prefix}\u{ffff}");
@@ -91,11 +98,14 @@ impl SparseEngine {
                 break;
             }
             let entry = entry.map_err(|e| redb_err("doc entry", e))?;
-            let key = entry.0.value().to_string();
+            let key = entry.0.value();
             // Extract document_id from key format "{database_id}:{tenant}:{collection}:{doc_id}"
-            let doc_id = key.strip_prefix(&prefix).unwrap_or(&key);
+            let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
             let value = entry.1.value();
-            f(doc_id, value)?;
+            f(&storage_key, value)?;
             count += 1;
         }
 
@@ -120,7 +130,7 @@ impl SparseEngine {
         mut handler: F,
     ) -> crate::Result<usize>
     where
-        F: FnMut(&[(String, Vec<u8>)]),
+        F: FnMut(&[(StorageKey, Vec<u8>)]),
     {
         let prefix = coll_prefix(database_id, tenant_id, collection);
         let end = format!("{prefix}\u{ffff}");
@@ -142,10 +152,13 @@ impl SparseEngine {
                 break;
             }
             let entry = entry.map_err(|e| redb_err("doc entry", e))?;
-            let key = entry.0.value().to_string();
-            let doc_id = key.strip_prefix(&prefix).unwrap_or(&key).to_string();
+            let key = entry.0.value();
+            let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
             let value = entry.1.value().to_vec();
-            chunk.push((doc_id, value));
+            chunk.push((storage_key, value));
             total += 1;
 
             if chunk.len() >= chunk_size {
@@ -225,7 +238,7 @@ impl SparseEngine {
         tenant_id: u64,
         collection: &str,
         field: &str,
-        doc_ids: &std::collections::HashSet<String>,
+        doc_ids: &std::collections::HashSet<StorageKey>,
     ) -> crate::Result<Vec<(String, usize)>> {
         let prefix = format!(
             "{}{field}:",
@@ -251,7 +264,10 @@ impl SparseEngine {
             {
                 let value = &rest[..colon_pos];
                 let doc_id = &rest[colon_pos + 1..];
-                if doc_ids.contains(doc_id) {
+                let doc_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                    invalid_storage_key_err(KeyedTable::Indexes, collection, doc_id)
+                })?;
+                if doc_ids.contains(&doc_key) {
                     *groups.entry(value.to_string()).or_default() += 1;
                 }
             }
@@ -294,9 +310,9 @@ impl SparseEngine {
         tenant_id: u64,
         collection: &str,
         limit: usize,
-        predicate: &dyn Fn(&str, &[u8]) -> bool,
+        predicate: &dyn Fn(&StorageKey, &[u8]) -> bool,
         stop: &dyn Fn() -> bool,
-    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+    ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
         let prefix = coll_prefix(database_id, tenant_id, collection);
         let end = format!("{prefix}\u{ffff}");
 
@@ -321,13 +337,16 @@ impl SparseEngine {
             let value_bytes = entry.1.value();
             let key = entry.0.value();
             let doc_id = key.strip_prefix(&prefix).unwrap_or(key);
+            let storage_key = StorageKey::parse(doc_id).ok_or_else(|| {
+                invalid_storage_key_err(KeyedTable::Documents, collection, doc_id)
+            })?;
 
             // Evaluate predicate on raw bytes — skip allocation if no match.
-            if !predicate(doc_id, value_bytes) {
+            if !predicate(&storage_key, value_bytes) {
                 continue;
             }
 
-            results.push((doc_id.to_string(), value_bytes.to_vec()));
+            results.push((storage_key, value_bytes.to_vec()));
         }
 
         debug!(collection, count = results.len(), "filtered document scan");
@@ -478,6 +497,8 @@ impl SparseEngine {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use super::*;
 
     fn open_temp() -> (SparseEngine, tempfile::TempDir) {
@@ -486,19 +507,23 @@ mod tests {
         (engine, dir)
     }
 
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
     #[test]
     fn for_each_matches_scan_documents() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(0, 1, "users", "u2", b"bob").unwrap();
-        engine.put(0, 1, "users", "u3", b"carol").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(0, 1, "users", &key(2), b"bob").unwrap();
+        engine.put(0, 1, "users", &key(3), b"carol").unwrap();
 
         let materialized = engine.scan_documents(0, 1, "users", usize::MAX).unwrap();
 
-        let mut streamed: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut streamed: Vec<(StorageKey, Vec<u8>)> = Vec::new();
         engine
             .scan_documents_for_each(0, 1, "users", usize::MAX, |doc_id, bytes| {
-                streamed.push((doc_id.to_string(), bytes.to_vec()));
+                streamed.push((*doc_id, bytes.to_vec()));
                 Ok(())
             })
             .unwrap();
@@ -510,16 +535,16 @@ mod tests {
     #[test]
     fn for_each_respects_limit() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(0, 1, "users", "u2", b"bob").unwrap();
-        engine.put(0, 1, "users", "u3", b"carol").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(0, 1, "users", &key(2), b"bob").unwrap();
+        engine.put(0, 1, "users", &key(3), b"carol").unwrap();
 
         let materialized = engine.scan_documents(0, 1, "users", 2).unwrap();
 
-        let mut streamed: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut streamed: Vec<(StorageKey, Vec<u8>)> = Vec::new();
         engine
             .scan_documents_for_each(0, 1, "users", 2, |doc_id, bytes| {
-                streamed.push((doc_id.to_string(), bytes.to_vec()));
+                streamed.push((*doc_id, bytes.to_vec()));
                 Ok(())
             })
             .unwrap();
@@ -535,9 +560,7 @@ mod tests {
     fn filtered_scan_stops_on_the_stop_signal() {
         let (engine, _dir) = open_temp();
         for i in 0..8 {
-            engine
-                .put(0, 1, "users", &format!("u{i}"), b"body")
-                .unwrap();
+            engine.put(0, 1, "users", &key(i), b"body").unwrap();
         }
 
         // Stop after the third row is visited.
@@ -548,7 +571,7 @@ mod tests {
                 1,
                 "users",
                 usize::MAX,
-                &|_: &str, _: &[u8]| {
+                &|_: &StorageKey, _: &[u8]| {
                     visited.set(visited.get() + 1);
                     true
                 },
@@ -564,9 +587,7 @@ mod tests {
     fn filtered_scan_runs_to_completion_without_a_stop() {
         let (engine, _dir) = open_temp();
         for i in 0..8 {
-            engine
-                .put(0, 1, "users", &format!("u{i}"), b"body")
-                .unwrap();
+            engine.put(0, 1, "users", &key(i), b"body").unwrap();
         }
 
         let rows = engine
@@ -575,7 +596,7 @@ mod tests {
                 1,
                 "users",
                 usize::MAX,
-                &|_: &str, _: &[u8]| true,
+                &|_: &StorageKey, _: &[u8]| true,
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
@@ -586,8 +607,8 @@ mod tests {
     #[test]
     fn for_each_propagates_callback_error() {
         let (engine, _dir) = open_temp();
-        engine.put(0, 1, "users", "u1", b"alice").unwrap();
-        engine.put(0, 1, "users", "u2", b"bob").unwrap();
+        engine.put(0, 1, "users", &key(1), b"alice").unwrap();
+        engine.put(0, 1, "users", &key(2), b"bob").unwrap();
 
         let mut seen = 0usize;
         let result =

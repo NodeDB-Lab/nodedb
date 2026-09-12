@@ -215,9 +215,10 @@ impl CoreLoop {
             if rows.len() >= top_k {
                 break;
             }
-            let hex_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
-            let bytes_opt = match self.overlay_or_base_body(txn_id, &coll_key, &hex_key, || {
-                self.sparse.get(database_id, tid, collection, &hex_key)
+            let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
+            let hex_key = storage_key.to_string();
+            let bytes_opt = match self.overlay_or_base_body(txn_id, &coll_key, &storage_key, || {
+                self.sparse.get(database_id, tid, collection, &storage_key)
             }) {
                 Ok(b) => b,
                 Err(e) => {

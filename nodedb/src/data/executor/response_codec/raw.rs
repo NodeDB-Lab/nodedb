@@ -139,14 +139,16 @@ pub fn flatten_to_relational_rows(bytes: &[u8]) -> Vec<u8> {
 /// Flatten a gathered array of vector-family search hits (dense / sparse /
 /// multi-vector) into bare relational rows for the post-processing tail.
 ///
-/// A hit is `{id: <surrogate u32>, distance, doc_id?, body?: <doc msgpack>}`.
-/// The document `body`'s columns become top-level (so ORDER BY / DISTINCT /
-/// projection can reference any document column), `distance` is surfaced, and
-/// `_surrogate` carries the internal id. The output `id` is, in order: the
-/// document body's own `id`; else the user PK from `resolve_pk(surrogate)`;
-/// else the `doc_id`; else the raw surrogate. `resolve_pk` lets a body-less hit
-/// (sparse / multi-vector, or a `skip_payload_fetch` dense hit) still surface
-/// the user PK — mirroring the Control-Plane response translator.
+/// A hit is `{id: <HybridFusionKey wire string>, distance, doc_id?,
+/// body?: <doc msgpack>}`. The document `body`'s columns become top-level (so
+/// ORDER BY / DISTINCT / projection can reference any document column),
+/// `distance` is surfaced, and `_surrogate` carries the internal id (or, for
+/// a headless hit with no surrogate binding, the `__local_<id>` sentinel
+/// text). The output `id` is, in order: the document body's own `id`; else
+/// the user PK from `resolve_pk(surrogate)`; else the `doc_id`; else the raw
+/// surrogate (or sentinel). `resolve_pk` lets a body-less hit (sparse /
+/// multi-vector, or a `skip_payload_fetch` dense hit) still surface the user
+/// PK — mirroring the Control-Plane response translator.
 ///
 /// The body is *bare* msgpack (the storage wire shape), so it is decoded and
 /// re-encoded with the native `Value` codec (`value_from_msgpack` /
@@ -157,12 +159,13 @@ pub fn flatten_vector_hits_to_relational_rows(
     bytes: &[u8],
     resolve_pk: impl Fn(u32) -> Option<String>,
 ) -> Vec<u8> {
+    use crate::data::executor::handlers::hybrid_key::HybridFusionKey;
     use nodedb_types::Value;
 
     #[derive(zerompk::FromMessagePack)]
     #[msgpack(map)]
     struct Hit {
-        id: u32,
+        id: HybridFusionKey,
         distance: f32,
         doc_id: Option<String>,
         body: Option<Vec<u8>>,
@@ -188,21 +191,28 @@ pub fn flatten_vector_hits_to_relational_rows(
             fields
                 .entry("distance".to_string())
                 .or_insert(Value::Float(h.distance as f64));
+            // `None` for a headless hit (no surrogate binding) — never
+            // resolvable to a user PK.
+            let surrogate = h.id.storage_key().map(|k| k.surrogate().as_u32());
+            let raw_identity = match surrogate {
+                Some(s) => Value::Integer(s as i64),
+                None => Value::String(h.id.to_string()),
+            };
             if !fields.contains_key("id") {
                 // Prefer a catalog-resolved PK, then the DP-set doc_id, then the
-                // raw surrogate as a last resort.
-                match resolve_pk(h.id).or(h.doc_id) {
+                // raw surrogate (or the headless sentinel) as a last resort.
+                match surrogate.and_then(&resolve_pk).or(h.doc_id) {
                     Some(pk) => {
                         fields.insert("id".to_string(), Value::String(pk));
                     }
                     None => {
-                        fields.insert("id".to_string(), Value::Integer(h.id as i64));
+                        fields.insert("id".to_string(), raw_identity.clone());
                     }
                 }
             }
             fields
                 .entry("_surrogate".to_string())
-                .or_insert(Value::Integer(h.id as i64));
+                .or_insert(raw_identity);
             nodedb_types::value_to_msgpack(&Value::Object(fields)).ok()
         })
         .collect();
@@ -374,13 +384,21 @@ mod tests {
     }
 
     /// A vector-family hit in the Data-Plane wire shape (bare `#[msgpack(map)]`).
+    /// `id` is the `HybridFusionKey` wire string: an 8-hex-char storage key
+    /// for a bound hit, matching `test_storage_key`.
     #[derive(zerompk::ToMessagePack)]
     #[msgpack(map)]
     struct TestHit {
-        id: u32,
+        id: String,
         distance: f32,
         doc_id: Option<String>,
         body: Option<Vec<u8>>,
+    }
+
+    /// Render surrogate `n` as the 8-hex-char storage key text a bound
+    /// `HybridFusionKey` carries on the wire.
+    fn test_storage_key(n: u32) -> String {
+        nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(n)).to_string()
     }
 
     #[test]
@@ -390,7 +408,7 @@ mod tests {
             ("tag", Value::String("keep".into())),
         ]);
         let input = zerompk::to_msgpack_vec(&vec![TestHit {
-            id: 7,
+            id: test_storage_key(7),
             distance: 0.5,
             doc_id: None,
             body: Some(body),
@@ -412,7 +430,7 @@ mod tests {
         // Sparse / multivec hit: no body → `id` comes from the PK resolver, not
         // the raw surrogate.
         let input = zerompk::to_msgpack_vec(&vec![TestHit {
-            id: 42,
+            id: test_storage_key(42),
             distance: 1.25,
             doc_id: None,
             body: None,
@@ -431,7 +449,7 @@ mod tests {
     #[test]
     fn body_less_vector_hit_falls_back_to_surrogate_when_unresolved() {
         let input = zerompk::to_msgpack_vec(&vec![TestHit {
-            id: 9,
+            id: test_storage_key(9),
             distance: 0.0,
             doc_id: None,
             body: None,

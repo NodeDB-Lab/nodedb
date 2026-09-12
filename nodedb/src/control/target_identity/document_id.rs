@@ -4,25 +4,28 @@
 //! collection on behalf of another operation, and validate that a matched
 //! existing row carries a registered surrogate.
 
-use nodedb_types::Surrogate;
+use nodedb_types::{Surrogate, extract_pk_value};
 
-use super::pk::{TargetPk, extract_pk_value};
+use super::pk::TargetPk;
+use crate::engine::document::store::RowIdentity;
 
 /// The user-visible primary key (`document_id`) for a row written on this
 /// target, mirroring the plain-`INSERT` identity path (`insert.rs`): an
 /// auto-`_rowid` row's PK is the decimal surrogate the Data Plane also writes
-/// into `_rowid`; a declared-PK row's PK is the field value extracted from
-/// the body.
+/// into `_rowid`. A declared-PK row's PK is the field value extracted from
+/// the body. A row with no content key renders the same decimal identity.
+///
+/// Both forms come from [`RowIdentity::for_surrogate`], the same formatter
+/// `assign_target_surrogate` binds a freshly minted row under.
 pub(crate) fn derive_document_id(
     target_pk: &TargetPk,
     body: &[u8],
     surrogate: Surrogate,
 ) -> String {
     match target_pk {
-        TargetPk::AutoRowId => surrogate.as_u32().to_string(),
-        TargetPk::Field { name, .. } => {
-            extract_pk_value(body, name).unwrap_or_else(|| surrogate.as_u32().to_string())
-        }
+        TargetPk::AutoRowId => RowIdentity::for_surrogate(surrogate).into_string(),
+        TargetPk::Field { name, .. } => extract_pk_value(body, name)
+            .unwrap_or_else(|| RowIdentity::for_surrogate(surrogate).into_string()),
     }
 }
 

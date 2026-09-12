@@ -7,6 +7,7 @@
 
 pub mod admission;
 pub mod delete;
+pub mod delete_cascade;
 pub mod scan;
 pub mod update;
 pub mod update_persist;

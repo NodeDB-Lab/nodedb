@@ -72,11 +72,12 @@ pub fn binary_tuple_to_msgpack(tuple_bytes: &[u8], schema: &StrictSchema) -> Opt
 }
 
 /// The error for a stored Binary Tuple that does not decode against the
-/// collection's strict schema. Names the row so an operator can find it.
-pub fn undecodable_strict_row(collection: &str, doc_id: &str) -> crate::Error {
+/// collection's strict schema. Names the row by its client-visible identity,
+/// never its storage key, so the error text never leaks the internal hex key.
+pub fn undecodable_strict_row(collection: &str, identity: &str) -> crate::Error {
     crate::Error::Serialization {
         format: "binary_tuple".into(),
-        detail: format!("document \"{doc_id}\" of collection \"{collection}\" does not decode"),
+        detail: format!("document \"{identity}\" of collection \"{collection}\" does not decode"),
     }
 }
 

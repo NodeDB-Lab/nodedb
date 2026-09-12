@@ -63,27 +63,23 @@ fn multi_core_broadcast_inner_join() {
         );
     }
 
-    // Phase 1: Scan prefs from core 1 via DocumentScan (same as broadcast_raw).
+    // Phase 1: scan prefs from core 1 with the KV scan the coordinator's
+    // build-side gather emits for a KV collection.
     let phase1_payload = send_ok(
         &mut core1.core,
         &mut core1.tx,
         &mut core1.rx,
-        PhysicalPlan::Document(DocumentOp::Scan {
+        PhysicalPlan::Kv(KvOp::Scan {
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "prefs",
             ),
+            cursor: Vec::new(),
+            count: 100,
             filters: Vec::new(),
-            limit: 100,
-            offset: 0,
             sort_keys: Vec::new(),
-            distinct: false,
-            projection: Vec::new(),
-            computed_columns: Vec::new(),
-            window_functions: Vec::new(),
-            system_time: nodedb_types::SystemTimeScope::Current,
-            valid_at_ms: None,
-            prefilter: None,
+            match_pattern: None,
+            surrogate_ceiling: None,
         }),
     );
 
@@ -227,22 +223,17 @@ fn multi_core_broadcast_left_join() {
         &mut core1.core,
         &mut core1.tx,
         &mut core1.rx,
-        PhysicalPlan::Document(DocumentOp::Scan {
+        PhysicalPlan::Kv(KvOp::Scan {
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
                 "prefs",
             ),
+            cursor: Vec::new(),
+            count: 100,
             filters: Vec::new(),
-            limit: 100,
-            offset: 0,
             sort_keys: Vec::new(),
-            distinct: false,
-            projection: Vec::new(),
-            computed_columns: Vec::new(),
-            window_functions: Vec::new(),
-            system_time: nodedb_types::SystemTimeScope::Current,
-            valid_at_ms: None,
-            prefilter: None,
+            match_pattern: None,
+            surrogate_ceiling: None,
         }),
     );
 
@@ -399,22 +390,17 @@ fn multi_core_broadcast_merge_simulation() {
     }
 
     // Phase 1: scan prefs from BOTH cores and concatenate raw payloads.
-    let scan_plan = PhysicalPlan::Document(DocumentOp::Scan {
+    let scan_plan = PhysicalPlan::Kv(KvOp::Scan {
         collection: nodedb_types::QualifiedCollection::new(
             nodedb_types::DatabaseId::DEFAULT,
             "prefs",
         ),
+        cursor: Vec::new(),
+        count: 100,
         filters: Vec::new(),
-        limit: 100,
-        offset: 0,
         sort_keys: Vec::new(),
-        distinct: false,
-        projection: Vec::new(),
-        computed_columns: Vec::new(),
-        window_functions: Vec::new(),
-        system_time: nodedb_types::SystemTimeScope::Current,
-        valid_at_ms: None,
-        prefilter: None,
+        match_pattern: None,
+        surrogate_ceiling: None,
     });
     let payload0 = send_ok(
         &mut core0.core,

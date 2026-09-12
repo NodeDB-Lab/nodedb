@@ -24,8 +24,8 @@
 //! * DELETE — `(collection, document_id, Option<SyncProvenance>, surrogate)`.
 //!   The autocommit delete shape `(collection, document_id, prov)` omits the
 //!   surrogate; replay needs it (the redb storage key is
-//!   `surrogate_to_doc_id(surrogate)`, and the delete cascade keys on it), so
-//!   the redo shape appends it as a fourth element.
+//!   `StorageKey::for_surrogate(surrogate)`, and the delete cascade keys on
+//!   it), so the redo shape appends it as a fourth element.
 //!
 //! ## Idempotency
 //!
@@ -76,7 +76,7 @@ use super::handlers::point::apply_delete::PointDeleteParams;
 use super::handlers::point::apply_put::PointPutParams;
 use super::handlers::transaction::overlay::BitemporalStamp;
 use crate::data::executor::core_loop::write_index::KeyRepr;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     /// Replay reconstituted document `Put` / `Delete` redo sub-records.
@@ -133,9 +133,11 @@ impl CoreLoop {
                     i64,
                 );
                 type PlainPut = (String, String, Vec<u8>, Option<SyncProvenance>, u32);
+                // Replay keys the row by its surrogate; the record's text
+                // `document_id` is the client key and stays unread.
                 let decoded = zerompk::from_msgpack::<BitemporalPut>(&record.payload)
                     .map(
-                        |(collection, _doc_id, value, _prov, surrogate, sys, vf, vu)| {
+                        |(collection, _document_id, value, _prov, surrogate, sys, vf, vu)| {
                             (
                                 collection,
                                 value,
@@ -150,7 +152,7 @@ impl CoreLoop {
                     )
                     .or_else(|_| {
                         zerompk::from_msgpack::<PlainPut>(&record.payload).map(
-                            |(collection, _doc_id, value, _prov, surrogate)| {
+                            |(collection, _document_id, value, _prov, surrogate)| {
                                 (collection, value, surrogate, None)
                             },
                         )
@@ -190,6 +192,8 @@ impl CoreLoop {
                     );
                 }
             } else {
+                // Replay keys the row by its surrogate; the record's text
+                // `document_id` is the client key and stays unread.
                 let Ok((collection, _document_id, _prov, surrogate_u32)) =
                     zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(
                         &record.payload,
@@ -239,7 +243,7 @@ impl CoreLoop {
         record_lsn: u64,
     ) -> bool {
         let surrogate = Surrogate::new(surrogate_u32);
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {
@@ -258,12 +262,13 @@ impl CoreLoop {
                 database_id,
                 tid: tenant_id,
                 collection,
-                document_id: row_key.as_str(),
+                storage_key,
                 surrogate,
                 value,
                 index_text: true,
                 user_roles: &[],
                 enforce: false,
+                resolved_targets: &[],
                 wal_lsn: (record_lsn != 0).then(|| crate::types::Lsn::new(record_lsn)),
             },
         ) {
@@ -307,7 +312,8 @@ impl CoreLoop {
         surrogate_u32: u32,
     ) -> bool {
         let surrogate = Surrogate::new(surrogate_u32);
-        let row_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let row_key = storage_key.to_string();
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {
@@ -330,6 +336,7 @@ impl CoreLoop {
                 surrogate,
                 user_roles: &[],
                 enforce: false,
+                resolved_targets: &[],
             },
         ) {
             Ok(outcome) => match txn.commit() {
@@ -485,12 +492,8 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
-        let stored = h
-            .core
-            .sparse
-            .get(0, 7, "notes", row_key.as_str())
-            .expect("get");
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let stored = h.core.sparse.get(0, 7, "notes", &row_key).expect("get");
         assert!(
             stored.is_some(),
             "document row must be restored from redo replay"
@@ -520,12 +523,8 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        let row_key = surrogate_to_doc_id(Surrogate::new(surrogate));
-        let stored = h
-            .core
-            .sparse
-            .get(0, 7, "notes", row_key.as_str())
-            .expect("get");
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+        let stored = h.core.sparse.get(0, 7, "notes", &row_key).expect("get");
         assert!(stored.is_none(), "redo delete must remove the document row");
     }
 
@@ -547,7 +546,7 @@ mod tests {
                 0,
                 7,
                 "notes",
-                surrogate_to_doc_id(Surrogate::new(surrogate)).as_str(),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .expect("get");
         h.core
@@ -560,7 +559,7 @@ mod tests {
                 0,
                 7,
                 "notes",
-                surrogate_to_doc_id(Surrogate::new(surrogate)).as_str(),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
             )
             .expect("get");
         assert_eq!(
@@ -831,11 +830,11 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        let row_key = surrogate_to_doc_id(Surrogate::new(doc_surrogate));
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(doc_surrogate));
         assert!(
             h.core
                 .sparse
-                .get(0, 7, "notes", row_key.as_str())
+                .get(0, 7, "notes", &row_key)
                 .expect("get")
                 .is_some(),
             "document sub-record must be replayed"

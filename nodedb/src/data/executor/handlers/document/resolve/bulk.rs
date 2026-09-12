@@ -24,7 +24,7 @@ use crate::data::executor::handlers::bulk_dml::update_project::{
 };
 use crate::data::executor::handlers::{returning_rows, rls_write_gate};
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::doc_id_to_surrogate;
+use crate::engine::document::store::RowIdentity;
 
 /// Borrowed arguments for [`CoreLoop::resolve_bulk_update`].
 pub(super) struct ResolveBulkUpdate<'a> {
@@ -106,7 +106,7 @@ impl CoreLoop {
         let mut returned_docs: Vec<serde_json::Value> = Vec::new();
         for row in projected {
             let ProjectedUpdateRow {
-                doc_id,
+                key: storage_key,
                 current_bytes,
                 old_doc: _,
                 doc,
@@ -116,10 +116,10 @@ impl CoreLoop {
             // `execute_bulk_update` decides it — on the same JSON document.
             rls_write_gate::admit_row(rls_write_check, &doc, tid, collection)
                 .map_err(ErrorCode::from)?;
-            let Some(surrogate) = doc_id_to_surrogate(&doc_id) else {
-                // No surrogate identity to address on a replica; live handler skips too.
-                continue;
-            };
+            let surrogate = storage_key.surrogate();
+            // Rendered once here — `ResolvedPut::document_id` is the one `&str`
+            // API downstream that still needs the storage key as text.
+            let doc_id = storage_key.to_string();
             mutations.push(put_mutation(ResolvedPut {
                 collection,
                 document_id: &doc_id,
@@ -168,38 +168,37 @@ impl CoreLoop {
             .map_err(ErrorCode::from)?;
 
         let mut mutations = Vec::with_capacity(doc_ids.len());
-        let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
-        for doc_id in doc_ids {
-            // A row that vanished between the scan and this read removes
-            // nothing, so it carries no image for the policy to restrict.
-            let Some(stored) = self.doc_resolve_read(&ctx, collection, &doc_id)? else {
+        let mut rows: Vec<(RowIdentity, Vec<u8>)> = Vec::new();
+        for key in doc_ids {
+            let Some(stored) = self.doc_resolve_read(&ctx, collection, &key)? else {
                 continue;
             };
+            // `RETURNING` reports the row's client-visible identity, never
+            // the storage key.
+            let identity = key.to_identity();
             rls_write_gate::admit_stored_row(
                 rls_write_check,
                 &stored,
-                &doc_id,
+                &identity,
                 ctx.strict_schema.as_ref(),
                 tid,
                 collection,
             )
             .map_err(ErrorCode::from)?;
-            let Some(surrogate) = doc_id_to_surrogate(&doc_id) else {
-                continue;
-            };
+            let surrogate = key.surrogate();
             mutations.push(delete_mutation(
                 collection,
-                &doc_id,
+                &key.to_string(),
                 surrogate,
                 Some(stored.clone()),
                 resolved_sum_targets,
             ));
-            rows.push((doc_id, stored));
+            rows.push((identity, stored));
         }
 
-        let borrowed: Vec<(&str, &[u8])> = rows
+        let borrowed: Vec<(&RowIdentity, &[u8])> = rows
             .iter()
-            .map(|(id, body)| (id.as_str(), body.as_slice()))
+            .map(|(id, body)| (id, body.as_slice()))
             .collect();
         let response_payload = resolved_response_payload(
             returning,

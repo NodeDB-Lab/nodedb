@@ -423,6 +423,12 @@ pub(in crate::data::executor) use super::row_shape::{
 
 #[cfg(test)]
 mod tests {
+    /// Storage key for a small test surrogate, keyed by a mnemonic letter so
+    /// call sites below read the same as the doc-id literals they replace.
+    fn key(surrogate: u32) -> nodedb_types::StorageKey {
+        nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(surrogate))
+    }
+
     /// Verify that `scan_collection_for_each` visits exactly the same
     /// `(id, bytes)` set as `scan_collection` for a sparse/document collection.
     ///
@@ -445,9 +451,9 @@ mod tests {
         let raw_a = b"{\"x\":1}";
         let raw_b = b"{\"x\":2}";
         let raw_c = b"{\"x\":3}";
-        core.sparse.put(0, tid, coll, "a", raw_a).unwrap();
-        core.sparse.put(0, tid, coll, "b", raw_b).unwrap();
-        core.sparse.put(0, tid, coll, "c", raw_c).unwrap();
+        core.sparse.put(0, tid, coll, &key(1), raw_a).unwrap();
+        core.sparse.put(0, tid, coll, &key(2), raw_b).unwrap();
+        core.sparse.put(0, tid, coll, &key(3), raw_c).unwrap();
 
         // Collect via `scan_collection` (the reference output).
         let mut expected = core.scan_collection(0, tid, coll, usize::MAX).unwrap();
@@ -567,10 +573,18 @@ mod tests {
 
         // Insert in non-alphabetical order so insertion order != sorted order.
         // If either scan path sorts internally the assertion will catch the divergence.
-        core.sparse.put(0, tid, coll, "d", b"{\"v\":4}").unwrap();
-        core.sparse.put(0, tid, coll, "a", b"{\"v\":1}").unwrap();
-        core.sparse.put(0, tid, coll, "c", b"{\"v\":3}").unwrap();
-        core.sparse.put(0, tid, coll, "b", b"{\"v\":2}").unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(4), b"{\"v\":4}")
+            .unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(1), b"{\"v\":1}")
+            .unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(3), b"{\"v\":3}")
+            .unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(2), b"{\"v\":2}")
+            .unwrap();
 
         // Reference output — NOT sorted.
         let expected = core.scan_collection(0, tid, coll, usize::MAX).unwrap();
@@ -718,8 +732,12 @@ mod tests {
 
         let tid: u64 = 1;
         let coll = "err_test";
-        core.sparse.put(0, tid, coll, "a", b"{\"v\":1}").unwrap();
-        core.sparse.put(0, tid, coll, "b", b"{\"v\":2}").unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(1), b"{\"v\":1}")
+            .unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(2), b"{\"v\":2}")
+            .unwrap();
 
         let mut calls = 0usize;
         let result = core.scan_collection_for_each(0, tid, coll, |_id, _bytes| {

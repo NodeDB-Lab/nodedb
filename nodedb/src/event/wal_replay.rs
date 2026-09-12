@@ -404,6 +404,30 @@ mod tests {
     }
 
     #[test]
+    fn document_put_replays_journaled_identity_verbatim() {
+        // The current 5-tuple arity carries the row's `RowIdentity` text as
+        // `document_id`. A declared-PK string and a decimal surrogate both
+        // replay as `RowId::row(from_user_key(..))`, never reinterpreted.
+        use crate::event::types::RowId;
+        use nodedb_types::RowIdentity;
+        for (journaled, lsn) in [("order-1", 210u64), ("9", 211u64)] {
+            let provenance: Option<SyncProvenance> = None;
+            let payload =
+                zerompk::to_msgpack_vec(&("orders", journaled, b"value", provenance, 9u32))
+                    .unwrap();
+            let record = make_record(RecordType::Put, &payload, 1, 0, lsn);
+            let mut seq = 0u64;
+            let event = one_event(&record, &mut seq);
+            assert_eq!(
+                event.row_id,
+                RowId::row(RowIdentity::from_user_key(journaled)),
+                "replayed row id is the journaled identity text"
+            );
+            assert_eq!(event.row_id.as_str(), journaled);
+        }
+    }
+
+    #[test]
     fn parse_document_put_with_provenance() {
         // New 4-element arity: (collection, document_id, value, Option<SyncProvenance>).
         let provenance: Option<SyncProvenance> = None;

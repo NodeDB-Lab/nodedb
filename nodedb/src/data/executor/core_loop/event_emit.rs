@@ -84,7 +84,7 @@ impl CoreLoop {
         task: &super::super::task::ExecutionTask,
         tid: u64,
         collection: &str,
-        row_id: &str,
+        identity: crate::engine::document::store::RowIdentity,
         new_stored: &[u8],
         prior_stored: Option<&[u8]>,
     ) {
@@ -104,14 +104,18 @@ impl CoreLoop {
         };
 
         // A schemaless body with no declared `id` column carries its identity
-        // only in the storage key. Inject `row_id` verbatim — the string every
-        // read path injects via `sparse_row_to_doc` — so a WHEN filter, CDC,
-        // or change stream reads the same `id` a query returns.
-        // `inject_str_field` is a no-op when the body already carries `id`, so
-        // a declared primary key is never overwritten.
+        // only in the storage key. The caller decided that identity already;
+        // this injects it, the same string every read path injects via
+        // `sparse_row_to_doc`, so a WHEN filter, CDC, or change stream reads
+        // the same `id` a query returns. This identity also becomes the
+        // `WriteEvent.row_id` that fans out to CDC serialization, streaming
+        // materialized views, event-trigger SQL generation, CRDT sync
+        // packaging, and webhook delivery. `inject_str_field` is a no-op
+        // when the body already carries `id`, so a declared primary key is
+        // never overwritten.
         let doc_id = self
             .is_schemaless_document_collection(database_id, tid, collection)
-            .then_some(row_id);
+            .then_some(identity.as_str());
         let new_final: Cow<[u8]> = match (new_converted.as_deref(), doc_id) {
             (Some(c), _) => Cow::Borrowed(c),
             (None, Some(id)) => Cow::Owned(msgpack_scan::inject_str_field(new_stored, "id", id)),
@@ -127,9 +131,31 @@ impl CoreLoop {
             task,
             collection,
             op,
-            row_id,
+            identity,
             Some(new_final.as_ref()),
             old_final.as_deref(),
+        );
+    }
+
+    /// Emit a document-row DELETE event to the Event Plane.
+    ///
+    /// `identity` is the client-visible identity of the deleted row. The
+    /// caller decides the encoding, mirroring [`Self::emit_put_event`] on
+    /// the put side.
+    pub(in crate::data::executor) fn emit_document_delete_event(
+        &mut self,
+        task: &super::super::task::ExecutionTask,
+        collection: &str,
+        identity: crate::engine::document::store::RowIdentity,
+        old_value: Option<&[u8]>,
+    ) {
+        self.emit_write_event(
+            task,
+            collection,
+            crate::event::WriteOp::Delete,
+            identity,
+            None,
+            old_value,
         );
     }
 
@@ -169,7 +195,8 @@ impl CoreLoop {
             } else {
                 (Some(value.as_slice()), None)
             };
-        self.emit_write_event(task, stream, op, node_id, new_value, old_value);
+        let identity = crate::engine::document::store::RowIdentity::from_user_key(node_id);
+        self.emit_write_event(task, stream, op, identity, new_value, old_value);
     }
 
     /// Emit a CDC write event for a graph edge mutation on the edge's own
@@ -185,21 +212,14 @@ impl CoreLoop {
         task: &super::super::task::ExecutionTask,
         edge: GraphEdgeEvent<'_>,
     ) {
-        let row_id = crate::event::graph_cdc::edge_row_id(edge.src_id, edge.label, edge.dst_id);
+        let row_id = crate::event::types::RowId::edge(edge.src_id, edge.label, edge.dst_id);
         let (new_value, old_value): (Option<&[u8]>, Option<&[u8]>) =
             if matches!(edge.op, crate::event::WriteOp::Delete) {
                 (None, None)
             } else {
                 (edge.properties, None)
             };
-        self.emit_write_event(
-            task,
-            edge.collection,
-            edge.op,
-            &row_id,
-            new_value,
-            old_value,
-        );
+        self.emit_event_with_row_id(task, edge.collection, edge.op, row_id, new_value, old_value);
     }
 
     /// Set the Event Plane producer (called after open, before event loop).
@@ -207,7 +227,7 @@ impl CoreLoop {
         self.event_producer = Some(producer);
     }
 
-    /// Emit a write event to the Event Plane.
+    /// Emit a write event for one row to the Event Plane.
     ///
     /// Called after a successful write (PointPut, PointDelete, PointUpdate,
     /// BatchInsert, BulkDelete, atomic KV ops, etc.). The Data Plane NEVER
@@ -227,7 +247,30 @@ impl CoreLoop {
         task: &super::super::task::ExecutionTask,
         collection: &str,
         op: crate::event::WriteOp,
-        row_id: &str,
+        identity: crate::engine::document::store::RowIdentity,
+        new_value: Option<&[u8]>,
+        old_value: Option<&[u8]>,
+    ) {
+        self.emit_event_with_row_id(
+            task,
+            collection,
+            op,
+            crate::event::types::RowId::row(identity),
+            new_value,
+            old_value,
+        );
+    }
+
+    /// Emit a write event carrying any [`crate::event::types::RowId`].
+    ///
+    /// [`Self::emit_write_event`] is the entry point for single rows. Edge
+    /// events name an `(src, label, dst)` triple and call this directly.
+    pub(in crate::data::executor) fn emit_event_with_row_id(
+        &mut self,
+        task: &super::super::task::ExecutionTask,
+        collection: &str,
+        op: crate::event::WriteOp,
+        row_id: crate::event::types::RowId,
         new_value: Option<&[u8]>,
         old_value: Option<&[u8]>,
     ) {
@@ -245,7 +288,7 @@ impl CoreLoop {
             sequence: self.event_sequence,
             collection: Arc::from(collection),
             op,
-            row_id: crate::event::types::RowId::new(row_id),
+            row_id,
             lsn: self.watermark,
             database_id: task.request.database_id,
             tenant_id: task.request.tenant_id,
@@ -279,7 +322,7 @@ impl CoreLoop {
             sequence: self.event_sequence,
             collection: Arc::from("_heartbeat"),
             op: crate::event::WriteOp::Heartbeat,
-            row_id: crate::event::types::RowId::new(""),
+            row_id: crate::event::types::RowId::Heartbeat,
             // watermark = last committed LSN. Correct for heartbeats: uncommitted
             // writes should NOT advance the Event Plane's watermark.
             lsn: self.watermark,

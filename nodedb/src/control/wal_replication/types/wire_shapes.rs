@@ -28,6 +28,28 @@ pub struct ReplicatedBatchEdge {
     pub dst_surrogate: u32,
 }
 
+/// The fields of one `ApplyBalanceDelta`, borrowed from the plan or the wire
+/// entry. Shared by the encode and decode helpers so both name every field.
+#[derive(Debug, Clone, Copy)]
+pub struct BalanceDeltaFields<'a> {
+    /// TARGET collection, db-qualified.
+    pub collection: &'a str,
+    /// Target row's storage key — hex-encoded surrogate.
+    pub document_id: &'a str,
+    /// Target row's global identity.
+    pub surrogate: u32,
+    /// The balance column this delta moves.
+    pub column: &'a str,
+    /// Signed amount as an exact decimal string.
+    pub delta: &'a str,
+    /// Binding's join column, for the typed not-found error on apply.
+    pub join_column: &'a str,
+    /// Join value that resolved to `surrogate`.
+    pub join_value: &'a str,
+    /// The TARGET collection's declared `PRIMARY KEY` column, when it has one.
+    pub declared_primary_key: Option<&'a str>,
+}
+
 /// One entry of a write's materialized-sum resolution: which target row a
 /// binding's `(target collection, join value)` pair names. Supersedes the
 /// `(join_value, surrogate)` pairs in `*_sum_targets`, which can't tell apart

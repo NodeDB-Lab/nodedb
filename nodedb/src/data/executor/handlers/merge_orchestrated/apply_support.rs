@@ -7,14 +7,15 @@
 use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 use super::plan::MergePlanActions;
 
 /// One committed Phase-A put captured for post-commit event emission:
-/// `(row_key, new stored body borrowed from the plan, prior stored value)`.
-/// The body borrows from the merge plan (owned for the whole apply) rather than
-/// being cloned.
-pub(super) type MergePutEvent<'a> = (String, &'a [u8], Option<Vec<u8>>);
+/// `(row identity, new stored body borrowed from the plan, prior stored value)`.
+/// The identity is the one INSERT minted for the row. The body borrows from
+/// the merge plan (owned for the whole apply) rather than being cloned.
+pub(super) type MergePutEvent<'a> = (RowIdentity, &'a [u8], Option<Vec<u8>>);
 
 /// Record the in-memory index mutations a successful
 /// [`crate::data::executor::core_loop::CoreLoop::apply_point_put`] performed as
@@ -29,7 +30,7 @@ pub(super) fn record_put_index_undo(undo_log: &mut Vec<UndoEntry>, outcome: &mut
             vector_id: d.vector_id,
             collection: d.collection,
             field: d.field,
-            doc_id: d.doc_id,
+            doc_id: Some(d.doc_id),
         });
     }
     for (key, entry_id) in std::mem::take(&mut outcome.spatial_inserts) {
@@ -62,22 +63,29 @@ pub(super) fn gate_merge_arms(
     ) {
         return Ok(());
     }
-    let arms = plan
+    // Updates and deletes name their row by its storage key; inserts name
+    // theirs by the source join value, an engine-native key that is never a
+    // document storage key.
+    let doc_arms = plan
         .updates
         .iter()
-        .map(|u| (u.body.as_slice(), u.doc_id.as_str()))
-        .chain(
-            plan.deletes
-                .iter()
-                .map(|d| (d.body.as_slice(), d.doc_id.as_str())),
-        )
-        .chain(
-            plan.inserts
-                .iter()
-                .map(|i| (i.body.as_slice(), i.join_key.as_str())),
-        );
-    for (body, row_id) in arms {
-        rls_write_gate::admit_stored_row(rls_write_check, body, row_id, None, tid, collection)?;
+        .map(|u| (u.body.as_slice(), u.key))
+        .chain(plan.deletes.iter().map(|d| (d.body.as_slice(), d.key)));
+    for (body, key) in doc_arms {
+        let identity = key.to_identity();
+        rls_write_gate::admit_stored_row(rls_write_check, body, &identity, None, tid, collection)?;
+    }
+    for insert in &plan.inserts {
+        let identity =
+            crate::engine::document::store::RowIdentity::from_user_key(insert.join_key.as_str());
+        rls_write_gate::admit_stored_row(
+            rls_write_check,
+            &insert.body,
+            &identity,
+            None,
+            tid,
+            collection,
+        )?;
     }
     Ok(())
 }
@@ -86,10 +94,15 @@ pub(super) fn gate_merge_arms(
 /// reads. Same shape the point and bulk DML RETURNING paths emit, so a MERGE
 /// row projects identically.
 ///
+/// `key` is the row's storage key: every caller's `MergeUpdate::key`,
+/// `MergeDelete::key`, or a freshly minted insert key. This function converts
+/// it to the client-visible identity before decoding.
+///
 /// The schema argument is `None` unconditionally: a merge plan's captured
 /// bodies are MessagePack for BOTH storage modes (`collect_merge_plan` decodes
 /// a strict target's Binary Tuple and re-encodes the resolved row before the
 /// apply pass ever sees it), so the strict decoder would have nothing to read.
-pub(super) fn returning_doc(body: &[u8], doc_id: &str) -> crate::Result<serde_json::Value> {
-    super::super::returning_doc::from_stored(body, doc_id, None)
+pub(super) fn returning_doc(body: &[u8], key: &StorageKey) -> crate::Result<serde_json::Value> {
+    let identity = key.to_identity();
+    super::super::returning_doc::from_stored(body, &identity, None)
 }

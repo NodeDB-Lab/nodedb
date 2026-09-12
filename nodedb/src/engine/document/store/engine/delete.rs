@@ -7,10 +7,11 @@
 //! row is removed in place.
 
 use super::batch::{DocumentEngine, wall_now_ms};
+use crate::engine::document::store::StorageKey;
 use crate::engine::document::store::extract::extract_index_values_rmpv;
 
 impl<'a> DocumentEngine<'a> {
-    pub fn delete(&self, collection: &str, doc_id: &str) -> crate::Result<bool> {
+    pub fn delete(&self, collection: &str, doc_id: &StorageKey) -> crate::Result<bool> {
         if self.is_bitemporal(collection) {
             let prior_body = self.sparse.versioned_get_current(
                 self.database_id,
@@ -67,6 +68,8 @@ impl<'a> DocumentEngine<'a> {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::Surrogate;
+
     use crate::engine::sparse::btree::SparseEngine;
 
     use super::*;
@@ -77,14 +80,18 @@ mod tests {
         (engine, dir)
     }
 
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(Surrogate::new(surrogate))
+    }
+
     #[test]
     fn delete_document() {
         let (sparse, _dir) = make_engine();
         let doc_engine = DocumentEngine::new(&sparse, 0, 1);
 
         let doc = serde_json::json!({"name": "Bob"});
-        doc_engine.put("users", "u1", &doc).unwrap();
-        assert!(doc_engine.delete("users", "u1").unwrap());
-        assert!(doc_engine.get("users", "u1").unwrap().is_none());
+        doc_engine.put("users", &key(1), &doc).unwrap();
+        assert!(doc_engine.delete("users", &key(1)).unwrap());
+        assert!(doc_engine.get("users", &key(1)).unwrap().is_none());
     }
 }

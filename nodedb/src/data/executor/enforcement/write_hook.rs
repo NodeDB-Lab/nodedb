@@ -194,6 +194,7 @@ pub(in crate::data::executor) fn target_write_set(
         .iter()
         .map(|target| crate::bridge::envelope::WriteSetEntry {
             surrogate: target.surrogate.as_u32(),
+            identity: target.identity.clone(),
             is_delete: false,
             value: target.body.clone(),
             collection: Some(target.collection.clone()),

@@ -95,6 +95,7 @@ impl CoreLoop {
                 collection,
                 value,
                 surrogate,
+                resolved_sum_targets,
                 ..
             }) = task.plan()
             else {
@@ -102,7 +103,7 @@ impl CoreLoop {
             };
             let tid = task.request.tenant_id.as_u64();
             let db_id = task.request.database_id.as_u64();
-            let row_key = crate::engine::document::store::surrogate_to_doc_id(*surrogate);
+            let storage_key = crate::engine::document::store::StorageKey::for_surrogate(*surrogate);
             results.push(
                 self.apply_point_put(
                     &txn,
@@ -110,13 +111,14 @@ impl CoreLoop {
                         database_id: db_id,
                         tid,
                         collection: collection.as_str(),
-                        document_id: &row_key,
+                        storage_key,
                         surrogate: *surrogate,
                         value,
                         index_text: true,
                         user_roles: &task.request.user_roles,
                         enforce: true,
                         wal_lsn: task.wal_lsn(),
+                        resolved_targets: resolved_sum_targets.as_slice(),
                     },
                 )
                 .map_err(|e| {
@@ -175,14 +177,13 @@ impl CoreLoop {
                             Ok(p) => p.prior_value.as_deref(),
                             Err(_) => None,
                         };
-                        self.emit_put_event(
-                            task,
-                            tid,
-                            collection.as_str(),
-                            document_id,
-                            value,
-                            prior,
+                        // The plan's `document_id` is the row's client identity,
+                        // the same one `execute_point_put` emits and the WAL
+                        // journals.
+                        let identity = crate::engine::document::store::RowIdentity::from_user_key(
+                            document_id.as_str(),
                         );
+                        self.emit_put_event(task, tid, collection.as_str(), identity, value, prior);
                     }
                     self.response_ok(task)
                 }

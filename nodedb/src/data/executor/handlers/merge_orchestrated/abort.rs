@@ -43,7 +43,14 @@ impl CoreLoop {
         keys: &[String],
     ) {
         for key in keys {
-            self.doc_cache.invalidate(database_id, tid, collection, key);
+            // `key` is a bare string accumulated several calls removed from
+            // any typed scan. Eviction is always safe to skip: a shape that
+            // fails to parse as a storage key can hold no live cache entry
+            // either way.
+            if let Some(key) = crate::engine::document::store::StorageKey::parse(key) {
+                self.doc_cache
+                    .invalidate(database_id, tid, collection, &key);
+            }
         }
     }
 

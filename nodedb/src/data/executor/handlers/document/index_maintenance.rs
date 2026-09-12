@@ -113,7 +113,10 @@ impl CoreLoop {
         // Deduplicate-unique-as-we-go: track `(normalized_value → doc_id)`
         // so a dup within the existing set is flagged before we ever
         // touch the index table.
-        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<
+            String,
+            crate::engine::document::store::StorageKey,
+        > = std::collections::HashMap::new();
 
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
@@ -170,7 +173,7 @@ impl CoreLoop {
                     );
                 }
                 if unique {
-                    seen.insert(stored.clone(), doc_id.clone());
+                    seen.insert(stored.clone(), *doc_id);
                 }
                 pending_keys.push(crate::engine::sparse::btree_index::index_key_for(
                     crate::engine::sparse::btree_index::IndexEntryTxn {

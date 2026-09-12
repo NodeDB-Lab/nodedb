@@ -181,7 +181,7 @@ fn event_source_preserved_through_write_event() {
         database_id: nodedb::types::DatabaseId::DEFAULT,
         collection: Arc::from("orders"),
         op: WriteOp::Insert,
-        row_id: RowId::new("doc-1"),
+        row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("doc-1")),
         lsn: Lsn::new(100),
         tenant_id: TenantId::new(1),
         vshard_id: VShardId::new(0),

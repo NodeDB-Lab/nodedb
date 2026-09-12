@@ -6,6 +6,7 @@ use super::error_code::ErrorCode;
 use super::payload::Payload;
 use super::status::Status;
 use crate::types::{Lsn, RequestId};
+use nodedb_types::RowIdentity;
 
 /// One row-level effect of an applied write, carried back from the Data Plane
 /// so the Control Plane can mint a durable redo record *after* apply.
@@ -19,6 +20,11 @@ use crate::types::{Lsn, RequestId};
 pub struct WriteSetEntry {
     /// The row's stable global surrogate.
     pub surrogate: u32,
+    /// The row's client identity, by the rule INSERT mints it with.
+    ///
+    /// The redo record journals this text as its `document_id`, so a WAL
+    /// replay names the same row a live event names.
+    pub identity: RowIdentity,
     /// `true` for a delete effect (no body), `false` for a put (post-image in
     /// `value`).
     pub is_delete: bool,

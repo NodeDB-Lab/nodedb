@@ -52,8 +52,9 @@
 //! # Identity comes from the plan, never from a store probe
 //!
 //! Rows are keyed by an 8-hex surrogate
-//! ([`surrogate_to_doc_id`](crate::engine::document::store::surrogate_to_doc_id)),
-//! so a join-key VALUE is not a storage key. The Control Plane resolves each
+//! ([`StorageKey`](crate::engine::document::store::StorageKey), rendered via
+//! its `Display` impl), so a join-key VALUE is not a storage key. The
+//! Control Plane resolves each
 //! join value to its target row's surrogate at plan time and the resolution
 //! arrives on
 //! [`EnforcementCtx::resolved_targets`](crate::data::executor::enforcement::images::EnforcementCtx).
@@ -70,7 +71,7 @@ use redb::WriteTransaction;
 use rust_decimal::Decimal;
 
 use nodedb_physical::physical_plan::MaterializedSumBinding;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::delta::fold_sum_deltas;
 use super::rmw::BalanceRmw;
@@ -84,12 +85,13 @@ use crate::types::DatabaseId;
 pub(in crate::data::executor) struct TargetWrite {
     /// Target collection name.
     pub collection: String,
-    /// Storage key of the target row — the hex-encoded surrogate.
-    pub document_id: String,
     /// The target row's surrogate, so an undo entry addresses the same identity
-    /// the forward write used. The old code had no surrogate to record and
-    /// pushed `Surrogate::ZERO`.
+    /// the forward write used.
     pub surrogate: Surrogate,
+    /// The target row's client identity: its declared primary key when the
+    /// target declares one, else its decimal surrogate. The redo entry and the
+    /// target row's event both name the row by it.
+    pub identity: RowIdentity,
     /// The MessagePack body this write handed to `apply_point_put` — NOT the
     /// bytes that reached storage.
     ///
@@ -187,11 +189,14 @@ impl CoreLoop {
                         // cache entries those writes populated. Left behind, they
                         // serve balances that no longer exist in storage.
                         for write in &writes {
+                            let key = crate::engine::document::store::StorageKey::for_surrogate(
+                                write.surrogate,
+                            );
                             self.doc_cache.invalidate(
                                 ctx.database_id,
                                 ctx.tid,
                                 &write.collection,
-                                &write.document_id,
+                                &key,
                             );
                         }
                         return Err(e);
@@ -248,6 +253,7 @@ impl CoreLoop {
                 join_column: &binding.join_column,
                 join_value,
                 wal_lsn: ctx.wal_lsn,
+                target_declared_primary_key: binding.declared_primary_key.as_deref(),
             },
         )
     }
@@ -308,7 +314,7 @@ mod tests {
     use crate::data::executor::handlers::document::write::DocumentBatchInsertParams;
     use crate::data::executor::handlers::update_from_join::UpdateFromJoinParams;
     use crate::data::executor::strict_format;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::TenantId;
     use nodedb_physical::physical_plan::{ResolvedSumTarget, StorageMode, UpdateValue};
     use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
@@ -347,6 +353,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -422,7 +429,7 @@ mod tests {
     /// worse — the row survives the statement and is unreadable to every strict
     /// reader afterwards.
     ///
-    /// The target row is seeded under `surrogate_to_doc_id`, the key every
+    /// The target row is seeded under its `StorageKey`, the key every
     /// reader of that collection uses. Seeding under the raw join VALUE would
     /// only prove that a lookup keyed by the same wrong value finds it.
     #[test]
@@ -447,7 +454,7 @@ mod tests {
         row.insert("balance".to_string(), Value::String("100".into()));
         let tuple = strict_format::value_to_binary_tuple(&Value::Object(row), &schema, TARGET)
             .expect("encode seed tuple");
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         core.sparse
             .put(DB, TID, TARGET, &target_key, &tuple)
             .expect("seed target row");
@@ -502,7 +509,7 @@ mod tests {
 
         let seed = serde_json::json!({"id": ACCOUNT, "owner": "alice", "balance": "100"});
         let body = doc_format::encode_to_msgpack(&seed);
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         core.sparse
             .put(DB, TID, TARGET, &target_key, &body)
             .expect("seed target row");
@@ -534,7 +541,7 @@ mod tests {
         );
         register_source(&mut core);
 
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         let seed = serde_json::json!({"id": ACCOUNT, "balance": "100"});
         core.sparse
             .put(
@@ -668,7 +675,7 @@ mod tests {
 
         // Seeded so that an accidental apply would be VISIBLE as a moved total
         // rather than failing on an absent row and looking like a refusal.
-        let target_key = surrogate_to_doc_id(TARGET_SURROGATE);
+        let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         let seed = serde_json::json!({"id": ACCOUNT, "balance": "100"});
         core.sparse
             .put(
@@ -798,7 +805,7 @@ mod tests {
                 DB,
                 TID,
                 collection,
-                &surrogate_to_doc_id(surrogate),
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
                 &doc_format::encode_to_msgpack(&row),
             )
             .expect("seed target row");
@@ -811,7 +818,7 @@ mod tests {
                 DB,
                 TID,
                 SOURCE,
-                &surrogate_to_doc_id(surrogate),
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
                 &doc_format::encode_to_msgpack(&row),
             )
             .expect("seed source row");
@@ -824,7 +831,12 @@ mod tests {
     fn balance_in(core: &CoreLoop, collection: &str, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, collection, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                collection,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target row")
             .expect("target row must still exist");
         doc_format::decode_document(&stored)
@@ -910,6 +922,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -932,7 +945,15 @@ mod tests {
 
         let resolved = resolved_onto_target(&[(ACCOUNT_A, SURROGATE_A), (ACCOUNT_B, SURROGATE_B)]);
         let task = make_default_task();
-        let response = core.execute_truncate(&task, TID, SOURCE, &resolved);
+        let response = core.execute_truncate(
+            &task,
+            TID,
+            crate::data::executor::handlers::truncate::TruncateParams {
+                collection: SOURCE,
+                resolved_sum_targets: &resolved,
+                declared_primary_key: None,
+            },
+        );
 
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
         assert_eq!(balance_of(&core, SURROGATE_A), "0");
@@ -957,14 +978,14 @@ mod tests {
                 DB,
                 TID,
                 SOURCE,
-                &surrogate_to_doc_id(Surrogate(1)),
+                &nodedb_types::StorageKey::for_surrogate(Surrogate(1)),
                 &doc_format::encode_to_msgpack(&entry),
             )
             .expect("seed written row");
 
         let rate = serde_json::json!({"rate_id": "r1", "amount": 80});
         let source_rows = vec![(
-            surrogate_to_doc_id(Surrogate(9)),
+            nodedb_types::StorageKey::for_surrogate(Surrogate(9)).to_string(),
             doc_format::encode_to_msgpack(&rate),
         )];
 
@@ -1010,13 +1031,13 @@ mod tests {
 
         let documents = vec![
             (
-                surrogate_to_doc_id(Surrogate(1)),
+                nodedb_types::StorageKey::for_surrogate(Surrogate(1)).to_string(),
                 doc_format::encode_to_msgpack(
                     &serde_json::json!({"account_id": ACCOUNT_A, "amount": 25}),
                 ),
             ),
             (
-                surrogate_to_doc_id(Surrogate(2)),
+                nodedb_types::StorageKey::for_surrogate(Surrogate(2)).to_string(),
                 doc_format::encode_to_msgpack(
                     &serde_json::json!({"account_id": ACCOUNT_A, "amount": 75}),
                 ),
@@ -1087,6 +1108,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -1103,7 +1125,12 @@ mod tests {
         assert_eq!(balance_of(&core, SURROGATE_B), "50");
         assert!(
             core.sparse
-                .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(1)))
+                .get(
+                    DB,
+                    TID,
+                    SOURCE,
+                    &nodedb_types::StorageKey::for_surrogate(Surrogate(1))
+                )
                 .expect("read source row")
                 .is_some(),
             "no source row may be removed on a refused statement"
@@ -1160,6 +1187,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -1182,7 +1210,12 @@ mod tests {
         assert_eq!(balance_in(&core, REMOTE_TARGET, SURROGATE_B), "50");
         assert!(
             core.sparse
-                .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(1)))
+                .get(
+                    DB,
+                    TID,
+                    SOURCE,
+                    &nodedb_types::StorageKey::for_surrogate(Surrogate(1))
+                )
                 .expect("read source row")
                 .is_none(),
             "the statement itself must have run: the matched source rows are gone"
@@ -1221,6 +1254,7 @@ mod tests {
                     surrogates: None,
                     edges: None,
                 },
+                declared_primary_key: None,
             },
         );
 
@@ -1558,7 +1592,12 @@ mod tests {
         );
         assert!(
             core.sparse
-                .get(DB, TID, SOURCE, &surrogate_to_doc_id(Surrogate(1)))
+                .get(
+                    DB,
+                    TID,
+                    SOURCE,
+                    &nodedb_types::StorageKey::for_surrogate(Surrogate(1))
+                )
                 .expect("read source row")
                 .is_some(),
             "the source row must still have been written"

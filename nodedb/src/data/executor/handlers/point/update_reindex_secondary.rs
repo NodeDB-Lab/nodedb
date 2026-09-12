@@ -8,17 +8,16 @@
 //! inverted index. Both are maintained here, together, so a caller cannot
 //! remember one and forget the other.
 
-use nodedb_types::Surrogate;
-
 use crate::data::executor::core_loop::CoreLoop;
+use crate::engine::document::store::StorageKey;
 
 /// Inputs to [`CoreLoop::update_reindex_vector_and_sparse`].
 pub(in crate::data::executor) struct UpdateSecondaryReindex<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub row_key: &'a str,
-    pub surrogate: Surrogate,
+    /// The row's storage key, shared by the vector and sparse reindex paths.
+    pub storage_key: StorageKey,
     pub new_body: &'a [u8],
     pub is_strict: bool,
     /// Precomputed by the caller so a loop over N rows pays the
@@ -27,7 +26,7 @@ pub(in crate::data::executor) struct UpdateSecondaryReindex<'a> {
 }
 
 impl CoreLoop {
-    /// Re-index `row_key`'s vectors and sparse literal from its new body.
+    /// Re-index the row's vectors and sparse literal from its new body.
     ///
     /// Each half is a no-op when the collection declares nothing of that kind.
     /// A vector whose width disagrees with the index is an error, so an
@@ -41,8 +40,7 @@ impl CoreLoop {
             database_id: p.database_id,
             tid: p.tid,
             collection: p.collection,
-            row_key: p.row_key,
-            surrogate: p.surrogate,
+            storage_key: p.storage_key,
             new_body: p.new_body,
             is_strict: p.is_strict,
             has_vectors: p.has_vectors,
@@ -53,7 +51,7 @@ impl CoreLoop {
             database_id: p.database_id,
             tid: p.tid,
             collection: p.collection,
-            row_key: p.row_key,
+            storage_key: p.storage_key,
             new_body: p.new_body,
             is_strict: p.is_strict,
             has_sparse,

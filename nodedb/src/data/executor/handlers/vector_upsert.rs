@@ -214,7 +214,7 @@ impl CoreLoop {
         // row scannable at all, so skipping it made such a row invisible to
         // `SELECT *` while every other path still counted it as stored. An
         // empty tagged map is the honest sidecar for "no non-vector columns".
-        let row_key = format!("{:08x}", surrogate.as_u32());
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
         let sidecar: std::borrow::Cow<'_, [u8]> = if payload.is_empty() {
             match zerompk::to_msgpack_vec(&HashMap::<String, Value>::new()) {
                 Ok(bytes) => std::borrow::Cow::Owned(bytes),
@@ -234,7 +234,7 @@ impl CoreLoop {
             task.request.database_id.as_u64(),
             tid,
             collection,
-            &row_key,
+            &storage_key,
             &sidecar,
         ) {
             // Roll back Steps 3 + 4 so the HNSW node and bitmap entries
@@ -285,7 +285,7 @@ impl CoreLoop {
                 task,
                 spec,
                 rls_filters,
-                &row_key,
+                &storage_key,
                 &sidecar,
             );
         }

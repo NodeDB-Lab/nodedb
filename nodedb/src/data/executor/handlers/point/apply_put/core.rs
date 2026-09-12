@@ -36,13 +36,14 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            document_id,
+            storage_key,
             surrogate,
             value,
             index_text,
             user_roles,
             enforce,
             wal_lsn,
+            resolved_targets,
         } = params;
         let config_key = (
             crate::types::DatabaseId::new(database_id),
@@ -98,9 +99,10 @@ impl CoreLoop {
                 .is_some_and(|config| !config.index_paths.is_empty());
         let old_value = if bitemporal {
             self.sparse
-                .versioned_get_current(database_id, tid, collection, document_id)?
+                .versioned_get_current(database_id, tid, collection, &storage_key)?
         } else if need_old {
-            self.sparse.get(database_id, tid, collection, document_id)?
+            self.sparse
+                .get(database_id, tid, collection, &storage_key)?
         } else {
             None
         };
@@ -131,6 +133,7 @@ impl CoreLoop {
                 value,
                 old_value: &old_value,
                 user_roles,
+                resolved_targets,
             },
         )?;
 
@@ -142,7 +145,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    doc_id: document_id,
+                    doc_id: &storage_key,
                     sys_from_ms,
                     valid_from_ms,
                     valid_until_ms,
@@ -152,7 +155,7 @@ impl CoreLoop {
             old_value
         } else {
             self.sparse
-                .put_in_txn(txn, database_id, tid, collection, document_id, &stored)?
+                .put_in_txn(txn, database_id, tid, collection, &storage_key, &stored)?
         };
 
         // Pre-image capture for the column-stats read-modify-write, so a
@@ -186,7 +189,7 @@ impl CoreLoop {
                     // Recorded here, at the detection site — an fsync'd
                     // report survives a restart, unlike a log line.
                     crate::diag::fts_index_update_failed(&e, collection, surrogate.as_u32());
-                    warn!(core = self.core_id, %collection, %document_id, error = %e, "inverted index update failed; rejecting the write");
+                    warn!(core = self.core_id, %collection, %storage_key, error = %e, "inverted index update failed; rejecting the write");
                     return Err(e);
                 }
             }
@@ -205,7 +208,7 @@ impl CoreLoop {
         }
 
         self.doc_cache
-            .put(database_id, tid, collection, document_id, &stored);
+            .put(database_id, tid, collection, &storage_key, &stored);
 
         // Secondary index extraction into the caller's write txn — the
         // non-_in_txn variant would deadlock since `execute_point_put`
@@ -233,7 +236,7 @@ impl CoreLoop {
                 tid,
                 collection,
                 doc: &doc,
-                document_id,
+                document_id: &storage_key,
                 paths: &paths,
                 bitemporal,
             })?;
@@ -264,7 +267,7 @@ impl CoreLoop {
                                 coll: collection,
                                 field: &path.path,
                                 value: &value,
-                                doc_id: document_id,
+                                doc_id: &storage_key,
                                 sys_from_ms,
                             },
                         )?;
@@ -283,7 +286,7 @@ impl CoreLoop {
                         collection,
                         old_doc: old_doc_for_index.as_ref(),
                         new_doc: &doc,
-                        doc_id: document_id,
+                        doc_id: &storage_key,
                         index_paths: &paths,
                     },
                 )?;
@@ -293,20 +296,19 @@ impl CoreLoop {
         }
 
         let spatial_inserts =
-            self.apply_point_put_spatial(database_id, tid, collection, document_id, value);
+            self.apply_point_put_spatial(database_id, tid, collection, storage_key, value);
         let vector_inserts = self.apply_point_put_vector_indexes(
             crate::data::executor::handlers::point::apply_put::VectorIndexPutParams {
                 database_id,
                 tid,
                 collection,
-                document_id,
-                surrogate,
+                storage_key,
                 value,
                 wal_lsn: wal_lsn.map(|l| l.as_u64()).unwrap_or(0),
             },
         )?;
         // No-op unless the strict schema declares a `SparseVector` column.
-        self.apply_point_put_sparse_indexes(database_id, tid, collection, document_id, value);
+        self.apply_point_put_sparse_indexes(database_id, tid, collection, storage_key, value);
 
         Ok(PointPutOutcome {
             prior_value: prior,
@@ -332,7 +334,7 @@ mod tests {
     use crate::data::executor::handlers::point::apply_put::PointPutParams;
     use crate::data::executor::handlers::point::put::PointPutExec;
     use crate::data::executor::task::ExecutionTask;
-    use crate::engine::document::store::surrogate_to_doc_id;
+    use crate::engine::document::store::StorageKey;
     use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
     use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
@@ -360,6 +362,10 @@ mod tests {
         txn.delete_table(DOC_LENGTHS).unwrap();
         txn.open_table(POISONED_DOC_LENGTHS).unwrap();
         txn.commit().unwrap();
+    }
+
+    fn row_key() -> String {
+        StorageKey::for_surrogate(SURROGATE).to_string()
     }
 
     fn point_put_task(row_key: &str) -> ExecutionTask {
@@ -395,8 +401,10 @@ mod tests {
     }
 
     fn stored_row(core: &CoreLoop, row_key: &str) -> Option<Vec<u8>> {
+        let key = crate::engine::document::store::StorageKey::parse(row_key)
+            .expect("test row_key is always a rendered storage key");
         core.sparse
-            .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, row_key)
+            .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, &key)
             .unwrap()
     }
 
@@ -406,7 +414,7 @@ mod tests {
     fn healthy_index_commits_the_row_and_indexes_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
 
         let task = point_put_task(&row_key);
         let resp = core.execute_point_put(
@@ -438,7 +446,7 @@ mod tests {
     fn index_failure_rejects_the_write_and_leaves_no_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
         poison_inverted_index(&core);
 
         let task = point_put_task(&row_key);
@@ -466,9 +474,11 @@ mod tests {
             "the rejected write must leave no committed row — a stored row whose \
              index update failed is invisible to full-text search forever"
         );
+        let key = crate::engine::document::store::StorageKey::parse(&row_key)
+            .expect("test row_key is always a rendered storage key");
         assert!(
             core.doc_cache
-                .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, &row_key)
+                .get(DatabaseId::DEFAULT.as_u64(), TID, COLL, &key)
                 .is_none(),
             "the rejected write must not populate the document cache either, or \
              reads would serve a row that is not in durable storage"
@@ -481,7 +491,7 @@ mod tests {
     fn apply_point_put_propagates_index_failure_instead_of_absorbing_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
         poison_inverted_index(&core);
 
         let txn = core.sparse.begin_write().unwrap();
@@ -491,13 +501,14 @@ mod tests {
                 database_id: DatabaseId::DEFAULT.as_u64(),
                 tid: TID,
                 collection: COLL,
-                document_id: &row_key,
+                storage_key: crate::engine::document::store::StorageKey::for_surrogate(SURROGATE),
                 surrogate: SURROGATE,
                 value: BODY,
                 index_text: true,
                 user_roles: &[],
                 enforce: true,
                 wal_lsn: None,
+                resolved_targets: &[],
             },
         );
 
@@ -521,7 +532,7 @@ mod tests {
     fn index_text_disabled_is_unaffected_by_a_broken_index() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let row_key = surrogate_to_doc_id(SURROGATE);
+        let row_key = row_key();
         poison_inverted_index(&core);
 
         let txn = core.sparse.begin_write().unwrap();
@@ -531,13 +542,14 @@ mod tests {
                 database_id: DatabaseId::DEFAULT.as_u64(),
                 tid: TID,
                 collection: COLL,
-                document_id: &row_key,
+                storage_key: crate::engine::document::store::StorageKey::for_surrogate(SURROGATE),
                 surrogate: SURROGATE,
                 value: BODY,
                 index_text: false,
                 user_roles: &[],
                 enforce: true,
                 wal_lsn: None,
+                resolved_targets: &[],
             },
         );
 

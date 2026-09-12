@@ -40,6 +40,7 @@ pub async fn verify_hash_chain(
     // so any redaction rule on the collection is refused: hashing a masked row
     // would report an intact chain as broken.
     let gate = CollectionReadGate::open(state, identity, database_id, &collection)?;
+    gate.require_document_engine(&collection, "VERIFY_HASH_CHAIN")?;
     gate.refuse_if_any_redaction(&collection, "the hash chain")?;
 
     // Scan all documents.

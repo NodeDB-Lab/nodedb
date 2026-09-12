@@ -106,22 +106,25 @@ impl SurrogateAssigner {
 
     /// Allocate a FRESH surrogate for a row with no content primary key — a
     /// collection whose primary key is the auto-generated `_rowid` (no
-    /// `PRIMARY KEY` was declared). Unlike [`assign`](Self::assign), there is
-    /// no fast-path lookup: every call allocates a new value, so N rows get N
-    /// distinct surrogates instead of collapsing onto the binding for an empty
-    /// key.
+    /// `PRIMARY KEY` was declared), or a timeseries row.
     ///
-    /// The surrogate is self-bound (pk = its own decimal string). The Data
-    /// Plane sets the row's `_rowid` field equal to this surrogate, so the
-    /// self-binding makes a later `WHERE _rowid = N` point lookup resolve back
-    /// to it, and reuses the same durable bind/flush machinery as `assign` so
-    /// the hwm advance is persisted and Raft-proposed identically.
+    /// [`assign`](Self::assign) has a fast-path lookup. This does not. Every
+    /// call allocates a new value, so N rows get N distinct surrogates.
+    ///
+    /// The surrogate self-binds under its identity, so a later keyed lookup
+    /// resolves. The identity is the surrogate's decimal string, matching the
+    /// `_rowid` value the Data Plane writes for an auto-`_rowid` row, so
+    /// `WHERE _rowid = N` resolves back to it.
+    ///
+    /// Reuses `assign`'s bind/flush machinery, so the hwm advance persists
+    /// and Raft-proposes identically. Returns the bound identity string,
+    /// which the caller uses verbatim.
     pub fn assign_fresh(
         &self,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-    ) -> crate::Result<Surrogate> {
+    ) -> crate::Result<(Surrogate, String)> {
         let catalog = self.credential_store.catalog();
 
         // Allocate + self-bind + maybe-flush under the registry write lock,
@@ -140,10 +143,8 @@ impl SurrogateAssigner {
                     continue;
                 }
             };
-            // Self-bind: pk is the surrogate's own decimal string, matching the
-            // `_rowid` value the Data Plane writes (surrogate as i64) once run
-            // through `sql_value_to_string`, so `WHERE _rowid = N` resolves.
-            let pk = surrogate.as_u32().to_string();
+            let pk =
+                crate::engine::document::store::RowIdentity::for_surrogate(surrogate).into_string();
             let pk_bytes = pk.as_bytes();
             catalog.put_surrogate(database_id, tenant_id, collection, pk_bytes, surrogate)?;
             self.wal_appender.record_bind_to_wal(
@@ -154,7 +155,7 @@ impl SurrogateAssigner {
                 pk_bytes,
             )?;
             self.maybe_flush(&registry, catalog)?;
-            return Ok(surrogate);
+            return Ok((surrogate, pk));
         }
     }
 

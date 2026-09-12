@@ -150,6 +150,11 @@ pub struct MaterializedSumBinding {
     pub join_column: String,
     /// Expression evaluated against the source INSERT row to compute the delta.
     pub value_expr: nodedb_query::expr::SqlExpr,
+    /// The TARGET collection's declared `PRIMARY KEY` column, when it has
+    /// one. Resolved from the catalog at plan time. Names the target row in
+    /// the event and redo entry its balance write produces.
+    #[serde(default)]
+    pub declared_primary_key: Option<String>,
 }
 
 /// Period lock configuration propagated to Data Plane.

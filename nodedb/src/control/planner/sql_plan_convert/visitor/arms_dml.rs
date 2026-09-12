@@ -18,6 +18,12 @@ macro_rules! impl_dml_arms_for_convert_visitor {
                 column_schema,
                 primary_key,
             } = args;
+            let primary_key = primary_key.ok_or_else(|| crate::Error::PlanError {
+                detail: format!(
+                    "insert converter reached collection '{collection}' with no resolved \
+                     primary key"
+                ),
+            })?;
             super::super::dml::convert_insert(super::super::dml::ConvertInsertArgs {
                 collection,
                 route,
@@ -45,6 +51,12 @@ macro_rules! impl_dml_arms_for_convert_visitor {
                 column_schema,
                 primary_key,
             } = args;
+            let primary_key = primary_key.ok_or_else(|| crate::Error::PlanError {
+                detail: format!(
+                    "upsert converter reached collection '{collection}' with no resolved \
+                     primary key"
+                ),
+            })?;
             super::super::dml::convert_upsert(super::super::dml::ConvertUpsertArgs {
                 collection,
                 route,

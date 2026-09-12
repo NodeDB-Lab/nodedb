@@ -29,7 +29,7 @@ impl PhysicalSurrogateAssigner for SurrogateAssigner {
         database_id: nodedb_types::DatabaseId,
         tenant_id: nodedb_types::TenantId,
         collection: &str,
-    ) -> Result<nodedb_types::Surrogate, SurrogateAssignError> {
+    ) -> Result<(nodedb_types::Surrogate, String), SurrogateAssignError> {
         Self::assign_fresh(self, database_id, tenant_id, collection)
             .map_err(|e| SurrogateAssignError::Backend(e.to_string()))
     }

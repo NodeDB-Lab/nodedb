@@ -24,27 +24,47 @@ pub fn json_value_to_text(v: &serde_json::Value) -> String {
 }
 
 /// Flatten a parsed JSON value into row objects.
+///
+/// The envelope `id` is a rendered [`StorageKey`](crate::engine::document::store::StorageKey)
+/// by construction.
+/// A value that fails `StorageKey::parse` is surfaced as `Err`, never accommodated.
 pub fn push_flat_rows(
     value: serde_json::Value,
     out: &mut Vec<serde_json::Map<String, serde_json::Value>>,
-) {
+) -> crate::Result<()> {
     match value {
         serde_json::Value::Array(items) => {
             for item in items {
-                push_flat_rows(item, out);
+                push_flat_rows(item, out)?;
             }
         }
         serde_json::Value::Object(mut map) => {
             if is_scan_wrapper(&map)
-                && let Some(serde_json::Value::Object(inner)) = map.remove("data")
+                && let Some(serde_json::Value::Object(mut inner)) = map.remove("data")
             {
+                // The envelope carries the row's storage key, which is
+                // internal. A body with no `id` field carries identity
+                // nowhere else, so the key renders to an identity at this
+                // boundary. `or_insert` leaves a declared primary key as the
+                // authority.
+                if let Some(serde_json::Value::String(key)) = map.remove("id") {
+                    let identity = crate::engine::document::store::StorageKey::parse(&key)
+                        .ok_or_else(|| crate::Error::Internal {
+                            detail: format!("scan envelope id is not a storage key: '{key}'"),
+                        })?
+                        .to_identity();
+                    inner
+                        .entry("id")
+                        .or_insert(serde_json::Value::String(identity.into_string()));
+                }
                 out.push(inner);
-                return;
+                return Ok(());
             }
             out.push(map);
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// The Data Plane's raw document-scan codec emits objects with exactly

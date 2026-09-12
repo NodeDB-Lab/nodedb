@@ -12,13 +12,15 @@
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
-use crate::data::executor::handlers::transaction::stage_write::hex_key;
+use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 impl CoreLoop {
     /// Consult the active transaction's staging overlay for a point-get.
+    ///
+    /// `document_id` is the plan's resolved client identity of the row.
     ///
     /// Returns `None` when there is no active transaction on this task, or
     /// the transaction has no overlay entry for this collection/surrogate —
@@ -37,7 +39,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u64,
         collection: &str,
-        document_id: &str,
+        document_id: &RowIdentity,
         surrogate: Surrogate,
     ) -> Option<Result<Vec<u8>, Response>> {
         let txn_id = task.request.txn_id?;
@@ -49,9 +51,6 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        // A staged-only insert has no base surrogate yet, so the read plan's
-        // `surrogate` is unresolved (zero) — resolve by document id first, then
-        // fall back to the surrogate for rows that already exist in base.
         let overlay = self.txn_overlays.get(&txn_id)?;
         // A staged-only insert has no base surrogate yet, so the read plan's
         // `surrogate` is unresolved (zero) — resolve by document id first, then
@@ -66,9 +65,8 @@ impl CoreLoop {
     }
 
     /// Consult the active transaction's staging overlay for a raw KV key
-    /// (hex-encoded into the overlay's doc-id, same as every KV staging
-    /// path -- see `stage_kv::hex_key`), for read-merge in `BatchGet` /
-    /// `FieldGet`.
+    /// (keyed by `kv_row_identity`, same as every KV staging path), for
+    /// read-merge in `BatchGet` / `FieldGet`.
     ///
     /// Unlike [`overlay_point_lookup`], which is tailored to a single
     /// point-get's not-found response shape, this returns a plain nested
@@ -90,7 +88,7 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        let doc_id = hex_key(key);
+        let doc_id = kv_row_identity(key);
         let overlay = self.txn_overlays.get(&txn_id)?;
 
         // A staged EXPIRE with an already-past instant makes the row appear

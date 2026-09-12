@@ -22,13 +22,12 @@
 
 use std::sync::Arc;
 
-use nodedb_physical::physical_plan::{
-    DocumentOp, MaterializedSumBinding, ResolvedSumTarget, UpdateValue,
-};
+use nodedb_physical::physical_plan::{DocumentOp, MaterializedSumBinding, UpdateValue};
 use nodedb_types::Surrogate;
 
 use super::recon::recon_point_row;
 use super::resolve::lookup_join_value;
+use super::resolve_target::ResolvedTargets;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId};
 
@@ -190,7 +189,7 @@ pub(super) async fn extend_with_stored_row(
     state: &SharedState,
     bindings: &Arc<Vec<MaterializedSumBinding>>,
     scope: &StoredRowScope<'_>,
-    resolved: &mut Vec<ResolvedSumTarget>,
+    resolved: &mut ResolvedTargets,
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
@@ -228,34 +227,21 @@ pub(super) async fn extend_with_stored_row(
         rows.extend(old.iter().cloned());
         rows.extend(new.iter().cloned());
     }
+    // One entry per DISTINCT `(target collection, join value)` PAIR across
+    // every binding and every source of join values, mirroring the
+    // body-driven resolution: a write whose old and new join keys are the
+    // same resolves that target once, while two bindings that share a join
+    // column and name different targets each keep their own entry.
+    // `ResolvedTargets` enforces the dedupe.
     for binding in bindings.iter() {
         for join_value in crate::query::binding_join_keys(binding, &[], &rows)? {
-            // One entry per DISTINCT `(target collection, join value)` PAIR
-            // across every binding and every source of join values, mirroring
-            // the body-driven resolution: a write whose old and new join keys
-            // are the same resolves that target once, while two bindings that
-            // share a join column and name different targets each keep their
-            // own entry.
-            if resolved
-                .iter()
-                .any(|entry| entry.addresses(&binding.target_collection, &join_value))
-            {
-                continue;
-            }
-            let surrogate = lookup_join_value(
-                state,
-                binding,
-                &join_value,
-                tenant_id,
-                database_id,
-                trace_id,
-            )
-            .await?;
-            resolved.push(ResolvedSumTarget::new(
-                &binding.target_collection,
-                join_value,
-                surrogate,
-            ));
+            resolved
+                .resolve(&binding.target_collection, join_value, async |v| {
+                    lookup_join_value(state, binding, v, tenant_id, database_id, trace_id)
+                        .await
+                        .map(Some)
+                })
+                .await?;
         }
     }
     Ok(outcome)

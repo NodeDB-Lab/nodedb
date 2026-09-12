@@ -328,6 +328,10 @@ pub enum DocumentOp {
         /// divergence, before writing.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`. Names the column each
+        /// removed row's identity is read from for its event and redo entry.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Estimate count via HLL cardinality stats.
@@ -473,6 +477,10 @@ pub enum DocumentOp {
         /// See `PointPut::resolved_sum_targets`.
         #[serde(default)]
         resolved_sum_targets: Vec<ResolvedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`. Names the column each
+        /// removed row's identity is read from when staged.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// MERGE: join-based multi-action DML (INSERT/UPDATE/DELETE per WHEN
@@ -557,6 +565,10 @@ pub enum DocumentOp {
         join_column: String,
         /// Join value that resolved to `surrogate`.
         join_value: String,
+        /// The TARGET collection's declared `PRIMARY KEY` column, when it
+        /// has one. Names the target row in its event and redo entry.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Read-only resolve pass over the wrapped write op: runs its full

@@ -21,6 +21,7 @@ pub mod index;
 pub mod predicate;
 pub mod recon;
 pub mod resolve;
+pub mod resolve_target;
 pub mod settle;
 pub mod stored;
 
@@ -30,3 +31,4 @@ pub use index::MaterializedSumIndex;
 pub use resolve::{
     resolve_materialized_sum_targets, resolve_sum_targets_for_bodies, source_drives_bindings,
 };
+pub use resolve_target::ResolvedTargets;

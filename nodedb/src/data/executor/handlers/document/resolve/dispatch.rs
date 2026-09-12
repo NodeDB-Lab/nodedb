@@ -136,6 +136,9 @@ impl CoreLoop {
                 resolved_sum_targets,
                 ollp_predicted_surrogates: _,
                 ollp_predicted_edges: _,
+                // Read only by overlay staging; a resolved delete removes rows
+                // by storage key.
+                declared_primary_key: _,
             } => self.resolve_bulk_delete(
                 task,
                 ResolveBulkDelete {

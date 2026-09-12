@@ -198,7 +198,7 @@ impl CoreLoop {
             task,
             collection,
             crate::event::WriteOp::Update,
-            &src_str,
+            crate::engine::document::store::RowIdentity::from_user_key(src_str.as_ref()),
             Some(&new_source),
             Some(&source_bytes),
         );
@@ -206,7 +206,7 @@ impl CoreLoop {
             task,
             collection,
             crate::event::WriteOp::Update,
-            &dst_str,
+            crate::engine::document::store::RowIdentity::from_user_key(dst_str.as_ref()),
             Some(&new_dest),
             if dest_bytes.is_empty() {
                 None
@@ -315,7 +315,7 @@ impl CoreLoop {
             task,
             source_collection,
             crate::event::WriteOp::Delete,
-            &item_str,
+            crate::engine::document::store::RowIdentity::from_user_key(item_str.as_ref()),
             None,
             Some(&item_data),
         );
@@ -323,7 +323,7 @@ impl CoreLoop {
             task,
             dest_collection,
             crate::event::WriteOp::Insert,
-            &dest_str,
+            crate::engine::document::store::RowIdentity::from_user_key(dest_str.as_ref()),
             Some(&item_data),
             None,
         );

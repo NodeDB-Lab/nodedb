@@ -56,7 +56,7 @@ fn write_event(seq: u64) -> WriteEvent {
         sequence: seq,
         collection: Arc::from("orders"),
         op: WriteOp::Insert,
-        row_id: RowId::new(format!("r-{seq}")),
+        row_id: RowId::row(nodedb_types::RowIdentity::from_user_key(format!("r-{seq}"))),
         lsn: Lsn::new(seq * 10),
         database_id: DatabaseId::new(7),
         tenant_id: TenantId::new(1),

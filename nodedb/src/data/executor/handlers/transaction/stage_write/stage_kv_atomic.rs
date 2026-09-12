@@ -40,7 +40,7 @@ use nodedb_physical::physical_plan::KvOp;
 use nodedb_types::Surrogate;
 
 use super::context::StageCtx;
-use super::stage_kv::hex_key;
+use super::stage_kv::kv_row_identity;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::StagedTtl;
@@ -159,7 +159,7 @@ impl CoreLoop {
         collection: &'a str,
         key: &[u8],
     ) -> StageCtx<'a> {
-        let doc_id = hex_key(key);
+        let doc_id = kv_row_identity(key);
         let coll_key = (
             task.request.database_id,
             crate::types::TenantId::new(tid),

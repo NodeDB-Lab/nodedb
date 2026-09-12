@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
-use crate::data::executor::handlers::transaction::stage_write::hex_key;
+use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
@@ -156,7 +156,7 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.to_string(),
             );
-            let doc_id = hex_key(key);
+            let doc_id = kv_row_identity(key);
             if let Some(overlay) = self.txn_overlays.get(&txn_id) {
                 let staged_value = overlay.get_by_doc_id(&coll_key, &doc_id);
                 if matches!(staged_value, Some(Staged::Tombstone)) {

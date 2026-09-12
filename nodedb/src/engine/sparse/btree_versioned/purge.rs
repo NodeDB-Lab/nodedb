@@ -259,8 +259,14 @@ impl SparseEngine {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::StorageKey;
+
     use super::super::value::VersionedPut;
     use super::*;
+
+    fn key(surrogate: u32) -> StorageKey {
+        StorageKey::for_surrogate(nodedb_types::Surrogate::new(surrogate))
+    }
 
     fn fresh_engine() -> (tempfile::TempDir, SparseEngine) {
         let dir = tempfile::tempdir().unwrap();
@@ -269,12 +275,12 @@ mod tests {
         (dir, eng)
     }
 
-    fn put_version(eng: &SparseEngine, doc_id: &str, sys_from: i64) {
+    fn put_version(eng: &SparseEngine, doc_id: u32, sys_from: i64) {
         eng.versioned_put(VersionedPut {
             database_id: 1,
             tenant: 1,
             coll: "c",
-            doc_id,
+            doc_id: &key(doc_id),
             body: b"payload",
             sys_from_ms: sys_from,
             valid_from_ms: 0,
@@ -283,9 +289,9 @@ mod tests {
         .unwrap();
     }
 
-    fn count_doc_versions(eng: &SparseEngine, doc_id: &str) -> usize {
-        let lo = super::super::key::doc_prefix(1, 1, "c", doc_id);
-        let hi = super::super::key::doc_prefix_end(1, 1, "c", doc_id);
+    fn count_doc_versions(eng: &SparseEngine, doc_id: u32) -> usize {
+        let lo = super::super::key::doc_prefix(1, 1, "c", &key(doc_id));
+        let hi = super::super::key::doc_prefix_end(1, 1, "c", &key(doc_id));
         let txn = eng.db.begin_read().unwrap();
         let t = txn.open_table(DOCUMENTS_VERSIONED).unwrap();
         t.range(lo.as_str()..hi.as_str()).unwrap().count()
@@ -294,35 +300,35 @@ mod tests {
     #[test]
     fn purge_drops_superseded_doc_versions_below_cutoff() {
         let (_d, eng) = fresh_engine();
-        put_version(&eng, "d1", 100);
-        put_version(&eng, "d1", 200);
-        put_version(&eng, "d1", 300);
-        assert_eq!(count_doc_versions(&eng, "d1"), 3);
+        put_version(&eng, 1, 100);
+        put_version(&eng, 1, 200);
+        put_version(&eng, 1, 300);
+        assert_eq!(count_doc_versions(&eng, 1), 3);
 
         let (docs, _idx) = eng
             .purge_superseded_document_versions(1, 1, "c", 150)
             .unwrap();
         assert_eq!(docs, 1, "only v@100 is below cutoff AND superseded");
-        assert_eq!(count_doc_versions(&eng, "d1"), 2);
+        assert_eq!(count_doc_versions(&eng, 1), 2);
     }
 
     #[test]
     fn purge_preserves_latest_version_even_below_cutoff() {
         let (_d, eng) = fresh_engine();
-        put_version(&eng, "d1", 100);
+        put_version(&eng, 1, 100);
         // Only one version: it's the latest, never deleted.
         let (docs, _idx) = eng
             .purge_superseded_document_versions(1, 1, "c", 10_000)
             .unwrap();
         assert_eq!(docs, 0);
-        assert_eq!(count_doc_versions(&eng, "d1"), 1);
+        assert_eq!(count_doc_versions(&eng, 1), 1);
     }
 
     #[test]
     fn purge_groups_by_doc_id() {
         let (_d, eng) = fresh_engine();
         // Two docs, each with 3 versions at 100/200/300.
-        for id in ["d1", "d2"] {
+        for id in [1u32, 2] {
             put_version(&eng, id, 100);
             put_version(&eng, id, 200);
             put_version(&eng, id, 300);
@@ -331,16 +337,16 @@ mod tests {
             .purge_superseded_document_versions(1, 1, "c", 150)
             .unwrap();
         assert_eq!(docs, 2, "one victim per doc");
-        assert_eq!(count_doc_versions(&eng, "d1"), 2);
-        assert_eq!(count_doc_versions(&eng, "d2"), 2);
+        assert_eq!(count_doc_versions(&eng, 1), 2);
+        assert_eq!(count_doc_versions(&eng, 2), 2);
     }
 
     #[test]
     fn purge_is_idempotent() {
         let (_d, eng) = fresh_engine();
-        put_version(&eng, "d1", 100);
-        put_version(&eng, "d1", 200);
-        put_version(&eng, "d1", 300);
+        put_version(&eng, 1, 100);
+        put_version(&eng, 1, 200);
+        put_version(&eng, 1, 300);
         let (a, _) = eng
             .purge_superseded_document_versions(1, 1, "c", 150)
             .unwrap();
@@ -363,7 +369,7 @@ mod tests {
     fn delete_all_versioned_for_collection_drops_every_version() {
         let (_d, eng) = fresh_engine();
         // Two docs, three system-time versions each in coll "c".
-        for id in ["d1", "d2"] {
+        for id in [1u32, 2] {
             put_version(&eng, id, 100);
             put_version(&eng, id, 200);
             put_version(&eng, id, 300);
@@ -373,7 +379,7 @@ mod tests {
             database_id: 1,
             tenant: 1,
             coll: "other",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 100,
             valid_from_ms: 0,
@@ -384,7 +390,7 @@ mod tests {
             database_id: 1,
             tenant: 2,
             coll: "c",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 100,
             valid_from_ms: 0,
@@ -417,7 +423,7 @@ mod tests {
                 database_id: 1,
                 tenant: 1,
                 coll,
-                doc_id: "d1",
+                doc_id: &key(1),
                 body: b"x",
                 sys_from_ms: 100,
                 valid_from_ms: 0,
@@ -430,7 +436,7 @@ mod tests {
             database_id: 1,
             tenant: 2,
             coll: "c",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 100,
             valid_from_ms: 0,
@@ -453,13 +459,13 @@ mod tests {
     fn purge_scoped_to_tenant_collection() {
         let (_d, eng) = fresh_engine();
         // same doc_id in another collection / tenant; must not be touched.
-        put_version(&eng, "d1", 100);
-        put_version(&eng, "d1", 200);
+        put_version(&eng, 1, 100);
+        put_version(&eng, 1, 200);
         eng.versioned_put(VersionedPut {
             database_id: 1,
             tenant: 1,
             coll: "other",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 100,
             valid_from_ms: 0,
@@ -470,7 +476,7 @@ mod tests {
             database_id: 1,
             tenant: 1,
             coll: "other",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 200,
             valid_from_ms: 0,
@@ -481,7 +487,7 @@ mod tests {
             database_id: 1,
             tenant: 2,
             coll: "c",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 100,
             valid_from_ms: 0,
@@ -492,7 +498,7 @@ mod tests {
             database_id: 1,
             tenant: 2,
             coll: "c",
-            doc_id: "d1",
+            doc_id: &key(1),
             body: b"x",
             sys_from_ms: 200,
             valid_from_ms: 0,
@@ -505,8 +511,8 @@ mod tests {
             .unwrap();
         assert_eq!(docs, 1);
         // The other collection and tenant still have all their versions.
-        let lo_other = super::super::key::doc_prefix(1, 1, "other", "d1");
-        let hi_other = super::super::key::doc_prefix_end(1, 1, "other", "d1");
+        let lo_other = super::super::key::doc_prefix(1, 1, "other", &key(1));
+        let hi_other = super::super::key::doc_prefix_end(1, 1, "other", &key(1));
         let txn = eng.db.begin_read().unwrap();
         let t = txn.open_table(DOCUMENTS_VERSIONED).unwrap();
         assert_eq!(
@@ -515,8 +521,8 @@ mod tests {
                 .count(),
             2
         );
-        let lo_t2 = super::super::key::doc_prefix(1, 2, "c", "d1");
-        let hi_t2 = super::super::key::doc_prefix_end(1, 2, "c", "d1");
+        let lo_t2 = super::super::key::doc_prefix(1, 2, "c", &key(1));
+        let hi_t2 = super::super::key::doc_prefix_end(1, 2, "c", &key(1));
         assert_eq!(t.range(lo_t2.as_str()..hi_t2.as_str()).unwrap().count(), 2);
     }
 }

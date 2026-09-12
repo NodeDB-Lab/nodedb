@@ -68,6 +68,31 @@ pub fn fts_index_update_failed(err: &crate::Error, collection: &str, surrogate: 
     .emit();
 }
 
+/// Report an index entry a committed DELETE's cascade failed to remove.
+/// Called from the bulk-delete cascade's warn sites, after the row's own
+/// transaction has already committed — `index_kind` names which cascaded
+/// structure (`"inverted"`, `"secondary"`, `"graph_edge"`) still carries it.
+pub fn orphaned_index_entry_after_delete(
+    err: &crate::Error,
+    collection: &str,
+    index_kind: &'static str,
+) {
+    let class = error_class(err);
+    let ctx = context::OrphanedIndexEntryAfterDelete {
+        collection,
+        index_kind,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "committed delete's cascade left an index entry behind",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
 /// Report a document batch insert refused because its rows carry no
 /// surrogates. Called from the batch-insert handler's parallel-length guard;
 /// the actual defect is in whatever produced the mismatched plan.

@@ -16,9 +16,21 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::SpatialPredicate;
-use nodedb_types::{Surrogate, SurrogateBitmap};
+use nodedb_types::SurrogateBitmap;
 
 use super::spatial_refine::{apply_predicate, expand_bbox, extract_geometry, project_doc};
+
+/// Whether `doc_id`'s surrogate is a member of `prefilter`.
+///
+/// `doc_id` is the hex-encoded surrogate for a document-collection row, or
+/// a columnar-family user `id` that never parses as a storage key — the
+/// latter is never admitted, matching a sparse miss on a parsed key.
+fn prefilter_admits(prefilter: &SurrogateBitmap, doc_id: &str) -> bool {
+    match nodedb_types::StorageKey::parse(doc_id) {
+        Some(key) => prefilter.contains(key.surrogate()),
+        None => false,
+    }
+}
 
 /// Parameters for [`CoreLoop::execute_spatial_scan`].
 pub(in crate::data::executor) struct SpatialScanParams<'a> {
@@ -203,17 +215,18 @@ impl CoreLoop {
                 None => continue,
             };
 
+            // The doc-map id is the hex surrogate for a document-collection
+            // row, and a columnar-family user `id` otherwise — the latter
+            // never parses as a storage key, so it falls through exactly
+            // where a sparse miss on a parsed key would.
+            let storage_key = nodedb_types::StorageKey::parse(&doc_id);
+
             // Prefilter: skip candidates not in the surrogate bitmap before
             // any geometry evaluation. The doc_id is a hex-encoded surrogate.
-            if let Some(bitmap) = prefilter {
-                match u32::from_str_radix(&doc_id, 16) {
-                    Ok(raw) => {
-                        if !bitmap.contains(Surrogate(raw)) {
-                            continue;
-                        }
-                    }
-                    Err(_) => continue,
-                }
+            if let Some(bitmap) = prefilter
+                && !prefilter_admits(bitmap, &doc_id)
+            {
+                continue;
             }
 
             // Fetch the candidate's document in an engine-aware way. A sparse
@@ -223,10 +236,24 @@ impl CoreLoop {
             // is resolved from the columnar id → doc map. Both forms normalise
             // to standard msgpack maps that `decode_document_value` and
             // `extract_geometry` read identically.
-            let doc = match self.sparse.get(database_id, tid, collection, &doc_id) {
+            let sparse_result = match storage_key {
+                Some(key) => self.sparse.get(database_id, tid, collection, &key),
+                None => Ok(None),
+            };
+            let doc = match sparse_result {
                 Ok(Some(raw)) => {
+                    // `sparse_result` is only `Ok(Some(_))` when `storage_key`
+                    // resolved to a key above.
+                    let Some(key) = storage_key else {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: "spatial scan: sparse hit with no storage key".into(),
+                            },
+                        );
+                    };
                     let (_, doc_mp) = crate::data::executor::scan_normalize::sparse_row_to_doc(
-                        &doc_id,
+                        &key,
                         &raw,
                         body_format.as_format_ref(),
                     );
@@ -377,15 +404,10 @@ impl CoreLoop {
             }
 
             // Prefilter: skip non-members before geometry evaluation.
-            if let Some(bitmap) = prefilter {
-                match u32::from_str_radix(doc_id, 16) {
-                    Ok(raw) => {
-                        if !bitmap.contains(Surrogate(raw)) {
-                            continue;
-                        }
-                    }
-                    Err(_) => continue,
-                }
+            if let Some(bitmap) = prefilter
+                && !prefilter_admits(bitmap, doc_id)
+            {
+                continue;
             }
 
             // A row skipped here silently drops out of the spatial result set,
@@ -461,7 +483,7 @@ impl CoreLoop {
 
 #[cfg(test)]
 mod tests {
-    use super::SpatialScanParams;
+    use super::{SpatialScanParams, prefilter_admits};
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
     use crate::data::executor::task::ExecutionTask;
     use crate::engine::spatial::RTreeEntry;
@@ -529,7 +551,8 @@ mod tests {
         lng: f64,
         lat: f64,
     ) -> String {
-        let doc_id = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+        let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
+        let doc_id = storage_key.to_string();
 
         // Build a minimal msgpack document with a GeoJSON Point field.
         let geojson = serde_json::json!({
@@ -539,7 +562,7 @@ mod tests {
         let msgpack = nodedb_types::json_to_msgpack(&geojson).unwrap();
 
         core.sparse
-            .put(0, tid, collection, &doc_id, &msgpack)
+            .put(0, tid, collection, &storage_key, &msgpack)
             .unwrap();
 
         // Manually populate the R-tree and the doc-map.
@@ -599,33 +622,27 @@ mod tests {
         })
     }
 
+    fn doc_id(surrogate: u32) -> String {
+        nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)).to_string()
+    }
+
     #[test]
     fn prefilter_skips_non_member_doc_ids() {
-        // Direct unit on the prefilter check: the candidate-loop logic
-        // parses doc_id as hex Surrogate and skips non-members.
+        // Direct unit on the production prefilter check (`prefilter_admits`),
+        // not a re-implementation of it.
         let mut bitmap = SurrogateBitmap::new();
         bitmap.insert(Surrogate(2));
 
-        let candidate_doc_ids = [
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate(1)),
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate(2)),
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate(3)),
-        ];
+        let candidate_doc_ids = [doc_id(1), doc_id(2), doc_id(3)];
 
         let kept: Vec<_> = candidate_doc_ids
             .iter()
-            .filter(|doc_id| match u32::from_str_radix(doc_id, 16) {
-                Ok(raw) => bitmap.contains(Surrogate(raw)),
-                Err(_) => false,
-            })
+            .filter(|doc_id| prefilter_admits(&bitmap, doc_id))
             .cloned()
             .collect();
 
         assert_eq!(kept.len(), 1);
-        assert_eq!(
-            kept[0],
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate(2))
-        );
+        assert_eq!(kept[0], doc_id(2));
     }
 
     // Note: the R-tree-branch by-surrogate candidate hydration

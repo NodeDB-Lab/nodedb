@@ -92,14 +92,14 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        document_ids: &[String],
+        document_ids: &[nodedb_types::StorageKey],
     ) -> crate::Result<Vec<BalancedEntry>> {
         let Some(def) = self.balanced_def(database_id, tid, collection) else {
             return Ok(Vec::new());
         };
         let mut entries = Vec::new();
-        for document_id in document_ids {
-            let Some(stored) = self.sparse.get(database_id, tid, collection, document_id)? else {
+        for key in document_ids {
+            let Some(stored) = self.sparse.get(database_id, tid, collection, key)? else {
                 continue;
             };
             // A stored row of a collection that declares constraints over its

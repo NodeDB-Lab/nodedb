@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::CoreLoop;
+use crate::engine::document::store::StorageKey;
 use crate::engine::sparse::doc_cache::DocCache;
 
 /// (added, removed) secondary-index (field, value) tuples.
@@ -15,7 +16,7 @@ pub(in crate::data::executor) struct SecondaryIndexInputs<'a> {
     pub collection: &'a str,
     pub old_doc: Option<&'a serde_json::Value>,
     pub new_doc: &'a serde_json::Value,
-    pub doc_id: &'a str,
+    pub doc_id: &'a StorageKey,
     pub index_paths: &'a [crate::engine::document::store::IndexPath],
 }
 

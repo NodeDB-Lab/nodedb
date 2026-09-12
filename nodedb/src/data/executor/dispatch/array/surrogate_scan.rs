@@ -18,6 +18,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec::encode_raw_document_rows;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
     pub(in crate::data::executor) fn dispatch_array_surrogate_bitmap_scan(
@@ -98,7 +99,7 @@ impl CoreLoop {
                 if sur.as_u32() == 0 {
                     continue;
                 }
-                let hex = format!("{:08x}", sur.as_u32());
+                let hex = StorageKey::for_surrogate(*sur).to_string();
                 // Empty msgpack map as the row body — the consumer
                 // (`collect_surrogates`) only reads `id`.
                 rows.push((hex, vec![0x80]));
@@ -338,13 +339,17 @@ mod tests {
         }));
         assert_eq!(r.status, Status::Ok, "vector+prefilter failed: {r:?}");
 
-        // Result hits MUST all carry surrogate ids in 1..=5.
+        // Result hits MUST all carry storage keys whose surrogate is in 1..=5.
         let json =
             nodedb_types::msgpack_to_json_string(r.payload.as_ref()).expect("hits msgpack→json");
         let hits: Vec<serde_json::Value> = serde_json::from_str(&json).expect("hits json parse");
         assert!(!hits.is_empty(), "expected at least one hit, got none");
         for hit in &hits {
-            let id = hit["id"].as_u64().expect("hit.id present") as u32;
+            let key = hit["id"].as_str().expect("hit.id present");
+            let id = nodedb_types::StorageKey::parse(key)
+                .expect("hit.id is a storage key")
+                .surrogate()
+                .as_u32();
             assert!(
                 (1..=5).contains(&id),
                 "hit surrogate {id} outside slice prefilter range 1..=5"

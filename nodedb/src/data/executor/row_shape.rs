@@ -66,16 +66,20 @@ pub(in crate::data::executor) fn sparse_body_to_msgpack<'a>(
 /// field. Injection is a no-op when the body already carries an `id` — a
 /// vector-primary sidecar stores the user's declared primary key, and its
 /// sparse key is the internal surrogate-hex, which must not displace it.
-/// Shared by the materializing scan and the streaming scan so both paths
-/// produce byte-identical output.
+///
+/// `key` is the row's storage key. The client-visible identity is its
+/// surrogate's decimal string, per [`StorageKey::to_identity`]. Shared by the
+/// materializing scan and the streaming scan so both paths produce
+/// byte-identical output.
 pub(in crate::data::executor) fn sparse_row_to_doc(
-    id: &str,
+    key: &nodedb_types::StorageKey,
     raw: &[u8],
     format: SparseBodyFormatRef<'_>,
 ) -> (String, Vec<u8>) {
+    let identity = key.to_identity();
     let mp = sparse_body_to_msgpack(raw, format);
-    let mp = msgpack_scan::inject_str_field(&mp, "id", id);
-    (id.to_string(), mp)
+    let mp = msgpack_scan::inject_str_field(&mp, "id", identity.as_str());
+    (key.to_string(), mp)
 }
 
 /// Convert a single row from a `DecodedColumn` to a `nodedb_types::value::Value`.

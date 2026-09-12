@@ -28,7 +28,7 @@ fn make_event(source: EventSource, op: WriteOp, collection: &str) -> WriteEvent 
         sequence: 1,
         collection: Arc::from(collection),
         op,
-        row_id: RowId::new("row-1"),
+        row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
         lsn: Lsn::new(100),
         database_id: DatabaseId::new(7),
         tenant_id: TenantId::new(1),

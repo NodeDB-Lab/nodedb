@@ -4,6 +4,7 @@
 //! path, compute its real affected-row count, and record it in the overlay.
 
 use nodedb_physical::physical_plan::{ColumnarOp, DocumentOp, GraphOp, SpatialOp, TimeseriesOp};
+use nodedb_types::RowIdentity;
 
 use super::constraint::OverlayPk;
 use super::context::StageCtx;
@@ -214,6 +215,7 @@ impl CoreLoop {
             | PhysicalPlan::ClusterEvent(_) => return self.stage_not_point_write(task),
         };
 
+        // The plan's `document_id` is the row's resolved client identity.
         match doc_op {
             DocumentOp::PointInsert {
                 collection,
@@ -223,8 +225,14 @@ impl CoreLoop {
                 surrogate,
                 ..
             } => {
-                let ctx =
-                    StageCtx::new(task, tid, txn_id, collection.as_str(), document_id, *surrogate);
+                let ctx = StageCtx::new(
+                    task,
+                    tid,
+                    txn_id,
+                    collection.as_str(),
+                    RowIdentity::from_user_key(document_id.as_str()),
+                    *surrogate,
+                );
                 self.stage_point_insert(&ctx, value, *if_absent)
             }
             DocumentOp::PointPut {
@@ -234,8 +242,14 @@ impl CoreLoop {
                 surrogate,
                 ..
             } => {
-                let ctx =
-                    StageCtx::new(task, tid, txn_id, collection.as_str(), document_id, *surrogate);
+                let ctx = StageCtx::new(
+                    task,
+                    tid,
+                    txn_id,
+                    collection.as_str(),
+                    RowIdentity::from_user_key(document_id.as_str()),
+                    *surrogate,
+                );
                 self.stage_point_put(&ctx, value)
             }
             DocumentOp::PointDelete {
@@ -245,8 +259,14 @@ impl CoreLoop {
                 rls_write_check,
                 ..
             } => {
-                let ctx =
-                    StageCtx::new(task, tid, txn_id, collection.as_str(), document_id, *surrogate);
+                let ctx = StageCtx::new(
+                    task,
+                    tid,
+                    txn_id,
+                    collection.as_str(),
+                    RowIdentity::from_user_key(document_id.as_str()),
+                    *surrogate,
+                );
                 self.stage_point_delete(&ctx, rls_write_check)
             }
             DocumentOp::PointUpdate {
@@ -258,8 +278,14 @@ impl CoreLoop {
                 declared_primary_key,
                 ..
             } => {
-                let ctx =
-                    StageCtx::new(task, tid, txn_id, collection.as_str(), document_id, *surrogate);
+                let ctx = StageCtx::new(
+                    task,
+                    tid,
+                    txn_id,
+                    collection.as_str(),
+                    RowIdentity::from_user_key(document_id.as_str()),
+                    *surrogate,
+                );
                 self.stage_point_update(&ctx, updates, rls_write_check, declared_primary_key.as_deref())
             }
             // Predicate UPDATE staged like a point update, resolved against
@@ -299,6 +325,7 @@ impl CoreLoop {
                 rls_write_check,
                 // See the `BulkUpdate` arm: staging carries no delta.
                 resolved_sum_targets: _,
+                declared_primary_key,
             } => self.stage_bulk_delete(StageBulkDeleteParams {
                 task,
                 tid,
@@ -306,6 +333,7 @@ impl CoreLoop {
                 collection: collection.as_str(),
                 filter_bytes: filters,
                 rls_write_check,
+                declared_primary_key: declared_primary_key.as_deref(),
             }),
 
             // `UPSERT INTO`: resolve the current body under base ∪ overlay,
@@ -320,8 +348,14 @@ impl CoreLoop {
                 rls_write_check,
                 ..
             } => {
-                let ctx =
-                    StageCtx::new(task, tid, txn_id, collection.as_str(), document_id, *surrogate);
+                let ctx = StageCtx::new(
+                    task,
+                    tid,
+                    txn_id,
+                    collection.as_str(),
+                    RowIdentity::from_user_key(document_id.as_str()),
+                    *surrogate,
+                );
                 self.stage_document_upsert(&ctx, value, on_conflict_updates, rls_write_check)
             }
 
@@ -384,7 +418,7 @@ impl CoreLoop {
         &self,
         rls_write_check: &nodedb_types::RlsWriteCheck,
         body: &[u8],
-        doc_id: &str,
+        identity: &crate::engine::document::store::RowIdentity,
         database_id: u64,
         tid: u64,
         collection: &str,
@@ -399,7 +433,7 @@ impl CoreLoop {
         crate::data::executor::handlers::rls_write_gate::admit_stored_row(
             rls_write_check,
             body,
-            doc_id,
+            identity,
             schema.as_ref(),
             tid,
             collection,

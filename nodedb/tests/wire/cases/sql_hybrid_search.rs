@@ -238,7 +238,7 @@ async fn rrf_score_in_select_without_order_by_returns_score() {
 // ── 5. `id` must be the user's primary key, not the internal surrogate ─────
 
 /// Pre-fix, `TextOp::HybridSearch` hits carried only `doc_id` (the DP-side
-/// `surrogate_to_doc_id(surrogate)` hex string) with no surrogate->PK
+/// `StorageKey::for_surrogate(surrogate)` hex string) with no surrogate->PK
 /// translation on the Text/Hybrid plan path (only the Vector plan path had
 /// one) — so `SELECT id` against a hybrid query had no `id` field to read at
 /// all and the cell came back empty. `create_hybrid_collection` inserts rows

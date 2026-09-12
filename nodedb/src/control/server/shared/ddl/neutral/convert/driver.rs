@@ -67,11 +67,33 @@ pub async fn convert_collection(
         String::new()
     };
 
+    // Resolve the SOURCE storage mode from the catalog row read above, before
+    // this DDL mutates `coll.collection_type`. Mirrors the exhaustive match in
+    // `build_doc_config_from_stored`, so the Data Plane handler decodes the
+    // scanned rows the same way the collection's own register path would.
+    let source_storage_mode = match &coll.collection_type {
+        nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Strict(schema)) => {
+            nodedb_physical::physical_plan::StorageMode::Strict {
+                schema: schema.clone(),
+            }
+        }
+        nodedb_types::CollectionType::KeyValue(config) => {
+            nodedb_physical::physical_plan::StorageMode::Strict {
+                schema: config.schema.clone(),
+            }
+        }
+        nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Schemaless)
+        | nodedb_types::CollectionType::Columnar(_) => {
+            nodedb_physical::physical_plan::StorageMode::Schemaless
+        }
+    };
+
     // Dispatch to Data Plane: re-encode if needed (strict = Binary Tuple).
     let plan = PhysicalPlan::Meta(MetaOp::ConvertCollection {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
         target_type: target_type.clone(),
         schema_json: schema_json_for_dp,
+        source_storage_mode,
     });
 
     dispatch_system(
@@ -140,6 +162,15 @@ pub async fn convert_collection(
 
     persist_collection_replicated(state, database_id, &coll)
         .map_err(|e| err("XX000", e.to_string()))?;
+
+    // Refresh this node's Data Plane `doc_configs` entry to the NEW storage
+    // mode. Without this, every later read of the collection resolves its
+    // body format from the pre-conversion entry until the process restarts.
+    crate::control::server::shared::ddl::neutral::collection::dispatch_register_from_stored(
+        state, &coll,
+    )
+    .await
+    .map_err(|e| err("XX000", e.to_string()))?;
 
     tracing::info!(
         %collection,

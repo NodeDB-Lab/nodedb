@@ -11,6 +11,9 @@ use crate::wal::manager::WalManager;
 
 /// Encode a document PUT redo record: `(collection, document_id, value,
 /// Option<SyncProvenance>, surrogate)`. Must match `wal_replay_redo_document`'s decode.
+///
+/// `document_id` is the row's client identity. The Event Plane replay reads
+/// it back verbatim as the event's row id.
 pub(crate) fn encode_document_put_record(
     collection: &str,
     document_id: &str,
@@ -28,6 +31,8 @@ pub(crate) fn encode_document_put_record(
 
 /// Encode a document DELETE redo record: `(collection, document_id,
 /// Option<SyncProvenance>, surrogate)` — surrogate keys the redb storage row.
+///
+/// `document_id` is the row's client identity, as for the PUT record.
 pub(crate) fn encode_document_delete_record(
     collection: &str,
     document_id: &str,
@@ -66,7 +71,7 @@ pub(super) fn wal_append_document_op(
         } => {
             let entry = encode_document_put_record(
                 collection.as_str(),
-                document_id,
+                document_id.as_str(),
                 value,
                 surrogate.as_u32(),
             )?;
@@ -86,7 +91,7 @@ pub(super) fn wal_append_document_op(
         } => {
             let entry = encode_document_put_record(
                 collection.as_str(),
-                document_id,
+                document_id.as_str(),
                 value,
                 surrogate.as_u32(),
             )?;
@@ -100,8 +105,11 @@ pub(super) fn wal_append_document_op(
         } => {
             // 4-tuple keys secondary vector-index removal by surrogate on restart —
             // a 3-tuple would leave the deleted embedding to resurrect.
-            let entry =
-                encode_document_delete_record(collection.as_str(), document_id, surrogate.as_u32())?;
+            let entry = encode_document_delete_record(
+                collection.as_str(),
+                document_id.as_str(),
+                surrogate.as_u32(),
+            )?;
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)
         }
         // NotAWrite — reads / query ops / DDL that produces no engine mutation here

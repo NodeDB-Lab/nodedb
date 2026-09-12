@@ -137,7 +137,7 @@ pub(crate) async fn run_insert_select(
             // atomic write.
             let page_bodies: Vec<&[u8]> =
                 documents.iter().map(|(_, body)| body.as_slice()).collect();
-            let resolved_sum_targets =
+            let mut resolved_sum_targets =
                 crate::control::planner::materialized_sum::resolve_sum_targets_for_bodies(
                     state,
                     &page_bodies,
@@ -147,6 +147,21 @@ pub(crate) async fn run_insert_select(
                     crate::types::TraceId::ZERO,
                 )
                 .await?;
+            // Period-lock target for the same page, in the SAME slot — a
+            // target collection under a period lock reads its reference row's
+            // surrogate off `resolved_sum_targets` exactly like a
+            // materialized-sum fold does.
+            resolved_sum_targets.extend(
+                crate::control::planner::period_lock::resolve_period_lock_targets_for_bodies(
+                    state,
+                    &page_bodies,
+                    req.target_collection,
+                    tenant_id,
+                    database_id,
+                    crate::types::TraceId::ZERO,
+                )
+                .await?,
+            );
 
             let plan = PhysicalPlan::Document(DocumentOp::BatchInsert {
                 collection: nodedb_types::QualifiedCollection::from_stored(

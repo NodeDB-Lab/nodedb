@@ -10,7 +10,6 @@ use crate::data::executor::enforcement::chain_guard::ChainGuard;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec};
 
 /// Parameters for [`CoreLoop::execute_document_batch_insert`].
@@ -146,11 +145,15 @@ impl CoreLoop {
         let has_vectors = self.collection_has_vectors(database_id, tid, collection)
             || self.collection_has_sparse(database_id, tid, collection);
 
-        // Row key for post-commit event emission, captured as each row applies
-        // successfully; the value bytes are re-borrowed from `documents` after
-        // commit rather than cloned here. On any error we return early
-        // (dropping `txn`, which rolls back every row applied so far).
-        let mut applied: Vec<String> = Vec::with_capacity(documents.len());
+        // Row identity + storage key for post-commit event emission and cache
+        // invalidation, captured as each row applies successfully; the value
+        // bytes are re-borrowed from `documents` after commit rather than
+        // cloned here. On any error we return early (dropping `txn`, which
+        // rolls back every row applied so far).
+        let mut applied: Vec<(
+            crate::engine::document::store::RowIdentity,
+            nodedb_types::StorageKey,
+        )> = Vec::with_capacity(documents.len());
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
         // Per-row secondary-index tuples (added ∪ removed ∪ bitemporal),
         // parallel to `applied`. Recorded into the per-index write-value
@@ -173,10 +176,14 @@ impl CoreLoop {
         // document-cache entries `apply_point_put` populated — are reversed in
         // one place. Dropping `txn` reverses the durable writes; it does not
         // reverse either of those.
-        let mut failure: Option<(String, crate::Error)> = None;
+        let mut failure: Option<(nodedb_types::StorageKey, crate::Error)> = None;
         for (i, (document_id, value)) in documents.iter().enumerate() {
             let surrogate = surrogates[i];
-            let row_key = surrogate_to_doc_id(surrogate);
+            let key = nodedb_types::StorageKey::for_surrogate(surrogate);
+            // The plan's `document_id` is the identity INSERT minted for this
+            // row: the declared primary key value, else the decimal surrogate.
+            let row_identity =
+                crate::engine::document::store::RowIdentity::from_user_key(document_id.as_str());
             // Every row of a batch insert is INSERT-shaped, so every row is a
             // chain link. The chain rewrites the BODY, so it runs before the
             // body is encoded and stored. The link covers the user-visible
@@ -185,9 +192,8 @@ impl CoreLoop {
             let chained = match chain.chain_insert(self, database_id, tid, document_id, value) {
                 Ok(chained) => chained,
                 Err(e) => {
-                    // Cloned, not moved: `row_key` is still borrowed by the
-                    // parameters of the call this arm is handling.
-                    failure = Some((row_key.clone(), e));
+                    // `key` is `Copy`, so this costs nothing.
+                    failure = Some((key, e));
                     break;
                 }
             };
@@ -198,20 +204,22 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    document_id: &row_key,
+                    storage_key: key,
                     surrogate,
                     value: effective_value,
                     index_text: true,
                     user_roles: &task.request.user_roles,
                     enforce: true,
                     wal_lsn: task.wal_lsn(),
+                    resolved_targets: resolved_sum_targets,
                 },
             ) {
                 Ok(o) => o,
                 Err(e) => {
-                    // Cloned, not moved: `row_key` is still borrowed by the
-                    // parameters of the call this arm is handling.
-                    failure = Some((row_key.clone(), e));
+                    // `key` is `Copy`, so this costs nothing and `row_key`
+                    // stays borrowed by the parameters of the call this arm
+                    // is handling.
+                    failure = Some((key, e));
                     break;
                 }
             };
@@ -229,9 +237,8 @@ impl CoreLoop {
             ) {
                 Ok(enforcement) => enforcement,
                 Err(e) => {
-                    // Cloned, not moved: `row_key` is still borrowed by the
-                    // parameters of the call this arm is handling.
-                    failure = Some((row_key.clone(), e));
+                    // `key` is `Copy`, so this costs nothing.
+                    failure = Some((key, e));
                     break;
                 }
             };
@@ -243,6 +250,7 @@ impl CoreLoop {
             if has_vectors {
                 write_set.push(WriteSetEntry {
                     surrogate: surrogate.as_u32(),
+                    identity: row_identity.clone(),
                     is_delete: false,
                     value: value.clone(),
                     collection: None,
@@ -254,18 +262,21 @@ impl CoreLoop {
                 tuples.extend(outcome.bitemporal_index_tuples);
                 row_index_tuples.push(tuples);
             }
-            applied.push(row_key);
+            applied.push((row_identity, key));
         }
 
-        if let Some((failed_row_key, error)) = failure {
+        if let Some((failed_key, error)) = failure {
             // The whole page rolls back, so put the chain head back where it
             // started and drop every cache entry the abandoned rows populated —
             // a cached body for a row that never committed is served to readers
             // as though it had.
             chain.restore(self);
-            for row_key in applied.iter().chain(std::iter::once(&failed_row_key)) {
-                self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+            for key in applied
+                .iter()
+                .map(|(_, key)| key)
+                .chain(std::iter::once(&failed_key))
+            {
+                self.doc_cache.invalidate(database_id, tid, collection, key);
             }
             return self.response_error(task, error);
         }
@@ -276,9 +287,8 @@ impl CoreLoop {
         if let Err(e) = self.settle_balanced_entries(database_id, tid, collection, balanced_entries)
         {
             chain.restore(self);
-            for row_key in &applied {
-                self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+            for (_, key) in &applied {
+                self.doc_cache.invalidate(database_id, tid, collection, key);
             }
             return self.response_error(task, e);
         }
@@ -287,9 +297,8 @@ impl CoreLoop {
         // hashes it covers.
         if let Err(e) = chain.persist_head(self, &txn) {
             chain.restore(self);
-            for row_key in &applied {
-                self.doc_cache
-                    .invalidate(database_id, tid, collection, row_key);
+            for (_, key) in &applied {
+                self.doc_cache.invalidate(database_id, tid, collection, key);
             }
             return self.response_error(task, e);
         }
@@ -324,8 +333,8 @@ impl CoreLoop {
             m.record_document_insert();
         }
 
-        for (i, row_key) in applied.iter().enumerate() {
-            self.emit_put_event(task, tid, collection, row_key, &documents[i].1, None);
+        for (i, (identity, _)) in applied.into_iter().enumerate() {
+            self.emit_put_event(task, tid, collection, identity, &documents[i].1, None);
         }
 
         let mut response = if let Some(spec) = returning {
@@ -337,10 +346,16 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
             );
-            let rows: Vec<(&str, &[u8])> = documents
+            let identities: Vec<crate::engine::document::store::RowIdentity> = documents
+                .iter()
+                .map(|(document_id, _)| {
+                    crate::engine::document::store::RowIdentity::from_user_key(document_id.as_str())
+                })
+                .collect();
+            let rows: Vec<(&crate::engine::document::store::RowIdentity, &[u8])> = identities
                 .iter()
                 .zip(stored_bodies.iter())
-                .map(|((document_id, _), stored)| (document_id.as_str(), stored.as_slice()))
+                .map(|(identity, stored)| (identity, stored.as_slice()))
                 .collect();
             self.stored_returning_response(task, spec, rls_filters, strict_schema.as_ref(), &rows)
         } else {
@@ -377,11 +392,11 @@ mod tests {
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::doc_format;
     use crate::data::executor::task::ExecutionTask;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
     use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, ResolvedSumTarget};
-    use nodedb_types::Surrogate;
+    use nodedb_types::{StorageKey, Surrogate};
     use std::time::{Duration, Instant};
 
     const TID: u64 = 1;
@@ -446,7 +461,7 @@ mod tests {
                 DatabaseId::DEFAULT.as_u64(),
                 TID,
                 COLL,
-                &surrogate_to_doc_id(surrogate),
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
             )
             .unwrap()
     }
@@ -585,6 +600,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -614,7 +630,7 @@ mod tests {
                 DatabaseId::DEFAULT.as_u64(),
                 TID,
                 SUM_TARGET,
-                &surrogate_to_doc_id(SUM_T1),
+                &nodedb_types::StorageKey::for_surrogate(SUM_T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -637,7 +653,7 @@ mod tests {
                 DatabaseId::DEFAULT.as_u64(),
                 TID,
                 SUM_TARGET,
-                &surrogate_to_doc_id(surrogate),
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
             )
             .expect("read target row")
             .expect("target row must still exist");
@@ -659,8 +675,14 @@ mod tests {
         let mut core = sum_seeded_core(dir.path());
 
         let documents = vec![
-            (surrogate_to_doc_id(Surrogate(1)), sum_entry(SUM_A1, 25)),
-            (surrogate_to_doc_id(Surrogate(2)), sum_entry(SUM_A1, 75)),
+            (
+                StorageKey::for_surrogate(Surrogate(1)).to_string(),
+                sum_entry(SUM_A1, 25),
+            ),
+            (
+                StorageKey::for_surrogate(Surrogate(2)).to_string(),
+                sum_entry(SUM_A1, 75),
+            ),
         ];
         let surrogates = vec![Surrogate(1), Surrogate(2)];
         let resolved = vec![ResolvedSumTarget::new(SUM_TARGET, SUM_A1, SUM_T1)];

@@ -666,6 +666,10 @@ pub enum ReplicatedWrite {
         /// See `PointPut::resolved_sum_target_bindings`.
         #[serde(default)]
         resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`. Names the column each
+        /// removed row's identity is read from on every applier.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
     KvTruncate {
         collection: String,
@@ -751,6 +755,9 @@ pub enum ReplicatedWrite {
         join_column: String,
         /// Join value that resolved to `surrogate`.
         join_value: String,
+        /// See `PointUpdate::declared_primary_key`, for the TARGET collection.
+        #[serde(default)]
+        declared_primary_key: Option<String>,
     },
 
     /// Resolved-row-set form of a columnar predicate `UPDATE` / `DELETE` on a

@@ -51,18 +51,19 @@ pub trait SurrogateAssigner: Send + Sync {
 
     /// Allocate a FRESH, never-before-issued surrogate for a row that has no
     /// content primary key — i.e. a collection whose primary key is the
-    /// auto-generated `_rowid` (no `PRIMARY KEY` was declared at CREATE). Each
-    /// call returns a new value; there is no `pk_bytes` to content-address on,
-    /// so repeated calls do NOT collapse to the same surrogate (which is
-    /// exactly the bug that content-addressing an empty key would cause).
+    /// auto-generated `_rowid` (no `PRIMARY KEY` was declared at CREATE), or
+    /// a timeseries row.
     ///
-    /// The Data Plane sets the row's `_rowid` equal to this surrogate, so
-    /// implementations should bind the surrogate to its own value for reverse
-    /// `_rowid = N` point lookups.
+    /// Every call allocates a new value. There is no `pk_bytes` to
+    /// content-address on, so repeated calls never collapse onto one
+    /// surrogate.
+    ///
+    /// The returned `String` is the bound identity. The caller uses it
+    /// verbatim and never re-derives it.
     fn assign_fresh(
         &self,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-    ) -> Result<Surrogate, SurrogateAssignError>;
+    ) -> Result<(Surrogate, String), SurrogateAssignError>;
 }

@@ -22,69 +22,16 @@
 
 use std::cell::Cell;
 
-use tracing::warn;
-
-use nodedb_types::columnar::schema::StrictSchema;
+use nodedb_types::StorageKey;
 
 use super::audit_body::{inject_temporal_columns, strict_audit_body};
-use crate::bridge::scan_filter::ScanFilter;
+use super::fetch_types::FetchedRows;
+use super::{DocFetchParams, DocScanMode};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
-use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
+use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::sparse_body_format::{SparseBodyFormat, SparseBodyFormatRef};
 use crate::data::executor::task::ExecutionTask;
-
-/// Which temporal slice of a document collection a scan fetches.
-pub(in crate::data::executor) enum DocScanMode {
-    /// Newest live version per document. Bitemporal collections read current
-    /// state from the versioned store; plain collections from the live table.
-    Current,
-    /// Newest version per document visible at a system-time cutoff and/or a
-    /// valid-time instant (`AS OF SYSTEM TIME` / `AS OF VALID TIME`).
-    AsOf {
-        system_as_of_ms: Option<i64>,
-        valid_at_ms: Option<i64>,
-    },
-    /// Every system-time version of every document (`AS OF SYSTEM TIME NULL`
-    /// audit log), each row carrying the synthetic `_ts_*` temporal columns.
-    AllVersions { valid_at_ms: Option<i64> },
-}
-
-impl DocScanMode {
-    /// The current-time read is the only mode that folds this transaction's
-    /// staging overlay onto the base result — temporal reads never see staged
-    /// (current-version-only) writes.
-    pub(in crate::data::executor) fn is_current(&self) -> bool {
-        matches!(self, DocScanMode::Current)
-    }
-}
-
-/// Borrowed inputs for [`CoreLoop::document_scan_fetch`].
-pub(in crate::data::executor) struct DocFetchParams<'a> {
-    pub collection: &'a str,
-    pub mode: &'a DocScanMode,
-    pub limit: usize,
-    pub offset: usize,
-    pub filter_predicates: &'a [ScanFilter],
-    pub strict_schema: Option<&'a StrictSchema>,
-    /// The fetch may not stop at `limit`: a downstream ORDER BY or DISTINCT
-    /// decides which rows survive, so the first `limit` rows the store happens
-    /// to return are not the first `limit` rows of the answer. The fetch is
-    /// bounded by the memory budget instead, and the caller surfaces
-    /// `ResourcesExhausted` rather than truncating silently.
-    pub full_fetch: bool,
-}
-
-/// Raw rows plus the schema the downstream should decode them with.
-pub(in crate::data::executor) struct FetchedRows {
-    pub rows: Vec<(String, Vec<u8>)>,
-    pub effective_schema: Option<StrictSchema>,
-    /// The statement's deadline passed while the storage scan was running, so
-    /// `rows` holds an arbitrary prefix of the answer. The caller MUST fail the
-    /// statement rather than emit these rows — a truncated result set is
-    /// indistinguishable from a complete one at the client.
-    pub deadline_expired: bool,
-}
 
 impl CoreLoop {
     /// Fetch the raw rows for a document scan according to `mode`, feeding the
@@ -121,24 +68,24 @@ impl CoreLoop {
                 // msgpack) operates uniformly, then hand it downstream with no
                 // schema (bodies are already normalized).
                 // `versioned_scan_as_of` takes an infallible
-                // `Fn(&str, &[u8]) -> bool` predicate (a storage-engine
-                // primitive out of scope for this fix), so a
+                // `Fn(&StorageKey, &[u8]) -> bool` predicate, so a
                 // division/modulo-by-zero is captured via this `Cell`
                 // side-channel and checked once the scan returns, rather
                 // than silently folded away.
                 let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-                let predicate = |doc_id: &str, body: &[u8]| match matches_with_resolved_schema(
-                    strict_schema,
-                    filter_predicates,
-                    doc_id,
-                    body,
-                ) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        predicate_err.set(Some(e));
-                        false
-                    }
-                };
+                let predicate =
+                    |doc_id: &StorageKey, body: &[u8]| match matches_with_resolved_schema(
+                        strict_schema,
+                        filter_predicates,
+                        doc_id,
+                        body,
+                    ) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            predicate_err.set(Some(e));
+                            false
+                        }
+                    };
                 let raw = self.sparse.versioned_scan_as_of(
                     crate::engine::sparse::btree_versioned::VersionedScanParams {
                         database_id: task.request.database_id.as_u64(),
@@ -183,18 +130,19 @@ impl CoreLoop {
                 // so a user can `SELECT` / `ORDER BY` / project on them.
                 // See the `AsOf` arm above for the `Cell` side-channel rationale.
                 let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-                let predicate = |doc_id: &str, body: &[u8]| match matches_with_resolved_schema(
-                    strict_schema,
-                    filter_predicates,
-                    doc_id,
-                    body,
-                ) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        predicate_err.set(Some(e));
-                        false
-                    }
-                };
+                let predicate =
+                    |doc_id: &StorageKey, body: &[u8]| match matches_with_resolved_schema(
+                        strict_schema,
+                        filter_predicates,
+                        doc_id,
+                        body,
+                    ) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            predicate_err.set(Some(e));
+                            false
+                        }
+                    };
                 let raw = self.sparse.versioned_scan_all(
                     crate::engine::sparse::btree_versioned::VersionedScanParams {
                         database_id: task.request.database_id.as_u64(),
@@ -210,7 +158,7 @@ impl CoreLoop {
                 if let Some(e) = predicate_err.take() {
                     return Err(crate::Error::from(e));
                 }
-                let mut rows: Vec<(String, Vec<u8>)> = Vec::with_capacity(raw.len());
+                let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::with_capacity(raw.len());
                 for row in raw {
                     let msgpack_body = match strict_schema {
                         Some(schema) => strict_audit_body(&row.body, schema)?,
@@ -249,7 +197,7 @@ impl CoreLoop {
 
     /// Newest live version per document (current-time read). Bitemporal
     /// collections read current state from the versioned store; plain
-    /// collections from the live table with a `scan_collection` fallback.
+    /// collections from the live table.
     fn fetch_current(
         &mut self,
         task: &ExecutionTask,
@@ -278,14 +226,12 @@ impl CoreLoop {
             SparseBodyFormat::VectorSidecar
         );
 
-        // `scan_documents_filtered`/`versioned_scan_as_of`/`scan_collection`
-        // take an infallible `Fn(&str, &[u8]) -> bool` predicate (a
-        // storage-engine primitive out of scope for this fix), so a
-        // division/modulo-by-zero is captured via this `Cell` side-channel
-        // and checked once every branch below returns, rather than silently
-        // folded away.
+        // `scan_documents_filtered`/`versioned_scan_as_of` take an infallible
+        // predicate, so a division/modulo-by-zero is captured via this `Cell`
+        // side-channel and checked once every branch below returns, rather
+        // than silently folded away.
         let predicate_err: Cell<Option<nodedb_query::EvalError>> = Cell::new(None);
-        let matches = |doc_id: &str, value: &[u8]| -> bool {
+        let matches = |key: &StorageKey, value: &[u8]| -> bool {
             if filter_predicates.is_empty() {
                 return true;
             }
@@ -300,7 +246,7 @@ impl CoreLoop {
             } else {
                 value
             };
-            match matches_with_resolved_schema(strict_schema, filter_predicates, doc_id, value) {
+            match matches_with_resolved_schema(strict_schema, filter_predicates, key, value) {
                 Ok(b) => b,
                 Err(e) => {
                     predicate_err.set(Some(e));
@@ -309,7 +255,7 @@ impl CoreLoop {
             }
         };
 
-        let rows = if filter_predicates.is_empty() {
+        let rows: Vec<(StorageKey, Vec<u8>)> = if filter_predicates.is_empty() {
             if bitemporal {
                 self.sparse.versioned_scan_as_of(
                     crate::engine::sparse::btree_versioned::VersionedScanParams {
@@ -320,7 +266,7 @@ impl CoreLoop {
                         valid_at_ms: None,
                         limit: fetch_limit,
                     },
-                    &|_, _| true,
+                    &|_: &StorageKey, _: &[u8]| true,
                     &stop,
                 )?
             } else {
@@ -329,52 +275,12 @@ impl CoreLoop {
                 // scan is the longest-running read shape there is, and only
                 // this entry point takes the stop signal. Rows, order and the
                 // `limit` cutoff are identical.
-                let sparse_result = self.sparse.scan_documents_filtered(
-                    database_id,
-                    tid,
-                    collection,
-                    fetch_limit,
-                    &|_: &str, _: &[u8]| true,
-                    &stop,
-                );
-                match sparse_result {
-                    Ok(docs) if docs.is_empty() => {
-                        let fallback =
-                            self.scan_collection(database_id, tid, collection, fetch_limit)?;
-                        if !fallback.is_empty() {
-                            warn!(
-                                core = self.core_id,
-                                %collection,
-                                count = fallback.len(),
-                                "document scan fallback to scan_collection"
-                            );
-                        }
-                        fallback
-                    }
-                    other => other?,
-                }
-            }
-        } else if strict_schema.is_some() {
-            if bitemporal {
-                self.sparse.versioned_scan_as_of(
-                    crate::engine::sparse::btree_versioned::VersionedScanParams {
-                        database_id,
-                        tenant: tid,
-                        coll: collection,
-                        sys_cutoff_ms: None,
-                        valid_at_ms: None,
-                        limit: fetch_limit,
-                    },
-                    &matches,
-                    &stop,
-                )?
-            } else {
                 self.sparse.scan_documents_filtered(
                     database_id,
                     tid,
                     collection,
                     fetch_limit,
-                    &matches,
+                    &|_: &StorageKey, _: &[u8]| true,
                     &stop,
                 )?
             }
@@ -392,22 +298,14 @@ impl CoreLoop {
                 &stop,
             )?
         } else {
-            let sparse_result = self.sparse.scan_documents_filtered(
+            self.sparse.scan_documents_filtered(
                 database_id,
                 tid,
                 collection,
                 fetch_limit,
                 &matches,
                 &stop,
-            );
-            match sparse_result {
-                Ok(docs) if docs.is_empty() => self
-                    .scan_collection(database_id, tid, collection, fetch_limit)?
-                    .into_iter()
-                    .filter(|(id, data)| matches(id, data))
-                    .collect(),
-                other => other?,
-            }
+            )?
         };
 
         if let Some(e) = predicate_err.take() {
@@ -420,10 +318,18 @@ impl CoreLoop {
         // every downstream transform — sort, window functions, computed
         // columns, projection, DISTINCT — sees the same standard-msgpack shape
         // it sees for every other collection. Without it the tagged values pass
-        // through untouched and reach the client as `[4,"alice"]`.
-        let rows = if is_vector_sidecar {
+        // through untouched and reach the client as `[4,"alice"]`. The key
+        // stays typed; the row's envelope id is rendered once downstream.
+        let rows: Vec<(StorageKey, Vec<u8>)> = if is_vector_sidecar {
             rows.into_iter()
-                .map(|(id, body)| sparse_row_to_doc(&id, &body, SparseBodyFormatRef::VectorSidecar))
+                .map(|(key, body)| {
+                    let (_, mp) = crate::data::executor::scan_normalize::sparse_row_to_doc(
+                        &key,
+                        &body,
+                        SparseBodyFormatRef::VectorSidecar,
+                    );
+                    (key, mp)
+                })
                 .collect()
         } else {
             rows

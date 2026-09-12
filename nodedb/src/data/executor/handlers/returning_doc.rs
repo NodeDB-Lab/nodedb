@@ -20,18 +20,23 @@ use nodedb_types::columnar::StrictSchema;
 
 use crate::data::executor::doc_format;
 use crate::data::executor::strict_format;
+use crate::engine::document::store::RowIdentity;
 
-/// Set `id` to the row's storage key unless the document already carries one.
+/// Set `id` to the row's client-visible identity unless the document already
+/// carries one.
 ///
 /// For callers that already hold the decoded document (the update paths
 /// re-project the image they just built rather than re-reading storage).
-pub(in crate::data::executor) fn attach_row_id(doc: &mut serde_json::Value, doc_id: &str) {
+pub(in crate::data::executor) fn attach_row_id(
+    doc: &mut serde_json::Value,
+    identity: &RowIdentity,
+) {
     if let Some(obj) = doc.as_object_mut()
         && !obj.contains_key("id")
     {
         obj.insert(
             "id".to_string(),
-            serde_json::Value::String(doc_id.to_string()),
+            serde_json::Value::String(identity.as_str().to_string()),
         );
     }
 }
@@ -49,7 +54,7 @@ pub(in crate::data::executor) fn attach_row_id(doc: &mut serde_json::Value, doc_
 /// row count as the truth.
 pub(in crate::data::executor) fn from_stored(
     body: &[u8],
-    doc_id: &str,
+    identity: &RowIdentity,
     strict_schema: Option<&StrictSchema>,
 ) -> crate::Result<serde_json::Value> {
     let mut doc = match strict_schema {
@@ -57,7 +62,7 @@ pub(in crate::data::executor) fn from_stored(
             crate::Error::Serialization {
                 format: "binary_tuple".to_string(),
                 detail: format!(
-                    "RETURNING row {doc_id}: stored body ({} bytes) is not a Binary Tuple \
+                    "RETURNING row {identity}: stored body ({} bytes) is not a Binary Tuple \
                      readable under the collection's strict schema",
                     body.len()
                 ),
@@ -67,10 +72,11 @@ pub(in crate::data::executor) fn from_stored(
         // non-map body as `{id, value}`, which is the shape schemaless callers
         // have always emitted for a body that is not a document map.
         None => {
-            let with_id = nodedb_query::msgpack_scan::inject_str_field(body, "id", doc_id);
+            let with_id =
+                nodedb_query::msgpack_scan::inject_str_field(body, "id", identity.as_str());
             doc_format::decode_document(&with_id)?
         }
     };
-    attach_row_id(&mut doc, doc_id);
+    attach_row_id(&mut doc, identity);
     Ok(doc)
 }

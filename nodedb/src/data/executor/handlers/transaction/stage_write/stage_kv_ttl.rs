@@ -9,7 +9,7 @@
 //! sibling to `Staged`, declared in `overlay::staged`) rather than the
 //! shared `Staged::Put`/`Tombstone` every engine's read-merge uses. A
 //! same-transaction `GetTtl` (`kv/ttl.rs::execute_kv_get_ttl`) consults this
-//! same map keyed by the same [`super::stage_kv::hex_key`] identity.
+//! same map keyed by the same [`super::stage_kv::kv_row_identity`].
 //!
 //! Both handlers reuse [`CoreLoop::kv_atomic_stage_ctx`] (the same
 //! surrogate-resolution `Incr` / `Cas` / `GetSet` use) to bind a stable

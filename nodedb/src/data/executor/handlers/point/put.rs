@@ -11,7 +11,7 @@ use crate::data::executor::enforcement::chain_guard::{self, ChainGuard};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec};
 use nodedb_types::Surrogate;
 
@@ -48,8 +48,8 @@ impl CoreLoop {
             rls_filters,
             resolved_sum_targets,
         } = params;
-        let row_key = surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let document_identity = RowIdentity::from_user_key(document_id);
         debug!(core = self.core_id, %collection, %document_id, "point put");
 
         let database_id = task.request.database_id.as_u64();
@@ -71,7 +71,7 @@ impl CoreLoop {
         let chained = if chain.enabled()
             && self
                 .sparse
-                .get(database_id, tid, collection, row_key)
+                .get(database_id, tid, collection, &storage_key)
                 .ok()
                 .flatten()
                 .is_none()
@@ -100,24 +100,39 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: resolved_sum_targets,
             },
         ) {
             Ok(p) => p,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
 
         if let Err(e) = chain.persist_head(self, &txn) {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -137,7 +152,14 @@ impl CoreLoop {
         let enforcement = match write_hook::run(self, &txn, &hook_ctx, images) {
             Ok(outcome) => outcome,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
@@ -149,7 +171,14 @@ impl CoreLoop {
         if let Err(e) =
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -185,11 +214,13 @@ impl CoreLoop {
         // Emit write event to Event Plane. Insert vs Update is derived
         // from whether `prior` was present — a PointPut onto an existing
         // row is an Update from every downstream consumer's perspective.
+        // The plan's `document_id` is the row's client identity, and the
+        // identity the WAL journals for it.
         self.emit_put_event(
             task,
             tid,
             collection,
-            row_key,
+            document_identity.clone(),
             value,
             prior.prior_value.as_deref(),
         );
@@ -205,7 +236,7 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 strict_schema.as_ref(),
-                &[(document_id, prior.stored_value.as_slice())],
+                &[(&document_identity, prior.stored_value.as_slice())],
             )
         } else {
             // An upsert always writes the row, whether or not one was there before.
@@ -250,6 +281,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -281,7 +313,7 @@ mod tests {
                 DB,
                 TID,
                 TARGET,
-                &surrogate_to_doc_id(T1),
+                &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -300,7 +332,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)

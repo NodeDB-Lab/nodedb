@@ -21,6 +21,7 @@ use crate::data::executor::handlers::point::update::post_image::{
 };
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 
 /// Borrowed arguments for [`CoreLoop::resolve_point_update`].
 pub(super) struct ResolvePointUpdate<'a> {
@@ -74,7 +75,8 @@ impl CoreLoop {
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
-        let row_key = row_key.as_str();
+        let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
+        let document_identity = RowIdentity::from_user_key(document_id);
 
         let config_key = (
             task.request.database_id,
@@ -95,7 +97,7 @@ impl CoreLoop {
         }
 
         // A gone row reports `{"affected": 0}`, same as `execute_point_update`.
-        let Some(current_bytes) = self.doc_resolve_read(&ctx, collection, row_key)? else {
+        let Some(current_bytes) = self.doc_resolve_read(&ctx, collection, &row_key)? else {
             return Ok(DocumentResolveOutcome {
                 mutations: Vec::new(),
                 response_payload: affected_payload(0),
@@ -139,7 +141,7 @@ impl CoreLoop {
         rls_write_gate::admit_stored_row(
             rls_write_check,
             &stored_image,
-            document_id,
+            &row_identity,
             ctx.strict_schema.as_ref(),
             tid,
             collection,
@@ -150,7 +152,7 @@ impl CoreLoop {
             returning,
             rls_filters,
             ctx.strict_schema.as_ref(),
-            &[(document_id, stored_image.as_slice())],
+            &[(&document_identity, stored_image.as_slice())],
         )?;
         Ok(DocumentResolveOutcome {
             mutations: vec![put_mutation(ResolvedPut {
@@ -185,11 +187,12 @@ impl CoreLoop {
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let row_key = row_key_of(surrogate);
-        let row_key = row_key.as_str();
+        let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
+        let document_identity = RowIdentity::from_user_key(document_id);
 
         // A row that is already absent removes nothing, so there is no image for
         // the policy to restrict — the same admission `gate_point_delete` makes.
-        let Some(prior) = self.doc_resolve_read(&ctx, collection, row_key)? else {
+        let Some(prior) = self.doc_resolve_read(&ctx, collection, &row_key)? else {
             return Ok(DocumentResolveOutcome {
                 mutations: Vec::new(),
                 response_payload: resolved_response_payload(
@@ -204,7 +207,7 @@ impl CoreLoop {
         rls_write_gate::admit_stored_row(
             rls_write_check,
             &prior,
-            row_key,
+            &row_identity,
             ctx.strict_schema.as_ref(),
             tid,
             collection,
@@ -215,7 +218,7 @@ impl CoreLoop {
             returning,
             rls_filters,
             ctx.strict_schema.as_ref(),
-            &[(document_id, prior.as_slice())],
+            &[(&document_identity, prior.as_slice())],
         )?;
         Ok(DocumentResolveOutcome {
             mutations: vec![delete_mutation(

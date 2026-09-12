@@ -281,6 +281,7 @@ impl CoreLoop {
                 rls_filters,
                 rls_write_check,
                 resolved_sum_targets,
+                declared_primary_key,
             } => self.execute_bulk_delete(
                 task,
                 tid,
@@ -295,6 +296,7 @@ impl CoreLoop {
                         surrogates: ollp_predicted_surrogates.as_deref(),
                         edges: ollp_predicted_edges.as_deref(),
                     },
+                    declared_primary_key: declared_primary_key.as_deref(),
                 },
             ),
 
@@ -326,9 +328,18 @@ impl CoreLoop {
 
             DocumentOp::Truncate {
                 collection,
+                restart_identity: _,
                 resolved_sum_targets,
-                ..
-            } => self.execute_truncate(task, tid, collection.as_str(), resolved_sum_targets),
+                declared_primary_key,
+            } => self.execute_truncate(
+                task,
+                tid,
+                super::super::handlers::truncate::TruncateParams {
+                    collection: collection.as_str(),
+                    resolved_sum_targets,
+                    declared_primary_key: declared_primary_key.as_deref(),
+                },
+            ),
 
             DocumentOp::EstimateCount { collection, field } => {
                 self.execute_estimate_count(task, tid, collection.as_str(), field)
@@ -467,6 +478,7 @@ impl CoreLoop {
                 delta,
                 join_column,
                 join_value,
+                declared_primary_key,
             } => self.execute_apply_balance_delta(
                 task,
                 super::super::handlers::document::apply_balance_delta::ApplyBalanceDeltaParams {
@@ -478,6 +490,7 @@ impl CoreLoop {
                     delta,
                     join_column,
                     join_value,
+                    declared_primary_key: declared_primary_key.as_deref(),
                 },
             ),
         }

@@ -112,4 +112,13 @@ pub enum DataPlaneErrorCode {
         limit: u64,
     },
     DivisionByZero,
+    /// A period-lock reference row exists but does not carry the
+    /// configured `status_column` — a misconfigured column name, not a
+    /// locked period.
+    PeriodLockMisconfigured {
+        collection: String,
+        ref_table: String,
+        status_column: String,
+        row_identity: String,
+    },
 }

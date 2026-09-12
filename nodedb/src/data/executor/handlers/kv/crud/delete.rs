@@ -59,7 +59,7 @@ impl CoreLoop {
                     task,
                     collection,
                     crate::event::WriteOp::Delete,
-                    &key_str,
+                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
                     None,
                     None,
                 );

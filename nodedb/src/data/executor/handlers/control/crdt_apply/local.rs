@@ -140,6 +140,7 @@ impl CoreLoop {
                     task,
                     tenant_id.as_u64(),
                     collection,
+                    document_id,
                     surrogate,
                     &bytes,
                 );

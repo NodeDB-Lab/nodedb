@@ -4,7 +4,7 @@
 //! the write pass and the RESOLVE pass consume, and the operation's
 //! parameters.
 
-use nodedb_types::Surrogate;
+use nodedb_types::StorageKey;
 
 use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec, UpdateValue};
 
@@ -14,11 +14,9 @@ use nodedb_physical::physical_plan::{ResolvedSumTarget, ReturningSpec, UpdateVal
 /// classifier so the two cannot diverge on which rows match or what post-image
 /// each carries.
 pub(in crate::data::executor) struct ResolvedUpdateRow {
-    /// Target storage key (hex-encoded surrogate on a surrogate-keyed row).
-    pub doc_id: String,
-    /// The row's registered surrogate, parsed from `doc_id`. `None` for a
-    /// legacy non-surrogate-keyed row.
-    pub surrogate: Option<Surrogate>,
+    /// Target storage key. `.surrogate()` recovers the numeric surrogate;
+    /// `.to_identity()` / `Display` recover the client-visible or rendered forms.
+    pub key: StorageKey,
     /// Post-image body: strict Binary Tuple for a strict target, MessagePack
     /// for a schemaless target.
     pub body: Vec<u8>,
@@ -47,8 +45,8 @@ pub(in crate::data::executor) struct UpdateFromJoinParams<'a> {
     /// handler runs the identical scan/join/assignment/encode pipeline as the
     /// write path but writes NOTHING — no `sparse.put`, no vector re-index, no
     /// write-set, no events — and returns the matched rows as msgpack
-    /// `Vec<(doc_id, Option<surrogate_u32>, post_image_body)>` for the expander
-    /// to rewrite into concrete `PointPut` ops. `false` = the normal write path.
+    /// `Vec<ResolvedUpdateRowWire>` for the expander to rewrite into concrete
+    /// `PointPut` ops. `false` = the normal write path.
     pub resolve_only: bool,
     /// Control-Plane-shipped source rows for cross-core `UPDATE ... FROM`. When
     /// `Some`, the source join-map is built from these pre-scanned

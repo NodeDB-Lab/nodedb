@@ -17,7 +17,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::RowIdentity;
 
 use super::apply_support::returning_doc;
 use super::plan::MergeDelete;
@@ -36,6 +36,9 @@ pub(super) struct MergeDeleteArms<'a> {
     pub(super) returning: bool,
     /// Join-key VALUE → target row surrogate, resolved on the Control Plane.
     pub(super) resolved_targets: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
+    /// The target's declared `PRIMARY KEY` column, when it has one. Names
+    /// each removed row in its event and redo entry.
+    pub(super) declared_primary_key: Option<&'a str>,
 }
 
 /// The statement-wide accumulators these arms contribute to, shared with the
@@ -64,6 +67,7 @@ impl CoreLoop {
             has_vectors,
             returning,
             resolved_targets,
+            declared_primary_key,
         } = arms;
         let MergeDeleteTally {
             affected,
@@ -72,126 +76,107 @@ impl CoreLoop {
         } = tally;
 
         for del in deletes {
-            match del.surrogate {
-                Some(surrogate) => {
-                    // One write txn per arm: the removal and its index cascades
-                    // commit together, and a failing arm drops the txn
-                    // un-committed so it leaves nothing behind.
-                    let txn = match self.sparse.begin_write() {
-                        Ok(txn) => txn,
-                        Err(e) => return Err(self.response_error(task, e)),
-                    };
-                    match self.apply_point_delete(
+            let surrogate = del.key.surrogate();
+            let row_key = del.key.to_string();
+            // The identity INSERT minted for this row, from the plan's
+            // captured MessagePack body: the declared primary key, else the
+            // decimal surrogate.
+            let row_identity = RowIdentity::of_stored_row(&del.body, declared_primary_key, del.key);
+            // One write txn per arm: the removal and its index cascades
+            // commit together, and a failing arm drops the txn
+            // un-committed so it leaves nothing behind.
+            let txn = match self.sparse.begin_write() {
+                Ok(txn) => txn,
+                Err(e) => return Err(self.response_error(task, e)),
+            };
+            match self.apply_point_delete(
+                &txn,
+                PointDeleteParams {
+                    database_id,
+                    tid,
+                    collection,
+                    document_id: &row_key,
+                    surrogate,
+                    user_roles: &task.request.user_roles,
+                    enforce: true,
+                    resolved_targets,
+                },
+            ) {
+                Ok(outcome) => {
+                    // A DELETE arm takes the removed row's contribution
+                    // back off its target, folded inside THIS arm's
+                    // transaction so the debit and the removal commit
+                    // together. The pre-image is the plan's captured
+                    // body — the only image a delete has.
+                    match write_hook::run(
+                        self,
                         &txn,
-                        PointDeleteParams {
+                        &write_hook::HookCtx {
                             database_id,
                             tid,
                             collection,
-                            document_id: &del.doc_id,
-                            surrogate,
-                            user_roles: &task.request.user_roles,
-                            enforce: true,
+                            resolved_targets,
+                            deferred_sum_targets: &[],
+                            wal_lsn: task.wal_lsn(),
+                        },
+                        write_hook::WriteImages::Delete {
+                            old: write_hook::ImageBody::Submitted(&del.body),
                         },
                     ) {
-                        Ok(outcome) => {
-                            // A DELETE arm takes the removed row's contribution
-                            // back off its target, folded inside THIS arm's
-                            // transaction so the debit and the removal commit
-                            // together. The pre-image is the plan's captured
-                            // body — the only image a delete has.
-                            match write_hook::run(
-                                self,
-                                &txn,
-                                &write_hook::HookCtx {
-                                    database_id,
-                                    tid,
-                                    collection,
-                                    resolved_targets,
-                                    deferred_sum_targets: &[],
-                                    wal_lsn: task.wal_lsn(),
-                                },
-                                write_hook::WriteImages::Delete {
-                                    old: write_hook::ImageBody::Submitted(&del.body),
-                                },
-                            ) {
-                                // The arm's BALANCED contribution is NOT settled
-                                // here: these arms commit one transaction each,
-                                // after the caller's phase-A commit, so a
-                                // violation found here could no longer be
-                                // undone. The caller accounts every delete
-                                // arm's pre-image before phase A runs and
-                                // judges the whole MERGE there.
-                                Ok(enforcement) => write_set.extend(write_hook::target_write_set(
-                                    &enforcement.target_writes,
-                                )),
-                                // Dropping `txn` un-committed reverses the
-                                // removal and every target it had debited.
-                                Err(e) => return Err(self.response_error(task, e)),
-                            }
-                            if let Err(e) = txn.commit() {
-                                return Err(self.response_error(
-                                    task,
-                                    crate::Error::Storage {
-                                        engine: "sparse".into(),
-                                        detail: format!("merge delete commit: {e}"),
-                                    },
-                                ));
-                            }
-                            if outcome.prior_value.is_some() {
-                                *affected += 1;
-                                // A DELETE arm returns the PRE-image — the row
-                                // as it was classified, since nothing survives
-                                // the delete to project. Taken from the plan's
-                                // captured body rather than `prior_value`, which
-                                // is the raw stored form (Binary Tuple on a
-                                // strict target) and would need re-decoding.
-                                if returning {
-                                    match returning_doc(&del.body, &del.doc_id) {
-                                        Ok(doc) => returned_docs.push(doc),
-                                        Err(e) => return Err(self.response_error(task, e)),
-                                    }
-                                }
-                                if has_vectors {
-                                    write_set.push(WriteSetEntry {
-                                        surrogate: surrogate.as_u32(),
-                                        is_delete: true,
-                                        value: Vec::new(),
-                                        collection: None,
-                                    });
-                                }
-                            }
-                            let row_key = surrogate_to_doc_id(surrogate);
-                            self.emit_write_event(
-                                task,
-                                collection,
-                                crate::event::WriteOp::Delete,
-                                &row_key,
-                                None,
-                                outcome.prior_value.as_deref(),
-                            );
-                        }
+                        // The arm's BALANCED contribution is NOT settled
+                        // here: these arms commit one transaction each,
+                        // after the caller's phase-A commit, so a
+                        // violation found here could no longer be
+                        // undone. The caller accounts every delete
+                        // arm's pre-image before phase A runs and
+                        // judges the whole MERGE there.
+                        Ok(enforcement) => write_set
+                            .extend(write_hook::target_write_set(&enforcement.target_writes)),
+                        // Dropping `txn` un-committed reverses the
+                        // removal and every target it had debited.
                         Err(e) => return Err(self.response_error(task, e)),
                     }
-                }
-                None => {
-                    if let Err(e) = self
-                        .sparse
-                        .delete(database_id, tid, collection, &del.doc_id)
-                    {
-                        return Err(self.response_error(task, e));
+                    if let Err(e) = txn.commit() {
+                        return Err(self.response_error(
+                            task,
+                            crate::Error::Storage {
+                                engine: "sparse".into(),
+                                detail: format!("merge delete commit: {e}"),
+                            },
+                        ));
                     }
-                    // Legacy non-surrogate row: the raw delete reports no prior
-                    // value, so the plan's captured pre-image is the only image
-                    // of the removed row — without it a RETURNING delete of such
-                    // a row would silently drop it from the result set.
-                    if returning {
-                        match returning_doc(&del.body, &del.doc_id) {
-                            Ok(doc) => returned_docs.push(doc),
-                            Err(e) => return Err(self.response_error(task, e)),
+                    if outcome.prior_value.is_some() {
+                        *affected += 1;
+                        // A DELETE arm returns the PRE-image — the row
+                        // as it was classified, since nothing survives
+                        // the delete to project. Taken from the plan's
+                        // captured body rather than `prior_value`, which
+                        // is the raw stored form (Binary Tuple on a
+                        // strict target) and would need re-decoding.
+                        if returning {
+                            match returning_doc(&del.body, &del.key) {
+                                Ok(doc) => returned_docs.push(doc),
+                                Err(e) => return Err(self.response_error(task, e)),
+                            }
+                        }
+                        if has_vectors {
+                            write_set.push(WriteSetEntry {
+                                surrogate: surrogate.as_u32(),
+                                identity: row_identity.clone(),
+                                is_delete: true,
+                                value: Vec::new(),
+                                collection: None,
+                            });
                         }
                     }
-                    *affected += 1;
+                    self.emit_document_delete_event(
+                        task,
+                        collection,
+                        row_identity,
+                        outcome.prior_value.as_deref(),
+                    );
                 }
+                Err(e) => return Err(self.response_error(task, e)),
             }
         }
         Ok(())

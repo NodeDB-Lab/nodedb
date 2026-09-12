@@ -232,8 +232,10 @@ fn emit_arms(
         ));
     }
 
-    for (doc_id, surrogate_u32, body, _old_body) in arms.updates {
-        let surrogate = require_surrogate(surrogate_u32, &doc_id, "MERGE")?;
+    for (_doc_id, surrogate_u32, body, _old_body) in arms.updates {
+        // The wire surrogate is never absent: every matched MERGE UPDATE row
+        // is a storage-keyed row.
+        let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
         let document_id = derive_document_id(target_pk, &body, surrogate);
         let pk_bytes = document_id.clone().into_bytes();
         out.push(point_task(

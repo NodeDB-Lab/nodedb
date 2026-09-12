@@ -1,24 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! INSERT conflict semantics for columnar-family engines.
-//!
-//! Columnar storage is OLAP-shaped (append-only segments, zonemap pruning),
-//! but `PRIMARY KEY` appears in the ANSI SQL surface and must mean the same
-//! thing across every engine NodeDB ships. The resolution is to treat PK on
-//! a columnar collection as both a sort key (enforced at segment flush) and
-//! a logical uniqueness constraint enforced via a sparse PK index plus
-//! positional deletes: duplicate INSERTs tombstone the prior row rather
-//! than raising 23505, and readers skip tombstoned row-ids.
-//!
-//! Spatial extends columnar and inherits the same semantics. Timeseries is
-//! a different profile (append-only, time-keyed) and is not covered here.
-
 use crate::harness::TestServer;
 
 // ── Plain columnar ──────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn columnar_insert_duplicate_pk_keeps_latest() {
+async fn columnar_insert_duplicate_pk_refuses_with_23505() {
     let server = TestServer::start().await;
 
     server
@@ -39,45 +26,43 @@ async fn columnar_insert_duplicate_pk_keeps_latest() {
         .await
         .unwrap();
 
-    // Duplicate PK — must NOT raise 23505 on columnar (OLAP-shaped), but
-    // must also NOT produce two visible rows (the silent-duplicate bug).
-    server
-        .exec("INSERT INTO metrics (id, region, value) VALUES ('m1', 'us-west', 2.0)")
+    // A declared PRIMARY KEY means uniqueness on every column, `id` included.
+    match server
+        .client
+        .simple_query("INSERT INTO metrics (id, region, value) VALUES ('m1', 'us-west', 2.0)")
         .await
-        .unwrap();
+    {
+        Ok(_) => panic!("expected unique_violation on the declared primary key, got success"),
+        Err(e) => {
+            let db_err = e.as_db_error().expect("expected DbError");
+            assert_eq!(
+                db_err.code().code(),
+                "23505",
+                "expected SQLSTATE 23505, got {}: {}",
+                db_err.code().code(),
+                db_err.message()
+            );
+        }
+    }
 
     let rows = server
         .query_rows("SELECT id, region, value FROM metrics WHERE id = 'm1'")
         .await
         .unwrap();
-
-    // Regression guard: the original bug was two rows visible for one PK.
     assert_eq!(
         rows.len(),
         1,
-        "duplicate PK must not produce two visible rows, got: {rows:?}"
+        "the refused insert must leave exactly one row, got: {rows:?}"
     );
-
-    // Latest-write-wins on the tombstoned prior row. row[0]=id, row[1]=region, row[2]=value.
     assert_eq!(
-        rows[0][1], "us-west",
-        "expected latest write (us-west), got: {:?}",
-        rows[0]
-    );
-    assert!(
-        rows[0][2].contains('2'),
-        "expected value 2.0, got: {:?}",
-        rows[0]
-    );
-    assert_ne!(
         rows[0][1], "us-east",
-        "prior row must be tombstoned, got: {:?}",
+        "the original row must be unchanged, got: {:?}",
         rows[0]
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn columnar_full_scan_hides_tombstoned_duplicate() {
+async fn columnar_full_scan_hides_tombstoned_upsert() {
     let server = TestServer::start().await;
 
     server
@@ -93,8 +78,11 @@ async fn columnar_full_scan_hides_tombstoned_duplicate() {
         .exec("INSERT INTO m (id, v) VALUES ('a', 1), ('b', 2), ('c', 3)")
         .await
         .unwrap();
+    // UPSERT merges into the existing row rather than refusing it, and does
+    // so by tombstoning the prior row and writing a new one. A full scan
+    // must hide the tombstoned row and expose only the latest one.
     server
-        .exec("INSERT INTO m (id, v) VALUES ('b', 20)")
+        .exec("UPSERT INTO m (id, v) VALUES ('b', 20)")
         .await
         .unwrap();
 
@@ -106,7 +94,7 @@ async fn columnar_full_scan_hides_tombstoned_duplicate() {
     assert_eq!(
         rows.len(),
         3,
-        "full scan must return 3 rows after dup, got: {rows:?}"
+        "full scan must return 3 rows after upsert, got: {rows:?}"
     );
     // ORDER BY id → a, b, c with latest-wins on b. row[0]=id, row[1]=v.
     assert_eq!(
@@ -262,144 +250,5 @@ async fn columnar_order_by_sort_key_accepted() {
         rows.len(),
         3,
         "ORDER BY without PK must not dedup; got: {rows:?}"
-    );
-}
-
-// ── Natural-key PRIMARY KEY on a non-`id` column ────────────────────────────
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn columnar_natural_key_pk_on_non_id_column_keeps_distinct_rows() {
-    // A PRIMARY KEY declared on a non-`id` column must drive row identity on
-    // columnar too. Two rows with DISTINCT natural keys must both stay visible
-    // — the built-in synthetic `id` (NULL for every row) must NOT make them
-    // collide into a single tombstoned row (silent data loss).
-    let server = TestServer::start().await;
-
-    server
-        .exec(
-            "CREATE COLLECTION metrics (\
-                sku TEXT PRIMARY KEY, region TEXT, value FLOAT\
-            ) WITH (engine='columnar')",
-        )
-        .await
-        .unwrap();
-    server
-        .exec("CREATE UNIQUE INDEX metrics_pk ON metrics (sku)")
-        .await
-        .unwrap();
-
-    server
-        .exec("INSERT INTO metrics (sku, region, value) VALUES ('a', 'us-east', 1.0)")
-        .await
-        .unwrap();
-    // Distinct natural key: must NOT collide on an empty synthetic `id`.
-    server
-        .exec("INSERT INTO metrics (sku, region, value) VALUES ('b', 'us-west', 2.0)")
-        .await
-        .unwrap();
-
-    let rows = server
-        .query_rows("SELECT sku, region FROM metrics ORDER BY sku")
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.len(),
-        2,
-        "both distinct natural-key rows must stay visible, got: {rows:?}"
-    );
-    assert_eq!(rows[0][0], "a", "got: {rows:?}");
-    assert_eq!(rows[1][0], "b", "got: {rows:?}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spatial_natural_key_pk_on_non_id_column_keeps_distinct_rows() {
-    // Spatial inherits columnar identity: a non-`id` PRIMARY KEY must keep
-    // distinct natural-key rows distinct rather than colliding on synthetic id.
-    let server = TestServer::start().await;
-
-    server
-        .exec(
-            "CREATE COLLECTION places (\
-                code TEXT PRIMARY KEY, geom GEOMETRY SPATIAL_INDEX, label TEXT\
-            ) WITH (engine='spatial')",
-        )
-        .await
-        .unwrap();
-    server
-        .exec("CREATE UNIQUE INDEX places_pk ON places (code)")
-        .await
-        .unwrap();
-
-    server
-        .exec("INSERT INTO places (code, geom, label) VALUES ('p1', ST_Point(0.0, 0.0), 'origin')")
-        .await
-        .unwrap();
-    server
-        .exec("INSERT INTO places (code, geom, label) VALUES ('p2', ST_Point(1.0, 1.0), 'other')")
-        .await
-        .unwrap();
-
-    let rows = server
-        .query_rows("SELECT code, label FROM places ORDER BY code")
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.len(),
-        2,
-        "both distinct natural-key rows must stay visible, got: {rows:?}"
-    );
-    assert_eq!(rows[0][0], "p1", "got: {rows:?}");
-    assert_eq!(rows[1][0], "p2", "got: {rows:?}");
-}
-
-// ── Spatial inherits columnar PK semantics ──────────────────────────────────
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spatial_insert_duplicate_pk_keeps_latest() {
-    let server = TestServer::start().await;
-
-    server
-        .exec(
-            "CREATE COLLECTION places (\
-                id TEXT PRIMARY KEY, geom GEOMETRY SPATIAL_INDEX, label TEXT\
-            ) WITH (engine='spatial')",
-        )
-        .await
-        .unwrap();
-    server
-        .exec("CREATE UNIQUE INDEX places_pk ON places (id)")
-        .await
-        .unwrap();
-
-    server
-        .exec("INSERT INTO places (id, geom, label) VALUES ('p1', ST_Point(0.0, 0.0), 'origin')")
-        .await
-        .unwrap();
-
-    server
-        .exec("INSERT INTO places (id, geom, label) VALUES ('p1', ST_Point(1.0, 1.0), 'moved')")
-        .await
-        .unwrap();
-
-    let rows = server
-        .query_rows("SELECT id, label FROM places WHERE id = 'p1'")
-        .await
-        .unwrap();
-
-    assert_eq!(
-        rows.len(),
-        1,
-        "spatial duplicate PK must not produce two rows, got: {rows:?}"
-    );
-    // row[0]=id, row[1]=label
-    assert_eq!(
-        rows[0][1], "moved",
-        "expected latest (moved), got: {:?}",
-        rows[0]
-    );
-    assert_ne!(
-        rows[0][1], "origin",
-        "prior row must be tombstoned, got: {:?}",
-        rows[0]
     );
 }

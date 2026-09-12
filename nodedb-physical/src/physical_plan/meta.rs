@@ -71,10 +71,17 @@ pub enum MetaOp {
     ///
     /// `target_type`: "document_schemaless", "document_strict", "kv".
     /// `schema_json`: for "document_strict"/"kv", JSON-serialized column definitions.
+    /// `source_storage_mode`: the collection's storage mode BEFORE this
+    /// conversion, read from the catalog by the Control Plane dispatcher.
+    /// The Data Plane's own `doc_configs` cache still reflects the OLD mode
+    /// at dispatch time (the catalog flip and re-register happen after this
+    /// op returns), so the handler cannot resolve the source format from
+    /// that cache. It must take it from the plan instead.
     ConvertCollection {
         collection: QualifiedCollection,
         target_type: String,
         schema_json: String,
+        source_storage_mode: super::document::StorageMode,
     },
 
     /// Snapshot a tenant's data from the sparse engine.

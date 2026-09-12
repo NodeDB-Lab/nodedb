@@ -105,6 +105,10 @@ pub const LEGAL_HOLD_ACTIVE: &str = "23607";
 /// `23608` — NodeDB extension: type-guard constraint violated.
 pub const TYPE_GUARD_VIOLATION: &str = "23608";
 
+/// `23609` — NodeDB extension: period-lock reference row has no configured
+/// status column; a misconfigured column name, not a locked period.
+pub const PERIOD_LOCK_MISCONFIGURED: &str = "23609";
+
 // ── Class 28 — Invalid Authorization Specification ───────────────────────────
 
 /// `28000` — `invalid_authorization_specification` (no valid credentials)
@@ -346,6 +350,7 @@ mod tests {
             APPEND_ONLY_VIOLATION,
             BALANCE_VIOLATION,
             PERIOD_LOCKED,
+            PERIOD_LOCK_MISCONFIGURED,
             STATE_TRANSITION_VIOLATION,
             TRANSITION_CHECK_VIOLATION,
             RETENTION_VIOLATION,

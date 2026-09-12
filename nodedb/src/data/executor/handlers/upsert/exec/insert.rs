@@ -10,6 +10,7 @@ use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, W
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::StrictSchema;
 
@@ -20,7 +21,6 @@ pub(super) struct InsertCtx<'a> {
     pub collection: &'a str,
     pub document_id: &'a str,
     pub surrogate: Surrogate,
-    pub row_key: &'a str,
     pub value: &'a [u8],
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     pub returning: Option<&'a nodedb_physical::physical_plan::ReturningSpec>,
@@ -45,7 +45,6 @@ impl CoreLoop {
             collection,
             document_id,
             surrogate,
-            row_key,
             value,
             rls_write_check,
             returning,
@@ -56,14 +55,24 @@ impl CoreLoop {
             strict_schema,
         } = ctx;
 
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        // The plan's `document_id` is the row's client identity: the write
+        // gate, the event, the redo entry, and `RETURNING` all name it.
+        let document_identity = RowIdentity::from_user_key(document_id);
+
         // Insert: document doesn't exist, create new (same as PointPut).
         // The incoming body IS the post-image here, and the planner
         // emits it as MessagePack for both storage modes (the strict
         // tuple is encoded on the way to disk), so it is decoded
         // without a schema.
-        if let Err(e) =
-            rls_write_gate::admit_stored_row(rls_write_check, value, row_key, None, tid, collection)
-        {
+        if let Err(e) = rls_write_gate::admit_stored_row(
+            rls_write_check,
+            value,
+            &document_identity,
+            None,
+            tid,
+            collection,
+        ) {
             return self.response_error(task, e);
         }
 
@@ -96,18 +105,26 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,
                 user_roles: &task.request.user_roles,
                 enforce: true,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: hook_ctx.resolved_targets,
             },
         ) {
             Ok(p) => p,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
@@ -115,7 +132,14 @@ impl CoreLoop {
         // The advanced head lands in the SAME transaction as the row
         // whose hash it is.
         if let Err(e) = chain.persist_head(self, &txn) {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -132,7 +156,14 @@ impl CoreLoop {
         ) {
             Ok(o) => o,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return self.response_error(task, e);
             }
         };
@@ -143,7 +174,14 @@ impl CoreLoop {
         if let Err(e) =
             self.settle_balanced_entries(database_id, tid, collection, enforcement.balanced_entries)
         {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return self.response_error(task, e);
         }
 
@@ -160,7 +198,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            row_key,
+            document_identity.clone(),
             value,
             prior.prior_value.as_deref(),
         );
@@ -177,13 +215,14 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 strict_schema,
-                &[(document_id, prior.stored_value.as_slice())],
+                &[(&document_identity, prior.stored_value.as_slice())],
             ),
             None => self.response_affected(task, 1),
         };
         if has_vectors {
             response.write_set = vec![WriteSetEntry {
                 surrogate: surrogate.as_u32(),
+                identity: document_identity,
                 is_delete: false,
                 value: value.to_vec(),
                 collection: None,

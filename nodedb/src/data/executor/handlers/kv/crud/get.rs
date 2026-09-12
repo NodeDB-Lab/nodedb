@@ -8,7 +8,7 @@ use super::types::KvGetParams;
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
-use crate::data::executor::handlers::transaction::stage_write::hex_key;
+use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
 use crate::types::TenantId;
@@ -41,7 +41,7 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.to_string(),
             );
-            let doc_id = hex_key(key);
+            let doc_id = kv_row_identity(key);
             if let Some(overlay) = self.txn_overlays.get(&txn_id) {
                 // A staged EXPIRE with an already-past instant makes the row
                 // appear absent to a same-transaction read -- independent of

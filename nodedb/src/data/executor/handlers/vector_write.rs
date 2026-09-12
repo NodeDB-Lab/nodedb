@@ -139,7 +139,7 @@ impl CoreLoop {
             .and_then(|c| c.get_surrogate(vector_id));
 
         if let Some(surrogate) = surrogate_opt {
-            let row_key = format!("{:08x}", surrogate.as_u32());
+            let row_key = nodedb_types::StorageKey::for_surrogate(surrogate);
             let fields =
                 match self
                     .sparse

@@ -68,8 +68,7 @@ impl CoreLoop {
             resolved_sum_targets,
             deferred_sum_targets,
         } = p;
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
+        let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         let database_id = dummy_task.request.database_id.as_u64();
 
         // Pre-read the plain-table value: it decides insert-vs-update for the
@@ -94,7 +93,7 @@ impl CoreLoop {
         let folds_images = write_hook::folds_images(self, &hook_ctx);
         let prior_bytes = if chain.enabled() || folds_images {
             self.sparse
-                .get(database_id, tid, collection, row_key)
+                .get(database_id, tid, collection, &storage_key)
                 .ok()
                 .flatten()
         } else {
@@ -134,11 +133,11 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    row_key,
+                    &storage_key,
                 )
             } else {
                 self.sparse
-                    .exists_in_txn(&txn, database_id, tid, collection, row_key)
+                    .exists_in_txn(&txn, database_id, tid, collection, &storage_key)
             };
             let exists = match exists_result {
                 Ok(exists) => exists,
@@ -181,13 +180,14 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: row_key,
+                storage_key,
                 surrogate,
                 value: effective_value,
                 index_text: true,
                 user_roles,
                 enforce: true,
                 wal_lsn: dummy_task.wal_lsn(),
+                resolved_targets: resolved_sum_targets,
             },
         ) {
             Ok(o) => o,
@@ -196,7 +196,14 @@ impl CoreLoop {
                 // after we mutated the chain head and, on the later rejections,
                 // after it had already cached the row. Reverse both so the
                 // aborted op leaves no trace, then propagate the typed error.
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return Err(e.into());
             }
         };
@@ -206,7 +213,14 @@ impl CoreLoop {
         // and drops `txn` uncommitted, so a rejected insert never leaves a head
         // behind on disk either.
         if let Err(e) = chain.persist_head(self, &txn) {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return Err(ErrorCode::from(e));
         }
 
@@ -232,7 +246,14 @@ impl CoreLoop {
         let enforcement = match write_hook::run(self, &txn, &hook_ctx, images) {
             Ok(outcome) => outcome,
             Err(e) => {
-                chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+                chain_guard::abort_after_apply(
+                    self,
+                    &chain,
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                );
                 return Err(ErrorCode::from(e));
             }
         };
@@ -248,7 +269,14 @@ impl CoreLoop {
         // inside an explicit transaction.
         if let Err(e) = self.settle_balanced_entries(database_id, tid, collection, balanced_entries)
         {
-            chain_guard::abort_after_apply(self, &chain, database_id, tid, collection, row_key);
+            chain_guard::abort_after_apply(
+                self,
+                &chain,
+                database_id,
+                tid,
+                collection,
+                &storage_key,
+            );
             return Err(ErrorCode::from(e));
         }
 
@@ -264,8 +292,8 @@ impl CoreLoop {
         for target in target_writes {
             undo_log.push(UndoEntry::PutDocument {
                 collection: target.collection,
-                document_id: target.document_id,
-                surrogate: target.surrogate,
+                document_id: nodedb_types::StorageKey::for_surrogate(target.surrogate),
+                identity: target.identity,
                 old_value: target.outcome.prior_value,
                 bitemporal_sys_from_ms: target.outcome.bitemporal_sys_from_ms,
                 bitemporal_index_tuples: target.outcome.bitemporal_index_tuples,
@@ -279,7 +307,7 @@ impl CoreLoop {
                     vector_id: delta.vector_id,
                     collection: delta.collection,
                     field: delta.field,
-                    doc_id: delta.doc_id,
+                    doc_id: Some(delta.doc_id),
                 });
             }
             for (key, entry_id) in target.outcome.spatial_inserts {
@@ -292,8 +320,9 @@ impl CoreLoop {
 
         undo_log.push(UndoEntry::PutDocument {
             collection: collection.to_string(),
-            document_id: row_key.to_string(),
-            surrogate,
+            document_id: storage_key,
+            // The plan's `document_id` is the row's client identity.
+            identity: nodedb_types::RowIdentity::from_user_key(document_id),
             old_value: outcome.prior_value,
             bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
             bitemporal_index_tuples: outcome.bitemporal_index_tuples,
@@ -312,7 +341,7 @@ impl CoreLoop {
                 vector_id: delta.vector_id,
                 collection: delta.collection,
                 field: delta.field,
-                doc_id: delta.doc_id,
+                doc_id: Some(delta.doc_id),
             });
         }
 

@@ -25,7 +25,7 @@ pub(in crate::data::executor) struct BitemporalUpdateReindex<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub doc_id: &'a str,
+    pub doc_id: &'a crate::engine::document::store::StorageKey,
     pub sys_from_ms: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
@@ -43,7 +43,7 @@ pub(in crate::data::executor) struct NonbitemporalUpdateReindex<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub doc_id: &'a str,
+    pub storage_key: &'a crate::engine::document::store::StorageKey,
     /// New stored bytes for the primary document row.
     pub new_body: &'a [u8],
     pub index_paths: &'a [IndexPath],
@@ -193,7 +193,7 @@ impl CoreLoop {
             p.database_id,
             p.tid,
             p.collection,
-            p.doc_id,
+            p.storage_key,
             p.new_body,
         )?;
 
@@ -206,7 +206,7 @@ impl CoreLoop {
                     collection: p.collection,
                     old_doc: Some(p.old_doc),
                     new_doc: p.new_doc,
-                    doc_id: p.doc_id,
+                    doc_id: p.storage_key,
                     index_paths: p.index_paths,
                 },
             )?

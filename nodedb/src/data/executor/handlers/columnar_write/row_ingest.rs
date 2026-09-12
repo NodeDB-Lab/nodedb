@@ -55,7 +55,8 @@ impl CoreLoop {
     /// `params.engine_key`, applying intent-specific ON CONFLICT semantics
     /// (upsert-overwrite for `Insert` and `Put`, silent skip for
     /// `InsertIfAbsent`, merge-via-`apply_on_conflict_updates` for `Put`
-    /// with non-empty `on_conflict_updates`).
+    /// with non-empty `on_conflict_updates`, `RejectedConstraint` error for
+    /// `InsertUnique` on a PK the index already carries).
     ///
     /// Returns the accepted row count (and, on request, the stored post-images),
     /// or `Err(Response)` on the first unrecoverable error (short-circuits the
@@ -209,7 +210,10 @@ impl CoreLoop {
                         }
                     }
                 }
-                _ => values,
+                ColumnarInsertIntent::Put
+                | ColumnarInsertIntent::Insert
+                | ColumnarInsertIntent::InsertIfAbsent
+                | ColumnarInsertIntent::InsertUnique => values,
             };
 
             // The row that will actually exist afterwards is decided here, not
@@ -241,6 +245,45 @@ impl CoreLoop {
             let row_surrogate = surrogates.get(row_idx).copied();
             let result = match intent {
                 ColumnarInsertIntent::InsertIfAbsent => engine.insert_if_absent(&final_values),
+                ColumnarInsertIntent::InsertUnique => {
+                    let pk_bytes = match engine.encode_pk_from_row(&final_values) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return Err(self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!("columnar insert: pk encode failed: {e}"),
+                                },
+                            ));
+                        }
+                    };
+                    if engine.pk_index().contains(&pk_bytes) {
+                        let key_desc = schema
+                            .columns
+                            .iter()
+                            .zip(final_values.iter())
+                            .filter(|(col, _)| col.primary_key)
+                            .map(|(col, v)| format!("{}={v}", col.name))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(self.response_error(
+                            task,
+                            crate::Error::RejectedConstraint {
+                                collection: engine_key.2.clone(),
+                                constraint: "unique".to_string(),
+                                detail: format!(
+                                    "duplicate key value '{key_desc}' violates primary-key \
+                                     uniqueness on '{}'",
+                                    engine_key.2
+                                ),
+                            },
+                        ));
+                    }
+                    match row_surrogate {
+                        Some(s) => engine.insert_with_surrogate(&final_values, s),
+                        None => engine.insert(&final_values),
+                    }
+                }
                 ColumnarInsertIntent::Insert | ColumnarInsertIntent::Put => match row_surrogate {
                     Some(s) => engine.insert_with_surrogate(&final_values, s),
                     None => engine.insert(&final_values),

@@ -23,6 +23,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::enforcement::materialized_sum::divergence::SumTargetCheck;
 use nodedb_physical::physical_plan::{OllpPredictedEdge, ResolvedSumTarget, UpdateValue};
+use nodedb_types::StorageKey;
 
 /// The predictions one bulk statement carries.
 pub(in crate::data::executor) struct BulkAdmission<'a> {
@@ -52,10 +53,10 @@ impl CoreLoop {
         &self,
         database_id: u64,
         tid: u64,
-        matching_ids: Vec<String>,
+        matching_ids: Vec<StorageKey>,
         admission: &BulkAdmission<'_>,
-    ) -> Result<Vec<String>, ErrorCode> {
-        let apply_ids: Vec<String> = match admission.predicted_surrogates {
+    ) -> Result<Vec<StorageKey>, ErrorCode> {
+        let apply_ids: Vec<StorageKey> = match admission.predicted_surrogates {
             Some(predicted) => {
                 // The set comparison is deterministic: both sides are sorted.
                 if self.ollp_is_group_leader
@@ -110,9 +111,8 @@ impl CoreLoop {
 
     /// Compute the sorted ACTUAL implicit-edge set for the matched docs.
     ///
-    /// For each matched `doc_id`, parse its surrogate (same `len()==8` hex
-    /// parse as [`ollp_actual_surrogates`]), fetch the stored doc bytes via the
-    /// SAME `sparse.get` path the delete loop uses, decode it, and — only when
+    /// For each matched storage key, fetch the stored doc bytes via the SAME
+    /// `sparse.get` path the delete loop uses, decode it, and — only when
     /// it carries BOTH `_from` and `_to` as strings — record an
     /// [`OllpPredictedEdge`] with the raw `_type` as `label`. A matched doc
     /// without both endpoints is not an edge and is skipped; if it gained an
@@ -129,21 +129,13 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        matching_ids: &[String],
+        matching_ids: &[StorageKey],
     ) -> Vec<OllpPredictedEdge> {
         // `decode_document` returns `serde_json::Value`, whose `get`/`as_str`
         // are inherent methods — no extra trait import needed.
         let mut edges: Vec<OllpPredictedEdge> = Vec::new();
-        for doc_id in matching_ids {
-            let surrogate = if doc_id.len() == 8 {
-                match u32::from_str_radix(doc_id, 16) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                }
-            } else {
-                continue;
-            };
-            let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, doc_id) else {
+        for key in matching_ids {
+            let Ok(Some(bytes)) = self.sparse.get(database_id, tid, collection, key) else {
                 continue;
             };
             let Ok(doc) = doc_format::decode_document(&bytes) else {
@@ -157,7 +149,7 @@ impl CoreLoop {
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
                 edges.push(OllpPredictedEdge {
-                    surrogate,
+                    surrogate: key.surrogate().as_u32(),
                     from: from.to_string(),
                     to: to.to_string(),
                     label,

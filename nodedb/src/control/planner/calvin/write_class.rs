@@ -390,6 +390,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             restart_identity: false,
             resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
         });
         assert!(is_write_plan(&plan), "DocumentOp::Truncate must be a write");
     }
@@ -609,6 +610,7 @@ mod tests {
             delta: "25".to_owned(),
             join_column: "account_id".to_owned(),
             join_value: "acc-1".to_owned(),
+            declared_primary_key: None,
         })
     }
 

@@ -28,8 +28,8 @@
 //! (a hash of measurement + tags), which is not a cross-engine surrogate. For
 //! staging, each row is keyed by the per-row `Surrogate` the planner minted
 //! via `assign_fresh` (`convert_timeseries_ingest`) — a fresh unique id per
-//! row so every staged INSERT occupies its own overlay slot. `surrogate_to_doc_id`
-//! (hex) is used only for the overlay's doc-id side-map.
+//! row so every staged INSERT occupies its own overlay slot. The overlay's
+//! identity side-map holds that surrogate's decimal `RowIdentity`.
 //!
 //! Row body encoding: each row's `{field => value}` map is stored VERBATIM
 //! (the exact column names the INSERT used) and encoded via
@@ -45,14 +45,13 @@
 
 use std::collections::HashMap;
 
-use nodedb_types::Surrogate;
 use nodedb_types::value::Value;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use super::context::StageCtx;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::surrogate_to_doc_id;
 use crate::types::TxnId;
 
 /// Inputs for [`CoreLoop::stage_timeseries_insert`]. Bundled because the raw
@@ -204,8 +203,14 @@ impl CoreLoop {
                 }
             };
 
-            let doc_id = surrogate_to_doc_id(surrogate);
-            let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+            let ctx = StageCtx::new(
+                task,
+                tid,
+                txn_id,
+                collection,
+                RowIdentity::for_surrogate(surrogate),
+                surrogate,
+            );
             if let Err(e) = self.stage_put_capped(&ctx, body) {
                 return self.response_error(task, e);
             }
@@ -397,8 +402,14 @@ impl CoreLoop {
             .get(&txn_id)
             .map(|overlay| overlay.journal_len());
         for (surrogate, body) in surrogates.iter().copied().zip(encoded_rows) {
-            let doc_id = surrogate_to_doc_id(surrogate);
-            let ctx = StageCtx::new(task, tid, txn_id, collection, doc_id, surrogate);
+            let ctx = StageCtx::new(
+                task,
+                tid,
+                txn_id,
+                collection,
+                RowIdentity::for_surrogate(surrogate),
+                surrogate,
+            );
             if let Err(error) = self.stage_put_capped(&ctx, body) {
                 self.rollback_canonical_ilp_stage(txn_id, prior_marker);
                 return self.response_error(task, error);
@@ -633,7 +644,12 @@ mod tests {
         let existing = TxnId::new(81);
         {
             let overlay = core.txn_overlay_mut(existing);
-            overlay.insert_put(collection.clone(), 1, "1", b"prior".to_vec());
+            overlay.insert_put(
+                collection.clone(),
+                1,
+                &RowIdentity::from_user_key("1"),
+                b"prior".to_vec(),
+            );
         }
         let prior_marker = core
             .txn_overlays
@@ -642,8 +658,18 @@ mod tests {
             .journal_len();
         {
             let overlay = core.txn_overlay_mut(existing);
-            overlay.insert_put(collection.clone(), 2, "2", b"first-new".to_vec());
-            overlay.insert_put(collection.clone(), 3, "3", b"second-new".to_vec());
+            overlay.insert_put(
+                collection.clone(),
+                2,
+                &RowIdentity::from_user_key("2"),
+                b"first-new".to_vec(),
+            );
+            overlay.insert_put(
+                collection.clone(),
+                3,
+                &RowIdentity::from_user_key("3"),
+                b"second-new".to_vec(),
+            );
         }
         core.rollback_canonical_ilp_stage(existing, Some(prior_marker));
         let overlay = core
@@ -662,8 +688,18 @@ mod tests {
         let created = TxnId::new(82);
         {
             let overlay = core.txn_overlay_mut(created);
-            overlay.insert_put(collection.clone(), 4, "4", b"created-a".to_vec());
-            overlay.insert_put(collection, 5, "5", b"created-b".to_vec());
+            overlay.insert_put(
+                collection.clone(),
+                4,
+                &RowIdentity::from_user_key("4"),
+                b"created-a".to_vec(),
+            );
+            overlay.insert_put(
+                collection,
+                5,
+                &RowIdentity::from_user_key("5"),
+                b"created-b".to_vec(),
+            );
         }
         assert_eq!(metrics.active_txn_overlays.load(Ordering::Relaxed), 2);
         core.rollback_canonical_ilp_stage(created, None);

@@ -39,8 +39,6 @@ impl CoreLoop {
             user_roles,
             resolved_sum_targets,
         } = p;
-        let row_key = crate::engine::document::store::surrogate_to_doc_id(surrogate);
-        let row_key = row_key.as_str();
         let database_id = dummy_task.request.database_id.as_u64();
         let hook_ctx = HookCtx {
             database_id,
@@ -83,6 +81,7 @@ impl CoreLoop {
                 surrogate,
                 user_roles,
                 enforce: true,
+                resolved_targets: resolved_sum_targets,
             },
         )?;
 
@@ -131,8 +130,8 @@ impl CoreLoop {
         for target in target_writes {
             undo_log.push(UndoEntry::PutDocument {
                 collection: target.collection,
-                document_id: target.document_id,
-                surrogate: target.surrogate,
+                document_id: nodedb_types::StorageKey::for_surrogate(target.surrogate),
+                identity: target.identity,
                 old_value: target.outcome.prior_value,
                 bitemporal_sys_from_ms: target.outcome.bitemporal_sys_from_ms,
                 bitemporal_index_tuples: target.outcome.bitemporal_index_tuples,
@@ -146,7 +145,7 @@ impl CoreLoop {
                     vector_id: delta.vector_id,
                     collection: delta.collection,
                     field: delta.field,
-                    doc_id: delta.doc_id,
+                    doc_id: Some(delta.doc_id),
                 });
             }
             for (key, entry_id) in target.outcome.spatial_inserts {
@@ -162,8 +161,9 @@ impl CoreLoop {
         if let Some(old) = outcome.prior_value {
             undo_log.push(UndoEntry::DeleteDocument {
                 collection: collection.to_string(),
-                document_id: row_key.to_string(),
-                surrogate,
+                document_id: nodedb_types::StorageKey::for_surrogate(surrogate),
+                // The plan's `document_id` is the row's client identity.
+                identity: nodedb_types::RowIdentity::from_user_key(document_id),
                 old_value: old,
                 bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
                 bitemporal_index_tuples: outcome.bitemporal_index_tuples,
@@ -185,7 +185,7 @@ impl CoreLoop {
                 vector_id: delta.vector_id,
                 collection: delta.collection,
                 field: delta.field,
-                doc_id: delta.doc_id,
+                doc_id: Some(delta.doc_id),
             });
         }
 

@@ -11,8 +11,13 @@
 //! prior versions from current-state reads only" — are the correctness
 //! contract the handlers rely on.
 
-use nodedb::engine::document::store::{CollectionConfig, DocumentEngine};
+use nodedb::engine::document::store::{CollectionConfig, DocumentEngine, StorageKey};
 use nodedb::engine::sparse::btree::SparseEngine;
+use nodedb_types::Surrogate;
+
+fn key(n: u32) -> StorageKey {
+    StorageKey::for_surrogate(Surrogate::new(n))
+}
 
 fn open() -> (SparseEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -38,17 +43,21 @@ fn update_via_put_creates_new_version_and_preserves_old() {
     let (sparse, _d) = open();
     let engine = register(&sparse);
 
-    engine.put("c", "k", &serde_json::json!({"v": 1})).unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 1}))
+        .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let t_mid = wall_ms();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    engine.put("c", "k", &serde_json::json!({"v": 2})).unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 2}))
+        .unwrap();
 
-    assert_eq!(engine.get("c", "k").unwrap().unwrap()["v"], 2);
+    assert_eq!(engine.get("c", &key(1)).unwrap().unwrap()["v"], 2);
 
     // History at t_mid still sees v=1.
     let body = sparse
-        .versioned_get_as_of(0, 1, "c", "k", Some(t_mid), None)
+        .versioned_get_as_of(0, 1, "c", &key(1), Some(t_mid), None)
         .unwrap()
         .expect("historical version");
     let rmpv_val = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
@@ -62,19 +71,19 @@ fn delete_appends_tombstone_but_prior_version_still_visible_as_of() {
     let engine = register(&sparse);
 
     engine
-        .put("c", "k", &serde_json::json!({"name": "Alice"}))
+        .put("c", &key(1), &serde_json::json!({"name": "Alice"}))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let t_before_delete = wall_ms();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    assert!(engine.delete("c", "k").unwrap());
+    assert!(engine.delete("c", &key(1)).unwrap());
 
     // Current-state read: None.
-    assert!(engine.get("c", "k").unwrap().is_none());
+    assert!(engine.get("c", &key(1)).unwrap().is_none());
 
     // Historical read at t_before_delete: still Alice.
     let body = sparse
-        .versioned_get_as_of(0, 1, "c", "k", Some(t_before_delete), None)
+        .versioned_get_as_of(0, 1, "c", &key(1), Some(t_before_delete), None)
         .unwrap()
         .expect("pre-delete version still reachable");
     let rmpv_val = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
@@ -87,14 +96,16 @@ fn ten_sequential_updates_produce_ten_reachable_versions() {
     let engine = register(&sparse);
     let mut cutoffs: Vec<(i64, i64)> = Vec::new(); // (cutoff_ms, expected_v)
     for i in 1..=10 {
-        engine.put("c", "k", &serde_json::json!({"v": i})).unwrap();
+        engine
+            .put("c", &key(1), &serde_json::json!({"v": i}))
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(3));
         cutoffs.push((wall_ms(), i));
         std::thread::sleep(std::time::Duration::from_millis(3));
     }
     for (cutoff, expected) in &cutoffs {
         let body = sparse
-            .versioned_get_as_of(0, 1, "c", "k", Some(*cutoff), None)
+            .versioned_get_as_of(0, 1, "c", &key(1), Some(*cutoff), None)
             .unwrap()
             .unwrap_or_else(|| panic!("missing version at cutoff {cutoff}"));
         let rmpv_val = rmpv::decode::read_value(&mut body.as_slice()).unwrap();
@@ -114,29 +125,29 @@ fn secondary_index_reflects_each_version_independently() {
     );
 
     engine
-        .put("c", "u1", &serde_json::json!({"email": "a@x.com"}))
+        .put("c", &key(1), &serde_json::json!({"email": "a@x.com"}))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let t_mid = wall_ms();
     std::thread::sleep(std::time::Duration::from_millis(5));
     engine
-        .put("c", "u1", &serde_json::json!({"email": "b@x.com"}))
+        .put("c", &key(1), &serde_json::json!({"email": "b@x.com"}))
         .unwrap();
 
     // Past: "a@x.com" → u1 at t_mid.
     let ids_a_mid = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "a@x.com", Some(t_mid))
         .unwrap();
-    assert_eq!(ids_a_mid, vec!["u1"]);
+    assert_eq!(ids_a_mid, vec![key(1)]);
 
     // Current: "b@x.com" → u1.
     let ids_b_now = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "b@x.com", None)
         .unwrap();
-    assert_eq!(ids_b_now, vec!["u1"]);
+    assert_eq!(ids_b_now, vec![key(1)]);
 
     // After delete → no current entry for b@x.com either.
-    engine.delete("c", "u1").unwrap();
+    engine.delete("c", &key(1)).unwrap();
     let ids_b_after = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "b@x.com", None)
         .unwrap();
@@ -145,18 +156,22 @@ fn secondary_index_reflects_each_version_independently() {
     let ids_a_still = sparse
         .versioned_index_lookup_as_of(0, 1, "c", "$.email", "a@x.com", Some(t_mid))
         .unwrap();
-    assert_eq!(ids_a_still, vec!["u1"]);
+    assert_eq!(ids_a_still, vec![key(1)]);
 }
 
 #[test]
 fn re_put_after_tombstone_is_a_live_resurrection() {
     let (sparse, _d) = open();
     let engine = register(&sparse);
-    engine.put("c", "k", &serde_json::json!({"v": 1})).unwrap();
-    engine.delete("c", "k").unwrap();
-    assert!(engine.get("c", "k").unwrap().is_none());
-    engine.put("c", "k", &serde_json::json!({"v": 2})).unwrap();
-    let now = engine.get("c", "k").unwrap().unwrap();
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 1}))
+        .unwrap();
+    engine.delete("c", &key(1)).unwrap();
+    assert!(engine.get("c", &key(1)).unwrap().is_none());
+    engine
+        .put("c", &key(1), &serde_json::json!({"v": 2}))
+        .unwrap();
+    let now = engine.get("c", &key(1)).unwrap().unwrap();
     assert_eq!(now["v"], 2);
 }
 

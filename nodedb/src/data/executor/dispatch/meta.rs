@@ -84,12 +84,14 @@ impl CoreLoop {
                 collection,
                 target_type,
                 schema_json,
+                source_storage_mode,
             } => self.execute_convert_collection(
                 task,
                 tid,
                 collection.as_str(),
                 target_type,
                 schema_json,
+                source_storage_mode,
             ),
 
             MetaOp::PurgeTenant { tenant_id } => self.execute_purge_tenant(task, *tenant_id),
@@ -384,6 +386,7 @@ mod txn_created_columnar_engine_tests {
 
     use nodedb_bridge::buffer::RingBuffer;
     use nodedb_physical::physical_plan::MetaOp;
+    use nodedb_types::StorageKey;
     use nodedb_types::Surrogate;
     use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
     use nodedb_types::value::Value;
@@ -766,7 +769,7 @@ mod txn_created_columnar_engine_tests {
             TenantId::new(TID),
             "refresh_a".to_string(),
         );
-        let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut rows: Vec<(StorageKey, Vec<u8>)> = Vec::new();
         core.merge_overlay_into_scan(txn_a, &coll_key, &mut rows, &|_, _| true);
 
         core.reap_expired_overlays();

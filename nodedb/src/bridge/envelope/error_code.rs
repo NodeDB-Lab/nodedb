@@ -57,6 +57,15 @@ pub enum ErrorCode {
     BalanceViolation { collection: String, detail: String },
     /// Period is closed/locked: writes rejected.
     PeriodLocked { collection: String },
+    /// A period-lock reference row exists but does not carry the
+    /// configured `status_column` — a misconfigured column name, refused
+    /// as a config error rather than admitted or treated as locked.
+    PeriodLockMisconfigured {
+        collection: String,
+        ref_table: String,
+        status_column: String,
+        row_identity: String,
+    },
     /// Retention period not expired: DELETE rejected.
     RetentionViolation { collection: String },
     /// Legal hold active: DELETE rejected.
@@ -168,6 +177,17 @@ impl From<crate::Error> for ErrorCode {
                 ),
             },
             crate::Error::PeriodLocked { collection, .. } => Self::PeriodLocked { collection },
+            crate::Error::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+                row_identity,
+            } => Self::PeriodLockMisconfigured {
+                collection,
+                ref_table,
+                status_column,
+                row_identity,
+            },
             crate::Error::RetentionViolation { collection, .. } => {
                 Self::RetentionViolation { collection }
             }

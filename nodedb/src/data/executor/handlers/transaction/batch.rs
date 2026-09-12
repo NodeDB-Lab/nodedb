@@ -430,7 +430,10 @@ impl CoreLoop {
     }
 
     /// Emit deferred trigger events for every write recorded in the
-    /// committed transaction's undo log.
+    /// committed transaction's undo log. `UndoEntry::{PutDocument,
+    /// DeleteDocument}.identity` is the row's client identity, the same one
+    /// an immediate trigger sees via `emit_put_event` /
+    /// `emit_document_delete_event`.
     fn emit_deferred_writes(&mut self, task: &ExecutionTask, undo_log: Vec<UndoEntry>) {
         use crate::data::executor::core_loop::deferred::DeferredWrite;
         let deferred_writes: Vec<DeferredWrite> = undo_log
@@ -438,7 +441,7 @@ impl CoreLoop {
             .filter_map(|entry| match entry {
                 UndoEntry::PutDocument {
                     collection,
-                    document_id,
+                    identity,
                     old_value,
                     ..
                 } => Some(DeferredWrite {
@@ -448,19 +451,19 @@ impl CoreLoop {
                     } else {
                         crate::event::WriteOp::Insert
                     },
-                    row_id: document_id,
+                    identity,
                     new_value: None,
                     old_value,
                 }),
                 UndoEntry::DeleteDocument {
                     collection,
-                    document_id,
+                    identity,
                     old_value,
                     ..
                 } => Some(DeferredWrite {
                     collection,
                     op: crate::event::WriteOp::Delete,
-                    row_id: document_id,
+                    identity,
                     new_value: None,
                     old_value: Some(old_value),
                 }),
@@ -499,7 +502,7 @@ mod tests {
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
     use crate::data::executor::handlers::point::insert::PointInsertParams;
-    use crate::engine::document::store::{CollectionConfig, surrogate_to_doc_id};
+    use crate::engine::document::store::CollectionConfig;
     use crate::types::{DatabaseId, TenantId};
     use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget};
     use nodedb_types::{QualifiedCollection, Surrogate};
@@ -527,6 +530,7 @@ mod tests {
             target_column: "balance".to_string(),
             join_column: "account_id".to_string(),
             value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+            declared_primary_key: None,
         }
     }
 
@@ -558,7 +562,7 @@ mod tests {
                 DB,
                 TID,
                 TARGET,
-                &surrogate_to_doc_id(T1),
+                &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
             )
             .expect("seed target row");
@@ -577,7 +581,12 @@ mod tests {
     fn balance(core: &CoreLoop, surrogate: Surrogate) -> String {
         let stored = core
             .sparse
-            .get(DB, TID, TARGET, &surrogate_to_doc_id(surrogate))
+            .get(
+                DB,
+                TID,
+                TARGET,
+                &nodedb_types::StorageKey::for_surrogate(surrogate),
+            )
             .expect("read target")
             .expect("target row must exist");
         doc_format::decode_document(&stored)

@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use nodedb_types::RowIdentity;
 use nodedb_types::sync::wire::SyncProvenance;
 use tracing::warn;
 
@@ -106,7 +107,7 @@ pub(super) fn parse_put_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Insert,
-            row_id: RowId::new(key_str.as_ref()),
+            row_id: RowId::row(RowIdentity::from_user_key(key_str.into_owned())),
             lsn,
             database_id,
             tenant_id,
@@ -131,7 +132,7 @@ pub(super) fn parse_put_record(
             op: WriteOp::BulkInsert {
                 count: entries.len() as u32,
             },
-            row_id: RowId::new("_batch"),
+            row_id: RowId::Batch,
             lsn,
             database_id,
             tenant_id,
@@ -148,8 +149,9 @@ pub(super) fn parse_put_record(
 
     // Try document put with surrogate (current arity):
     // (collection, document_id, value, provenance, surrogate_u32). The trailing
-    // surrogate is consumed by the Data Plane's vector-index replay; the event
-    // stream keys on `document_id`, so it is ignored here.
+    // surrogate is consumed by the Data Plane's vector-index replay. The event
+    // stream keys on `document_id`, which the writer journals as the row's
+    // `RowIdentity` text, so it is wrapped verbatim and never reinterpreted.
     if let Ok((collection, document_id, value, _prov, _surrogate)) =
         zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>, u32)>(payload)
     {
@@ -160,7 +162,7 @@ pub(super) fn parse_put_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Insert,
-            row_id: RowId::new(document_id.as_str()),
+            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             database_id,
             tenant_id,
@@ -186,7 +188,7 @@ pub(super) fn parse_put_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Insert,
-            row_id: RowId::new(document_id.as_str()),
+            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             database_id,
             tenant_id,
@@ -215,7 +217,7 @@ pub(super) fn parse_put_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Insert,
-            row_id: RowId::new(document_id.as_str()),
+            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             database_id,
             tenant_id,
@@ -247,9 +249,7 @@ pub(super) fn parse_put_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Insert,
-            row_id: RowId::new(
-                crate::event::graph_cdc::edge_row_id(&src_id, &label, &dst_id).as_str(),
-            ),
+            row_id: RowId::edge(src_id, label, dst_id),
             lsn,
             database_id,
             tenant_id,
@@ -314,7 +314,7 @@ pub(super) fn parse_graph_node_label_record(
         sequence: *sequence,
         collection: Arc::from(crate::event::graph_cdc::GRAPH_LABEL_STREAM),
         op,
-        row_id: RowId::new(node_id.as_str()),
+        row_id: RowId::row(RowIdentity::from_user_key(node_id)),
         lsn,
         database_id,
         tenant_id,
@@ -350,7 +350,7 @@ pub(super) fn parse_delete_record(
             op: WriteOp::BulkDelete {
                 count: keys.len() as u32,
             },
-            row_id: RowId::new("_batch"),
+            row_id: RowId::Batch,
             lsn,
             database_id,
             tenant_id,
@@ -376,7 +376,7 @@ pub(super) fn parse_delete_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Delete,
-            row_id: RowId::new(document_id.as_str()),
+            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             database_id,
             tenant_id,
@@ -400,7 +400,7 @@ pub(super) fn parse_delete_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Delete,
-            row_id: RowId::new(document_id.as_str()),
+            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             database_id,
             tenant_id,
@@ -422,7 +422,7 @@ pub(super) fn parse_delete_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Delete,
-            row_id: RowId::new(document_id.as_str()),
+            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
             database_id,
             tenant_id,
@@ -450,9 +450,7 @@ pub(super) fn parse_delete_record(
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
             op: WriteOp::Delete,
-            row_id: RowId::new(
-                crate::event::graph_cdc::edge_row_id(&src_id, &label, &dst_id).as_str(),
-            ),
+            row_id: RowId::edge(src_id, label, dst_id),
             lsn,
             database_id,
             tenant_id,

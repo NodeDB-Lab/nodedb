@@ -25,9 +25,9 @@
 //! we use the registry's snapshot API directly and verify each entry
 //! maps to the correct `MetaOp::TemporalPurge*` variant by tag.
 
-use nodedb_types::TenantId;
 use nodedb_types::config::BitemporalRetention;
 use nodedb_types::temporal::ms_to_ordinal_upper;
+use nodedb_types::{StorageKey, Surrogate, TenantId};
 use nodedb_wal::{TemporalPurgeEngine, TemporalPurgePayload};
 
 use nodedb::engine::bitemporal::{
@@ -37,6 +37,11 @@ use nodedb::engine::graph::edge_store::EdgeStore;
 use nodedb::engine::graph::edge_store::temporal::EdgeRef;
 use nodedb::engine::sparse::btree::SparseEngine;
 use nodedb::engine::sparse::btree_versioned::VersionedPut;
+
+/// Storage key for a small test surrogate.
+fn key(surrogate: u32) -> StorageKey {
+    StorageKey::for_surrogate(Surrogate::new(surrogate))
+}
 
 // ---------- EdgeStore ----------
 
@@ -88,7 +93,7 @@ fn document_strict_end_to_end_purge() {
             database_id: 0,
             tenant: 1,
             coll: "users",
-            doc_id: "u1",
+            doc_id: &key(1),
             body: b"payload",
             sys_from_ms: sys,
             valid_from_ms: 0,
@@ -108,7 +113,7 @@ fn document_strict_end_to_end_purge() {
         database_id: 0,
         tenant: 1,
         coll: "orphan",
-        doc_id: "o1",
+        doc_id: &key(2),
         body: b"payload",
         sys_from_ms: 400,
         valid_from_ms: 0,

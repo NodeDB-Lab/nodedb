@@ -146,6 +146,18 @@ async fn plan_authorize_and_admit_once(
         database_id,
     )?;
 
+    // Resolves each write's period-lock reference row into the same slot the
+    // materialized-sum resolution above just populated — see
+    // `period_lock::resolve_period_lock_targets`.
+    crate::control::planner::period_lock::resolve_period_lock_targets(
+        state,
+        &mut tasks,
+        tenant_id,
+        database_id,
+        trace_id,
+    )
+    .await?;
+
     // Deliberate gate: proves the final task set is authorizable before a
     // descriptor lease is acquired. The caller re-derives the capability per
     // task through the clone-check gate, immediately before each dispatch.

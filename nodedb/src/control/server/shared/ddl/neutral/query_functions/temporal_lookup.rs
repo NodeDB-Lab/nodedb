@@ -43,6 +43,7 @@ pub async fn temporal_lookup(
     // authorized, row-filtered, and redacted here — nothing downstream of the
     // hand-built plan does any of it.
     let gate = CollectionReadGate::open(state, identity, database_id, &table)?;
+    gate.require_document_engine(&table, "TEMPORAL_LOOKUP")?;
 
     // Scan the table.
     let vshard = VShardId::from_collection_in_database(database_id, &table);
@@ -80,7 +81,7 @@ pub async fn temporal_lookup(
     // The raw document-scan codec wraps each row as `{"id": .., "data": {..}}`;
     // unwrap it so matching and redaction operate on the stored fields, not
     // the wire wrapper.
-    let docs = unwrap_scan_docs(docs);
+    let docs = unwrap_scan_docs(docs)?;
 
     // Find the row with latest time_column <= as_of for the given key.
     let mut best_doc: Option<&serde_json::Map<String, serde_json::Value>> = None;

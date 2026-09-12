@@ -8,8 +8,8 @@
 //! (`surrogate_pk{,_rev}_v3`) is SHARDED to the collection's data-group
 //! members. `document_strict` collections are single-vShard-homed, so when the
 //! coordinator is NOT a member of that group, resolution misses → the
-//! coordinator ships `Surrogate::ZERO` to the owner → the owner does
-//! `surrogate_to_doc_id(ZERO)` → the row is NOT FOUND. So cross-node PK reads
+//! coordinator ships `Surrogate::ZERO` to the owner → the owner renders
+//! `StorageKey::for_surrogate(ZERO)` → the row is NOT FOUND. So cross-node PK reads
 //! from a non-member coordinator silently returned EMPTY.
 //!
 //! Scans are unaffected: they route + scan on the owner with no surrogate

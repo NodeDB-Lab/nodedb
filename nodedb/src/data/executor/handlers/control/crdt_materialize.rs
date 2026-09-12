@@ -29,14 +29,28 @@
 
 use tracing::warn;
 
-use nodedb_types::Surrogate;
+use nodedb_types::{RowIdentity, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::crdt::tenant_state::TenantCrdtEngine;
 use crate::engine::document::crdt_store::loro_value_to_json;
-use crate::engine::document::store::surrogate_to_doc_id;
+use crate::engine::document::store::StorageKey;
+
+/// One CRDT row write to materialize into the sparse store.
+pub(super) struct CrdtMaterializeWrite<'a> {
+    pub tid: u64,
+    pub collection: &'a str,
+    /// The Loro row id the client addresses the row by: its client identity.
+    pub document_id: &'a str,
+    pub surrogate: Surrogate,
+    pub value: &'a [u8],
+    /// Gates inverted BM25 text indexing: `false` on the CRDT sync path (a
+    /// separate `FtsIndex` frame delivers text), `true` for user SQL DML on a
+    /// `crdt='true'` collection.
+    pub index_text: bool,
+}
 
 impl CoreLoop {
     /// Read the merged Loro row back and encode it into the schemaless
@@ -72,7 +86,8 @@ impl CoreLoop {
     /// Routes through `apply_point_put` inside a single write transaction, then
     /// commits and emits the `WriteEvent`, mirroring `execute_point_put`. The
     /// storage key is the hex-encoded surrogate (identical to the native path),
-    /// NOT the CRDT `document_id` (the user-facing Loro row id); bitemporal
+    /// NOT the CRDT `document_id` (the user-facing Loro row id, which the
+    /// `WriteEvent` names the row by); bitemporal
     /// collections append a version per applied delta (handled inside
     /// `apply_point_put`), non-bitemporal collections overwrite by key
     /// (idempotent under replay). Inverted BM25 text indexing is skipped
@@ -85,28 +100,44 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u64,
         collection: &str,
+        document_id: &str,
         surrogate: Surrogate,
         value: &[u8],
     ) {
-        self.materialize_document_write(task, tid, collection, surrogate, value, false);
+        self.materialize_document_write(
+            task,
+            CrdtMaterializeWrite {
+                tid,
+                collection,
+                document_id,
+                surrogate,
+                value,
+                index_text: false,
+            },
+        );
     }
 
     /// Shared body of the sparse-store materialization. `index_text` gates
     /// inverted BM25 text indexing: `false` on the CRDT sync path (a separate
     /// `FtsIndex` frame delivers text), `true` for user SQL DML on a
     /// `crdt='true'` collection (no separate frame — the merged row is the
-    /// only source).
+    /// only source). `document_id` is the Loro row id the client addresses
+    /// the row by: the row's client identity.
     pub(super) fn materialize_document_write(
         &mut self,
         task: &ExecutionTask,
-        tid: u64,
-        collection: &str,
-        surrogate: Surrogate,
-        value: &[u8],
-        index_text: bool,
+        write: CrdtMaterializeWrite<'_>,
     ) {
+        let CrdtMaterializeWrite {
+            tid,
+            collection,
+            document_id,
+            surrogate,
+            value,
+            index_text,
+        } = write;
         let database_id = task.request.database_id.as_u64();
-        let storage_key = surrogate_to_doc_id(surrogate);
+        let storage_key = StorageKey::for_surrogate(surrogate);
 
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
@@ -122,13 +153,14 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection,
-                document_id: storage_key.as_str(),
+                storage_key,
                 surrogate,
                 value,
                 index_text,
                 user_roles: &task.request.user_roles,
                 enforce: false,
                 wal_lsn: task.wal_lsn(),
+                resolved_targets: &[],
             },
         ) {
             Ok(p) => p,
@@ -158,7 +190,7 @@ impl CoreLoop {
             task,
             tid,
             collection,
-            storage_key.as_str(),
+            RowIdentity::from_user_key(document_id),
             value,
             prior.prior_value.as_deref(),
         );

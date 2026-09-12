@@ -5,12 +5,11 @@
 //! change stream plus the cluster-wide NOTIFY fan-out.
 
 use crate::bridge::envelope::{PhysicalPlan, Response};
-use crate::control::change_stream::ChangeOperation;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::ClusterArrayOp;
 
-use super::extract::{cluster_array_change_meta, extract_write_metadata};
+use super::extract::{WriteChangeMeta, cluster_array_change_meta, extract_write_metadata};
 
 /// Current wall-clock time as milliseconds since Unix epoch.
 ///
@@ -58,10 +57,10 @@ fn publish_change_event(
     shared: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
-    change_meta: (String, String, ChangeOperation),
+    change_meta: WriteChangeMeta,
     lsn: nodedb_types::Lsn,
 ) {
-    let (collection, doc_id, op) = change_meta;
+    let (collection, document_id, op) = change_meta;
     if !is_timeseries_cdc_enabled(shared, database_id, tenant_id, &collection) {
         return;
     }
@@ -71,7 +70,7 @@ fn publish_change_event(
         lsn,
         tenant_id,
         collection,
-        document_id: doc_id,
+        document_id,
         operation: op,
         timestamp_ms: current_timestamp_ms(),
         after: None,
@@ -104,7 +103,7 @@ fn publish_change_event(
 /// uses [`publish_origin_change_events`] and never names this type.
 pub(crate) struct WriteChangeSet {
     /// One tuple per logical row change — see `extract_write_metadata`.
-    metas: Vec<(String, String, ChangeOperation)>,
+    metas: Vec<WriteChangeMeta>,
 }
 
 /// Derive a plan's change events. Pure: it matches over the plan and clones out

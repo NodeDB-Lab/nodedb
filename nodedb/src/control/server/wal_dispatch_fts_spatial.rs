@@ -22,8 +22,8 @@ use crate::wal::manager::WalManager;
 /// This is the ONE builder for the shape: both the sync `dispatch_insert`
 /// autocommit WAL append and the transaction-resolve serializer call it so
 /// producer and `replay_spatial_wal` never drift. `doc_id` is derived from
-/// `surrogate` via `surrogate_to_doc_id`, matching the hex-encoded key both
-/// the R-tree entry and the sparse document body are keyed by.
+/// `surrogate` via `StorageKey::for_surrogate`, matching the hex-encoded key
+/// both the R-tree entry and the sparse document body are keyed by.
 pub(crate) fn encode_spatial_put_payload(
     collection: &str,
     field: &str,
@@ -31,7 +31,7 @@ pub(crate) fn encode_spatial_put_payload(
     geometry: &Geometry,
     provenance: &SyncProvenance,
 ) -> crate::Result<nodedb_wal::record::SpatialPutPayload> {
-    let doc_id = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+    let doc_id = crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_string();
     let geometry_bytes =
         zerompk::to_msgpack_vec(geometry).map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
@@ -54,7 +54,7 @@ pub(crate) fn encode_spatial_delete_payload(
     surrogate: Surrogate,
     provenance: &SyncProvenance,
 ) -> nodedb_wal::record::SpatialDeletePayload {
-    let doc_id = crate::engine::document::store::surrogate_to_doc_id(surrogate);
+    let doc_id = crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_string();
     nodedb_wal::record::SpatialDeletePayload::new(provenance.clone(), collection, field, doc_id)
 }
 

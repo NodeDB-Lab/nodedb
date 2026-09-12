@@ -241,7 +241,8 @@ mod tests {
         assert_eq!(decoded.text, "hello world");
         assert_eq!(
             decoded.doc_id,
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate::new(7))
+            crate::engine::document::store::StorageKey::for_surrogate(Surrogate::new(7))
+                .to_string()
         );
     }
 
@@ -274,7 +275,8 @@ mod tests {
         assert_eq!(decoded.collection, "docs");
         assert_eq!(
             decoded.doc_id,
-            crate::engine::document::store::surrogate_to_doc_id(Surrogate::new(7))
+            crate::engine::document::store::StorageKey::for_surrogate(Surrogate::new(7))
+                .to_string()
         );
     }
 

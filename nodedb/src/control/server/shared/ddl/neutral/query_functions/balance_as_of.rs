@@ -47,6 +47,7 @@ pub async fn balance_as_of(
     // redaction rule on that column has no honest answer — masking it would
     // report a number no row holds.
     let gate = CollectionReadGate::open(state, identity, database_id, &collection)?;
+    gate.require_document_engine(&collection, "BALANCE_AS_OF")?;
     gate.refuse_if_field_redacted(&collection, &column, "the as-of balance")?;
 
     // Read current balance from the target document.
@@ -109,6 +110,7 @@ pub async fn balance_as_of(
     // `value_expr` can name any of its columns, so a redaction rule anywhere on
     // it is refused rather than silently summed over hidden values.
     gate.authorize(&mat_def.source_collection)?;
+    gate.require_document_engine(&mat_def.source_collection, "BALANCE_AS_OF")?;
     gate.refuse_if_any_redaction(&mat_def.source_collection, "the as-of balance")?;
 
     // Scan the source collection for rows where join_column = key AND created_at > as_of.
@@ -151,7 +153,7 @@ pub async fn balance_as_of(
         .map_err(|e| err("22P02", &format!("invalid JSON in source scan: {e}")))?;
     // Unwrap the `{"id", "data"}` scan envelope so matching and `value_expr`
     // evaluation read the stored fields, not the wire wrapper.
-    let source_docs = unwrap_scan_docs(source_docs);
+    let source_docs = unwrap_scan_docs(source_docs)?;
 
     // Sum value_expr for source rows where join_column = key AND created_at > as_of.
     let mut recent_sum = rust_decimal::Decimal::ZERO;

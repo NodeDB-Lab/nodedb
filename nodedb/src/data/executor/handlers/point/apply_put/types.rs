@@ -7,13 +7,15 @@ use nodedb_types::Surrogate;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::spatial_key::SpatialIndexKey;
+use crate::engine::document::store::StorageKey;
+use nodedb_physical::physical_plan::ResolvedSumTarget;
 
 /// Parameters for [`CoreLoop::apply_point_put`](crate::data::executor::core_loop::CoreLoop::apply_point_put).
 pub(in crate::data::executor) struct PointPutParams<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub document_id: &'a str,
+    pub storage_key: StorageKey,
     pub surrogate: Surrogate,
     pub value: &'a [u8],
     /// Whether to index the document's text into the inverted BM25 index.
@@ -43,6 +45,11 @@ pub(in crate::data::executor) struct PointPutParams<'a> {
     /// record the vector checkpoint already absorbed. On the replay paths this
     /// carries the record's own LSN.
     pub wal_lsn: Option<crate::types::Lsn>,
+    /// `(target collection, join-key value)` → target row surrogate, resolved
+    /// on the Control Plane at plan time — read by period-lock enforcement to
+    /// find its reference row. Empty for a caller whose statement type
+    /// resolves nothing, or for `enforce: false` callers, which never read it.
+    pub resolved_targets: &'a [ResolvedSumTarget],
 }
 
 /// Capture of the mutations an [`CoreLoop::apply_point_put`](crate::data::executor::core_loop::CoreLoop::apply_point_put)
@@ -107,6 +114,17 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         ErrorCode::PeriodLocked { collection } => crate::Error::PeriodLocked {
             collection,
             detail: "period is closed or locked".to_string(),
+        },
+        ErrorCode::PeriodLockMisconfigured {
+            collection,
+            ref_table,
+            status_column,
+            row_identity,
+        } => crate::Error::PeriodLockMisconfigured {
+            collection,
+            ref_table,
+            status_column,
+            row_identity,
         },
         ErrorCode::StateTransitionViolation { collection, detail } => {
             crate::Error::StateTransitionViolation { collection, detail }
