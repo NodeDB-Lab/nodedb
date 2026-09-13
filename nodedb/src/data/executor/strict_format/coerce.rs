@@ -166,7 +166,7 @@ pub fn coerce_value(val: &Value, col_type: &ColumnType, col_name: &str) -> crate
         ColumnType::Vector(dim) => match val {
             Value::Bytes(b) if b.len() == *dim as usize * 4 => Ok(val.clone()),
             Value::Array(arr) => {
-                let floats = extract_vector_floats(arr);
+                let floats = extract_vector_floats(col_name, arr)?;
                 validate_and_encode_vector(col_name, *dim, &floats)
             }
             Value::String(s) => {
@@ -229,15 +229,56 @@ pub fn coerce_value(val: &Value, col_type: &ColumnType, col_name: &str) -> crate
     }
 }
 
-/// Extract f32 floats from a `Value::Array`.
-fn extract_vector_floats(arr: &[Value]) -> Vec<f32> {
-    arr.iter()
-        .filter_map(|v| match v {
-            Value::Float(f) => Some(*f as f32),
-            Value::Integer(n) => Some(*n as f32),
-            _ => None,
-        })
-        .collect()
+/// Extract `f32` floats from a `Value::Array` for a VECTOR column.
+///
+/// Accepts the element shapes the planner actually produces for an
+/// `ARRAY[...]` literal — `Float`, `Integer`, `Decimal` (a folded numeric
+/// literal arrives as `Decimal`), and numeric `String` — matching the
+/// schemaless point-put path (`vector_string::floats_from_value`), so one
+/// literal behaves the same on every engine.
+///
+/// A non-numeric element is rejected by index and type. A `filter_map` here
+/// used to drop it silently, which reported the literal as having fewer
+/// elements than the user wrote and surfaced the mismatch as an internal
+/// error.
+fn extract_vector_floats(col_name: &str, arr: &[Value]) -> crate::Result<Vec<f32>> {
+    let mut floats = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let f = match v {
+            Value::Float(f) => *f as f32,
+            Value::Integer(n) => *n as f32,
+            Value::Decimal(d) => {
+                use rust_decimal::prelude::ToPrimitive;
+                d.to_f32().ok_or_else(|| crate::Error::BadRequest {
+                    detail: format!(
+                        "column '{col_name}': VECTOR element {i}: cannot represent DECIMAL {d} as FLOAT"
+                    ),
+                })?
+            }
+            Value::String(s) => s.parse::<f32>().map_err(|_| crate::Error::BadRequest {
+                detail: format!(
+                    "column '{col_name}': VECTOR element {i}: expected a numeric element, got String({s:?})"
+                ),
+            })?,
+            other => {
+                return Err(crate::Error::BadRequest {
+                    detail: format!(
+                        "column '{col_name}': VECTOR element {i}: expected a numeric element, got {}",
+                        other.type_name()
+                    ),
+                });
+            }
+        };
+        if !f.is_finite() {
+            return Err(crate::Error::BadRequest {
+                detail: format!(
+                    "column '{col_name}': VECTOR element {i}: expected a finite element, got {f}"
+                ),
+            });
+        }
+        floats.push(f);
+    }
+    Ok(floats)
 }
 
 /// Validate dimension count and encode as little-endian bytes.
@@ -414,5 +455,52 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("\"extra\"") && msg.contains("does not exist"));
+    }
+
+    #[test]
+    fn vector_accepts_decimal_and_numeric_string_elements() {
+        // `ARRAY[0.1, 0.2, 0.3]` folds its numeric literals to `Decimal`
+        // elements; numeric strings are accepted like the schemaless path.
+        let arr = vec![
+            Value::Decimal(rust_decimal::Decimal::new(1, 1)),
+            Value::String("0.2".into()),
+            Value::Integer(3),
+        ];
+        let floats = extract_vector_floats("embedding", &arr).unwrap();
+        assert_eq!(floats.len(), 3);
+        assert!((floats[0] - 0.1).abs() < 1e-6, "{floats:?}");
+        assert!((floats[1] - 0.2).abs() < 1e-6, "{floats:?}");
+        assert!((floats[2] - 3.0).abs() < 1e-6, "{floats:?}");
+    }
+
+    #[test]
+    fn vector_element_error_names_index_and_type() {
+        let arr = vec![Value::Float(0.1), Value::String("x".into())];
+        let err = extract_vector_floats("embedding", &arr)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("VECTOR element 1"), "{err}");
+        assert!(err.contains("String"), "{err}");
+    }
+
+    #[test]
+    fn vector_rejects_non_finite_elements() {
+        let arr = vec![Value::Float(f64::NAN)];
+        assert!(extract_vector_floats("embedding", &arr).is_err());
+    }
+
+    #[test]
+    fn vector_encodes_three_decimals_at_full_width() {
+        let arr = vec![
+            Value::Decimal(rust_decimal::Decimal::new(1, 1)),
+            Value::Decimal(rust_decimal::Decimal::new(2, 1)),
+            Value::Decimal(rust_decimal::Decimal::new(3, 1)),
+        ];
+        let floats = extract_vector_floats("embedding", &arr).unwrap();
+        let encoded = validate_and_encode_vector("embedding", 3, &floats).unwrap();
+        match encoded {
+            Value::Bytes(b) => assert_eq!(b.len(), 12),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
     }
 }
