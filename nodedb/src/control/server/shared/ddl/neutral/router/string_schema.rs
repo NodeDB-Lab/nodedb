@@ -138,22 +138,37 @@ pub(super) async fn try_string(
     // before the parse gate). Replicate that exactly here, before the parse
     // gate, so the prefix recognition and syntax messages stay byte-identical.
     if upper.starts_with("CREATE TYPEGUARD ") || upper.starts_with("CREATE OR REPLACE TYPEGUARD ") {
-        return Some(typeguard::create_typeguard(state, identity, sql));
+        return Some(typeguard::create_typeguard(
+            state,
+            identity,
+            database_id,
+            sql,
+        ));
     }
     if upper.starts_with("ALTER TYPEGUARD ") {
-        return Some(typeguard::alter_typeguard(state, identity, sql));
+        return Some(typeguard::alter_typeguard(
+            state,
+            identity,
+            database_id,
+            sql,
+        ));
     }
     if upper.starts_with("DROP TYPEGUARD ") {
-        return Some(typeguard::drop_typeguard(state, identity, sql));
+        return Some(typeguard::drop_typeguard(state, identity, database_id, sql));
     }
     if upper.starts_with("VALIDATE TYPEGUARD ON ") {
-        return Some(typeguard::validate_typeguard(state, identity, sql).await);
+        return Some(typeguard::validate_typeguard(state, identity, database_id, sql).await);
     }
     if upper.starts_with("SHOW TYPEGUARD ON ") {
-        return Some(typeguard::show_typeguard(state, identity, sql));
+        return Some(typeguard::show_typeguard(state, identity, database_id, sql));
     }
     if upper == "SHOW TYPEGUARDS" || upper.starts_with("SHOW TYPEGUARDS") {
-        return Some(typeguard::show_typeguards(state, identity, sql));
+        return Some(typeguard::show_typeguards(
+            state,
+            identity,
+            database_id,
+            sql,
+        ));
     }
 
     None
