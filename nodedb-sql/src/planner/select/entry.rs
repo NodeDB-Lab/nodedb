@@ -173,6 +173,7 @@ pub fn plan_query(
                     SqlPlan::Subquery {
                         filters,
                         projection,
+                        window_functions,
                         sort_keys,
                         offset,
                         distinct,
@@ -182,6 +183,7 @@ pub fn plan_query(
                         input: Box::new(upgraded_leaf),
                         filters,
                         projection,
+                        window_functions,
                         sort_keys,
                         offset,
                         distinct,

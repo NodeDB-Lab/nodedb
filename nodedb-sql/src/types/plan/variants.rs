@@ -525,6 +525,9 @@ pub enum SqlPlan {
         filters: Vec<Filter>,
         /// Outer projection (target list). Empty = inherit the body's columns.
         projection: Vec<Projection>,
+        /// Window functions evaluated over the materialized rows. Empty =
+        /// none.
+        window_functions: Vec<crate::types::WindowSpec>,
         /// Outer `ORDER BY` keys applied over the materialized rows.
         sort_keys: Vec<SortKey>,
         /// Outer `OFFSET` (0 = none).

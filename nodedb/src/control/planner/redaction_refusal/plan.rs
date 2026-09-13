@@ -461,6 +461,8 @@ mod tests {
             input: Box::new(aggregate_plan("users", vec![agg_spec("min", "ssn")])),
             filters: Vec::new(),
             projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,
