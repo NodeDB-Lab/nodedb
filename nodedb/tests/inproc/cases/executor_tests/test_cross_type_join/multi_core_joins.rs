@@ -80,6 +80,8 @@ fn multi_core_broadcast_inner_join() {
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
         }),
     );
 
@@ -234,6 +236,8 @@ fn multi_core_broadcast_left_join() {
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
         }),
     );
 
@@ -401,6 +405,8 @@ fn multi_core_broadcast_merge_simulation() {
         sort_keys: Vec::new(),
         match_pattern: None,
         surrogate_ceiling: None,
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
     });
     let payload0 = send_ok(
         &mut core0.core,

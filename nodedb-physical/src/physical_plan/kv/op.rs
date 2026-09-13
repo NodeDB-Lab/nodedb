@@ -152,6 +152,14 @@ pub enum KvOp {
         /// See `Get::surrogate_ceiling`; drops entries above the ceiling.
         #[serde(default)]
         surrogate_ceiling: Option<u32>,
+        /// Output column names (same format as DocumentOp::Scan). Empty =
+        /// return the whole row document.
+        #[serde(default)]
+        projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` applied per row after the scan
+        /// (same format as DocumentOp::Scan). Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
     },
 
     /// Set or update TTL on an existing key.

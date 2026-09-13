@@ -1186,6 +1186,8 @@ mod tests {
                 match_pattern: None,
                 sort_keys: Vec::new(),
                 surrogate_ceiling: None,
+                projection: Vec::new(),
+                computed_columns: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::Expire {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

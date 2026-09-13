@@ -234,6 +234,8 @@ fn kv_scan_returns_entries() {
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
         }),
     );
 
@@ -283,6 +285,8 @@ fn kv_scan_with_match_pattern() {
             match_pattern: Some("user:*".into()),
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
         }),
     );
 

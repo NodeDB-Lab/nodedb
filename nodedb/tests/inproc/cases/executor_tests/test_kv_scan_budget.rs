@@ -48,6 +48,8 @@ fn kv_scan(collection: &str, count: usize) -> PhysicalPlan {
         match_pattern: None,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
     })
 }
 

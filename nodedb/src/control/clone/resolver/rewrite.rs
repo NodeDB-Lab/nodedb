@@ -117,6 +117,7 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
             input,
             filters,
             projection,
+            computed_columns,
             sort_keys,
             limit,
             offset,
@@ -139,6 +140,7 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
                         input: child,
                         filters: filters.clone(),
                         projection: projection.clone(),
+                        computed_columns: computed_columns.clone(),
                         sort_keys: sort_keys.clone(),
                         limit: *limit,
                         offset: *offset,
@@ -249,6 +251,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
             // (clones-of-clones still funnel through here per-level);
             // the resolver overrides it for source delegation below.
             surrogate_ceiling: _,
+            projection,
+            computed_columns,
         }) if collection == &target_qualified => {
             Ok(SourceRewrite::task(PhysicalPlan::Kv(KvOp::Scan {
                 collection: source_qualified,
@@ -258,6 +262,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
                 match_pattern: match_pattern.clone(),
                 sort_keys: sort_keys.clone(),
                 surrogate_ceiling: kv_surrogate_ceiling,
+                projection: projection.clone(),
+                computed_columns: computed_columns.clone(),
             })))
         }
 
@@ -626,6 +632,7 @@ mod tests {
                 input: Box::new(gather(plan)),
                 filters: Vec::new(),
                 projection: Vec::new(),
+                computed_columns: Vec::new(),
                 sort_keys: Vec::new(),
                 limit: None,
                 offset: 0,

@@ -611,6 +611,8 @@ fn kv_index_write_amp_ratio_matches() {
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
         }),
     );
     let json: serde_json::Value = payload_value(&payload);

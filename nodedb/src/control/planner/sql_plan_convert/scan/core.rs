@@ -58,6 +58,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 rows: Vec::new(),
                 filters: filter_bytes,
                 projection: proj_names,
+                computed_columns: Vec::new(),
+                window_functions: Vec::new(),
                 sort_keys: sort,
                 limit: *limit,
                 offset: *offset,
@@ -134,6 +136,11 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             // Original SQL planner output never carries a clone ceiling;
             // the clone resolver overrides it when delegating to source.
             surrogate_ceiling: None,
+            // KV scan parity with doc/columnar/timeseries: carry the SELECT
+            // output columns so expression projections are evaluated in the
+            // Data Plane instead of surfacing as NULL at response shaping.
+            projection: proj_names,
+            computed_columns: computed_bytes,
         }),
         EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
             PhysicalPlan::Document(DocumentOp::Scan {
