@@ -87,7 +87,7 @@ pub fn compute_output_order(
         if crate::aggregate_walk::contains_aggregate(expr, functions) {
             let alias = match item {
                 ast::SelectItem::ExprWithAlias { alias, .. } => normalize_ident(alias),
-                _ => format!("{expr}").to_lowercase(),
+                _ => crate::planner::ast_helpers::unaliased_projection_alias(expr),
             };
             let produced =
                 crate::aggregate_walk::extract_aggregates(expr, &alias, functions, scope)?.len();

@@ -36,7 +36,10 @@ pub fn extract_window_functions(
     let mut specs = Vec::new();
     for item in &select.projection {
         let (expr, alias) = match item {
-            ast::SelectItem::UnnamedExpr(e) => (e, format!("{e}")),
+            ast::SelectItem::UnnamedExpr(e) => (
+                e,
+                crate::planner::ast_helpers::unaliased_projection_alias(e),
+            ),
             ast::SelectItem::ExprWithAlias { expr, alias } => (expr, normalize_ident(alias)),
             _ => continue,
         };
