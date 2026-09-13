@@ -89,6 +89,14 @@ pub(in super::super::super) fn convert_insert(
     let mut balanced_documents: Vec<(String, Vec<u8>)> = Vec::new();
     let mut balanced_surrogates: Vec<Surrogate> = Vec::new();
 
+    // Rows of a plain multi-row INSERT, accumulated across the loop and
+    // emitted as ONE `BatchInsert` page. One statement answers one
+    // CommandComplete with the row count, and its rows commit or fail
+    // together. `ON CONFLICT DO NOTHING` and CRDT rows stay per-row: their
+    // outcome is decided per row and a page cannot express the skip.
+    let mut batch_documents: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut batch_surrogates: Vec<Surrogate> = Vec::new();
+
     // Every engine's rows expand their DEFAULTs here, ahead of identity
     // derivation. A DEFAULT materialized after the primary-key NOT NULL gate
     // refuses a key the declaration supplies.
@@ -124,44 +132,105 @@ pub(in super::super::super) fn convert_insert(
                     balanced_surrogates.push(surrogate);
                     continue;
                 }
-                let plan = if is_crdt {
-                    PhysicalPlan::Crdt(CrdtOp::DocUpsert {
-                        collection: qualified_collection.clone(),
-                        document_id: doc_id,
-                        fields_json: super::super::crdt_gate::row_to_fields_json(row)?,
-                        surrogate,
-                        partial: false,
-                        returning: None,
-                        rls_filters: Vec::new(),
-                    })
-                } else {
-                    PhysicalPlan::Document(DocumentOp::PointInsert {
-                        collection: qualified_collection.clone(),
-                        document_id: doc_id,
-                        value: value_bytes,
-                        if_absent,
-                        surrogate,
-                        // Both filled in after conversion: the RETURNING spec
-                        // by the protocol layer's injection pass, the read
-                        // filter by the RLS injection pass.
-                        returning: None,
-                        rls_filters: Vec::new(),
-                        // Filled by the materialized-sum resolution pass,
-                        // which runs after conversion (it needs the catalog
-                        // and, in cluster mode, a routed lookup).
-                        resolved_sum_targets: Vec::new(),
-                        deferred_sum_targets: Vec::new(),
-                    })
-                };
+                if is_crdt {
+                    tasks.push(PhysicalTask {
+                        tenant_id,
+                        vshard_id: vshard,
+                        database_id: ctx.database_id,
+                        plan: PhysicalPlan::Crdt(CrdtOp::DocUpsert {
+                            collection: qualified_collection.clone(),
+                            document_id: doc_id,
+                            fields_json: super::super::crdt_gate::row_to_fields_json(row)?,
+                            surrogate,
+                            partial: false,
+                            returning: None,
+                            rls_filters: Vec::new(),
+                        }),
+                        post_set_op: PostSetOp::None,
+                        txn_id: None,
+                    });
+                    continue;
+                }
+                if if_absent {
+                    // `ON CONFLICT DO NOTHING` decides per row which rows
+                    // already exist, so the rows cannot share one page.
+                    tasks.push(PhysicalTask {
+                        tenant_id,
+                        vshard_id: vshard,
+                        database_id: ctx.database_id,
+                        plan: PhysicalPlan::Document(DocumentOp::PointInsert {
+                            collection: qualified_collection.clone(),
+                            document_id: doc_id,
+                            value: value_bytes,
+                            if_absent,
+                            surrogate,
+                            // Both filled in after conversion: the RETURNING
+                            // spec by the protocol layer's injection pass, the
+                            // read filter by the RLS injection pass.
+                            returning: None,
+                            rls_filters: Vec::new(),
+                            // Filled by the materialized-sum resolution pass,
+                            // which runs after conversion.
+                            resolved_sum_targets: Vec::new(),
+                            deferred_sum_targets: Vec::new(),
+                        }),
+                        post_set_op: PostSetOp::None,
+                        txn_id: None,
+                    });
+                    continue;
+                }
+                batch_documents.push((doc_id, value_bytes));
+                batch_surrogates.push(surrogate);
+            }
+        }
+    }
+
+    // Emit the statement's plain rows: one `BatchInsert` page when there is
+    // more than one, so the driver sees a single `INSERT 0 n` tag and the
+    // rows share one atomic write; a lone row keeps its `PointInsert` task.
+    match batch_documents.len() {
+        0 => {}
+        1 => {
+            if let Some(((document_id, value), surrogate)) =
+                batch_documents.pop().zip(batch_surrogates.pop())
+            {
                 tasks.push(PhysicalTask {
                     tenant_id,
                     vshard_id: vshard,
                     database_id: ctx.database_id,
-                    plan,
+                    plan: PhysicalPlan::Document(DocumentOp::PointInsert {
+                        collection: qualified_collection.clone(),
+                        document_id,
+                        value,
+                        if_absent: false,
+                        surrogate,
+                        returning: None,
+                        rls_filters: Vec::new(),
+                        resolved_sum_targets: Vec::new(),
+                        deferred_sum_targets: Vec::new(),
+                    }),
                     post_set_op: PostSetOp::None,
                     txn_id: None,
                 });
             }
+        }
+        _ => {
+            tasks.push(PhysicalTask {
+                tenant_id,
+                vshard_id: vshard,
+                database_id: ctx.database_id,
+                plan: PhysicalPlan::Document(DocumentOp::BatchInsert {
+                    collection: qualified_collection.clone(),
+                    documents: batch_documents,
+                    surrogates: batch_surrogates,
+                    returning: None,
+                    rls_filters: Vec::new(),
+                    resolved_sum_targets: Vec::new(),
+                    deferred_sum_targets: Vec::new(),
+                }),
+                post_set_op: PostSetOp::None,
+                txn_id: None,
+            });
         }
     }
 
