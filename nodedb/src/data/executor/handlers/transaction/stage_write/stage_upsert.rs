@@ -175,7 +175,7 @@ impl CoreLoop {
                 strict_format::value_to_binary_tuple(&merged, schema, ctx.collection)
             };
             result.map_err(|e| match e {
-                crate::Error::UnknownStrictField { .. } => e,
+                crate::Error::UnknownStrictField { .. } | crate::Error::BadRequest { .. } => e,
                 other => crate::Error::Serialization {
                     format: "binary_tuple".into(),
                     detail: other.to_string(),
