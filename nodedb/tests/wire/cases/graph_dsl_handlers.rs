@@ -448,3 +448,42 @@ async fn graph_traverse_node_id_containing_keyword_substring() {
         "traversal must reach 'b'; substring 'DEPTH' in src id must not be parsed as DEPTH keyword; got: {blob}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_traverse_rejects_a_mistyped_clause_keyword() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION mistyped").await.unwrap();
+    server
+        .exec("GRAPH INSERT EDGE IN 'mistyped' FROM '1' TO '2' TYPE 'l'")
+        .await
+        .unwrap();
+
+    // `DEPTS` is not a clause. Seeking for DEPTH, finding none, and defaulting
+    // the depth left `DEPTS 3` unread: the statement answered a different
+    // question than it asked, and reported success.
+    server
+        .expect_error(
+            "GRAPH TRAVERSE IN 'mistyped' FROM '1' DEPTS 3 LABEL 'l'",
+            "42601",
+        )
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_path_rejects_a_stray_literal() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION strays").await.unwrap();
+    server
+        .exec("GRAPH INSERT EDGE IN 'strays' FROM 'a' TO 'b' TYPE 'l'")
+        .await
+        .unwrap();
+
+    // The trailing literal belongs to no clause. Ignoring it accepted a
+    // statement whose text does not mean what it parses to.
+    server
+        .expect_error(
+            "GRAPH PATH IN 'strays' FROM 'a' TO 'b' 'stray'",
+            "42601",
+        )
+        .await;
+}

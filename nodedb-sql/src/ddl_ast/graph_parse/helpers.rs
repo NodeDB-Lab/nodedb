@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    super::statement::{GraphDirection, GraphProperties},
-    tokenizer::Tok,
-};
+use super::tokenizer::Tok;
 use crate::error::SqlError;
 
 pub(super) fn find_keyword(toks: &[Tok<'_>], keyword: &str) -> Option<usize> {
@@ -20,31 +17,10 @@ pub(super) fn quoted_after(toks: &[Tok<'_>], keyword: &str) -> Option<String> {
     }
 }
 
-pub(super) fn quoted_list_after(toks: &[Tok<'_>], keyword: &str) -> Vec<String> {
-    let Some(pos) = find_keyword(toks, keyword) else {
-        return Vec::new();
-    };
-    toks[pos + 1..]
-        .iter()
-        .map_while(|t| match t {
-            Tok::Quoted(s) => Some(s.clone().into_owned()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Extract a brace-balanced object literal (`{…}`, braces included) that
 /// immediately follows `keyword`. Used for `PERSONALIZATION {…}` in
 /// `GRAPH ALGO`. Returns `None` when the keyword is absent or is not followed
 /// by an object token.
-pub(super) fn object_after(toks: &[Tok<'_>], keyword: &str) -> Option<String> {
-    let pos = find_keyword(toks, keyword)?;
-    match toks.get(pos + 1)? {
-        Tok::Object(s) => Some((*s).to_string()),
-        _ => None,
-    }
-}
-
 pub(super) fn word_after(toks: &[Tok<'_>], keyword: &str) -> Option<String> {
     let pos = find_keyword(toks, keyword)?;
     if let Tok::Word(w) = toks.get(pos + 1)? {
@@ -55,10 +31,6 @@ pub(super) fn word_after(toks: &[Tok<'_>], keyword: &str) -> Option<String> {
 }
 
 pub(super) fn usize_after(toks: &[Tok<'_>], keyword: &str) -> Option<usize> {
-    word_after(toks, keyword)?.parse().ok()
-}
-
-pub(super) fn float_after(toks: &[Tok<'_>], keyword: &str) -> Option<f64> {
     word_after(toks, keyword)?.parse().ok()
 }
 
@@ -102,56 +74,10 @@ pub(super) fn float_triple_after(toks: &[Tok<'_>], keyword: &str) -> Option<(f64
     Some((k1, k2, k3))
 }
 
-/// Read a `DIRECTION` clause.
-///
-/// An omitted clause defaults to `out`. A value outside the vocabulary is
-/// refused by name — defaulting it would answer a question the caller did
-/// not ask, and `DIRECTION INBOUND` is indistinguishable from `DIRECTION
-/// BANANA` once both have become `out`.
-pub(super) fn direction_after(toks: &[Tok<'_>]) -> Result<GraphDirection, SqlError> {
-    let Some(word) = word_after(toks, "DIRECTION") else {
-        return Ok(GraphDirection::Out);
-    };
-    match word.to_ascii_uppercase().as_str() {
-        "IN" => Ok(GraphDirection::In),
-        "OUT" => Ok(GraphDirection::Out),
-        "BOTH" => Ok(GraphDirection::Both),
-        _ => Err(SqlError::Parse {
-            detail: format!("DIRECTION must be one of in, out, both — found '{word}'"),
-        }),
-    }
-}
-
-/// Read an optional numeric clause, refusing a value that is present but
-/// not a number. `Ok(None)` means the clause was omitted, so the caller
-/// applies its own default; it never means "the value was unreadable".
-pub(super) fn usize_after_checked(
-    toks: &[Tok<'_>],
-    keyword: &str,
-) -> Result<Option<usize>, SqlError> {
-    let Some(word) = word_after(toks, keyword) else {
-        return Ok(None);
-    };
-    word.parse().map(Some).map_err(|_| SqlError::Parse {
-        detail: format!("{keyword} must be a non-negative integer — found '{word}'"),
-    })
-}
-
 /// A required clause was absent.
 pub(super) fn missing_clause(statement: &str, clause: &str) -> SqlError {
     SqlError::Parse {
         detail: format!("{statement} requires {clause}"),
-    }
-}
-
-pub(super) fn extract_properties(toks: &[Tok<'_>]) -> GraphProperties {
-    let Some(pos) = find_keyword(toks, "PROPERTIES") else {
-        return GraphProperties::None;
-    };
-    match toks.get(pos + 1) {
-        Some(Tok::Object(obj_str)) => GraphProperties::Object((*obj_str).to_string()),
-        Some(Tok::Quoted(s)) => GraphProperties::Quoted(s.clone().into_owned()),
-        _ => GraphProperties::None,
     }
 }
 
