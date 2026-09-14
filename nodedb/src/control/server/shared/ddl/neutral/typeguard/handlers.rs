@@ -58,6 +58,7 @@ fn status(command: &str) -> Vec<DdlResult> {
 pub fn create_typeguard(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let or_replace = find_ascii_case_insensitive(sql, "OR REPLACE").is_some();
@@ -77,7 +78,7 @@ pub fn create_typeguard(
 
     let tenant_id = identity.tenant_id.as_u64();
     let mut coll = catalog
-        .get_collection(DatabaseId::DEFAULT, tenant_id, &coll_name)
+        .get_collection(database_id, tenant_id, &coll_name)
         .map_err(|e| err("XX000", &e.to_string()))?
         .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
 
@@ -100,7 +101,7 @@ pub fn create_typeguard(
     }
 
     coll.type_guards = guards;
-    persist_collection_replicated(state, DatabaseId::DEFAULT, &coll)
+    persist_collection_replicated(state, database_id, &coll)
         .map_err(|e| err("XX000", &e.to_string()))?;
 
     state.schema_version.bump();
@@ -114,6 +115,7 @@ pub fn create_typeguard(
 pub fn alter_typeguard_add(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let coll_name = extract_collection_name(sql)?;
@@ -128,7 +130,7 @@ pub fn alter_typeguard_add(
 
     let tenant_id = identity.tenant_id.as_u64();
     let mut coll = catalog
-        .get_collection(DatabaseId::DEFAULT, tenant_id, &coll_name)
+        .get_collection(database_id, tenant_id, &coll_name)
         .map_err(|e| err("XX000", &e.to_string()))?
         .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
 
@@ -152,7 +154,7 @@ pub fn alter_typeguard_add(
     }
 
     coll.type_guards.push(guard);
-    persist_collection_replicated(state, DatabaseId::DEFAULT, &coll)
+    persist_collection_replicated(state, database_id, &coll)
         .map_err(|e| err("XX000", &e.to_string()))?;
 
     state.schema_version.bump();
@@ -164,6 +166,7 @@ pub fn alter_typeguard_add(
 pub fn alter_typeguard_drop(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let coll_name = extract_collection_name(sql)?;
@@ -180,7 +183,7 @@ pub fn alter_typeguard_drop(
 
     let tenant_id = identity.tenant_id.as_u64();
     let mut coll = catalog
-        .get_collection(DatabaseId::DEFAULT, tenant_id, &coll_name)
+        .get_collection(database_id, tenant_id, &coll_name)
         .map_err(|e| err("XX000", &e.to_string()))?
         .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
 
@@ -194,7 +197,7 @@ pub fn alter_typeguard_drop(
         ));
     }
 
-    persist_collection_replicated(state, DatabaseId::DEFAULT, &coll)
+    persist_collection_replicated(state, database_id, &coll)
         .map_err(|e| err("XX000", &e.to_string()))?;
 
     state.schema_version.bump();
@@ -206,13 +209,14 @@ pub fn alter_typeguard_drop(
 pub fn alter_typeguard(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let upper = sql.to_uppercase();
     if upper.contains(" ADD ") {
-        alter_typeguard_add(state, identity, sql)
+        alter_typeguard_add(state, identity, database_id, sql)
     } else if upper.contains(" DROP ") {
-        alter_typeguard_drop(state, identity, sql)
+        alter_typeguard_drop(state, identity, database_id, sql)
     } else {
         Err(err(
             "42601",
@@ -227,6 +231,7 @@ pub fn alter_typeguard(
 pub fn drop_typeguard(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let upper = sql.to_uppercase();
@@ -238,7 +243,7 @@ pub fn drop_typeguard(
 
     let tenant_id = identity.tenant_id.as_u64();
     let mut coll = catalog
-        .get_collection(DatabaseId::DEFAULT, tenant_id, &coll_name)
+        .get_collection(database_id, tenant_id, &coll_name)
         .map_err(|e| err("XX000", &e.to_string()))?
         .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
 
@@ -253,7 +258,7 @@ pub fn drop_typeguard(
     }
 
     coll.type_guards.clear();
-    persist_collection_replicated(state, DatabaseId::DEFAULT, &coll)
+    persist_collection_replicated(state, database_id, &coll)
         .map_err(|e| err("XX000", &e.to_string()))?;
 
     state.schema_version.bump();
@@ -267,6 +272,7 @@ pub fn drop_typeguard(
 pub fn show_typeguard(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let coll_name = extract_collection_name(sql)?;
@@ -275,7 +281,7 @@ pub fn show_typeguard(
 
     let tenant_id = identity.tenant_id.as_u64();
     let coll = catalog
-        .get_collection(DatabaseId::DEFAULT, tenant_id, &coll_name)
+        .get_collection(database_id, tenant_id, &coll_name)
         .map_err(|e| err("XX000", &e.to_string()))?
         .ok_or_else(|| err("42P01", &format!("collection '{coll_name}' not found")))?;
 
@@ -316,13 +322,14 @@ pub fn show_typeguard(
 pub fn show_typeguards(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     _sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let catalog = state.credentials.catalog();
 
     let tenant_id = identity.tenant_id.as_u64();
     let collections = catalog
-        .load_collections_for_tenant(DatabaseId::DEFAULT, tenant_id)
+        .load_collections_for_tenant(database_id, tenant_id)
         .map_err(|e| err("XX000", &e.to_string()))?;
 
     let columns = vec!["collection".to_string(), "fields".to_string()];
