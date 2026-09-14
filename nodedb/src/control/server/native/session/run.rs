@@ -311,7 +311,7 @@ impl NativeSession {
                 dispatch::SqlOutcome::Stream(sql_stream) => {
                     super::session_stream::emit_sql_stream(
                         &mut self.stream,
-                        sql_stream,
+                        *sql_stream,
                         format,
                         self.state.as_ref(),
                     )

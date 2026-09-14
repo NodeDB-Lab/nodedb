@@ -119,6 +119,12 @@ impl<'a> Cursor<'a> {
     }
 
     /// The next `count` float words after `keyword`.
+    ///
+    /// Used by the cursor's own tests; the fixed-arity clause families that
+    /// would call it at runtime still read their floats through
+    /// `helpers::array_floats_after`. Kept as the typed accessor the cursor
+    /// tests pin the `claim` bookkeeping to.
+    #[allow(dead_code)] // exercised from `#[cfg(test)]`, so the lib build has no caller
     pub(super) fn floats_after<const N: usize>(&mut self, keyword: &str) -> Option<[f64; N]> {
         let pos = self.find(keyword)?;
         let mut out = [0.0f64; N];
@@ -160,10 +166,7 @@ impl<'a> Cursor<'a> {
     /// An optional numeric clause, refusing a value that is present but not a
     /// number. `Ok(None)` means the clause was omitted, so the caller applies
     /// its own default; it never means "the value was unreadable".
-    pub(super) fn usize_after_checked(
-        &mut self,
-        keyword: &str,
-    ) -> Result<Option<usize>, SqlError> {
+    pub(super) fn usize_after_checked(&mut self, keyword: &str) -> Result<Option<usize>, SqlError> {
         let Some(word) = self.word_after(keyword) else {
             return Ok(None);
         };
@@ -254,7 +257,9 @@ mod tests {
         assert_eq!(cursor.usize_after_checked("DEPTH").unwrap(), Some(3));
         assert_eq!(cursor.quoted_after("IN").as_deref(), Some("g"));
         let _ = cursor.direction_after("DIRECTION").unwrap();
-        cursor.finish("GRAPH TRAVERSE").expect("every token claimed");
+        cursor
+            .finish("GRAPH TRAVERSE")
+            .expect("every token claimed");
     }
 
     #[test]

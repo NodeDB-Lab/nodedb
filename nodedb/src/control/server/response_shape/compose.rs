@@ -33,9 +33,9 @@ use super::kv::apply_kv_wrap;
 use super::project::push_flat_rows;
 use super::redaction::RedactionCtx;
 use super::request::MaterializedShapeRequest;
-use super::sequence_stamp::SequenceStamper;
 use super::returning::shape_returning_rows;
 use super::schema::OutputSchema;
+use super::sequence_stamp::SequenceStamper;
 use super::types::{DdlColType, PlanKind, ShapedRows};
 
 /// NOTICE text for an `AS OF SYSTEM TIME` cutoff older than the oldest
@@ -101,7 +101,9 @@ pub fn shape_response_materialized(
         PlanKind::ArraySlice => shape_array_slice(&translated, redaction)?,
         // `RETURNING` rows are held to the columns already announced to the
         // client, when any were — see `super::returning`.
-        PlanKind::ReturningRows => shape_returning_rows(&translated, projection, redaction, stamper)?,
+        PlanKind::ReturningRows => {
+            shape_returning_rows(&translated, projection, redaction, stamper)?
+        }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
             shape_generic_rows(&translated, projection, redaction, stamper)?
         }
@@ -134,7 +136,10 @@ pub fn shape_payload_no_plan(
             ShapeOutcome::Rows(shape_returning_rows(payload, projection, redaction, None)?)
         }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
-            ShapeOutcome::Rows(shape_generic_rows(payload, projection, redaction)?)
+            // No plan in scope means no statement identity either, so no
+            // sequence stamps: a `nextval(...)` column only ever reaches this
+            // shaper through a streamed/materialized path that carries one.
+            ShapeOutcome::Rows(shape_generic_rows(payload, projection, redaction, None)?)
         }
     })
 }
@@ -246,6 +251,15 @@ pub fn shape_decoded_rows(
             // encoder maps them to RowDescription OIDs and renders each cell in
             // that type's PostgreSQL text form.
             scale_declared_instants(&mut projected_rows, &keys, &column_types)?;
+            // Sequence stamps run after every projection, at the same boundary
+            // the instant conversion uses: the Data Plane evaluated nothing for
+            // a `nextval(...)` column, so its value is allocated here, once per
+            // output row, in output order.
+            if let Some(stamper) = stamper {
+                let sequences: Vec<Option<String>> =
+                    s.columns.iter().map(|c| c.sequence.clone()).collect();
+                stamper.stamp(&mut projected_rows, &keys, &sequences)?;
+            }
             Ok(ShapedRows {
                 columns: display_names,
                 column_types,
@@ -594,8 +608,8 @@ mod tests {
                     display_name: (*display).to_string(),
                     lookup_key: (*lookup).to_string(),
                     ty: DdlColType::Text,
- sequence: None,
-})
+                    sequence: None,
+                })
                 .collect(),
             is_star: false,
         }

@@ -114,6 +114,11 @@ pub(super) struct NdjsonBody {
     /// Global take-N across the whole union.
     pub limit: usize,
     pub projection: Option<OutputSchema>,
+    /// Statement identity, used by the response boundary to build a
+    /// `nextval(...)` sequence stamper. A sequence output column carries no
+    /// Data-Plane value, so the value is allocated here, per batch.
+    pub database_id: u64,
+    pub tenant_id: u64,
     /// The statement's redaction inputs, resolved ONCE before the first batch
     /// is pulled. Re-resolving per batch would risk the first NDJSON lines
     /// going out unredacted.
@@ -141,6 +146,8 @@ pub(super) fn ndjson_body_stream(
         stream,
         limit,
         projection,
+        database_id,
+        tenant_id,
         redaction,
         state,
         lease_scope,
@@ -200,9 +207,9 @@ pub(super) fn ndjson_body_stream(
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
                 Some(
                     &crate::control::server::response_shape::sequence_stamp::SequenceStamper::new(
-                        std::sync::Arc::clone(&state.shared.sequence_registry),
-                        database_id.as_u64(),
-                        tenant_id.as_u64(),
+                        std::sync::Arc::clone(&state.sequence_registry),
+                        database_id,
+                        tenant_id,
                     ),
                 ),
             ) {
@@ -299,6 +306,8 @@ mod tests {
             stream,
             limit: usize::MAX,
             projection: None,
+            database_id: 1,
+            tenant_id: 1,
             redaction: None,
             state: test_state(),
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
@@ -316,6 +325,8 @@ mod tests {
             stream,
             limit: 1500,
             projection: None,
+            database_id: 1,
+            tenant_id: 1,
             redaction: None,
             state: test_state(),
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
@@ -338,6 +349,8 @@ mod tests {
             stream,
             limit: usize::MAX,
             projection: None,
+            database_id: 1,
+            tenant_id: 1,
             redaction: None,
             state: test_state(),
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
@@ -420,6 +433,8 @@ mod tests {
                 stream,
                 limit: usize::MAX,
                 projection: None,
+                database_id: 1,
+                tenant_id: 1,
                 redaction: None,
                 state: Arc::clone(&state),
                 lease_scope: crate::control::lease::QueryLeaseScope::empty(),

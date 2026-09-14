@@ -153,6 +153,8 @@ pub async fn query_ndjson(
                         stream,
                         limit,
                         projection: Some(output_schema.clone()),
+                        database_id: database_id.as_u64(),
+                        tenant_id: tenant_id.as_u64(),
                         // `try_open_stream` returns `Some` only for a single-task plan.
                         redaction: tasks.first().map(|task| {
                             QueryRedaction::for_plan(tenant_id, scope.auth(), &task.plan)

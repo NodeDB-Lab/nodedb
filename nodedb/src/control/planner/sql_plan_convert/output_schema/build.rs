@@ -73,8 +73,8 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     display_name: key.clone(),
                     lookup_key: key.clone(),
                     ty: types.get(key).copied().unwrap_or(DdlColType::Text),
- sequence: None,
-});
+                    sequence: None,
+                });
             }
             for agg in aggregates {
                 let (function, field) = agg_expr_to_pair(agg);
@@ -83,8 +83,8 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     display_name: key.clone(),
                     lookup_key: key,
                     ty: DdlColType::Text,
- sequence: None,
-});
+                    sequence: None,
+                });
             }
             OutputSchema {
                 columns,
@@ -182,8 +182,8 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     display_name: c.clone(),
                     lookup_key: c.clone(),
                     ty: DdlColType::Text,
- sequence: None,
-})
+                    sequence: None,
+                })
                 .collect(),
             is_star: false,
         },
@@ -226,8 +226,8 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     display_name: agg.alias.clone(),
                     lookup_key: agg.alias.clone(),
                     ty: infer_aggregate_type(agg, &types),
- sequence: None,
-})
+                    sequence: None,
+                })
             };
             let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
             if output_order.is_empty() {
@@ -274,8 +274,8 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     display_name: name.clone(),
                     lookup_key: name.clone(),
                     ty: DdlColType::Text,
- sequence: None,
-})
+                    sequence: None,
+                })
                 .collect(),
             is_star: false,
         },
@@ -327,8 +327,8 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     display_name: name.clone(),
                     lookup_key: name.clone(),
                     ty: DdlColType::Text,
- sequence: None,
-})
+                    sequence: None,
+                })
                 .collect(),
             is_star: false,
         },

@@ -327,7 +327,7 @@ impl CoreLoop {
         // missing float field is stored as NaN and both paths render it as SQL
         // NULL, which a hand-written projection over the ingest values would
         // have printed as "NaN".
-        let mut returned_rows: Vec<rmpv::Value> = match returning {
+        let returned_rows: Vec<rmpv::Value> = match returning {
             Some(_) => match self.columnar_memtables.get(&key) {
                 Some(mt) => {
                     super::raw_scan::emit_memtable_rows_at(mt, &outcome.accepted_row_indices)

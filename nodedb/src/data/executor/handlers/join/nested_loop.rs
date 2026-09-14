@@ -224,7 +224,6 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::ResourcesExhausted);
         }
 
-
         let payload = super::super::super::response_codec::encode_binary_rows(&results);
         self.response_with_payload(task, payload)
     }

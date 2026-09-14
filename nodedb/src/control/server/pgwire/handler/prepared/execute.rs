@@ -145,8 +145,8 @@ impl NodeDbPgHandler {
                         // matching PostgreSQL text form and, for binary
                         // columns, extract the correctly-typed scalar.
                         ty: pg_type_to_ddl_col_type(f.datatype()),
- sequence: None,
-})
+                        sequence: None,
+                    })
                     .collect(),
                 is_star: false,
             })

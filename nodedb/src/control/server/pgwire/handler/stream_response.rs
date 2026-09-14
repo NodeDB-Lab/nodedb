@@ -70,7 +70,10 @@ pub(crate) fn streaming_multirow_response(
         redaction,
         state,
         meter_guard,
-        sequence_stamper,
+        // This shape emits one opaque `result` text column per row, so it never
+        // reaches the shaping core and has no addressable cell to stamp. The
+        // projected shape's own response builder applies the stamper.
+        sequence_stamper: _,
     } = context;
 
     let schema = Arc::new(vec![text_field("result")]);

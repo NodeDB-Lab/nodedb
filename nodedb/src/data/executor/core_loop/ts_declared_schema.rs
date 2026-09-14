@@ -188,6 +188,20 @@ pub(in crate::data::executor) enum TsGroupKeyKind {
     Text,
 }
 
+/// The wire shape a memtable storage type renders as.
+///
+/// `Timestamp` maps to `Integer` here: the instant case is decided from the
+/// declared DDL type before this runs, so what reaches it is a `BIGINT`
+/// time key or a system-time column, both of which render as the number
+/// storage holds.
+fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
+    match storage {
+        ColumnType::Int64 | ColumnType::Timestamp => TsGroupKeyKind::Integer,
+        ColumnType::Float64 => TsGroupKeyKind::Float,
+        ColumnType::Symbol => TsGroupKeyKind::Text,
+    }
+}
+
 /// Whether a declared DDL type makes a column an instant on the wire.
 ///
 /// Both planes answer this from `nodedb_types::columnar::ColumnType`: the

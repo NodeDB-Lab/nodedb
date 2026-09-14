@@ -259,6 +259,10 @@ impl NodeDbPgHandler {
                     redaction,
                     state: std::sync::Arc::clone(&state),
                     meter_guard,
+                    // The raw multirow shape ships each row as one opaque JSON
+                    // text cell, so a sequence output column has no addressable
+                    // cell here. The projected shape above carries the stamper.
+                    sequence_stamper: None,
                 },
             ),
         };

@@ -481,9 +481,6 @@ async fn graph_path_rejects_a_stray_literal() {
     // The trailing literal belongs to no clause. Ignoring it accepted a
     // statement whose text does not mean what it parses to.
     server
-        .expect_error(
-            "GRAPH PATH IN 'strays' FROM 'a' TO 'b' 'stray'",
-            "42601",
-        )
+        .expect_error("GRAPH PATH IN 'strays' FROM 'a' TO 'b' 'stray'", "42601")
         .await;
 }

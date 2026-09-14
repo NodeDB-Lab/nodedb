@@ -354,6 +354,9 @@ fn lower_subquery_projection(projection: &[Projection]) -> crate::Result<Vec<Str
             }
             Projection::Star | Projection::QualifiedStar(_) => return Ok(Vec::new()),
             Projection::Computed { alias, .. } => names.push(alias.clone()),
+            // A sequence item rides the body under the same alias the response
+            // boundary stamps it into.
+            Projection::Sequence { alias, .. } => names.push(alias.clone()),
         }
     }
     Ok(names)

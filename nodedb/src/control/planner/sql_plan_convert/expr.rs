@@ -290,9 +290,13 @@ pub(super) fn convert_sort_keys(keys: &[SortKey]) -> Vec<SortKeySpec> {
 fn has_expression_projection(projection: &[nodedb_sql::types::query::Projection]) -> bool {
     projection.iter().any(|p| match p {
         nodedb_sql::types::query::Projection::Computed { .. } => true,
+        // A sequence output column has no row expression to evaluate: the
+        // response boundary allocates its value, so it never needs the
+        // Subquery post-processor a computed expression does.
         nodedb_sql::types::query::Projection::Column(_)
         | nodedb_sql::types::query::Projection::Star
-        | nodedb_sql::types::query::Projection::QualifiedStar(_) => false,
+        | nodedb_sql::types::query::Projection::QualifiedStar(_)
+        | nodedb_sql::types::query::Projection::Sequence { .. } => false,
     })
 }
 

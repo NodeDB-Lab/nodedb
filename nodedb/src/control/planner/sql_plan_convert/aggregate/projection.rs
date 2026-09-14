@@ -88,8 +88,7 @@ pub(in crate::control::planner::sql_plan_convert) fn serialize_join_computed_pro
             Projection::Sequence { .. } => {}
             Projection::Star | Projection::QualifiedStar(_) => {
                 return Err(crate::Error::BadRequest {
-                    detail: "wildcard join projection reached computed-expression lowering"
-                        .into(),
+                    detail: "wildcard join projection reached computed-expression lowering".into(),
                 });
             }
         }

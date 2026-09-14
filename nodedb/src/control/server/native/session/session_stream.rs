@@ -40,10 +40,11 @@ fn decode_batch_to_columns_rows(
     json_text: &str,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    stamper: Option<&crate::control::server::response_shape::sequence_stamp::SequenceStamper>,
 ) -> crate::Result<(Vec<String>, Vec<Vec<Value>>)> {
     match sonic_rs::from_str::<serde_json::Value>(json_text) {
         Ok(decoded) => {
-            let shaped = shape_decoded_rows(&decoded, projection, redaction)?;
+            let shaped = shape_decoded_rows(&decoded, projection, redaction, stamper)?;
             Ok(to_native_columns_rows(&shaped))
         }
         Err(_) => Ok((
@@ -77,6 +78,7 @@ pub(super) async fn emit_sql_stream(
         projection,
         redaction,
         lease_scope: _lease_scope,
+        sequence_stamper,
     } = sql_stream;
 
     let mut emitted: usize = 0;
@@ -106,6 +108,7 @@ pub(super) async fn emit_sql_stream(
             &json_text,
             projection.as_ref(),
             redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+            sequence_stamper.as_ref(),
         )?;
         if batch_rows.is_empty() {
             continue;
@@ -245,6 +248,7 @@ mod tests {
             let mut conn = ConnStream::plain(sock);
             let stream: ResultStream = Box::pin(futures::stream::iter(batches));
             let sql_stream = SqlStream {
+                sequence_stamper: None,
                 seq: 7,
                 limit,
                 stream,

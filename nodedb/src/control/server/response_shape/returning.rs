@@ -291,8 +291,8 @@ mod tests {
                     display_name: (*name).to_string(),
                     lookup_key: (*name).to_string(),
                     ty: *ty,
- sequence: None,
-})
+                    sequence: None,
+                })
                 .collect(),
             is_star: false,
         }
@@ -409,14 +409,14 @@ mod tests {
     #[test]
     fn a_malformed_payload_fails_when_columns_were_announced() {
         let schema = announced(&[("id", DdlColType::Text)]);
-        assert!(shape_returning_rows(&[0xFF, 0xFE], Some(&schema), None).is_err());
+        assert!(shape_returning_rows(&[0xFF, 0xFE], Some(&schema), None, None).is_err());
     }
 
     /// With nothing announced there is no contract to violate, so the legacy
     /// single-column fallback still applies.
     #[test]
     fn a_malformed_payload_falls_back_when_nothing_was_announced() {
-        let shaped = shape_returning_rows(&[0xFF, 0xFE], None, None).expect("fallback");
+        let shaped = shape_returning_rows(&[0xFF, 0xFE], None, None, None).expect("fallback");
         assert_eq!(shaped.columns, ["result"]);
     }
 }

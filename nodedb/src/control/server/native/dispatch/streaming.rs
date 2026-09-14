@@ -35,8 +35,10 @@ use super::DispatchCtx;
 pub(crate) enum SqlOutcome {
     /// A single materialized response — encoded/chunked by the session loop.
     Response(Box<NativeResponse>),
-    /// A lazy row stream to be emitted as multiple frames.
-    Stream(SqlStream),
+    /// A lazy row stream to be emitted as multiple frames. Boxed: a stream
+    /// carries its projection, redaction, lease scope, and sequence stamper,
+    /// which is far larger than the response variant.
+    Stream(Box<SqlStream>),
 }
 
 impl SqlOutcome {
@@ -78,6 +80,11 @@ pub(crate) struct SqlStream {
     /// stream, so retaining the scope here holds leases until final emission
     /// or connection teardown drops the stream.
     pub(crate) lease_scope: Option<crate::control::lease::QueryLeaseScope>,
+    /// Sequence stamps for this statement, when its SELECT list carries
+    /// `nextval(...)`: the value is allocated at the response boundary, since
+    /// the Data Plane evaluates nothing for a sequence output column.
+    pub sequence_stamper:
+        Option<crate::control::server::response_shape::sequence_stamp::SequenceStamper>,
 }
 
 impl SqlStream {
@@ -186,5 +193,12 @@ pub(crate) async fn try_open_sql_stream(
             &child_plan,
         )),
         lease_scope: None,
+        sequence_stamper: Some(
+            crate::control::server::response_shape::sequence_stamp::SequenceStamper::new(
+                std::sync::Arc::clone(&ctx.state.sequence_registry),
+                ctx.database_id().as_u64(),
+                ctx.tenant_id().as_u64(),
+            ),
+        ),
     }))
 }

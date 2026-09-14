@@ -21,12 +21,11 @@ use super::{
 };
 use crate::error::SqlError;
 
-pub(super) fn parse_insert_edge(
-    cursor: &mut Cursor<'_>,
-) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_insert_edge(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH INSERT EDGE";
-    let collection =
-        cursor.quoted_after("IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let src = cursor
         .quoted_after("FROM")
         .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
@@ -46,12 +45,11 @@ pub(super) fn parse_insert_edge(
     }))
 }
 
-pub(super) fn parse_delete_edge(
-    cursor: &mut Cursor<'_>,
-) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_delete_edge(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH DELETE EDGE";
-    let collection =
-        cursor.quoted_after("IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let src = cursor
         .quoted_after("FROM")
         .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
@@ -87,8 +85,9 @@ pub(super) fn parse_set_labels(
 
 pub(super) fn parse_traverse(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH TRAVERSE";
-    let collection =
-        cursor.quoted_after("IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let start = cursor
         .quoted_after("FROM")
         .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
@@ -106,8 +105,9 @@ pub(super) fn parse_traverse(cursor: &mut Cursor<'_>) -> Result<NodedbStatement,
 
 pub(super) fn parse_neighbors(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH NEIGHBORS";
-    let collection =
-        cursor.quoted_after("IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let node = cursor
         .quoted_after("OF")
         .ok_or_else(|| missing_clause(STMT, "OF <node>"))?;
@@ -123,8 +123,9 @@ pub(super) fn parse_neighbors(cursor: &mut Cursor<'_>) -> Result<NodedbStatement
 
 pub(super) fn parse_path(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH PATH";
-    let collection =
-        cursor.quoted_after("IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let src = cursor
         .quoted_after("FROM")
         .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
