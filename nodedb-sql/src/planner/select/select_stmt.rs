@@ -89,6 +89,25 @@ pub(super) fn plan_select(
                     columns.push(name.clone());
                     values.push(SqlValue::Null);
                 }
+                // A FROM-less `nextval('<literal>')` is recognised as a
+                // sequence projection before the expression resolver runs, so
+                // it never reaches `Projection::Computed`. There is no row set
+                // to stamp: evaluate the accessor here, at plan time, exactly
+                // as a `Computed` accessor would be. Doing so also records the
+                // value in the session's `currval` map and surfaces an
+                // undefined sequence as `42704`.
+                Projection::Sequence { sequence, alias } => {
+                    columns.push(alias.clone());
+                    volatile = true;
+                    let expr = SqlExpr::Function {
+                        name: "nextval".into(),
+                        args: vec![SqlExpr::Literal(SqlValue::String(sequence.clone()))],
+                        distinct: false,
+                    };
+                    values.push(crate::planner::catalog_expr_fold::eval_catalog_constant(
+                        &expr, catalog, functions,
+                    )?);
+                }
                 _ => {
                     columns.push(format!("col{i}"));
                     values.push(SqlValue::Null);
