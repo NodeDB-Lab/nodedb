@@ -41,6 +41,8 @@ pub(super) fn convert_constant_result(
             rows: payload,
             filters: Vec::new(),
             projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,
@@ -247,6 +249,7 @@ pub(super) fn convert_subquery(
         input,
         filters,
         projection,
+        window_functions,
         sort_keys,
         offset,
         distinct,
@@ -311,6 +314,16 @@ pub(super) fn convert_subquery(
             input: Box::new(child),
             filters: super::filter::serialize_filters(filters)?,
             projection: lower_subquery_projection(projection)?,
+            // Expression projections ride as computed columns so the
+            // materialized-row ProviderScan evaluates them per row instead
+            // of the response shaper looking up an alias that was never
+            // computed (silent NULL — issue #295). Window-aliased items are
+            // excluded here; they ride as window specs below.
+            computed_columns: super::aggregate::extract_computed_columns(
+                projection,
+                window_functions,
+            )?,
+            window_functions: super::aggregate::serialize_window_functions(window_functions)?,
             sort_keys: lower_subquery_sort_keys(sort_keys, merged_doc_body),
             limit,
             offset,
