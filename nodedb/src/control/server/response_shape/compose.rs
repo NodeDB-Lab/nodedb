@@ -279,20 +279,21 @@ pub fn shape_decoded_rows(
             // wire's microseconds here too: the same once-only conversion the
             // named-projection path applies. A column with no declared type
             // (a schemaless field) stays TEXT and is left untouched.
-            if let Some(s) = projection {
-                if s.is_star && !s.columns.is_empty() {
-                    let types: Vec<DdlColType> = columns
-                        .iter()
-                        .map(|name| {
-                            s.columns
-                                .iter()
-                                .find(|c| c.lookup_key == *name || c.display_name == *name)
-                                .map(|c| c.ty)
-                                .unwrap_or(DdlColType::Text)
-                        })
-                        .collect();
-                    scale_declared_instants(&mut rows, &columns, &types)?;
-                }
+            if let Some(s) = projection
+                && s.is_star
+                && !s.columns.is_empty()
+            {
+                let types: Vec<DdlColType> = columns
+                    .iter()
+                    .map(|name| {
+                        s.columns
+                            .iter()
+                            .find(|c| c.lookup_key == *name || c.display_name == *name)
+                            .map(|c| c.ty)
+                            .unwrap_or(DdlColType::Text)
+                    })
+                    .collect();
+                scale_declared_instants(&mut rows, &columns, &types)?;
             }
             Ok(ShapedRows {
                 columns,
