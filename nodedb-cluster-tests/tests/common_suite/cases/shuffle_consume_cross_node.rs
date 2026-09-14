@@ -108,6 +108,8 @@ fn provider_scan_plan(rows: &[&Row]) -> Vec<u8> {
         limit: None,
         offset: 0,
         distinct: false,
+        computed_columns: Vec::new(),
+        window_functions: Vec::new(),
     });
     plan_wire::encode(&plan).expect("encode provider scan plan")
 }
