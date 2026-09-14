@@ -19,13 +19,19 @@ pub(super) fn convert_constant_result(
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
+    // A constant row is one JSON object, which cannot hold two cells under one
+    // key. `SELECT nextval('s'), nextval('s')` legally repeats an output name;
+    // keying both cells by the name would collapse them to the last value. Use
+    // the same unique per-column keys every response encoder derives, so each
+    // column keeps its own cell.
+    let cell_keys = crate::control::server::response_shape::project::cell_keys(columns);
     let mut obj = serde_json::Map::new();
-    for (col, val) in columns.iter().zip(values.iter()) {
+    for ((_col, val), key) in columns.iter().zip(values.iter()).zip(cell_keys.iter()) {
         let json_val = match val {
             SqlValue::Null => serde_json::Value::Null,
             other => serde_json::Value::String(sql_value_to_string(other)),
         };
-        obj.insert(col.clone(), json_val);
+        obj.insert(key.clone(), json_val);
     }
     let arr = serde_json::Value::Array(vec![serde_json::Value::Object(obj)]);
     let payload = nodedb_types::json_to_msgpack(&arr).map_err(|e| crate::Error::Serialization {
