@@ -86,7 +86,34 @@ fn infer_projection(
     catalog: &dyn SqlCatalog,
     query: &ast::Query,
 ) -> Result<(Vec<ColumnInfo>, bool)> {
-    infer_body(catalog, &query.body)
+    let (mut columns, open) = infer_body(catalog, &query.body)?;
+
+    // The SEARCH preprocessor rewrites `SEARCH c USING VECTOR(...)` into
+    // `SELECT * FROM c ORDER BY vector_distance(...) LIMIT k`, and the
+    // response layer appends a synthetic `distance` cell to every row of such
+    // a query. Derived-relation inference must declare that column: without
+    // it `s.distance` over a closed-schema source resolves against no
+    // relation and is refused with 42703, while the same projection over an
+    // open-schema source runs.
+    if !columns.iter().any(|c| c.name == "distance")
+        && query.order_by.iter().any(|order| match &order.kind {
+            ast::OrderByKind::Expressions(exprs) => {
+                exprs.iter().any(|ordered| match &ordered.expr {
+                    Expr::Function(func) => matches!(
+                        func.name.0.as_slice(),
+                        [ast::ObjectNamePart::Identifier(ident)]
+                            if normalize_ident(ident) == "vector_distance"
+                    ),
+                    _ => false,
+                })
+            }
+            ast::OrderByKind::All(_) => false,
+        })
+    {
+        columns.push(synthetic_column("distance"));
+    }
+
+    Ok((columns, open))
 }
 
 fn infer_body(catalog: &dyn SqlCatalog, body: &SetExpr) -> Result<(Vec<ColumnInfo>, bool)> {
@@ -319,5 +346,23 @@ mod tests {
         let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["p", "q"]);
         assert_eq!(info.columns[0].data_type, SqlDataType::Int64);
+    }
+
+    #[test]
+    fn vector_search_projection_declares_the_synthetic_distance_column() {
+        // `SEARCH c USING VECTOR(...)` preprocesses to `ORDER BY
+        // vector_distance(...)`; the response layer appends a `distance`
+        // cell, so the derived relation must name it even when the source
+        // schema is closed.
+        let info = infer("SELECT * FROM src ORDER BY vector_distance(b, ARRAY[0.1, 0.2]) LIMIT 2");
+        let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"distance"), "columns: {names:?}");
+    }
+
+    #[test]
+    fn plain_ordered_projection_has_no_distance_column() {
+        let info = infer("SELECT * FROM src ORDER BY b LIMIT 2");
+        let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"distance"), "columns: {names:?}");
     }
 }
