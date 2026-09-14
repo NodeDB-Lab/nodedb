@@ -33,6 +33,6 @@
 mod adapter;
 mod sequence_access;
 mod sql_catalog_impl;
-mod type_convert;
+pub(crate) mod type_convert;
 
 pub use adapter::OriginCatalog;
