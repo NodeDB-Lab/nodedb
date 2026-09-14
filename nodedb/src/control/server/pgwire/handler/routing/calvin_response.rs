@@ -81,6 +81,7 @@ pub(super) fn calvin_execution_response(
                 database_id,
                 tenant_id,
                 redaction: Some(redaction.ctx(&state.redaction)),
+                session_sequences: None,
             })
     {
         return Ok(CalvinTaskOutcome::Rows(shaped));

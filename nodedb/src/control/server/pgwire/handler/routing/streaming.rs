@@ -237,6 +237,7 @@ impl NodeDbPgHandler {
                                 std::sync::Arc::clone(&state.sequence_registry),
                                 task.database_id.as_u64(),
                                 task.tenant_id.as_u64(),
+                                self.sessions.sequence_values(session_id),
                             ),
                         ),
                     },

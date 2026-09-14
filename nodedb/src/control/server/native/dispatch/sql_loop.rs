@@ -204,6 +204,7 @@ pub(super) async fn run_dispatch_loop(
                         database_id,
                         tenant_id: ctx.tenant_id(),
                         redaction: Some(redaction.ctx(&ctx.state.redaction)),
+                        session_sequences: None,
                     }) {
                         Ok(ShapeOutcome::Rows(mut shaped)) => {
                             if let Some(notice) = shaped.notice.take() {
@@ -315,6 +316,7 @@ pub(super) async fn run_dispatch_loop(
                 database_id,
                 tenant_id: ctx.tenant_id(),
                 redaction: Some(redaction.ctx(&ctx.state.redaction)),
+                session_sequences: None,
             }) {
                 Ok(ShapeOutcome::Rows(mut shaped)) => {
                     if let Some(notice) = shaped.notice.take() {

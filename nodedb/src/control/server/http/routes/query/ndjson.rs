@@ -332,6 +332,7 @@ pub async fn query_ndjson(
                         database_id,
                         tenant_id,
                         redaction: Some(redaction.ctx(&state.shared.redaction)),
+                        session_sequences: None,
                     }) {
                         Ok(HttpShaped::Rows(rows)) => {
                             task_rows += rows.len() as u64;

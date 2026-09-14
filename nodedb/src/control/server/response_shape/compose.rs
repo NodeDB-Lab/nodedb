@@ -72,6 +72,7 @@ pub fn shape_response_materialized(
         database_id,
         tenant_id,
         redaction,
+        session_sequences,
     } = request;
 
     match plan_kind {
@@ -84,11 +85,13 @@ pub fn shape_response_materialized(
 
     // Sequence stamps: the one place a `nextval` value is produced for a
     // SELECT or RETURNING row set. Built from the request's own identity, so
-    // every materialized caller stamps without opting in.
+    // every materialized caller stamps without opting in. The session map is
+    // threaded through so a stamped value updates the caller's `currval`.
     let stamper = SequenceStamper::new(
         std::sync::Arc::clone(&state.sequence_registry),
         database_id.as_u64(),
         tenant_id.as_u64(),
+        session_sequences,
     );
     let stamper = Some(&stamper);
 
@@ -535,6 +538,7 @@ mod tests {
             database_id: DatabaseId::new(1),
             tenant_id: TenantId::new(1),
             redaction: None,
+            session_sequences: None,
         })
         .expect("execution plan passthrough");
         assert!(matches!(materialized, ShapeOutcome::Passthrough));

@@ -210,6 +210,7 @@ pub(super) fn ndjson_body_stream(
                         std::sync::Arc::clone(&state.sequence_registry),
                         database_id,
                         tenant_id,
+                        None,
                     ),
                 ),
             ) {

@@ -7,6 +7,8 @@
 //! tenant and redaction context together, and a positional list that long is
 //! both unreadable and easy to transpose at a call site.
 
+use std::sync::Arc;
+
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::state::SharedState;
 use nodedb_types::{DatabaseId, TenantId};
@@ -31,4 +33,8 @@ pub struct MaterializedShapeRequest<'a> {
     /// Column-level redaction for this statement, resolved once per query.
     /// `None` only where the producer has no requester identity at all.
     pub redaction: Option<RedactionCtx<'a>>,
+    /// The calling session's `currval` map, so a per-row `nextval` stamp is
+    /// visible to a later `currval` in the same session. `None` where the
+    /// producer has no session (HTTP, internal merges).
+    pub session_sequences: Option<Arc<crate::control::sequence::SessionSequenceValues>>,
 }

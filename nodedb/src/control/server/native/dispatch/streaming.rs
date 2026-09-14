@@ -198,6 +198,7 @@ pub(crate) async fn try_open_sql_stream(
                 std::sync::Arc::clone(&ctx.state.sequence_registry),
                 ctx.database_id().as_u64(),
                 ctx.tenant_id().as_u64(),
+                None,
             ),
         ),
     }))

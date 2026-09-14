@@ -434,6 +434,7 @@ pub async fn query(
                     database_id,
                     tenant_id,
                     redaction: Some(redaction.ctx(&state.shared.redaction)),
+                    session_sequences: None,
                 }) {
                     Ok(HttpShaped::Rows(rows)) => result_rows.extend(rows),
                     Ok(HttpShaped::Passthrough) => result_rows.push(passthrough_json_row(payload)),
@@ -550,6 +551,7 @@ fn append_response(
         database_id: append.database_id,
         tenant_id: append.tenant_id,
         redaction: Some(append.redaction.ctx(&append.state.shared.redaction)),
+        session_sequences: None,
     }) {
         Ok(HttpShaped::Rows(rows)) => result_rows.extend(rows),
         Ok(HttpShaped::Passthrough) => result_rows.push(passthrough_json_row(&payload)),

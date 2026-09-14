@@ -18,19 +18,23 @@
 //! batch per stamped column per row set. A retried statement can leave a gap;
 //! PostgreSQL accepts gaps for the same reason.
 //!
-//! `currval` is not recorded here: the shaper holds no session map. Threading
-//! the session recorder from the pgwire dispatch is a later slice.
+//! The last value of each batch is recorded in the calling session's map, so a
+//! later `currval` (or a column `DEFAULT currval(...)`) in the same session
+//! answers with the last per-row stamp, matching PostgreSQL.
 
 use serde_json::{Map, Value as JsonValue};
 use std::sync::Arc;
 
-use crate::control::sequence::{SequenceError, SequenceRegistry};
+use crate::control::sequence::{SequenceError, SequenceRegistry, SessionSequenceValues};
 
 /// Allocates and writes sequence stamps for one shaped row set.
 pub struct SequenceStamper {
     registry: Arc<SequenceRegistry>,
     database_id: u64,
     tenant_id: u64,
+    /// The calling session's `currval` map. `None` for a shaper with no
+    /// session behind it, which then records nothing.
+    session: Option<Arc<SessionSequenceValues>>,
 }
 
 impl SequenceStamper {
@@ -38,11 +42,13 @@ impl SequenceStamper {
         registry: Arc<SequenceRegistry>,
         database_id: u64,
         tenant_id: u64,
+        session: Option<Arc<SessionSequenceValues>>,
     ) -> Self {
         Self {
             registry,
             database_id,
             tenant_id,
+            session,
         }
     }
 
@@ -70,6 +76,10 @@ impl SequenceStamper {
                         detail: format!("nextval('{name}'): {other}"),
                     },
                 })?;
+            // Record the batch's last value as this session's `currval`.
+            if let (Some(session), Some(last)) = (&self.session, values.last()) {
+                session.record(self.database_id, self.tenant_id, name, *last);
+            }
             for (row, value) in rows.iter_mut().zip(values) {
                 row.insert(key.clone(), JsonValue::from(value));
             }

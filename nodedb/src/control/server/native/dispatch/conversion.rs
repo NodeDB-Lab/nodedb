@@ -237,6 +237,7 @@ pub(crate) fn calvin_native_response(
                 database_id,
                 tenant_id,
                 redaction: redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+                session_sequences: None,
             })
     {
         let (cols, rows) = to_native_columns_rows(&shaped);

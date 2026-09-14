@@ -403,6 +403,7 @@ impl NodeDbPgHandler {
                     database_id: task_database_id,
                     tenant_id,
                     redaction: Some(redaction.ctx(&self.state.redaction)),
+                    session_sequences: self.sessions.sequence_values(session_id),
                 })
                 // Preserve the shaper error's own SQLSTATE: hardcoding XX000
                 // turned a client-visible refusal such as an undefined
