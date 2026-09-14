@@ -80,7 +80,10 @@ impl CoreLoop {
             // stored post-image, not an echo of the request.
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
-        self.response_ok(task)
+        // A put always writes its row, so the statement affected exactly one:
+        // the tag is `INSERT 0 1`, never a bare `OK` (pgwire's generic tag for
+        // a plan that reports nothing).
+        self.response_affected(task, 1)
     }
 
     /// SQL `INSERT` semantics: write only if key doesn't already exist.
@@ -167,7 +170,10 @@ impl CoreLoop {
         if let Some(spec) = returning {
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
-        self.response_ok(task)
+        // An insert writes exactly one row or fails the statement, so the
+        // affected count is 1 and pgwire renders `INSERT 0 1` — the same tag
+        // the document engine's point insert produces.
+        self.response_affected(task, 1)
     }
 
     /// SQL `INSERT ... ON CONFLICT DO NOTHING` semantics: write if absent,
