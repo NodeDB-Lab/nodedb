@@ -44,6 +44,7 @@ use super::compose::{project_row, redact_rows, single_result_row};
 use super::project::cell_keys;
 use super::redaction::RedactionCtx;
 use super::schema::OutputSchema;
+use super::sequence_stamp::SequenceStamper;
 use super::types::{DdlColType, ShapedRows};
 
 /// Shape a DML-with-`RETURNING` response.
@@ -55,6 +56,7 @@ pub fn shape_returning_rows(
     payload: &[u8],
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    stamper: Option<&SequenceStamper>,
 ) -> Result<ShapedRows, NodeDbError> {
     let announced = announced_columns(projection);
 
@@ -106,7 +108,7 @@ pub fn shape_returning_rows(
             notice: None,
         });
     };
-    Ok(project_onto_announced(schema, &rows))
+    project_onto_announced(schema, &rows, stamper)
 }
 
 /// The announced output columns, or `None` when the caller announced nothing
@@ -140,7 +142,11 @@ fn rows_keyed_by_column(rp: &RowsPayload) -> Vec<Map<String, JsonValue>> {
 /// Uses the same `project_row` + `cell_keys` pair the SELECT path uses, so a
 /// `RETURNING` result and a `SELECT` result of the same columns are laid out
 /// identically for the encoders.
-fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]) -> ShapedRows {
+fn project_onto_announced(
+    schema: &OutputSchema,
+    rows: &[Map<String, JsonValue>],
+    stamper: Option<&SequenceStamper>,
+) -> Result<ShapedRows, NodeDbError> {
     let lookup_keys: Vec<String> = schema
         .columns
         .iter()
@@ -154,7 +160,7 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]
     let column_types: Vec<DdlColType> = schema.columns.iter().map(|c| c.ty).collect();
     let keys = cell_keys(&display_names);
 
-    let projected = rows
+    let mut projected: Vec<Map<String, JsonValue>> = rows
         .iter()
         .map(|row| {
             let mut out = project_row(row, &lookup_keys, &display_names, &keys);
@@ -166,13 +172,18 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]
             out
         })
         .collect();
+    if let Some(stamper) = stamper {
+        let sequences: Vec<Option<String>> =
+            schema.columns.iter().map(|c| c.sequence.clone()).collect();
+        stamper.stamp(&mut projected, &keys, &sequences)?;
+    }
 
-    ShapedRows {
+    Ok(ShapedRows {
         columns: display_names,
         column_types,
         rows: projected,
         notice: None,
-    }
+    })
 }
 
 /// Re-read a `RETURNING` cell's TEXT form as the column's announced type.
@@ -271,7 +282,8 @@ mod tests {
                     display_name: (*name).to_string(),
                     lookup_key: (*name).to_string(),
                     ty: *ty,
-                })
+ sequence: None,
+})
                 .collect(),
             is_star: false,
         }
@@ -286,7 +298,7 @@ mod tests {
             &["id", "name", "score"],
             &[&[Some("a"), Some("x"), Some("1")]],
         );
-        let shaped = shape_returning_rows(&bytes, None, None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, None, None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name", "score"]);
         assert_eq!(shaped.rows.len(), 1);
     }
@@ -300,7 +312,7 @@ mod tests {
             &[&[Some("a"), Some("x"), Some("surprise")]],
         );
         let schema = announced(&[("id", DdlColType::Text), ("name", DdlColType::Text)]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name"]);
         assert_eq!(shaped.column_types.len(), shaped.columns.len());
         let keys = shaped.cell_keys();
@@ -319,7 +331,7 @@ mod tests {
             ("name", DdlColType::Text),
             ("score", DdlColType::Int8),
         ]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name", "score"]);
         assert_eq!(shaped.rows[0]["id"], JsonValue::String("a".into()));
         assert_eq!(shaped.rows[0]["name"], JsonValue::Null);
@@ -340,7 +352,7 @@ mod tests {
             ("b", DdlColType::Bool),
             ("s", DdlColType::Text),
         ]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.rows[0]["i"], JsonValue::from(42i64));
         assert_eq!(shaped.rows[0]["f"], JsonValue::from(1.5f64));
         assert_eq!(shaped.rows[0]["b"], JsonValue::Bool(true));
@@ -354,7 +366,7 @@ mod tests {
     fn an_unparseable_cell_stays_text() {
         let bytes = payload(&["i"], &[&[Some("not a number")]]);
         let schema = announced(&[("i", DdlColType::Int8)]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(
             shaped.rows[0]["i"],
             JsonValue::String("not a number".into())
@@ -366,7 +378,7 @@ mod tests {
     #[test]
     fn an_empty_payload_keeps_the_announced_columns() {
         let schema = announced(&[("id", DdlColType::Text), ("score", DdlColType::Int8)]);
-        let shaped = shape_returning_rows(&[], Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&[], Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "score"]);
         assert!(shaped.rows.is_empty());
     }
@@ -377,7 +389,7 @@ mod tests {
     fn a_rowless_payload_keeps_the_announced_columns() {
         let bytes = payload(&[], &[]);
         let schema = announced(&[("id", DdlColType::Text)]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id"]);
         assert!(shaped.rows.is_empty());
     }

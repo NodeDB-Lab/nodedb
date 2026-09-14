@@ -19,6 +19,12 @@ pub struct OutputColumn {
     pub display_name: String,
     pub lookup_key: String,
     pub ty: super::types::DdlColType,
+    /// Set when the column is a sequence accessor (`SELECT nextval('s')`).
+    ///
+    /// The Data Plane emits no cell for it: the control plane allocates one
+    /// value per output row and stamps the cell after shaping, where the row
+    /// count is known. `None` for every ordinary column.
+    pub sequence: Option<String>,
 }
 
 /// The authoritative output schema of a query, resolved by the planner.

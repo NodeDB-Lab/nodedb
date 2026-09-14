@@ -15,6 +15,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::control::server::response_shape::compose::shape_decoded_rows;
 use crate::control::server::response_shape::redaction::{QueryRedaction, redact_envelope_row};
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::response_shape::sequence_stamp::SequenceStamper;
 use crate::control::server::response_shape::types::DdlColType;
 use crate::control::server::result_stream::ResultStream;
 use crate::control::server::shared::metering::DetachedMeterGuard;
@@ -39,6 +40,10 @@ pub(crate) struct StreamResponseContext {
     pub(crate) state: Arc<SharedState>,
     /// `None` when metering is disabled, or when this request is not billable.
     pub(crate) meter_guard: Option<DetachedMeterGuard>,
+    /// Sequence stamps for this statement, when its SELECT list carries
+    /// `nextval(...)`. Built once from the same identity redaction uses, so
+    /// every streamed batch stamps from one plan and one sequence set.
+    pub(crate) sequence_stamper: Option<SequenceStamper>,
 }
 
 /// Build a streaming multi-row pgwire `Response` whose `DataRow`s are pulled
@@ -65,6 +70,7 @@ pub(crate) fn streaming_multirow_response(
         redaction,
         state,
         meter_guard,
+        sequence_stamper,
     } = context;
 
     let schema = Arc::new(vec![text_field("result")]);
@@ -155,6 +161,7 @@ pub(crate) fn streaming_shaped_response(
         redaction,
         state,
         meter_guard,
+        sequence_stamper,
     } = context;
 
     let display_columns: Vec<String> = schema_out
@@ -228,6 +235,7 @@ pub(crate) fn streaming_shaped_response(
                 &value,
                 Some(&schema_out),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+                sequence_stamper.as_ref(),
             )
             .map_err(|e| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
@@ -343,6 +351,7 @@ pub(crate) async fn streaming_star_response(
         &serde_json::Value::Array(values),
         None,
         redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+        None,
     ) {
         Ok(s) => s,
         Err(e) => {

@@ -57,7 +57,8 @@ pub(super) fn projection_to_column(
                 display_name,
                 lookup_key: qname.clone(),
                 ty,
-            })
+ sequence: None,
+})
         }
         Projection::Computed { expr, alias } => {
             // For an aliased column reference (`o.id AS oid`) the Data Plane
@@ -78,9 +79,16 @@ pub(super) fn projection_to_column(
                 display_name: alias.clone(),
                 lookup_key,
                 ty: infer_computed_expr_type(expr, types),
-            })
+ sequence: None,
+})
         }
         Projection::Star | Projection::QualifiedStar(_) => None,
+        Projection::Sequence { sequence, alias } => Some(OutputColumn {
+            display_name: alias.clone(),
+            lookup_key: alias.clone(),
+            ty: DdlColType::Int8,
+            sequence: Some(sequence.clone()),
+        }),
     }
 }
 
@@ -148,7 +156,8 @@ pub(super) fn group_by_key_column(
                 display_name,
                 lookup_key,
                 ty,
-            }
+ sequence: None,
+}
         }
         _ => {
             // The executor emits the evaluated value under the shared
@@ -163,7 +172,8 @@ pub(super) fn group_by_key_column(
                 display_name,
                 lookup_key,
                 ty: infer_computed_expr_type(expr, types),
-            }
+ sequence: None,
+}
         }
     }
 }
@@ -190,7 +200,8 @@ pub(super) fn ordered_columns_for<C: SqlCatalog + ?Sized>(
                     c.int_width,
                     c.float_width,
                 ),
-            })
+ sequence: None,
+})
             .collect(),
         _ => Vec::new(),
     }

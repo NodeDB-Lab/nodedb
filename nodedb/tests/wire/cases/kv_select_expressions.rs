@@ -5,13 +5,13 @@
 //! Previously the kv scan carried neither the SELECT projection list nor
 //! computed columns, so expression projections were never evaluated: the
 //! column came back NULL at response shaping (`SELECT 1 + 1 FROM kv`
-//! returned an empty column) and sequence accessors could not raise their
-//! typed 0A000 either. The scan now carries projection + computed columns
-//! like the document/columnar paths, so:
+//! returned an empty column). The scan now carries projection + computed
+//! columns like the document/columnar paths, so:
 //!
 //! - scalar expressions over kv rows evaluate per row;
-//! - `nextval`/`currval`/`setval` in a kv SELECT list raise 0A000 instead
-//!   of silently NULLing.
+//! - a bare `nextval` in a kv SELECT list is stamped once per emitted row at
+//!   the response boundary, while `currval`/`setval` stay refused (0A000):
+//!   only `nextval` has a defined value per output row.
 
 use crate::harness::TestServer;
 
@@ -48,15 +48,30 @@ async fn scalar_expressions_evaluate_per_row() {
     assert_eq!(s, vec![Some("2"), Some("2")], "{rows:?}");
 }
 
+/// A bare `nextval` in a kv SELECT list is a control-plane stamp: one value
+/// per emitted row, in output order. `currval` and `setval` have no defined
+/// per-row value and stay refused with `0A000`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn accessor_in_select_list_raises_0a000() {
+async fn nextval_in_select_list_stamps_each_row() {
     let server = TestServer::start().await;
     setup(&server).await;
     server
-        .expect_error("SELECT nextval('nope') FROM kvsel", "0A000")
-        .await;
+        .exec("CREATE SEQUENCE seq_kvsel_stamp")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT nextval('seq_kvsel_stamp') FROM kvsel ORDER BY id")
+        .await
+        .expect("per-row nextval over a kv scan must return the stamped values");
+    assert_eq!(
+        rows,
+        vec!["1".to_string(), "2".to_string()],
+        "one consecutive value per emitted row"
+    );
+
     server
-        .expect_error("SELECT currval('nope') FROM kvsel", "0A000")
+        .expect_error("SELECT currval('seq_kvsel_stamp') FROM kvsel", "0A000")
         .await;
 }
 

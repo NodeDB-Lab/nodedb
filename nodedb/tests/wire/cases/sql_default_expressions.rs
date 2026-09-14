@@ -433,6 +433,57 @@ async fn default_currval_fills_a_column() {
     );
 }
 
+/// A `nextval` in the SELECT list is evaluated once per returned row, in
+/// output order, on the control plane. The Data Plane holds no sequence
+/// state, so this statement used to be refused outright.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn select_list_nextval_advances_once_per_row() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE SEQUENCE seq_sel_rows").await.unwrap();
+    server
+        .exec("CREATE COLLECTION sel_seq (id INT PRIMARY KEY, v TEXT)")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO sel_seq (id, v) VALUES (1,'a'),(2,'b'),(3,'c')")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text("SELECT nextval('seq_sel_rows') AS n FROM sel_seq ORDER BY id")
+        .await
+        .expect("per-row nextval must plan and run");
+    assert_eq!(
+        rows,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "one consecutive value per returned row, in row order"
+    );
+
+    // A filter shrinks the row set: only emitted rows consume values.
+    let rows = server
+        .query_text("SELECT nextval('seq_sel_rows') AS n FROM sel_seq WHERE id > 2")
+        .await
+        .expect("filtered per-row nextval");
+    assert_eq!(rows, vec!["4".to_string()], "the filter removed two rows");
+}
+
+/// An embedded sequence accessor stays refused at plan time: only a bare
+/// projection item has a defined per-row value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedded_nextval_stays_refused() {
+    let server = TestServer::start().await;
+    server.exec("CREATE SEQUENCE seq_embedded").await.unwrap();
+    server
+        .exec("CREATE COLLECTION emb_seq (id INT PRIMARY KEY)")
+        .await
+        .unwrap();
+
+    server
+        .expect_error("SELECT nextval('seq_embedded') + 1 FROM emb_seq", "0A000")
+        .await;
+}
+
 /// Asserts a rendered row carries a real value in place of an absent or NULL column.
 fn assert_not_null(row: &str, label: &str) {
     let trimmed = row.trim();

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Expression errors over a constant derived table must raise, not fold to
-//! NULL / empty rows (issue #295). The derived body materializes as rows on
-//! the coordinator; expression projections and aggregate/group-key arguments
-//! evaluate against those rows per-row, so division raises 22012 and
-//! sequence accessors raise 0A000 instead of silently vanishing.
+//! NULL / empty rows. The derived body materializes as rows on the
+//! coordinator; expression projections and aggregate/group-key arguments
+//! evaluate against those rows per-row, so division raises 22012 and a bare
+//! `nextval` stamps one value per output row. `currval`/`setval` have no
+//! defined per-row value and still raise 0A000.
 
 use crate::harness::TestServer;
 
@@ -43,12 +44,21 @@ async fn group_by_division_over_derived_raises() {
         .await;
 }
 
+/// A bare `nextval` over a derived table is stamped once per materialized
+/// row. `currval` over the same shape stays refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn accessor_over_derived_is_loud() {
+async fn accessor_over_derived_stamps_each_row() {
     let server = TestServer::start().await;
     server.exec("CREATE SEQUENCE der_seq").await.unwrap();
+
+    let rows = server
+        .query_text("SELECT nextval('der_seq') FROM (SELECT 1 AS x) s")
+        .await
+        .expect("per-row nextval over a derived table must return the stamped value");
+    assert_eq!(rows, vec!["1".to_string()], "one row, one value");
+
     server
-        .expect_error("SELECT nextval('der_seq') FROM (SELECT 1 AS x) s", "0A000")
+        .expect_error("SELECT currval('der_seq') FROM (SELECT 1 AS x) s", "0A000")
         .await;
 }
 

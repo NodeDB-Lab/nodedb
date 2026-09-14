@@ -49,6 +49,9 @@ fn is_pure_vector_projection(projection: &[Projection]) -> bool {
                 }
             }
             Projection::Star | Projection::QualifiedStar(_) => return false,
+            // A sequence stamp is a client-visible counter, not a column of
+            // the scanned row: this is not the pure vector-search shape.
+            Projection::Sequence { .. } => return false,
         }
     }
     true

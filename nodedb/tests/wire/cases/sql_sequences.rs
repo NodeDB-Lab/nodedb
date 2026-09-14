@@ -330,20 +330,32 @@ async fn two_row_collection_with_sequence(server: &TestServer, label: &str) -> (
     (sequence, collection)
 }
 
-/// `nextval` in a SELECT list over a FROM relation raises `0A000`
-/// (feature_not_supported). Per-row allocation is not implemented, and a
-/// silent NULL for every row is worse than the refusal.
+/// A bare `nextval` in a SELECT list over a FROM relation is stamped at the
+/// response boundary: one consecutive value per emitted row, in output order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn nextval_in_a_select_list_over_a_scan_is_refused() {
+async fn nextval_in_a_select_list_over_a_scan_allocates_per_row() {
     let server = TestServer::start().await;
     let (sequence, collection) = two_row_collection_with_sequence(&server, "nextval").await;
 
-    server
-        .expect_error(
-            &format!("SELECT nextval('{sequence}') FROM {collection}"),
-            "0A000",
-        )
-        .await;
+    let rows = server
+        .query_text(&format!(
+            "SELECT nextval('{sequence}') FROM {collection} ORDER BY id"
+        ))
+        .await
+        .expect("per-row nextval over a scan must return the stamped values");
+    assert_eq!(
+        rows,
+        vec!["1".to_string(), "2".to_string()],
+        "one consecutive value per emitted row"
+    );
+
+    // The next allocation continues the sequence, proving the statement
+    // consumed exactly the two values it emitted.
+    let next = server
+        .query_text(&format!("SELECT nextval('{sequence}')"))
+        .await
+        .unwrap();
+    assert_eq!(next, vec!["3".to_string()], "two rows consumed two values");
 }
 
 /// `currval` in a SELECT list over a FROM relation raises `0A000`, the same
@@ -365,20 +377,27 @@ async fn currval_in_a_select_list_over_a_scan_is_refused() {
         .await;
 }
 
-/// A projection mixing a plain column with a sequence accessor is refused as
-/// a whole. Returning the column and a NULL beside it would ship the silent
-/// cell this refusal exists to prevent.
+/// A projection mixing a plain column with a sequence accessor ships the real
+/// column value beside a real stamp, never an empty cell.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_projection_mixing_a_column_and_an_accessor_is_refused() {
+async fn a_projection_mixing_a_column_and_an_accessor_stamps_the_accessor() {
     let server = TestServer::start().await;
     let (sequence, collection) = two_row_collection_with_sequence(&server, "mixed").await;
 
-    server
-        .expect_error(
-            &format!("SELECT id, nextval('{sequence}') FROM {collection}"),
-            "0A000",
-        )
-        .await;
+    let rows = server
+        .query_rows(&format!(
+            "SELECT id, nextval('{sequence}') FROM {collection} ORDER BY id"
+        ))
+        .await
+        .expect("a mixed projection must run");
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "1".to_string()],
+            vec!["2".to_string(), "2".to_string()],
+        ],
+        "the plain column and the stamp travel together"
+    );
 }
 
 /// A sequence accessor in a WHERE clause over a FROM relation is refused for
@@ -396,33 +415,95 @@ async fn a_sequence_accessor_in_a_where_clause_is_refused() {
         .await;
 }
 
-/// The refusal yields no result set at all, so no row can carry an empty or
-/// NULL cell, and the statement allocates nothing from the sequence.
+/// Two `nextval` calls in one FROM-less SELECT allocate the next two values,
+/// and each keeps its own cell even though both output columns share a name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_refused_accessor_produces_no_row_and_no_allocation() {
+async fn two_nextvals_in_one_select_each_keep_their_cell() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE SEQUENCE seq_two_nextval")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT nextval('seq_two_nextval'), nextval('seq_two_nextval')")
+        .await
+        .expect("two from-less nextvals must each return");
+    assert_eq!(
+        rows,
+        vec![vec!["1".to_string(), "2".to_string()]],
+        "each nextval call owns its cell"
+    );
+}
+
+/// A per-row `nextval` stamp updates the session's `currval`, so a later
+/// `currval` answers with the last stamped value — the PostgreSQL contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_per_row_stamp_updates_the_session_currval() {
+    let server = TestServer::start().await;
+    let (sequence, collection) = two_row_collection_with_sequence(&server, "stamp_currval").await;
+
+    let stamped = server
+        .query_text(&format!(
+            "SELECT nextval('{sequence}') FROM {collection} ORDER BY id"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stamped, vec!["1".to_string(), "2".to_string()]);
+
+    let currval = server
+        .query_text(&format!("SELECT currval('{sequence}')"))
+        .await
+        .unwrap();
+    assert_eq!(
+        currval,
+        vec!["2".to_string()],
+        "currval must echo the last per-row stamp"
+    );
+}
+
+/// An unknown sequence in a per-row projection is an undefined object
+/// (`42704`), never an internal fault (`XX000`) and never a silent success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_sequence_in_a_select_list_raises_42704() {
+    let server = TestServer::start().await;
+    let (_sequence, collection) = two_row_collection_with_sequence(&server, "unknown").await;
+
+    server
+        .expect_error(
+            &format!("SELECT nextval('seq_never_created') FROM {collection}"),
+            "42704",
+        )
+        .await;
+}
+
+/// A filter shrinks the stamped row set: only emitted rows consume a value,
+/// and no emitted cell is empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_filtered_scan_consumes_only_emitted_rows() {
     let server = TestServer::start().await;
     let (sequence, collection) = two_row_collection_with_sequence(&server, "guard").await;
 
-    let result = server
-        .query_text(&format!("SELECT nextval('{sequence}') FROM {collection}"))
-        .await;
-    let message = match result {
-        Ok(rows) => panic!("per-row nextval must not return rows, got {rows:?}"),
-        Err(message) => message,
-    };
-    assert!(
-        message.contains("0A000"),
-        "refusal must carry SQLSTATE 0A000, got: {message}"
+    let rows = server
+        .query_text(&format!(
+            "SELECT nextval('{sequence}') FROM {collection} WHERE id = 2"
+        ))
+        .await
+        .expect("a filtered per-row nextval must return the stamped value");
+    assert_eq!(
+        rows,
+        vec!["1".to_string()],
+        "one emitted row consumed one value, got {rows:?}"
     );
 
-    // A refused statement consumes nothing, so the first real allocation is 1.
-    let first = server
+    // The un-emitted row consumed nothing, so the next allocation is 2.
+    let next = server
         .query_text(&format!("SELECT nextval('{sequence}')"))
         .await
         .unwrap();
     assert_eq!(
-        first,
-        vec!["1".to_string()],
-        "the refused statement must not have allocated, got {first:?}"
+        next,
+        vec!["2".to_string()],
+        "the filtered-out row must not have allocated, got {next:?}"
     );
 }

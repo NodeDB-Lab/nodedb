@@ -25,6 +25,39 @@ pub(super) fn source_projection(plan: &SqlPlan) -> Vec<Projection> {
     }
 }
 
+/// Recognise `nextval('<literal>')` as a projection item.
+///
+/// Returns the sequence name. The caller turns this into a
+/// [`Projection::Sequence`] without converting the expression, so the
+/// per-row gate in the function resolver never fires for the one accessor
+/// the control plane can evaluate per row. A non-literal argument (a column,
+/// a parameter) is not recognised and keeps the loud refusal.
+fn nextval_sequence_argument(expr: &ast::Expr) -> Option<String> {
+    let ast::Expr::Function(func) = expr else {
+        return None;
+    };
+    let is_nextval = matches!(
+        func.name.0.as_slice(),
+        [ast::ObjectNamePart::Identifier(ident)]
+            if crate::parser::normalize::normalize_ident(ident).eq_ignore_ascii_case("nextval")
+    );
+    if !is_nextval {
+        return None;
+    }
+    let ast::FunctionArguments::List(list) = &func.args else {
+        return None;
+    };
+    match list.args.as_slice() {
+        [ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(ast::Expr::Value(v)))] => {
+            match &v.value {
+                ast::Value::SingleQuotedString(name) => Some(name.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Convert SELECT projection items.
 pub fn convert_projection(
     items: &[ast::SelectItem],
@@ -35,6 +68,13 @@ pub fn convert_projection(
     for item in items {
         match item {
             ast::SelectItem::UnnamedExpr(expr) => {
+                if let Some(sequence) = nextval_sequence_argument(expr) {
+                    result.push(Projection::Sequence {
+                        sequence,
+                        alias: format!("{expr}").to_lowercase(),
+                    });
+                    continue;
+                }
                 let sql_expr = convert_expr(expr, &scope)?;
                 match &sql_expr {
                     SqlExpr::Column { table, name } => {
@@ -52,6 +92,13 @@ pub fn convert_projection(
                 }
             }
             ast::SelectItem::ExprWithAlias { expr, alias } => {
+                if let Some(sequence) = nextval_sequence_argument(expr) {
+                    result.push(Projection::Sequence {
+                        sequence,
+                        alias: normalize_ident(alias),
+                    });
+                    continue;
+                }
                 let sql_expr = convert_expr(expr, &scope)?;
                 result.push(Projection::Computed {
                     expr: sql_expr,

@@ -129,6 +129,7 @@ fn projects_column(projection: &[Projection], table: Option<&str>, name: &str) -
             projected.eq_ignore_ascii_case(&qualified) || bare(projected).eq_ignore_ascii_case(name)
         }
         Projection::Computed { alias, .. } => alias.eq_ignore_ascii_case(name),
+        Projection::Sequence { alias, .. } => alias.eq_ignore_ascii_case(name),
         Projection::Star | Projection::QualifiedStar(_) => true,
     })
 }

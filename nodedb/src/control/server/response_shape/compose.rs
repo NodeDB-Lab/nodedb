@@ -33,6 +33,7 @@ use super::kv::apply_kv_wrap;
 use super::project::push_flat_rows;
 use super::redaction::RedactionCtx;
 use super::request::MaterializedShapeRequest;
+use super::sequence_stamp::SequenceStamper;
 use super::returning::shape_returning_rows;
 use super::schema::OutputSchema;
 use super::types::{DdlColType, PlanKind, ShapedRows};
@@ -81,6 +82,16 @@ pub fn shape_response_materialized(
         | PlanKind::MultiRow => {}
     }
 
+    // Sequence stamps: the one place a `nextval` value is produced for a
+    // SELECT or RETURNING row set. Built from the request's own identity, so
+    // every materialized caller stamps without opting in.
+    let stamper = SequenceStamper::new(
+        std::sync::Arc::clone(&state.sequence_registry),
+        database_id.as_u64(),
+        tenant_id.as_u64(),
+    );
+    let stamper = Some(&stamper);
+
     // Seam-1 order, exactly as pgwire's `dispatch_task_loop` applies it
     // (apply_kv_wrap -> translate_search_response) before any decode/shape step.
     let wrapped = apply_kv_wrap(plan, payload);
@@ -90,9 +101,9 @@ pub fn shape_response_materialized(
         PlanKind::ArraySlice => shape_array_slice(&translated, redaction)?,
         // `RETURNING` rows are held to the columns already announced to the
         // client, when any were — see `super::returning`.
-        PlanKind::ReturningRows => shape_returning_rows(&translated, projection, redaction)?,
+        PlanKind::ReturningRows => shape_returning_rows(&translated, projection, redaction, stamper)?,
         PlanKind::SingleDocument | PlanKind::MultiRow => {
-            shape_generic_rows(&translated, projection, redaction)?
+            shape_generic_rows(&translated, projection, redaction, stamper)?
         }
         // Handled by the early return above; kept exhaustive (no catch-all,
         // no panic) so a future PlanKind desync degrades to passthrough
@@ -120,7 +131,7 @@ pub fn shape_payload_no_plan(
         PlanKind::Execution | PlanKind::DmlResult(_) => ShapeOutcome::Passthrough,
         PlanKind::ArraySlice => ShapeOutcome::Rows(shape_array_slice(payload, redaction)?),
         PlanKind::ReturningRows => {
-            ShapeOutcome::Rows(shape_returning_rows(payload, projection, redaction)?)
+            ShapeOutcome::Rows(shape_returning_rows(payload, projection, redaction, None)?)
         }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
             ShapeOutcome::Rows(shape_generic_rows(payload, projection, redaction)?)
@@ -155,7 +166,7 @@ fn shape_array_slice(
     let notice = truncated.then(|| TRUNCATED_BEFORE_HORIZON_NOTICE.to_string());
 
     let mut shaped = match sonic_rs::from_str::<JsonValue>(&rows_json) {
-        Ok(value) => shape_decoded_rows(&value, None, redaction)?,
+        Ok(value) => shape_decoded_rows(&value, None, redaction, None)?,
         Err(_) => empty_shaped(),
     };
     shaped.notice = notice;
@@ -171,13 +182,14 @@ fn shape_generic_rows(
     payload: &[u8],
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    stamper: Option<&SequenceStamper>,
 ) -> crate::Result<ShapedRows> {
     if payload.is_empty() {
         return Ok(empty_shaped());
     }
     let text = decode_payload_to_json(payload);
     match sonic_rs::from_str::<JsonValue>(&text) {
-        Ok(value) => shape_decoded_rows(&value, projection, redaction),
+        Ok(value) => shape_decoded_rows(&value, projection, redaction, stamper),
         Err(_) => Ok(single_result_row(text)),
     }
 }
@@ -199,6 +211,7 @@ pub fn shape_decoded_rows(
     decoded: &JsonValue,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    stamper: Option<&SequenceStamper>,
 ) -> crate::Result<ShapedRows> {
     let mut rows = Vec::new();
     push_flat_rows(decoded.clone(), &mut rows)?;
@@ -533,7 +546,8 @@ mod tests {
                     display_name: (*display).to_string(),
                     lookup_key: (*lookup).to_string(),
                     ty: DdlColType::Text,
-                })
+ sequence: None,
+})
                 .collect(),
             is_star: false,
         }
@@ -556,7 +570,7 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(serde_json::json!({"email": "a@b.c", "name": "Alice"}));
 
-        let shaped = shape_decoded_rows(&decoded, None, Some(ctx(&store, &roles, &sources)))
+        let shaped = shape_decoded_rows(&decoded, None, Some(ctx(&store, &roles, &sources)), None)
             .expect("shape rows");
         assert_eq!(shaped.rows[0]["email"], JsonValue::String("***".into()));
         assert_eq!(shaped.rows[0]["name"], JsonValue::String("Alice".into()));
@@ -576,8 +590,8 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(serde_json::json!({"email": "a@b.c", "name": "Alice"}));
 
-        let baseline = shape_decoded_rows(&decoded, None, None).expect("shape rows");
-        let shaped = shape_decoded_rows(&decoded, None, Some(ctx(&store, &roles, &sources)))
+        let baseline = shape_decoded_rows(&decoded, None, None, None).expect("shape rows");
+        let shaped = shape_decoded_rows(&decoded, None, Some(ctx(&store, &roles, &sources)), None)
             .expect("shape rows");
         assert_eq!(shaped.rows, baseline.rows);
         assert_eq!(shaped.columns, baseline.columns);
@@ -602,6 +616,7 @@ mod tests {
             &decoded,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
+            None,
         )
         .expect("shape rows");
         assert_eq!(shaped.columns, vec!["contact".to_string()]);
@@ -630,6 +645,7 @@ mod tests {
             &decoded,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
+            None,
         )
         .expect("shape rows");
         // `cell_keys` suffixes the duplicate display name.
@@ -651,7 +667,7 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(serde_json::json!({"id": "u1", "email": "a@b.c"}));
 
-        let shaped = shape_decoded_rows(&decoded, None, Some(ctx(&store, &roles, &sources)))
+        let shaped = shape_decoded_rows(&decoded, None, Some(ctx(&store, &roles, &sources)), None)
             .expect("shape rows");
         assert!(
             shaped.columns.contains(&"email".to_string()),

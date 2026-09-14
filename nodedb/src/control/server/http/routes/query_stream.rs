@@ -191,10 +191,20 @@ pub(super) fn ndjson_body_stream(
             // `{"id": …, "id_1": …}` rather than collapsing to one cell.
             // Only re-borrows the once-resolved inputs, so the very first
             // batch is redacted under the same policy as the last.
+            // Sequence stamps work per batch: the allocator is shared and
+            // draws fresh values for each batch's row count, so the values
+            // continue across batches in output order.
             let shaped = match shape_decoded_rows(
                 &value,
                 projection.as_ref(),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+                Some(
+                    &crate::control::server::response_shape::sequence_stamp::SequenceStamper::new(
+                        std::sync::Arc::clone(&state.shared.sequence_registry),
+                        database_id.as_u64(),
+                        tenant_id.as_u64(),
+                    ),
+                ),
             ) {
                 Ok(s) => s,
                 Err(e) => {

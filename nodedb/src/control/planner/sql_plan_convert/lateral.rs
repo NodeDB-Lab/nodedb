@@ -198,6 +198,9 @@ fn projection_to_join_projections(projection: &[Projection]) -> Vec<JoinProjecti
                 source: alias.clone(),
                 output: alias.clone(),
             }),
+            // A sequence stamp reads no column from the joined rows: the
+            // control plane fills the cell after shaping. Nothing to fetch.
+            Projection::Sequence { .. } => None,
             Projection::Star | Projection::QualifiedStar(_) => None,
         })
         .collect()

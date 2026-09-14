@@ -70,25 +70,30 @@ pub(in crate::control::planner::sql_plan_convert) fn serialize_join_computed_pro
         });
     }
 
-    let computed = proj
-        .iter()
-        .map(|item| match item {
-            Projection::Column(name) => Some(crate::bridge::expr_eval::ComputedColumn {
+    let mut computed = Vec::new();
+    for item in proj {
+        match item {
+            Projection::Column(name) => computed.push(crate::bridge::expr_eval::ComputedColumn {
                 alias: name.clone(),
                 expr: crate::bridge::expr_eval::SqlExpr::Column(name.clone()),
             }),
             Projection::Computed { expr, alias } => {
-                Some(crate::bridge::expr_eval::ComputedColumn {
+                computed.push(crate::bridge::expr_eval::ComputedColumn {
                     alias: alias.clone(),
                     expr: sql_expr_to_bridge_expr_qualified(expr),
                 })
             }
-            Projection::Star | Projection::QualifiedStar(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "wildcard join projection reached computed-expression lowering".into(),
-        })?;
+            // A sequence stamp reads nothing and evaluates nothing on the
+            // Data Plane; the control plane fills the cell after shaping.
+            Projection::Sequence { .. } => {}
+            Projection::Star | Projection::QualifiedStar(_) => {
+                return Err(crate::Error::BadRequest {
+                    detail: "wildcard join projection reached computed-expression lowering"
+                        .into(),
+                });
+            }
+        }
+    }
     encode_computed_columns(computed, "join computed projection")
 }
 

@@ -231,6 +231,13 @@ impl NodeDbPgHandler {
                         redaction,
                         state: std::sync::Arc::clone(&state),
                         meter_guard,
+                        sequence_stamper: Some(
+                            crate::control::server::response_shape::sequence_stamp::SequenceStamper::new(
+                                std::sync::Arc::clone(&state.sequence_registry),
+                                task.database_id.as_u64(),
+                                task.tenant_id.as_u64(),
+                            ),
+                        ),
                     },
                 )
             }

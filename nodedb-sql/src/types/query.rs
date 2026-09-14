@@ -66,6 +66,14 @@ pub enum Projection {
     QualifiedStar(String),
     /// Computed expression: `SELECT price * qty AS total`
     Computed { expr: SqlExpr, alias: String },
+    /// Sequence accessor: `SELECT nextval('s') AS n`.
+    ///
+    /// The control plane allocates one value per output row and stamps the
+    /// cell after shaping. The Data Plane never sees the accessor: it holds no
+    /// sequence state and would answer NULL for every row. Only `nextval` in
+    /// a top-level projection item becomes a stamp; an accessor anywhere else
+    /// stays refused at plan time.
+    Sequence { sequence: String, alias: String },
 }
 
 /// Sort key for ORDER BY.
