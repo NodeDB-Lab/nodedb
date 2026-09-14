@@ -9,9 +9,10 @@ use crate::data::executor::core_loop::TsGroupKeyKind;
 /// Render one GROUP BY key part with the type its column carries ungrouped.
 ///
 /// The grouped scan reduces every key to a string, so the column's own type
-/// is put back here. An empty part is SQL NULL. A declared instant is stored
-/// in milliseconds and read in microseconds, exactly as row emission reads
-/// it, so the two routes to one stored instant render it identically.
+/// is put back here. An empty part is SQL NULL. A declared instant stays in
+/// its stored millisecond unit; the response boundary converts declared
+/// instants once, after every aggregate, so every route to one stored instant
+/// renders it identically.
 ///
 /// A part that does not parse as its column's type falls back to the text it
 /// holds: the key is data the scan produced, and dropping the group would
@@ -22,14 +23,7 @@ fn group_key_value(part: Option<&&str>, kind: TsGroupKeyKind) -> crate::Result<r
     };
     let value = match kind {
         TsGroupKeyKind::Instant => match text.parse::<i64>() {
-            Ok(millis) => {
-                let micros = nodedb_types::NdbDateTime::from_millis(millis)
-                    .map_err(|e| crate::Error::Internal {
-                        detail: format!("grouped timeseries key at {millis} ms: {e}"),
-                    })?
-                    .micros;
-                rmpv::Value::Integer(micros.into())
-            }
+            Ok(millis) => rmpv::Value::Integer(millis.into()),
             Err(_) => rmpv::Value::String((*text).into()),
         },
         TsGroupKeyKind::Integer => match text.parse::<i64>() {

@@ -172,10 +172,18 @@ fn project_onto_announced(
             out
         })
         .collect();
+    // The one instant conversion, shared with the SELECT path: stored
+    // milliseconds become the microseconds the wire renders. It runs before
+    // the stamps: stored data converts once, then generated values fill the
+    // cells no projection supplied.
+    super::compose::scale_declared_instants(&mut projected, &keys, &column_types)
+        .map_err(NodeDbError::from)?;
     if let Some(stamper) = stamper {
         let sequences: Vec<Option<String>> =
             schema.columns.iter().map(|c| c.sequence.clone()).collect();
-        stamper.stamp(&mut projected, &keys, &sequences)?;
+        stamper
+            .stamp(&mut projected, &keys, &sequences)
+            .map_err(NodeDbError::from)?;
     }
 
     Ok(ShapedRows {
@@ -206,7 +214,8 @@ fn retype_cell(ct: DdlColType, cell: &mut JsonValue) {
         DdlColType::Int8
         | DdlColType::Int4
         | DdlColType::Int2
-        // Epoch microseconds; the encoder formats the number as ISO-8601.
+        // Epoch milliseconds, the storage unit; the response boundary scales
+        // declared instants to the microseconds the wire renders.
         | DdlColType::Timestamp
         | DdlColType::Timestamptz => text.parse::<i64>().ok().map(JsonValue::from),
         DdlColType::Float8 | DdlColType::Float4 => text

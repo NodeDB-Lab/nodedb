@@ -168,37 +168,6 @@ impl CoreLoop {
             })
             .collect()
     }
-
-    /// Declared columns of a timeseries collection that carry an instant.
-    ///
-    /// A column declared `TIMESTAMP` or `TIMESTAMPTZ` is one. The memtable
-    /// keeps every timestamp column in epoch milliseconds, while a client
-    /// reads a `TIMESTAMP` cell as epoch microseconds, so row emission scales
-    /// exactly these columns.
-    ///
-    /// A `BIGINT TIME_KEY` shares the same millisecond column and is absent
-    /// from this list: its declared type is an integer, so it hands back the
-    /// number that was inserted.
-    ///
-    /// An undeclared measurement (raw ILP protocol ingest) has no entry and
-    /// yields an empty list — the planner types its columns as text, so no
-    /// cell of it is read as an instant.
-    pub(in crate::data::executor) fn ts_instant_columns(
-        &self,
-        database_id: DatabaseId,
-        tid: TenantId,
-        collection: &str,
-    ) -> Vec<String> {
-        let Some(declared) = self.declared_timeseries(database_id, tid, collection) else {
-            return Vec::new();
-        };
-        declared
-            .columns
-            .iter()
-            .filter(|(_, type_str)| declared_type_is_instant(type_str))
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
 }
 
 /// How one grouped timeseries column renders in an aggregate result row.
@@ -208,7 +177,8 @@ impl CoreLoop {
 /// timeseries column can take on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum TsGroupKeyKind {
-    /// A declared `TIMESTAMP` / `TIMESTAMPTZ` column: epoch microseconds.
+    /// A declared `TIMESTAMP` / `TIMESTAMPTZ` column: stored epoch
+    /// milliseconds; the response boundary converts declared instants once.
     Instant,
     /// An integer column, including a `BIGINT TIME_KEY`, in its stored unit.
     Integer,
@@ -216,20 +186,6 @@ pub(in crate::data::executor) enum TsGroupKeyKind {
     Float,
     /// A dictionary symbol, or a column with no resolvable storage type.
     Text,
-}
-
-/// The wire shape a memtable storage type renders as.
-///
-/// `Timestamp` maps to `Integer` here: the instant case is decided from the
-/// declared DDL type before this runs, so what reaches it is a `BIGINT`
-/// time key or a system-time column, both of which render as the number
-/// storage holds.
-fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
-    match storage {
-        ColumnType::Int64 | ColumnType::Timestamp => TsGroupKeyKind::Integer,
-        ColumnType::Float64 => TsGroupKeyKind::Float,
-        ColumnType::Symbol => TsGroupKeyKind::Text,
-    }
 }
 
 /// Whether a declared DDL type makes a column an instant on the wire.

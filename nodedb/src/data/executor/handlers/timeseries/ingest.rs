@@ -336,14 +336,6 @@ impl CoreLoop {
             },
             None => Vec::new(),
         };
-        // Same scan-unit rule `SELECT` applies: a declared `TIMESTAMP` cell
-        // leaves the engine as epoch microseconds, not the milliseconds
-        // storage holds.
-        let instant_columns = self.ts_instant_columns(task.request.database_id, tid, collection);
-        if let Err(e) = super::raw_scan::scale_instant_cells(&mut returned_rows, &instant_columns) {
-            return self.response_error(task, e);
-        }
-
         if accepted > 0
             && let Some(lsn) = wal_lsn
         {

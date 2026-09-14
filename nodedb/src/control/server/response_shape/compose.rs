@@ -237,16 +237,15 @@ pub fn shape_decoded_rows(
             // columns to the last value. Encoders re-derive the same keys via
             // `cell_keys` when reading cells.
             let keys = super::project::cell_keys(&display_names);
-            let projected_rows = rows
+            let column_types: Vec<DdlColType> = s.columns.iter().map(|c| c.ty).collect();
+            let mut projected_rows: Vec<Map<String, JsonValue>> = rows
                 .iter()
                 .map(|row| project_row(row, &lookup_keys, &display_names, &keys))
                 .collect();
-            // Carry each projected column's real catalog type, aligned in
-            // order with `display_names`. Only the pgwire encoder consumes
-            // these — mapping them to typed RowDescription OIDs and rendering
-            // each cell in that type's PostgreSQL text form; native/http
-            // ignore column types entirely.
-            let column_types: Vec<DdlColType> = s.columns.iter().map(|c| c.ty).collect();
+            // The declared catalog types travel with the shaped rows: pgwire's
+            // encoder maps them to RowDescription OIDs and renders each cell in
+            // that type's PostgreSQL text form.
+            scale_declared_instants(&mut projected_rows, &keys, &column_types)?;
             Ok(ShapedRows {
                 columns: display_names,
                 column_types,
@@ -268,6 +267,55 @@ pub fn shape_decoded_rows(
             })
         }
     }
+}
+
+/// Convert declared instant cells from the storage unit to the wire unit.
+///
+/// A timeseries collection stores every instant as epoch milliseconds and the
+/// wire renders epoch microseconds. The conversion happens exactly once, here
+/// at the response boundary, after every predicate and projection — so the
+/// Data Plane, joins, and computed expressions all observe milliseconds, and a
+/// remote scan agrees with a local one.
+///
+/// Non-instant columns, SQL NULL, and cells that are not integral numbers pass
+/// through untouched. An instant that would overflow microseconds fails the
+/// response instead of wrapping.
+pub(super) fn scale_declared_instants(
+    rows: &mut [Map<String, JsonValue>],
+    keys: &[String],
+    column_types: &[DdlColType],
+) -> crate::Result<()> {
+    let instant_keys: Vec<&String> = keys
+        .iter()
+        .zip(column_types.iter())
+        .filter(|(_, ct)| matches!(ct, DdlColType::Timestamp | DdlColType::Timestamptz))
+        .map(|(key, _)| key)
+        .collect();
+    if instant_keys.is_empty() {
+        return Ok(());
+    }
+    for row in rows.iter_mut() {
+        for key in &instant_keys {
+            let Some(cell) = row.get_mut(*key) else {
+                continue;
+            };
+            let JsonValue::Number(n) = cell else {
+                continue;
+            };
+            let Some(millis) = n.as_i64() else {
+                continue;
+            };
+            // One constructor owns the millisecond-to-microsecond rule and
+            // its range check, so a future change to either lands here.
+            let micros = nodedb_types::NdbDateTime::from_millis(millis)
+                .map_err(|e| crate::Error::Internal {
+                    detail: format!("declared instant column {key} at {millis} ms: {e}"),
+                })?
+                .micros;
+            *cell = JsonValue::from(micros);
+        }
+    }
+    Ok(())
 }
 
 /// Apply the statement's column-level redaction policy to every flat row.

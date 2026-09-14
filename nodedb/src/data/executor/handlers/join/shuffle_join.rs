@@ -439,7 +439,6 @@ mod tests {
             computed_projection_bytes: &[],
             join_filter_bytes: &[],
             post_filter_bytes: &[],
-            instant_columns: &[],
         };
         let inputs = ShuffleJoinInputs {
             build_path,
