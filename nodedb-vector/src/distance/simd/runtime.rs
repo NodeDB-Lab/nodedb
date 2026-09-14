@@ -2,6 +2,7 @@
 
 //! Runtime SIMD detection and dispatch table.
 
+use super::bbq;
 use super::hamming::fast_hamming;
 use super::scalar::{scalar_cosine, scalar_ip, scalar_l2};
 use crate::distance::typed_scalar;
@@ -12,8 +13,15 @@ use super::{avx2, avx512};
 #[cfg(target_arch = "aarch64")]
 use super::neon;
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use super::wasm_simd128;
+
 /// Function pointer type for half-precision byte-level distance kernels.
 type HalfFn = fn(&[u8], &[u8], usize) -> f32;
+
+/// Fused BBQ decode-and-distance: centred query bytes, packed sign
+/// bits, and the candidate's residual scale. No intermediate Vec<f32>.
+pub type BbqFn = fn(&[u8], &[u8], f32, usize) -> f32;
 
 /// Selected SIMD runtime — function pointers to the best available kernels.
 pub struct SimdRuntime {
@@ -30,6 +38,8 @@ pub struct SimdRuntime {
     pub l2_squared_bf16: HalfFn,
     pub cosine_distance_bf16: HalfFn,
     pub neg_inner_product_bf16: HalfFn,
+    /// Fused BBQ kernels (see `BbqFn`).
+    pub l2_bbq: BbqFn,
 }
 
 impl SimdRuntime {
@@ -57,6 +67,7 @@ impl SimdRuntime {
                     l2_squared_bf16: typed_scalar::l2_squared_bf16,
                     cosine_distance_bf16: typed_scalar::cosine_bf16,
                     neg_inner_product_bf16: typed_scalar::neg_inner_product_bf16,
+                    l2_bbq: avx512::l2_bbq,
                 };
                 tracing::info!(kernel = rt.name, "vector SIMD kernel selected");
                 debug_assert!(
@@ -78,6 +89,7 @@ impl SimdRuntime {
                     l2_squared_bf16: typed_scalar::l2_squared_bf16,
                     cosine_distance_bf16: typed_scalar::cosine_bf16,
                     neg_inner_product_bf16: typed_scalar::neg_inner_product_bf16,
+                    l2_bbq: avx2::l2_bbq,
                 };
                 tracing::info!(kernel = rt.name, "vector SIMD kernel selected");
                 return rt;
@@ -97,6 +109,29 @@ impl SimdRuntime {
                 l2_squared_bf16: typed_scalar::l2_squared_bf16,
                 cosine_distance_bf16: typed_scalar::cosine_bf16,
                 neg_inner_product_bf16: typed_scalar::neg_inner_product_bf16,
+                l2_bbq: neon::l2_bbq,
+            };
+            tracing::info!(kernel = rt.name, "vector SIMD kernel selected");
+            return rt;
+        }
+        // The tier module is itself compile-time gated on `target_feature =
+        // "simd128"`, so this arm's guard must match that gate exactly: no
+        // runtime probe exists for wasm features.
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            let rt = Self {
+                l2_squared: wasm_simd128::l2_squared,
+                cosine_distance: wasm_simd128::cosine_distance,
+                neg_inner_product: wasm_simd128::neg_inner_product,
+                hamming: fast_hamming,
+                name: "wasm-simd128",
+                l2_squared_f16: typed_scalar::l2_squared_f16,
+                cosine_distance_f16: typed_scalar::cosine_f16,
+                neg_inner_product_f16: typed_scalar::neg_inner_product_f16,
+                l2_squared_bf16: typed_scalar::l2_squared_bf16,
+                cosine_distance_bf16: typed_scalar::cosine_bf16,
+                neg_inner_product_bf16: typed_scalar::neg_inner_product_bf16,
+                l2_bbq: wasm_simd128::l2_bbq,
             };
             tracing::info!(kernel = rt.name, "vector SIMD kernel selected");
             return rt;
@@ -115,6 +150,7 @@ impl SimdRuntime {
                 l2_squared_bf16: typed_scalar::l2_squared_bf16,
                 cosine_distance_bf16: typed_scalar::cosine_bf16,
                 neg_inner_product_bf16: typed_scalar::neg_inner_product_bf16,
+                l2_bbq: bbq::l2_bbq,
             };
             tracing::info!(kernel = rt.name, "vector SIMD kernel selected");
             rt

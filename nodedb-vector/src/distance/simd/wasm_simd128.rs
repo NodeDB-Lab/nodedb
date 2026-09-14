@@ -231,3 +231,40 @@ mod tests {
         assert_eq!(cosine_distance(&a, &z), 1.0);
     }
 }
+
+/// 4-lane tier (`simd128`): `v128_bitselect` between `+scale` and `-scale`.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use super::bbq::{l2_scalar_from_bytes, recon_scale};
+pub fn l2_bbq(centered: &[u8], packed: &[u8], residual_norm: f32, dim: usize) -> f32 {
+    use std::arch::wasm32::*;
+
+    let scale = recon_scale(residual_norm, dim);
+    let pos = f32x4_splat(scale);
+    let neg = f32x4_splat(-scale);
+    let mut acc = f32x4_splat(0.0);
+
+    let mut i = 0;
+    while i + 4 <= dim {
+        let byte = packed[i / 8];
+        let base = i % 8;
+        let mut lanes = [0u32; 4];
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            let bit = (byte >> (7 - (base + k))) & 1;
+            *lane = if bit == 1 { u32::MAX } else { 0 };
+        }
+        let mask = u32x4(lanes[0], lanes[1], lanes[2], lanes[3]);
+        // SAFETY: `i + 4 <= dim` and the caller guarantees the byte slices.
+        let q = unsafe { v128_load(centered.as_ptr().add(i * 4).cast()) };
+        let recon = v128_bitselect(pos, neg, mask);
+        let d = f32x4_sub(q, recon);
+        acc = f32x4_add(acc, f32x4_mul(d, d));
+        i += 4;
+    }
+
+    let sum = f32x4_extract_lane::<0>(acc)
+        + f32x4_extract_lane::<1>(acc)
+        + f32x4_extract_lane::<2>(acc)
+        + f32x4_extract_lane::<3>(acc)
+        + l2_scalar_from_bytes(centered, packed, scale, i, dim);
+    sum.sqrt()
+}

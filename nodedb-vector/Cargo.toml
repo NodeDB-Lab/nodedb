@@ -44,3 +44,8 @@ rand = { workspace = true }
 tempfile = { workspace = true }
 libc = { workspace = true }
 nodedb-wal = { workspace = true }
+fluxbench = { workspace = true }
+
+[[bench]]
+name = "bbq_kernel"
+harness = false

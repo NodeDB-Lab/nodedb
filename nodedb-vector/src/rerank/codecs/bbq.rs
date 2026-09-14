@@ -36,50 +36,9 @@ fn encode_payload(query_norm: f32, centered: &[f32]) -> Vec<u8> {
     buf
 }
 
-fn decode_payload(payload: &[u8], dim: usize) -> Result<(f32, Vec<f32>), RerankError> {
-    let expected = 4 + dim * 4;
-    if payload.len() != expected {
-        return Err(RerankError::BadInput(format!(
-            "bbq distance: payload len {} != expected {} for dim {}",
-            payload.len(),
-            expected,
-            dim
-        )));
-    }
-    let query_norm = f32::from_le_bytes(
-        payload[..4]
-            .try_into()
-            .expect("slice of 4 bytes always converts to [u8;4]"),
-    );
-    let centered: Vec<f32> = payload[4..]
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|b| f32::from_le_bytes(*b))
-        .collect();
-    Ok((query_norm, centered))
-}
-
-// ── Inline dequantize (mirrors BbqCodec::dequantize, which is private) ────────
-
-/// Reconstruct an approximate FP32 vector from BBQ sign bits and residual norm.
-///
-/// Each dimension is approximated as ±residual_norm / √dim, with the sign
-/// taken from the packed bit (MSB-first within each byte, same as BBQ's
-/// `pack_signs`).
-#[inline]
-fn bbq_dequantize(packed: &[u8], residual_norm: f32, dim: usize) -> Vec<f32> {
-    let scale = if dim > 0 {
-        residual_norm / (dim as f32).sqrt()
-    } else {
-        0.0
-    };
-    (0..dim)
-        .map(|i| {
-            let bit = (packed[i / 8] >> (7 - (i % 8))) & 1;
-            if bit != 0 { scale } else { -scale }
-        })
-        .collect()
+/// Byte length of a prepared BBQ payload for `dim`: alpha + centered f32s.
+fn payload_len(dim: usize) -> usize {
+    4 + dim * 4
 }
 
 // ── BbqRerank ─────────────────────────────────────────────────────────────────
@@ -197,7 +156,15 @@ impl RerankCodec for BbqRerank {
             }
         };
 
-        let (_query_norm, centered) = decode_payload(payload, self.dim)?;
+        let expected = payload_len(self.dim);
+        if payload.len() != expected {
+            return Err(RerankError::BadInput(format!(
+                "bbq distance: payload len {} != expected {} for dim {}",
+                payload.len(),
+                expected,
+                self.dim
+            )));
+        }
 
         let packed_len = self.dim.div_ceil(8);
         let uqv_ref = UnifiedQuantizedVectorRef::from_bytes(encoded, packed_len).map_err(|e| {
@@ -205,14 +172,15 @@ impl RerankCodec for BbqRerank {
         })?;
 
         let header = uqv_ref.header();
-        let recon = bbq_dequantize(uqv_ref.packed_bits(), header.residual_norm, self.dim);
-        let dist = centered
-            .iter()
-            .zip(recon.iter())
-            .map(|(&a, &b)| (a - b) * (a - b))
-            .sum::<f32>()
-            .sqrt();
-        Ok(dist)
+        // Fused and allocation-free: the kernel reads the centered query
+        // straight from the prepared payload bytes, so a rerank pass pays one
+        // pass and no allocation per candidate (nor per query).
+        Ok((crate::distance::simd::runtime().l2_bbq)(
+            &payload[4..],
+            uqv_ref.packed_bits(),
+            header.residual_norm,
+            self.dim,
+        ))
     }
 
     fn name(&self) -> CodecName {

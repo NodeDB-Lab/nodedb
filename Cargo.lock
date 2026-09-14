@@ -4708,6 +4708,7 @@ dependencies = [
  "arc-swap",
  "bytemuck",
  "crc32c",
+ "fluxbench",
  "half",
  "libc",
  "memmap2",
