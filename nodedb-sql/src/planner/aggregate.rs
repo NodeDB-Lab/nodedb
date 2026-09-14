@@ -413,8 +413,13 @@ pub fn extract_aggregates_from_projection(
             // lowercases. Without this match the row description
             // column `count(distinct user_id)` would not resolve to
             // the JSON value stored under `COUNT(DISTINCT user_id)`,
-            // and the client would see NULL.
-            ast::SelectItem::UnnamedExpr(expr) => (expr, format!("{expr}").to_lowercase()),
+            // and the client would see NULL. The lowercase rule lives in
+            // `unaliased_projection_alias` so no site can derive it
+            // differently.
+            ast::SelectItem::UnnamedExpr(expr) => (
+                expr,
+                crate::planner::ast_helpers::unaliased_projection_alias(expr),
+            ),
             ast::SelectItem::ExprWithAlias { expr, alias } => (expr, normalize_ident(alias)),
             _ => continue,
         };

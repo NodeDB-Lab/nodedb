@@ -19,6 +19,18 @@ pub fn qualified_ident_pair(expr: &ast::Expr) -> Option<(String, String)> {
     }
 }
 
+/// The output name an unaliased projection item takes: the lowercased SQL
+/// text of the expression.
+///
+/// This is the single derivation every consumer must use. A window spec is
+/// matched back to its projection by alias, so deriving the name twice — once
+/// lowercased here, once verbatim in the window extractor — silently detached
+/// every unaliased windowed projection from its spec and answered a NULL
+/// column with no error.
+pub fn unaliased_projection_alias(expr: &ast::Expr) -> String {
+    format!("{expr}").to_lowercase()
+}
+
 /// Flatten a right-leaning AND expression tree into a list of conjuncts.
 pub fn flatten_and_expr(expr: &ast::Expr, out: &mut Vec<ast::Expr>) {
     match expr {

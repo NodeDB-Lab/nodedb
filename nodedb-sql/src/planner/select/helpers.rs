@@ -46,7 +46,7 @@ pub fn convert_projection(
                     _ => {
                         result.push(Projection::Computed {
                             expr: sql_expr,
-                            alias: format!("{expr}").to_lowercase(),
+                            alias: crate::planner::ast_helpers::unaliased_projection_alias(expr),
                         });
                     }
                 }
