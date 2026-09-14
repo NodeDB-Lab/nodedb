@@ -31,11 +31,6 @@ use crate::control::state::SharedState;
 /// seconds, so a coarse poll costs nothing and avoids a busy loop.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Upper bound on the whole wait. Generous relative to a randomized election
-/// timeout plus replay of a retained log, but finite: a group that cannot elect
-/// or cannot apply is a failure, not a reason to hang forever.
-pub const DATA_GROUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// True when `group_id` names a data group whose log carries user writes that
 /// must be replayed into the Data Plane before queries are served.
 ///
@@ -172,12 +167,20 @@ fn pending_groups(statuses: Vec<nodedb_cluster::GroupStatus>) -> Vec<PendingGrou
 ///
 /// A node with no Raft status source (a deployment with no cluster handle
 /// installed) hosts no data groups and returns immediately.
-pub async fn await_data_group_recovery(shared: &Arc<SharedState>) -> anyhow::Result<()> {
+///
+/// `timeout` bounds the whole wait: generous relative to a randomized election
+/// timeout plus replay of a retained log, but finite — a group that cannot
+/// elect or cannot apply is a failure, not a reason to hang forever. The
+/// caller supplies it from `[server] data_group_recovery_timeout_ms`.
+pub async fn await_data_group_recovery(
+    shared: &Arc<SharedState>,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let Some(status_fn) = shared.raft_status_fn.get() else {
         return Ok(());
     };
     let status_fn = Arc::clone(status_fn);
-    let deadline = Instant::now() + DATA_GROUP_RECOVERY_TIMEOUT;
+    let deadline = Instant::now() + timeout;
 
     loop {
         let pending = pending_groups(status_fn());
@@ -193,7 +196,7 @@ pub async fn await_data_group_recovery(shared: &Arc<SharedState>) -> anyhow::Res
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(anyhow::anyhow!(
-                "data raft group recovery timeout after {DATA_GROUP_RECOVERY_TIMEOUT:?}: {detail}"
+                "data raft group recovery timeout after {timeout:?}: {detail}"
             ));
         }
 

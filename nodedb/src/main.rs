@@ -274,6 +274,7 @@ async fn server_main() -> anyhow::Result<()> {
             health_loop_gate,
             gateway_enable_gate,
         },
+        std::time::Duration::from_millis(config.server.data_group_recovery_timeout_ms),
     )
     .await?;
 

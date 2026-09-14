@@ -66,6 +66,20 @@ pub struct ServerSection {
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
+    /// Startup budget, in milliseconds, for the data-group replay gate.
+    ///
+    /// After a restart every locally hosted data Raft group must re-deliver
+    /// its retained log before the client gateway opens. A group that has not
+    /// caught up within this budget fails the boot with a `StartupError`.
+    ///
+    /// A post-restart leadership race can hold a group one index short of its
+    /// commit index (a trailing election no-op delivered while a proposer
+    /// waits) until a fresh boot converges it. Raise this on loaded or
+    /// large-log deployments so a slow-but-sound replay is not aborted at the
+    /// default. Default: 60000 (60s).
+    #[serde(default = "default_data_group_recovery_timeout_ms")]
+    pub data_group_recovery_timeout_ms: u64,
+
     /// Log output format: `"text"` (default, human-readable) or `"json"` (structured).
     /// Unknown values are rejected at startup — there is no silent fallback.
     #[serde(default)]
@@ -125,6 +139,7 @@ impl Default for ServerSection {
             data_plane_cores: default_data_plane_cores(),
             memory_limit: default_memory_limit(),
             max_connections: default_max_connections(),
+            data_group_recovery_timeout_ms: default_data_group_recovery_timeout_ms(),
             log_format: LogFormat::Text,
             tls: None,
             single_node_calvin: default_single_node_calvin(),
@@ -156,6 +171,13 @@ fn default_memory_limit() -> usize {
 
 fn default_max_connections() -> usize {
     4096
+}
+
+/// Default for [`ServerSection::data_group_recovery_timeout_ms`]: 60s, the
+/// budget the recovery gate has always used. Operators raise it when a
+/// post-restart replay on a loaded box needs longer to converge.
+fn default_data_group_recovery_timeout_ms() -> u64 {
+    60_000
 }
 
 /// Deserializer for `memory_limit` that accepts either a raw byte count
@@ -208,6 +230,7 @@ mod tests {
         assert_eq!(s.memory_limit, 1024 * 1024 * 1024);
         assert!(s.data_plane_cores >= 1);
         assert_eq!(s.max_connections, 4096);
+        assert_eq!(s.data_group_recovery_timeout_ms, 60_000);
         assert_eq!(s.log_format, LogFormat::Text);
     }
 

@@ -33,6 +33,7 @@ pub async fn await_cluster_ready(
     raft_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
     data_plane_replay_done: Vec<tokio::sync::oneshot::Receiver<()>>,
     gates: ClusterReadyGates,
+    data_group_recovery_timeout: Duration,
 ) -> anyhow::Result<()> {
     let ClusterReadyGates {
         raft_gate,
@@ -143,7 +144,12 @@ pub async fn await_cluster_ready(
     // elections, so without this wait the gateway can open while a data
     // group's engines are still empty and an acknowledged write reads back as
     // if it never happened. Fail closed, like the replay wait above.
-    if let Err(e) = crate::bootstrap::data_group_recovery::await_data_group_recovery(shared).await {
+    if let Err(e) = crate::bootstrap::data_group_recovery::await_data_group_recovery(
+        shared,
+        data_group_recovery_timeout,
+    )
+    .await
+    {
         data_groups_gate.fail(format!("data raft group recovery failed: {e}"));
         return Err(e);
     }
