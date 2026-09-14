@@ -138,6 +138,8 @@ impl CoreLoop {
                 match_pattern,
                 sort_keys,
                 surrogate_ceiling,
+                projection,
+                computed_columns,
             } => self.execute_kv_scan(
                 task,
                 super::scan::KvScanHandlerParams {
@@ -150,6 +152,8 @@ impl CoreLoop {
                     filters,
                     sort_keys,
                     surrogate_ceiling: *surrogate_ceiling,
+                    projection,
+                    computed_columns,
                 },
             ),
             KvOp::Expire {

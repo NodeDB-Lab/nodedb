@@ -246,6 +246,8 @@ async fn scan_all_entries(
         match_pattern: None,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
     });
     gate.inject_rls(&mut plan)?;
 

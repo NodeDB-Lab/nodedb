@@ -151,6 +151,8 @@ pub fn full_scan_plan_for_collection(
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
         }),
         CollectionType::Columnar(ColumnarProfile::Plain)
         | CollectionType::Columnar(ColumnarProfile::Spatial { .. }) => {
