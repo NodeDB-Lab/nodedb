@@ -426,3 +426,34 @@ async fn a_refused_accessor_produces_no_row_and_no_allocation() {
         "the refused statement must not have allocated, got {first:?}"
     );
 }
+
+/// A from-less projection legally repeats an output name
+/// (`SELECT nextval('s'), nextval('s')`). The constant row is a single JSON
+/// object, so keying both cells by the display name collapsed them to the
+/// last value and both wire columns rendered it. Each column must keep its
+/// own cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicate_constant_column_names_keep_their_own_cells() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE SEQUENCE dup_cell_seq START 1 INCREMENT 1")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT nextval('dup_cell_seq'), nextval('dup_cell_seq')")
+        .await
+        .expect("a from-less projection repeating an output name must return one row");
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one constant row, got {rows:?}"
+    );
+    assert_eq!(
+        rows[0],
+        vec!["1".to_string(), "2".to_string()],
+        "each duplicate column must keep its own cell; keying both by the \
+         display name collapses them to the last value"
+    );
+}

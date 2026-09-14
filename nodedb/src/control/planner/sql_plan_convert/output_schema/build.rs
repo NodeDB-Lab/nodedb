@@ -173,17 +173,26 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             let types = super::join_types::join_column_types(left, right, catalog, database_id);
             schema_from_projection(projection, &types, &[])
         }
-        SqlPlan::ConstantResult { columns, .. } => OutputSchema {
-            columns: columns
-                .iter()
-                .map(|c| OutputColumn {
-                    display_name: c.clone(),
-                    lookup_key: c.clone(),
-                    ty: DdlColType::Text,
-                })
-                .collect(),
-            is_star: false,
-        },
+        SqlPlan::ConstantResult { columns, .. } => {
+            // The row payload keys each cell by the unique per-column key
+            // (`cell_keys`), not the raw display name: two constant columns may
+            // share a name (`SELECT nextval('s'), nextval('s')`), and a single
+            // JSON object would collapse them. `display_name` keeps the
+            // client-facing name; `lookup_key` is the cell key.
+            let lookup_keys = crate::control::server::response_shape::project::cell_keys(columns);
+            OutputSchema {
+                columns: columns
+                    .iter()
+                    .zip(lookup_keys)
+                    .map(|(c, lookup_key)| OutputColumn {
+                        display_name: c.clone(),
+                        lookup_key,
+                        ty: DdlColType::Text,
+                    })
+                    .collect(),
+                is_star: false,
+            }
+        }
         SqlPlan::Aggregate {
             input,
             group_by,
