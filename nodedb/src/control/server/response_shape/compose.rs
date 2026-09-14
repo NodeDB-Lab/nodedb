@@ -273,6 +273,27 @@ pub fn shape_decoded_rows(
             // schemaless collections.
             let columns = derive_columns(&rows);
             let column_types = ShapedRows::text_types(columns.len());
+            // A declared collection's star still carries the resolved catalog
+            // types for its declared columns. They are not announced, but a
+            // declared instant is stored in milliseconds and leaves as the
+            // wire's microseconds here too: the same once-only conversion the
+            // named-projection path applies. A column with no declared type
+            // (a schemaless field) stays TEXT and is left untouched.
+            if let Some(s) = projection {
+                if s.is_star && !s.columns.is_empty() {
+                    let types: Vec<DdlColType> = columns
+                        .iter()
+                        .map(|name| {
+                            s.columns
+                                .iter()
+                                .find(|c| c.lookup_key == *name || c.display_name == *name)
+                                .map(|c| c.ty)
+                                .unwrap_or(DdlColType::Text)
+                        })
+                        .collect();
+                    scale_declared_instants(&mut rows, &columns, &types)?;
+                }
+            }
             Ok(ShapedRows {
                 columns,
                 column_types,
