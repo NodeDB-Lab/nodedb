@@ -11,7 +11,8 @@ pub mod parse;
 pub mod privilege;
 
 pub use error_map::{
-    error_to_sqlstate, notice_warning, response_status_to_sqlstate, sqlstate_error,
+    error_to_sqlstate, notice_warning, numeric_code_to_sqlstate, response_status_to_sqlstate,
+    sqlstate_error,
 };
 pub use field::{
     bool_field, bytea_field, float4_array_field, float4_field, float8_array_field, float8_field,

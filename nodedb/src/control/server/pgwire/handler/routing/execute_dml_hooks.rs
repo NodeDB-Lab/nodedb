@@ -21,7 +21,7 @@ use crate::control::trigger::dml_hook::DmlWriteInfo;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::super::types::{error_to_sqlstate, sqlstate_error};
+use super::super::super::types::{error_to_sqlstate, numeric_code_to_sqlstate, sqlstate_error};
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::PlanKind;
 
@@ -332,7 +332,7 @@ impl NodeDbPgHandler {
                         projection,
                         Some(redaction.ctx(&self.state.redaction)),
                     )
-                    .map_err(|e| sqlstate_error("XX000", e.message()))?
+                    .map_err(|e| sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message()))?
                     {
                         ShapeOutcome::Rows(shaped) => {
                             // Clone write-path DML result (PointUpdate/PointDelete):

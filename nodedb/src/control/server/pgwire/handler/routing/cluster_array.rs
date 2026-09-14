@@ -19,7 +19,7 @@ use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::session::SessionId;
 
-use super::super::super::types::{error_to_sqlstate, sqlstate_error};
+use super::super::super::types::{error_to_sqlstate, numeric_code_to_sqlstate, sqlstate_error};
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::{PlanKind, payload_to_response};
 use super::super::shape_encode;
@@ -128,7 +128,7 @@ impl NodeDbPgHandler {
             projection,
             Some(redaction.ctx(&self.state.redaction)),
         )
-        .map_err(|e| sqlstate_error("XX000", e.message()))?
+        .map_err(|e| sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message()))?
         {
             ShapeOutcome::Rows(shaped) => {
                 let (response, notice) =

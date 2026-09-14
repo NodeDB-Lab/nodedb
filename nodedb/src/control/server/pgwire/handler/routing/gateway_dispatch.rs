@@ -22,7 +22,7 @@ use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch}
 use crate::types::{TenantId, TraceId};
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::super::types::sqlstate_error;
+use super::super::super::types::{numeric_code_to_sqlstate, sqlstate_error};
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::shape_encode;
@@ -75,7 +75,7 @@ fn push_shaped_response(
         projection,
         Some(redaction.ctx(&state.redaction)),
     )
-    .map_err(|e| sqlstate_error("XX000", e.message()))?
+    .map_err(|e| sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message()))?
     {
         ShapeOutcome::Rows(shaped) => {
             let (response, notice) = shape_encode::shaped_query_response(shaped, result_formats);
@@ -228,7 +228,7 @@ impl NodeDbPgHandler {
                         projection,
                         Some(redaction.ctx(&self.state.redaction)),
                     )
-                    .map_err(|e| sqlstate_error("XX000", e.message()))?
+                    .map_err(|e| sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message()))?
                     {
                         ShapeOutcome::Rows(shaped) => {
                             task_rows = Some(task_rows.unwrap_or(0) + shaped.rows.len() as u64);

@@ -13,7 +13,7 @@ use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::redaction::RedactionCtx;
 use crate::control::server::response_shape::schema::OutputSchema;
 
-use super::super::super::types::sqlstate_error;
+use super::super::super::types::{numeric_code_to_sqlstate, sqlstate_error};
 use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::shape_encode;
 
@@ -37,7 +37,7 @@ pub(super) fn apply_set_ops(
     };
     Ok(
         match compose::shape_payload_no_plan(&merged, PlanKind::MultiRow, projection, redaction)
-            .map_err(|e| sqlstate_error("XX000", e.message()))?
+            .map_err(|e| sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message()))?
         {
             ShapeOutcome::Rows(shaped) => {
                 shape_encode::shaped_query_response(shaped, result_formats)

@@ -197,7 +197,7 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
 /// numeric code, so a constraint violation (say) maps to the same SQLSTATE
 /// whether it happened locally or on a remote node. Unmapped/unknown codes
 /// fall back to INTERNAL_ERROR — the behaviour before codes were preserved.
-pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> &'static str {
+pub fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> &'static str {
     use nodedb_types::error::ErrorCode as Ec;
     match code {
         // Mirrors the `RejectedConstraint` arm.
@@ -213,6 +213,27 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::DOCUMENT_NOT_FOUND => sqlstate::NO_DATA,
         // Mirrors the `BadRequest` / `PlanError` arms.
         Ec::BAD_REQUEST | Ec::PLAN_ERROR => sqlstate::SYNTAX_ERROR,
+        // A named catalog object (a sequence, most commonly) that does not
+        // exist. Without this arm the code falls back to INTERNAL_ERROR
+        // (XX000), so a client-visible "undefined object" reaches pgwire as an
+        // internal fault — the same error-class leak the response-shaping path
+        // had.
+        Ec::UNDEFINED_OBJECT => sqlstate::UNDEFINED_OBJECT,
+        // The object exists but its prerequisite step has not run, such as
+        // `currval` before this session called `nextval`. Mirrors the
+        // `ObjectNotInPrerequisiteState` arm.
+        Ec::OBJECT_NOT_READY => sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        // A generic lookup miss. Mirrors `crate::Error::DocumentNotFound`'s
+        // no-data class for the callers that use the generic code.
+        Ec::NOT_FOUND => sqlstate::NO_DATA,
+        // The named database does not exist.
+        Ec::DATABASE_NOT_FOUND => sqlstate::INVALID_CATALOG_NAME,
+        // SQL is disabled for this server; not a retryable internal fault.
+        Ec::SQL_NOT_ENABLED => sqlstate::FEATURE_NOT_SUPPORTED,
+        // A value could not be coerced to the target type.
+        Ec::TYPE_MISMATCH => sqlstate::CANNOT_COERCE,
+        // A value outside the target type's range.
+        Ec::OVERFLOW => sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,
         // Mirrors the `UndefinedFunction` arm.
         Ec::UNDEFINED_FUNCTION => sqlstate::UNDEFINED_FUNCTION,
         // Mirrors the `UndefinedColumn` arm.
