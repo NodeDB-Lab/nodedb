@@ -182,10 +182,32 @@ impl CoreLoop {
                     }
                 };
             if !specs.is_empty() && !rows.is_empty() {
-                let mut decoded: Vec<(String, serde_json::Value)> = Vec::with_capacity(rows.len());
-                for (i, row) in rows.iter().enumerate() {
-                    match nodedb_types::json_from_msgpack(row) {
-                        Ok(v) => decoded.push((i.to_string(), v)),
+                // Decode losslessly: the JSON codec downgrades tagged cells
+                // (Uuid, Bytes, Decimal, DateTime) of every row the window set
+                // does not even touch. The value evaluator appends one Value
+                // per spec; those cells overlay the original maps, so only the
+                // window aliases come from evaluation.
+                let mut maps: Vec<nodedb_types::Value> = Vec::with_capacity(rows.len());
+                let mut column_index: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for row in rows.iter() {
+                    match nodedb_types::value_from_msgpack(row) {
+                        Ok(value) => {
+                            let nodedb_types::Value::Object(map) = &value else {
+                                return self.response_error(
+                                    task,
+                                    ErrorCode::Internal {
+                                        detail: "ProviderScan: window row is not an object"
+                                            .to_string(),
+                                    },
+                                );
+                            };
+                            for key in map.keys() {
+                                let next = column_index.len();
+                                column_index.entry(key.clone()).or_insert(next);
+                            }
+                            maps.push(value);
+                        }
                         Err(e) => {
                             return self.response_error(
                                 task,
@@ -196,13 +218,42 @@ impl CoreLoop {
                         }
                     }
                 }
-                if let Err(e) =
-                    crate::bridge::window_func::evaluate_window_functions(&mut decoded, &specs)
-                {
-                    return self.response_error(task, ErrorCode::from(crate::Error::from(e)));
+                let width = column_index.len();
+                let mut arrays: Vec<Vec<nodedb_types::Value>> = maps
+                    .iter()
+                    .map(|value| {
+                        let nodedb_types::Value::Object(map) = value else {
+                            return Vec::new();
+                        };
+                        let mut cells = vec![nodedb_types::Value::Null; width];
+                        for (key, position) in &column_index {
+                            if let Some(cell) = map.get(key) {
+                                cells[*position] = cell.clone();
+                            }
+                        }
+                        cells
+                    })
+                    .collect();
+                let new_cols = match crate::bridge::window_func::evaluate_window_functions_value(
+                    &mut arrays,
+                    &column_index,
+                    &specs,
+                ) {
+                    Ok(cols) => cols,
+                    Err(e) => {
+                        return self.response_error(task, ErrorCode::from(crate::Error::from(e)));
+                    }
+                };
+                for (value, cells) in maps.iter_mut().zip(arrays) {
+                    let nodedb_types::Value::Object(map) = value else {
+                        continue;
+                    };
+                    for (offset, name) in new_cols.iter().enumerate() {
+                        map.insert(name.clone(), cells[width + offset].clone());
+                    }
                 }
-                for (slot, (_, v)) in rows.iter_mut().zip(decoded) {
-                    match nodedb_types::json_to_msgpack(&v) {
+                for (slot, value) in rows.iter_mut().zip(maps) {
+                    match nodedb_types::value_to_msgpack(&value) {
                         Ok(encoded) => *slot = encoded,
                         Err(e) => {
                             return self.response_error(

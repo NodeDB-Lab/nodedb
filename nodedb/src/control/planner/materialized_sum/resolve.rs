@@ -44,6 +44,41 @@ fn un_batch_cross_shard_pages(
     let mut rebuilt: Vec<PhysicalTask> = Vec::with_capacity(tasks.len());
 
     for task in tasks.drain(..) {
+        // Decide from a borrow first: the common path (a co-resident page, a
+        // page whose collection drives no binding, or any non-page task) must
+        // not pay a deep clone of the page's row bodies.
+        let cross_shard_page = match &task.plan {
+            PhysicalPlan::Document(DocumentOp::BatchInsert {
+                collection,
+                documents,
+                ..
+            }) if !documents.is_empty() => {
+                let bindings = state.materialized_sum_index.bindings_for_source(
+                    catalog,
+                    schema_version,
+                    database_id,
+                    tenant_id,
+                    strip_db_prefix(database_id, collection.as_str()),
+                )?;
+                bindings.is_some_and(|bindings| {
+                    bindings.iter().any(|binding| {
+                        !sum_target_is_co_resident(
+                            database_id,
+                            collection.as_str(),
+                            &binding.target_collection,
+                        )
+                    })
+                })
+            }
+            _ => false,
+        };
+        if !cross_shard_page {
+            rebuilt.push(task);
+            continue;
+        }
+
+        // Un-batch: take the page apart by value. The shape was checked on the
+        // borrow above.
         let PhysicalPlan::Document(DocumentOp::BatchInsert {
             collection,
             documents,
@@ -51,33 +86,10 @@ fn un_batch_cross_shard_pages(
             returning,
             rls_filters,
             ..
-        }) = task.plan.clone()
+        }) = task.plan
         else {
-            rebuilt.push(task);
-            continue;
+            unreachable!("checked above: only a cross-shard BatchInsert reaches here");
         };
-        if documents.is_empty() {
-            rebuilt.push(task);
-            continue;
-        }
-        let Some(bindings) = state.materialized_sum_index.bindings_for_source(
-            catalog,
-            schema_version,
-            database_id,
-            tenant_id,
-            strip_db_prefix(database_id, collection.as_str()),
-        )?
-        else {
-            rebuilt.push(task);
-            continue;
-        };
-        let cross_shard = bindings.iter().any(|binding| {
-            !sum_target_is_co_resident(database_id, collection.as_str(), &binding.target_collection)
-        });
-        if !cross_shard {
-            rebuilt.push(task);
-            continue;
-        }
         for ((document_id, value), surrogate) in documents.into_iter().zip(surrogates) {
             rebuilt.push(PhysicalTask {
                 tenant_id: task.tenant_id,

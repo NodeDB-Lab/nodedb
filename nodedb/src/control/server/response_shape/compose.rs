@@ -319,6 +319,11 @@ pub fn shape_decoded_rows(
 /// Non-instant columns, SQL NULL, and cells that are not integral numbers pass
 /// through untouched. An instant that would overflow microseconds fails the
 /// response instead of wrapping.
+///
+/// Invariant recorded for the numeric arm below: every engine emits a declared
+/// instant either as a `DateTime`/string (which skips this function) or as a
+/// numeric value in **milliseconds**. A future engine emitting a numeric
+/// instant in microseconds would be scaled ×1000 here unnoticed.
 pub(super) fn scale_declared_instants(
     rows: &mut [Map<String, JsonValue>],
     keys: &[String],

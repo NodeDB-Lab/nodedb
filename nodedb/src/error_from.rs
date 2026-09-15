@@ -28,6 +28,22 @@ impl From<nodedb_query::EvalError> for Error {
     }
 }
 
+/// The value-codec window evaluator's error. A missing partition column or a
+/// bad frame is an internal plan error; an argument failure wraps the shared
+/// `EvalError` so the wire class matches the other evaluators.
+impl From<nodedb_query::WindowError> for Error {
+    fn from(e: nodedb_query::WindowError) -> Self {
+        match e {
+            nodedb_query::WindowError::Eval(inner) => Self::from(inner),
+            nodedb_query::WindowError::ColumnNotFound { name } => Self::Internal {
+                detail: format!("window column '{name}' not found in result columns"),
+            },
+            nodedb_query::WindowError::ArgEval { detail } => Self::Internal { detail },
+            nodedb_query::WindowError::BadFrame { detail } => Self::Internal { detail },
+        }
+    }
+}
+
 impl From<crate::engine::timeseries::ilp::IlpError> for Error {
     fn from(e: crate::engine::timeseries::ilp::IlpError) -> Self {
         Self::BadRequest {

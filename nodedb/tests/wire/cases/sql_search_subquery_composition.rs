@@ -264,3 +264,74 @@ async fn outer_order_by_distance_then_limit_takes_farthest() {
         "LIMIT after an outer ORDER BY must cut the reordered rows, got: {rows:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outer_order_by_vector_distance_declares_distance() {
+    let server = TestServer::start().await;
+    create_vector_collection(&server, "vec_implicit").await;
+
+    // A hand-written `ORDER BY vector_distance(...)` derived table (no SEARCH
+    // keyword) takes the same sort-trigger rewrite as the SEARCH form, so the
+    // synthetic `distance` column must resolve AND carry a value: declaring
+    // the column without producing a cell would make `s.distance` a phantom.
+    let rows = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM vec_implicit \
+              ORDER BY vector_distance(embedding, ARRAY[0.1, 0.2, 0.3, 0.4]) LIMIT 2) s",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two rows expected, got: {rows:?}");
+    let first: f64 = rows[0]
+        .parse()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got: {rows:?}"));
+    let second: f64 = rows[1]
+        .parse()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got: {rows:?}"));
+    assert!(
+        first <= second,
+        "distance must be ordered nearest-first, got: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outer_order_by_vector_distance_without_index_stays_consistent() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION vec_no_index").await.unwrap();
+    for (id, v) in [
+        ("r0", [0.10f32, 0.20, 0.30, 0.40]),
+        ("r1", [0.11, 0.21, 0.31, 0.41]),
+    ] {
+        server
+            .exec(&format!(
+                "INSERT INTO vec_no_index (id, embedding) VALUES ('{id}', ARRAY[{},{},{},{}])",
+                v[0], v[1], v[2], v[3]
+            ))
+            .await
+            .unwrap();
+    }
+
+    // The no-index negative case: the sort-trigger rewrite does not consult
+    // the index, so the derived table must either serve numeric distances
+    // (brute force) or refuse the statement outright. The only wrong outcome
+    // is a declared `distance` column with silent NULL cells (schema-vs-row
+    // skew), so a success must carry a value per row.
+    let result = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM vec_no_index \
+              ORDER BY vector_distance(embedding, ARRAY[0.1, 0.2, 0.3, 0.4]) LIMIT 2) s",
+        )
+        .await;
+    match result {
+        Ok(rows) => assert!(
+            rows.iter().all(|row| row.parse::<f64>().is_ok()),
+            "distance cells must be numeric when the query succeeds, got: {rows:?}"
+        ),
+        Err(e) => assert!(
+            !e.to_string().is_empty(),
+            "a refusal must carry its reason, got an empty error"
+        ),
+    }
+}

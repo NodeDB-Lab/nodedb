@@ -172,10 +172,16 @@ impl CoreLoop {
         // suppression (clone_write_suppresses_source_row).
         if !computed_columns.is_empty() {
             let computed_cols: Vec<crate::bridge::expr_eval::ComputedColumn> =
-                if computed_columns.is_empty() {
-                    Vec::new()
-                } else {
-                    zerompk::from_msgpack(computed_columns).unwrap_or_default()
+                match zerompk::from_msgpack(computed_columns) {
+                    Ok(cols) => cols,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("KV scan: malformed computed columns: {e}"),
+                            },
+                        );
+                    }
                 };
             for entry in result_entries.iter_mut() {
                 match crate::data::executor::handlers::document::read::projection::
