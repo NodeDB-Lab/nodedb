@@ -82,7 +82,10 @@ mod tests {
     fn decoded(bytes: &[u8]) -> HashMap<String, nodedb_types::Value> {
         match nodedb_types::value_from_msgpack(bytes).unwrap() {
             nodedb_types::Value::Object(map) => map,
-            other => panic!("expected an object, got {other:?}"),
+            other => panic!(
+                "expected an object, got the {:?} variant",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -101,7 +104,12 @@ mod tests {
 
         let projected = decoded(&apply_projection_msgpack(&data, &computed, &projection).unwrap());
 
-        assert_eq!(projected.len(), 3, "got {projected:?}");
+        assert_eq!(
+            projected.len(),
+            3,
+            "keys: {:?}",
+            projected.keys().collect::<Vec<_>>()
+        );
         assert_eq!(
             projected.get("name"),
             Some(&nodedb_types::Value::String("Ada".into()))
@@ -133,7 +141,8 @@ mod tests {
         assert_eq!(
             projected.get("pr_score"),
             Some(&nodedb_types::Value::Null),
-            "a missing projection key must be SQL NULL, got {projected:?}"
+            "a missing projection key must be SQL NULL; keys: {:?}",
+            projected.keys().collect::<Vec<_>>()
         );
     }
 
