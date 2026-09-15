@@ -20,7 +20,89 @@ use super::stored::stored_row_scope;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::server::surrogate_exchange::lookup_surrogate_routed;
 use crate::control::state::SharedState;
+use crate::query::sum_target_is_co_resident;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
+
+/// Replace every `BatchInsert` page whose source drives a CROSS-SHARD
+/// materialized-sum binding with one `PointInsert` task per row.
+///
+/// The page shape is settled per settlement on the Data Plane and per sibling
+/// task on the Control Plane; a page that needs a cross-shard sibling never
+/// completes its Calvin transaction. The per-row shape is exactly what this
+/// server shipped before pages existed, and it settles the same rows, so the
+/// page is un-batched before resolution rather than settled by a new path.
+/// Pages whose bindings are all co-resident (and pages over collections that
+/// drive no binding at all) keep their single task.
+fn un_batch_cross_shard_pages(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+) -> crate::Result<()> {
+    let schema_version = state.schema_version.current();
+    let catalog = state.credentials.catalog();
+    let mut rebuilt: Vec<PhysicalTask> = Vec::with_capacity(tasks.len());
+
+    for task in tasks.drain(..) {
+        let PhysicalPlan::Document(DocumentOp::BatchInsert {
+            collection,
+            documents,
+            surrogates,
+            returning,
+            rls_filters,
+            ..
+        }) = task.plan.clone()
+        else {
+            rebuilt.push(task);
+            continue;
+        };
+        if documents.is_empty() {
+            rebuilt.push(task);
+            continue;
+        }
+        let Some(bindings) = state.materialized_sum_index.bindings_for_source(
+            catalog,
+            schema_version,
+            database_id,
+            tenant_id,
+            strip_db_prefix(database_id, collection.as_str()),
+        )?
+        else {
+            rebuilt.push(task);
+            continue;
+        };
+        let cross_shard = bindings.iter().any(|binding| {
+            !sum_target_is_co_resident(database_id, collection.as_str(), &binding.target_collection)
+        });
+        if !cross_shard {
+            rebuilt.push(task);
+            continue;
+        }
+        for ((document_id, value), surrogate) in documents.into_iter().zip(surrogates) {
+            rebuilt.push(PhysicalTask {
+                tenant_id: task.tenant_id,
+                vshard_id: task.vshard_id,
+                database_id: task.database_id,
+                plan: PhysicalPlan::Document(DocumentOp::PointInsert {
+                    collection: collection.clone(),
+                    document_id,
+                    value,
+                    if_absent: false,
+                    surrogate,
+                    returning: returning.clone(),
+                    rls_filters: rls_filters.clone(),
+                    resolved_sum_targets: Vec::new(),
+                    deferred_sum_targets: Vec::new(),
+                }),
+                post_set_op: task.post_set_op,
+                txn_id: task.txn_id,
+            });
+        }
+    }
+
+    *tasks = rebuilt;
+    Ok(())
+}
 
 /// Resolve the materialized-sum target rows for every document write in
 /// `tasks`, storing the result in that op's `resolved_sum_targets`.
@@ -50,6 +132,16 @@ pub async fn resolve_materialized_sum_targets(
     database_id: DatabaseId,
     trace_id: TraceId,
 ) -> crate::Result<Vec<ReadSetEntry>> {
+    // A `BatchInsert` page whose source drives a CROSS-SHARD balance cannot
+    // ride one page: the settlement below appends an `ApplyBalanceDelta`
+    // sibling per settled target, and a page carrying that join never reaches
+    // Calvin completion — the statement dies on the completion deadline
+    // ("timed out waiting for Calvin transaction completion"). The per-row
+    // `PointInsert` shape settles the same rows correctly, so a cross-shard
+    // page is un-batched here, before the resolution below runs. A page whose
+    // bindings are all co-resident keeps its page.
+    un_batch_cross_shard_pages(state, tasks, tenant_id, database_id)?;
+
     let schema_version = state.schema_version.current();
     let catalog = state.credentials.catalog();
     let mut appended: Vec<PhysicalTask> = Vec::new();
@@ -672,10 +764,12 @@ mod tests {
         );
     }
 
-    /// A batch resolves each DISTINCT join value once, so a page of rows
-    /// against one account yields one entry rather than one per row.
+    /// A page over a CROSS-SHARD binding is un-batched before resolution:
+    /// each row becomes its own point insert carrying its own resolution, so
+    /// the page never carries a sibling-dependent settlement. Two rows naming
+    /// one account resolve that account once per row.
     #[tokio::test]
-    async fn repeated_join_values_resolve_once() {
+    async fn a_cross_shard_page_is_un_batched_into_resolved_rows() {
         let (state, _directory) = test_state();
         declare_binding(&state);
         let target_surrogate = state
@@ -683,29 +777,62 @@ mod tests {
             .assign(DB, TENANT, "accounts", b"acc-1")
             .expect("bind target row");
 
-        let mut tasks = vec![PhysicalTask {
-            tenant_id: TENANT,
-            vshard_id: VShardId::new(0),
-            database_id: DB,
-            plan: PhysicalPlan::Document(DocumentOp::BatchInsert {
-                collection: nodedb_types::QualifiedCollection::new(DB, "entries"),
-                documents: vec![
-                    ("e1".to_string(), body("acc-1")),
-                    ("e2".to_string(), body("acc-1")),
-                ],
-                surrogates: vec![Surrogate::new(901), Surrogate::new(902)],
-                returning: None,
-                rls_filters: Vec::new(),
-                resolved_sum_targets: Vec::new(),
-                deferred_sum_targets: Vec::new(),
-            }),
-            post_set_op: PostSetOp::None,
-            txn_id: None,
-        }];
+        let mut tasks = vec![page_task(
+            "entries",
+            &[("e1", "acc-1"), ("e2", "acc-1")],
+            &[901, 902],
+        )];
         resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
             .await
             .expect("resolution succeeds");
 
+        assert_eq!(
+            tasks.len(),
+            2,
+            "a cross-shard page must become one task per row"
+        );
+        for task in &tasks {
+            match &task.plan {
+                PhysicalPlan::Document(DocumentOp::PointInsert {
+                    resolved_sum_targets,
+                    ..
+                }) => assert_eq!(
+                    resolved_sum_targets,
+                    &[ResolvedSumTarget::new(
+                        "accounts",
+                        "acc-1",
+                        target_surrogate
+                    )]
+                ),
+                other => panic!("expected the per-row point shape, got {other:?}"),
+            }
+        }
+    }
+
+    /// A page whose binding is CO-RESIDENT keeps its single task, and its rows
+    /// resolve each DISTINCT join value once: two rows against one account
+    /// yield one entry rather than one per row.
+    #[tokio::test]
+    async fn a_co_resident_page_stays_one_task_and_resolves_once() {
+        let (state, _directory) = test_state();
+        declare_binding(&state);
+        let source = co_resident_source("accounts");
+        declare_source(&state, &source);
+        let target_surrogate = state
+            .surrogate_assigner
+            .assign(DB, TENANT, "accounts", b"acc-1")
+            .expect("bind target row");
+
+        let mut tasks = vec![page_task(
+            &source,
+            &[("e1", "acc-1"), ("e2", "acc-1")],
+            &[901, 902],
+        )];
+        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
+            .await
+            .expect("resolution succeeds");
+
+        assert_eq!(tasks.len(), 1, "a co-resident page keeps its page");
         match &tasks[0].plan {
             PhysicalPlan::Document(DocumentOp::BatchInsert {
                 resolved_sum_targets,
@@ -719,6 +846,65 @@ mod tests {
                 )]
             ),
             other => panic!("plan shape changed: {other:?}"),
+        }
+    }
+
+    /// Declare `source` as another source of the `accounts` binding, so a test
+    /// can pick a source whose vShard co-resides with the target's.
+    fn declare_source(state: &SharedState, source: &str) {
+        let catalog = state.credentials.catalog();
+        let mut target = StoredCollection::new(TENANT.as_u64(), "accounts", "tester");
+        target.materialized_sums.push(MaterializedSumDef {
+            target_collection: "accounts".to_string(),
+            target_column: "balance".to_string(),
+            source_collection: source.to_string(),
+            join_column: "account_id".to_string(),
+            value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+        });
+        catalog
+            .put_collection(DB, &target)
+            .expect("persist target collection");
+        let stored = StoredCollection::new(TENANT.as_u64(), source, "tester");
+        catalog
+            .put_collection(DB, &stored)
+            .expect("persist source collection");
+        state.materialized_sum_index.invalidate();
+    }
+
+    /// A source that homes to `target`'s own vShard. Co-residency is the
+    /// exception, so the name is searched: printable ASCII pairs give ~9,000
+    /// candidates over 1,024 vShards, so a hit is found with near certainty.
+    fn co_resident_source(target: &str) -> String {
+        for first in 33u8..=126 {
+            for second in 33u8..=126 {
+                let name = format!("{}{}", first as char, second as char);
+                if crate::query::sum_target_is_co_resident(DB, &name, target) {
+                    return name;
+                }
+            }
+        }
+        panic!("a co-resident source name must exist");
+    }
+
+    fn page_task(collection: &str, rows: &[(&str, &str)], surrogates: &[u32]) -> PhysicalTask {
+        PhysicalTask {
+            tenant_id: TENANT,
+            vshard_id: VShardId::new(0),
+            database_id: DB,
+            plan: PhysicalPlan::Document(DocumentOp::BatchInsert {
+                collection: nodedb_types::QualifiedCollection::new(DB, collection),
+                documents: rows
+                    .iter()
+                    .map(|(id, account)| (id.to_string(), body(account)))
+                    .collect(),
+                surrogates: surrogates.iter().copied().map(Surrogate::new).collect(),
+                returning: None,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+                deferred_sum_targets: Vec::new(),
+            }),
+            post_set_op: PostSetOp::None,
+            txn_id: None,
         }
     }
 }
