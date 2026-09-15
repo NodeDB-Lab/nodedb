@@ -2,10 +2,9 @@
 
 //! Response emission helpers for document scans.
 //!
-//! Two emission shapes are kept distinct: transformed rows (decoded → projected
-//! → re-encoded via response_codec::encode) and raw rows (msgpack passthrough
-//! via encode_raw_document_rows). Both honour the chunked-streaming contract
-//! when row count exceeds `stream_chunk_size`.
+//! Rows are emitted as MessagePack passthrough (`encode_raw_document_rows`),
+//! with the chunked-streaming contract honoured when row count exceeds
+//! `stream_chunk_size`.
 //!
 //! A chunk boundary is a deadline safe point. A statement that goes over
 //! mid-stream returns a terminal `DeadlineExceeded` frame instead of its last
@@ -16,32 +15,10 @@
 use crate::bridge::dispatch::BridgeResponse;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::response_codec::{self, DocumentRow};
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    /// Send transformed document rows (decoded → projected → re-encoded).
-    pub(in crate::data::executor) fn send_document_rows_transformed(
-        &mut self,
-        task: &ExecutionTask,
-        result: &Vec<DocumentRow>,
-        chunk_size: usize,
-    ) -> Response {
-        if result.len() <= chunk_size {
-            match response_codec::encode(result) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                ),
-            }
-        } else {
-            self.stream_chunks_transformed(task, result, chunk_size)
-        }
-    }
-
     /// Send raw document rows with msgpack passthrough (no decode+re-encode).
     pub(in crate::data::executor) fn send_document_rows_raw(
         &mut self,
@@ -64,51 +41,6 @@ impl CoreLoop {
         }
     }
 
-    /// Stream transformed document rows in chunks.
-    fn stream_chunks_transformed(
-        &mut self,
-        task: &ExecutionTask,
-        result: &[DocumentRow],
-        chunk_size: usize,
-    ) -> Response {
-        let deadline = crate::data::executor::deadline::DeadlineCheck::for_task(task);
-        let chunks: Vec<_> = result.chunks(chunk_size).collect();
-        let last_idx = chunks.len().saturating_sub(1);
-        for (i, chunk) in chunks.iter().enumerate() {
-            // Safe point: a chunk boundary. Every partial already pushed stays
-            // on the ring, but the terminal frame this returns carries
-            // `DeadlineExceeded`, and the Control Plane surfaces the error
-            // rather than the rows it collected. See the module docs.
-            if deadline.expired_now() {
-                return self.response_error(task, ErrorCode::DeadlineExceeded);
-            }
-            let is_last = i == last_idx;
-            match response_codec::encode(&chunk.to_vec()) {
-                Ok(payload) => {
-                    if is_last {
-                        return self.response_with_payload(task, payload);
-                    }
-                    let partial = self.response_partial(task, payload);
-                    let _ = self.response_tx.try_push(BridgeResponse { inner: partial });
-                }
-                Err(e) => {
-                    return self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: e.to_string(),
-                        },
-                    );
-                }
-            }
-        }
-        self.response_error(
-            task,
-            ErrorCode::Internal {
-                detail: "streaming response incomplete".into(),
-            },
-        )
-    }
-
     /// Stream raw document rows in chunks with msgpack passthrough.
     fn stream_chunks_raw(
         &mut self,
@@ -120,7 +52,7 @@ impl CoreLoop {
         let chunks: Vec<_> = rows.chunks(chunk_size).collect();
         let last_idx = chunks.len().saturating_sub(1);
         for (i, chunk) in chunks.iter().enumerate() {
-            // Safe point: a chunk boundary. See `stream_chunks_transformed`.
+            // Safe point: a chunk boundary. See the module docs.
             if deadline.expired_now() {
                 return self.response_error(task, ErrorCode::DeadlineExceeded);
             }

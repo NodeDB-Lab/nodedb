@@ -487,3 +487,55 @@ async fn derived_table_window_row_number_orders_correctly() {
         );
     }
 }
+
+/// A tagged cell must survive window evaluation over a derived table.
+///
+/// The window path once round-tripped every row through JSON, where
+/// MessagePack binary has no representation: a `BYTES` cell came back as a
+/// base64 `String`. The text rendering is identical, so the skew only shows
+/// through an operator that reads the type — `length()` here (byte strings are
+/// not strings to it) — which must answer the same with and without a window
+/// alias beside the column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn window_evaluation_preserves_tagged_cells() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION win_tagged (id STRING PRIMARY KEY, b BYTES) TYPE DOCUMENT STRICT")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO win_tagged (id, b) VALUES ('a', X'0102'), ('b', X'030405')")
+        .await
+        .unwrap();
+
+    // Reference rendering: no window alias anywhere in the query.
+    let plain = server
+        .query_rows("SELECT b, length(b) FROM win_tagged ORDER BY id")
+        .await
+        .unwrap();
+
+    // The same cells now pass through window evaluation: the derived table
+    // carries a `row_number()` alias, so every row is decoded and re-encoded.
+    let windowed = server
+        .query_rows(
+            "SELECT b, length(b) FROM \
+             (SELECT id, b, row_number() OVER (ORDER BY id) AS rn FROM win_tagged) s \
+             ORDER BY id",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        windowed, plain,
+        "a cell beside a window alias must keep its type; plain = {plain:?}"
+    );
+    let first = plain
+        .first()
+        .and_then(|row| row.first())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        first.to_lowercase().contains("aqi") && !first.contains('['),
+        "expected the base64 rendering of X'0102', got {first:?}"
+    );
+}

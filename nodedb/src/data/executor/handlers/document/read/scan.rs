@@ -5,13 +5,12 @@
 use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
-use super::projection::{apply_projection, apply_projection_msgpack};
+use super::projection::apply_projection_msgpack;
 use super::{DocFetchParams, DocScanMode};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::document::sort;
-use crate::data::executor::response_codec::DocumentRow;
 use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::data::executor::task::ExecutionTask;
@@ -70,14 +69,36 @@ impl CoreLoop {
             if window_functions_bytes.is_empty() {
                 Vec::new()
             } else {
-                zerompk::from_msgpack(window_functions_bytes).unwrap_or_default()
+                match zerompk::from_msgpack(window_functions_bytes) {
+                    Ok(specs) => specs,
+                    Err(e) => {
+                        warn!(core = self.core_id, error = %e, "failed to parse window functions");
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("malformed window functions: {e}"),
+                            },
+                        );
+                    }
+                }
             };
 
         let computed_cols: Vec<crate::bridge::expr_eval::ComputedColumn> =
             if computed_columns_bytes.is_empty() {
                 Vec::new()
             } else {
-                zerompk::from_msgpack(computed_columns_bytes).unwrap_or_default()
+                match zerompk::from_msgpack(computed_columns_bytes) {
+                    Ok(cols) => cols,
+                    Err(e) => {
+                        warn!(core = self.core_id, error = %e, "failed to parse computed columns");
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("malformed computed columns: {e}"),
+                            },
+                        );
+                    }
+                }
             };
 
         let scan_budget_bytes = self.query_tuning.max_scan_result_bytes;
@@ -325,34 +346,35 @@ impl CoreLoop {
                 }
 
                 if !window_specs.is_empty() {
-                    let mut decoded_rows: Vec<(String, serde_json::Value)> = match sorted
-                        .into_iter()
-                        .map(|(doc_id, mp)| {
-                            crate::data::executor::doc_format::decode_document(&mp)
-                                .map(|doc| (doc_id, doc))
-                        })
-                        .collect::<crate::Result<Vec<_>>>()
+                    // Window evaluation rides the same MessagePack rows the
+                    // other arms send. Decoding each document to JSON here
+                    // downgraded tagged cells — MessagePack binary has no JSON
+                    // representation, so a `BYTES` cell came back as a base64
+                    // `String` — and evaluated the window set over the
+                    // degraded rows.
+                    let mut windowed: Vec<(String, Vec<u8>)> = sorted;
+                    let mut payloads: Vec<Vec<u8>> =
+                        windowed.iter().map(|(_, mp)| mp.clone()).collect();
+                    if let Err(e) =
+                        crate::bridge::window_func::evaluate_window_functions_on_msgpack_rows(
+                            &mut payloads,
+                            &window_specs,
+                        )
                     {
-                        Ok(rows) => rows,
-                        Err(e) => return self.response_error(task, e),
-                    };
-                    if let Err(e) = crate::bridge::window_func::evaluate_window_functions(
-                        &mut decoded_rows,
-                        &window_specs,
-                    ) {
-                        return self.response_error(task, crate::Error::from(e));
+                        return self.response_error(task, e);
+                    }
+                    for ((_, mp), edited) in windowed.iter_mut().zip(payloads) {
+                        *mp = edited;
                     }
 
-                    // Project first, then dedupe on the projected JSON value
-                    // so `SELECT DISTINCT col` honours SQL semantics.
-                    let projected_rows: Vec<_> = match decoded_rows
+                    // Project first, then dedupe on the projected row so
+                    // `SELECT DISTINCT col` honours SQL semantics.
+                    let projected_rows: Vec<_> = match windowed
                         .into_iter()
-                        .map(|(doc_id, data)| {
-                            let projected = apply_projection(data, &computed_cols, projection)?;
-                            Ok(DocumentRow {
-                                id: doc_id,
-                                data: projected,
-                            })
+                        .map(|(doc_id, mp)| {
+                            let projected =
+                                apply_projection_msgpack(&mp, &computed_cols, projection)?;
+                            Ok((doc_id, projected))
                         })
                         .collect::<crate::Result<Vec<_>>>()
                     {
@@ -364,14 +386,14 @@ impl CoreLoop {
                         let mut seen = std::collections::HashSet::new();
                         projected_rows
                             .into_iter()
-                            .filter(|row| seen.insert(row.data.to_string()))
+                            .filter(|(_, value)| seen.insert(value.clone()))
                             .collect()
                     } else {
                         projected_rows
                     };
 
                     let result: Vec<_> = deduped.into_iter().skip(offset).take(limit).collect();
-                    self.send_document_rows_transformed(task, &result, stream_chunk_size)
+                    self.send_document_rows_raw(task, &result, stream_chunk_size)
                 } else {
                     let needs_transform = !computed_cols.is_empty() || !projection.is_empty();
 

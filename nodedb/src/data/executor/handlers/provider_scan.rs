@@ -132,12 +132,28 @@ impl CoreLoop {
                     }
                 };
             for row in rows.iter_mut() {
-                let Ok(doc_val) = nodedb_types::value_from_msgpack(row) else {
-                    continue;
+                let doc_val = match nodedb_types::value_from_msgpack(row) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("ProviderScan: computed-column row decode: {e}"),
+                            },
+                        );
+                    }
                 };
                 let mut map = match doc_val {
                     nodedb_types::Value::Object(m) => m,
-                    _ => continue,
+                    _ => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: "ProviderScan: computed-column row is not an object"
+                                    .to_string(),
+                            },
+                        );
+                    }
                 };
                 for cc in &computed_cols {
                     if matches!(map.get(&cc.alias), Some(v) if !v.is_null()) {
@@ -153,10 +169,16 @@ impl CoreLoop {
                         }
                     }
                 }
-                if let Ok(encoded) =
-                    nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(map))
-                {
-                    *row = encoded;
+                match nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(map)) {
+                    Ok(encoded) => *row = encoded,
+                    Err(e) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("ProviderScan: computed-column row encode: {e}"),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -182,88 +204,16 @@ impl CoreLoop {
                     }
                 };
             if !specs.is_empty() && !rows.is_empty() {
-                // Decode losslessly: the JSON codec downgrades tagged cells
-                // (Uuid, Bytes, Decimal, DateTime) of every row the window set
-                // does not even touch. The value evaluator appends one Value
-                // per spec; those cells overlay the original maps, so only the
-                // window aliases come from evaluation.
-                let mut maps: Vec<nodedb_types::Value> = Vec::with_capacity(rows.len());
-                let mut column_index: std::collections::HashMap<String, usize> =
-                    std::collections::HashMap::new();
-                for row in rows.iter() {
-                    match nodedb_types::value_from_msgpack(row) {
-                        Ok(value) => {
-                            let nodedb_types::Value::Object(map) = &value else {
-                                return self.response_error(
-                                    task,
-                                    ErrorCode::Internal {
-                                        detail: "ProviderScan: window row is not an object"
-                                            .to_string(),
-                                    },
-                                );
-                            };
-                            for key in map.keys() {
-                                let next = column_index.len();
-                                column_index.entry(key.clone()).or_insert(next);
-                            }
-                            maps.push(value);
-                        }
-                        Err(e) => {
-                            return self.response_error(
-                                task,
-                                ErrorCode::Internal {
-                                    detail: format!("ProviderScan: window row decode: {e}"),
-                                },
-                            );
-                        }
-                    }
-                }
-                let width = column_index.len();
-                let mut arrays: Vec<Vec<nodedb_types::Value>> = maps
-                    .iter()
-                    .map(|value| {
-                        let nodedb_types::Value::Object(map) = value else {
-                            return Vec::new();
-                        };
-                        let mut cells = vec![nodedb_types::Value::Null; width];
-                        for (key, position) in &column_index {
-                            if let Some(cell) = map.get(key) {
-                                cells[*position] = cell.clone();
-                            }
-                        }
-                        cells
-                    })
-                    .collect();
-                let new_cols = match crate::bridge::window_func::evaluate_window_functions_value(
-                    &mut arrays,
-                    &column_index,
-                    &specs,
-                ) {
-                    Ok(cols) => cols,
-                    Err(e) => {
-                        return self.response_error(task, ErrorCode::from(crate::Error::from(e)));
-                    }
-                };
-                for (value, cells) in maps.iter_mut().zip(arrays) {
-                    let nodedb_types::Value::Object(map) = value else {
-                        continue;
-                    };
-                    for (offset, name) in new_cols.iter().enumerate() {
-                        map.insert(name.clone(), cells[width + offset].clone());
-                    }
-                }
-                for (slot, value) in rows.iter_mut().zip(maps) {
-                    match nodedb_types::value_to_msgpack(&value) {
-                        Ok(encoded) => *slot = encoded,
-                        Err(e) => {
-                            return self.response_error(
-                                task,
-                                ErrorCode::Internal {
-                                    detail: format!("ProviderScan: window row encode: {e}"),
-                                },
-                            );
-                        }
-                    }
+                // The shared helper keeps the whole row set on the Value
+                // codec: a JSON round trip here would downgrade every tagged
+                // cell in rows the window set does not even touch, and each
+                // step fails loudly instead of skipping a row.
+                if let Err(e) =
+                    crate::bridge::window_func::evaluate_window_functions_on_msgpack_rows(
+                        &mut rows, &specs,
+                    )
+                {
+                    return self.response_error(task, ErrorCode::from(e));
                 }
             }
         }
