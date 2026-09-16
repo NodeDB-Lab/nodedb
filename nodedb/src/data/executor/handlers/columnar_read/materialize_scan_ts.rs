@@ -51,7 +51,7 @@ use nodedb_types::value::Value;
 use super::materialize_scan::{build_response, encode_cursor};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
+use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType, TimeKind};
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
 
 impl CoreLoop {
@@ -98,9 +98,9 @@ impl CoreLoop {
                     }
                 }
 
-                let value_bytes = match encode_ts_memtable_row(mt, col_count, row_idx, collection) {
-                    Some(b) => b,
-                    None => continue,
+                let value_bytes = match encode_ts_memtable_row(mt, col_count, row_idx) {
+                    Ok(b) => b,
+                    Err(e) => return self.response_error(task, e),
                 };
 
                 // Surrogate: bit 31 set (memtable) | lower 31 bits = row_idx.
@@ -223,10 +223,9 @@ impl CoreLoop {
                         &col_data,
                         &sym_dicts,
                         row_idx,
-                        collection,
                     ) {
-                        Some(b) => b,
-                        None => continue,
+                        Ok(b) => b,
+                        Err(e) => return self.response_error(task, e),
                     };
 
                     // Surrogate: (part_id & 0xFFFF) << 16 | (row_idx & 0xFFFF).
@@ -293,35 +292,24 @@ pub(super) fn encode_ts_part_surrogate(part_id_1based: u32, row_idx: u32) -> u32
 
 /// Encode a memtable row as msgpack `Value::Object` bytes.
 ///
-/// Returns `None` if serialization fails (logged by caller).
+/// A cell that cannot be read as its column's type, or a row that cannot
+/// be encoded, fails the scan: a skipped row is a silently short result.
 fn encode_ts_memtable_row(
     mt: &crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
     col_count: usize,
     row_idx: usize,
-    collection: &str,
-) -> Option<Vec<u8>> {
+) -> crate::Result<Vec<u8>> {
     let mut map: HashMap<String, Value> = HashMap::with_capacity(col_count);
     let schema = mt.schema();
 
     for (col_idx, (col_name, col_type)) in schema.columns.iter().enumerate() {
         let col_data = mt.column(col_idx);
-        let val = memtable_col_to_value(col_data, col_type, col_idx, mt, row_idx);
+        let val = memtable_col_to_value(col_data, col_type, col_idx, mt, row_idx)
+            .map_err(|e| instant_read_error(col_name, e))?;
         map.insert(col_name.clone(), val);
     }
 
-    let ndb_val = Value::Object(map);
-    match nodedb_types::value_to_msgpack(&ndb_val) {
-        Ok(b) => Some(b),
-        Err(e) => {
-            tracing::warn!(
-                collection,
-                row_idx,
-                error = %e,
-                "ts_materialize_scan: memtable row encode failed; skipping"
-            );
-            None
-        }
-    }
+    encode_row_map(map, row_idx)
 }
 
 /// Encode a partition row as msgpack `Value::Object` bytes.
@@ -330,36 +318,50 @@ fn encode_ts_partition_row(
     col_data: &[Option<ColumnData>],
     sym_dicts: &HashMap<usize, nodedb_types::timeseries::SymbolDictionary>,
     row_idx: usize,
-    collection: &str,
-) -> Option<Vec<u8>> {
+) -> crate::Result<Vec<u8>> {
     let mut map: HashMap<String, Value> = HashMap::with_capacity(schema_columns.len());
 
     for (col_i, (col_name, col_type)) in schema_columns.iter().enumerate() {
         let Some(data) = &col_data[col_i] else {
             continue;
         };
-        let val = partition_col_to_value(data, col_type, col_i, sym_dicts, row_idx);
+        let val = partition_col_to_value(data, col_type, col_i, sym_dicts, row_idx)
+            .map_err(|e| instant_read_error(col_name, e))?;
         map.insert(col_name.clone(), val);
     }
 
-    let ndb_val = Value::Object(map);
-    match nodedb_types::value_to_msgpack(&ndb_val) {
-        Ok(b) => Some(b),
-        Err(e) => {
-            tracing::warn!(
-                collection,
-                row_idx,
-                error = %e,
-                "ts_materialize_scan: partition row encode failed; skipping"
-            );
-            None
-        }
+    encode_row_map(map, row_idx)
+}
+
+/// Serialize one row map to msgpack bytes.
+fn encode_row_map(map: HashMap<String, Value>, row_idx: usize) -> crate::Result<Vec<u8>> {
+    nodedb_types::value_to_msgpack(&Value::Object(map)).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("timeseries materialize scan row {row_idx}: {e}"),
+    })
+}
+
+/// The error for a stored millisecond count that no instant can carry.
+fn instant_read_error(column: &str, e: nodedb_types::NdbDateTimeError) -> crate::Error {
+    crate::Error::Internal {
+        detail: format!("timeseries column {column}: {e}"),
     }
 }
 
 // ---------------------------------------------------------------------------
 // Column-to-Value converters
 // ---------------------------------------------------------------------------
+
+/// Read a stored millisecond time cell as the value its kind denotes.
+///
+/// An instant column yields a typed instant, a `Millis` column the integer
+/// stored. `Err` when the milliseconds overflow the microsecond range.
+fn time_cell_value(kind: TimeKind, millis: i64) -> Result<Value, nodedb_types::NdbDateTimeError> {
+    match kind {
+        TimeKind::Instant(k) => k.from_millis(millis),
+        TimeKind::Millis => Ok(Value::Integer(millis)),
+    }
+}
 
 /// Convert a memtable column entry to `nodedb_types::Value`.
 fn memtable_col_to_value(
@@ -368,9 +370,11 @@ fn memtable_col_to_value(
     col_idx: usize,
     mt: &crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
     row_idx: usize,
-) -> Value {
-    match col_type {
-        ColumnType::Timestamp(_) => Value::Integer(col_data.as_timestamps()[row_idx]),
+) -> Result<Value, nodedb_types::NdbDateTimeError> {
+    let value = match col_type {
+        ColumnType::Timestamp(kind) => {
+            return time_cell_value(*kind, col_data.as_timestamps()[row_idx]);
+        }
         ColumnType::Float64 => {
             let v = col_data.as_f64()[row_idx];
             if v.is_nan() {
@@ -387,7 +391,8 @@ fn memtable_col_to_value(
                 .map(|s| Value::String(s.to_string()))
                 .unwrap_or(Value::Null)
         }
-    }
+    };
+    Ok(value)
 }
 
 /// Convert a partition column entry to `nodedb_types::Value`.
@@ -397,9 +402,11 @@ fn partition_col_to_value(
     col_i: usize,
     sym_dicts: &HashMap<usize, nodedb_types::timeseries::SymbolDictionary>,
     row_idx: usize,
-) -> Value {
-    match col_type {
-        ColumnType::Timestamp(_) => Value::Integer(data.as_timestamps()[row_idx]),
+) -> Result<Value, nodedb_types::NdbDateTimeError> {
+    let value = match col_type {
+        ColumnType::Timestamp(kind) => {
+            return time_cell_value(*kind, data.as_timestamps()[row_idx]);
+        }
         ColumnType::Float64 => {
             let v = data.as_f64()[row_idx];
             if v.is_nan() {
@@ -426,7 +433,8 @@ fn partition_col_to_value(
                 Value::Null
             }
         }
-    }
+    };
+    Ok(value)
 }
 
 /// Extract a timestamp value from a column (for `_ts_system` filtering).

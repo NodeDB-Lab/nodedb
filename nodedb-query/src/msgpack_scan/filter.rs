@@ -341,6 +341,52 @@ mod tests {
         );
     }
 
+    /// An instant cell compares by epoch microseconds against a typed
+    /// instant literal and against an ISO-8601 string literal.
+    #[test]
+    fn instant_cell_compares_by_micros() {
+        use nodedb_types::{InstantKind, NdbDateTime, Value};
+        const MICROS: i64 = 1_583_402_400_000_000;
+        let mut doc = Vec::new();
+        crate::msgpack_scan::write_map_header(&mut doc, 1);
+        crate::msgpack_scan::write_kv_instant(&mut doc, "ts", InstantKind::Naive, MICROS);
+
+        let same = Value::NaiveDateTime(NdbDateTime::from_micros(MICROS));
+        let later = Value::NaiveDateTime(NdbDateTime::from_micros(MICROS + 1));
+        assert!(
+            filter("ts", "eq", same.clone())
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        assert!(
+            !filter("ts", "eq", later.clone())
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        assert!(filter("ts", "lt", later).matches_binary(&doc).unwrap());
+        assert!(filter("ts", "gte", same).matches_binary(&doc).unwrap());
+        assert!(
+            filter("ts", "eq", Value::String("2020-03-05T10:00:00Z".into()))
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        assert!(
+            filter("ts", "gt", Value::String("2020-03-05 09:00:00".into()))
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
+        assert!(
+            filter(
+                "ts",
+                "eq",
+                Value::NaiveDateTime(NdbDateTime::from_micros(MICROS))
+            )
+            .matches_binary_indexed(&doc, &idx)
+            .unwrap()
+        );
+    }
+
     #[test]
     fn eq_coerces_string_to_integer() {
         let doc = encode(&json!({"age": 25}));

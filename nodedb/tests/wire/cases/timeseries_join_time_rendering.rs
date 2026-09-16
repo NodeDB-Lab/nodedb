@@ -20,12 +20,9 @@ use crate::harness::TestServer;
 /// ingest (wall-clock "now") is separable from the value the INSERT supplied.
 const EARLY: &str = "2020-03-05 10:00:00";
 /// `EARLY` as a declared `TIMESTAMP` column renders it. The engine stores
-/// 1583402400000 epoch milliseconds; a `TIMESTAMP` cell carries epoch
-/// microseconds, which the pgwire encoder writes as ISO-8601 UTC.
+/// 1583402400000 epoch milliseconds and emits the cell as a typed instant,
+/// which the pgwire encoder writes as ISO-8601 UTC.
 const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
-/// `EARLY` as epoch microseconds — 1583402400000 milliseconds times 1000.
-/// A projection that announces no catalog type leaves its cells this number.
-const EARLY_MICROS: &str = "1583402400000000";
 
 /// Create a timeseries collection and a document collection that join on the
 /// event's `host`, then insert exactly one row into each so the join yields
@@ -142,17 +139,12 @@ async fn a_joined_time_key_denotes_the_stored_instant() {
         .expect("the time key projected through a JOIN must succeed");
     assert_eq!(joined.len(), 1, "the join yields one row: {joined:?}");
 
-    // Two renderings denote 2020-03-05T10:00:00Z, and the expected value is
-    // whichever one the join announces a type for. EARLY_ISO is that instant
-    // written as ISO-8601 UTC, which a cell typed TIMESTAMP produces.
-    // EARLY_MICROS is the same instant in epoch microseconds — the unit a
-    // TIMESTAMP cell carries — which an untyped cell leaves as a number.
-    // Epoch MILLISECONDS denote 1970-01-19 read either way, so a millisecond
-    // value fails both arms.
-    assert!(
-        joined[0] == EARLY_ISO || joined[0] == EARLY_MICROS,
-        "a joined time key must denote {EARLY}: expected {EARLY_ISO} \
-         or {EARLY_MICROS}, got {joined:?}"
+    // The cell is typed at emission, so the join carries the instant itself
+    // and renders it as ISO-8601 UTC. The stored 1583402400000 milliseconds
+    // read as a number would denote 1970-01-19.
+    assert_eq!(
+        joined[0], EARLY_ISO,
+        "a joined time key must denote {EARLY}: got {joined:?}"
     );
 }
 
@@ -202,23 +194,17 @@ async fn an_aliased_joined_time_key_denotes_the_stored_instant() {
         .expect("an aliased time key projected through a JOIN must succeed");
     assert_eq!(joined.len(), 1, "the join yields one row: {joined:?}");
 
-    // The expected value is EARLY, the inserted instant, in whichever unit the
-    // alias announces a type for. EARLY_ISO is 2020-03-05T10:00:00Z as a cell
-    // typed TIMESTAMP renders it; EARLY_MICROS is the same instant in the epoch
-    // microseconds a TIMESTAMP cell carries, which an untyped cell leaves as a
-    // number. The stored 1583402400000 milliseconds denote 1970-01-19 read
-    // either way, so a millisecond value fails both arms.
-    assert!(
-        joined[0] == EARLY_ISO || joined[0] == EARLY_MICROS,
-        "an aliased joined time key must denote {EARLY}: expected {EARLY_ISO} \
-         or {EARLY_MICROS}, got {joined:?}"
+    // The alias renames a cell that is already a typed instant, so it renders
+    // as ISO-8601 UTC under the new name.
+    assert_eq!(
+        joined[0], EARLY_ISO,
+        "an aliased joined time key must denote {EARLY}: got {joined:?}"
     );
 }
 
 /// `EARLY` truncated to its hour, as `time_bucket('1 hour', ...)` denotes it.
 /// `EARLY` sits on the hour, so the bucket is the same instant.
 const EARLY_BUCKET_ISO: &str = EARLY_ISO;
-const EARLY_BUCKET_MICROS: &str = EARLY_MICROS;
 
 /// A transforming computed projection of a time key renders the same through
 /// a JOIN as through a direct read. `time_bucket` arithmetic depends on the
@@ -268,10 +254,9 @@ async fn a_time_bucket_of_a_time_key_denotes_the_stored_instant() {
         .expect("time_bucket over the time key must succeed");
     assert_eq!(direct.len(), 1, "one stored point: {direct:?}");
 
-    assert!(
-        direct[0] == EARLY_BUCKET_ISO || direct[0] == EARLY_BUCKET_MICROS,
-        "time_bucket of the time key must denote {EARLY}: expected {EARLY_BUCKET_ISO} \
-         or {EARLY_BUCKET_MICROS}, got {direct:?}"
+    assert_eq!(
+        direct[0], EARLY_BUCKET_ISO,
+        "time_bucket of the time key must denote {EARLY}: got {direct:?}"
     );
 }
 
@@ -293,10 +278,9 @@ async fn a_joined_time_bucket_of_a_time_key_denotes_the_stored_instant() {
         .expect("time_bucket over the time key through a JOIN must succeed");
     assert_eq!(joined.len(), 1, "the join yields one row: {joined:?}");
 
-    assert!(
-        joined[0] == EARLY_BUCKET_ISO || joined[0] == EARLY_BUCKET_MICROS,
-        "a joined time_bucket of the time key must denote {EARLY}: expected \
-         {EARLY_BUCKET_ISO} or {EARLY_BUCKET_MICROS}, got {joined:?}"
+    assert_eq!(
+        joined[0], EARLY_BUCKET_ISO,
+        "a joined time_bucket of the time key must denote {EARLY}: got {joined:?}"
     );
 }
 
@@ -461,10 +445,9 @@ async fn a_grouped_time_bucket_denotes_the_stored_instant() {
         "one stored point falls in one group: {rows:?}"
     );
 
-    assert!(
-        rows[0][0] == EARLY_ISO || rows[0][0] == EARLY_MICROS,
-        "a grouped time_bucket key must denote {EARLY}: expected {EARLY_ISO} \
-         or {EARLY_MICROS}, got {rows:?}"
+    assert_eq!(
+        rows[0][0], EARLY_ISO,
+        "a grouped time_bucket key must denote {EARLY}: got {rows:?}"
     );
 }
 

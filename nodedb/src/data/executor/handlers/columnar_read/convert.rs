@@ -92,6 +92,11 @@ pub(in crate::data::executor) fn row_to_projected_json(
 /// Encodes the column value at the given row index directly into `buf`
 /// without intermediate decoding. Used by timeseries raw_scan and aggregate
 /// handlers that still use the internal `ColumnarMemtable`.
+///
+/// A time cell is written as its column's kind says: an instant column
+/// yields a typed instant ext, a `Millis` column the integer stored. `Err`
+/// when a stored millisecond count overflows the microsecond range an
+/// instant carries; the cell is never written wrapped.
 pub(in crate::data::executor) fn emit_column_value(
     buf: &mut Vec<u8>,
     mt: &crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
@@ -99,13 +104,14 @@ pub(in crate::data::executor) fn emit_column_value(
     col_type: &crate::engine::timeseries::columnar_memtable::ColumnType,
     col_data: &crate::engine::timeseries::columnar_memtable::ColumnData,
     row_idx: usize,
-) {
+) -> crate::Result<()> {
     use crate::engine::timeseries::columnar_memtable::{
         ColumnData as TsColumnData, ColumnType as TsColumnType,
     };
     match col_type {
-        TsColumnType::Timestamp(_) => {
-            nodedb_query::msgpack_scan::write_i64(buf, col_data.as_timestamps()[row_idx]);
+        TsColumnType::Timestamp(kind) => {
+            let millis = col_data.as_timestamps()[row_idx];
+            write_time_cell(buf, *kind, millis)?;
         }
         TsColumnType::Float64 => {
             let v = col_data.as_f64()[row_idx];
@@ -134,5 +140,110 @@ pub(in crate::data::executor) fn emit_column_value(
                 nodedb_query::msgpack_scan::write_null(buf);
             }
         }
+    }
+    Ok(())
+}
+
+/// Epoch microseconds for a stored millisecond count.
+///
+/// `Err` when `millis * 1000` overflows `i64`: the stored value cannot be
+/// expressed as an instant, and wrapping it would hand back a different one.
+fn instant_micros(millis: i64) -> crate::Result<i64> {
+    nodedb_types::NdbDateTime::from_millis(millis)
+        .map(|dt| dt.micros)
+        .map_err(|e| crate::Error::Internal {
+            detail: format!("timeseries time cell at {millis} ms: {e}"),
+        })
+}
+
+/// Write a stored millisecond time cell as the value its kind denotes.
+pub(in crate::data::executor) fn write_time_cell(
+    buf: &mut Vec<u8>,
+    kind: crate::engine::timeseries::columnar_memtable::TimeKind,
+    millis: i64,
+) -> crate::Result<()> {
+    use crate::engine::timeseries::columnar_memtable::TimeKind;
+    match kind {
+        TimeKind::Instant(k) => nodedb_types::write_instant(buf, k, instant_micros(millis)?),
+        TimeKind::Millis => nodedb_query::msgpack_scan::write_i64(buf, millis),
+    }
+    Ok(())
+}
+
+/// The rmpv cell for a stored millisecond time value, typed by its kind.
+///
+/// An instant column yields the ten-byte instant ext, a `Millis` column the
+/// integer stored.
+pub(in crate::data::executor) fn rmpv_time_cell(
+    kind: crate::engine::timeseries::columnar_memtable::TimeKind,
+    millis: i64,
+) -> crate::Result<rmpv::Value> {
+    use crate::engine::timeseries::columnar_memtable::TimeKind;
+    Ok(match kind {
+        TimeKind::Instant(k) => {
+            rmpv::Value::Ext(k.ext_type(), instant_micros(millis)?.to_be_bytes().to_vec())
+        }
+        TimeKind::Millis => rmpv::Value::Integer(millis.into()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::timeseries::columnar_memtable::{
+        ColumnData, ColumnType, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
+    };
+    use nodedb_types::InstantKind;
+
+    const MS: i64 = 1_583_402_400_000;
+
+    fn memtable(kind: TimeKind) -> ColumnarMemtable {
+        let schema = ColumnarSchema {
+            columns: vec![
+                ("ts".into(), ColumnType::Timestamp(kind)),
+                ("v".into(), ColumnType::Float64),
+            ],
+            timestamp_idx: 0,
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 2],
+        };
+        ColumnarMemtable::new(schema, ColumnarMemtableConfig::default())
+    }
+
+    fn emit(kind: TimeKind, millis: i64) -> crate::Result<Vec<u8>> {
+        let mt = memtable(kind);
+        let data = ColumnData::Timestamp(vec![millis]);
+        let mut buf = Vec::new();
+        emit_column_value(&mut buf, &mt, 0, &ColumnType::Timestamp(kind), &data, 0)?;
+        Ok(buf)
+    }
+
+    #[test]
+    fn an_instant_column_emits_a_typed_instant_ext() {
+        let buf = emit(TimeKind::Instant(InstantKind::Naive), MS).expect("emit");
+        assert_eq!(
+            nodedb_types::read_instant(&buf, 0),
+            Some((InstantKind::Naive, MS * 1000))
+        );
+        let buf = emit(TimeKind::Instant(InstantKind::Utc), MS).expect("emit");
+        assert_eq!(
+            nodedb_types::read_instant(&buf, 0),
+            Some((InstantKind::Utc, MS * 1000))
+        );
+    }
+
+    #[test]
+    fn a_millis_column_emits_the_integer_stored() {
+        let buf = emit(TimeKind::Millis, MS).expect("emit");
+        let mut expected = Vec::new();
+        nodedb_query::msgpack_scan::write_i64(&mut expected, MS);
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn a_millisecond_count_past_the_microsecond_range_is_an_error() {
+        let err = emit(TimeKind::Instant(InstantKind::Naive), i64::MAX)
+            .expect_err("i64::MAX ms cannot be expressed in microseconds");
+        assert!(err.to_string().contains("time cell"), "{err}");
+        assert!(emit(TimeKind::Millis, i64::MAX).is_ok());
     }
 }

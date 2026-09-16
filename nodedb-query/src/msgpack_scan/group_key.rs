@@ -5,6 +5,8 @@
 //! Builds a deterministic string key from field values extracted directly
 //! from msgpack bytes, avoiding full document decode.
 
+use nodedb_types::{NdbDateTime, read_instant};
+
 use crate::expr::{EvalError, GroupKeySpec, SqlExpr};
 use crate::msgpack_scan::field::extract_field;
 use crate::msgpack_scan::index::FieldIndex;
@@ -94,13 +96,22 @@ pub fn build_group_key_indexed(
 }
 
 /// Append the msgpack value at `doc[start..end]` to the key buffer as a JSON
-/// literal (string quoted, numbers/null verbatim, complex values hex-encoded).
+/// literal (string quoted, numbers/null verbatim, an instant as its quoted
+/// ISO-8601 form, complex values hex-encoded).
+///
+/// An instant keys by its epoch microseconds rendered as ISO-8601: the same
+/// text the JSON transcoder gives the cell, so a group column parsed back
+/// from the key reads as the cell would.
 fn append_value_at(buf: &mut String, doc: &[u8], start: usize, end: usize) {
     if read_null(doc, start) {
         buf.push_str("null");
     } else if let Some(s) = read_str(doc, start) {
         buf.push('"');
         buf.push_str(s);
+        buf.push('"');
+    } else if let Some((_, micros)) = read_instant(doc, start) {
+        buf.push('"');
+        buf.push_str(&NdbDateTime::from_micros(micros).to_iso8601());
         buf.push('"');
     } else if let Some(n) = read_i64(doc, start) {
         use std::fmt::Write;
@@ -217,6 +228,30 @@ mod tests {
         let doc = encode(&json!({"temp": 36.6}));
         let key = build_group_key(&doc, &keys(&["temp"])).unwrap();
         assert_eq!(key, "[36.6]");
+    }
+
+    /// An instant cell keys by its ISO-8601 form, a scalar JSON string, and
+    /// the indexed builder produces the same key.
+    #[test]
+    fn instant_field_keys_as_iso8601() {
+        use nodedb_types::InstantKind;
+        let mut doc = Vec::new();
+        crate::msgpack_scan::write_map_header(&mut doc, 2);
+        crate::msgpack_scan::write_kv_instant(
+            &mut doc,
+            "ts",
+            InstantKind::Naive,
+            1_583_402_400_000_000,
+        );
+        crate::msgpack_scan::write_kv_i64(&mut doc, "n", 1);
+
+        let key = build_group_key(&doc, &keys(&["ts", "n"])).unwrap();
+        assert_eq!(key, r#"["2020-03-05T10:00:00.000000Z",1]"#);
+        let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
+        assert_eq!(
+            build_group_key_indexed(&doc, &keys(&["ts", "n"]), &idx).unwrap(),
+            key
+        );
     }
 
     /// A computed group key evaluates its expression and folds the result into

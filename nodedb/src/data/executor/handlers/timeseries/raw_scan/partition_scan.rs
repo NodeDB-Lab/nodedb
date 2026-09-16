@@ -11,18 +11,20 @@ use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
 use super::row_emit::{emit_partition_row, extract_timestamp};
 
 /// Scan disk partitions in parallel, returning rmpv rows sorted by timestamp.
+///
+/// `Err` when a stored time cell cannot be read as its column's instant.
 pub(super) fn scan_partitions_parallel(
     partition_dirs: &[std::path::PathBuf],
     time_range: (i64, i64),
     limit: usize,
     filter_predicates: &[crate::bridge::scan_filter::ScanFilter],
     has_filters: bool,
-) -> Vec<rmpv::Value> {
+) -> crate::Result<Vec<rmpv::Value>> {
     if partition_dirs.len() <= 1 {
-        return partition_dirs
-            .first()
-            .map(|dir| scan_one_partition(dir, time_range, limit, filter_predicates, has_filters))
-            .unwrap_or_default();
+        return match partition_dirs.first() {
+            Some(dir) => scan_one_partition(dir, time_range, limit, filter_predicates, has_filters),
+            None => Ok(Vec::new()),
+        };
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -61,8 +63,11 @@ pub(super) fn scan_partitions_parallel(
                 })
                 .collect();
 
-            handles.into_iter().filter_map(|h| h.join().ok()).collect()
-        });
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect::<crate::Result<Vec<_>>>()
+        })?;
 
         // Merge: each thread's results are already time-sorted (partitions are
         // time-ordered). Flatten, sort globally, truncate to limit.
@@ -74,7 +79,7 @@ pub(super) fn scan_partitions_parallel(
         // Sort by timestamp (first field in each row map).
         merged.sort_by_key(extract_timestamp);
         merged.truncate(limit);
-        merged
+        Ok(merged)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -95,31 +100,33 @@ pub(super) fn scan_partitions_sequential(
     limit: usize,
     filter_predicates: &[crate::bridge::scan_filter::ScanFilter],
     has_filters: bool,
-) -> Vec<rmpv::Value> {
+) -> crate::Result<Vec<rmpv::Value>> {
     let mut results = Vec::new();
     for dir in partition_dirs {
         if results.len() >= limit {
             break;
         }
         let remaining = limit - results.len();
-        let rows = scan_one_partition(dir, time_range, remaining, filter_predicates, has_filters);
+        let rows = scan_one_partition(dir, time_range, remaining, filter_predicates, has_filters)?;
         results.extend(rows);
     }
     results.truncate(limit);
-    results
+    Ok(results)
 }
 
 /// Scan a single disk partition, returning rmpv rows.
+///
+/// `Err` when a stored time cell cannot be read as its column's instant.
 pub(super) fn scan_one_partition(
     part_dir: &std::path::Path,
     time_range: (i64, i64),
     limit: usize,
     filter_predicates: &[crate::bridge::scan_filter::ScanFilter],
     has_filters: bool,
-) -> Vec<rmpv::Value> {
+) -> crate::Result<Vec<rmpv::Value>> {
     let schema = match ColumnarSegmentReader::read_schema(part_dir, None) {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        Err(_) => return Ok(Vec::new()),
     };
 
     // Prefetch all column files into page cache before reading.
@@ -146,7 +153,7 @@ pub(super) fn scan_one_partition(
 
     let ts_col = col_data.get(schema.timestamp_idx).and_then(|d| d.as_ref());
     let Some(ts_col) = ts_col else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let timestamps = ts_col.as_timestamps();
     let indices = timestamp_range_filter(timestamps, time_range.0, time_range.1);
@@ -189,12 +196,12 @@ pub(super) fn scan_one_partition(
         if rows.len() >= limit {
             break;
         }
-        let row = emit_partition_row(&schema_vec, &col_data, &sym_dicts, idx as usize);
+        let row = emit_partition_row(&schema_vec, &col_data, &sym_dicts, idx as usize)?;
         rows.push(row);
     }
 
     // Release page cache for this partition.
     crate::data::io::fadvise::release_partition_columns(part_dir, &all_col_names);
 
-    rows
+    Ok(rows)
 }

@@ -122,8 +122,9 @@ fn compare_values(a: Option<&rmpv::Value>, b: Option<&rmpv::Value>) -> Ordering 
             x.as_str().unwrap_or("").cmp(y.as_str().unwrap_or(""))
         }
         (rmpv::Value::Boolean(x), rmpv::Value::Boolean(y)) => x.cmp(y),
-        // A computed key that evaluates to an instant arrives as the instant
-        // ext; two instants order by their epoch microseconds.
+        // A declared instant column, and a computed key that evaluates to an
+        // instant, arrive as the instant ext; two instants order by their
+        // epoch microseconds.
         (rmpv::Value::Ext(tx, px), rmpv::Value::Ext(ty, py)) => {
             match (instant_from_ext(*tx, px), instant_from_ext(*ty, py)) {
                 (Some((_, x)), Some((_, y))) => x.cmp(&y),

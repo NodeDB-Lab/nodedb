@@ -188,6 +188,7 @@ impl CoreLoop {
         // encoder is told each key column's declared shape.
         let group_key_kinds =
             self.ts_group_key_kinds(task.request.database_id, tid, collection, group_by);
+        let bucket_kind = self.ts_time_key_kind(task.request.database_id, tid, collection);
         let payload = match super::encode::encode_grouped_results(
             &merged,
             group_by,
@@ -195,7 +196,10 @@ impl CoreLoop {
             limit,
             bucket_interval_ms,
             sort_keys,
-            &group_key_kinds,
+            super::encode::GroupedKeyTypes {
+                group_key_kinds: &group_key_kinds,
+                bucket_kind,
+            },
         ) {
             Ok(p) => p,
             Err(e) => return self.response_error(task, e),

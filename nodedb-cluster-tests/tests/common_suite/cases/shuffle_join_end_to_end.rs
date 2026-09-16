@@ -28,12 +28,9 @@ use crate::common::cluster_harness::{TestCluster, wait_for};
 /// stores in its timeseries collection.
 const EARLY: &str = "2020-03-05 10:00:00";
 /// `EARLY` as a declared `TIMESTAMP` time key renders it. The engine stores
-/// 1583402400000 epoch milliseconds; a `TIMESTAMP` cell carries epoch
-/// microseconds, which the pgwire encoder writes as ISO-8601 UTC.
+/// 1583402400000 epoch milliseconds and emits the cell as a typed instant,
+/// which the pgwire encoder writes as ISO-8601 UTC.
 const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
-/// `EARLY` as epoch microseconds — 1583402400000 milliseconds times 1000.
-/// A projection that announces no catalog type leaves its cells this number.
-const EARLY_MICROS: &str = "1583402400000000";
 
 /// Run `sql` and collect the `id` column of every returned data row, sorted, so
 /// the result is order-independent for equality assertions.
@@ -344,10 +341,9 @@ async fn a_shuffle_join_renders_a_time_key_as_the_stored_instant() {
         .collect();
 
     assert_eq!(values.len(), 1, "one event matches one host: {values:?}");
-    assert!(
-        values[0] == EARLY_ISO || values[0] == EARLY_MICROS,
-        "a shuffle-joined time key must denote {EARLY}: expected {EARLY_ISO} \
-         or {EARLY_MICROS}, got {values:?}"
+    assert_eq!(
+        values[0], EARLY_ISO,
+        "a shuffle-joined time key must denote {EARLY}: got {values:?}"
     );
 
     cluster.shutdown().await;

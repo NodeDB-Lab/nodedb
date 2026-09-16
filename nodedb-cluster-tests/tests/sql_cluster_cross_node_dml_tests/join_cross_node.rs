@@ -281,14 +281,10 @@ async fn cross_node_join_compares_time_keys_in_one_unit() {
         );
     }
 
-    // The joined TIME_KEY itself must denote the stored instant, whichever
-    // unit the coordinator's gather step renders it in: ISO-8601 UTC (a
-    // typed TIMESTAMP cell) or epoch microseconds (an untyped cell). Epoch
-    // MILLISECONDS denote 1970-01-19 under either reading, so a millisecond
-    // value fails both arms and reveals the gather step decoded the wrong
-    // unit.
+    // The joined TIME_KEY is a typed instant on every node, so the
+    // coordinator's gather step renders it as ISO-8601 UTC. The stored
+    // 1583402400000 milliseconds read as a number would denote 1970-01-19.
     const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
-    const EARLY_MICROS: &str = "1583402400000000";
     let time_key_sql = format!(
         "SELECT {EVENTS}.captured_at FROM {EVENTS} INNER JOIN {FEATURES} \
          ON {EVENTS}.host = {FEATURES}.host"
@@ -300,10 +296,9 @@ async fn cross_node_join_compares_time_keys_in_one_unit() {
             1,
             "node {idx}: the join must yield one row: {rows:?}"
         );
-        assert!(
-            rows[0] == EARLY_ISO || rows[0] == EARLY_MICROS,
-            "node {idx}: joined time key must denote 2020-03-05T10:00:00Z: \
-             expected {EARLY_ISO} or {EARLY_MICROS}, got {rows:?}"
+        assert_eq!(
+            rows[0], EARLY_ISO,
+            "node {idx}: joined time key must denote 2020-03-05T10:00:00Z: got {rows:?}"
         );
     }
 

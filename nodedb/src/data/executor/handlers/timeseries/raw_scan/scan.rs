@@ -144,7 +144,10 @@ impl CoreLoop {
                 if results.len() >= gather_limit {
                     break;
                 }
-                let row = emit_memtable_row(mt, &columns, idx as usize);
+                let row = match emit_memtable_row(mt, &columns, idx as usize) {
+                    Ok(row) => row,
+                    Err(e) => return self.response_error(task, e),
+                };
                 if need_json_filter {
                     // Encode rmpv row to msgpack bytes for binary filter eval.
                     let mut buf = Vec::new();
@@ -186,13 +189,16 @@ impl CoreLoop {
 
                 let remaining = gather_limit.saturating_sub(results.len());
                 if remaining > 0 && !partition_dirs.is_empty() {
-                    let partition_rows = scan_partitions_parallel(
+                    let partition_rows = match scan_partitions_parallel(
                         &partition_dirs,
                         time_range,
                         remaining,
                         filter_predicates,
                         has_filters,
-                    );
+                    ) {
+                        Ok(rows) => rows,
+                        Err(e) => return self.response_error(task, e),
+                    };
                     results.extend(partition_rows);
                     results.truncate(gather_limit);
                 }
@@ -270,15 +276,6 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
         results.truncate(limit);
-
-        // The engine stores its timestamp columns in milliseconds; a client
-        // reads a `TIMESTAMP` cell as epoch microseconds. Scale here, once
-        // every predicate, sort and computed column has run against the
-        // engine's own unit.
-        let instant_columns = self.ts_instant_columns(task.request.database_id, tid, collection);
-        if let Err(e) = super::row_emit::scale_instant_cells(&mut results, &instant_columns) {
-            return self.response_error(task, e);
-        }
 
         let array = rmpv::Value::Array(results);
         let mut buf = Vec::new();

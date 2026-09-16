@@ -168,30 +168,27 @@ impl CoreLoop {
         .unwrap_or_else(|| vec![TsGroupKeyKind::Text; group_by.len()])
     }
 
-    /// Columns of a timeseries collection whose memtable type is an instant.
+    /// The time kind of a timeseries collection's designated time column.
     ///
-    /// The memtable keeps every time column in epoch milliseconds, while a
-    /// client reads a `TIMESTAMP` cell as epoch microseconds, so row emission
-    /// scales exactly these columns.
-    ///
-    /// A `BIGINT TIME_KEY` shares the same millisecond storage but its kind
-    /// is `Millis`, so it is absent from this list and hands back the number
-    /// that was inserted. A collection with no schema yields an empty list.
-    pub(in crate::data::executor) fn ts_instant_columns(
+    /// A `time_bucket` result is derived from that column and renders with
+    /// its kind: a declared `TIMESTAMP` key yields an instant, a `BIGINT`
+    /// key yields the integer stored. A collection with no schema, or a
+    /// schema whose time index is out of range, renders as `Millis`.
+    pub(in crate::data::executor) fn ts_time_key_kind(
         &self,
         database_id: DatabaseId,
         tid: TenantId,
         collection: &str,
-    ) -> Vec<String> {
+    ) -> TimeKind {
         self.with_ts_schema(database_id, tid, collection, |schema| {
-            schema
-                .columns
-                .iter()
-                .filter(|(_, ty)| matches!(ty, ColumnType::Timestamp(TimeKind::Instant(_))))
-                .map(|(name, _)| name.clone())
-                .collect()
+            match schema.columns.get(schema.timestamp_idx) {
+                Some((_, ColumnType::Timestamp(kind))) => *kind,
+                Some((_, ColumnType::Int64 | ColumnType::Float64 | ColumnType::Symbol)) | None => {
+                    TimeKind::Millis
+                }
+            }
         })
-        .unwrap_or_default()
+        .unwrap_or(TimeKind::Millis)
     }
 }
 
@@ -202,7 +199,7 @@ impl CoreLoop {
 /// timeseries column can take on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum TsGroupKeyKind {
-    /// A declared `TIMESTAMP` / `TIMESTAMPTZ` column: epoch microseconds.
+    /// A declared `TIMESTAMP` / `TIMESTAMPTZ` column: a typed instant.
     Instant(InstantKind),
     /// An integer column, including a `BIGINT TIME_KEY`, in its stored unit.
     Integer,
