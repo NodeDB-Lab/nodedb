@@ -465,7 +465,7 @@ mod tests {
     use super::*;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
     };
     use crate::engine::timeseries::last_value_cache::LastValueCache;
     use crate::types::{DatabaseId, TenantId};
@@ -486,7 +486,7 @@ mod tests {
         ColumnarMemtable::new(
             ColumnarSchema {
                 columns: vec![
-                    ("timestamp".into(), ColumnType::Timestamp),
+                    ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                     ("value".into(), ColumnType::Float64),
                     ("host".into(), ColumnType::Symbol),
                 ],

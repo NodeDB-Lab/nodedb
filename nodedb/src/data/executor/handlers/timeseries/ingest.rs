@@ -15,9 +15,7 @@
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec;
-use crate::engine::timeseries::columnar_memtable::{
-    ColumnType, ColumnarMemtable, ColumnarMemtableConfig,
-};
+use crate::engine::timeseries::columnar_memtable::{ColumnarMemtable, ColumnarMemtableConfig};
 use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::ilp_ingest;
 
@@ -402,15 +400,7 @@ impl CoreLoop {
                 .schema()
                 .columns
                 .iter()
-                .map(|(name, col_type)| {
-                    let type_str = match col_type {
-                        ColumnType::Timestamp => "TIMESTAMP",
-                        ColumnType::Float64 => "FLOAT",
-                        ColumnType::Int64 => "BIGINT",
-                        ColumnType::Symbol => "VARCHAR",
-                    };
-                    serde_json::json!([name, type_str])
-                })
+                .map(|(name, col_type)| serde_json::json!([name, col_type.ddl_type_name()]))
                 .collect();
             serde_json::json!({
                 "accepted": accepted,

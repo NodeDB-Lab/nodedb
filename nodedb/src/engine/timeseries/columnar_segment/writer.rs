@@ -74,10 +74,10 @@ impl ColumnarSegmentWriter {
         // declared collection to reach the inference fallback and flush a
         // partition under inferred names — `timestamp.col` instead of the
         // declared TIME_KEY — the seed would have to arrive empty, which needs
-        // one of: the catalog unreadable at boot (now an error rather than a
-        // silent empty seed, see `CatalogForRead::open`), a core spawned
-        // without `doc_config_seed`, or the collection missing from the
-        // catalog. All three are boot-integrity failures, not steady state.
+        // one of: the catalog unreadable at boot (an error, see
+        // `CatalogForRead::open`), a core spawned without `doc_config_seed`,
+        // or the collection missing from the catalog. All three are
+        // boot-integrity failures, not steady state.
         //
         // If that ever regresses, the damage is durable and silent: those
         // partitions keep projecting under the inferred name after the
@@ -198,10 +198,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::super::columnar_memtable::{
-        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig,
+        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
     };
     use super::super::reader::ColumnarSegmentReader;
     use super::*;
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     fn test_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
@@ -281,7 +283,7 @@ mod tests {
         let ts_col = ColumnarSegmentReader::read_column_with_codec(
             &part_dir,
             "timestamp",
-            ColumnType::Timestamp,
+            MILLIS,
             Some(ResolvedColumnCodec::DoubleDelta),
             None,
         )
@@ -312,7 +314,7 @@ mod tests {
 
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],
@@ -367,7 +369,7 @@ mod tests {
 
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -401,7 +403,7 @@ mod tests {
         let ts_col = ColumnarSegmentReader::read_column_with_codec(
             &part_dir,
             "timestamp",
-            ColumnType::Timestamp,
+            MILLIS,
             Some(ResolvedColumnCodec::Gorilla),
             None,
         )
@@ -507,13 +509,8 @@ mod tests {
         let meta = ColumnarSegmentReader::read_meta(&part_dir, Some(&kek)).unwrap();
         assert_eq!(meta.row_count, 100);
 
-        let ts_col = ColumnarSegmentReader::read_column(
-            &part_dir,
-            "timestamp",
-            ColumnType::Timestamp,
-            Some(&kek),
-        )
-        .unwrap();
+        let ts_col =
+            ColumnarSegmentReader::read_column(&part_dir, "timestamp", MILLIS, Some(&kek)).unwrap();
         assert_eq!(ts_col.as_timestamps().len(), 100);
 
         let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, Some(&kek))

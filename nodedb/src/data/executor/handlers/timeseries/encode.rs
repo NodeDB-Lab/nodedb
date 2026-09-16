@@ -21,7 +21,7 @@ fn group_key_value(part: Option<&&str>, kind: TsGroupKeyKind) -> crate::Result<r
         return Ok(rmpv::Value::Nil);
     };
     let value = match kind {
-        TsGroupKeyKind::Instant => match text.parse::<i64>() {
+        TsGroupKeyKind::Instant(_) => match text.parse::<i64>() {
             Ok(millis) => {
                 let micros = nodedb_types::NdbDateTime::from_millis(millis)
                     .map_err(|e| crate::Error::Internal {

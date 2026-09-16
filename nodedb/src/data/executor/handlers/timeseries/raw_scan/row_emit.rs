@@ -101,7 +101,7 @@ pub(super) fn emit_partition_row(
             continue;
         };
         let val = match col_type {
-            ColumnType::Timestamp => rmpv::Value::Integer(data.as_timestamps()[idx].into()),
+            ColumnType::Timestamp(_) => rmpv::Value::Integer(data.as_timestamps()[idx].into()),
             ColumnType::Float64 => {
                 let v = data.as_f64()[idx];
                 if v.is_nan() {
@@ -181,9 +181,9 @@ pub(super) fn apply_computed_columns_rmpv(
 /// columns — so nothing inside the engine sees the wire unit.
 ///
 /// `instant_columns` comes from `CoreLoop::ts_instant_columns`, which lists
-/// the columns declared `TIMESTAMP` or `TIMESTAMPTZ`. A `BIGINT TIME_KEY`
-/// lives in the same millisecond column and is not in that list, so it keeps
-/// the integer the client inserted.
+/// the columns whose memtable time kind is an instant. A `BIGINT TIME_KEY`
+/// lives in the same millisecond storage with kind `Millis` and is not in
+/// that list, so it keeps the integer the client inserted.
 ///
 /// SQL NULL cells pass through untouched. A stored value that cannot be
 /// expressed in microseconds fails the read rather than wrapping.

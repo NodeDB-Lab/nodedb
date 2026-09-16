@@ -370,7 +370,7 @@ fn memtable_col_to_value(
     row_idx: usize,
 ) -> Value {
     match col_type {
-        ColumnType::Timestamp => Value::Integer(col_data.as_timestamps()[row_idx]),
+        ColumnType::Timestamp(_) => Value::Integer(col_data.as_timestamps()[row_idx]),
         ColumnType::Float64 => {
             let v = col_data.as_f64()[row_idx];
             if v.is_nan() {
@@ -399,7 +399,7 @@ fn partition_col_to_value(
     row_idx: usize,
 ) -> Value {
     match col_type {
-        ColumnType::Timestamp => Value::Integer(data.as_timestamps()[row_idx]),
+        ColumnType::Timestamp(_) => Value::Integer(data.as_timestamps()[row_idx]),
         ColumnType::Float64 => {
             let v = data.as_f64()[row_idx];
             if v.is_nan() {

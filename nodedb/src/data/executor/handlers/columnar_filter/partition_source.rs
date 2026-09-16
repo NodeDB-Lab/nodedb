@@ -248,7 +248,12 @@ mod tests {
     fn partition_columns_adapter() {
         // Simulate sealed partition data.
         let schema = vec![
-            ("timestamp".into(), ColumnType::Timestamp),
+            (
+                "timestamp".into(),
+                ColumnType::Timestamp(
+                    crate::engine::timeseries::columnar_memtable::TimeKind::Millis,
+                ),
+            ),
             ("value".into(), ColumnType::Float64),
             ("host".into(), ColumnType::Symbol),
         ];

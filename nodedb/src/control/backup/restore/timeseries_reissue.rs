@@ -99,7 +99,7 @@ fn decode_memtable_rows(
 /// Extract one cell from a memtable column as a `Value`.
 fn memtable_cell(mt: &ColumnarMemtable, col_idx: usize, ty: ColumnType, idx: usize) -> Value {
     match ty {
-        ColumnType::Timestamp => Value::Integer(mt.column(col_idx).as_timestamps()[idx]),
+        ColumnType::Timestamp(_) => Value::Integer(mt.column(col_idx).as_timestamps()[idx]),
         ColumnType::Int64 => Value::Integer(mt.column(col_idx).as_i64()[idx]),
         ColumnType::Float64 => {
             let v = mt.column(col_idx).as_f64()[idx];
@@ -207,7 +207,7 @@ fn partition_cell(
     idx: usize,
 ) -> Value {
     match ty {
-        ColumnType::Timestamp => Value::Integer(data.as_timestamps()[idx]),
+        ColumnType::Timestamp(_) => Value::Integer(data.as_timestamps()[idx]),
         ColumnType::Int64 => Value::Integer(data.as_i64()[idx]),
         ColumnType::Float64 => {
             let v = data.as_f64()[idx];

@@ -60,7 +60,7 @@ pub fn eval_filters_to_bitmask<'a>(
                     _ => return None,
                 }
             }
-            ColumnType::Int64 | ColumnType::Timestamp => {
+            ColumnType::Int64 | ColumnType::Timestamp(_) => {
                 let fv = f.value.as_i64()?;
                 let vals = if *col_type == ColumnType::Int64 {
                     col_data.as_i64()

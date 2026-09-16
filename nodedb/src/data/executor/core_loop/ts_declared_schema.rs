@@ -18,8 +18,9 @@
 //! line's own timestamp as the time column.
 
 use nodedb_physical::physical_plan::TimeseriesSchema;
+use nodedb_types::InstantKind;
 
-use crate::engine::timeseries::columnar_memtable::{ColumnType, ColumnarSchema};
+use crate::engine::timeseries::columnar_memtable::{ColumnType, ColumnarSchema, TimeKind};
 use crate::types::{DatabaseId, TenantId};
 
 use super::state::CoreLoop;
@@ -117,13 +118,33 @@ impl CoreLoop {
         })
     }
 
+    /// Run `f` against the memtable schema that types this collection's
+    /// columns: the resident memtable's when one exists, else the declared
+    /// one. A memtable is created on first ingest, so a node serving only
+    /// flushed partitions after a restart has none, and the declared shape
+    /// is the same schema that memtable would have been built from. `None`
+    /// when the collection has neither.
+    fn with_ts_schema<R>(
+        &self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+        f: impl FnOnce(&ColumnarSchema) -> R,
+    ) -> Option<R> {
+        let key = (database_id, tid, collection.to_string());
+        if let Some(memtable) = self.columnar_memtables.get(&key) {
+            return Some(f(memtable.schema()));
+        }
+        self.declared_ts_memtable_schema(database_id, tid, collection)
+            .map(|schema| f(&schema))
+    }
+
     /// How each named GROUP BY column of a timeseries collection renders.
     ///
     /// A grouped column must carry the type it carries ungrouped, so this
-    /// resolves the same declared shape row emission reads. A declared
-    /// collection answers from its DDL; a measurement ingested over the raw
-    /// ILP protocol has no DDL, so its resident memtable schema answers.
-    /// A column present in neither renders as text.
+    /// answers from the memtable schema, whose column types carry the time
+    /// kind. A column absent from the schema, or a collection with no schema
+    /// at all, renders as text.
     pub(in crate::data::executor) fn ts_group_key_kinds(
         &self,
         database_id: DatabaseId,
@@ -131,73 +152,46 @@ impl CoreLoop {
         collection: &str,
         group_by: &[String],
     ) -> Vec<TsGroupKeyKind> {
-        if let Some(declared) = self.declared_timeseries(database_id, tid, collection) {
-            let time_key_index = declared.time_key_index();
-            return group_by
+        self.with_ts_schema(database_id, tid, collection, |schema| {
+            group_by
                 .iter()
                 .map(|name| {
-                    let Some(index) = declared.columns.iter().position(|(c, _)| c == name) else {
-                        return TsGroupKeyKind::Text;
-                    };
-                    let declared_type = declared.columns[index].1.as_str();
-                    if declared_type_is_instant(declared_type) {
-                        return TsGroupKeyKind::Instant;
-                    }
-                    kind_of_storage(memtable_column_type(
-                        declared_type,
-                        Some(index) == time_key_index,
-                    ))
+                    schema
+                        .columns
+                        .iter()
+                        .find(|(c, _)| c == name)
+                        .map(|(_, ty)| kind_of_storage(*ty))
+                        .unwrap_or(TsGroupKeyKind::Text)
                 })
-                .collect();
-        }
-
-        let key = (database_id, tid, collection.to_string());
-        let Some(memtable) = self.columnar_memtables.get(&key) else {
-            return vec![TsGroupKeyKind::Text; group_by.len()];
-        };
-        let schema = memtable.schema();
-        group_by
-            .iter()
-            .map(|name| {
-                schema
-                    .columns
-                    .iter()
-                    .find(|(c, _)| c == name)
-                    .map(|(_, ty)| kind_of_storage(*ty))
-                    .unwrap_or(TsGroupKeyKind::Text)
-            })
-            .collect()
+                .collect()
+        })
+        .unwrap_or_else(|| vec![TsGroupKeyKind::Text; group_by.len()])
     }
 
-    /// Declared columns of a timeseries collection that carry an instant.
+    /// Columns of a timeseries collection whose memtable type is an instant.
     ///
-    /// A column declared `TIMESTAMP` or `TIMESTAMPTZ` is one. The memtable
-    /// keeps every timestamp column in epoch milliseconds, while a client
-    /// reads a `TIMESTAMP` cell as epoch microseconds, so row emission scales
-    /// exactly these columns.
+    /// The memtable keeps every time column in epoch milliseconds, while a
+    /// client reads a `TIMESTAMP` cell as epoch microseconds, so row emission
+    /// scales exactly these columns.
     ///
-    /// A `BIGINT TIME_KEY` shares the same millisecond column and is absent
-    /// from this list: its declared type is an integer, so it hands back the
-    /// number that was inserted.
-    ///
-    /// An undeclared measurement (raw ILP protocol ingest) has no entry and
-    /// yields an empty list — the planner types its columns as text, so no
-    /// cell of it is read as an instant.
+    /// A `BIGINT TIME_KEY` shares the same millisecond storage but its kind
+    /// is `Millis`, so it is absent from this list and hands back the number
+    /// that was inserted. A collection with no schema yields an empty list.
     pub(in crate::data::executor) fn ts_instant_columns(
         &self,
         database_id: DatabaseId,
         tid: TenantId,
         collection: &str,
     ) -> Vec<String> {
-        let Some(declared) = self.declared_timeseries(database_id, tid, collection) else {
-            return Vec::new();
-        };
-        declared
-            .columns
-            .iter()
-            .filter(|(_, type_str)| declared_type_is_instant(type_str))
-            .map(|(name, _)| name.clone())
-            .collect()
+        self.with_ts_schema(database_id, tid, collection, |schema| {
+            schema
+                .columns
+                .iter()
+                .filter(|(_, ty)| matches!(ty, ColumnType::Timestamp(TimeKind::Instant(_))))
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
     }
 }
 
@@ -209,7 +203,7 @@ impl CoreLoop {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum TsGroupKeyKind {
     /// A declared `TIMESTAMP` / `TIMESTAMPTZ` column: epoch microseconds.
-    Instant,
+    Instant(InstantKind),
     /// An integer column, including a `BIGINT TIME_KEY`, in its stored unit.
     Integer,
     /// A floating-point column.
@@ -220,43 +214,36 @@ pub(in crate::data::executor) enum TsGroupKeyKind {
 
 /// The wire shape a memtable storage type renders as.
 ///
-/// `Timestamp` maps to `Integer` here: the instant case is decided from the
-/// declared DDL type before this runs, so what reaches it is a `BIGINT`
-/// time key or a system-time column, both of which render as the number
-/// storage holds.
+/// A time column answers from its own kind: an instant renders as one, a
+/// `Millis` column (a `BIGINT` time key or the system-time column) renders
+/// as the number storage holds.
 fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
     match storage {
-        ColumnType::Int64 | ColumnType::Timestamp => TsGroupKeyKind::Integer,
+        ColumnType::Timestamp(TimeKind::Instant(kind)) => TsGroupKeyKind::Instant(kind),
+        ColumnType::Int64 | ColumnType::Timestamp(TimeKind::Millis) => TsGroupKeyKind::Integer,
         ColumnType::Float64 => TsGroupKeyKind::Float,
         ColumnType::Symbol => TsGroupKeyKind::Text,
     }
 }
 
-/// Whether a declared DDL type makes a column an instant on the wire.
-///
-/// Both planes answer this from `nodedb_types::columnar::ColumnType`: the
-/// Control Plane decides how a cell is READ, this decides the unit it is
-/// WRITTEN in, and one classifier keeps them from naming different sets.
-fn declared_type_is_instant(declared_type: &str) -> bool {
-    nodedb_types::columnar::ColumnType::from_declared_type(declared_type)
-        .is_some_and(|declared| declared.is_instant())
-}
-
 /// Map a declared SQL type onto the memtable's storage type.
 ///
-/// The designated time key is always the memtable's `Timestamp` column
-/// regardless of how it was spelled — `TIMESTAMP`, `TIMESTAMPTZ`, and
-/// `BIGINT` time keys all store epoch milliseconds.
+/// The designated time key is always a memtable `Timestamp` column. Its
+/// kind comes from the declared type: `TIMESTAMP` and `TIMESTAMPTZ` are
+/// instants, while a `BIGINT` time key (or any other spelling) is `Millis`.
+/// The engine-assigned system-time column is `Millis` too.
 fn memtable_column_type(declared_type: &str, is_time_key: bool) -> ColumnType {
     use nodedb_types::columnar::ColumnType as DeclaredType;
 
-    if is_time_key {
-        return ColumnType::Timestamp;
-    }
     match DeclaredType::from_declared_type(declared_type) {
-        Some(
-            DeclaredType::Timestamp | DeclaredType::Timestamptz | DeclaredType::SystemTimestamp,
-        ) => ColumnType::Timestamp,
+        Some(DeclaredType::Timestamp) => {
+            ColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive))
+        }
+        Some(DeclaredType::Timestamptz) => {
+            ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc))
+        }
+        Some(DeclaredType::SystemTimestamp) => ColumnType::Timestamp(TimeKind::Millis),
+        _ if is_time_key => ColumnType::Timestamp(TimeKind::Millis),
         Some(DeclaredType::Int64) => ColumnType::Int64,
         // The memtable has no boolean column; ILP ingest widens booleans to
         // f64, so a declared BOOLEAN lands in the same place.
@@ -273,20 +260,47 @@ fn memtable_column_type(declared_type: &str, is_time_key: bool) -> ColumnType {
 mod tests {
     use super::*;
 
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
+    const NAIVE: ColumnType = ColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive));
+    const UTC: ColumnType = ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc));
+
     #[test]
     fn time_key_is_the_timestamp_column_whatever_its_declared_type() {
+        assert!(memtable_column_type("BIGINT TIME_KEY", true).is_time());
+        assert!(memtable_column_type("TIMESTAMP TIME_KEY", true).is_time());
+        assert!(memtable_column_type("TIMESTAMPTZ", true).is_time());
+        assert!(memtable_column_type("TEXT", true).is_time());
+    }
+
+    /// The kind follows the declared type: a `BIGINT` time key reads back as
+    /// the integer stored, a `TIMESTAMP` as a naive instant, a `TIMESTAMPTZ`
+    /// as a UTC instant. The system-time column is engine-assigned and reads
+    /// back as milliseconds.
+    #[test]
+    fn time_kind_follows_the_declared_type() {
+        assert_eq!(memtable_column_type("BIGINT TIME_KEY", true), MILLIS);
+        assert_eq!(memtable_column_type("TIMESTAMP TIME_KEY", true), NAIVE);
+        assert_eq!(memtable_column_type("timestamp", true), NAIVE);
+        assert_eq!(memtable_column_type("TIMESTAMPTZ", true), UTC);
+        assert_eq!(memtable_column_type("TIMESTAMPTZ", false), UTC);
+        assert_eq!(memtable_column_type("SYSTEM_TIMESTAMP", false), MILLIS);
+        assert_eq!(memtable_column_type("SYSTEM_TIMESTAMP", true), MILLIS);
+    }
+
+    #[test]
+    fn group_key_kind_comes_from_the_column_kind() {
         assert_eq!(
-            memtable_column_type("BIGINT TIME_KEY", true),
-            ColumnType::Timestamp
+            kind_of_storage(NAIVE),
+            TsGroupKeyKind::Instant(InstantKind::Naive)
         );
         assert_eq!(
-            memtable_column_type("TIMESTAMP TIME_KEY", true),
-            ColumnType::Timestamp
+            kind_of_storage(UTC),
+            TsGroupKeyKind::Instant(InstantKind::Utc)
         );
-        assert_eq!(
-            memtable_column_type("TIMESTAMPTZ", true),
-            ColumnType::Timestamp
-        );
+        assert_eq!(kind_of_storage(MILLIS), TsGroupKeyKind::Integer);
+        assert_eq!(kind_of_storage(ColumnType::Int64), TsGroupKeyKind::Integer);
+        assert_eq!(kind_of_storage(ColumnType::Float64), TsGroupKeyKind::Float);
+        assert_eq!(kind_of_storage(ColumnType::Symbol), TsGroupKeyKind::Text);
     }
 
     #[test]
@@ -308,25 +322,7 @@ mod tests {
         // Only the designated key drives partitioning, but a non-key
         // timestamp column keeps timestamp storage — its value comes from the
         // row, not from the ingest line's clock.
-        assert_eq!(
-            memtable_column_type("TIMESTAMP", false),
-            ColumnType::Timestamp
-        );
-    }
-
-    /// The declared types the planner reads back as instants are exactly the
-    /// ones emission scales. A `BIGINT` time key is stored in the same
-    /// millisecond column and must NOT be scaled.
-    #[test]
-    fn only_declared_timestamp_types_are_instants() {
-        assert!(declared_type_is_instant("TIMESTAMP TIME_KEY"));
-        assert!(declared_type_is_instant("TIMESTAMPTZ"));
-        assert!(declared_type_is_instant("timestamp"));
-        assert!(!declared_type_is_instant("BIGINT TIME_KEY"));
-        assert!(!declared_type_is_instant("INT"));
-        assert!(!declared_type_is_instant("TEXT"));
-        assert!(!declared_type_is_instant("SYSTEM_TIMESTAMP"));
-        assert!(!declared_type_is_instant(""));
+        assert_eq!(memtable_column_type("TIMESTAMP", false), NAIVE);
     }
 
     #[test]

@@ -78,17 +78,7 @@ pub(super) fn preflight_ilp_batch(
         let catalog_fields = schema
             .columns
             .iter()
-            .map(|(name, ty)| {
-                let sql_type = match ty {
-                    crate::engine::timeseries::columnar_memtable::ColumnType::Timestamp => {
-                        "TIMESTAMP"
-                    }
-                    crate::engine::timeseries::columnar_memtable::ColumnType::Float64 => "FLOAT",
-                    crate::engine::timeseries::columnar_memtable::ColumnType::Int64 => "BIGINT",
-                    crate::engine::timeseries::columnar_memtable::ColumnType::Symbol => "VARCHAR",
-                };
-                (name.clone(), sql_type.to_owned())
-            })
+            .map(|(name, ty)| (name.clone(), ty.ddl_type_name().to_owned()))
             .collect();
         groups.push(IlpMeasurementBatch {
             measurement,

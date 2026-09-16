@@ -68,7 +68,7 @@ pub(crate) fn eval_filters_sparse(
                     }
                 }
             }
-            ColumnType::Timestamp => {
+            ColumnType::Timestamp(_) => {
                 let fv = nodedb_query::scan_filter::value_as_timestamp_ms(&f.value)?;
                 if let ColumnData::Timestamp(vals) = col_data {
                     for (mi, &idx) in indices.iter().enumerate() {
@@ -142,7 +142,7 @@ pub(crate) fn eval_filters_dense(
                     }
                 }
             }
-            ColumnType::Timestamp => {
+            ColumnType::Timestamp(_) => {
                 let fv = nodedb_query::scan_filter::value_as_timestamp_ms(&f.value)?;
                 if let ColumnData::Timestamp(vals) = col_data {
                     for i in 0..row_count {
@@ -273,7 +273,7 @@ pub(crate) fn eval_filters_bitmask(
                     _ => return None,
                 }
             }
-            ColumnType::Timestamp => {
+            ColumnType::Timestamp(_) => {
                 let fv = nodedb_query::scan_filter::value_as_timestamp_ms(&f.value)?;
                 let ColumnData::Timestamp(vals) = col_data else {
                     return None;

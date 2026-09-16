@@ -24,7 +24,7 @@ mod tests {
     use super::*;
     use crate::bridge::scan_filter::ScanFilter;
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
     };
     use nodedb_types::timeseries::SeriesId;
 
@@ -33,7 +33,7 @@ mod tests {
     fn make_test_mt() -> ColumnarMemtable {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("value".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],

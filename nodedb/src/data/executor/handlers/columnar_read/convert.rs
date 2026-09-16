@@ -104,7 +104,7 @@ pub(in crate::data::executor) fn emit_column_value(
         ColumnData as TsColumnData, ColumnType as TsColumnType,
     };
     match col_type {
-        TsColumnType::Timestamp => {
+        TsColumnType::Timestamp(_) => {
             nodedb_query::msgpack_scan::write_i64(buf, col_data.as_timestamps()[row_idx]);
         }
         TsColumnType::Float64 => {
