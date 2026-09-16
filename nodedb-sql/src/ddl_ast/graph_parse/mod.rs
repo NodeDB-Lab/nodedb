@@ -20,6 +20,7 @@
 //! vocabulary, means no statement reaches the boundary at all. Both are
 //! reported as a parse error naming what is wrong.
 
+mod cursor;
 mod entry;
 pub mod fusion_params;
 mod helpers;

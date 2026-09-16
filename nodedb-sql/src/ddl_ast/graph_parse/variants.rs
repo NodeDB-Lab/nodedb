@@ -7,26 +7,35 @@
 //! here, so "this clause is missing" must not be reported the same way as
 //! "this was never a graph statement" — the second sends the input to the
 //! general SQL parser, which can only say `GRAPH` is not SQL.
+//!
+//! Each parser reads its clauses through [`Cursor`], which claims the tokens
+//! it consumes; the dispatcher refuses any token left unclaimed. A mistyped
+//! keyword is then a parse error naming the token, not a silently defaulted
+//! clause.
 
 use super::{
     super::statement::{GraphStmt, NodedbStatement},
+    cursor::Cursor,
     fusion_params::{FusionParams, RAG_FUSION_KEYWORDS},
-    helpers::{
-        direction_after, extract_properties, missing_clause, quoted_after, quoted_list_after,
-        usize_after, usize_after_checked, word_after,
-    },
-    tokenizer::Tok,
+    helpers::missing_clause,
 };
 use crate::error::SqlError;
 
-pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_insert_edge(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH INSERT EDGE";
-    let collection =
-        quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
-    let src = quoted_after(toks, "FROM").ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
-    let dst = quoted_after(toks, "TO").ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
-    let label = quoted_after(toks, "TYPE").ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?;
-    let properties = extract_properties(toks);
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let src = cursor
+        .quoted_after("FROM")
+        .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
+    let dst = cursor
+        .quoted_after("TO")
+        .ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
+    let label = cursor
+        .quoted_after("TYPE")
+        .ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?;
+    let properties = cursor.extract_properties();
     Ok(NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
         collection,
         src,
@@ -36,13 +45,20 @@ pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, Sql
     }))
 }
 
-pub(super) fn parse_delete_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_delete_edge(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH DELETE EDGE";
-    let collection =
-        quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
-    let src = quoted_after(toks, "FROM").ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
-    let dst = quoted_after(toks, "TO").ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
-    let label = quoted_after(toks, "TYPE").ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let src = cursor
+        .quoted_after("FROM")
+        .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
+    let dst = cursor
+        .quoted_after("TO")
+        .ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
+    let label = cursor
+        .quoted_after("TYPE")
+        .ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphDeleteEdge {
         collection,
         src,
@@ -52,13 +68,14 @@ pub(super) fn parse_delete_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, Sql
 }
 
 pub(super) fn parse_set_labels(
-    toks: &[Tok<'_>],
+    cursor: &mut Cursor<'_>,
     remove: bool,
 ) -> Result<NodedbStatement, SqlError> {
     let keyword = if remove { "UNLABEL" } else { "LABEL" };
-    let node_id = quoted_after(toks, keyword)
+    let node_id = cursor
+        .quoted_after(keyword)
         .ok_or_else(|| missing_clause(&format!("GRAPH {keyword}"), "<node>"))?;
-    let labels = quoted_list_after(toks, "AS");
+    let labels = cursor.quoted_list_after("AS");
     Ok(NodedbStatement::Graph(GraphStmt::GraphSetLabels {
         node_id,
         labels,
@@ -66,14 +83,17 @@ pub(super) fn parse_set_labels(
     }))
 }
 
-pub(super) fn parse_traverse(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_traverse(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH TRAVERSE";
-    let collection =
-        quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
-    let start = quoted_after(toks, "FROM").ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
-    let depth = usize_after_checked(toks, "DEPTH")?.unwrap_or(2);
-    let edge_label = quoted_after(toks, "LABEL");
-    let direction = direction_after(toks)?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let start = cursor
+        .quoted_after("FROM")
+        .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
+    let depth = cursor.usize_after_checked("DEPTH")?.unwrap_or(2);
+    let edge_label = cursor.quoted_after("LABEL");
+    let direction = cursor.direction_after("DIRECTION")?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphTraverse {
         collection,
         start,
@@ -83,13 +103,16 @@ pub(super) fn parse_traverse(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlErr
     }))
 }
 
-pub(super) fn parse_neighbors(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_neighbors(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH NEIGHBORS";
-    let collection =
-        quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
-    let node = quoted_after(toks, "OF").ok_or_else(|| missing_clause(STMT, "OF <node>"))?;
-    let edge_label = quoted_after(toks, "LABEL");
-    let direction = direction_after(toks)?;
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let node = cursor
+        .quoted_after("OF")
+        .ok_or_else(|| missing_clause(STMT, "OF <node>"))?;
+    let edge_label = cursor.quoted_after("LABEL");
+    let direction = cursor.direction_after("DIRECTION")?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphNeighbors {
         collection,
         node,
@@ -98,14 +121,19 @@ pub(super) fn parse_neighbors(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlEr
     }))
 }
 
-pub(super) fn parse_path(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_path(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH PATH";
-    let collection =
-        quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
-    let src = quoted_after(toks, "FROM").ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
-    let dst = quoted_after(toks, "TO").ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
-    let max_depth = usize_after_checked(toks, "MAX_DEPTH")?.unwrap_or(10);
-    let edge_label = quoted_after(toks, "LABEL");
+    let collection = cursor
+        .quoted_after("IN")
+        .ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
+    let src = cursor
+        .quoted_after("FROM")
+        .ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
+    let dst = cursor
+        .quoted_after("TO")
+        .ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
+    let max_depth = cursor.usize_after_checked("MAX_DEPTH")?.unwrap_or(10);
+    let edge_label = cursor.quoted_after("LABEL");
     Ok(NodedbStatement::Graph(GraphStmt::GraphPath {
         collection,
         src,
@@ -115,24 +143,23 @@ pub(super) fn parse_path(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> 
     }))
 }
 
-pub(super) fn parse_algo(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_algo(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH ALGO";
-    let algorithm = super::helpers::find_keyword(toks, "ALGO")
-        .and_then(|i| match toks.get(i + 1)? {
-            Tok::Word(w) => Some(w.to_ascii_uppercase()),
-            _ => None,
-        })
+    let algorithm = cursor
+        .word_after("ALGO")
+        .map(|word| word.to_ascii_uppercase())
         .ok_or_else(|| missing_clause(STMT, "ALGO <algorithm>"))?;
 
     // Accept either a bare word (`ON users`) or a quoted literal (`ON 'users'`)
     // so clients can escape collection names safely.
-    let collection_raw =
-        quoted_after(toks, "ON").ok_or_else(|| missing_clause(STMT, "ON <collection>"))?;
+    let collection_raw = cursor
+        .quoted_after("ON")
+        .ok_or_else(|| missing_clause(STMT, "ON <collection>"))?;
 
     // Reject the `ON (subquery)` form: the tokenizer strips `(` and `)`, so
-    // `ON (SELECT …)` becomes `[ON, SELECT, …]` and `quoted_after("ON")`
-    // returns `"SELECT"`, which would be stored as the collection name and
-    // then ignored — producing tenant-wide results.
+    // `ON (SELECT …)` becomes `[ON, SELECT, …]` and the reader returns
+    // `"SELECT"`, which would be stored as the collection name and then
+    // ignored — producing tenant-wide results.
     const SUBQUERY_KEYWORDS: &[&str] = &["SELECT", "WITH", "VALUES", "TABLE"];
     if SUBQUERY_KEYWORDS
         .iter()
@@ -147,30 +174,90 @@ pub(super) fn parse_algo(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> 
     Ok(NodedbStatement::Graph(GraphStmt::GraphAlgo {
         algorithm,
         collection,
-        edge_label: quoted_after(toks, "EDGE_LABEL"),
-        damping: super::helpers::float_after(toks, "DAMPING"),
-        tolerance: super::helpers::float_after(toks, "TOLERANCE"),
-        resolution: super::helpers::float_after(toks, "RESOLUTION"),
-        max_iterations: usize_after(toks, "ITERATIONS"),
-        sample_size: usize_after(toks, "SAMPLE"),
-        source_node: quoted_after(toks, "FROM").or_else(|| quoted_after(toks, "SOURCE")),
-        direction: word_after(toks, "DIRECTION"),
-        mode: word_after(toks, "MODE"),
-        personalization: super::helpers::object_after(toks, "PERSONALIZATION"),
+        edge_label: cursor.quoted_after("EDGE_LABEL"),
+        damping: cursor.float_after("DAMPING"),
+        tolerance: cursor.float_after("TOLERANCE"),
+        resolution: cursor.float_after("RESOLUTION"),
+        max_iterations: cursor.usize_after("ITERATIONS"),
+        sample_size: cursor.usize_after("SAMPLE"),
+        source_node: cursor
+            .quoted_after("FROM")
+            .or_else(|| cursor.quoted_after("SOURCE")),
+        direction: cursor.word_after("DIRECTION"),
+        mode: cursor.word_after("MODE"),
+        personalization: cursor.object_after("PERSONALIZATION"),
     }))
 }
 
 /// Parse `GRAPH RAG FUSION ON <collection> QUERY ARRAY[…] [options…]`.
 ///
-/// All fusion parameters are delegated to [`FusionParams::extract`] so
-/// every fusion SQL surface shares one typed, quote-aware extractor.
-pub(super) fn parse_rag_fusion(toks: &[Tok<'_>], sql: &str) -> Result<NodedbStatement, SqlError> {
-    let collection = word_after(toks, "ON")
-        .or_else(|| quoted_after(toks, "ON"))
+/// All fusion parameters are delegated to [`FusionParams::extract`] so every
+/// fusion SQL surface shares one typed, quote-aware extractor. That extractor
+/// reads the bracket payload from the raw text, so it claims no tokens here —
+/// the variant claims the rest, and the extractor's own validation is what
+/// refuses a malformed option.
+pub(super) fn parse_rag_fusion(
+    cursor: &mut Cursor<'_>,
+    sql: &str,
+) -> Result<NodedbStatement, SqlError> {
+    let collection = cursor
+        .word_after("ON")
+        .or_else(|| cursor.quoted_after("ON"))
         .ok_or_else(|| missing_clause("GRAPH RAG FUSION", "ON <collection>"))?;
-    let params = FusionParams::extract(toks, sql, &RAG_FUSION_KEYWORDS);
+    let params = FusionParams::extract(cursor.tokens(), sql, &RAG_FUSION_KEYWORDS);
+    cursor.consume_rest();
     Ok(NodedbStatement::Graph(GraphStmt::GraphRagFusion {
         collection,
         params,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ddl_ast::graph_parse::cursor::Cursor;
+    use crate::ddl_ast::graph_parse::tokenizer;
+
+    fn parse(sql: &str, prefix_len: usize, statement: &str) -> Result<NodedbStatement, SqlError> {
+        let mut cursor = Cursor::new(tokenizer::tokenize(sql), prefix_len);
+        let parsed = match statement {
+            "GRAPH TRAVERSE" => parse_traverse(&mut cursor),
+            "GRAPH PATH" => parse_path(&mut cursor),
+            other => panic!("unhandled test statement {other}"),
+        };
+        parsed.and_then(|stmt| cursor.finish(statement).map(|()| stmt))
+    }
+
+    #[test]
+    fn a_mistyped_keyword_fails_the_statement() {
+        let err = parse("GRAPH TRAVERSE FROM 1 DEPTS 3 IN g", 2, "GRAPH TRAVERSE")
+            .expect_err("DEPTS is not a clause");
+        assert!(err.to_string().contains("DEPTS"), "{err}");
+    }
+
+    #[test]
+    fn a_valid_statement_still_parses() {
+        let stmt = parse(
+            "GRAPH TRAVERSE FROM 1 DEPTH 3 IN g DIRECTION both",
+            2,
+            "GRAPH TRAVERSE",
+        )
+        .expect("every token belongs to a clause");
+        let NodedbStatement::Graph(GraphStmt::GraphTraverse { depth, .. }) = stmt else {
+            panic!("expected a traverse statement");
+        };
+        assert_eq!(depth, 3);
+    }
+
+    #[test]
+    fn a_stray_literal_fails_the_statement() {
+        // The statement needs its required IN clause: without it the parser
+        // correctly refuses for the missing clause before it ever reaches the
+        // stray token. With IN present, the unclaimed trailing literal is what
+        // the cursor's finish step must name.
+        let err = parse("GRAPH PATH IN g FROM 'a' TO 'b' 'stray'", 2, "GRAPH PATH")
+            .expect_err("the stray literal belongs to no clause");
+        assert!(err.to_string().contains("stray"), "{err}");
+        assert!(err.to_string().contains("unexpected token"), "{err}");
+    }
 }

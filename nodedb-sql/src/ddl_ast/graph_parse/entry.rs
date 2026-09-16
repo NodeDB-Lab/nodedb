@@ -3,7 +3,11 @@
 //! Graph DSL entry point.
 
 use super::super::statement::{GraphStmt, NodedbStatement};
-use super::{tokenizer, variants};
+use super::{
+    cursor::Cursor,
+    tokenizer::{self, Tok},
+    variants,
+};
 use crate::error::SqlError;
 
 /// Parse a graph DSL statement.
@@ -31,23 +35,29 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     let toks = tokenizer::tokenize(trimmed);
 
     let parsed = if upper.starts_with("GRAPH INSERT EDGE ") {
-        variants::parse_insert_edge(&toks)
+        run(toks, 3, "GRAPH INSERT EDGE", variants::parse_insert_edge)
     } else if upper.starts_with("GRAPH DELETE EDGE ") {
-        variants::parse_delete_edge(&toks)
+        run(toks, 3, "GRAPH DELETE EDGE", variants::parse_delete_edge)
     } else if upper.starts_with("GRAPH LABEL ") {
-        variants::parse_set_labels(&toks, false)
+        run(toks, 2, "GRAPH LABEL", |cursor| {
+            variants::parse_set_labels(cursor, false)
+        })
     } else if upper.starts_with("GRAPH UNLABEL ") {
-        variants::parse_set_labels(&toks, true)
+        run(toks, 2, "GRAPH UNLABEL", |cursor| {
+            variants::parse_set_labels(cursor, true)
+        })
     } else if upper.starts_with("GRAPH TRAVERSE ") {
-        variants::parse_traverse(&toks)
+        run(toks, 2, "GRAPH TRAVERSE", variants::parse_traverse)
     } else if upper.starts_with("GRAPH NEIGHBORS ") {
-        variants::parse_neighbors(&toks)
+        run(toks, 2, "GRAPH NEIGHBORS", variants::parse_neighbors)
     } else if upper.starts_with("GRAPH PATH ") {
-        variants::parse_path(&toks)
+        run(toks, 2, "GRAPH PATH", variants::parse_path)
     } else if upper.starts_with("GRAPH ALGO ") {
-        variants::parse_algo(&toks)
+        run(toks, 2, "GRAPH ALGO", variants::parse_algo)
     } else if upper.starts_with("GRAPH RAG FUSION ") {
-        variants::parse_rag_fusion(&toks, trimmed)
+        run(toks, 3, "GRAPH RAG FUSION", |cursor| {
+            variants::parse_rag_fusion(cursor, trimmed)
+        })
     } else {
         // Starts with `GRAPH ` but names no known command. Still graph DSL,
         // so report it here rather than letting the SQL parser guess.
@@ -57,6 +67,22 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     };
 
     Some(parsed)
+}
+
+/// Run one variant with a consume-tracking cursor, then refuse any token the
+/// statement left unclaimed.
+///
+/// `prefix_len` counts the command words the dispatcher matched
+/// (`GRAPH TRAVERSE` is two, `GRAPH INSERT EDGE` is three); no clause claims
+/// them.
+fn run<'a>(
+    toks: Vec<Tok<'a>>,
+    prefix_len: usize,
+    statement: &str,
+    parse: impl FnOnce(&mut Cursor<'a>) -> Result<NodedbStatement, SqlError>,
+) -> Result<NodedbStatement, SqlError> {
+    let mut cursor = Cursor::new(toks, prefix_len);
+    parse(&mut cursor).and_then(|stmt| cursor.finish(statement).map(|()| stmt))
 }
 
 #[cfg(test)]
