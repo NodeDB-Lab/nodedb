@@ -55,9 +55,7 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     } else if upper.starts_with("GRAPH ALGO ") {
         run(toks, 2, "GRAPH ALGO", variants::parse_algo)
     } else if upper.starts_with("GRAPH RAG FUSION ") {
-        run(toks, 3, "GRAPH RAG FUSION", |cursor| {
-            variants::parse_rag_fusion(cursor, trimmed)
-        })
+        run(toks, 3, "GRAPH RAG FUSION", variants::parse_rag_fusion)
     } else {
         // Starts with `GRAPH ` but names no known command. Still graph DSL,
         // so report it here rather than letting the SQL parser guess.
@@ -377,6 +375,28 @@ mod tests {
                 let (k1, k2) = params.rrf_k.expect("RRF_K must be parsed");
                 assert!((k1 - 1.0).abs() < 1e-10, "vector_k must be 1.0, got {k1}");
                 assert!((k2 - 99.5).abs() < 1e-10, "graph_k must be 99.5, got {k2}");
+            }
+            other => panic!("expected GraphRagFusion, got {other:?}"),
+        }
+    }
+
+    /// `ON` introduces both the fusion collection and the BM25 field. The field
+    /// read must anchor on `BM25`, or the collection name is captured as the
+    /// field and the real `ON` is left unclaimed.
+    #[test]
+    fn parse_rag_fusion_three_source_reads_the_bm25_field() {
+        let stmt = parsed(
+            "GRAPH RAG FUSION ON ents \
+             QUERY ARRAY[0.1] \
+             VECTOR_TOP_K 5 \
+             BM25 'attention' ON 'body' \
+             RRF_K (60.0, 35.0, 50.0)",
+        );
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphRagFusion { params, .. }) => {
+                assert_eq!(params.bm25_query.as_deref(), Some("attention"));
+                assert_eq!(params.bm25_field.as_deref(), Some("body"));
+                assert_eq!(params.rrf_k_triple, Some((60.0, 35.0, 50.0)));
             }
             other => panic!("expected GraphRagFusion, got {other:?}"),
         }

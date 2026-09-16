@@ -69,6 +69,22 @@ impl<'a> Cursor<'a> {
         self.claim_text(pos + 1)
     }
 
+    /// The word or quoted literal after `keyword`, searching only at or after
+    /// the first `anchor` token. Used where one keyword introduces two clauses,
+    /// as `ON` does for `ON <collection>` and `BM25 <text> ON <field>`.
+    pub(super) fn quoted_after_from(&mut self, anchor: &str, keyword: &str) -> Option<String> {
+        let anchor_pos = self
+            .toks
+            .iter()
+            .position(|tok| Self::is_keyword(tok, anchor))?;
+        let offset = self.toks[anchor_pos..]
+            .iter()
+            .position(|tok| Self::is_keyword(tok, keyword))?;
+        let pos = anchor_pos + offset;
+        self.used[pos] = true;
+        self.claim_text(pos + 1)
+    }
+
     /// Every consecutive word or quoted literal after `keyword`, up to the
     /// first token that is neither. Used by `AS <label> [, <label>…]`.
     pub(super) fn quoted_list_after(&mut self, keyword: &str) -> Vec<String> {
@@ -119,18 +135,68 @@ impl<'a> Cursor<'a> {
     }
 
     /// The next `count` float words after `keyword`.
-    pub(super) fn floats_after<const N: usize>(&mut self, keyword: &str) -> Option<[f64; N]> {
-        let pos = self.find(keyword)?;
-        let mut out = [0.0f64; N];
-        for (offset, slot) in out.iter_mut().enumerate() {
-            let value = match self.toks.get(pos + 1 + offset)? {
-                Tok::Word(w) => w.parse::<f64>().ok()?,
-                _ => return None,
-            };
-            self.used[pos + 1 + offset] = true;
-            *slot = value;
+    pub(super) fn floats_after_max(
+        &mut self,
+        keyword: &str,
+        max: usize,
+    ) -> Result<Option<Vec<f64>>, SqlError> {
+        let Some(pos) = self.find(keyword) else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        let mut at = pos + 1;
+        while out.len() < max {
+            match self.toks.get(at) {
+                Some(Tok::Word(w)) => match w.parse::<f64>() {
+                    Ok(value) => {
+                        self.used[at] = true;
+                        out.push(value);
+                        at += 1;
+                    }
+                    Err(_) => break,
+                },
+                _ => break,
+            }
         }
-        Some(out)
+        if out.is_empty() {
+            let found = match self.toks.get(pos + 1) {
+                Some(Tok::Word(w)) => (*w).to_string(),
+                Some(Tok::Quoted(s)) => format!("'{s}'"),
+                Some(Tok::Object(_)) => "{…}".to_string(),
+                None => "nothing".to_string(),
+            };
+            return Err(SqlError::Parse {
+                detail: format!("{keyword} expects numbers — found {found}"),
+            });
+        }
+        Ok(Some(out))
+    }
+
+    /// The `ARRAY[f1, f2, …]` payload after `anchor`, claiming the anchor, the
+    /// `ARRAY` word, and every numeric element. The tokenizer drops the
+    /// brackets, so the element run ends at the first non-numeric token (the
+    /// next clause keyword).
+    pub(super) fn floats_array_after(&mut self, anchor: &str) -> Option<Vec<f64>> {
+        let pos = self.find(anchor)?;
+        let mut at = pos + 1;
+        if let Some(Tok::Word(w)) = self.toks.get(at)
+            && w.eq_ignore_ascii_case("ARRAY")
+        {
+            self.used[at] = true;
+            at += 1;
+        }
+        let mut out = Vec::new();
+        while let Some(Tok::Word(w)) = self.toks.get(at) {
+            match w.parse::<f64>() {
+                Ok(value) => {
+                    self.used[at] = true;
+                    out.push(value);
+                    at += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
     }
 
     /// Read a `DIRECTION` clause.
@@ -185,23 +251,6 @@ impl<'a> Cursor<'a> {
                 GraphProperties::Quoted(s.clone().into_owned())
             }
             _ => GraphProperties::None,
-        }
-    }
-
-    /// The token slice, for readers that validate their own span (fusion
-    /// parameters read the bracket payload from the raw statement text).
-    pub(super) fn tokens(&self) -> &[Tok<'a>] {
-        &self.toks
-    }
-
-    /// Claim every remaining token.
-    ///
-    /// For a statement whose parameters a dedicated extractor validated
-    /// (`GRAPH RAG FUSION`), where this cursor's clause readers do not see the
-    /// bracket payload the extractor reads from the raw text.
-    pub(super) fn consume_rest(&mut self) {
-        for slot in self.used.iter_mut() {
-            *slot = true;
         }
     }
 
@@ -271,9 +320,23 @@ mod tests {
         let toks = tokenize("GRAPH RAG FUSION ON g RRF_K (60.0, 35.0)");
         let mut cursor = Cursor::new(toks, 3);
         assert_eq!(cursor.word_after("ON").as_deref(), Some("g"));
-        assert_eq!(cursor.floats_after::<2>("RRF_K"), Some([60.0, 35.0]));
+        assert_eq!(
+            cursor.floats_after_max("RRF_K", 3).unwrap(),
+            Some(vec![60.0, 35.0])
+        );
         cursor
             .finish("GRAPH RAG FUSION")
             .expect("every token claimed");
+    }
+
+    #[test]
+    fn a_mistyped_float_value_is_refused() {
+        let toks = tokenize("GRAPH RAG FUSION ON g RRF_K (fast)");
+        let mut cursor = Cursor::new(toks, 3);
+        let err = cursor.floats_after_max("RRF_K", 3).unwrap_err();
+        assert!(
+            err.to_string().contains("RRF_K"),
+            "the error must name the clause: {err}"
+        );
     }
 }

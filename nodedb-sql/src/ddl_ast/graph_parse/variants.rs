@@ -192,20 +192,16 @@ pub(super) fn parse_algo(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, Sql
 /// Parse `GRAPH RAG FUSION ON <collection> QUERY ARRAY[…] [options…]`.
 ///
 /// All fusion parameters are delegated to [`FusionParams::extract`] so every
-/// fusion SQL surface shares one typed, quote-aware extractor. That extractor
-/// reads the bracket payload from the raw text, so it claims no tokens here —
-/// the variant claims the rest, and the extractor's own validation is what
-/// refuses a malformed option.
-pub(super) fn parse_rag_fusion(
-    cursor: &mut Cursor<'_>,
-    sql: &str,
-) -> Result<NodedbStatement, SqlError> {
+/// fusion SQL surface shares one typed, quote-aware extractor. The extractor
+/// reads its options through the cursor, so every keyword and value is claimed
+/// here and a token no clause owns is left for the dispatcher's `finish` to
+/// refuse by name.
+pub(super) fn parse_rag_fusion(cursor: &mut Cursor<'_>) -> Result<NodedbStatement, SqlError> {
     let collection = cursor
         .word_after("ON")
         .or_else(|| cursor.quoted_after("ON"))
         .ok_or_else(|| missing_clause("GRAPH RAG FUSION", "ON <collection>"))?;
-    let params = FusionParams::extract(cursor.tokens(), sql, &RAG_FUSION_KEYWORDS);
-    cursor.consume_rest();
+    let params = FusionParams::extract(cursor, &RAG_FUSION_KEYWORDS)?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphRagFusion {
         collection,
         params,

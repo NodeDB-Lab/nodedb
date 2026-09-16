@@ -25,7 +25,13 @@ pub async fn search_fusion(
     database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let (collection, params) = parse_search_using_fusion(sql).ok_or_else(|| {
+    let parsed = parse_search_using_fusion(sql).map_err(|e| {
+        ddl_err(
+            "42601",
+            format!("SEARCH <collection> USING FUSION(...): {e}"),
+        )
+    })?;
+    let (collection, params) = parsed.ok_or_else(|| {
         ddl_err(
             "42601",
             "syntax: SEARCH <collection> USING FUSION(ARRAY[...] ...)",

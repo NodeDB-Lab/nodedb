@@ -56,9 +56,9 @@ async fn graph_rag_fusion_rrf_k_pair_is_accepted() {
     server.exec("CREATE COLLECTION ragf_rrfk").await.unwrap();
 
     // The tokenizer strips `(` and `)`, collapsing `RRF_K (60.0, 35.0)` to
-    // three consecutive tokens. Without a dedicated `float_pair_after` helper
-    // the second value (graph_k = 35.0) is silently dropped and the default
-    // (10.0) used. The statement must not error on the pair syntax.
+    // three consecutive tokens. A reader that stops at the first value drops
+    // the second (graph_k = 35.0) and the default applies. The statement must
+    // not error on the pair syntax.
     let result = server
         .query_text(
             "GRAPH RAG FUSION ON ragf_rrfk \
@@ -430,4 +430,40 @@ async fn vector_and_text_hits_on_one_row_fuse_into_a_single_entry() {
         "exactly one entry may carry the text leg's contribution; \
          more than one means the legs keyed the same row differently: {blob}"
     );
+}
+
+// ── Mistyped fusion options are refused, never defaulted ─────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_rag_fusion_rejects_a_mistyped_option_keyword() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION ragf_typo").await.unwrap();
+
+    // `VECTOR_TOPK` is not a clause. Seeking `VECTOR_TOP_K`, finding none, and
+    // defaulting the cap left `VECTOR_TOPK 5` unread: the statement ran with a
+    // cap the text did not ask for, and reported success.
+    server
+        .expect_error(
+            "GRAPH RAG FUSION ON ragf_typo QUERY ARRAY[0.1, 0.2] VECTOR_TOPK 5",
+            "VECTOR_TOPK",
+        )
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_rag_fusion_rejects_an_unreadable_option_value() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION ragf_bad_value")
+        .await
+        .unwrap();
+
+    // The clause is present but its value is not a number: a silent default
+    // would answer a different question than the text asks.
+    server
+        .expect_error(
+            "GRAPH RAG FUSION ON ragf_bad_value QUERY ARRAY[0.1, 0.2] VECTOR_TOP_K five",
+            "VECTOR_TOP_K",
+        )
+        .await;
 }
