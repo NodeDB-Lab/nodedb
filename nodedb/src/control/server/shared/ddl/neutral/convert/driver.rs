@@ -21,6 +21,7 @@ use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::MetaOp;
 
 use super::super::super::result::{DdlError, DdlResult};
+use super::super::column_default::validate_constant_clause_expr;
 use super::column_defs::parse_convert_sql;
 use super::support::err;
 use super::typeguard_columns::typeguards_to_column_defs;
@@ -62,29 +63,10 @@ pub async fn convert_collection(
                         .map(|e| ("DEFAULT", e))
                         .or(guard.value_expr.as_deref().map(|e| ("VALUE", e)));
                     if let Some((clause, expr)) = carried {
-                        let references_column =
-                            nodedb_sql::planner::defaults::default_expr_references_columns(expr)
-                                .map_err(|e| {
-                                    err(
-                                        "42601",
-                                        format!(
-                                            "field '{}': {clause} is invalid: {e}",
-                                            guard.field
-                                        ),
-                                    )
-                                })?;
-                        if references_column {
-                            return Err(err(
-                                "42601",
-                                format!(
-                                    "field '{}': {clause} expression '{expr}' references another \
-                                     column; a strict-schema column DEFAULT is evaluated with no \
-                                     row in scope. Give a constant expression, or keep the \
-                                     collection schemaless",
-                                    guard.field
-                                ),
-                            ));
-                        }
+                        // The one gate refuses an unregistered function name
+                        // and a column-referencing expression alike, naming
+                        // the field and the clause the author wrote.
+                        validate_constant_clause_expr(clause, &guard.field, expr)?;
                     }
                 }
                 cols

@@ -54,33 +54,12 @@ pub(super) fn typeguards_to_column_defs(
             .clone()
             .map(|expr| ("DEFAULT", expr))
             .or(guard.value_expr.clone().map(|expr| ("VALUE", expr)));
-        if let Some((clause, expr)) = carried {
+        if let Some((_clause, expr)) = carried {
+            // The one gate refuses an unregistered function name and a
+            // column-referencing expression alike, naming the field. A guard
+            // VALUE evaluates per row against the document; the column DEFAULT
+            // it becomes does not.
             validate_column_default(&col.name, &expr)?;
-            // A guard VALUE is evaluated per row against the document; a
-            // strict-schema column DEFAULT is evaluated with no row in scope.
-            // Carrying a column-referencing expression over would accept the
-            // CONVERT and fail every insert with `UnevaluableDefault`, so it
-            // is refused here, naming the clause and the field.
-            let references_column = nodedb_sql::planner::defaults::default_expr_references_columns(
-                &expr,
-            )
-            .map_err(|e| {
-                err(
-                    "42601",
-                    format!("field '{}': {clause} is invalid: {e}", guard.field),
-                )
-            })?;
-            if references_column {
-                return Err(err(
-                    "42601",
-                    format!(
-                        "field '{}': {clause} expression '{expr}' references another column; \
-                         a strict-schema column DEFAULT is evaluated with no row in scope. \
-                         Give a constant expression, or keep the collection schemaless",
-                        guard.field
-                    ),
-                ));
-            }
             col.default = Some(expr);
         }
         columns.push(col);

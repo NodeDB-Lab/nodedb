@@ -38,7 +38,34 @@ pub(super) fn validate_column_defaults(columns: &[(String, String)]) -> Result<(
 
 /// Refuse one declared column `DEFAULT` the server cannot evaluate.
 pub(super) fn validate_column_default(column: &str, expr: &str) -> Result<(), DdlError> {
-    validate_clause_expr("DEFAULT", column, expr)
+    validate_constant_clause_expr("DEFAULT", column, expr)
+}
+
+/// Refuse a value-producing clause whose value must be constant.
+///
+/// A column `DEFAULT` is const-folded once, with no row in scope, so an
+/// expression that names another column can never produce a value there.
+/// Refusing it at this gate — the one every producer of a column `DEFAULT`
+/// calls — keeps the refusal at the declaration instead of the first insert's
+/// `UnevaluableDefault`.
+pub(super) fn validate_constant_clause_expr(
+    clause: &str,
+    owner: &str,
+    expr: &str,
+) -> Result<(), DdlError> {
+    validate_clause_expr(clause, owner, expr)?;
+    let references_column = nodedb_sql::planner::defaults::default_expr_references_columns(expr)
+        .map_err(|error| clause_error(clause, owner, &error))?;
+    if references_column {
+        return Err(DdlError::new(
+            sqlstate::SYNTAX_ERROR,
+            format!(
+                "{clause} for '{owner}' references another column; it is evaluated with no row \
+                 in scope, so give a constant expression"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse one declared value-producing clause the server cannot evaluate.

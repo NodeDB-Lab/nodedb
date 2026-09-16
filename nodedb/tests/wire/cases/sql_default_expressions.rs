@@ -441,3 +441,35 @@ fn assert_not_null(row: &str, label: &str) {
         "{label}: expected a value, got `{row}`"
     );
 }
+
+/// A column `DEFAULT` is const-folded once, with no row in scope: an
+/// expression that names another column can never produce a value. It is
+/// refused at the declaration, not at the first insert's `UnevaluableDefault`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_column_default_that_names_another_column_is_refused() {
+    let server = TestServer::start().await;
+
+    server
+        .expect_error(
+            "CREATE COLLECTION def_selfref (\
+                id TEXT PRIMARY KEY, \
+                status TEXT, \
+                lowered TEXT DEFAULT LOWER(status)) \
+             WITH (engine='document_strict')",
+            "references another column",
+        )
+        .await;
+
+    // The same rule reaches a CONVERT column list.
+    server
+        .exec("CREATE COLLECTION def_selfref_conv")
+        .await
+        .unwrap();
+    server
+        .expect_error(
+            "CONVERT COLLECTION def_selfref_conv TO document_strict \
+             (id TEXT PRIMARY KEY, status TEXT, lowered TEXT DEFAULT LOWER(status))",
+            "references another column",
+        )
+        .await;
+}
