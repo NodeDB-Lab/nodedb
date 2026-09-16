@@ -6,7 +6,7 @@ use nodedb_sql::types::{ColumnInfo, EngineType, SqlDataType};
 use nodedb_types::columnar::{FloatWidth, IntWidth};
 
 /// Convert a StoredCollection to engine type, columns, and primary key.
-pub(super) fn convert_collection_type(
+pub(crate) fn convert_collection_type(
     stored: &crate::control::security::catalog::StoredCollection,
 ) -> (EngineType, Vec<ColumnInfo>, Option<String>) {
     use nodedb_types::CollectionType;
