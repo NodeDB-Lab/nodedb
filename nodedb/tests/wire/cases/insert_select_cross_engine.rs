@@ -307,3 +307,44 @@ async fn insert_select_from_strict_source_normalizes_and_resolves() {
         "vector search must resolve the copied strict-source 'alpha'; got {near_e1:?}"
     );
 }
+
+/// A kv-engine source keeps nothing in the document store, so the document
+/// materializer read zero rows and the statement reported `INSERT 0 0`. The
+/// route scans the kv source through its own engine, and the copied rows must
+/// carry expression cells with the same semantics as a document source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_select_copies_a_kv_source_through_its_own_engine() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION isk_src (id BIGINT PRIMARY KEY, v TEXT) WITH (engine = 'kv')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO isk_src (id, v) VALUES (1, 'hello')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO isk_src (id, v) VALUES (2, 'world')")
+        .await
+        .unwrap();
+
+    server.exec("CREATE COLLECTION isk_dst").await.unwrap();
+    server
+        .exec("INSERT INTO isk_dst (id, v) SELECT id, upper(v) FROM isk_src")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT id, v FROM isk_dst ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            vec!["1".to_string(), "HELLO".to_string()],
+            vec!["2".to_string(), "WORLD".to_string()],
+        ],
+        "both rows must copy, with expression cells evaluated: {rows:?}"
+    );
+}
