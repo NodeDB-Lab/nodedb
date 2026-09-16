@@ -6,7 +6,7 @@
 //! reads the collection's active typeguards instead.
 
 use super::super::super::result::DdlError;
-use super::super::column_default::validate_column_default;
+use super::super::column_default::validate_constant_clause_expr;
 use super::support::err;
 use super::type_map::typeguard_type_to_column_type;
 
@@ -54,12 +54,12 @@ pub(super) fn typeguards_to_column_defs(
             .clone()
             .map(|expr| ("DEFAULT", expr))
             .or(guard.value_expr.clone().map(|expr| ("VALUE", expr)));
-        if let Some((_clause, expr)) = carried {
+        if let Some((clause, expr)) = carried {
             // The one gate refuses an unregistered function name and a
-            // column-referencing expression alike, naming the field. A guard
-            // VALUE evaluates per row against the document; the column DEFAULT
-            // it becomes does not.
-            validate_column_default(&col.name, &expr)?;
+            // column-referencing expression alike, naming the field and the
+            // clause the author wrote. A guard VALUE evaluates per row against
+            // the document; the column DEFAULT it becomes does not.
+            validate_constant_clause_expr(clause, &col.name, &expr)?;
             col.default = Some(expr);
         }
         columns.push(col);
