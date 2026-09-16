@@ -144,12 +144,16 @@ impl CoreLoop {
         ) {
             Ok(r) => r,
             Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
+                // The collect pass encodes strict post-images, so a client
+                // value error can reach here. Keep it typed: a bad value is
+                // not an internal fault.
+                let code = match e {
+                    crate::Error::BadRequest { detail } => ErrorCode::BadRequest { detail },
+                    other => ErrorCode::Internal {
+                        detail: other.to_string(),
                     },
-                );
+                };
+                return self.response_error(task, code);
             }
         };
 
