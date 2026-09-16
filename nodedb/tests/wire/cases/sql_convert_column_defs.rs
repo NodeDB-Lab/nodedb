@@ -86,3 +86,83 @@ async fn convert_refuses_a_default_naming_an_unknown_function() {
         )
         .await;
 }
+
+/// CONVERT rebuilt the strict schema from the column list alone and dropped the
+/// source primary key, so every insert after the conversion failed with no
+/// resolved primary key. The converted schema keeps the key column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn convert_keeps_the_source_primary_key() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION conv_key (id TEXT PRIMARY KEY, v TEXT)")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO conv_key (id, v) VALUES ('k1', 'a')")
+        .await
+        .unwrap();
+
+    server
+        .exec("CONVERT COLLECTION conv_key TO document_strict (id TEXT, v TEXT)")
+        .await
+        .unwrap();
+
+    server
+        .exec("INSERT INTO conv_key (id, v) VALUES ('k2', 'b')")
+        .await
+        .expect("an insert after CONVERT must resolve a primary key");
+
+    let rows = server
+        .query_text("SELECT id FROM conv_key ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec!["k1".to_string(), "k2".to_string()],
+        "both rows must be addressable: {rows:?}"
+    );
+}
+
+/// A column list that omits the source key is refused: the converted schema
+/// would carry no primary key and every later insert would be unresolvable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn convert_refuses_a_column_list_that_omits_the_source_key() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION conv_nokey (id TEXT PRIMARY KEY, v TEXT)")
+        .await
+        .unwrap();
+
+    server
+        .expect_error(
+            "CONVERT COLLECTION conv_nokey TO document_strict (v TEXT)",
+            "42601",
+        )
+        .await;
+}
+
+/// A guard that names another column is a per-row expression. Carried onto a
+/// strict column it becomes a DEFAULT evaluated with no row in scope, which
+/// fails every insert. CONVERT refuses it, naming the field and the clause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn convert_refuses_a_guard_that_references_another_column() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION conv_guard (id TEXT PRIMARY KEY, status TEXT, lowered TEXT)")
+        .await
+        .unwrap();
+    server
+        .exec("CREATE TYPEGUARD ON conv_guard (lowered STRING VALUE LOWER(status))")
+        .await
+        .unwrap();
+
+    let convert = "CONVERT COLLECTION conv_guard TO document_strict \
+                   (id TEXT, status TEXT, lowered TEXT)";
+    server.expect_error(convert, "lowered").await;
+    server
+        .expect_error(convert, "references another column")
+        .await;
+}

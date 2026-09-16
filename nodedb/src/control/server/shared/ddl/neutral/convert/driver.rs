@@ -47,6 +47,46 @@ pub async fn convert_collection(
     let columns: Option<Vec<nodedb_types::columnar::ColumnDef>> = match target_type.as_str() {
         "document_strict" | "kv" => {
             let cols = if let Some(cols) = explicit_columns {
+                // The list defines the schema; no guard is carried onto it. A
+                // guard the list covers and that names another column has no
+                // column DEFAULT equivalent — evaluated with no row in scope it
+                // would fail every insert, and dropping it would lose the
+                // guard's meaning silently. Refuse it, naming field and clause.
+                for guard in &coll.type_guards {
+                    if !cols.iter().any(|c| c.name == guard.field) {
+                        continue;
+                    }
+                    let carried = guard
+                        .default_expr
+                        .as_deref()
+                        .map(|e| ("DEFAULT", e))
+                        .or(guard.value_expr.as_deref().map(|e| ("VALUE", e)));
+                    if let Some((clause, expr)) = carried {
+                        let references_column =
+                            nodedb_sql::planner::defaults::default_expr_references_columns(expr)
+                                .map_err(|e| {
+                                    err(
+                                        "42601",
+                                        format!(
+                                            "field '{}': {clause} is invalid: {e}",
+                                            guard.field
+                                        ),
+                                    )
+                                })?;
+                        if references_column {
+                            return Err(err(
+                                "42601",
+                                format!(
+                                    "field '{}': {clause} expression '{expr}' references another \
+                                     column; a strict-schema column DEFAULT is evaluated with no \
+                                     row in scope. Give a constant expression, or keep the \
+                                     collection schemaless",
+                                    guard.field
+                                ),
+                            ));
+                        }
+                    }
+                }
                 cols
             } else if !coll.type_guards.is_empty() {
                 typeguards_to_column_defs(&coll.type_guards)?
