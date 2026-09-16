@@ -31,21 +31,35 @@
 //!
 //! # Scope
 //!
-//! Only [`SqlDataType::Int64`] and [`SqlDataType::Float64`] columns are
-//! coerced, and both are coerced symmetrically — this is not a float special
-//! case. They are the two declared types whose stored representation is
-//! decided by the declaration rather than by the value: nodedb keeps every
-//! integer as an `i64` and every float as an `f64`, and the declared width
-//! that drives the wire OID (see `ColumnInfo::int_width` /
-//! `ColumnInfo::float_width`) is only honest if the stored cell is a number of
-//! that family to begin with. Every other declared type either has one
-//! unambiguous literal form already or (like `DECIMAL`) is deliberately
-//! carried as text for exactness, and passes through untouched.
+//! [`SqlDataType::Int64`] and [`SqlDataType::Float64`] columns are coerced
+//! symmetrically — this is not a float special case. They are two declared
+//! types whose stored representation is decided by the declaration rather
+//! than by the value: nodedb keeps every integer as an `i64` and every float
+//! as an `f64`, and the declared width that drives the wire OID (see
+//! `ColumnInfo::int_width` / `ColumnInfo::float_width`) is only honest if the
+//! stored cell is a number of that family to begin with.
 //!
-//! The conversions mirror the strict document encoder's `coerce_value`, so the
-//! two engines accept and reject exactly the same literals for a given
-//! declared type.
+//! [`SqlDataType::Timestamp`] and [`SqlDataType::Timestamptz`] columns are
+//! coerced to a typed instant, once, here, for every engine. An integer time
+//! literal carries no unit of its own, and the engines that re-type on write
+//! disagree on one (the strict encoder reads an integer as microseconds, the
+//! columnar family as milliseconds), while the engines that store the
+//! planner's value verbatim would persist the bare integer and leave the read
+//! side to guess. Resolving the literal here fixes the unit in one place:
+//! SQL reads an integer time literal as epoch milliseconds, the unit every
+//! engine already reads it as through its own ingest paths. A text literal is
+//! parsed here for the same reason, so an unparseable spelling is refused at
+//! the statement instead of being stored as text that no read can render.
+//!
+//! Every other declared type either has one unambiguous literal form already
+//! or (like `DECIMAL`) is deliberately carried as text for exactness, and
+//! passes through untouched.
+//!
+//! The numeric conversions mirror the strict document encoder's
+//! `coerce_value`, so the two engines accept and reject exactly the same
+//! literals for a given declared type.
 
+use nodedb_types::datetime::NdbDateTime;
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::error::{Result, SqlError};
@@ -146,11 +160,12 @@ fn coerce_value(column: &str, value: SqlValue, declared: &SqlDataType) -> Result
     match declared {
         SqlDataType::Int64 => coerce_to_int(column, value),
         SqlDataType::Float64 => coerce_to_float(column, value),
+        SqlDataType::Timestamp | SqlDataType::Timestamptz => {
+            coerce_to_instant(column, value, declared)
+        }
         SqlDataType::String
         | SqlDataType::Bool
         | SqlDataType::Bytes
-        | SqlDataType::Timestamp
-        | SqlDataType::Timestamptz
         | SqlDataType::Decimal
         | SqlDataType::Uuid
         | SqlDataType::Vector(_)
@@ -202,6 +217,98 @@ fn coerce_to_float(column: &str, value: SqlValue) -> Result<SqlValue> {
             .map(SqlValue::Float)
             .map_err(|_| not_representable(column, &s, "FLOAT")),
         other => Ok(other),
+    }
+}
+
+/// Timestamp column: every accepted literal becomes the one typed instant
+/// the column stores, tagged as the declared kind.
+///
+/// A typed literal keeps its instant and takes the declared tag, so a
+/// `TIMESTAMP` column holds `SqlValue::Timestamp` and a `TIMESTAMPTZ` column
+/// holds `SqlValue::Timestamptz` whichever spelling wrote it. Text is parsed
+/// as ISO-8601 (`Z`, a `±HH:MM` offset, and fractional seconds are all
+/// accepted). A numeric literal is epoch milliseconds — the unit every engine
+/// reads an integer time literal as — and a fractional one contributes its
+/// integer part, mirroring the columnar engine. `NULL` is left alone:
+/// nullability is enforced elsewhere. Any other literal kind is refused
+/// naming the column and the kind, because no instant can be read from it.
+fn coerce_to_instant(column: &str, value: SqlValue, declared: &SqlDataType) -> Result<SqlValue> {
+    let declared_name = instant_declared_name(declared);
+    let tag = |at: NdbDateTime| match declared {
+        SqlDataType::Timestamptz => SqlValue::Timestamptz(at),
+        SqlDataType::Int64
+        | SqlDataType::Float64
+        | SqlDataType::String
+        | SqlDataType::Bool
+        | SqlDataType::Bytes
+        | SqlDataType::Timestamp
+        | SqlDataType::Decimal
+        | SqlDataType::Uuid
+        | SqlDataType::Vector(_)
+        | SqlDataType::Geometry
+        | SqlDataType::Unknown => SqlValue::Timestamp(at),
+    };
+    match value {
+        SqlValue::Null => Ok(SqlValue::Null),
+        SqlValue::Timestamp(at) | SqlValue::Timestamptz(at) => Ok(tag(at)),
+        SqlValue::String(s) => NdbDateTime::parse(&s)
+            .map(tag)
+            .ok_or_else(|| not_representable(column, &s, declared_name)),
+        SqlValue::Int(millis) => NdbDateTime::from_millis(millis)
+            .map(tag)
+            .map_err(|_| not_representable(column, &millis.to_string(), declared_name)),
+        SqlValue::Float(f) => whole_f64(f.trunc())
+            .and_then(|millis| NdbDateTime::from_millis(millis).ok())
+            .map(tag)
+            .ok_or_else(|| not_representable(column, &f.to_string(), declared_name)),
+        SqlValue::Decimal(d) => d
+            .trunc()
+            .to_i64()
+            .and_then(|millis| NdbDateTime::from_millis(millis).ok())
+            .map(tag)
+            .ok_or_else(|| not_representable(column, &d.to_string(), declared_name)),
+        SqlValue::Bool(_) | SqlValue::Bytes(_) | SqlValue::Array(_) => {
+            Err(SqlError::TypeMismatch {
+                detail: format!(
+                    "column '{column}': cannot store {} as {declared_name}",
+                    literal_kind(&value)
+                ),
+            })
+        }
+    }
+}
+
+/// The declared type name an instant coercion error reports.
+fn instant_declared_name(declared: &SqlDataType) -> &'static str {
+    match declared {
+        SqlDataType::Timestamptz => "TIMESTAMPTZ",
+        SqlDataType::Int64
+        | SqlDataType::Float64
+        | SqlDataType::String
+        | SqlDataType::Bool
+        | SqlDataType::Bytes
+        | SqlDataType::Timestamp
+        | SqlDataType::Decimal
+        | SqlDataType::Uuid
+        | SqlDataType::Vector(_)
+        | SqlDataType::Geometry
+        | SqlDataType::Unknown => "TIMESTAMP",
+    }
+}
+
+/// The article-prefixed kind name an error names a refused literal by.
+fn literal_kind(value: &SqlValue) -> &'static str {
+    match value {
+        SqlValue::Null => "null",
+        SqlValue::Bool(_) => "a boolean",
+        SqlValue::Int(_) => "an integer",
+        SqlValue::Float(_) => "a float",
+        SqlValue::Decimal(_) => "a decimal",
+        SqlValue::String(_) => "text",
+        SqlValue::Bytes(_) => "bytes",
+        SqlValue::Array(_) => "an array",
+        SqlValue::Timestamp(_) => "a timestamp",
+        SqlValue::Timestamptz(_) => "a timestamptz",
     }
 }
 
@@ -359,6 +466,152 @@ mod tests {
             coerced(&columns, "t", SqlValue::Int(9)).expect("text columns are untouched"),
             SqlValue::Int(9)
         );
+    }
+
+    /// `2020-03-05T10:00:00Z` as microseconds since the Unix epoch.
+    const EARLY_MICROS: i64 = 1_583_402_400_000_000;
+
+    fn early() -> NdbDateTime {
+        NdbDateTime::from_micros(EARLY_MICROS)
+    }
+
+    /// A typed literal keeps its instant and takes the declared tag, in both
+    /// directions.
+    #[test]
+    fn typed_instant_literals_are_retagged_to_the_declared_kind() {
+        let columns = [
+            column("at", SqlDataType::Timestamp),
+            column("at_tz", SqlDataType::Timestamptz),
+        ];
+        assert_eq!(
+            coerced(&columns, "at", SqlValue::Timestamptz(early()))
+                .expect("a typed instant fits a TIMESTAMP column"),
+            SqlValue::Timestamp(early())
+        );
+        assert_eq!(
+            coerced(&columns, "at_tz", SqlValue::Timestamp(early()))
+                .expect("a typed instant fits a TIMESTAMPTZ column"),
+            SqlValue::Timestamptz(early())
+        );
+    }
+
+    /// Text is parsed as ISO-8601: a `Z` suffix, an offset, and fractional
+    /// seconds all resolve to the one instant, and the offset shifts it.
+    #[test]
+    fn text_literals_are_parsed_to_the_instant_they_spell() {
+        let columns = [column("at", SqlDataType::Timestamp)];
+        for spelling in [
+            "2020-03-05 10:00:00",
+            "2020-03-05T10:00:00Z",
+            "2020-03-05T10:00:00.000000Z",
+            "2020-03-05T15:30:00+05:30",
+        ] {
+            assert_eq!(
+                coerced(&columns, "at", SqlValue::String(spelling.into()))
+                    .unwrap_or_else(|e| panic!("{spelling} parses: {e}")),
+                SqlValue::Timestamp(early()),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// Text that spells no instant is refused, and the error names the
+    /// column and the literal.
+    #[test]
+    fn non_datetime_text_is_refused_naming_the_column_and_literal() {
+        let columns = [column("created_at", SqlDataType::Timestamp)];
+        let err = coerced(
+            &columns,
+            "created_at",
+            SqlValue::String("not a date".into()),
+        )
+        .expect_err("non-datetime text must be refused");
+        let detail = err.to_string();
+        assert!(
+            detail.contains("created_at") && detail.contains("not a date"),
+            "error must name the column and the literal: {detail}"
+        );
+    }
+
+    /// An integer literal is epoch milliseconds; a fractional literal
+    /// contributes its integer part.
+    #[test]
+    fn numeric_literals_are_epoch_milliseconds() {
+        let columns = [
+            column("at", SqlDataType::Timestamp),
+            column("at_tz", SqlDataType::Timestamptz),
+        ];
+        assert_eq!(
+            coerced(&columns, "at", SqlValue::Int(1_583_402_400_000))
+                .expect("an integer is epoch milliseconds"),
+            SqlValue::Timestamp(early())
+        );
+        assert_eq!(
+            coerced(&columns, "at_tz", SqlValue::Int(1_583_402_400_000))
+                .expect("an integer is epoch milliseconds"),
+            SqlValue::Timestamptz(early())
+        );
+        assert_eq!(
+            coerced(&columns, "at", SqlValue::Float(1_583_402_400_000.7))
+                .expect("a float contributes its integer part"),
+            SqlValue::Timestamp(early())
+        );
+        assert_eq!(
+            coerced(&columns, "at", decimal("1583402400000.9"))
+                .expect("a decimal contributes its integer part"),
+            SqlValue::Timestamp(early())
+        );
+    }
+
+    /// A numeric literal whose milliseconds overflow the instant's range, or
+    /// that is not a finite number, is refused rather than wrapped.
+    #[test]
+    fn out_of_range_numeric_literals_are_refused() {
+        let columns = [column("at", SqlDataType::Timestamp)];
+        assert!(coerced(&columns, "at", SqlValue::Int(i64::MAX)).is_err());
+        assert!(coerced(&columns, "at", SqlValue::Float(f64::NAN)).is_err());
+        assert!(coerced(&columns, "at", SqlValue::Float(f64::INFINITY)).is_err());
+        assert!(coerced(&columns, "at", decimal("99999999999999999999999")).is_err());
+    }
+
+    /// NULL is untouched, and every literal kind that carries no instant is
+    /// refused with an error naming the column and the kind.
+    #[test]
+    fn null_passes_and_non_instant_kinds_are_refused() {
+        let columns = [column("created_at", SqlDataType::Timestamptz)];
+        assert_eq!(
+            coerced(&columns, "created_at", SqlValue::Null).expect("null is not an error"),
+            SqlValue::Null
+        );
+        for (literal, kind) in [
+            (SqlValue::Bool(true), "a boolean"),
+            (SqlValue::Bytes(vec![1, 2]), "bytes"),
+            (SqlValue::Array(vec![SqlValue::Int(1)]), "an array"),
+        ] {
+            let err = coerced(&columns, "created_at", literal)
+                .expect_err("a literal with no instant must be refused");
+            let detail = err.to_string();
+            assert!(
+                detail.contains("created_at") && detail.contains(kind),
+                "error must name the column and the kind: {detail}"
+            );
+        }
+    }
+
+    /// `SET at = <literal>` runs the same instant coercion as `VALUES`.
+    #[test]
+    fn assignments_coerce_instants() {
+        let columns = [column("at", SqlDataType::Timestamp)];
+        let mut assignments = vec![(
+            "at".to_string(),
+            SqlExpr::Literal(SqlValue::Int(1_583_402_400_000)),
+        )];
+        coerce_assignments_to_declared_types(&columns, &mut assignments, None)
+            .expect("an integer assignment is epoch milliseconds");
+        match &assignments[0].1 {
+            SqlExpr::Literal(value) => assert_eq!(*value, SqlValue::Timestamp(early())),
+            other => panic!("expected a literal assignment, got {other:?}"),
+        }
     }
 
     /// The primary key keeps its literal exactly as written even when its
