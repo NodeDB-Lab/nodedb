@@ -472,4 +472,16 @@ async fn a_column_default_that_names_another_column_is_refused() {
             "references another column",
         )
         .await;
+
+    // And ALTER ... ADD COLUMN.
+    server
+        .exec("CREATE COLLECTION def_selfref_alter (id TEXT PRIMARY KEY, status TEXT)")
+        .await
+        .unwrap();
+    server
+        .expect_error(
+            "ALTER TABLE def_selfref_alter ADD COLUMN lowered TEXT DEFAULT LOWER(status)",
+            "references another column",
+        )
+        .await;
 }

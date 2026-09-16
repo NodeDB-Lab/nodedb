@@ -32,6 +32,13 @@ pub(super) async fn alter_table_add_column(
 
     let column = parse_origin_column_def(col_def_str).map_err(|e| err("42601", e.to_string()))?;
     let column_name = column.name.clone();
+    // The declared DEFAULT passes the same gate a CREATE column passes: an
+    // unregistered function name, or an expression that names another column,
+    // is refused at the declaration rather than at the first insert.
+    super::super::super::column_default::validate_column_defaults(&[(
+        column_name.clone(),
+        col_def_str.to_string(),
+    )])?;
     // The declared type as written, e.g. `SMALLINT` from `age SMALLINT NOT
     // NULL`. `ColumnDef::column_type` cannot supply this: it has one `Int64`
     // variant for every integer width. Falls back to the resolved type's own
