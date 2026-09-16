@@ -50,9 +50,11 @@ use nodedb_types::{RowIdentity, Surrogate, value_to_pk_string};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_read::convert::row_to_projected_json;
+use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
 use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
-use crate::data::executor::handlers::transaction::overlay::ColumnarOverlayMergeParams;
+use crate::data::executor::handlers::transaction::overlay::{
+    ColumnarMatchedRow, ColumnarOverlayMergeParams,
+};
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
@@ -297,7 +299,7 @@ impl CoreLoop {
         // shared `ColumnarMatchedRow` tuple the overlay merge consumes. A
         // missing engine means the only affected rows are overlay-only staged
         // inserts, which the merge appends below.
-        let mut matched: Vec<(Option<Surrogate>, Vec<Value>, serde_json::Value)> = Vec::new();
+        let mut matched: Vec<ColumnarMatchedRow> = Vec::new();
         if let Some(engine) = self.columnar_engines.get(&coll_key) {
             for (surrogate, row) in engine.scan_memtable_rows_with_surrogates() {
                 if !filter_predicates.is_empty() {
@@ -311,15 +313,15 @@ impl CoreLoop {
                 }
                 // No computed columns on this path (`&[]` below), so this
                 // can never actually raise `DivisionByZero` today — handled
-                // uniformly with every other `row_to_projected_json` caller
+                // uniformly with every other `row_to_projected_value` caller
                 // instead of assuming that invariant with an `unwrap`.
-                let json = match row_to_projected_json(&row, &schema, &[], &[], false) {
+                let obj = match row_to_projected_value(&row, &schema, &[], &[], false) {
                     Ok(v) => v,
                     Err(_e) => {
                         return Err(self.response_error(task, ErrorCode::DivisionByZero));
                     }
                 };
-                matched.push((surrogate, row, json));
+                matched.push((surrogate, row, obj));
             }
         }
 

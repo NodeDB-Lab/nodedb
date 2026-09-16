@@ -2,6 +2,7 @@
 
 //! Read-only access methods on `ColumnData`: validity checks, value extraction.
 
+use nodedb_types::columnar::ColumnType;
 use nodedb_types::value::Value;
 use nodedb_types::value_from_msgpack;
 
@@ -57,7 +58,13 @@ impl ColumnData {
     }
 
     /// Extract a single row's value as `nodedb_types::Value`.
-    pub(crate) fn get_value(&self, row: usize) -> Value {
+    ///
+    /// A time cell is typed by the column's declared type: an instant column
+    /// yields `Value::NaiveDateTime` (`Timestamp`) or `Value::DateTime`
+    /// (`Timestamptz`) from the stored epoch microseconds, and every other
+    /// declared type backed by time storage (`SystemTimestamp`, `Duration`)
+    /// yields the integer stored.
+    pub(crate) fn get_value(&self, row: usize, declared: &ColumnType) -> Value {
         if self.is_null(row) {
             return Value::Null;
         }
@@ -65,9 +72,7 @@ impl ColumnData {
             Self::Int64 { values, .. } => Value::Integer(values[row]),
             Self::Float64 { values, .. } => Value::Float(values[row]),
             Self::Bool { values, .. } => Value::Bool(values[row]),
-            Self::Timestamp { values, .. } => Value::DateTime(
-                nodedb_types::datetime::NdbDateTime::from_micros(values[row]),
-            ),
+            Self::Timestamp { values, .. } => declared.time_cell(values[row]),
             Self::Decimal { values, .. } => {
                 Value::Decimal(rust_decimal::Decimal::deserialize(values[row]))
             }

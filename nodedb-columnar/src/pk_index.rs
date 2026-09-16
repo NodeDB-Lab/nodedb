@@ -178,7 +178,7 @@ pub fn encode_pk(value: &nodedb_types::value::Value) -> Vec<u8> {
         Value::String(s) => s.as_bytes().to_vec(),
         Value::Uuid(s) => s.as_bytes().to_vec(),
         Value::Decimal(d) => d.serialize().to_vec(),
-        Value::DateTime(dt) => {
+        Value::DateTime(dt) | Value::NaiveDateTime(dt) => {
             let sortable = (dt.micros as u64) ^ (1u64 << 63);
             sortable.to_be_bytes().to_vec()
         }

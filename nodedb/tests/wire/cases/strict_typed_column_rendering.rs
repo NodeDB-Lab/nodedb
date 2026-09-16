@@ -2,6 +2,8 @@
 
 //! A `document_strict` `TIMESTAMP` column renders the stored instant the same
 //! way whichever route reads it, and the same way a timeseries time key does.
+//! A `columnar` `TIMESTAMP` column renders the same instant from the live
+//! memtable and from a flushed segment.
 
 use crate::harness::TestServer;
 
@@ -143,5 +145,94 @@ async fn a_strict_timestamp_column_renders_the_same_as_a_timeseries_time_key() {
         strict_reading[0], timeseries_reading[0],
         "a strict TIMESTAMP column must render the same instant as a timeseries time \
          key: strict={strict_reading:?} timeseries={timeseries_reading:?}"
+    );
+}
+
+/// A `columnar` collection carrying a `TIMESTAMP` column, read back with a
+/// direct `SELECT` while the row is still in the live memtable, renders the
+/// stored instant as ISO-8601. The columnar engine stores the cell as epoch
+/// microseconds and reads it back as a typed instant, so the millisecond and
+/// microsecond integer forms are both rendering defects here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_columnar_timestamp_column_renders_the_stored_instant() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION columnar_ts_direct \
+             (id TEXT PRIMARY KEY, created_at TIMESTAMP) \
+             WITH (engine='columnar')",
+        )
+        .await
+        .expect("create columnar_ts_direct");
+    server
+        .exec(&format!(
+            "INSERT INTO columnar_ts_direct (id, created_at) VALUES ('r1', '{EARLY}')"
+        ))
+        .await
+        .expect("insert into columnar_ts_direct");
+
+    let rows = server
+        .query_text("SELECT created_at FROM columnar_ts_direct WHERE id = 'r1'")
+        .await
+        .expect("SELECT of a columnar TIMESTAMP column must succeed");
+    assert_eq!(rows.len(), 1, "one stored row: {rows:?}");
+    assert_eq!(
+        rows[0], EARLY_ISO,
+        "a columnar TIMESTAMP column must render {EARLY} as {EARLY_ISO}, got {rows:?}"
+    );
+}
+
+/// The columnar engine has two read paths for one column: the live memtable
+/// and the flushed segments a full memtable drains into. With a flush
+/// threshold of two, the first insert is read from the memtable, and after
+/// two more inserts the first rows live only in a flushed segment while the
+/// last stays in the memtable. Every row renders the one instant identically
+/// on both paths.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_columnar_timestamp_column_renders_the_same_before_and_after_flush() {
+    let server = TestServer::start_with_columnar_flush_threshold(2).await;
+    server
+        .exec(
+            "CREATE COLLECTION columnar_ts_flush \
+             (id TEXT PRIMARY KEY, created_at TIMESTAMP) \
+             WITH (engine='columnar')",
+        )
+        .await
+        .expect("create columnar_ts_flush");
+    server
+        .exec(&format!(
+            "INSERT INTO columnar_ts_flush (id, created_at) VALUES ('r1', '{EARLY}')"
+        ))
+        .await
+        .expect("insert r1 into columnar_ts_flush");
+
+    let before_flush = server
+        .query_text("SELECT created_at FROM columnar_ts_flush WHERE id = 'r1'")
+        .await
+        .expect("SELECT from the live memtable must succeed");
+    assert_eq!(
+        before_flush,
+        vec![EARLY_ISO.to_string()],
+        "the live-memtable read must render {EARLY} as {EARLY_ISO}"
+    );
+
+    for id in ["r2", "r3"] {
+        server
+            .exec(&format!(
+                "INSERT INTO columnar_ts_flush (id, created_at) VALUES ('{id}', '{EARLY}')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert {id} into columnar_ts_flush: {e}"));
+    }
+
+    let after_flush = server
+        .query_text("SELECT created_at FROM columnar_ts_flush ORDER BY id")
+        .await
+        .expect("SELECT across a flushed segment and the memtable must succeed");
+    assert_eq!(
+        after_flush,
+        vec![EARLY_ISO.to_string(); 3],
+        "a flushed-segment cell and a live-memtable cell must render the one \
+         instant identically: before={before_flush:?} after={after_flush:?}"
     );
 }

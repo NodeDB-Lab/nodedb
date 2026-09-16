@@ -1,59 +1,27 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Scan-params struct and the base scan entry point.
+//! The columnar base scan entry point.
 
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
-use nodedb_types::surrogate_bitmap::SurrogateBitmap;
+use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::expr_eval::ComputedColumn;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_read::bitemporal::bitemporal_row_visible;
+use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
+use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
+use crate::data::executor::handlers::columnar_read::scan_flushed::FlushedScanCtx;
+use crate::data::executor::handlers::transaction::overlay::{
+    ColumnarMatchedRow, ColumnarOverlayMergeParams,
+};
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
-use super::bitemporal::bitemporal_row_visible;
-use super::filter::row_matches_filters;
-use super::sort::{compare_sort_values, eval_row_sort_values};
-
-/// Parameters for a columnar base scan. Bundled as a struct because the
-/// raw parameter list exceeds the project's too-many-arguments bound.
-pub(in crate::data::executor) struct ColumnarScanParams<'a> {
-    pub collection: &'a str,
-    pub projection: &'a [String],
-    pub limit: usize,
-    pub filters: &'a [u8],
-    /// RLS filter bytes — wiring is the responsibility of a separate
-    /// enforcement pass; the base scan handler itself does not consume
-    /// them (hence the `_` destructure).
-    #[allow(dead_code)]
-    pub rls_filters: &'a [u8],
-    pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
-    /// Bitemporal system-time selection. `Current` is a current-state read;
-    /// `AsOf(ms)` drops rows with `_ts_system > ms`; `AllVersions` emits every
-    /// `_ts_system` row ordered ascending (audit log), with the system-time
-    /// column projected.
-    pub system_time: nodedb_types::SystemTimeScope,
-    /// Bitemporal valid-time point: drop rows whose
-    /// `[_ts_valid_from, _ts_valid_until)` interval does not contain this
-    /// point. `None` skips valid-time filtering entirely.
-    pub valid_at_ms: Option<i64>,
-    /// Optional cross-engine surrogate prefilter. When `Some`, the scan
-    /// skips whole memtable blocks whose surrogate range does not intersect
-    /// the bitmap (block boundary) and skips individual rows whose surrogate
-    /// is absent from the bitmap (row boundary). `None` = no prefilter.
-    pub prefilter: Option<&'a SurrogateBitmap>,
-    /// MessagePack-serialized `Vec<ComputedColumn>` for scalar projection
-    /// expressions such as JSON arrow operators. Empty slice means no
-    /// computed columns are requested.
-    pub computed_columns: &'a [u8],
-    /// The in-transaction identity of the caller, when the scan is issued
-    /// inside `BEGIN..COMMIT`. `Some` gates a post-scan overlay merge
-    /// (`merge_overlay_into_columnar_scan`) so the scan observes the
-    /// transaction's own staged, not-yet-durable `ColumnarOp::Insert` rows
-    /// (read-your-own-writes). `None` for autocommit reads.
-    pub txn_id: Option<crate::types::TxnId>,
-}
+use super::block_skip::memtable_block_skipped;
+use super::order::order_matched;
+use super::params::ColumnarScanParams;
 
 impl CoreLoop {
     /// Execute a base columnar scan: flushed segments first, then the live
@@ -64,6 +32,11 @@ impl CoreLoop {
     /// surrogate membership exactly like the live-memtable phase. See
     /// `scan_normalize::scan_columnar` for the parallel read path — keep both
     /// in sync on segment-iteration changes.
+    ///
+    /// Every result row is a `Value::Object` built by
+    /// `row_to_projected_value` and encoded by `encode_value_vec`, so a
+    /// declared `TIMESTAMP` / `TIMESTAMPTZ` cell reaches the client as a
+    /// typed instant from either phase.
     pub(in crate::data::executor) fn execute_columnar_scan(
         &mut self,
         task: &ExecutionTask,
@@ -120,7 +93,11 @@ impl CoreLoop {
             // Bound the materialized row count to a ceiling derived from the
             // memory budget (+1 row to detect "more exist") so the scan does
             // not pull the whole memtable into the `matched` Vec.
-            super::super::scan_budget::fetch_limit_for(limit, 0, scan_budget_bytes)
+            crate::data::executor::handlers::scan_budget::fetch_limit_for(
+                limit,
+                0,
+                scan_budget_bytes,
+            )
         } else {
             limit
         };
@@ -142,7 +119,7 @@ impl CoreLoop {
             Some(e) => e,
             None => {
                 // Empty result for missing collection.
-                return match response_codec::encode_json_vec_as_msgpack(&[]) {
+                return match response_codec::encode_value_vec(&[]) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(
                         task,
@@ -172,16 +149,12 @@ impl CoreLoop {
             Vec::new()
         };
 
-        // Collect matched rows as (row_values, json_object) pairs. We keep
-        // the raw `Vec<Value>` for sort-key comparison — the JSON form is
-        // emitted only after ORDER BY + limit are applied. When no sort
-        // is requested we short-circuit the limit enforcement inside the
-        // loop to avoid materialising the entire memtable.
-        let mut matched: Vec<(
-            Option<nodedb_types::Surrogate>,
-            Vec<nodedb_types::value::Value>,
-            serde_json::Value,
-        )> = Vec::new();
+        // Collect matched rows as (surrogate, row_values, projected object)
+        // triples. The raw `Vec<Value>` is kept for sort-key comparison — the
+        // projected object is emitted only after ORDER BY + limit are
+        // applied. When no sort is requested the limit is enforced inside the
+        // loop so the whole memtable is not materialised.
+        let mut matched: Vec<ColumnarMatchedRow> = Vec::new();
         let scan_budget = if sort_keys.is_empty() {
             limit.saturating_mul(10).max(limit)
         } else {
@@ -194,44 +167,10 @@ impl CoreLoop {
         let ts_valid_from_idx = schema.columns.iter().position(|c| c.name == TS_VALID_FROM);
         let ts_valid_until_idx = schema.columns.iter().position(|c| c.name == TS_VALID_UNTIL);
 
-        // Block-boundary prefilter: if a prefilter is present and none of
-        // the memtable's surrogates fall within the bitmap's [min, max]
-        // range, the entire memtable block can be skipped before any row
-        // decoding takes place.
-        let block_skipped = if let Some(bitmap) = prefilter {
-            if bitmap.is_empty() {
-                true
-            } else {
-                let surrogates = engine.memtable_surrogates();
-                // Compute the surrogate range of non-None entries in the memtable.
-                let (mt_min, mt_max) = surrogates
-                    .iter()
-                    .flatten()
-                    .fold((u32::MAX, u32::MIN), |(lo, hi), s| {
-                        (lo.min(s.0), hi.max(s.0))
-                    });
-                // If no surrogate was found (mt_min > mt_max) or the bitmap's
-                // range lies entirely outside the memtable range, skip.
-                if mt_min > mt_max {
-                    // No surrogates in memtable — cannot apply block skip.
-                    false
-                } else {
-                    // The bitmap is non-empty (guarded above); min/max are
-                    // always `Some`. Pattern-match to avoid `unwrap` in
-                    // non-test code while keeping the compiler honest.
-                    match (bitmap.0.min(), bitmap.0.max()) {
-                        (Some(bm_min), Some(bm_max)) => {
-                            // Disjoint ranges: bitmap entirely before or after memtable.
-                            bm_max < mt_min || bm_min > mt_max
-                        }
-                        // Unreachable: `is_empty()` was already checked above.
-                        _ => false,
-                    }
-                }
-            }
-        } else {
-            false
-        };
+        // Block-boundary prefilter: skip the whole live memtable before any
+        // row decoding when no recorded surrogate can be in the bitmap.
+        let block_skipped = prefilter
+            .is_some_and(|bitmap| memtable_block_skipped(bitmap, engine.memtable_surrogates()));
 
         // Deadline safe points for this scan: the phase boundary below, every
         // 1024th memtable row, and the stage boundary after the sort. The
@@ -250,7 +189,7 @@ impl CoreLoop {
         // apply a per-row membership test below, mirroring the live-memtable
         // phase. See the method-level doc comment for the full rationale.
         if let Err(e) = self.scan_flushed_columnar_segments(
-            super::scan_flushed::FlushedScanCtx {
+            FlushedScanCtx {
                 collection,
                 engine_key: &engine_key,
                 schema,
@@ -296,9 +235,9 @@ impl CoreLoop {
             {
                 // Row-boundary prefilter: skip this row when its surrogate is
                 // absent from the bitmap. Rows without a recorded surrogate
-                // (legacy / test paths) are always included when no prefilter
-                // is active; when a prefilter is active they are excluded
-                // because the surrogate identity is unknown.
+                // are always included when no prefilter is active; when a
+                // prefilter is active they are excluded because the surrogate
+                // identity is unknown.
                 if let Some(bitmap) = prefilter {
                     match row_surrogate {
                         Some(s) if bitmap.contains(s) => {}
@@ -331,7 +270,7 @@ impl CoreLoop {
                         }
                     }
                 }
-                let obj = match super::convert::row_to_projected_json(
+                let obj = match row_to_projected_value(
                     &row,
                     schema,
                     projection,
@@ -339,7 +278,7 @@ impl CoreLoop {
                     all_versions,
                 ) {
                     Ok(v) => v,
-                    // `row_to_projected_json` returns `crate::Result<_>`
+                    // `row_to_projected_value` returns `crate::Result<_>`
                     // (unlike `row_matches_filters` above) — its only
                     // fallible step is a computed-column expression eval,
                     // and `computed_cols` here is real, not `&[]` like the
@@ -383,7 +322,7 @@ impl CoreLoop {
                 collection.to_string(),
             );
             if let Err(e) = self.merge_overlay_into_columnar_scan(
-                crate::data::executor::handlers::transaction::overlay::ColumnarOverlayMergeParams {
+                ColumnarOverlayMergeParams {
                     txn_id,
                     coll_key: &coll_key,
                     schema,
@@ -405,43 +344,24 @@ impl CoreLoop {
             }
         }
 
-        if !sort_keys.is_empty() {
-            // Sort keys are expressions, so evaluating them can fail. Evaluate
-            // every row's keys first — `sort_by` has no way to report an error
-            // — then order by the results.
-            let mut keyed = Vec::with_capacity(matched.len());
-            for (_, row, _) in &matched {
-                match eval_row_sort_values(row, schema, sort_keys) {
-                    Ok(values) => keyed.push(values),
-                    Err(e) => return self.response_error(task, e),
-                }
-            }
-            let mut order: Vec<usize> = (0..matched.len()).collect();
-            order.sort_by(|&a, &b| compare_sort_values(&keyed[a], &keyed[b], sort_keys));
-            let mut reordered: Vec<_> = order
-                .into_iter()
-                .map(|i| matched[i].clone())
-                .collect::<Vec<_>>();
-            std::mem::swap(&mut matched, &mut reordered);
-            // Safe point: the sort is the one stage whose cost grows with the
-            // matched row count, and it has just finished. Nothing is emitted
-            // yet, so stopping here costs the client only the error.
-            if deadline.expired_now() {
-                return self.response_error(task, ErrorCode::DeadlineExceeded);
-            }
-        } else if all_versions {
-            // Audit-log order: ascending by system time. The hidden
-            // `_ts_system` column index was resolved above.
-            matched.sort_by(|(_, a, _), (_, b, _)| {
-                super::bitemporal::row_system_time(a, ts_system_idx)
-                    .cmp(&super::bitemporal::row_system_time(b, ts_system_idx))
-            });
+        if let Err(e) = order_matched(&mut matched, schema, sort_keys, all_versions, ts_system_idx)
+        {
+            return self.response_error(task, e);
+        }
+        // Safe point: the sort is the one stage whose cost grows with the
+        // matched row count, and it has just finished. Nothing is emitted
+        // yet, so stopping here costs the client only the error.
+        if !sort_keys.is_empty() && deadline.expired_now() {
+            return self.response_error(task, ErrorCode::DeadlineExceeded);
         }
 
-        let results: Vec<serde_json::Value> =
-            matched.into_iter().take(limit).map(|(_, _, j)| j).collect();
+        let results: Vec<Value> = matched
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, obj)| obj)
+            .collect();
 
-        let payload = match response_codec::encode_json_vec_as_msgpack(&results) {
+        let payload = match response_codec::encode_value_vec(&results) {
             Ok(payload) => payload,
             Err(e) => {
                 return self.response_error(
@@ -458,7 +378,11 @@ impl CoreLoop {
         // surface a deterministic error if it exceeds the budget rather than
         // silently truncating. Spatial scans are bounded (finite limit) and so
         // skip this check.
-        if unbounded && super::super::scan_budget::budget_exceeded(payload.len(), scan_budget_bytes)
+        if unbounded
+            && crate::data::executor::handlers::scan_budget::budget_exceeded(
+                payload.len(),
+                scan_budget_bytes,
+            )
         {
             return self.response_error(task, ErrorCode::ResourcesExhausted);
         }
@@ -471,15 +395,14 @@ impl CoreLoop {
 mod tests {
     //! Cross-engine prefilter coverage for FLUSHED plain-columnar segments.
     //!
-    //! These tests prove the silent-wrong-results fix: rows that live only in a
-    //! flushed segment (drained out of the live memtable) are now visible to a
-    //! prefiltered scan and are filtered per-row by their cross-engine
-    //! surrogate, instead of being skipped wholesale. Each test forces a real
-    //! flush — drain the memtable, encode a `SegmentWriter` segment, push the
-    //! bytes + the captured surrogate sidecar in lockstep, then `on_memtable_flushed`
-    //! clears the memtable — so the rows truly exist only in the flushed segment
-    //! before the scan runs. This mirrors the production flush block in
-    //! `handlers/columnar_write/insert.rs`.
+    //! Rows that live only in a flushed segment (drained out of the live
+    //! memtable) are visible to a prefiltered scan and are filtered per-row by
+    //! their cross-engine surrogate, instead of being skipped wholesale. Each
+    //! test forces a real flush — drain the memtable, encode a `SegmentWriter`
+    //! segment, push the bytes + the captured surrogate sidecar in lockstep,
+    //! then `on_memtable_flushed` clears the memtable — so the rows truly exist
+    //! only in the flushed segment before the scan runs. This mirrors the
+    //! production flush block in `handlers/columnar_write/insert.rs`.
 
     use std::time::{Duration, Instant};
 
@@ -487,7 +410,7 @@ mod tests {
     use nodedb_columnar::MutationEngine;
     use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
     use nodedb_types::value::Value;
-    use nodedb_types::{Surrogate, SurrogateBitmap};
+    use nodedb_types::{NdbDateTime, Surrogate, SurrogateBitmap};
 
     use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
@@ -497,10 +420,13 @@ mod tests {
 
     use super::ColumnarScanParams;
 
+    const MICROS: i64 = 1_583_402_400_000_000;
+
     fn schema() -> ColumnarSchema {
         ColumnarSchema::new(vec![
             ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
             ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("at", ColumnType::Timestamp),
         ])
         .expect("valid schema")
     }
@@ -548,27 +474,30 @@ mod tests {
         })
     }
 
-    /// Insert `(id, name, surrogate)` rows into a fresh engine, then run the
-    /// EXACT production flush sequence so the rows end up only in a flushed
-    /// segment. Registers the engine + populates both lockstep maps on `core`.
-    /// Returns the engine key.
-    fn insert_and_flush(
-        core: &mut CoreLoop,
-        collection: &str,
-        rows: &[(i64, &str, Surrogate)],
-    ) -> (DatabaseId, TenantId, String) {
-        let key = (
+    fn engine_key(collection: &str) -> (DatabaseId, TenantId, String) {
+        (
             DatabaseId::DEFAULT,
             TenantId::new(1),
             collection.to_string(),
-        );
-        let mut engine = MutationEngine::new(collection.to_string(), schema());
-        for (id, name, surr) in rows {
-            engine
-                .insert_with_surrogate(&[Value::Integer(*id), Value::String((*name).into())], *surr)
-                .expect("insert_with_surrogate");
-        }
+        )
+    }
 
+    fn row(id: i64, name: &str) -> [Value; 3] {
+        [
+            Value::Integer(id),
+            Value::String(name.into()),
+            Value::NaiveDateTime(NdbDateTime::from_micros(MICROS)),
+        ]
+    }
+
+    /// Run the EXACT production flush sequence on `engine` so its memtable
+    /// rows end up only in a flushed segment, populating both lockstep maps
+    /// on `core`.
+    fn flush(
+        core: &mut CoreLoop,
+        key: &(DatabaseId, TenantId, String),
+        engine: &mut MutationEngine,
+    ) {
         // ── Mirror handlers/columnar_write/insert.rs flush block ────────────
         let new_segment_id = engine.next_segment_id();
         let (seg_schema, columns, row_count) = engine.memtable_mut().drain_optimized();
@@ -608,18 +537,33 @@ mod tests {
             0,
             "memtable surrogates cleared after flush"
         );
+    }
+
+    /// Insert `(id, name, surrogate)` rows into a fresh engine, then flush so
+    /// the rows end up only in a flushed segment. Registers the engine on
+    /// `core`. Returns the engine key.
+    fn insert_and_flush(
+        core: &mut CoreLoop,
+        collection: &str,
+        rows: &[(i64, &str, Surrogate)],
+    ) -> (DatabaseId, TenantId, String) {
+        let key = engine_key(collection);
+        let mut engine = MutationEngine::new(collection.to_string(), schema());
+        for (id, name, surr) in rows {
+            engine
+                .insert_with_surrogate(&row(*id, name), *surr)
+                .expect("insert_with_surrogate");
+        }
+        flush(core, &key, &mut engine);
         core.columnar_engines.insert(key.clone(), engine);
         key
     }
 
-    /// Run a prefiltered scan and return the decoded result rows.
-    fn scan_with_prefilter(
-        core: &mut CoreLoop,
-        collection: &str,
-        prefilter: Option<&SurrogateBitmap>,
-    ) -> Vec<serde_json::Value> {
-        let task = make_task();
-        let params = ColumnarScanParams {
+    fn scan_params<'a>(
+        collection: &'a str,
+        prefilter: Option<&'a SurrogateBitmap>,
+    ) -> ColumnarScanParams<'a> {
+        ColumnarScanParams {
             collection,
             projection: &[],
             limit: 0,
@@ -631,24 +575,48 @@ mod tests {
             prefilter,
             computed_columns: &[],
             txn_id: None,
-        };
-        let resp = core.execute_columnar_scan(&task, params);
-        let decoded: Vec<nodedb_types::JsonValue> =
-            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode scan payload");
-        decoded.into_iter().map(|j| j.0).collect()
+        }
     }
 
-    fn ids(rows: &[serde_json::Value]) -> Vec<i64> {
+    fn decode_rows(payload: &[u8]) -> Vec<Value> {
+        match nodedb_types::value_from_msgpack(payload).expect("decode scan payload") {
+            Value::Array(rows) => rows,
+            other => panic!("scan payload must be an array of rows: {other:?}"),
+        }
+    }
+
+    /// Run a prefiltered scan and return the decoded result rows.
+    fn scan_with_prefilter(
+        core: &mut CoreLoop,
+        collection: &str,
+        prefilter: Option<&SurrogateBitmap>,
+    ) -> Vec<Value> {
+        let task = make_task();
+        let resp = core.execute_columnar_scan(&task, scan_params(collection, prefilter));
+        decode_rows(resp.payload.as_bytes())
+    }
+
+    fn field<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
+        match row {
+            Value::Object(map) => map.get(name),
+            _ => None,
+        }
+    }
+
+    fn ids(rows: &[Value]) -> Vec<i64> {
         let mut v: Vec<i64> = rows
             .iter()
-            .filter_map(|r| r.get("id").and_then(|x| x.as_i64()))
+            .filter_map(|r| match field(r, "id") {
+                Some(Value::Integer(i)) => Some(*i),
+                _ => None,
+            })
             .collect();
         v.sort_unstable();
         v
     }
 
     /// A prefilter that includes SOME flushed-row surrogates must return
-    /// exactly those rows — proving flushed rows are now prefiltered, not
+    /// exactly those rows — proving flushed rows are prefiltered, not
     /// skipped wholesale.
     #[test]
     fn flushed_rows_are_prefiltered_not_skipped() {
@@ -698,8 +666,8 @@ mod tests {
         );
     }
 
-    /// Sanity: with NO prefilter all flushed rows are returned (unchanged
-    /// behaviour — the gate only applies when a prefilter is present).
+    /// Sanity: with NO prefilter all flushed rows are returned (the gate only
+    /// applies when a prefilter is present).
     #[test]
     fn flushed_rows_no_prefilter_returns_all() {
         let (mut core, _dir) = make_core();
@@ -718,6 +686,39 @@ mod tests {
         assert_eq!(ids(&rows), vec![1, 2, 3]);
     }
 
+    /// A declared `TIMESTAMP` cell is the same naive instant whether the row
+    /// is read from the live memtable or from a flushed segment.
+    #[test]
+    fn a_timestamp_cell_is_the_same_instant_before_and_after_flush() {
+        let (mut core, _dir) = make_core();
+        let coll = "cf_instant";
+        let key = engine_key(coll);
+        let mut engine = MutationEngine::new(coll.to_string(), schema());
+        engine
+            .insert_with_surrogate(&row(1, "live"), Surrogate(701))
+            .expect("insert_with_surrogate");
+        core.columnar_engines.insert(key.clone(), engine);
+
+        let expected = Value::NaiveDateTime(NdbDateTime::from_micros(MICROS));
+        let live = scan_with_prefilter(&mut core, coll, None);
+        assert_eq!(live.len(), 1);
+        assert_eq!(field(&live[0], "at"), Some(&expected), "live memtable cell");
+
+        let mut engine = core
+            .columnar_engines
+            .remove(&key)
+            .expect("engine registered");
+        flush(&mut core, &key, &mut engine);
+        core.columnar_engines.insert(key.clone(), engine);
+        let flushed = scan_with_prefilter(&mut core, coll, None);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(
+            field(&flushed[0], "at"),
+            Some(&expected),
+            "flushed segment cell"
+        );
+    }
+
     /// Build a task whose deadline is already in the past.
     fn expired_task() -> ExecutionTask {
         let mut task = make_task();
@@ -730,22 +731,7 @@ mod tests {
         collection: &str,
         task: &ExecutionTask,
     ) -> crate::bridge::envelope::Response {
-        core.execute_columnar_scan(
-            task,
-            ColumnarScanParams {
-                collection,
-                projection: &[],
-                limit: 0,
-                filters: &[],
-                rls_filters: &[],
-                sort_keys: &[],
-                system_time: nodedb_types::SystemTimeScope::Current,
-                valid_at_ms: None,
-                prefilter: None,
-                computed_columns: &[],
-                txn_id: None,
-            },
-        )
+        core.execute_columnar_scan(task, scan_params(collection, None))
     }
 
     /// A statement over its deadline is stopped DURING execution, not merely
@@ -796,9 +782,7 @@ mod tests {
 
         let resp = scan_response(&mut core, coll, &make_task());
         assert_eq!(resp.status, crate::bridge::envelope::Status::Ok);
-        let decoded: Vec<nodedb_types::JsonValue> =
-            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode scan payload");
-        let rows: Vec<serde_json::Value> = decoded.into_iter().map(|j| j.0).collect();
+        let rows = decode_rows(resp.payload.as_bytes());
         assert_eq!(ids(&rows), vec![1, 2]);
     }
 

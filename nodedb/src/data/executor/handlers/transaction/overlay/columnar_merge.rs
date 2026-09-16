@@ -29,17 +29,17 @@ use nodedb_types::value::Value;
 use crate::bridge::expr_eval::ComputedColumn;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_read::convert::row_to_projected_json;
+use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
 use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// One matched columnar row: its cross-engine surrogate (when known), the
 /// decoded schema-ordered column values, and the already-projected response
-/// JSON. Shared shape between the base scan (`execute_columnar_scan`) and
-/// this overlay merge.
-pub(in crate::data::executor) type ColumnarMatchedRow =
-    (Option<Surrogate>, Vec<Value>, serde_json::Value);
+/// object (`Value::Object`). Shared shape between the base scan
+/// (`execute_columnar_scan`), the predicate DML row read, and this overlay
+/// merge.
+pub(in crate::data::executor) type ColumnarMatchedRow = (Option<Surrogate>, Vec<Value>, Value);
 
 /// Inputs for [`CoreLoop::merge_overlay_into_columnar_scan`].
 pub(in crate::data::executor) struct ColumnarOverlayMergeParams<'a> {
@@ -109,7 +109,7 @@ impl CoreLoop {
             .collect();
 
         // Base-minus-superseded: a tombstoned row is dropped; a staged put
-        // replaces the row's decoded values + JSON and is re-checked against
+        // replaces the row's decoded values + object and is re-checked against
         // the scan predicate (an update may have moved the row out of the
         // result). A row with no recorded surrogate has no overlay identity
         // to resolve and is left untouched, matching the base scan's own
@@ -121,7 +121,7 @@ impl CoreLoop {
         // checked once the retain pass finishes, aborting the merge before
         // the overlay-addition pass below runs.
         let mut first_err: Option<crate::Error> = None;
-        matched.retain_mut(|(surrogate, row, json)| {
+        matched.retain_mut(|(surrogate, row, obj)| {
             if first_err.is_some() {
                 return true;
             }
@@ -140,14 +140,14 @@ impl CoreLoop {
                                 return true;
                             }
                         }
-                        match row_to_projected_json(
+                        match row_to_projected_value(
                             &new_row,
                             schema,
                             projection,
                             computed_cols,
                             all_versions,
                         ) {
-                            Ok(v) => *json = v,
+                            Ok(v) => *obj = v,
                             Err(e) => {
                                 first_err = Some(e);
                                 return true;
@@ -183,9 +183,9 @@ impl CoreLoop {
             if !predicate(&new_row)? {
                 continue;
             }
-            let json =
-                row_to_projected_json(&new_row, schema, projection, computed_cols, all_versions)?;
-            matched.push((Some(Surrogate::new(surrogate)), new_row, json));
+            let obj =
+                row_to_projected_value(&new_row, schema, projection, computed_cols, all_versions)?;
+            matched.push((Some(Surrogate::new(surrogate)), new_row, obj));
             seen.insert(surrogate);
         }
         Ok(())

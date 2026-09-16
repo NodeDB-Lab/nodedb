@@ -62,11 +62,12 @@ impl CoreLoop {
             usize::MAX,
         )?;
         let mut row = Vec::with_capacity(row_capacity);
-        for col_idx in 0..column_count {
+        for (col_idx, col_def) in schema.columns.iter().enumerate() {
             let decoded = reader.read_column(col_idx).ok()?;
             row.push(crate::data::executor::scan_normalize::decoded_col_to_value(
                 &decoded,
                 loc.row_index as usize,
+                &col_def.column_type,
             ));
         }
         Some(row)

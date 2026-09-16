@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::InstantKind;
 use crate::value::Value;
 
 /// Typed column definition for strict document and columnar collections.
@@ -118,7 +119,56 @@ impl ColumnType {
     /// `SystemTimestamp` is not an instant. It is engine-assigned from HLC at
     /// commit and the planner types it as text.
     pub const fn is_instant(&self) -> bool {
-        matches!(self, Self::Timestamp | Self::Timestamptz)
+        self.instant_kind().is_some()
+    }
+
+    /// The instant kind a column of this type carries: `Naive` for
+    /// `Timestamp`, `Utc` for `Timestamptz`, `None` for every other type.
+    ///
+    /// A stored time cell is wrapped as `Value::NaiveDateTime` or
+    /// `Value::DateTime` by this kind, so a reader never has to decide which
+    /// variant a column means. `SystemTimestamp` and `Duration` share the
+    /// eight-byte time storage but are not instants: their cells read back as
+    /// the integer stored.
+    pub const fn instant_kind(&self) -> Option<InstantKind> {
+        match self {
+            Self::Timestamp => Some(InstantKind::Naive),
+            Self::Timestamptz => Some(InstantKind::Utc),
+            Self::Int64
+            | Self::Float64
+            | Self::String
+            | Self::Bool
+            | Self::Bytes
+            | Self::SystemTimestamp
+            | Self::Decimal { .. }
+            | Self::Geometry
+            | Self::Vector(_)
+            | Self::SparseVector
+            | Self::Uuid
+            | Self::Json
+            | Self::Ulid
+            | Self::Duration
+            | Self::Array
+            | Self::Set
+            | Self::Regex
+            | Self::Range
+            | Self::Record => None,
+        }
+    }
+
+    /// Type a stored time cell by this declared type.
+    ///
+    /// An instant column (`Timestamp`, `Timestamptz`) wraps `micros` as its
+    /// `instant_kind()` variant; every other declared type backed by
+    /// eight-byte time storage (`SystemTimestamp`, `Duration`) returns the
+    /// integer stored. The single mapping every segment-cell and memtable-cell
+    /// reader uses, so a row reads identically whether the reader inferred the
+    /// column's physical kind as `Int64` or `Timestamp`.
+    pub fn time_cell(&self, micros: i64) -> Value {
+        match self.instant_kind() {
+            Some(kind) => kind.from_micros(micros),
+            None => Value::Integer(micros),
+        }
     }
 
     /// Return the canonical PostgreSQL type OID for this column type.
@@ -221,6 +271,23 @@ mod tests {
 
     fn nodedb_types_datetime_epoch() -> crate::datetime::NdbDateTime {
         crate::datetime::NdbDateTime::from_micros(0)
+    }
+
+    #[test]
+    fn instant_kind_names_the_variant_a_time_column_reads_back_as() {
+        assert_eq!(
+            ColumnType::Timestamp.instant_kind(),
+            Some(InstantKind::Naive)
+        );
+        assert_eq!(
+            ColumnType::Timestamptz.instant_kind(),
+            Some(InstantKind::Utc)
+        );
+        assert_eq!(ColumnType::SystemTimestamp.instant_kind(), None);
+        assert_eq!(ColumnType::Duration.instant_kind(), None);
+        assert_eq!(ColumnType::Int64.instant_kind(), None);
+        assert!(ColumnType::Timestamp.is_instant());
+        assert!(!ColumnType::SystemTimestamp.is_instant());
     }
 
     #[test]

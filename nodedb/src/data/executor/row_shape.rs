@@ -84,18 +84,32 @@ pub(in crate::data::executor) fn sparse_row_to_doc(
 
 /// Convert a single row from a `DecodedColumn` to a `nodedb_types::value::Value`.
 ///
+/// `declared` is the column's declared type from the collection schema. It
+/// decides how an eight-byte integer cell is typed, because the segment
+/// reader infers a column's physical kind from its codec and decodes every
+/// time column as `DecodedColumn::Int64`: a `Timestamp` column yields
+/// `Value::NaiveDateTime`, a `Timestamptz` column `Value::DateTime`, both from
+/// the epoch microseconds the segment stores. Every other declared type
+/// yields the integer stored: a `SystemTimestamp` column is an engine-assigned
+/// system-time count, and the bitemporal `_ts_system`, `_ts_valid_from`,
+/// `_ts_valid_until` columns are declared `Int64` and hold epoch milliseconds
+/// with `i64::MIN` / `i64::MAX` as the unbounded sentinels, which no instant
+/// can carry. The live memtable applies the same rule, so a row reads
+/// identically before and after a flush.
+///
 /// Returns `Value::Null` if the row index is out of range or the validity bit is false.
 pub(in crate::data::executor) fn decoded_col_to_value(
     col: &nodedb_columnar::reader::DecodedColumn,
     row_idx: usize,
+    declared: &nodedb_types::columnar::ColumnType,
 ) -> nodedb_types::value::Value {
     use nodedb_columnar::reader::DecodedColumn;
     use nodedb_types::value::Value;
 
     match col {
-        DecodedColumn::Int64 { values, valid } => {
+        DecodedColumn::Int64 { values, valid } | DecodedColumn::Timestamp { values, valid } => {
             if row_idx < valid.len() && valid[row_idx] {
-                Value::Integer(values[row_idx])
+                declared.time_cell(values[row_idx])
             } else {
                 Value::Null
             }
@@ -103,14 +117,6 @@ pub(in crate::data::executor) fn decoded_col_to_value(
         DecodedColumn::Float64 { values, valid } => {
             if row_idx < valid.len() && valid[row_idx] {
                 Value::Float(values[row_idx])
-            } else {
-                Value::Null
-            }
-        }
-        DecodedColumn::Timestamp { values, valid } => {
-            if row_idx < valid.len() && valid[row_idx] {
-                // Represent as integer microseconds (same as Value::Integer for timestamps).
-                Value::Integer(values[row_idx])
             } else {
                 Value::Null
             }
@@ -160,13 +166,94 @@ pub(in crate::data::executor) fn decoded_col_to_value(
                 Value::Null
             }
         }
-        _ => Value::Null,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{kv_row_to_doc, msgpack_scan};
+    use nodedb_columnar::reader::DecodedColumn;
+    use nodedb_types::columnar::ColumnType;
+    use nodedb_types::value::Value;
+    use nodedb_types::{InstantKind, NdbDateTime};
+
+    use super::{decoded_col_to_value, kv_row_to_doc, msgpack_scan};
+
+    const MICROS: i64 = 1_583_402_400_000_000;
+
+    /// A time column as the segment reader decodes it: the reader infers the
+    /// physical kind from the codec, so a time column arrives as `Int64`.
+    fn time_column() -> DecodedColumn {
+        DecodedColumn::Int64 {
+            values: vec![MICROS, 0],
+            valid: vec![true, false],
+        }
+    }
+
+    /// A `TIMESTAMP` column reads back as a naive instant, a `TIMESTAMPTZ`
+    /// column as a UTC instant, each carrying the stored microseconds,
+    /// whether the reader decoded the column as `Int64` or as `Timestamp`.
+    #[test]
+    fn a_declared_instant_column_reads_back_as_its_instant_variant() {
+        let col = time_column();
+        assert_eq!(
+            decoded_col_to_value(&col, 0, &ColumnType::Timestamp),
+            Value::NaiveDateTime(NdbDateTime::from_micros(MICROS))
+        );
+        assert_eq!(
+            decoded_col_to_value(&col, 0, &ColumnType::Timestamptz),
+            Value::DateTime(NdbDateTime::from_micros(MICROS))
+        );
+        assert_eq!(
+            decoded_col_to_value(&col, 0, &ColumnType::Timestamp),
+            InstantKind::Naive.from_micros(MICROS)
+        );
+        let typed = DecodedColumn::Timestamp {
+            values: vec![MICROS],
+            valid: vec![true],
+        };
+        assert_eq!(
+            decoded_col_to_value(&typed, 0, &ColumnType::Timestamptz),
+            Value::DateTime(NdbDateTime::from_micros(MICROS))
+        );
+    }
+
+    /// A system-time column and a duration column share time storage but are
+    /// not instants: they read back as the integer stored.
+    #[test]
+    fn a_non_instant_time_column_reads_back_as_the_integer_stored() {
+        let col = time_column();
+        assert_eq!(
+            decoded_col_to_value(&col, 0, &ColumnType::SystemTimestamp),
+            Value::Integer(MICROS)
+        );
+        assert_eq!(
+            decoded_col_to_value(&col, 0, &ColumnType::Duration),
+            Value::Integer(MICROS)
+        );
+    }
+
+    /// The declared type never changes how a non-time column reads, and an
+    /// invalid or out-of-range row is NULL for every declared type.
+    #[test]
+    fn a_null_time_cell_is_null_for_every_declared_type() {
+        let col = time_column();
+        for ty in [
+            ColumnType::Timestamp,
+            ColumnType::Timestamptz,
+            ColumnType::SystemTimestamp,
+        ] {
+            assert_eq!(decoded_col_to_value(&col, 1, &ty), Value::Null);
+            assert_eq!(decoded_col_to_value(&col, 2, &ty), Value::Null);
+        }
+        let ints = DecodedColumn::Int64 {
+            values: vec![7],
+            valid: vec![true],
+        };
+        assert_eq!(
+            decoded_col_to_value(&ints, 0, &ColumnType::Int64),
+            Value::Integer(7)
+        );
+    }
 
     /// A raw (non-msgpack) KV value must be wrapped as a msgpack STRING, not
     /// appended verbatim.

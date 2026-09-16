@@ -199,7 +199,10 @@ impl CoreLoop {
                 out.push(
                     decoded_cols
                         .iter()
-                        .map(|dc| decoded_col_to_value(dc, row_idx))
+                        .zip(&schema.columns)
+                        .map(|(dc, col_def)| {
+                            decoded_col_to_value(dc, row_idx, &col_def.column_type)
+                        })
                         .collect(),
                 );
             }

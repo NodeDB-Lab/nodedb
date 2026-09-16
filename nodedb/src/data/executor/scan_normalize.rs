@@ -351,7 +351,11 @@ impl CoreLoop {
                     let mut map = std::collections::HashMap::new();
                     let mut id = String::new();
                     for (col_idx, col_def) in schema.columns.iter().enumerate() {
-                        let val = decoded_col_to_value(&decoded_cols[col_idx], row_idx);
+                        let val = decoded_col_to_value(
+                            &decoded_cols[col_idx],
+                            row_idx,
+                            &col_def.column_type,
+                        );
                         if col_def.name == "id"
                             && let nodedb_types::value::Value::String(s) = &val
                         {
