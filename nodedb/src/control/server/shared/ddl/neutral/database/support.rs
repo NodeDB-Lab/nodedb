@@ -3,7 +3,7 @@
 //! Shared error / result constructors for the protocol-neutral database DDL
 //! handlers.
 
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 
 use super::super::super::result::{DdlError, DdlResult};
 
@@ -32,11 +32,5 @@ pub(super) fn text_rows(
     columns: Vec<String>,
     rows: Vec<serde_json::Map<String, serde_json::Value>>,
 ) -> Vec<DdlResult> {
-    let column_types = vec![DdlColType::Text; columns.len()];
-    vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))]
 }

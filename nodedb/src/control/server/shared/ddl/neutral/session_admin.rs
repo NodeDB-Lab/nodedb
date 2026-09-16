@@ -145,13 +145,7 @@ pub fn show_sessions(
         })
         .collect();
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// KILL SESSION '<session_id>'
@@ -286,13 +280,10 @@ pub fn verify_audit_chain(
                 "entries".to_string(),
                 JsonValue::String(audit.len().to_string()),
             );
-            let column_types = ShapedRows::text_types(columns.len());
-            Ok(vec![DdlResult::Rows(ShapedRows {
+            Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
                 columns,
-                column_types,
-                rows: vec![row],
-                notice: None,
-            })])
+                vec![row],
+            ))])
         }
         Err(broken_seq) => Err(err(
             "XX001",

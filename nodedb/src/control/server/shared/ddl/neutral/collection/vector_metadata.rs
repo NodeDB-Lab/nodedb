@@ -218,12 +218,7 @@ pub fn handle_show_vector_models(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types: ShapedRows::text_types(6),
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Handle `SELECT VECTOR_METADATA('collection', 'column')` — return JSON.
@@ -258,12 +253,10 @@ pub fn handle_vector_metadata_query(
     let mut row = Map::new();
     row.insert("vector_metadata".to_string(), JsonValue::String(json));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["vector_metadata".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["vector_metadata".to_string()],
+        vec![row],
+    ))])
 }
 
 /// Format a Unix timestamp (seconds) as an ISO-8601 UTC date string (YYYY-MM-DD).

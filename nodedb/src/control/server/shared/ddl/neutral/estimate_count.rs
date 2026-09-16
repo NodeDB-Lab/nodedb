@@ -10,7 +10,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
 use nodedb_physical::physical_plan::DocumentOp;
@@ -72,18 +72,15 @@ pub async fn estimate_count(
                             &resp.payload,
                         );
                     let columns = vec!["estimate_count".to_string()];
-                    let column_types = vec![DdlColType::Text];
                     let mut row = Map::new();
                     row.insert(
                         "estimate_count".to_string(),
                         JsonValue::String(payload_text),
                     );
-                    return Ok(vec![DdlResult::Rows(ShapedRows {
+                    return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
                         columns,
-                        column_types,
-                        rows: vec![row],
-                        notice: None,
-                    })]);
+                        vec![row],
+                    ))]);
                 }
                 Err(e) => {
                     return Err(DdlError::new("XX000", e.to_string()));

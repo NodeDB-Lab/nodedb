@@ -68,12 +68,11 @@ pub fn show_users(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW ROLES — list all custom roles. Built-in role enum is fixed
@@ -122,12 +121,11 @@ pub fn show_roles(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW SESSION — display current session identity.
@@ -178,10 +176,9 @@ pub fn show_session(identity: &AuthenticatedIdentity) -> Result<Vec<DdlResult>, 
         JsonValue::String(if identity.is_superuser { "t" } else { "f" }.to_string()),
     );
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }

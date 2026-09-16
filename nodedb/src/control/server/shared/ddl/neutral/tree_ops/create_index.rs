@@ -282,12 +282,10 @@ pub async fn create_graph_index(
         JsonValue::String(total_edges.to_string()),
     );
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["edges_created".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["edges_created".to_string()],
+        vec![row],
+    ))])
 }
 
 /// Surface a build-time failure.

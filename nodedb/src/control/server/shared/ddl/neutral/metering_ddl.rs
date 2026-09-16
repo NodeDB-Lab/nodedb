@@ -115,12 +115,7 @@ pub fn show_usage(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types: ShapedRows::text_types(6),
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// SHOW QUOTA FOR AUTH USER '<id>' / SHOW QUOTA FOR ORG '<id>'
@@ -183,12 +178,7 @@ pub fn show_quota(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types: ShapedRows::text_types(7),
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// SHOW USAGE FOR TENANT <id>
@@ -237,12 +227,7 @@ pub fn show_usage_for_tenant(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types: ShapedRows::text_types(2),
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// EXPORT USAGE FOR TENANT <id> [PERIOD '<month>'] FORMAT 'json'
@@ -293,12 +278,10 @@ pub fn export_usage(
     let mut row = Map::new();
     row.insert("usage_json".to_string(), JsonValue::String(json));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["usage_json".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["usage_json".to_string()],
+        vec![row],
+    ))])
 }
 
 /// Parse FOR AUTH USER '<id>' or FOR ORG '<id>' from parts.

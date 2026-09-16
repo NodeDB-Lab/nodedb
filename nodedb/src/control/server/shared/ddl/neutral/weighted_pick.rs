@@ -220,12 +220,10 @@ pub async fn weighted_pick(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: pick_columns(),
-        column_types: ShapedRows::text_types(3),
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        pick_columns(),
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -325,12 +323,7 @@ fn pick_columns() -> Vec<String> {
 
 /// Empty (no-rows) result set with the WEIGHTED_PICK schema.
 fn empty_pick_rows() -> DdlResult {
-    DdlResult::Rows(ShapedRows {
-        columns: pick_columns(),
-        column_types: ShapedRows::text_types(3),
-        rows: Vec::new(),
-        notice: None,
-    })
+    DdlResult::Rows(ShapedRows::text_rows(pick_columns(), Vec::new()))
 }
 
 fn unquote(s: &str) -> String {

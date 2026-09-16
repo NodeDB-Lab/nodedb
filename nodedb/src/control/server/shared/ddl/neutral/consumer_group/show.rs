@@ -72,13 +72,7 @@ pub fn show_consumer_groups(
         rows.push(row);
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Handle `SHOW PARTITIONS ON <stream>`
@@ -159,11 +153,5 @@ pub fn show_partitions(
         }
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

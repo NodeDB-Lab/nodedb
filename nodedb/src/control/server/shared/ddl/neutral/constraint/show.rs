@@ -109,13 +109,7 @@ pub fn show_constraints(
         rows.push(constraint_row(&cc.name, kind_str, "", &cc.check_sql));
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Build a single `SHOW CONSTRAINTS` row keyed by the four text columns.

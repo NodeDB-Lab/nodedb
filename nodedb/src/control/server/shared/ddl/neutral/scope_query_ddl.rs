@@ -129,7 +129,6 @@ pub fn show_my_scopes(
     let effective = state.scope_grants.effective_scopes(&user_id, &org_ids);
 
     let columns = vec!["scope".to_string(), "source".to_string()];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let mut rows = Vec::new();
     for scope_name in &effective {
@@ -148,12 +147,7 @@ pub fn show_my_scopes(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// SHOW SCOPES FOR USER '<id>' / SHOW SCOPES FOR ORG '<id>'
@@ -184,7 +178,6 @@ pub fn show_scopes_for(
     };
 
     let columns = vec!["scope".to_string()];
-    let column_types = ShapedRows::text_types(columns.len());
     let rows: Vec<_> = scopes
         .iter()
         .map(|s| {
@@ -194,10 +187,5 @@ pub fn show_scopes_for(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

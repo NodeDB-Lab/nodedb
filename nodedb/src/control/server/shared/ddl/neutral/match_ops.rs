@@ -232,15 +232,12 @@ fn match_payload_to_rows(
     column_names: &[String],
 ) -> Result<Vec<DdlResult>, DdlError> {
     let columns = column_names.to_vec();
-    let column_types = ShapedRows::text_types(column_names.len());
 
     if payload.is_empty() {
-        return Ok(vec![DdlResult::Rows(ShapedRows {
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
             columns,
-            column_types,
-            rows: Vec::new(),
-            notice: None,
-        })]);
+            Vec::new(),
+        ))]);
     }
 
     let json_text = response_codec::decode_payload_to_json(payload);
@@ -257,12 +254,9 @@ fn match_payload_to_rows(
         out_rows.push(map);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows: out_rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        columns, out_rows,
+    ))])
 }
 
 // Tenant-prefix stripping lives in the Data Plane, in

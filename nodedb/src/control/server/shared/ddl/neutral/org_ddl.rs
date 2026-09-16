@@ -176,7 +176,6 @@ pub fn show_orgs(
         "tenant_id".to_string(),
         "status".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = orgs
         .iter()
@@ -193,12 +192,7 @@ pub fn show_orgs(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// SHOW MEMBERS OF ORG '<org_id>'
@@ -223,7 +217,6 @@ pub fn show_members(
         "role".to_string(),
         "joined_at".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = members
         .iter()
@@ -243,10 +236,5 @@ pub fn show_members(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

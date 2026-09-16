@@ -15,7 +15,7 @@ use serde_json::{Map, Value as JsonValue};
 use crate::control::change_stream::ReplayStart;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::authorization::authorize_collection;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -95,13 +95,6 @@ pub fn show_changes(
             "timestamp_ms".to_string(),
             "lsn".to_string(),
         ];
-        let column_types = vec![
-            DdlColType::Text,
-            DdlColType::Text,
-            DdlColType::Text,
-            DdlColType::Text,
-            DdlColType::Text,
-        ];
 
         let mut rows = Vec::with_capacity(changes.len());
         for change in &changes {
@@ -129,12 +122,7 @@ pub fn show_changes(
             rows.push(row);
         }
 
-        return Ok(vec![DdlResult::Rows(ShapedRows {
-            columns,
-            column_types,
-            rows,
-            notice: None,
-        })]);
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))]);
     }
 
     Err(DdlError::new(

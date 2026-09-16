@@ -11,7 +11,7 @@
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
@@ -46,7 +46,6 @@ pub fn show_grants(
     };
 
     let columns = vec!["username".to_string(), "role".to_string()];
-    let column_types = vec![DdlColType::Text, DdlColType::Text];
 
     let user = state.credentials.get_user(&target_user);
     let mut rows = Vec::new();
@@ -63,12 +62,7 @@ pub fn show_grants(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// `SHOW PERMISSIONS [ON <collection>] [FOR <user|role>]`
@@ -105,13 +99,6 @@ pub fn show_permissions(
         "target".to_string(),
         "type".to_string(),
     ];
-    let column_types = vec![
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-    ];
-
     let mut rows = Vec::new();
 
     if let Some(collection) = on_collection {
@@ -224,10 +211,5 @@ pub fn show_permissions(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

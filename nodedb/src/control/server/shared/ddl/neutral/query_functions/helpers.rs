@@ -73,12 +73,10 @@ pub fn json_to_decimal(v: &serde_json::Value) -> Option<rust_decimal::Decimal> {
 pub fn single_result(value: &str) -> Vec<DdlResult> {
     let mut row = Map::new();
     row.insert("result".to_string(), JsonValue::String(value.to_string()));
-    vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["result".to_string()],
+        vec![row],
+    ))]
 }
 
 /// Unwrap the `DocumentOp::Scan` raw-passthrough envelope (`{"id": ..,
@@ -132,10 +130,8 @@ pub fn unwrap_scan_doc_with_id(doc: JsonValue) -> (String, Map<String, JsonValue
 /// Mirrors the pgwire empty-`QueryResponse` case (one text column named
 /// `result`, no rows).
 pub fn empty_result() -> Vec<DdlResult> {
-    vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: Vec::new(),
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["result".to_string()],
+        Vec::new(),
+    ))]
 }

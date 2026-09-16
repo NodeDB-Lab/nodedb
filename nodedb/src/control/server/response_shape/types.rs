@@ -308,6 +308,38 @@ impl ShapedRows {
         vec![DdlColType::Text; n]
     }
 
+    /// A result set from decoded JSON rows, with one catalog type per column
+    /// and no notice.
+    pub fn from_json_rows(
+        columns: Vec<String>,
+        column_types: Vec<DdlColType>,
+        rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        Self {
+            columns,
+            column_types,
+            rows,
+            notice: None,
+        }
+    }
+
+    /// A result set whose every column is `Text`: the shape a DDL or
+    /// inspection statement answers with. The type list is sized from
+    /// `columns`, so the two cannot disagree.
+    pub fn text_rows(
+        columns: Vec<String>,
+        rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        let column_types = Self::text_types(columns.len());
+        Self::from_json_rows(columns, column_types, rows)
+    }
+
+    /// Attach a client-facing notice.
+    pub fn with_notice(mut self, notice: impl Into<String>) -> Self {
+        self.notice = Some(notice.into());
+        self
+    }
+
     /// Fold another shaped result into this one so N tasks answer with ONE result
     /// set — some drivers reject multiple result sets. Columns are the union of
     /// every contributor's; rows read by key so a missing column encodes NULL.
