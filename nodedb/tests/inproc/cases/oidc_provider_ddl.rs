@@ -224,7 +224,7 @@ async fn show_oidc_providers_exposes_tenant_binding() {
             assert_eq!(
                 rows.rows[0]
                     .get("tenant_id")
-                    .and_then(serde_json::Value::as_str),
+                    .and_then(nodedb_types::Value::as_str),
                 Some("42")
             );
         }

@@ -10,6 +10,7 @@
 //! (`Execution`, `DmlResult`) come back as [`HttpShaped::Passthrough`]; the
 //! caller keeps its existing raw decode/base64 fallback for those.
 
+use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use nodedb_types::NodeDbError;
@@ -31,15 +32,16 @@ pub(super) fn shape_http_payload(
 ) -> Result<HttpShaped, NodeDbError> {
     match shape_response_materialized(request)? {
         // Each row map is already keyed by `ShapedRows::cell_keys`, so it
-        // serializes to JSON as-is. When two output columns share a name the
-        // later one carries a `_<n>` suffix (`SELECT w.id, b.id` →
-        // `{"id": …, "id_1": …}`) — a JSON object cannot repeat a key, and
-        // dropping the duplicate would silently lose a projected column.
+        // serializes to JSON key for key, each typed cell converted at this
+        // edge. When two output columns share a name the later one carries a
+        // `_<n>` suffix (`SELECT w.id, b.id` → `{"id": …, "id_1": …}`) — a
+        // JSON object cannot repeat a key, and dropping the duplicate would
+        // silently lose a projected column.
         ShapeOutcome::Rows(shaped) => Ok(HttpShaped::Rows(
             shaped
                 .rows
-                .into_iter()
-                .map(serde_json::Value::Object)
+                .iter()
+                .map(|row| serde_json::Value::Object(row_to_wire_json(row)))
                 .collect(),
         )),
         ShapeOutcome::Passthrough => Ok(HttpShaped::Passthrough),
@@ -102,8 +104,8 @@ pub(super) fn ddl_results_to_json(
             // Keyed by `ShapedRows::cell_keys`, same JSON contract as
             // `shape_http_payload` above (duplicate names take a `_<n>` key).
             DdlResult::Rows(shaped) => {
-                for row in shaped.rows {
-                    rows.push(serde_json::Value::Object(row));
+                for row in &shaped.rows {
+                    rows.push(serde_json::Value::Object(row_to_wire_json(row)));
                 }
             }
             DdlResult::Empty => {

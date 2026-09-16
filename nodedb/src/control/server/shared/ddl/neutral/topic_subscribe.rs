@@ -218,7 +218,10 @@ mod tests {
         let DdlResult::Rows(rows) = &result[0] else {
             panic!("expected rows");
         };
-        assert_eq!(rows.rows[0]["backlog"], JsonValue::String("1".into()));
+        assert_eq!(
+            rows.rows[0]["backlog"],
+            nodedb_types::Value::String("1".into())
+        );
         assert_eq!(state.ep_topic_registry.receiver_count(), 0);
     }
 }

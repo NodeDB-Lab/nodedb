@@ -34,17 +34,15 @@
 //! a schemaless row carries fields no catalog column declares — which is the
 //! same answer `SELECT *` gives for the same row.
 
-use serde_json::{Map, Value as JsonValue};
-
-use nodedb_types::{NativeCell, NodeDbError};
+use nodedb_types::{NativeCell, NodeDbError, Value};
 
 use crate::data::executor::response_codec::{RowsPayload, decode_payload_to_json};
 
-use super::compose::{project_row, redact_rows, single_result_row};
+use super::compose::kernel::{project_row, redact_rows, single_result_row};
 use super::project::cell_keys;
 use super::redaction::RedactionCtx;
 use super::schema::OutputSchema;
-use super::types::{DdlColType, ShapedRows};
+use super::types::{DdlColType, ShapedRow, ShapedRows};
 
 /// Shape a DML-with-`RETURNING` response.
 ///
@@ -100,12 +98,7 @@ pub fn shape_returning_rows(
 
     let Some(schema) = announced else {
         let column_types = ShapedRows::text_types(columns.len());
-        return Ok(ShapedRows {
-            columns,
-            column_types,
-            rows,
-            notice: None,
-        });
+        return Ok(ShapedRows::from_rows(columns, column_types, rows));
     };
     Ok(project_onto_announced(schema, &rows))
 }
@@ -117,19 +110,16 @@ fn announced_columns(projection: Option<&OutputSchema>) -> Option<&OutputSchema>
     projection.filter(|schema| !schema.is_star && !schema.columns.is_empty())
 }
 
-/// Re-key each payload row from positional typed cells to a name-keyed JSON
-/// map. This is the one step where a cell leaves its `Value` form: an
-/// instant renders as ISO-8601 text, `Value::Null` (SQL NULL) as JSON `null`,
-/// numbers and booleans as themselves.
-fn rows_keyed_by_column(
-    columns: &[String],
-    rows: Vec<Vec<NativeCell>>,
-) -> Vec<Map<String, JsonValue>> {
+/// Re-key each payload row from positional typed cells to a name-keyed row.
+/// A cell keeps its `Value` form: an instant stays an instant, `Value::Null`
+/// is SQL NULL, numbers and booleans are themselves. Each protocol renders
+/// the cell at its own edge.
+fn rows_keyed_by_column(columns: &[String], rows: Vec<Vec<NativeCell>>) -> Vec<ShapedRow> {
     rows.into_iter()
         .map(|row_vals| {
-            let mut map = Map::new();
+            let mut map = ShapedRow::new();
             for (col, cell) in columns.iter().zip(row_vals) {
-                map.insert(col.clone(), JsonValue::from(cell.0));
+                map.insert(col.clone(), cell.0);
             }
             map
         })
@@ -141,7 +131,7 @@ fn rows_keyed_by_column(
 /// Uses the same `project_row` + `cell_keys` pair the SELECT path uses, so a
 /// `RETURNING` result and a `SELECT` result of the same columns are laid out
 /// identically for the encoders.
-fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]) -> ShapedRows {
+fn project_onto_announced(schema: &OutputSchema, rows: &[ShapedRow]) -> ShapedRows {
     let lookup_keys: Vec<String> = schema
         .columns
         .iter()
@@ -168,12 +158,7 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]
         })
         .collect();
 
-    ShapedRows {
-        columns: display_names,
-        column_types,
-        rows: projected,
-        notice: None,
-    }
+    ShapedRows::from_rows(display_names, column_types, projected)
 }
 
 /// Re-read a text `RETURNING` cell as the column's announced type.
@@ -188,8 +173,8 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]
 ///
 /// A cell that does not parse as its announced type is left as text, which
 /// both encoders render verbatim.
-fn retype_cell(ct: DdlColType, cell: &mut JsonValue) {
-    let JsonValue::String(text) = cell else {
+fn retype_cell(ct: DdlColType, cell: &mut Value) {
+    let Value::String(text) = cell else {
         return;
     };
     let retyped = match ct {
@@ -198,15 +183,17 @@ fn retype_cell(ct: DdlColType, cell: &mut JsonValue) {
         | DdlColType::Int2
         // Epoch microseconds; the encoder formats the number as ISO-8601.
         | DdlColType::Timestamp
-        | DdlColType::Timestamptz => text.parse::<i64>().ok().map(JsonValue::from),
+        | DdlColType::Timestamptz => text.parse::<i64>().ok().map(Value::Integer),
+        // A float that parses but is not finite has no JSON form, so it stays
+        // text.
         DdlColType::Float8 | DdlColType::Float4 => text
             .parse::<f64>()
             .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(JsonValue::Number),
+            .filter(|f| f.is_finite())
+            .map(Value::Float),
         DdlColType::Bool => match text.as_str() {
-            "t" | "true" | "TRUE" | "T" => Some(JsonValue::Bool(true)),
-            "f" | "false" | "FALSE" | "F" => Some(JsonValue::Bool(false)),
+            "t" | "true" | "TRUE" | "T" => Some(Value::Bool(true)),
+            "f" | "false" | "FALSE" | "F" => Some(Value::Bool(false)),
             _ => None,
         },
         DdlColType::Text
@@ -225,34 +212,37 @@ fn retype_cell(ct: DdlColType, cell: &mut JsonValue) {
 /// The announced columns with no rows — a write that matched nothing still
 /// answers with the result set the client was promised, just an empty one.
 fn empty_announced(schema: &OutputSchema) -> ShapedRows {
-    ShapedRows {
-        columns: schema
+    ShapedRows::from_rows(
+        schema
             .columns
             .iter()
             .map(|c| c.display_name.clone())
             .collect(),
-        column_types: schema.columns.iter().map(|c| c.ty).collect(),
-        rows: Vec::new(),
-        notice: None,
-    }
+        schema.columns.iter().map(|c| c.ty).collect(),
+        Vec::new(),
+    )
 }
 
 /// Single "result" column with zero rows, for an empty payload with nothing
 /// announced.
 fn single_result_column_empty() -> ShapedRows {
-    ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: Vec::new(),
-        notice: None,
-    }
+    ShapedRows::from_rows(
+        vec!["result".to_string()],
+        ShapedRows::text_types(1),
+        Vec::new(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::server::response_shape::cell::value_to_wire_json;
     use crate::control::server::response_shape::schema::OutputColumn;
-    use nodedb_types::{NdbDateTime, Value};
+    use nodedb_types::NdbDateTime;
+
+    fn text(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
 
     fn typed_payload(columns: &[&str], rows: Vec<Vec<Value>>) -> Vec<u8> {
         let rp = RowsPayload {
@@ -325,8 +315,8 @@ mod tests {
         assert_eq!(shaped.column_types.len(), shaped.columns.len());
         let keys = shaped.cell_keys();
         assert_eq!(shaped.rows[0].len(), keys.len(), "one cell per column");
-        assert_eq!(shaped.rows[0]["id"], JsonValue::String("a".into()));
-        assert_eq!(shaped.rows[0]["name"], JsonValue::String("x".into()));
+        assert_eq!(shaped.rows[0]["id"], text("a"));
+        assert_eq!(shaped.rows[0]["name"], text("x"));
     }
 
     /// An announced column the row does not carry is SQL NULL, in its
@@ -341,9 +331,9 @@ mod tests {
         ]);
         let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name", "score"]);
-        assert_eq!(shaped.rows[0]["id"], JsonValue::String("a".into()));
-        assert_eq!(shaped.rows[0]["name"], JsonValue::Null);
-        assert_eq!(shaped.rows[0]["score"], JsonValue::from(7i64));
+        assert_eq!(shaped.rows[0]["id"], text("a"));
+        assert_eq!(shaped.rows[0]["name"], Value::Null);
+        assert_eq!(shaped.rows[0]["score"], Value::Integer(7));
     }
 
     /// Cells are re-read as the announced type so a binary-format request is
@@ -361,16 +351,17 @@ mod tests {
             ("s", DdlColType::Text),
         ]);
         let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
-        assert_eq!(shaped.rows[0]["i"], JsonValue::from(42i64));
-        assert_eq!(shaped.rows[0]["f"], JsonValue::from(1.5f64));
-        assert_eq!(shaped.rows[0]["b"], JsonValue::Bool(true));
+        assert_eq!(shaped.rows[0]["i"], Value::Integer(42));
+        assert_eq!(shaped.rows[0]["f"], Value::Float(1.5));
+        assert_eq!(shaped.rows[0]["b"], Value::Bool(true));
         // A TEXT column keeps its text even when it looks like a number.
-        assert_eq!(shaped.rows[0]["s"], JsonValue::String("42".into()));
+        assert_eq!(shaped.rows[0]["s"], text("42"));
     }
 
     /// A typed cell passes through as itself: an integer stays a number under
-    /// an INT column, an instant renders as the ISO-8601 text a `SELECT` of
-    /// the same column renders, and SQL NULL is JSON `null`.
+    /// an INT column, an instant stays an instant (and renders at the edge as
+    /// the ISO-8601 text a `SELECT` of the same column renders), and SQL NULL
+    /// stays NULL.
     #[test]
     fn typed_cells_reach_the_row_as_themselves() {
         let at = NdbDateTime::from_micros(1_583_402_400_000_000);
@@ -390,25 +381,28 @@ mod tests {
             ("gone", DdlColType::Text),
         ]);
         let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
-        assert_eq!(shaped.rows[0]["n"], JsonValue::from(7i64));
+        assert_eq!(shaped.rows[0]["n"], Value::Integer(7));
+        assert_eq!(shaped.rows[0]["at"], Value::NaiveDateTime(at));
         assert_eq!(
-            shaped.rows[0]["at"],
-            JsonValue::String("2020-03-05T10:00:00.000000Z".into())
+            value_to_wire_json(&shaped.rows[0]["at"]),
+            serde_json::Value::String("2020-03-05T10:00:00.000000Z".into())
         );
-        assert_eq!(shaped.rows[0]["f"], JsonValue::from(1.5f64));
-        assert_eq!(shaped.rows[0]["gone"], JsonValue::Null);
+        assert_eq!(shaped.rows[0]["f"], Value::Float(1.5));
+        assert_eq!(shaped.rows[0]["gone"], Value::Null);
     }
 
-    /// The same instant renders as ISO-8601 when nothing was announced, so the
-    /// simple-query protocol shows what the extended one does.
+    /// The same instant stays typed when nothing was announced, and renders
+    /// as ISO-8601 at the edge, so the simple-query protocol shows what the
+    /// extended one does.
     #[test]
     fn an_instant_cell_renders_iso8601_without_a_projection() {
         let at = NdbDateTime::from_micros(1_583_402_400_000_000);
         let bytes = typed_payload(&["at"], vec![vec![Value::DateTime(at)]]);
         let shaped = shape_returning_rows(&bytes, None, None).expect("shape");
+        assert_eq!(shaped.rows[0]["at"], Value::DateTime(at));
         assert_eq!(
-            shaped.rows[0]["at"],
-            JsonValue::String("2020-03-05T10:00:00.000000Z".into())
+            value_to_wire_json(&shaped.rows[0]["at"]),
+            serde_json::Value::String("2020-03-05T10:00:00.000000Z".into())
         );
     }
 
@@ -419,10 +413,7 @@ mod tests {
         let bytes = payload(&["i"], &[&[Some("not a number")]]);
         let schema = announced(&[("i", DdlColType::Int8)]);
         let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
-        assert_eq!(
-            shaped.rows[0]["i"],
-            JsonValue::String("not a number".into())
-        );
+        assert_eq!(shaped.rows[0]["i"], text("not a number"));
     }
 
     /// A write that matched nothing still answers with the announced result

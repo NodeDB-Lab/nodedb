@@ -7,12 +7,20 @@
 //! per-row [`RedactionStore::apply_flat_row`] go through it, so the mask / hash
 //! / null semantics exist exactly once.
 //!
-//! `apply_flat_row` is the SELECT-path entry point: it rewrites one already
-//! flattened result row, whose columns may come from several source
-//! collections at once (a join), rather than one document belonging to a
-//! single collection.
+//! `apply_flat_row` (JSON cells) and `apply_flat_row_typed` (typed
+//! `nodedb_types::Value` cells) are the SELECT-path entry points: each
+//! rewrites one already flattened result row, whose columns may come from
+//! several source collections at once (a join), rather than one document
+//! belonging to a single collection. Both share one rule-resolution body
+//! through [`FlatRow`], and a typed cell hashes through the same JSON text
+//! its wire rendering produces, so the two cannot drift.
 
+use std::collections::BTreeMap;
+
+use nodedb_types::Value;
 use serde_json::{Map, Value as JsonValue};
+
+use crate::util::wire_json::value_to_wire_json;
 
 use super::store::RedactionStore;
 use super::types::{RedactionMode, RedactionRule, policy_key};
@@ -45,13 +53,66 @@ fn hash_value(value: &JsonValue) -> String {
     format!("hash:{digest:x}")
 }
 
-/// Rewrite `row[key]` per `mode`, if the row actually carries that key.
-fn redact_key(row: &mut Map<String, JsonValue>, key: &str, mode: &RedactionMode) {
-    if !row.contains_key(key) {
-        return;
+/// The value `mode` produces for a typed field whose present value is
+/// `current`. A mask or hash renders through the JSON path: the hash input
+/// is the cell's wire JSON, exactly what the JSON row would have held.
+fn redacted_typed_value(mode: &RedactionMode, current: Option<&Value>) -> Value {
+    match mode {
+        RedactionMode::Mask(mask) => Value::String(mask.clone()),
+        RedactionMode::Hash => {
+            let wire = current.map(value_to_wire_json);
+            Value::String(hash_value(wire.as_ref().unwrap_or(&JsonValue::Null)))
+        }
+        RedactionMode::Null => Value::Null,
     }
-    let value = redacted_value(mode, row.get(key));
-    row.insert(key.to_string(), value);
+}
+
+/// One flattened result row, whatever its cell type.
+///
+/// The rule-resolution body in `RedactionStore::apply_flat_row_impl` is
+/// written once against this trait; the JSON and typed row maps each
+/// implement it.
+trait FlatRow {
+    fn is_empty(&self) -> bool;
+    fn keys(&self) -> impl Iterator<Item = &str>;
+    /// Rewrite `self[key]` per `mode`, if the row actually carries that key.
+    fn redact_key(&mut self, key: &str, mode: &RedactionMode);
+}
+
+impl FlatRow for Map<String, JsonValue> {
+    fn is_empty(&self) -> bool {
+        Map::is_empty(self)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &str> {
+        Map::keys(self).map(String::as_str)
+    }
+
+    fn redact_key(&mut self, key: &str, mode: &RedactionMode) {
+        if !self.contains_key(key) {
+            return;
+        }
+        let value = redacted_value(mode, self.get(key));
+        self.insert(key.to_string(), value);
+    }
+}
+
+impl FlatRow for BTreeMap<String, Value> {
+    fn is_empty(&self) -> bool {
+        BTreeMap::is_empty(self)
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &str> {
+        BTreeMap::keys(self).map(String::as_str)
+    }
+
+    fn redact_key(&mut self, key: &str, mode: &RedactionMode) {
+        if !self.contains_key(key) {
+            return;
+        }
+        let value = redacted_typed_value(mode, self.get(key));
+        self.insert(key.to_string(), value);
+    }
 }
 
 /// How many of the plan's sources a row-map key can be attributed to.
@@ -73,7 +134,7 @@ fn attribution_count(key: &str, sources: &[(&str, Vec<&RedactionRule>)]) -> usiz
 }
 
 impl RedactionStore {
-    /// Redact one already-flattened SELECT result row in place.
+    /// Redact one already-flattened SELECT result row of JSON cells in place.
     ///
     /// `collections` lists the plan's source collections as
     /// `(qualifier, collection)`, where `qualifier` is the prefix that appears
@@ -101,6 +162,30 @@ impl RedactionStore {
         collections: &[(String, String)],
         row: &mut Map<String, JsonValue>,
     ) {
+        self.apply_flat_row_impl(tenant_id, roles, collections, row);
+    }
+
+    /// Redact one already-flattened SELECT result row of typed cells in
+    /// place. Same matching rules as [`RedactionStore::apply_flat_row`]; a
+    /// `Null` mode writes `Value::Null`, a mask or hash writes the same text
+    /// the JSON path writes.
+    pub fn apply_flat_row_typed(
+        &self,
+        tenant_id: u64,
+        roles: &[String],
+        collections: &[(String, String)],
+        row: &mut BTreeMap<String, Value>,
+    ) {
+        self.apply_flat_row_impl(tenant_id, roles, collections, row);
+    }
+
+    fn apply_flat_row_impl<R: FlatRow>(
+        &self,
+        tenant_id: u64,
+        roles: &[String],
+        collections: &[(String, String)],
+        row: &mut R,
+    ) {
         if roles.is_empty() || collections.is_empty() || row.is_empty() {
             return;
         }
@@ -122,14 +207,14 @@ impl RedactionStore {
 
         if let [(_, rules)] = sources.as_slice() {
             for rule in rules {
-                redact_key(row, &rule.field, &rule.mode);
+                row.redact_key(&rule.field, &rule.mode);
             }
             return;
         }
 
         for (qualifier, rules) in &sources {
             for rule in rules {
-                redact_key(row, &format!("{qualifier}.{}", rule.field), &rule.mode);
+                row.redact_key(&format!("{qualifier}.{}", rule.field), &rule.mode);
             }
         }
 
@@ -137,7 +222,7 @@ impl RedactionStore {
         let unattributed: Vec<String> = row
             .keys()
             .filter(|key| attribution_count(key, &sources) != 1)
-            .cloned()
+            .map(str::to_owned)
             .collect();
         for key in unattributed {
             let bare = key.rfind('.').map_or(key.as_str(), |dot| &key[dot + 1..]);
@@ -147,7 +232,7 @@ impl RedactionStore {
                 .find(|rule| rule.field == bare || rule.field == key)
                 .map(|rule| rule.mode.clone());
             if let Some(mode) = mode {
-                redact_key(row, &key, &mode);
+                row.redact_key(&key, &mode);
             }
         }
     }
@@ -271,6 +356,93 @@ mod tests {
         );
         assert!(r.contains_key("email"), "the column must not disappear");
         assert_eq!(r["email"], JsonValue::Null);
+    }
+
+    fn typed_row(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    /// The typed entry point resolves rules exactly as the JSON one: same
+    /// mask on the ruled side of a join, clear value on the other, and a
+    /// `Null` mode keeps the key present.
+    #[test]
+    fn typed_row_matches_the_json_rules() {
+        let store = store_with(
+            "workspaces",
+            "support",
+            vec![
+                mask("id", "***"),
+                RedactionRule {
+                    field: "note".into(),
+                    mode: RedactionMode::Null,
+                },
+            ],
+        );
+        let mut r = typed_row(&[
+            ("w.id", Value::String("w1".into())),
+            ("b.id", Value::String("b1".into())),
+            ("w.note", Value::Integer(7)),
+        ]);
+        store.apply_flat_row_typed(
+            1,
+            &["support".into()],
+            &[
+                ("w".into(), "workspaces".into()),
+                ("b".into(), "boards".into()),
+            ],
+            &mut r,
+        );
+        assert_eq!(r["w.id"], Value::String("***".into()));
+        assert_eq!(r["b.id"], Value::String("b1".into()));
+        assert_eq!(r["w.note"], Value::Null);
+    }
+
+    /// A hashed typed cell yields the digest the JSON path yields for the
+    /// same cell: a string hashes its bytes, a number hashes its JSON text,
+    /// and bytes hash their base64 wire text.
+    #[test]
+    fn typed_hash_matches_the_json_hash() {
+        let store = store_with(
+            "users",
+            "support",
+            vec![
+                RedactionRule {
+                    field: "email".into(),
+                    mode: RedactionMode::Hash,
+                },
+                RedactionRule {
+                    field: "n".into(),
+                    mode: RedactionMode::Hash,
+                },
+                RedactionRule {
+                    field: "blob".into(),
+                    mode: RedactionMode::Hash,
+                },
+            ],
+        );
+        let roles = ["support".to_string()];
+        let sources = [(String::new(), "users".to_string())];
+
+        let mut typed = typed_row(&[
+            ("email", Value::String("a@b.c".into())),
+            ("n", Value::Integer(42)),
+            ("blob", Value::Bytes(vec![0, 255, 7])),
+        ]);
+        store.apply_flat_row_typed(1, &roles, &sources, &mut typed);
+
+        let mut json = row(json!({"email": "a@b.c", "n": 42, "blob": "AP8H"}));
+        store.apply_flat_row(1, &roles, &sources, &mut json);
+
+        for key in ["email", "n", "blob"] {
+            assert_eq!(
+                typed[key],
+                Value::String(json[key].as_str().expect("hashed text").to_string()),
+                "{key}"
+            );
+        }
     }
 
     #[test]

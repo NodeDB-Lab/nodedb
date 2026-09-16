@@ -18,6 +18,7 @@ use pgwire::api::results::{DataRowEncoder, FieldInfo, QueryResponse, Response, T
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use serde_json::Value as JsonValue;
 
+use crate::control::server::response_shape::cell::value_to_wire_json;
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 
@@ -110,7 +111,8 @@ fn rows_to_response(shaped: ShapedRows) -> PgWireResult<Response> {
         let mut encoder = DataRowEncoder::new(schema.clone());
         for (idx, name) in columns.iter().enumerate() {
             let ct = column_types.get(idx).copied().unwrap_or(DdlColType::Text);
-            match row.get(name) {
+            // Each typed cell converts to JSON at this edge before it renders.
+            match row.get(name).map(value_to_wire_json) {
                 // Captured text (the transitional wrapper path, and text-typed
                 // migrated cells): re-emit verbatim so the DataRow bytes match.
                 Some(JsonValue::String(s)) => encoder.encode_field(&s)?,
@@ -123,7 +125,7 @@ fn rows_to_response(shaped: ShapedRows) -> PgWireResult<Response> {
                 // produced — string pre-rendering (`f64::to_string`) diverges
                 // (e.g. `0.0` → "0" vs "0.0"). Integer/other numerics render to
                 // the same decimal text either way.
-                Some(value @ JsonValue::Number(n)) => match ct {
+                Some(ref value @ JsonValue::Number(ref n)) => match ct {
                     DdlColType::Float8 => match n.as_f64() {
                         Some(f) => encoder.encode_field(&f)?,
                         None => encoder.encode_field(&None::<f64>)?,

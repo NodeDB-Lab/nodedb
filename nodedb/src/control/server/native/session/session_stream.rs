@@ -15,12 +15,12 @@ use crate::control::server::conn_stream::ConnStream;
 use crate::control::server::response_shape::compose::shape_decoded_rows;
 use crate::control::server::response_shape::redaction::RedactionCtx;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::decode_payload_value;
 
 use super::codec::{self, FrameFormat};
 use super::dispatch::{self, SqlStream, to_native_columns_rows};
 
-/// Decode one streamed row-batch's JSON text into columns/rows.
+/// Decode one streamed row-batch payload into columns/rows.
 ///
 /// Streamable plans are always plain unordered scans (`streamable_gather_child`
 /// only matches `Query(Exchange(Gather{as_aggregate:false}))` over a
@@ -33,22 +33,24 @@ use super::dispatch::{self, SqlStream, to_native_columns_rows};
 /// deliberately not called here, matching pgwire's own streamed responses,
 /// which likewise only ever get column projection, never kv_wrap/vector.
 ///
-/// A JSON-parse failure (non-JSON/malformed batch text) falls back to a
-/// single "result" text column, matching the shape this decoder has always
-/// produced for an undecodable batch.
+/// A payload that decodes as neither msgpack nor JSON falls back to a single
+/// "result" text column holding its lossy UTF-8 text, the shape this decoder
+/// produces for an undecodable batch.
 fn decode_batch_to_columns_rows(
-    json_text: &str,
+    payload: &[u8],
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
 ) -> crate::Result<(Vec<String>, Vec<Vec<Value>>)> {
-    match sonic_rs::from_str::<serde_json::Value>(json_text) {
+    match decode_payload_value(payload) {
         Ok(decoded) => {
-            let shaped = shape_decoded_rows(&decoded, projection, redaction)?;
+            let shaped = shape_decoded_rows(decoded, projection, redaction)?;
             Ok(to_native_columns_rows(&shaped))
         }
         Err(_) => Ok((
             vec!["result".into()],
-            vec![vec![Value::String(json_text.to_string())]],
+            vec![vec![Value::String(
+                String::from_utf8_lossy(payload).into_owned(),
+            )]],
         )),
     }
 }
@@ -98,12 +100,11 @@ pub(super) async fn emit_sql_stream(
 
         last_lsn = batch.watermark_lsn.as_u64();
 
-        let json_text = decode_payload_to_json(&batch.payload);
         // The redaction inputs were resolved once when the stream opened; this
         // only re-borrows them, so every batch — including the first — is
         // shaped under the same policy.
         let (cols, mut batch_rows) = decode_batch_to_columns_rows(
-            &json_text,
+            &batch.payload,
             projection.as_ref(),
             redaction.as_ref().map(|r| r.ctx(&state.redaction)),
         )?;
@@ -187,8 +188,8 @@ mod tests {
         SharedState::new(dispatcher, wal).expect("test shared state")
     }
 
-    /// A JSON-text array of `n` `{"id": i}` objects — `decode_payload_to_json`
-    /// returns JSON-leading bytes as-is, exercising the array → rows decode.
+    /// A JSON-text array of `n` `{"id": i}` objects — `decode_payload_value`
+    /// parses JSON-leading bytes as JSON, exercising the array → rows decode.
     fn json_batch(start: usize, n: usize) -> Vec<u8> {
         let items: Vec<serde_json::Value> = (start..start + n)
             .map(|i| serde_json::json!({ "id": i }))

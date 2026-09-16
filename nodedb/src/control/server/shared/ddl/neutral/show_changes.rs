@@ -235,7 +235,7 @@ mod tests {
                     .iter()
                     .map(|row| {
                         row.get("document_id")
-                            .and_then(JsonValue::as_str)
+                            .and_then(nodedb_types::Value::as_str)
                             .expect("document id column")
                     })
                     .collect::<Vec<_>>(),
@@ -283,7 +283,7 @@ mod tests {
             .iter()
             .map(|row| {
                 row.get("document_id")
-                    .and_then(JsonValue::as_str)
+                    .and_then(nodedb_types::Value::as_str)
                     .expect("document id column")
             })
             .collect();

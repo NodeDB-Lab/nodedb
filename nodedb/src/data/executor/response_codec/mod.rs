@@ -13,7 +13,8 @@
 //! Split by concern:
 //!
 //! - `encode` — generic encoders + the `decode_payload` /
-//!   `decode_payload_to_json` counterparts used at the Control Plane boundary.
+//!   `decode_payload_to_json` / `decode_payload_value` counterparts used at
+//!   the Control Plane boundary.
 //! - `decode` — payload→docs decoders for inline sub-plans (e.g. multi-way
 //!   joins consuming an inner-join Response).
 //! - `raw` — raw-msgpack passthrough encoders (`encode_raw_document_rows`,
@@ -30,7 +31,7 @@ mod raw;
 
 pub use arrow::encode_as_arrow_ipc;
 pub(in crate::data::executor) use decode::decode_response_to_docs;
-pub use encode::{decode_payload, decode_payload_to_json};
+pub use encode::{decode_payload, decode_payload_to_json, decode_payload_value};
 pub(in crate::data::executor) use encode::{
     encode, encode_count, encode_json_as_msgpack, encode_json_vec_as_msgpack, encode_serde,
     encode_value_vec,

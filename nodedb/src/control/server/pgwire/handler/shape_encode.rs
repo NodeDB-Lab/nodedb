@@ -14,6 +14,9 @@
 //! render as ISO-8601 text, and everything else (`Text`, integers, `Bool`)
 //! falls back to `json_value_to_text` — notably `Bool` as `t`/`f`, not
 //! `true`/`false`.
+//!
+//! Each typed cell converts to JSON at this edge through
+//! [`value_to_wire_json`] before it is rendered.
 
 use std::sync::Arc;
 
@@ -24,8 +27,9 @@ use pgwire::messages::data::DataRow;
 use nodedb_types::NdbDateTime;
 use nodedb_types::columnar::IntWidth;
 
+use crate::control::server::response_shape::cell::value_to_wire_json;
 use crate::control::server::response_shape::project::json_value_to_text;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::{DdlColType, ShapedRow, ShapedRows};
 
 use super::super::ddl_encode::col_type_to_field_with_format;
 use super::super::numeric_narrow::{checked_narrow, checked_narrow_f32};
@@ -39,25 +43,27 @@ use super::super::numeric_narrow::{checked_narrow, checked_narrow_f32};
 /// display names except where those repeat (`SELECT w.id, b.id`), in which
 /// case later duplicates carry a `_n` suffix so both cells survive the map.
 ///
-/// Missing keys and explicit JSON `null` both encode as SQL NULL. Every other
-/// cell renders per its column type via [`encode_typed_cell`]; a
-/// missing/short `column_types` entry defaults to `Text`.
+/// Each cell converts to JSON at this edge. Missing keys and a cell whose
+/// JSON is `null` (an explicit `Value::Null`, or a float with no JSON form)
+/// both encode as SQL NULL. Every other cell renders per its column type via
+/// [`encode_typed_cell`]; a missing/short `column_types` entry defaults to
+/// `Text`.
 pub(in crate::control::server::pgwire) fn encode_shaped_row(
     schema: &Arc<Vec<FieldInfo>>,
     cell_keys: &[String],
     column_types: &[DdlColType],
     formats: &[FieldFormat],
-    row: &serde_json::Map<String, serde_json::Value>,
+    row: &ShapedRow,
 ) -> PgWireResult<DataRow> {
     let mut encoder = DataRowEncoder::new(schema.clone());
     for (idx, name) in cell_keys.iter().enumerate() {
         let ct = column_types.get(idx).copied().unwrap_or(DdlColType::Text);
         let format = formats.get(idx).copied().unwrap_or(FieldFormat::Text);
-        match row.get(name) {
+        match row.get(name).map(value_to_wire_json) {
             None | Some(serde_json::Value::Null) => {
                 encoder.encode_field(&None::<&str>)?;
             }
-            Some(v) => encode_typed_cell(&mut encoder, ct, format, v)?,
+            Some(v) => encode_typed_cell(&mut encoder, ct, format, &v)?,
         }
     }
     Ok(encoder.take_row())
@@ -218,11 +224,11 @@ pub(in crate::control::server::pgwire) fn shaped_query_response(
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
+    use nodedb_types::Value;
     use pgwire::api::results::{QueryResponse, Response};
-    use serde_json::json;
 
     use super::shaped_query_response;
-    use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+    use crate::control::server::response_shape::types::{DdlColType, ShapedRow, ShapedRows};
 
     /// Drain a `QueryResponse` stream into a `Vec` of `DataRow`s.
     async fn drain(mut qr: QueryResponse) -> Vec<pgwire::messages::data::DataRow> {
@@ -273,10 +279,7 @@ mod tests {
         None
     }
 
-    fn make_shaped(
-        columns: &[&str],
-        rows: Vec<serde_json::Map<String, serde_json::Value>>,
-    ) -> ShapedRows {
+    fn make_shaped(columns: &[&str], rows: Vec<ShapedRow>) -> ShapedRows {
         let columns: Vec<String> = columns.iter().map(|s| s.to_string()).collect();
         let column_types = ShapedRows::text_types(columns.len());
         ShapedRows {
@@ -287,16 +290,20 @@ mod tests {
         }
     }
 
-    fn obj(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+    fn obj(pairs: &[(&str, Value)]) -> ShapedRow {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
     }
 
+    fn text(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+
     #[tokio::test]
     async fn string_cell_renders_verbatim() {
-        let shaped = make_shaped(&["a"], vec![obj(&[("a", json!("hello"))])]);
+        let shaped = make_shaped(&["a"], vec![obj(&[("a", text("hello"))])]);
         let (response, notice) = shaped_query_response(shaped, &[]);
         assert!(notice.is_none());
         let Response::Query(qr) = response else {
@@ -310,7 +317,10 @@ mod tests {
     async fn bool_cells_render_as_t_f_not_true_false() {
         let shaped = make_shaped(
             &["a"],
-            vec![obj(&[("a", json!(true))]), obj(&[("a", json!(false))])],
+            vec![
+                obj(&[("a", Value::Bool(true))]),
+                obj(&[("a", Value::Bool(false))]),
+            ],
         );
         let (response, _notice) = shaped_query_response(shaped, &[]);
         let Response::Query(qr) = response else {
@@ -325,7 +335,10 @@ mod tests {
     async fn number_cells_render_via_to_string() {
         let shaped = make_shaped(
             &["a"],
-            vec![obj(&[("a", json!(42))]), obj(&[("a", json!(0.0))])],
+            vec![
+                obj(&[("a", Value::Integer(42))]),
+                obj(&[("a", Value::Float(0.0))]),
+            ],
         );
         let (response, _notice) = shaped_query_response(shaped, &[]);
         let Response::Query(qr) = response else {
@@ -338,13 +351,13 @@ mod tests {
 
     #[tokio::test]
     async fn null_and_missing_column_both_encode_as_sql_null() {
-        let shaped = make_shaped(&["a", "b"], vec![obj(&[("a", serde_json::Value::Null)])]);
+        let shaped = make_shaped(&["a", "b"], vec![obj(&[("a", Value::Null)])]);
         let (response, _notice) = shaped_query_response(shaped, &[]);
         let Response::Query(qr) = response else {
             panic!("expected Query response");
         };
         let rows = drain(qr).await;
-        // "a" was explicit JSON null.
+        // "a" was an explicit NULL cell.
         assert_eq!(field_text(&rows[0], 0), None);
         // "b" was entirely absent from the row object.
         assert_eq!(field_text(&rows[0], 1), None);
@@ -354,7 +367,7 @@ mod tests {
     async fn column_order_is_preserved() {
         let shaped = make_shaped(
             &["b", "a"],
-            vec![obj(&[("a", json!("first")), ("b", json!("second"))])],
+            vec![obj(&[("a", text("first")), ("b", text("second"))])],
         );
         let (response, _notice) = shaped_query_response(shaped, &[]);
         let Response::Query(qr) = response else {
@@ -383,13 +396,13 @@ mod tests {
             DdlColType::Timestamp,
         ];
         let row = obj(&[
-            ("i", json!(42)),
+            ("i", Value::Integer(42)),
             // Integral float renders Postgres-style "0" (shortest form) via the
             // native float encoder, not serde's "0.0".
-            ("f", json!(0.0)),
-            ("b", json!(true)),
+            ("f", Value::Float(0.0)),
+            ("b", Value::Bool(true)),
             // Epoch microseconds → ISO-8601 text (0 == Unix epoch).
-            ("ts", json!(0)),
+            ("ts", Value::Integer(0)),
         ]);
         let shaped = ShapedRows {
             columns,
@@ -419,9 +432,40 @@ mod tests {
         );
     }
 
+    /// An instant cell reaches the wire as its ISO-8601 text through the
+    /// edge conversion, under a TEXT column and under a TIMESTAMP column
+    /// alike, and a byte cell as the transcoder's unpadded base64.
+    #[tokio::test]
+    async fn instant_and_byte_cells_render_through_the_edge_conversion() {
+        let at = nodedb_types::NdbDateTime::from_micros(1_583_402_400_000_000);
+        let shaped = shaped_typed(
+            &["t", "ts", "blob"],
+            vec![DdlColType::Text, DdlColType::Timestamp, DdlColType::Text],
+            obj(&[
+                ("t", Value::NaiveDateTime(at)),
+                ("ts", Value::NaiveDateTime(at)),
+                ("blob", Value::Bytes(vec![0, 255, 7])),
+            ]),
+        );
+        let (response, _notice) = shaped_query_response(shaped, &[]);
+        let Response::Query(qr) = response else {
+            panic!("expected Query response");
+        };
+        let rows = drain(qr).await;
+        assert_eq!(
+            field_text(&rows[0], 0).as_deref(),
+            Some("2020-03-05T10:00:00.000000Z")
+        );
+        assert_eq!(
+            field_text(&rows[0], 1).as_deref(),
+            Some("2020-03-05T10:00:00.000000Z")
+        );
+        assert_eq!(field_text(&rows[0], 2).as_deref(), Some("AP8H"));
+    }
+
     #[tokio::test]
     async fn notice_is_preserved_not_dropped() {
-        let mut shaped = make_shaped(&["a"], vec![obj(&[("a", json!("x"))])]);
+        let mut shaped = make_shaped(&["a"], vec![obj(&[("a", text("x"))])]);
         shaped.notice = Some("heads up".to_owned());
         let (_response, notice) = shaped_query_response(shaped, &[]);
         assert_eq!(notice.as_deref(), Some("heads up"));
@@ -461,11 +505,7 @@ mod tests {
         None
     }
 
-    fn shaped_typed(
-        columns: &[&str],
-        column_types: Vec<DdlColType>,
-        row: serde_json::Map<String, serde_json::Value>,
-    ) -> ShapedRows {
+    fn shaped_typed(columns: &[&str], column_types: Vec<DdlColType>, row: ShapedRow) -> ShapedRows {
         ShapedRows {
             columns: columns.iter().map(|s| s.to_string()).collect(),
             column_types,
@@ -490,10 +530,10 @@ mod tests {
                 DdlColType::Text,
             ],
             obj(&[
-                ("i", json!(42)),
-                ("f", json!(1.5)),
-                ("b", json!(true)),
-                ("t", json!("hello")),
+                ("i", Value::Integer(42)),
+                ("f", Value::Float(1.5)),
+                ("b", Value::Bool(true)),
+                ("t", text("hello")),
             ]),
         );
         let formats = vec![FieldFormat::Binary; 4];
@@ -528,7 +568,7 @@ mod tests {
         let shaped = shaped_typed(
             &["i", "j"],
             vec![DdlColType::Int8, DdlColType::Int8],
-            obj(&[("i", json!(7)), ("j", json!(9))]),
+            obj(&[("i", Value::Integer(7)), ("j", Value::Integer(9))]),
         );
         let formats = vec![FieldFormat::Binary, FieldFormat::Text];
         let (response, _notice) = shaped_query_response(shaped, &formats);

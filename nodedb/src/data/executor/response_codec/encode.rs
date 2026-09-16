@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Generic encoders for Data Plane response payloads, plus the
-//! `decode_payload` / `decode_payload_to_json` counterparts used at the Control
-//! Plane boundary.
+//! `decode_payload` / `decode_payload_to_json` / `decode_payload_value`
+//! counterparts used at the Control Plane boundary.
 //!
 //! # Every encoder here emits MessagePack
 //!
@@ -152,6 +152,32 @@ pub fn decode_payload_to_json(payload: &[u8]) -> String {
         .unwrap_or_else(|_| String::from_utf8_lossy(payload).into_owned())
 }
 
+/// Decode a MessagePack or JSON payload to a typed [`nodedb_types::Value`].
+///
+/// The counterpart of [`decode_payload_to_json`] for the shaping kernel,
+/// with the same format sniff: JSON text parses through `serde_json::Value`
+/// (so a JSON string is a `Value::String`, never parsed further), anything
+/// else reads as msgpack (a `bin` is `Value::Bytes`, an instant ext is a
+/// `Value::DateTime` / `Value::NaiveDateTime`). An empty payload is
+/// `Value::Null`. A non-empty payload that decodes as neither is an error.
+pub fn decode_payload_value(payload: &[u8]) -> crate::Result<nodedb_types::Value> {
+    let Some(&first) = payload.first() else {
+        return Ok(nodedb_types::Value::Null);
+    };
+
+    if looks_like_json(first) {
+        return sonic_rs::from_slice::<serde_json::Value>(payload)
+            .map(nodedb_types::Value::from)
+            .map_err(|e| crate::Error::Codec {
+                detail: format!("response payload is not JSON text: {e}"),
+            });
+    }
+
+    nodedb_types::value_from_msgpack(payload).map_err(|e| crate::Error::Codec {
+        detail: format!("response payload is not msgpack: {e}"),
+    })
+}
+
 /// True when `first` can open JSON text: an array, object, string, number or
 /// one of the `true` / `false` / `null` literals. No msgpack marker for a map
 /// or array shares these bytes.
@@ -211,6 +237,34 @@ mod tests {
             sonic_rs::from_slice::<serde_json::Value>(payload).is_err(),
             "encoder output parsed as JSON; the trap this guards no longer exists"
         );
+    }
+
+    /// `decode_payload_value` sniffs the same way `decode_payload_to_json`
+    /// does: JSON text and msgpack both land as the typed value, a msgpack
+    /// `bin` as bytes, and an empty payload as NULL.
+    #[test]
+    fn decode_payload_value_reads_json_text_and_msgpack_alike() {
+        use nodedb_types::Value;
+
+        let from_json = decode_payload_value(br#"[{"id":1,"s":"x"}]"#).unwrap();
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), Value::Integer(1));
+        row.insert("s".to_string(), Value::String("x".into()));
+        assert_eq!(from_json, Value::Array(vec![Value::Object(row.clone())]));
+
+        let msgpack =
+            nodedb_types::value_to_msgpack(&Value::Array(vec![Value::Object(row)])).unwrap();
+        assert_eq!(decode_payload_value(&msgpack).unwrap(), from_json);
+
+        let bin = nodedb_types::value_to_msgpack(&Value::Bytes(vec![0, 255])).unwrap();
+        assert_eq!(
+            decode_payload_value(&bin).unwrap(),
+            Value::Bytes(vec![0, 255])
+        );
+
+        assert_eq!(decode_payload_value(&[]).unwrap(), Value::Null);
+        assert!(decode_payload_value(&[0xC1]).is_err());
+        assert!(decode_payload_value(b"true-ish").is_err());
     }
 
     /// `TOPK` / `RANGE` rows — `encode_json_vec_as_msgpack`.
