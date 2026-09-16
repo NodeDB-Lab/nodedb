@@ -189,7 +189,7 @@ fn checkpoint_progress(
 /// Run one source-side `MaterializeScan` round-trip. Returns the entries in
 /// this page (raw `(key, value)` byte pairs) plus the next-cursor; the
 /// cursor is empty when the scan is complete.
-async fn scan_source_page(
+pub(crate) async fn scan_source_page(
     state: &SharedState,
     tenant_id: TenantId,
     source_db_id: DatabaseId,
