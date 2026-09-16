@@ -52,6 +52,16 @@ pub(crate) async fn scan_source_page(
             .await
         }
         EngineType::KeyValue => {
+            // The kv materialize-scan carries no snapshot fields, so a
+            // point-in-time or transactional read has nothing to thread into.
+            // Refusing by name beats copying rows the caller did not ask for.
+            if system_as_of_ms.is_some() || txn_id.is_some() {
+                return Err(crate::Error::PlanError {
+                    detail: "a point-in-time or transactional read is not supported \
+                             for an INSERT ... SELECT kv source"
+                        .to_string(),
+                });
+            }
             let (pairs, next) =
                 kv::scan_source_page(state, tenant_id, database_id, source_qualified, cursor)
                     .await?;
