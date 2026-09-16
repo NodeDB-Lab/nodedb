@@ -485,3 +485,31 @@ async fn a_column_default_that_names_another_column_is_refused() {
         )
         .await;
 }
+
+/// The gate reads the parsed DEFAULT, never the definition text: a column name
+/// that contains the word `default` must not be read as the clause, and a
+/// constant DEFAULT beside such a name must pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_column_name_containing_default_is_not_read_as_a_clause() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION def_named (id TEXT PRIMARY KEY, status TEXT)")
+        .await
+        .unwrap();
+
+    server
+        .exec("ALTER TABLE def_named ADD COLUMN is_default BOOLEAN")
+        .await
+        .expect("a column named is_default declares no DEFAULT clause");
+
+    server
+        .exec("ALTER TABLE def_named ADD COLUMN my_default TEXT DEFAULT 'x'")
+        .await
+        .expect("a constant DEFAULT beside a name that contains 'default' is accepted");
+
+    let rows = server
+        .query_text("SELECT is_default FROM def_named")
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "no rows yet, got {rows:?}");
+}

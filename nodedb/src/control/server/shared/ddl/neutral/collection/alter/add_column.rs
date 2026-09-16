@@ -34,11 +34,13 @@ pub(super) async fn alter_table_add_column(
     let column_name = column.name.clone();
     // The declared DEFAULT passes the same gate a CREATE column passes: an
     // unregistered function name, or an expression that names another column,
-    // is refused at the declaration rather than at the first insert.
-    super::super::super::column_default::validate_column_defaults(&[(
-        column_name.clone(),
-        col_def_str.to_string(),
-    )])?;
+    // is refused at the declaration rather than at the first insert. The gate
+    // reads the parsed default text, never the whole definition: the type
+    // parser finds the clause by substring, so a column name that contains the
+    // word `default` would otherwise be read as that clause.
+    if let Some(default_expr) = column.default.as_deref() {
+        super::super::super::column_default::validate_column_default(&column_name, default_expr)?;
+    }
     // The declared type as written, e.g. `SMALLINT` from `age SMALLINT NOT
     // NULL`. `ColumnDef::column_type` cannot supply this: it has one `Int64`
     // variant for every integer width. Falls back to the resolved type's own
