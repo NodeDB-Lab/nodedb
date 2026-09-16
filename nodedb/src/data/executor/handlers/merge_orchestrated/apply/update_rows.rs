@@ -44,7 +44,7 @@ pub(super) struct UpdateRowsTally<'a, 'p> {
     pub(super) put_events: &'a mut Vec<MergePutEvent<'p>>,
     pub(super) write_set: &'a mut Vec<WriteSetEntry>,
     pub(super) balanced_entries: &'a mut Vec<BalancedEntry>,
-    pub(super) returned_docs: &'a mut Vec<serde_json::Value>,
+    pub(super) returned_docs: &'a mut Vec<nodedb_types::Value>,
 }
 
 impl CoreLoop {

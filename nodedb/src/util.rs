@@ -4,6 +4,7 @@
 
 pub mod bounded_json;
 pub mod bounded_msgpack;
+pub mod rmpv_value;
 
 /// FNV-1a 64-bit hash of a byte slice.
 ///

@@ -81,26 +81,46 @@ pub fn undecodable_strict_row(collection: &str, identity: &str) -> crate::Error 
     }
 }
 
+/// Decode a Binary Tuple to the row a projection reads: every declared
+/// column, in schema order, with the reserved bitemporal bookkeeping columns
+/// dropped. A column the tuple does not carry is `Value::Null`.
+///
+/// The walk is shared by [`binary_tuple_to_json`], so the JSON and `Value`
+/// forms of a row can never disagree about which columns it has.
+pub fn binary_tuple_to_row_value(tuple_bytes: &[u8], schema: &StrictSchema) -> Option<Value> {
+    let Value::Object(mut map) = binary_tuple_to_value(tuple_bytes, schema)? else {
+        return None;
+    };
+    let mut row = std::collections::HashMap::with_capacity(map.len());
+    for col in projected_columns(schema) {
+        let v = map.remove(&col.name).unwrap_or(Value::Null);
+        row.insert(col.name.clone(), v);
+    }
+    Some(Value::Object(row))
+}
+
 /// Decode a Binary Tuple to a JSON object using the schema (for pgwire output).
 pub fn binary_tuple_to_json(
     tuple_bytes: &[u8],
     schema: &StrictSchema,
 ) -> Option<serde_json::Value> {
-    // Delegate to binary_tuple_to_value (which handles version-aware decoding)
-    // then convert Value → JSON.
-    let val = binary_tuple_to_value(tuple_bytes, schema)?;
-    match val {
-        Value::Object(map) => {
-            let mut obj = serde_json::Map::with_capacity(map.len());
-            for col in &schema.columns {
-                if is_reserved_bitemporal_column(&col.name) {
-                    continue;
-                }
-                let v = map.get(&col.name).unwrap_or(&Value::Null);
-                obj.insert(col.name.clone(), value_to_json(v));
-            }
-            Some(serde_json::Value::Object(obj))
-        }
-        _ => None,
+    let Value::Object(map) = binary_tuple_to_row_value(tuple_bytes, schema)? else {
+        return None;
+    };
+    let mut obj = serde_json::Map::with_capacity(map.len());
+    for col in projected_columns(schema) {
+        let v = map.get(&col.name).unwrap_or(&Value::Null);
+        obj.insert(col.name.clone(), value_to_json(v));
     }
+    Some(serde_json::Value::Object(obj))
+}
+
+/// The schema's columns a projection sees, in declaration order.
+fn projected_columns(
+    schema: &StrictSchema,
+) -> impl Iterator<Item = &nodedb_types::columnar::ColumnDef> {
+    schema
+        .columns
+        .iter()
+        .filter(|col| !is_reserved_bitemporal_column(&col.name))
 }

@@ -26,6 +26,7 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::types::{DatabaseId, TenantId, TxnId};
+use crate::util::rmpv_value::value_to_rmpv;
 
 /// Inputs for [`CoreLoop::merge_overlay_into_timeseries_scan`].
 pub(in crate::data::executor) struct TimeseriesOverlayMergeParams<'a> {
@@ -72,24 +73,8 @@ fn row_timestamp_ms(row: &Value, time_column: &str) -> Option<i64> {
 /// row shape the base raw scan emits, so a merged staged row is
 /// indistinguishable from a base row downstream (computed columns, encoding).
 fn staged_row_to_rmpv(row: &Value) -> rmpv::Value {
-    let Value::Object(map) = row else {
-        return rmpv::Value::Nil;
-    };
-    let fields: Vec<(rmpv::Value, rmpv::Value)> = map
-        .iter()
-        .map(|(k, v)| (rmpv::Value::String(k.as_str().into()), scalar_to_rmpv(v)))
-        .collect();
-    rmpv::Value::Map(fields)
-}
-
-/// Scalar `nodedb_types::Value` → `rmpv::Value`, matching the raw scan's own
-/// value emission (`row_emit::nodedb_value_to_rmpv`).
-fn scalar_to_rmpv(v: &Value) -> rmpv::Value {
-    match v {
-        Value::Integer(n) => rmpv::Value::Integer((*n).into()),
-        Value::Float(f) => rmpv::Value::F64(*f),
-        Value::String(s) => rmpv::Value::String(s.as_str().into()),
-        Value::Bool(b) => rmpv::Value::Boolean(*b),
+    match row {
+        Value::Object(_) => value_to_rmpv(row),
         _ => rmpv::Value::Nil,
     }
 }

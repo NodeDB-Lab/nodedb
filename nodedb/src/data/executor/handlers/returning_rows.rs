@@ -15,8 +15,10 @@ use crate::data::executor::scan_normalize::{kv_row_to_doc, sparse_row_to_doc};
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::RowIdentity;
+use crate::util::rmpv_value::rmpv_to_value;
 use nodedb_physical::physical_plan::{ReturningColumns, ReturningSpec};
 use nodedb_types::columnar::StrictSchema;
+use nodedb_types::{NativeCell, Value};
 
 /// Rows a write path hands back to a `RETURNING` projection: the row's
 /// client-visible identity paired with the exact bytes stored for it.
@@ -78,11 +80,11 @@ pub(in crate::data::executor) fn kv_stored_rows_payload(
     rls_filters: &[u8],
     rows: &[KvStoredRow<'_>],
 ) -> crate::Result<Vec<u8>> {
-    let docs: Vec<serde_json::Value> = rows
+    let docs: Vec<Value> = rows
         .iter()
         .map(|(key, value)| {
             let (_key_str, body) = kv_row_to_doc(key, value);
-            doc_format::decode_document(&body)
+            doc_format::decode_document_value(&body)
         })
         .collect::<crate::Result<Vec<_>>>()?;
     build_rows_payload(spec, rls_filters, &docs).map_err(|e| crate::Error::Internal {
@@ -103,11 +105,9 @@ impl CoreLoop {
         schema: &nodedb_types::columnar::ColumnarSchema,
         rows: &[Vec<nodedb_types::Value>],
     ) -> Response {
-        let docs: Vec<serde_json::Value> = rows
+        let docs: Vec<Value> = rows
             .iter()
-            .map(|row| {
-                serde_json::Value::from(super::columnar_write::row_values_to_object(schema, row))
-            })
+            .map(|row| super::columnar_write::row_values_to_object(schema, row))
             .collect();
         match build_rows_payload(spec, rls_filters, &docs) {
             Ok(payload) => self.response_with_payload(task, payload),
@@ -133,7 +133,7 @@ impl CoreLoop {
         rls_filters: &[u8],
         rows: &[rmpv::Value],
     ) -> Response {
-        let docs: Vec<serde_json::Value> = rows.iter().map(rmpv_row_to_json).collect();
+        let docs: Vec<Value> = rows.iter().map(rmpv_to_value).collect();
         match build_rows_payload(spec, rls_filters, &docs) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
@@ -164,7 +164,7 @@ impl CoreLoop {
         let (_id, mp) = sparse_row_to_doc(row_key, sidecar, SparseBodyFormatRef::VectorSidecar);
         // An empty row set here would report "the write affected nothing" for a
         // write that did land, so an unreadable sidecar fails the statement.
-        let docs: Vec<serde_json::Value> = match doc_format::decode_document(&mp) {
+        let docs: Vec<Value> = match doc_format::decode_document_value(&mp) {
             Ok(doc) => vec![doc],
             Err(e) => return self.response_error(task, e),
         };
@@ -180,39 +180,6 @@ impl CoreLoop {
     }
 }
 
-/// Re-key one scan-projected timeseries row into JSON for
-/// `build_rows_payload`. A straight transcode: msgpack nil stays SQL NULL.
-fn rmpv_row_to_json(row: &rmpv::Value) -> serde_json::Value {
-    let rmpv::Value::Map(fields) = row else {
-        return serde_json::Value::Null;
-    };
-    let mut obj = serde_json::Map::with_capacity(fields.len());
-    for (key, value) in fields {
-        let Some(name) = key.as_str() else { continue };
-        let cell = match value {
-            rmpv::Value::Nil => serde_json::Value::Null,
-            rmpv::Value::Boolean(b) => serde_json::Value::Bool(*b),
-            rmpv::Value::Integer(n) => n
-                .as_i64()
-                .map(|i| serde_json::Value::Number(i.into()))
-                .unwrap_or(serde_json::Value::Null),
-            rmpv::Value::F64(f) => serde_json::Number::from_f64(*f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            rmpv::Value::F32(f) => serde_json::Number::from_f64(f64::from(*f))
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            rmpv::Value::String(s) => s
-                .as_str()
-                .map(|text| serde_json::Value::String(text.to_string()))
-                .unwrap_or(serde_json::Value::Null),
-            _ => serde_json::Value::Null,
-        };
-        obj.insert(name.to_string(), cell);
-    }
-    serde_json::Value::Object(obj)
-}
-
 /// Project the STORED post-images of freshly written rows into a
 /// `RowsPayload` — the write paths hold the exact bytes handed to storage,
 /// so `RETURNING` reports what landed rather than echoing the submitted
@@ -224,27 +191,27 @@ pub(in crate::data::executor) fn build_stored_rows_payload(
     strict_schema: Option<&StrictSchema>,
     rows: &[StoredRow<'_>],
 ) -> crate::Result<Vec<u8>> {
-    let docs: Vec<serde_json::Value> = rows
+    let docs: Vec<Value> = rows
         .iter()
         .map(|(doc_id, body)| returning_doc::from_stored(body, doc_id, strict_schema))
         .collect::<crate::Result<Vec<_>>>()?;
     build_rows_payload(spec, rls_filters, &docs)
 }
 
-/// Project documents per `spec` (Star = insertion order, Named = spec order,
-/// missing/null → `None`) into a `RowsPayload` msgpack blob. `rls_filters`
-/// (the compiled read policy) is applied BEFORE projection — a predicate
-/// often references a column `RETURNING` omits, so a post-projection check
-/// would leak the row. Only the visible row set shrinks; the affected count
-/// already counted the write.
+/// Project documents per `spec` (Star = field name order, Named = spec
+/// order, missing → `Value::Null`) into a `RowsPayload` msgpack blob.
+/// `rls_filters` (the compiled read policy) is applied BEFORE projection — a
+/// predicate often references a column `RETURNING` omits, so a
+/// post-projection check would leak the row. Only the visible row set
+/// shrinks; the affected count already counted the write.
 pub(super) fn build_rows_payload(
     spec: &ReturningSpec,
     rls_filters: &[u8],
-    docs: &[serde_json::Value],
+    docs: &[Value],
 ) -> crate::Result<Vec<u8>> {
-    let visible: Vec<&serde_json::Value> = docs
+    let visible: Vec<&Value> = docs
         .iter()
-        .filter(|doc| rls_eval::rls_check_document(rls_filters, doc))
+        .filter(|doc| rls_eval::rls_check_value(rls_filters, doc))
         .collect();
 
     let (columns, source_names) = match &spec.columns {
@@ -252,13 +219,14 @@ pub(super) fn build_rows_payload(
             if visible.is_empty() {
                 return encode_empty(Vec::new());
             }
-            // Derive column names from the first doc's keys; both output and
-            // source names are identical for `RETURNING *`.
-            let cols: Vec<String> = visible
-                .first()
-                .and_then(|d| d.as_object())
-                .map(|obj| obj.keys().cloned().collect())
-                .unwrap_or_default();
+            // Derive column names from the first doc's keys, sorted so the
+            // shape is deterministic; both output and source names are
+            // identical for `RETURNING *`.
+            let mut cols: Vec<String> = match visible.first() {
+                Some(Value::Object(obj)) => obj.keys().cloned().collect(),
+                Some(_) | None => Vec::new(),
+            };
+            cols.sort_unstable();
             (cols.clone(), cols)
         }
         ReturningColumns::Named(items) => {
@@ -271,7 +239,7 @@ pub(super) fn build_rows_payload(
         }
     };
 
-    let rows: Vec<Vec<Option<String>>> = visible
+    let rows: Vec<Vec<NativeCell>> = visible
         .iter()
         .map(|doc| project_row(doc, &source_names))
         .collect();
@@ -292,25 +260,25 @@ fn encode_empty(columns: Vec<String>) -> crate::Result<Vec<u8>> {
     })
 }
 
-/// Project a single document into one cell per source name.
+/// Project a single document into one typed cell per source name.
 ///
-/// Returns `None` for missing fields or JSON null, `Some(text)` otherwise.
-fn project_row(doc: &serde_json::Value, source_names: &[String]) -> Vec<Option<String>> {
-    let obj = doc.as_object();
+/// A missing field is `Value::Null`; a document that is not an object has
+/// every cell `Value::Null`.
+fn project_row(doc: &Value, source_names: &[String]) -> Vec<NativeCell> {
+    let fields = match doc {
+        Value::Object(obj) => Some(obj),
+        _ => None,
+    };
     source_names
         .iter()
-        .map(|name| obj.and_then(|o| o.get(name)).and_then(value_to_text))
+        .map(|name| {
+            let cell = match fields.and_then(|obj| obj.get(name)) {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            };
+            NativeCell(cell)
+        })
         .collect()
-}
-
-/// Convert a JSON value to its TEXT representation for pgwire. `None` for
-/// JSON null (real SQL NULL); strings are as-is, other types use JSON text.
-fn value_to_text(val: &serde_json::Value) -> Option<String> {
-    match val {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(s.clone()),
-        other => Some(other.to_string()),
-    }
 }
 
 #[cfg(test)]
@@ -349,10 +317,14 @@ mod tests {
         zerompk::from_msgpack(payload).expect("decode RowsPayload")
     }
 
-    fn docs() -> Vec<serde_json::Value> {
+    fn cells(row: &[NativeCell]) -> Vec<Value> {
+        row.iter().map(|c| c.0.clone()).collect()
+    }
+
+    fn docs() -> Vec<Value> {
         vec![
-            json!({"id": "r1", "owner": "alice", "note": "hidden"}),
-            json!({"id": "r2", "owner": "bob", "note": "shown"}),
+            Value::from(json!({"id": "r1", "owner": "alice", "note": "hidden"})),
+            Value::from(json!({"id": "r2", "owner": "bob", "note": "shown"})),
         ]
     }
 
@@ -368,7 +340,8 @@ mod tests {
         let payload =
             build_rows_payload(&named(&["id"]), &owner_policy("bob"), &docs()).expect("build");
         let decoded = decode(&payload);
-        assert_eq!(decoded.rows, vec![vec![Some("r2".to_string())]]);
+        assert_eq!(decoded.rows.len(), 1);
+        assert_eq!(cells(&decoded.rows[0]), vec![Value::String("r2".into())]);
     }
 
     /// The predicate names a column the projection omits — the filter must
@@ -379,7 +352,8 @@ mod tests {
             build_rows_payload(&named(&["note"]), &owner_policy("bob"), &docs()).expect("build");
         let decoded = decode(&payload);
         assert_eq!(decoded.columns, vec!["note".to_string()]);
-        assert_eq!(decoded.rows, vec![vec![Some("shown".to_string())]]);
+        assert_eq!(decoded.rows.len(), 1);
+        assert_eq!(cells(&decoded.rows[0]), vec![Value::String("shown".into())]);
     }
 
     /// `RETURNING *` derives its column list from the first VISIBLE row, so a
@@ -387,8 +361,8 @@ mod tests {
     #[test]
     fn star_columns_come_from_the_first_visible_row() {
         let docs = vec![
-            json!({"id": "r1", "owner": "alice", "secret": "hidden"}),
-            json!({"id": "r2", "owner": "bob"}),
+            Value::from(json!({"id": "r1", "owner": "alice", "secret": "hidden"})),
+            Value::from(json!({"id": "r2", "owner": "bob"})),
         ];
         let spec = ReturningSpec {
             columns: ReturningColumns::Star,
@@ -404,5 +378,53 @@ mod tests {
     fn a_corrupt_policy_returns_no_rows() {
         let payload = build_rows_payload(&named(&["id"]), &[0xFF, 0xFE], &docs()).expect("build");
         assert!(decode(&payload).rows.is_empty());
+    }
+
+    /// Cells keep their stored type: an instant stays an instant, a missing
+    /// field is SQL NULL, a nested object stays nested.
+    #[test]
+    fn cells_keep_their_stored_type() {
+        let at = nodedb_types::NdbDateTime::from_micros(1_583_402_400_000_000);
+        let mut doc = std::collections::HashMap::new();
+        doc.insert("at".to_string(), Value::NaiveDateTime(at));
+        doc.insert("n".to_string(), Value::Integer(7));
+        doc.insert(
+            "meta".to_string(),
+            Value::Object(std::collections::HashMap::from([(
+                "k".to_string(),
+                Value::Bool(true),
+            )])),
+        );
+        let payload = build_rows_payload(
+            &named(&["at", "n", "meta", "absent"]),
+            &[],
+            &[Value::Object(doc)],
+        )
+        .expect("build");
+        let decoded = decode(&payload);
+        assert_eq!(
+            cells(&decoded.rows[0]),
+            vec![
+                Value::NaiveDateTime(at),
+                Value::Integer(7),
+                Value::Object(std::collections::HashMap::from([(
+                    "k".to_string(),
+                    Value::Bool(true),
+                )])),
+                Value::Null,
+            ]
+        );
+    }
+
+    /// A timeseries row's instant ext crosses into the payload typed.
+    #[test]
+    fn a_timeseries_instant_cell_stays_typed() {
+        let at = nodedb_types::NdbDateTime::from_micros(42);
+        let row = crate::util::rmpv_value::value_to_rmpv(&Value::Object(
+            std::collections::HashMap::from([("t".to_string(), Value::DateTime(at))]),
+        ));
+        let docs = vec![rmpv_to_value(&row)];
+        let payload = build_rows_payload(&named(&["t"]), &[], &docs).expect("build");
+        assert_eq!(cells(&decode(&payload).rows[0]), vec![Value::DateTime(at)]);
     }
 }

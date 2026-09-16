@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Row emission helpers — build `rmpv::Value` directly, plus value conversions.
+//! Row emission helpers — build `rmpv::Value` directly.
 
 use std::collections::HashMap;
 
 use nodedb_types::columnar::schema::TS_SYSTEM;
+
+use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
 
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
 
@@ -154,7 +156,7 @@ pub(super) fn apply_computed_columns_rmpv(
     row: rmpv::Value,
     computed_cols: &[crate::bridge::expr_eval::ComputedColumn],
 ) -> crate::Result<rmpv::Value> {
-    let doc = rmpv_to_nodedb_value(&row);
+    let doc = rmpv_to_value(&row);
     let mut fields: Vec<(rmpv::Value, rmpv::Value)> = Vec::with_capacity(computed_cols.len());
     for cc in computed_cols {
         // A computed column is projection-shaped: a division/modulo-by-zero
@@ -163,52 +165,10 @@ pub(super) fn apply_computed_columns_rmpv(
         let result = cc.expr.eval(&doc)?;
         fields.push((
             rmpv::Value::String(cc.alias.as_str().into()),
-            nodedb_value_to_rmpv(&result),
+            value_to_rmpv(&result),
         ));
     }
     Ok(rmpv::Value::Map(fields))
-}
-
-/// Convert rmpv row to nodedb_types::Value for expression evaluation.
-pub(super) fn rmpv_to_nodedb_value(row: &rmpv::Value) -> nodedb_types::Value {
-    match row {
-        rmpv::Value::Map(fields) => {
-            let mut map = std::collections::HashMap::new();
-            for (k, v) in fields {
-                let key = match k {
-                    rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
-                    _ => continue,
-                };
-                let val = match v {
-                    rmpv::Value::Integer(n) => {
-                        nodedb_types::Value::Integer(n.as_i64().unwrap_or(0))
-                    }
-                    rmpv::Value::F64(f) => nodedb_types::Value::Float(*f),
-                    rmpv::Value::String(s) => {
-                        nodedb_types::Value::String(s.as_str().unwrap_or("").to_string())
-                    }
-                    rmpv::Value::Nil => nodedb_types::Value::Null,
-                    rmpv::Value::Boolean(b) => nodedb_types::Value::Bool(*b),
-                    _ => nodedb_types::Value::Null,
-                };
-                map.insert(key, val);
-            }
-            nodedb_types::Value::Object(map)
-        }
-        _ => nodedb_types::Value::Null,
-    }
-}
-
-/// Convert nodedb_types::Value back to rmpv::Value for response encoding.
-pub(super) fn nodedb_value_to_rmpv(v: &nodedb_types::Value) -> rmpv::Value {
-    match v {
-        nodedb_types::Value::Integer(n) => rmpv::Value::Integer((*n).into()),
-        nodedb_types::Value::Float(f) => rmpv::Value::F64(*f),
-        nodedb_types::Value::String(s) => rmpv::Value::String(s.as_str().into()),
-        nodedb_types::Value::Bool(b) => rmpv::Value::Boolean(*b),
-        nodedb_types::Value::Null => rmpv::Value::Nil,
-        _ => rmpv::Value::Nil,
-    }
 }
 
 /// Rescale every declared-instant cell of `rows` from the milliseconds the

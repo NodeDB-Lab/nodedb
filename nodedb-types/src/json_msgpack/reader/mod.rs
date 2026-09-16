@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cursor-based msgpack → `serde_json::Value` and `nodedb_types::Value` readers.
+//! Msgpack → `serde_json::Value` and `nodedb_types::Value` readers.
 //!
-//! Deterministic raw byte parser — the first byte of each msgpack value
+//! The JSON reader walks the crate's own `Cursor`. The native reader is
+//! generic over `zerompk::Read` and is shared with `NativeCell`. Both are
+//! deterministic raw byte parsers — the first byte of each msgpack value
 //! unambiguously identifies its type per the msgpack specification.
 
 pub mod cursor;

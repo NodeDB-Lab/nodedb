@@ -186,7 +186,7 @@ impl CoreLoop {
         // lets the Control Plane mint a durable `Put` redo per row. Only populated
         // when the collection has a vector index.
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
-        let mut returned_docs: Vec<serde_json::Value> = if returning.is_some() {
+        let mut returned_docs: Vec<nodedb_types::Value> = if returning.is_some() {
             Vec::with_capacity(apply_ids.len())
         } else {
             Vec::new()
@@ -230,7 +230,7 @@ impl CoreLoop {
                 key: storage_key,
                 current_bytes,
                 old_doc: old_doc_json,
-                mut doc,
+                doc,
                 updated_bytes,
             } = row;
             // Period lock, both images — matching `execute_point_update`: a
@@ -391,8 +391,9 @@ impl CoreLoop {
                 // `row_identity` only stands in as `id` for a row that
                 // declares no primary key of its own — overwriting a
                 // declared key would return a value the client never wrote.
-                returning_doc::attach_row_id(&mut doc, &row_identity);
-                returned_docs.push(doc);
+                let mut row = nodedb_types::Value::from(doc);
+                returning_doc::attach_row_id(&mut row, &row_identity);
+                returned_docs.push(row);
             }
             // Carry the surrogate + post-image back for a post-apply
             // `Put` redo. `updated_bytes` is moved as its last use;

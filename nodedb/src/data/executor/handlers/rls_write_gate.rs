@@ -37,7 +37,8 @@ use super::columnar_write::row_values_to_object;
 use super::returning_doc;
 use super::rls_eval;
 
-/// Decide one already-decoded row image against the compiled write policy.
+/// Decide one already-decoded JSON row image against the compiled write
+/// policy.
 ///
 /// Fails closed: an undecodable filter payload or an evaluation error denies,
 /// so an adversarial predicate cannot be turned into an admitted write.
@@ -47,10 +48,41 @@ pub(in crate::data::executor) fn admit_row(
     tid: u64,
     collection: &str,
 ) -> crate::Result<()> {
+    decide(rls_write_check, tid, collection, |bytes| {
+        rls_eval::rls_check_document(bytes, image)
+    })
+}
+
+/// Decide one already-decoded typed DOCUMENT row image against the compiled
+/// write policy.
+///
+/// The document read side tests the stored msgpack body, so the image is
+/// encoded to msgpack and tested by the same evaluator — one compiled
+/// predicate means the same thing on both sides. Columnar rows go through
+/// [`admit_value_row`], whose evaluator is the columnar read side's.
+pub(in crate::data::executor) fn admit_document_value(
+    rls_write_check: &RlsWriteCheck,
+    image: &nodedb_types::Value,
+    tid: u64,
+    collection: &str,
+) -> crate::Result<()> {
+    decide(rls_write_check, tid, collection, |bytes| {
+        rls_eval::rls_check_value(bytes, image)
+    })
+}
+
+/// Map the gate's decision to a result, running `passes` on the compiled
+/// predicate only when there is one to evaluate.
+fn decide(
+    rls_write_check: &RlsWriteCheck,
+    tid: u64,
+    collection: &str,
+    passes: impl FnOnce(&[u8]) -> bool,
+) -> crate::Result<()> {
     match rls_write_check.decision() {
         WriteGateDecision::AdmitAll => Ok(()),
         WriteGateDecision::Evaluate(bytes) => {
-            if rls_eval::rls_check_document(bytes, image) {
+            if passes(bytes) {
                 return Ok(());
             }
             Err(crate::Error::RejectedAuthz {
@@ -100,7 +132,7 @@ pub(in crate::data::executor) fn admit_stored_row(
         }),
         WriteGateDecision::Evaluate(_) => {
             match returning_doc::from_stored(body, identity, strict_schema) {
-                Ok(image) => admit_row(rls_write_check, &image, tid, collection),
+                Ok(image) => admit_document_value(rls_write_check, &image, tid, collection),
                 Err(e) => Err(crate::Error::RejectedAuthz {
                     tenant_id: crate::types::TenantId::new(tid),
                     resource: format!(
@@ -175,30 +207,15 @@ pub(in crate::data::executor) fn admit_value_row(
     tid: u64,
     collection: &str,
 ) -> crate::Result<()> {
-    let bytes = match rls_write_check.decision() {
-        WriteGateDecision::AdmitAll => return Ok(()),
-        WriteGateDecision::DenyNotInjected => {
-            return Err(crate::Error::Internal {
-                detail: format!(
-                    "write plan for '{collection}' reached the Data Plane RLS write gate before \
-                     RLS injection ran; this is an internal invariant break, not a policy \
-                     rejection"
-                ),
-            });
-        }
-        WriteGateDecision::Evaluate(bytes) => bytes,
-    };
-    let admitted = match zerompk::from_msgpack::<Vec<ScanFilter>>(bytes) {
-        Ok(filters) => value_matches_filters(image, &filters).unwrap_or(false),
-        Err(_) => false,
-    };
-    if admitted {
-        return Ok(());
-    }
-    Err(crate::Error::RejectedAuthz {
-        tenant_id: crate::types::TenantId::new(tid),
-        resource: format!("RLS write policy on '{collection}' rejected the row"),
-    })
+    decide(
+        rls_write_check,
+        tid,
+        collection,
+        |bytes| match zerompk::from_msgpack::<Vec<ScanFilter>>(bytes) {
+            Ok(filters) => value_matches_filters(image, &filters).unwrap_or(false),
+            Err(_) => false,
+        },
+    )
 }
 
 /// Decide one schema-ordered columnar row — the values about to be written, or

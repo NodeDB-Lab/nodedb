@@ -3,7 +3,7 @@
 //! Shaping for DML `RETURNING` responses.
 //!
 //! A `RETURNING` payload is a [`RowsPayload`]: the Data Plane's own column list
-//! plus already-TEXT-formatted cells. For `RETURNING *` that column list is
+//! plus typed `Value` cells. For `RETURNING *` that column list is
 //! derived from the STORED row, so a schemaless collection can carry fields no
 //! catalog column declares — the list is only knowable once the rows exist.
 //!
@@ -36,7 +36,7 @@
 
 use serde_json::{Map, Value as JsonValue};
 
-use nodedb_types::NodeDbError;
+use nodedb_types::{NativeCell, NodeDbError};
 
 use crate::data::executor::response_codec::{RowsPayload, decode_payload_to_json};
 
@@ -91,16 +91,17 @@ pub fn shape_returning_rows(
         }
     };
 
-    let mut rows = rows_keyed_by_column(&rp);
+    let RowsPayload { columns, rows } = rp;
+    let mut rows = rows_keyed_by_column(&columns, rows);
     // `RETURNING` delivers stored column values to the client just as a SELECT
     // does, so the same redaction applies — and it runs on the payload's own
     // names, before any projection renames or drops them.
     redact_rows(redaction.as_ref(), &mut rows);
 
     let Some(schema) = announced else {
-        let column_types = ShapedRows::text_types(rp.columns.len());
+        let column_types = ShapedRows::text_types(columns.len());
         return Ok(ShapedRows {
-            columns: rp.columns,
+            columns,
             column_types,
             rows,
             notice: None,
@@ -116,19 +117,19 @@ fn announced_columns(projection: Option<&OutputSchema>) -> Option<&OutputSchema>
     projection.filter(|schema| !schema.is_star && !schema.columns.is_empty())
 }
 
-/// Re-key each payload row from positional cells to a name-keyed map, with
-/// JSON `null` for the cells the Data Plane marked SQL NULL.
-fn rows_keyed_by_column(rp: &RowsPayload) -> Vec<Map<String, JsonValue>> {
-    rp.rows
-        .iter()
+/// Re-key each payload row from positional typed cells to a name-keyed JSON
+/// map. This is the one step where a cell leaves its `Value` form: an
+/// instant renders as ISO-8601 text, `Value::Null` (SQL NULL) as JSON `null`,
+/// numbers and booleans as themselves.
+fn rows_keyed_by_column(
+    columns: &[String],
+    rows: Vec<Vec<NativeCell>>,
+) -> Vec<Map<String, JsonValue>> {
+    rows.into_iter()
         .map(|row_vals| {
             let mut map = Map::new();
-            for (col, cell) in rp.columns.iter().zip(row_vals.iter()) {
-                let v = match cell {
-                    Some(s) => JsonValue::String(s.clone()),
-                    None => JsonValue::Null,
-                };
-                map.insert(col.clone(), v);
+            for (col, cell) in columns.iter().zip(row_vals) {
+                map.insert(col.clone(), JsonValue::from(cell.0));
             }
             map
         })
@@ -175,15 +176,15 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[Map<String, JsonValue>]
     }
 }
 
-/// Re-read a `RETURNING` cell's TEXT form as the column's announced type.
+/// Re-read a text `RETURNING` cell as the column's announced type.
 ///
-/// `RowsPayload` cells arrive already rendered as text, but the RowDescription
-/// this response is held to announces each column's real catalog type — and a
-/// client that asked for a column in BINARY result format is handed the
-/// scalar's wire bytes, which have to come from a number or a bool, not from
-/// the digits of its text form. Retyping here also makes a `RETURNING`
-/// timestamp render in the same ISO-8601 text a `SELECT` of that column
-/// renders, instead of raw epoch microseconds.
+/// A typed cell is already a number, bool or instant and passes through. A
+/// text cell under a numeric, bool or timestamp column is a stored string
+/// (a schemaless row can hold `"42"` under a declared `INT`), and the
+/// RowDescription this response is held to announces the catalog type — a
+/// client that asked for BINARY result format is handed the scalar's wire
+/// bytes, which have to come from a number or a bool, not from the digits
+/// of its text form.
 ///
 /// A cell that does not parse as its announced type is left as text, which
 /// both encoders render verbatim.
@@ -251,16 +252,35 @@ fn single_result_column_empty() -> ShapedRows {
 mod tests {
     use super::*;
     use crate::control::server::response_shape::schema::OutputColumn;
+    use nodedb_types::{NdbDateTime, Value};
 
-    fn payload(columns: &[&str], rows: &[&[Option<&str>]]) -> Vec<u8> {
+    fn typed_payload(columns: &[&str], rows: Vec<Vec<Value>>) -> Vec<u8> {
         let rp = RowsPayload {
             columns: columns.iter().map(|c| (*c).to_string()).collect(),
             rows: rows
-                .iter()
-                .map(|row| row.iter().map(|cell| cell.map(|c| c.to_string())).collect())
+                .into_iter()
+                .map(|row| row.into_iter().map(NativeCell).collect())
                 .collect(),
         };
         zerompk::to_msgpack_vec(&rp).expect("encode RowsPayload")
+    }
+
+    /// Text cells, the form a schemaless row's string fields arrive in;
+    /// `None` is SQL NULL.
+    fn payload(columns: &[&str], rows: &[&[Option<&str>]]) -> Vec<u8> {
+        typed_payload(
+            columns,
+            rows.iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| match cell {
+                            Some(text) => Value::String((*text).to_string()),
+                            None => Value::Null,
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
     }
 
     fn announced(columns: &[(&str, DdlColType)]) -> OutputSchema {
@@ -346,6 +366,50 @@ mod tests {
         assert_eq!(shaped.rows[0]["b"], JsonValue::Bool(true));
         // A TEXT column keeps its text even when it looks like a number.
         assert_eq!(shaped.rows[0]["s"], JsonValue::String("42".into()));
+    }
+
+    /// A typed cell passes through as itself: an integer stays a number under
+    /// an INT column, an instant renders as the ISO-8601 text a `SELECT` of
+    /// the same column renders, and SQL NULL is JSON `null`.
+    #[test]
+    fn typed_cells_reach_the_row_as_themselves() {
+        let at = NdbDateTime::from_micros(1_583_402_400_000_000);
+        let bytes = typed_payload(
+            &["n", "at", "f", "gone"],
+            vec![vec![
+                Value::Integer(7),
+                Value::NaiveDateTime(at),
+                Value::Float(1.5),
+                Value::Null,
+            ]],
+        );
+        let schema = announced(&[
+            ("n", DdlColType::Int8),
+            ("at", DdlColType::Timestamp),
+            ("f", DdlColType::Float8),
+            ("gone", DdlColType::Text),
+        ]);
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        assert_eq!(shaped.rows[0]["n"], JsonValue::from(7i64));
+        assert_eq!(
+            shaped.rows[0]["at"],
+            JsonValue::String("2020-03-05T10:00:00.000000Z".into())
+        );
+        assert_eq!(shaped.rows[0]["f"], JsonValue::from(1.5f64));
+        assert_eq!(shaped.rows[0]["gone"], JsonValue::Null);
+    }
+
+    /// The same instant renders as ISO-8601 when nothing was announced, so the
+    /// simple-query protocol shows what the extended one does.
+    #[test]
+    fn an_instant_cell_renders_iso8601_without_a_projection() {
+        let at = NdbDateTime::from_micros(1_583_402_400_000_000);
+        let bytes = typed_payload(&["at"], vec![vec![Value::DateTime(at)]]);
+        let shaped = shape_returning_rows(&bytes, None, None).expect("shape");
+        assert_eq!(
+            shaped.rows[0]["at"],
+            JsonValue::String("2020-03-05T10:00:00.000000Z".into())
+        );
     }
 
     /// A value that does not parse as its announced type stays text rather

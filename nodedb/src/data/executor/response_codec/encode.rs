@@ -140,26 +140,29 @@ pub fn decode_payload<T: DeserializeOwned + Default>(payload: &[u8]) -> crate::R
 /// to JSON text via streaming transcoder (no intermediate `serde_json::Value`).
 /// If already JSON (starts with `[` or `{`), returns as-is.
 pub fn decode_payload_to_json(payload: &[u8]) -> String {
-    if payload.is_empty() {
+    let Some(&first) = payload.first() else {
         return String::new();
-    }
+    };
 
-    let first = payload[0];
-
-    let is_likely_json = first == b'['
-        || first == b'{'
-        || first == b'"'
-        || first.is_ascii_digit()
-        || first == b't'
-        || first == b'f'
-        || first == b'n';
-
-    if is_likely_json {
+    if looks_like_json(first) {
         return String::from_utf8_lossy(payload).into_owned();
     }
 
     nodedb_types::msgpack_to_json_string(payload)
         .unwrap_or_else(|_| String::from_utf8_lossy(payload).into_owned())
+}
+
+/// True when `first` can open JSON text: an array, object, string, number or
+/// one of the `true` / `false` / `null` literals. No msgpack marker for a map
+/// or array shares these bytes.
+fn looks_like_json(first: u8) -> bool {
+    first == b'['
+        || first == b'{'
+        || first == b'"'
+        || first.is_ascii_digit()
+        || first == b't'
+        || first == b'f'
+        || first == b'n'
 }
 
 #[cfg(test)]

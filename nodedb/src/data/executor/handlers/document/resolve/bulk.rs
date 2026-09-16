@@ -103,7 +103,7 @@ impl CoreLoop {
             .map_err(ErrorCode::from)?;
 
         let mut mutations = Vec::with_capacity(projected.len());
-        let mut returned_docs: Vec<serde_json::Value> = Vec::new();
+        let mut returned_docs: Vec<nodedb_types::Value> = Vec::new();
         for row in projected {
             let ProjectedUpdateRow {
                 key: storage_key,
@@ -129,7 +129,7 @@ impl CoreLoop {
                 resolved_sum_targets,
             }));
             if returning.is_some() {
-                returned_docs.push(doc);
+                returned_docs.push(nodedb_types::Value::from(doc));
             }
         }
 

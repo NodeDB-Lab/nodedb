@@ -120,7 +120,7 @@ impl CoreLoop {
         // than carried in, because an attempt that ends in `OllpRetryRequired`
         // is fully re-resolved and re-applied by the orchestrator — rows from a
         // failed attempt describe a snapshot that never committed.
-        let mut returned_docs: Vec<serde_json::Value> = Vec::new();
+        let mut returned_docs: Vec<nodedb_types::Value> = Vec::new();
 
         if let Err(response) = self.apply_merge_update_arm(
             &txn,
