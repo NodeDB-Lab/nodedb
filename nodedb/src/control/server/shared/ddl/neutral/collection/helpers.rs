@@ -59,9 +59,7 @@ pub(crate) fn parse_origin_column_def(s: &str) -> crate::Result<nodedb_types::co
     let is_pk = find_ascii_case_insensitive(s, "PRIMARY KEY").is_some();
     let nullable = !is_not_null && !is_pk;
 
-    let default = if let Some(pos) =
-        find_ascii_case_insensitive_from(s, " DEFAULT", type_start)
-    {
+    let default = if let Some(pos) = find_ascii_case_insensitive_from(s, " DEFAULT", type_start) {
         let after_default = s[pos + 8..].trim();
         let end = keywords
             .iter()
