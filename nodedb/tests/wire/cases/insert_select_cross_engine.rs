@@ -348,3 +348,60 @@ async fn insert_select_copies_a_kv_source_through_its_own_engine() {
         "both rows must copy, with expression cells evaluated: {rows:?}"
     );
 }
+
+/// A source engine with no `INSERT ... SELECT` materializer is refused by name:
+/// scanning it with the document materializer would copy nothing and report
+/// `INSERT 0 0`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_select_refuses_a_source_it_cannot_scan() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION isk_nosrc_src (id TEXT PRIMARY KEY) WITH (engine = 'columnar')")
+        .await
+        .unwrap();
+    server
+        .exec("CREATE COLLECTION isk_nosrc_dst")
+        .await
+        .unwrap();
+
+    server
+        .expect_error(
+            "INSERT INTO isk_nosrc_dst SELECT * FROM isk_nosrc_src",
+            "Columnar",
+        )
+        .await;
+}
+
+/// A kv collection whose primary key column is `key` stores the key outside the
+/// row body. The copy must still carry it: a NULL key column is silent data
+/// loss, and the target's own key would be minted from the wrong column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn insert_select_copies_a_kv_key_column() {
+    let server = TestServer::start().await;
+
+    server
+        .exec("CREATE COLLECTION isk_key_src (key TEXT PRIMARY KEY, v TEXT) WITH (engine = 'kv')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO isk_key_src (key, v) VALUES ('k1', 'hello')")
+        .await
+        .unwrap();
+
+    server.exec("CREATE COLLECTION isk_key_dst").await.unwrap();
+    server
+        .exec("INSERT INTO isk_key_dst (key, v) SELECT key, v FROM isk_key_src")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT key, v FROM isk_key_dst")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![vec!["k1".to_string(), "hello".to_string()]],
+        "the copied key column must carry the source key: {rows:?}"
+    );
+}

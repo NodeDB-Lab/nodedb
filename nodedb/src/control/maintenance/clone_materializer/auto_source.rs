@@ -65,9 +65,17 @@ pub(crate) async fn scan_source_page(
             let (pairs, next) =
                 kv::scan_source_page(state, tenant_id, database_id, source_qualified, cursor)
                     .await?;
+            // The KV key slot sits outside the stored body. The one shaping
+            // rule injects it (the same converter the scan and RETURNING paths
+            // use), so a copied `key` column reads the row's own key instead of
+            // NULL.
             let entries = pairs
                 .into_iter()
-                .map(|(key, value)| (String::from_utf8_lossy(&key).into_owned(), 0, value))
+                .map(|(key, value)| {
+                    let key = String::from_utf8_lossy(&key).into_owned();
+                    let body = nodedb_query::msgpack_scan::kv_row_msgpack(&key, &value);
+                    (key, 0, body)
+                })
                 .collect();
             Ok((entries, next))
         }
