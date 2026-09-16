@@ -43,6 +43,9 @@ pub(super) struct TuningOverrides {
     /// Overrides `[tuning.query] stream_chunk_size` so a test can drive the
     /// chunked-streaming scan path without seeding 1000 rows.
     pub(super) stream_chunk_size: Option<usize>,
+    /// Overrides `[tuning.timeseries] memtable_budget_bytes` so a test can
+    /// observe timeseries partition flushes on a handful of rows.
+    pub(super) timeseries_memtable_budget_bytes: Option<usize>,
 }
 
 impl TuningOverrides {
@@ -71,6 +74,14 @@ impl TuningOverrides {
     pub(super) fn stream_chunk(rows: usize) -> Self {
         Self {
             stream_chunk_size: Some(rows),
+            ..Self::default()
+        }
+    }
+
+    /// Boot with a lowered timeseries memtable budget.
+    pub(super) fn timeseries_memtable_budget(bytes: usize) -> Self {
+        Self {
+            timeseries_memtable_budget_bytes: Some(bytes),
             ..Self::default()
         }
     }
@@ -110,6 +121,11 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     }
     if let Some(rows) = tuning.stream_chunk_size {
         toml.push_str(&format!("\n[tuning.query]\nstream_chunk_size = {rows}\n"));
+    }
+    if let Some(bytes) = tuning.timeseries_memtable_budget_bytes {
+        toml.push_str(&format!(
+            "\n[tuning.timeseries]\nmemtable_budget_bytes = {bytes}\n"
+        ));
     }
     toml.push_str(&format!(
         "\n[backup_encryption]\nkey_path = {}\n",

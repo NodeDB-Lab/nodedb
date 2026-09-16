@@ -6,10 +6,16 @@
 //! for low-cardinality symbol GROUP BY, parallel partition processing via
 //! std::thread::scope, sparse index block-level skip, and single metadata
 //! read per partition.
+//!
+//! The caller's read policy travels as part of `filter_predicates`: the
+//! grouped scan lowers every predicate onto typed column vectors before any
+//! row is aggregated, and a predicate it cannot lower fails the statement.
+//! An unlowerable policy therefore never aggregates the rows it governs.
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::timeseries::grouped_filter::UnsupportedPredicate;
 use crate::engine::timeseries::grouped_scan::{
     GroupedAggResult, PartitionAggParams, aggregate_memtable, aggregate_partition,
 };
@@ -23,6 +29,9 @@ pub(in crate::data::executor) struct TsAggregateParams<'a> {
     pub collection: &'a str,
     pub time_range: (i64, i64),
     pub limit: usize,
+    /// The query's WHERE predicates followed by the caller's read policy.
+    /// Every predicate is pushed into the grouped scan, so the policy
+    /// excludes rows before they reach an accumulator.
     pub filter_predicates: &'a [crate::bridge::scan_filter::ScanFilter],
     pub bucket_interval_ms: i64,
     pub group_by: &'a [String],
@@ -62,15 +71,17 @@ impl CoreLoop {
         let mut merged = if let Some(mt) = self.columnar_memtables.get(&key)
             && !mt.is_empty()
         {
-            aggregate_memtable(
+            match aggregate_memtable(
                 mt,
                 group_by,
                 aggregates,
                 filter_predicates,
                 time_range,
                 bucket_interval_ms,
-            )
-            .unwrap_or_else(|| GroupedAggResult::new(num_aggs))
+            ) {
+                Ok(result) => result.unwrap_or_else(|| GroupedAggResult::new(num_aggs)),
+                Err(e) => return self.response_error(task, crate::Error::from(e)),
+            }
         } else {
             GroupedAggResult::new(num_aggs)
         };
@@ -98,7 +109,7 @@ impl CoreLoop {
                     let io_priority = Some(task.request.priority);
                     let io_metrics: &crate::data::io::IoMetrics = &self.io_metrics;
                     for dir in &partition_dirs {
-                        if let Some(part_result) = aggregate_partition(PartitionAggParams {
+                        match aggregate_partition(PartitionAggParams {
                             partition_dir: dir,
                             group_by,
                             aggregates,
@@ -110,7 +121,9 @@ impl CoreLoop {
                             io_priority,
                             io_metrics: Some(io_metrics),
                         }) {
-                            merged.merge(&part_result);
+                            Ok(Some(part_result)) => merged.merge(&part_result),
+                            Ok(None) => {}
+                            Err(e) => return self.response_error(task, crate::Error::from(e)),
                         }
                     }
                 } else {
@@ -127,41 +140,48 @@ impl CoreLoop {
                     let thread_count = available.min(partition_dirs.len()).min(8);
                     let chunk_size = partition_dirs.len().div_ceil(thread_count);
 
-                    let partition_results: Vec<GroupedAggResult> = std::thread::scope(|s| {
-                        let handles: Vec<_> = partition_dirs
-                            .chunks(chunk_size)
-                            .map(|chunk| {
-                                let gb = &group_by_owned;
-                                let ag = &agg_owned;
-                                let fl = &filters_owned;
-                                let nc = &needed_owned;
-                                s.spawn(move || {
-                                    let mut local = GroupedAggResult::new(ag.len());
-                                    for dir in chunk {
-                                        // Parallel threads: no io_uring (fadvise fallback).
-                                        if let Some(r) = aggregate_partition(PartitionAggParams {
-                                            partition_dir: dir,
-                                            group_by: gb,
-                                            aggregates: ag,
-                                            filters: fl,
-                                            time_range,
-                                            needed_columns: nc,
-                                            bucket_interval_ms,
-                                            uring_reader: None,
-                                            io_priority: None,
-                                            io_metrics: None,
-                                        }) {
-                                            local.merge(&r);
+                    let partition_results: Result<Vec<GroupedAggResult>, UnsupportedPredicate> =
+                        std::thread::scope(|s| {
+                            let handles: Vec<_> = partition_dirs
+                                .chunks(chunk_size)
+                                .map(|chunk| {
+                                    let gb = &group_by_owned;
+                                    let ag = &agg_owned;
+                                    let fl = &filters_owned;
+                                    let nc = &needed_owned;
+                                    s.spawn(move || -> Result<_, UnsupportedPredicate> {
+                                        let mut local = GroupedAggResult::new(ag.len());
+                                        for dir in chunk {
+                                            // Parallel threads: no io_uring (fadvise fallback).
+                                            if let Some(r) =
+                                                aggregate_partition(PartitionAggParams {
+                                                    partition_dir: dir,
+                                                    group_by: gb,
+                                                    aggregates: ag,
+                                                    filters: fl,
+                                                    time_range,
+                                                    needed_columns: nc,
+                                                    bucket_interval_ms,
+                                                    uring_reader: None,
+                                                    io_priority: None,
+                                                    io_metrics: None,
+                                                })?
+                                            {
+                                                local.merge(&r);
+                                            }
                                         }
-                                    }
-                                    local
+                                        Ok(local)
+                                    })
                                 })
-                            })
-                            .collect();
+                                .collect();
 
-                        handles.into_iter().filter_map(|h| h.join().ok()).collect()
-                    });
+                            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+                        });
 
+                    let partition_results = match partition_results {
+                        Ok(results) => results,
+                        Err(e) => return self.response_error(task, crate::Error::from(e)),
+                    };
                     for r in &partition_results {
                         merged.merge(r);
                     }

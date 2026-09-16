@@ -12,7 +12,7 @@ use nodedb_query::simd_filter;
 
 use super::super::columnar_memtable::{ColumnData, ColumnType, ColumnarMemtable};
 use super::super::columnar_segment::ColumnarSegmentReader;
-use super::super::grouped_filter;
+use super::super::grouped_filter::{self, UnsupportedPredicate};
 use super::strategies::dispatch_grouping;
 use super::types::{GroupedAggResult, resolve_schema};
 use crate::bridge::envelope::Priority;
@@ -20,6 +20,11 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::io::IoMetrics;
 
 /// Aggregate from a columnar memtable with GROUP BY + optional time_bucket.
+///
+/// `Ok(None)` when a GROUP BY or aggregate column is not in the memtable's
+/// schema. `Err` when a predicate in `filters` cannot be lowered onto the
+/// typed columns: the caller fails the statement rather than aggregating
+/// rows the predicate never excluded.
 pub fn aggregate_memtable(
     mt: &ColumnarMemtable,
     group_by: &[String],
@@ -27,15 +32,19 @@ pub fn aggregate_memtable(
     filters: &[ScanFilter],
     time_range: (i64, i64),
     bucket_interval_ms: i64,
-) -> Option<GroupedAggResult> {
+) -> Result<Option<GroupedAggResult>, UnsupportedPredicate> {
     let schema = mt.schema();
     let num_aggs = aggregates.len();
     let row_count = mt.row_count() as usize;
     if row_count == 0 {
-        return Some(GroupedAggResult::new(num_aggs));
+        return Ok(Some(GroupedAggResult::new(num_aggs)));
     }
 
-    let resolved = resolve_schema(&schema.columns, schema.timestamp_idx, group_by, aggregates)?;
+    let Some(resolved) =
+        resolve_schema(&schema.columns, schema.timestamp_idx, group_by, aggregates)
+    else {
+        return Ok(None);
+    };
 
     let col_refs: Vec<Option<&ColumnData>> = (0..schema.columns.len())
         .map(|i| Some(mt.column(i)))
@@ -63,7 +72,7 @@ pub fn aggregate_memtable(
     }
 
     if simd_filter::popcount(&mask) == 0 {
-        return Some(GroupedAggResult::new(num_aggs));
+        return Ok(Some(GroupedAggResult::new(num_aggs)));
     }
 
     let timestamps = if bucket_interval_ms > 0 {
@@ -72,7 +81,7 @@ pub fn aggregate_memtable(
         None
     };
 
-    Some(dispatch_grouping(
+    Ok(Some(dispatch_grouping(
         super::strategies::GroupedScanInputs {
             resolved: &resolved,
             columns: &col_refs,
@@ -84,7 +93,7 @@ pub fn aggregate_memtable(
         &sym_lookup,
         timestamps,
         bucket_interval_ms,
-    ))
+    )))
 }
 
 /// Parameters for partition-level grouped aggregation.
@@ -109,22 +118,36 @@ pub struct PartitionAggParams<'a> {
 ///
 /// When `uring_reader` is `Some`, column files are batch-read via io_uring
 /// (parallel kernel I/O). When `None`, falls back to fadvise + std::fs::read.
-pub fn aggregate_partition(p: PartitionAggParams<'_>) -> Option<GroupedAggResult> {
+///
+/// `Ok(None)` when the partition's schema or metadata cannot be read or does
+/// not carry a GROUP BY / aggregate column. `Err` when a predicate in
+/// `filters` cannot be lowered onto the partition's typed columns: the
+/// caller fails the statement rather than aggregating rows the predicate
+/// never excluded.
+pub fn aggregate_partition(
+    p: PartitionAggParams<'_>,
+) -> Result<Option<GroupedAggResult>, UnsupportedPredicate> {
     let num_aggs = p.aggregates.len();
 
-    let schema = ColumnarSegmentReader::read_schema(p.partition_dir, None).ok()?;
-    let meta = ColumnarSegmentReader::read_meta(p.partition_dir, None).ok()?;
+    let Ok(schema) = ColumnarSegmentReader::read_schema(p.partition_dir, None) else {
+        return Ok(None);
+    };
+    let Ok(meta) = ColumnarSegmentReader::read_meta(p.partition_dir, None) else {
+        return Ok(None);
+    };
     let row_count = meta.row_count as usize;
     if row_count == 0 {
-        return Some(GroupedAggResult::new(num_aggs));
+        return Ok(Some(GroupedAggResult::new(num_aggs)));
     }
 
-    let resolved = resolve_schema(
+    let Some(resolved) = resolve_schema(
         &schema.columns,
         schema.timestamp_idx,
         p.group_by,
         p.aggregates,
-    )?;
+    ) else {
+        return Ok(None);
+    };
 
     // Load sparse index for block-level skip.
     let sparse_idx = ColumnarSegmentReader::read_sparse_index(p.partition_dir, None)
@@ -203,7 +226,9 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> Option<GroupedAggResult
         // Block-level read already filtered by sparse index.
         // Only need time range filter within surviving blocks.
         if has_time_range {
-            let ts_col = col_data.get(resolved.ts_idx).and_then(|d| d.as_ref())?;
+            let Some(ts_col) = col_data.get(resolved.ts_idx).and_then(|d| d.as_ref()) else {
+                return Ok(None);
+            };
             let timestamps = ts_col.as_timestamps();
             let rt = simd_filter::filter_runtime();
             (rt.range_i64)(timestamps, p.time_range.0, p.time_range.1)
@@ -216,7 +241,9 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> Option<GroupedAggResult
         let m = if partition_fully_in_range {
             simd_filter::bitmask_all(effective_row_count)
         } else {
-            let ts_col = col_data.get(resolved.ts_idx).and_then(|d| d.as_ref())?;
+            let Some(ts_col) = col_data.get(resolved.ts_idx).and_then(|d| d.as_ref()) else {
+                return Ok(None);
+            };
             let timestamps = ts_col.as_timestamps();
             let rt = simd_filter::filter_runtime();
             (rt.range_i64)(timestamps, p.time_range.0, p.time_range.1)
@@ -231,26 +258,26 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> Option<GroupedAggResult
         }
     };
 
-    // Apply predicate filters.
+    // Apply predicate filters. A predicate the bitmask evaluator cannot
+    // lower fails the partition, and with it the statement.
     if !p.filters.is_empty() {
         let col_refs_tmp: Vec<Option<&ColumnData>> = col_data.iter().map(|c| c.as_ref()).collect();
         let sym_lookup_tmp =
             |col_idx: usize| -> Option<&nodedb_types::timeseries::SymbolDictionary> {
                 sym_dicts.get(&col_idx)
             };
-        if let Some(filter_mask) = grouped_filter::eval_filters_to_bitmask(
+        let filter_mask = grouped_filter::eval_filters_to_bitmask(
             p.filters,
             &schema.columns,
             &col_refs_tmp,
             &sym_lookup_tmp,
             effective_row_count,
-        ) {
-            mask = simd_filter::bitmask_and(&mask, &filter_mask);
-        }
+        )?;
+        mask = simd_filter::bitmask_and(&mask, &filter_mask);
     }
 
     if simd_filter::popcount(&mask) == 0 {
-        return Some(GroupedAggResult::new(num_aggs));
+        return Ok(Some(GroupedAggResult::new(num_aggs)));
     }
 
     let col_refs: Vec<Option<&ColumnData>> = col_data.iter().map(|c| c.as_ref()).collect();
@@ -285,7 +312,7 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> Option<GroupedAggResult
     // for other engines (vector, graph) sharing the same process.
     crate::data::io::fadvise::release_partition_columns(p.partition_dir, p.needed_columns);
 
-    Some(result)
+    Ok(Some(result))
 }
 
 struct ReadPartitionColumnsParams<'a> {

@@ -6,22 +6,50 @@
 //! returning packed `Vec<u64>` bitmasks. Uses SIMD kernels from
 //! `nodedb_query::simd_filter` for numeric and symbol comparisons.
 
+use nodedb_query::scan_filter::value_as_timestamp_ms;
 use nodedb_query::simd_filter;
 
 use super::columnar_memtable::{ColumnData, ColumnType};
 use crate::bridge::scan_filter::ScanFilter;
 
+/// A predicate the grouped scan cannot lower onto typed column vectors.
+///
+/// The grouped scan evaluates predicates only as SIMD bitmasks, so a shape
+/// it cannot lower fails the aggregate instead of aggregating rows the
+/// predicate never excluded. The message names the predicate and why.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("predicate `{field} {op}` cannot be evaluated by the timeseries grouped scan: {reason}")]
+pub struct UnsupportedPredicate {
+    pub field: String,
+    pub op: &'static str,
+    pub reason: &'static str,
+}
+
+impl UnsupportedPredicate {
+    fn new(f: &ScanFilter, reason: &'static str) -> Self {
+        Self {
+            field: f.field.clone(),
+            op: f.op.as_str(),
+            reason,
+        }
+    }
+}
+
 /// Evaluate ScanFilter predicates on columnar data, returning a bitmask.
 ///
-/// Bit *i* is set iff row *i* passes ALL filters.
-/// Returns `None` for unsupported patterns (OR clauses, contains, etc.).
+/// Bit *i* is set iff row *i* passes ALL filters. Supported shapes: a
+/// single `(column, op, literal)` comparison with `eq`/`ne` on symbol
+/// columns and `eq`/`ne`/`gt`/`gte`/`lt`/`lte` on numeric and time
+/// columns. Every other shape (OR clauses, expressions, `in`, `like`, an
+/// unknown column, a literal of the wrong type) is an
+/// [`UnsupportedPredicate`] error.
 pub fn eval_filters_to_bitmask<'a>(
     filters: &[ScanFilter],
     schema: &[(String, ColumnType)],
     columns: &[Option<&'a ColumnData>],
     sym_lookup: &dyn Fn(usize) -> Option<&'a nodedb_types::timeseries::SymbolDictionary>,
     row_count: usize,
-) -> Option<Vec<u64>> {
+) -> Result<Vec<u64>, UnsupportedPredicate> {
     let rt = simd_filter::filter_runtime();
     let mut mask = simd_filter::bitmask_all(row_count);
 
@@ -30,16 +58,26 @@ pub fn eval_filters_to_bitmask<'a>(
             continue;
         }
         if !f.clauses.is_empty() {
-            return None;
+            return Err(UnsupportedPredicate::new(f, "OR clauses"));
+        }
+        if f.expr.is_some() {
+            return Err(UnsupportedPredicate::new(f, "expression predicate"));
         }
 
-        let col_pos = schema.iter().position(|(n, _)| n == &f.field)?;
+        let col_pos = schema
+            .iter()
+            .position(|(n, _)| n == &f.field)
+            .ok_or(UnsupportedPredicate::new(f, "column not in the schema"))?;
         let (_, col_type) = &schema[col_pos];
-        let col_data = columns[col_pos]?;
+        let col_data =
+            columns[col_pos].ok_or(UnsupportedPredicate::new(f, "column data not loaded"))?;
 
         let filter_mask = match col_type {
             ColumnType::Float64 => {
-                let fv = f.value.as_f64()?;
+                let fv = f
+                    .value
+                    .as_f64()
+                    .ok_or(UnsupportedPredicate::new(f, "literal is not a float"))?;
                 let vals = col_data.as_f64();
                 let slice = &vals[..row_count.min(vals.len())];
                 match f.op.as_str() {
@@ -57,15 +95,25 @@ pub fn eval_filters_to_bitmask<'a>(
                         let b = (rt.lte_f64)(slice, fv + f64::EPSILON);
                         simd_filter::bitmask_not(&simd_filter::bitmask_and(&a, &b), row_count)
                     }
-                    _ => return None,
+                    _ => {
+                        return Err(UnsupportedPredicate::new(f, "operator on a float column"));
+                    }
                 }
             }
             ColumnType::Int64 | ColumnType::Timestamp(_) => {
-                let fv = f.value.as_i64()?;
-                let vals = if *col_type == ColumnType::Int64 {
-                    col_data.as_i64()
+                // A time column stores epoch milliseconds, so its literal is
+                // read as an instant: an integer, a datetime, or a datetime
+                // string all lower to the stored form.
+                let (fv, vals) = if *col_type == ColumnType::Int64 {
+                    let fv = f
+                        .value
+                        .as_i64()
+                        .ok_or(UnsupportedPredicate::new(f, "literal is not an integer"))?;
+                    (fv, col_data.as_i64())
                 } else {
-                    col_data.as_timestamps()
+                    let fv = value_as_timestamp_ms(&f.value)
+                        .ok_or(UnsupportedPredicate::new(f, "literal is not an instant"))?;
+                    (fv, col_data.as_timestamps())
                 };
                 let slice = &vals[..row_count.min(vals.len())];
                 match f.op.as_str() {
@@ -83,12 +131,21 @@ pub fn eval_filters_to_bitmask<'a>(
                         let b = (rt.lte_i64)(slice, fv);
                         simd_filter::bitmask_not(&simd_filter::bitmask_and(&a, &b), row_count)
                     }
-                    _ => return None,
+                    _ => {
+                        return Err(UnsupportedPredicate::new(
+                            f,
+                            "operator on an integer or time column",
+                        ));
+                    }
                 }
             }
             ColumnType::Symbol => {
-                let filter_str = f.value.as_str()?;
-                let dict = sym_lookup(col_pos)?;
+                let filter_str = f
+                    .value
+                    .as_str()
+                    .ok_or(UnsupportedPredicate::new(f, "literal is not a string"))?;
+                let dict = sym_lookup(col_pos)
+                    .ok_or(UnsupportedPredicate::new(f, "symbol dictionary not loaded"))?;
                 let sym_ids = col_data.as_symbols();
                 let slice = &sym_ids[..row_count.min(sym_ids.len())];
                 match f.op.as_str() {
@@ -106,7 +163,9 @@ pub fn eval_filters_to_bitmask<'a>(
                             simd_filter::bitmask_all(row_count)
                         }
                     }
-                    _ => return None,
+                    _ => {
+                        return Err(UnsupportedPredicate::new(f, "operator on a symbol column"));
+                    }
                 }
             }
         };
@@ -114,7 +173,7 @@ pub fn eval_filters_to_bitmask<'a>(
         mask = simd_filter::bitmask_and(&mask, &filter_mask);
     }
 
-    Some(mask)
+    Ok(mask)
 }
 
 /// Apply sparse index block-level skip to a bitmask.

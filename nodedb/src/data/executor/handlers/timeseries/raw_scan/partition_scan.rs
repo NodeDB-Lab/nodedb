@@ -4,25 +4,37 @@
 
 use std::collections::HashMap;
 
+use crate::bridge::scan_filter::ScanFilter;
 use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
 
-use super::row_emit::{emit_partition_row, extract_timestamp};
+use super::row_emit::{emit_partition_row, extract_timestamp, row_admitted};
 
 /// Scan disk partitions in parallel, returning rmpv rows sorted by timestamp.
 ///
-/// `Err` when a stored time cell cannot be read as its column's instant.
+/// `rls_predicates` is the caller's read policy: every row is checked
+/// against it before it counts toward `limit`. `Err` when a stored time
+/// cell cannot be read as its column's instant or a predicate expression
+/// divides by zero.
 pub(super) fn scan_partitions_parallel(
     partition_dirs: &[std::path::PathBuf],
     time_range: (i64, i64),
     limit: usize,
-    filter_predicates: &[crate::bridge::scan_filter::ScanFilter],
+    filter_predicates: &[ScanFilter],
     has_filters: bool,
+    rls_predicates: &[ScanFilter],
 ) -> crate::Result<Vec<rmpv::Value>> {
     if partition_dirs.len() <= 1 {
         return match partition_dirs.first() {
-            Some(dir) => scan_one_partition(dir, time_range, limit, filter_predicates, has_filters),
+            Some(dir) => scan_one_partition(
+                dir,
+                time_range,
+                limit,
+                filter_predicates,
+                has_filters,
+                rls_predicates,
+            ),
             None => Ok(Vec::new()),
         };
     }
@@ -41,11 +53,13 @@ pub(super) fn scan_partitions_parallel(
                 limit,
                 filter_predicates,
                 has_filters,
+                rls_predicates,
             );
         }
 
         let chunk_size = partition_dirs.len().div_ceil(thread_count);
         let filters_ref = filter_predicates;
+        let rls_ref = rls_predicates;
 
         let mut thread_results: Vec<Vec<rmpv::Value>> = std::thread::scope(|s| {
             let handles: Vec<_> = partition_dirs
@@ -58,6 +72,7 @@ pub(super) fn scan_partitions_parallel(
                             limit,
                             filters_ref,
                             has_filters,
+                            rls_ref,
                         )
                     })
                 })
@@ -90,6 +105,7 @@ pub(super) fn scan_partitions_parallel(
             limit,
             filter_predicates,
             has_filters,
+            rls_predicates,
         )
     }
 }
@@ -98,8 +114,9 @@ pub(super) fn scan_partitions_sequential(
     partition_dirs: &[std::path::PathBuf],
     time_range: (i64, i64),
     limit: usize,
-    filter_predicates: &[crate::bridge::scan_filter::ScanFilter],
+    filter_predicates: &[ScanFilter],
     has_filters: bool,
+    rls_predicates: &[ScanFilter],
 ) -> crate::Result<Vec<rmpv::Value>> {
     let mut results = Vec::new();
     for dir in partition_dirs {
@@ -107,7 +124,14 @@ pub(super) fn scan_partitions_sequential(
             break;
         }
         let remaining = limit - results.len();
-        let rows = scan_one_partition(dir, time_range, remaining, filter_predicates, has_filters)?;
+        let rows = scan_one_partition(
+            dir,
+            time_range,
+            remaining,
+            filter_predicates,
+            has_filters,
+            rls_predicates,
+        )?;
         results.extend(rows);
     }
     results.truncate(limit);
@@ -116,13 +140,18 @@ pub(super) fn scan_partitions_sequential(
 
 /// Scan a single disk partition, returning rmpv rows.
 ///
-/// `Err` when a stored time cell cannot be read as its column's instant.
+/// The WHERE predicates run on the typed columns when the evaluator can
+/// lower them and per row otherwise. The read policy runs per row after
+/// them, before the row counts toward `limit`. `Err` when a stored time
+/// cell cannot be read as its column's instant or a predicate expression
+/// divides by zero.
 pub(super) fn scan_one_partition(
     part_dir: &std::path::Path,
     time_range: (i64, i64),
     limit: usize,
-    filter_predicates: &[crate::bridge::scan_filter::ScanFilter],
+    filter_predicates: &[ScanFilter],
     has_filters: bool,
+    rls_predicates: &[ScanFilter],
 ) -> crate::Result<Vec<rmpv::Value>> {
     let schema = match ColumnarSegmentReader::read_schema(part_dir, None) {
         Ok(s) => s,
@@ -165,8 +194,11 @@ pub(super) fn scan_one_partition(
         sym_dicts: &sym_dicts,
     };
 
+    // `row_filters` carries the WHERE predicates only when the typed-column
+    // evaluator could not lower them, so they still apply per row instead
+    // of being dropped.
     let row_count = timestamps.len();
-    let filtered_indices = if has_filters {
+    let (filtered_indices, row_filters): (Vec<u32>, &[ScanFilter]) = if has_filters {
         if let Some(bitmask) =
             crate::data::executor::handlers::columnar_filter::eval_filters_bitmask(
                 &part_src,
@@ -174,21 +206,22 @@ pub(super) fn scan_one_partition(
                 row_count,
             )
         {
-            nodedb_query::simd_filter::bitmask_to_indices(&bitmask)
+            (nodedb_query::simd_filter::bitmask_to_indices(&bitmask), &[])
         } else {
             match crate::data::executor::handlers::columnar_filter::eval_filters_sparse(
                 &part_src,
                 filter_predicates,
                 &indices,
             ) {
-                Some(mask) => {
-                    crate::data::executor::handlers::columnar_filter::apply_mask(&indices, &mask)
-                }
-                None => indices,
+                Some(mask) => (
+                    crate::data::executor::handlers::columnar_filter::apply_mask(&indices, &mask),
+                    &[],
+                ),
+                None => (indices, filter_predicates),
             }
         }
     } else {
-        indices
+        (indices, &[])
     };
 
     let mut rows = Vec::with_capacity(filtered_indices.len().min(limit));
@@ -197,6 +230,9 @@ pub(super) fn scan_one_partition(
             break;
         }
         let row = emit_partition_row(&schema_vec, &col_data, &sym_dicts, idx as usize)?;
+        if !row_admitted(&row, row_filters, rls_predicates)? {
+            continue;
+        }
         rows.push(row);
     }
 

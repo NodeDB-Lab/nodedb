@@ -45,6 +45,14 @@ impl From<crate::engine::timeseries::columnar_segment::SegmentError> for Error {
     }
 }
 
+impl From<crate::engine::timeseries::grouped_filter::UnsupportedPredicate> for Error {
+    fn from(e: crate::engine::timeseries::grouped_filter::UnsupportedPredicate) -> Self {
+        Self::FeatureNotSupported {
+            detail: e.to_string(),
+        }
+    }
+}
+
 impl From<crate::engine::timeseries::query::QueryError> for Error {
     fn from(e: crate::engine::timeseries::query::QueryError) -> Self {
         Self::Storage {

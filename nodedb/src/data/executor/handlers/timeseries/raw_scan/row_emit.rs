@@ -6,9 +6,41 @@ use std::collections::HashMap;
 
 use nodedb_types::columnar::schema::TS_SYSTEM;
 
+use crate::bridge::scan_filter::ScanFilter;
+use crate::data::executor::handlers::columnar_read::filter::value_matches_filters;
 use crate::data::executor::handlers::columnar_read::{emit_column_value, rmpv_time_cell};
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
 use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
+
+/// Whether an emitted row passes `where_predicates` and then the caller's
+/// read policy.
+///
+/// Both sets empty admits the row without touching it. Otherwise the row is
+/// converted once and both sets are evaluated by the predicate matcher the
+/// columnar read path and the write gate use, so a policy means one thing
+/// on every engine. `where_predicates` carries the WHERE clause only when
+/// the typed-column evaluator could not lower it. `Err` when a predicate
+/// expression divides by zero.
+pub(super) fn row_admitted(
+    row: &rmpv::Value,
+    where_predicates: &[ScanFilter],
+    rls_predicates: &[ScanFilter],
+) -> crate::Result<bool> {
+    if where_predicates.is_empty() && rls_predicates.is_empty() {
+        return Ok(true);
+    }
+    let doc = rmpv_to_value(row);
+    Ok(value_matches_filters(&doc, where_predicates)?
+        && value_matches_filters(&doc, rls_predicates)?)
+}
+
+/// [`row_admitted`] for a row whose WHERE clause was already applied.
+pub(super) fn row_admitted_by_policy(
+    row: &rmpv::Value,
+    rls_predicates: &[ScanFilter],
+) -> crate::Result<bool> {
+    row_admitted(row, &[], rls_predicates)
+}
 
 /// Extract the `_ts_system` value from an rmpv-encoded row for audit-log
 /// ordering. Rows without the column sort first (treated as `i64::MIN`).
