@@ -275,6 +275,17 @@ mod tests {
         assert_eq!(ErrorCode::from(wire), original);
     }
 
+    /// A client value error keeps its detail across the node hop, so the
+    /// coordinator renders the same `42601` a single node renders.
+    #[test]
+    fn a_bad_request_roundtrips_verbatim() {
+        let original = ErrorCode::BadRequest {
+            detail: "column 'embedding': VECTOR element 1: expected a numeric element".into(),
+        };
+        let wire = DataPlaneErrorCode::from(original.clone());
+        assert_eq!(ErrorCode::from(wire), original);
+    }
+
     #[test]
     fn execution_error_keeps_a_data_plane_verdict_typed() {
         let typed = execution_error_to_typed(crate::Error::DataPlane(ErrorCode::DivisionByZero));

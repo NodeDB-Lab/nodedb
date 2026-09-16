@@ -226,5 +226,8 @@ mod tests {
             detail: "io_uring".into(),
         }));
         assert!(!write_definitely_not_applied(&ErrorCode::DuplicateWrite));
+        assert!(!write_definitely_not_applied(&ErrorCode::BadRequest {
+            detail: "column 'embedding': expected a numeric element".into(),
+        }));
     }
 }

@@ -107,6 +107,7 @@ impl CoreLoop {
             crate::Error::UnknownStrictField { column, .. } => {
                 ErrorCode::UndefinedColumn { column }
             }
+            crate::Error::BadRequest { detail } => ErrorCode::BadRequest { detail },
             other => ErrorCode::Internal {
                 detail: format!("strict re-encode: {other}"),
             },

@@ -159,9 +159,9 @@ async fn create_strict_vector(server: &TestServer, name: &str) {
         .unwrap_or_else(|e| panic!("create {name}: {e}"));
 }
 
-/// The planner folds `ARRAY[0.1, 0.2, 0.3]` to `Decimal` elements. Strict
-/// coercion accepted only `Float` and `Integer`, so the literal was reported as
-/// having 0 elements and the mismatch surfaced as an internal error.
+/// The planner folds `ARRAY[0.1, 0.2, 0.3]` to `Decimal` elements. Coercion
+/// reads Float, Integer, Decimal and numeric String elements, so the literal
+/// keeps its element count and reaches the column intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn document_strict_inserts_a_decimal_array_literal_into_a_vector_column() {
     let server = TestServer::start().await;
