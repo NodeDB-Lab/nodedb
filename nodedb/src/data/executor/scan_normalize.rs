@@ -55,10 +55,7 @@ impl CoreLoop {
             return Ok(docs);
         }
 
-        let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-            zerompk::from_msgpack(filter_bytes).map_err(|e| crate::Error::PlanError {
-                detail: format!("{context} deserialization failed: {e}"),
-            })?;
+        let filters = crate::bridge::scan_filter::decode_scan_filters(filter_bytes, context)?;
 
         let mut kept = Vec::with_capacity(docs.len());
         for (id, bytes) in docs {
@@ -83,10 +80,7 @@ impl CoreLoop {
         if rls_filters.is_empty() {
             return Ok(true);
         }
-        let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-            zerompk::from_msgpack(rls_filters).map_err(|e| crate::Error::PlanError {
-                detail: format!("RLS filter deserialization failed: {e}"),
-            })?;
+        let filters = crate::bridge::scan_filter::decode_scan_filters(rls_filters, "RLS filter")?;
         Ok(crate::bridge::scan_filter::ScanFilter::all_match_binary(
             &filters, row,
         )?)

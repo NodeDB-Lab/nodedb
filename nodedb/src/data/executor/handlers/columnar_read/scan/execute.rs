@@ -11,7 +11,9 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_read::bitemporal::bitemporal_row_visible;
 use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
-use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
+use crate::data::executor::handlers::columnar_read::filter::{
+    decode_rls_filters, row_matches_filters_and_policy,
+};
 use crate::data::executor::handlers::columnar_read::scan_flushed::FlushedScanCtx;
 use crate::data::executor::handlers::transaction::overlay::{
     ColumnarMatchedRow, ColumnarOverlayMergeParams,
@@ -47,7 +49,7 @@ impl CoreLoop {
             projection,
             limit,
             filters,
-            rls_filters: _,
+            rls_filters,
             sort_keys,
             system_time,
             valid_at_ms,
@@ -80,6 +82,13 @@ impl CoreLoop {
             }
         } else {
             Vec::new()
+        };
+        // The read policy is decoded before any row is read: a payload the
+        // Data Plane cannot decode fails the statement instead of admitting
+        // the rows it governs.
+        let rls_predicates: Vec<ScanFilter> = match decode_rls_filters(rls_filters) {
+            Ok(p) => p,
+            Err(e) => return self.response_error(task, e),
         };
         // A no-LIMIT SQL `SELECT * FROM <columnar>` arrives as
         // `limit == usize::MAX`. Capture that before the `limit == 0` rewrite
@@ -153,13 +162,10 @@ impl CoreLoop {
         // triples. The raw `Vec<Value>` is kept for sort-key comparison — the
         // projected object is emitted only after ORDER BY + limit are
         // applied. When no sort is requested the limit is enforced inside the
-        // loop so the whole memtable is not materialised.
+        // loop so the whole memtable is not materialised. The limit counts
+        // rows that pass every predicate, so a row the WHERE clause or the
+        // read policy excludes never consumes a slot.
         let mut matched: Vec<ColumnarMatchedRow> = Vec::new();
-        let scan_budget = if sort_keys.is_empty() {
-            limit.saturating_mul(10).max(limit)
-        } else {
-            usize::MAX
-        };
         // Resolve hidden bitemporal column positions once; `None` means
         // the collection is not bitemporal, so the per-row filter is a
         // no-op regardless of `system_as_of_ms` / `valid_at_ms` values.
@@ -197,6 +203,7 @@ impl CoreLoop {
                 limit,
                 sort_keys,
                 filter_predicates: &filter_predicates,
+                rls_predicates: &rls_predicates,
                 prefilter,
                 computed_cols: &computed_cols,
                 all_versions,
@@ -224,15 +231,11 @@ impl CoreLoop {
         }
 
         // ── Phase 2: live memtable ──────────────────────────────────────────
-        // Rows still in the active memtable (not yet flushed).
-        // Reduce the over-fetch budget by however many rows flushed segments
-        // already contributed so we do not materialise more than needed.
-        let memtable_budget = scan_budget.saturating_sub(matched.len());
-        if !block_skipped && memtable_budget > 0 {
-            for (row_surrogate, row) in engine
-                .scan_memtable_rows_with_surrogates()
-                .take(memtable_budget)
-            {
+        // Rows still in the active memtable (not yet flushed). Skipped when
+        // the flushed pass already filled an unsorted limit; otherwise the
+        // loop stops at the limit or the deadline, like the flushed pass.
+        if !block_skipped && (!sort_keys.is_empty() || matched.len() < limit) {
+            for (row_surrogate, row) in engine.scan_memtable_rows_with_surrogates() {
                 // Row-boundary prefilter: skip this row when its surrogate is
                 // absent from the bitmap. Rows without a recorded surrogate
                 // are always included when no prefilter is active; when a
@@ -255,19 +258,24 @@ impl CoreLoop {
                 ) {
                     continue;
                 }
-                if !filter_predicates.is_empty() {
-                    match row_matches_filters(&row, schema, &filter_predicates) {
-                        Ok(true) => {}
-                        Ok(false) => continue,
-                        // `row_matches_filters` returns `EvalError`, which
-                        // has exactly one variant and no direct
-                        // `Into<ErrorCode>` — mirrors
-                        // `stage_columnar_dml.rs`'s identical call site,
-                        // which hardcodes the same typed code rather than
-                        // collapsing to `Internal`/`XX000`.
-                        Err(_e) => {
-                            return self.response_error(task, ErrorCode::DivisionByZero);
-                        }
+                // The query's WHERE predicates, then the caller's read
+                // policy: a row the policy excludes is dropped here, before
+                // projection, sort, and limit, so a LIMIT counts admitted
+                // rows only.
+                match row_matches_filters_and_policy(
+                    &row,
+                    schema,
+                    &filter_predicates,
+                    &rls_predicates,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    // `EvalError` has exactly one variant and no direct
+                    // `Into<ErrorCode>` — mirrors `stage_columnar_dml.rs`'s
+                    // identical call site, which hardcodes the same typed
+                    // code rather than collapsing to `Internal`/`XX000`.
+                    Err(_e) => {
+                        return self.response_error(task, ErrorCode::DivisionByZero);
                     }
                 }
                 let obj = match row_to_projected_value(
@@ -279,7 +287,7 @@ impl CoreLoop {
                 ) {
                     Ok(v) => v,
                     // `row_to_projected_value` returns `crate::Result<_>`
-                    // (unlike `row_matches_filters` above) — its only
+                    // (unlike `row_matches_filters_and_policy` above) — its only
                     // fallible step is a computed-column expression eval,
                     // and `computed_cols` here is real, not `&[]` like the
                     // DML staging path, so propagate the actual typed error
@@ -328,6 +336,7 @@ impl CoreLoop {
                     schema,
                     projection,
                     filter_predicates: &filter_predicates,
+                    rls_predicates: &rls_predicates,
                     computed_cols: &computed_cols,
                     all_versions,
                 },
@@ -563,12 +572,20 @@ mod tests {
         collection: &'a str,
         prefilter: Option<&'a SurrogateBitmap>,
     ) -> ColumnarScanParams<'a> {
+        scan_params_with_rls(collection, prefilter, &[])
+    }
+
+    fn scan_params_with_rls<'a>(
+        collection: &'a str,
+        prefilter: Option<&'a SurrogateBitmap>,
+        rls_filters: &'a [u8],
+    ) -> ColumnarScanParams<'a> {
         ColumnarScanParams {
             collection,
             projection: &[],
             limit: 0,
             filters: &[],
-            rls_filters: &[],
+            rls_filters,
             sort_keys: &[],
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
@@ -576,6 +593,18 @@ mod tests {
             computed_columns: &[],
             txn_id: None,
         }
+    }
+
+    /// A read policy `name = <name>`, encoded the way the planner ships it.
+    fn policy_name_eq(name: &str) -> Vec<u8> {
+        let filter = crate::bridge::scan_filter::ScanFilter {
+            field: "name".into(),
+            op: "eq".into(),
+            value: Value::String(name.into()),
+            clauses: vec![],
+            expr: None,
+        };
+        zerompk::to_msgpack_vec(&vec![filter]).expect("encode policy")
     }
 
     fn decode_rows(payload: &[u8]) -> Vec<Value> {
@@ -716,6 +745,70 @@ mod tests {
             field(&flushed[0], "at"),
             Some(&expected),
             "flushed segment cell"
+        );
+    }
+
+    /// A read policy governs rows from the live memtable and from flushed
+    /// segments alike: only the rows it admits come back.
+    #[test]
+    fn a_read_policy_admits_only_matching_rows_from_both_phases() {
+        let (mut core, _dir) = make_core();
+        let coll = "cf_rls_both";
+        let key = insert_and_flush(
+            &mut core,
+            coll,
+            &[(1, "mine", Surrogate(801)), (2, "theirs", Surrogate(802))],
+        );
+        let mut engine = core
+            .columnar_engines
+            .remove(&key)
+            .expect("engine registered");
+        engine
+            .insert_with_surrogate(&row(3, "mine"), Surrogate(803))
+            .expect("insert_with_surrogate");
+        engine
+            .insert_with_surrogate(&row(4, "theirs"), Surrogate(804))
+            .expect("insert_with_surrogate");
+        core.columnar_engines.insert(key, engine);
+
+        let policy = policy_name_eq("mine");
+        let task = make_task();
+        let resp = core.execute_columnar_scan(&task, scan_params_with_rls(coll, None, &policy));
+        assert_eq!(resp.status, crate::bridge::envelope::Status::Ok);
+        assert_eq!(
+            ids(&decode_rows(resp.payload.as_bytes())),
+            vec![1, 3],
+            "one flushed and one live row are admitted; the others are excluded"
+        );
+    }
+
+    /// A read policy payload the Data Plane cannot decode fails the scan.
+    /// The alternative — treating it as "no policy" — would return every
+    /// row the policy exists to hide.
+    #[test]
+    fn a_malformed_read_policy_payload_fails_the_scan() {
+        let (mut core, _dir) = make_core();
+        let coll = "cf_rls_malformed";
+        insert_and_flush(
+            &mut core,
+            coll,
+            &[(1, "mine", Surrogate(901)), (2, "theirs", Surrogate(902))],
+        );
+
+        // `0xC1` is the one byte MessagePack reserves and never emits.
+        let malformed = [0xC1u8];
+        let task = make_task();
+        let resp = core.execute_columnar_scan(&task, scan_params_with_rls(coll, None, &malformed));
+
+        assert_eq!(
+            resp.status,
+            crate::bridge::envelope::Status::Error,
+            "an unreadable policy must not admit rows"
+        );
+        assert!(
+            resp.payload.is_empty(),
+            "a failed scan carries no rows, got {} bytes",
+            resp.payload.len()
         );
     }
 

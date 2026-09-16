@@ -11,10 +11,11 @@ pub(in crate::data::executor) struct ColumnarScanParams<'a> {
     pub projection: &'a [String],
     pub limit: usize,
     pub filters: &'a [u8],
-    /// RLS filter bytes — wiring is the responsibility of a separate
-    /// enforcement pass; the base scan handler itself does not consume
-    /// them (hence the `_` destructure).
-    #[allow(dead_code)]
+    /// The caller's read policy as a MessagePack `Vec<ScanFilter>`, injected
+    /// by the planner. Empty when no policy governs the caller. The scan
+    /// evaluates it per row after block pruning and `filters`, before
+    /// projection, sort, and limit, on the flushed-segment, live-memtable,
+    /// and in-transaction overlay rows alike.
     pub rls_filters: &'a [u8],
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     /// Bitemporal system-time selection. `Current` is a current-state read;

@@ -337,6 +337,7 @@ impl CoreLoop {
                 schema: &schema,
                 projection: &[],
                 filter_predicates: &filter_predicates,
+                rls_predicates: &[],
                 computed_cols: &[],
                 all_versions: false,
             },

@@ -1,36 +1,23 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Spatial query handler: R-tree index scan with predicate refinement.
-//!
-//! Documents with geometry fields are auto-indexed into per-field R-trees
-//! on insert (see `handlers/point.rs`). Spatial queries use the R-tree for
-//! fast bbox candidate selection, then refine with exact predicates.
-//!
-//! Internal document representation: `nodedb_types::Value` (no JSON intermediary).
-
 use tracing::debug;
 
-use super::super::response_codec;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::doc_format;
+use crate::data::executor::handlers::columnar_read::filter::decode_rls_filters;
+use crate::data::executor::handlers::spatial_refine::{
+    apply_predicate, expand_bbox, extract_geometry, project_doc,
+};
+use crate::data::executor::handlers::transaction::overlay::SpatialOverlayMergeParams;
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::SpatialPredicate;
 use nodedb_types::SurrogateBitmap;
 
-use super::spatial_refine::{apply_predicate, expand_bbox, extract_geometry, project_doc};
-
-/// Whether `doc_id`'s surrogate is a member of `prefilter`.
-///
-/// `doc_id` is the hex-encoded surrogate for a document-collection row, or
-/// a columnar-family user `id` that never parses as a storage key — the
-/// latter is never admitted, matching a sparse miss on a parsed key.
-fn prefilter_admits(prefilter: &SurrogateBitmap, doc_id: &str) -> bool {
-    match nodedb_types::StorageKey::parse(doc_id) {
-        Some(key) => prefilter.contains(key.surrogate()),
-        None => false,
-    }
-}
+use super::full_scan::SpatialFullScanParams;
+use super::prefilter::prefilter_admits;
 
 /// Parameters for [`CoreLoop::execute_spatial_scan`].
 pub(in crate::data::executor) struct SpatialScanParams<'a> {
@@ -46,22 +33,6 @@ pub(in crate::data::executor) struct SpatialScanParams<'a> {
     pub projection: &'a [String],
     pub rls_filters: &'a [u8],
     pub prefilter: Option<&'a SurrogateBitmap>,
-}
-
-/// Parameters for [`CoreLoop::spatial_full_scan`].
-struct SpatialFullScanParams<'a> {
-    task: &'a ExecutionTask,
-    tid: u64,
-    collection: &'a str,
-    field: &'a str,
-    predicate: &'a SpatialPredicate,
-    query_geom: &'a nodedb_types::geometry::Geometry,
-    distance_meters: f64,
-    limit: usize,
-    projection: &'a [String],
-    attr_filters: &'a [ScanFilter],
-    rls_filters: &'a [ScanFilter],
-    prefilter: Option<&'a SurrogateBitmap>,
 }
 
 impl CoreLoop {
@@ -106,16 +77,27 @@ impl CoreLoop {
         // The query geometry was parsed and validated on the Control Plane.
         let query_geom = query_geometry;
 
-        // 2. Deserialize attribute and RLS filters.
+        // 2. Deserialize attribute and RLS filters. A payload that does not
+        // decode fails the scan: an unreadable predicate never admits the
+        // rows it would have excluded.
         let attr_filters: Vec<ScanFilter> = if attribute_filters.is_empty() {
             Vec::new()
         } else {
-            zerompk::from_msgpack(attribute_filters).unwrap_or_default()
+            match zerompk::from_msgpack(attribute_filters) {
+                Ok(f) => f,
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("malformed spatial attribute filters: {e}"),
+                        },
+                    );
+                }
+            }
         };
-        let row_level_filters: Vec<ScanFilter> = if rls_filters.is_empty() {
-            Vec::new()
-        } else {
-            zerompk::from_msgpack(rls_filters).unwrap_or_default()
+        let row_level_filters: Vec<ScanFilter> = match decode_rls_filters(rls_filters) {
+            Ok(f) => f,
+            Err(e) => return self.response_error(task, e),
         };
 
         // 3. Compute search bbox (expand by distance for ST_DWithin).
@@ -260,7 +242,7 @@ impl CoreLoop {
                     // A candidate skipped here silently drops out of the
                     // spatial result set, which reads as "no row matched the
                     // geometry" rather than "a row could not be read".
-                    match super::super::doc_format::decode_document_value(&doc_mp) {
+                    match doc_format::decode_document_value(&doc_mp) {
                         Ok(d) => d,
                         Err(e) => return self.response_error(task, e),
                     }
@@ -288,7 +270,7 @@ impl CoreLoop {
                     let Some(doc_mp) = columnar_docs.as_ref().and_then(|m| m.get(&doc_id)) else {
                         continue;
                     };
-                    match super::super::doc_format::decode_document_value(doc_mp) {
+                    match doc_format::decode_document_value(doc_mp) {
                         Ok(d) => d,
                         Err(e) => return self.response_error(task, e),
                     }
@@ -333,7 +315,7 @@ impl CoreLoop {
 
         if let Some(txn_id) = task.request.txn_id
             && let Err(e) = self.merge_overlay_into_spatial_scan(
-                super::transaction::overlay::SpatialOverlayMergeParams {
+                SpatialOverlayMergeParams {
                     txn_id,
                     coll_key: &coll_key,
                     field,
@@ -360,130 +342,11 @@ impl CoreLoop {
             ),
         }
     }
-
-    /// Full scan when no R-tree exists for the field.
-    fn spatial_full_scan(&self, params: SpatialFullScanParams<'_>) -> Response {
-        let SpatialFullScanParams {
-            task,
-            tid,
-            collection,
-            field,
-            predicate,
-            query_geom,
-            distance_meters,
-            limit,
-            projection,
-            attr_filters,
-            rls_filters,
-            prefilter,
-        } = params;
-        debug!(core = self.core_id, %collection, "spatial full scan (no R-tree index yet)");
-
-        let scan_limit = limit * 10;
-        let entries = match self.scan_collection(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            scan_limit,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: e.to_string(),
-                    },
-                );
-            }
-        };
-
-        let mut results = Vec::new();
-        for (doc_id, doc_bytes) in &entries {
-            if results.len() >= limit {
-                break;
-            }
-
-            // Prefilter: skip non-members before geometry evaluation.
-            if let Some(bitmap) = prefilter
-                && !prefilter_admits(bitmap, doc_id)
-            {
-                continue;
-            }
-
-            // A row skipped here silently drops out of the spatial result set,
-            // which reads as "no row matched the geometry" rather than "a row
-            // could not be read".
-            let doc = match super::super::doc_format::decode_document_value(doc_bytes) {
-                Ok(d) => d,
-                Err(e) => return self.response_error(task, e),
-            };
-
-            let doc_geom = match extract_geometry(&doc, field) {
-                Some(g) => g,
-                None => continue,
-            };
-
-            if !apply_predicate(predicate, query_geom, &doc_geom, distance_meters) {
-                continue;
-            }
-
-            match ScanFilter::all_match_value(attr_filters, &doc) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(_e) => {
-                    return self.response_error(task, ErrorCode::DivisionByZero);
-                }
-            }
-            match ScanFilter::all_match_value(rls_filters, &doc) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(_e) => {
-                    return self.response_error(task, ErrorCode::DivisionByZero);
-                }
-            }
-
-            results.push(project_doc(&doc, doc_id, projection));
-        }
-
-        if let Some(txn_id) = task.request.txn_id {
-            let coll_key = (
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection.to_string(),
-            );
-            if let Err(e) = self.merge_overlay_into_spatial_scan(
-                super::transaction::overlay::SpatialOverlayMergeParams {
-                    txn_id,
-                    coll_key: &coll_key,
-                    field,
-                    predicate,
-                    query_geom,
-                    distance_meters,
-                    projection,
-                    attr_filters,
-                    row_level_filters: rls_filters,
-                },
-                &mut results,
-            ) {
-                return self.response_error(task, e);
-            }
-        }
-
-        match response_codec::encode_value_vec(&results) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: e.to_string(),
-                },
-            ),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SpatialScanParams, prefilter_admits};
+    use super::SpatialScanParams;
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Status};
     use crate::data::executor::task::ExecutionTask;
     use crate::engine::spatial::RTreeEntry;
@@ -620,29 +483,6 @@ mod tests {
             rls_filters: Vec::new(),
             prefilter: None,
         })
-    }
-
-    fn doc_id(surrogate: u32) -> String {
-        nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)).to_string()
-    }
-
-    #[test]
-    fn prefilter_skips_non_member_doc_ids() {
-        // Direct unit on the production prefilter check (`prefilter_admits`),
-        // not a re-implementation of it.
-        let mut bitmap = SurrogateBitmap::new();
-        bitmap.insert(Surrogate(2));
-
-        let candidate_doc_ids = [doc_id(1), doc_id(2), doc_id(3)];
-
-        let kept: Vec<_> = candidate_doc_ids
-            .iter()
-            .filter(|doc_id| prefilter_admits(&bitmap, doc_id))
-            .cloned()
-            .collect();
-
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0], doc_id(2));
     }
 
     // Note: the R-tree-branch by-surrogate candidate hydration

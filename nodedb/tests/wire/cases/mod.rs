@@ -37,6 +37,7 @@ mod clone_tombstone_hides_source_row;
 mod clone_write_isolation;
 mod clone_write_isolation_fuzz;
 mod clone_write_suppresses_source_row;
+mod columnar_read_row_level_security;
 mod columnar_write_row_level_security;
 mod command_complete_tag_conformance;
 mod crdt_write_rls_database_scope;

@@ -30,7 +30,7 @@ use crate::bridge::expr_eval::ComputedColumn;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
-use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
+use crate::data::executor::handlers::columnar_read::filter::row_matches_filters_and_policy;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
@@ -48,6 +48,11 @@ pub(in crate::data::executor) struct ColumnarOverlayMergeParams<'a> {
     pub schema: &'a ColumnarSchema,
     pub projection: &'a [String],
     pub filter_predicates: &'a [ScanFilter],
+    /// The caller's decoded read policy. A staged row the policy excludes is
+    /// dropped from the result exactly like a base row; empty admits every
+    /// row. The predicate DML row read passes an empty slice because its
+    /// plan carries a write check, not a read policy.
+    pub rls_predicates: &'a [ScanFilter],
     pub computed_cols: &'a [ComputedColumn],
     pub all_versions: bool,
 }
@@ -82,6 +87,7 @@ impl CoreLoop {
             schema,
             projection,
             filter_predicates,
+            rls_predicates,
             computed_cols,
             all_versions,
         } = params;
@@ -94,10 +100,7 @@ impl CoreLoop {
         };
 
         let predicate = |row: &[Value]| -> Result<bool, nodedb_query::EvalError> {
-            if filter_predicates.is_empty() {
-                return Ok(true);
-            }
-            row_matches_filters(row, schema, filter_predicates)
+            row_matches_filters_and_policy(row, schema, filter_predicates, rls_predicates)
         };
 
         // Surrogates already represented in the base result. Additions

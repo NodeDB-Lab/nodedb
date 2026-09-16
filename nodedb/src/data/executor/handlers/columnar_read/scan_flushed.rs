@@ -10,7 +10,7 @@ use crate::data::executor::scan_normalize::decoded_col_to_value;
 
 use super::bitemporal::bitemporal_row_visible;
 use super::convert::row_to_projected_value;
-use super::filter::row_matches_filters;
+use super::filter::row_matches_filters_and_policy;
 
 /// Read-only context for the flushed-segment scan phase. All fields are
 /// borrowed from locals already computed in `execute_columnar_scan`.
@@ -22,6 +22,8 @@ pub(in crate::data::executor) struct FlushedScanCtx<'a> {
     pub limit: usize,
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub filter_predicates: &'a [ScanFilter],
+    /// The caller's decoded read policy; empty admits every row.
+    pub rls_predicates: &'a [ScanFilter],
     pub prefilter: Option<&'a nodedb_types::surrogate_bitmap::SurrogateBitmap>,
     pub computed_cols: &'a [ComputedColumn],
     pub all_versions: bool,
@@ -54,6 +56,7 @@ impl CoreLoop {
             limit,
             sort_keys,
             filter_predicates,
+            rls_predicates,
             prefilter,
             computed_cols,
             all_versions,
@@ -192,9 +195,15 @@ impl CoreLoop {
                     ) {
                         continue;
                     }
-                    if !filter_predicates.is_empty()
-                        && !row_matches_filters(&row, schema, filter_predicates)?
-                    {
+                    // The query's WHERE predicates, then the caller's read
+                    // policy, before projection so a limit counts admitted
+                    // rows only.
+                    if !row_matches_filters_and_policy(
+                        &row,
+                        schema,
+                        filter_predicates,
+                        rls_predicates,
+                    )? {
                         continue;
                     }
 
