@@ -32,9 +32,8 @@ use pgwire::error::PgWireResult;
 /// Range-check an integer cell against the width its column advertises, before
 /// it is narrowed for transmission.
 ///
-/// `Ok(None)` means the cell is absent or not an integer and encodes as SQL
-/// NULL, matching the wider `Int8` arm. `Ok(Some(n))` guarantees `n` fits
-/// `width`, so the caller's narrowing cast is lossless by construction.
+/// `Ok(n)` guarantees `n` fits `width`, so the caller's narrowing cast is
+/// lossless by construction.
 ///
 /// An out-of-range value is a hard error rather than a truncation: the
 /// column's `RowDescription` already told the client to read two or four
@@ -49,14 +48,11 @@ use pgwire::error::PgWireResult;
 /// exist: rows written before a column's width was declared, and rows
 /// arriving over non-SQL ingest paths, are not covered by that check.
 pub(in crate::control::server::pgwire) fn checked_narrow(
-    v: &serde_json::Value,
+    n: i64,
     width: IntWidth,
-) -> PgWireResult<Option<i64>> {
-    let Some(n) = v.as_i64() else {
-        return Ok(None);
-    };
+) -> PgWireResult<i64> {
     if width.contains(n) {
-        return Ok(Some(n));
+        return Ok(n);
     }
     Err(out_of_range(format!(
         "value {n} is out of range for type {}",
@@ -66,9 +62,6 @@ pub(in crate::control::server::pgwire) fn checked_narrow(
 
 /// Narrow a float cell to the `f32` a `real` column transmits, refusing the
 /// one narrowing that is not value-preserving.
-///
-/// `Ok(None)` means the cell is absent or not a number and encodes as SQL
-/// NULL, matching the wider `Float8` arm.
 ///
 /// This is deliberately *not* the float mirror of [`checked_narrow`]'s range
 /// constraint — see the module docs. Rounding is correct and never an error;
@@ -83,12 +76,7 @@ pub(in crate::control::server::pgwire) fn checked_narrow(
 /// exist, layered underneath rather than replaced by it: rows written before a
 /// column's width was declared, and rows arriving over non-SQL ingest paths,
 /// are not covered by that check.
-pub(in crate::control::server::pgwire) fn checked_narrow_f32(
-    v: &serde_json::Value,
-) -> PgWireResult<Option<f32>> {
-    let Some(f) = v.as_f64() else {
-        return Ok(None);
-    };
+pub(in crate::control::server::pgwire) fn checked_narrow_f32(f: f64) -> PgWireResult<f32> {
     let narrowed = f as f32;
     if f.is_finite() && !narrowed.is_finite() {
         return Err(out_of_range(format!(
@@ -96,7 +84,7 @@ pub(in crate::control::server::pgwire) fn checked_narrow_f32(
             FloatWidth::F32.pg_type_name()
         )));
     }
-    Ok(Some(narrowed))
+    Ok(narrowed)
 }
 
 /// A pgwire `22003` (`numeric_value_out_of_range`) error — the SQLSTATE
@@ -113,7 +101,6 @@ fn out_of_range(message: String) -> pgwire::error::PgWireError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     /// The SQLSTATE a guard raised, or a panic naming what it raised instead.
     fn sqlstate_of(err: pgwire::error::PgWireError) -> String {
@@ -126,32 +113,17 @@ mod tests {
     #[test]
     fn integer_inside_declared_width_passes_through() {
         assert_eq!(
-            checked_narrow(&json!(i16::MAX as i64), IntWidth::I16).expect("in range"),
-            Some(i16::MAX as i64)
+            checked_narrow(i16::MAX as i64, IntWidth::I16).expect("in range"),
+            i16::MAX as i64
         );
-        assert_eq!(
-            checked_narrow(&json!(-1), IntWidth::I32).expect("in range"),
-            Some(-1)
-        );
+        assert_eq!(checked_narrow(-1, IntWidth::I32).expect("in range"), -1);
     }
 
     #[test]
     fn integer_outside_declared_width_is_rejected() {
-        let err = checked_narrow(&json!(i16::MAX as i64 + 1), IntWidth::I16)
+        let err = checked_narrow(i16::MAX as i64 + 1, IntWidth::I16)
             .expect_err("one past the boundary must be refused");
         assert_eq!(sqlstate_of(err), "22003");
-    }
-
-    #[test]
-    fn non_integer_cell_encodes_as_null() {
-        assert_eq!(
-            checked_narrow(&json!(null), IntWidth::I16).expect("null is not an error"),
-            None
-        );
-        assert_eq!(
-            checked_narrow(&json!("x"), IntWidth::I16).expect("text is not an error"),
-            None
-        );
     }
 
     /// Narrowing rounds, and rounding is not an error: PostgreSQL's `real`
@@ -159,13 +131,10 @@ mod tests {
     /// unreadable for almost every value they hold.
     #[test]
     fn float_narrowing_rounds_without_erroring() {
-        for v in [json!(1.1), json!(0.0), json!(-2.5), json!(3.4e38)] {
-            let narrowed = checked_narrow_f32(&v)
-                .expect("an in-range value must narrow without error")
-                .expect("a JSON number must narrow to Some");
+        for v in [1.1, 0.0, -2.5, 3.4e38] {
+            let narrowed = checked_narrow_f32(v).expect("an in-range value must narrow");
             assert_eq!(
-                narrowed,
-                v.as_f64().expect("test value is a number") as f32,
+                narrowed, v as f32,
                 "{v} must narrow by the ordinary rounding cast"
             );
         }
@@ -175,9 +144,9 @@ mod tests {
     /// number silently replaced by infinity on the wire.
     #[test]
     fn finite_float_overflowing_f32_is_rejected() {
-        for v in [json!(1e39), json!(-1e39), json!(f64::MAX), json!(f64::MIN)] {
-            let err = checked_narrow_f32(&v)
-                .expect_err("a finite value beyond f32 range must be refused");
+        for v in [1e39, -1e39, f64::MAX, f64::MIN] {
+            let err =
+                checked_narrow_f32(v).expect_err("a finite value beyond f32 range must be refused");
             assert_eq!(sqlstate_of(err), "22003", "{v} must report 22003");
         }
     }
@@ -186,8 +155,7 @@ mod tests {
     /// `f64` nodedb actually stores.
     #[test]
     fn float_overflow_error_names_the_declared_type() {
-        let err =
-            checked_narrow_f32(&json!(1e300)).expect_err("1e300 must overflow single precision");
+        let err = checked_narrow_f32(1e300).expect_err("1e300 must overflow single precision");
         let pgwire::error::PgWireError::UserError(info) = err else {
             panic!("expected a UserError carrying a SQLSTATE");
         };
@@ -198,17 +166,18 @@ mod tests {
         );
     }
 
-    /// A cell that is not a number at all encodes as SQL NULL, exactly as the
-    /// wider `Float8` arm does — never an error.
+    /// A value already infinite or NaN is representable in both widths and
+    /// passes through as itself, never as an overflow.
     #[test]
-    fn non_numeric_float_cell_encodes_as_null() {
-        assert_eq!(
-            checked_narrow_f32(&json!(null)).expect("null is not an error"),
-            None
+    fn non_finite_float_passes_through() {
+        assert!(
+            checked_narrow_f32(f64::NAN)
+                .expect("NaN is not an overflow")
+                .is_nan()
         );
         assert_eq!(
-            checked_narrow_f32(&json!("Infinity")).expect("string is not an error"),
-            None
+            checked_narrow_f32(f64::INFINITY).expect("inf is not an overflow"),
+            f32::INFINITY
         );
     }
 }

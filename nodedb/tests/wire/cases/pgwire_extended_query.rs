@@ -555,12 +555,13 @@ async fn extended_query_binary_typed_columns_decode() {
     assert_eq!(name, "hello");
 }
 
-/// A `TIMESTAMP` column is feature-blocked for binary encoding, so it stays
-/// text even when the client requests binary. The extended query still
-/// succeeds and its binary-capable sibling column decodes; the same timestamp
-/// is retrievable as text over the simple-query path.
+/// A `TIMESTAMP` column honours a binary result request: the cell arrives as
+/// PostgreSQL binary `timestamp` (microseconds since 2000-01-01) and decodes
+/// through the driver's `SystemTime` reader to the stored instant, next to
+/// its integer sibling. The same timestamp renders as ISO-8601 text over the
+/// simple-query path.
 #[tokio::test]
-async fn extended_query_timestamp_text_fallback_with_binary_sibling() {
+async fn extended_query_timestamp_decodes_from_binary_with_sibling() {
     let server = TestServer::start().await;
     server
         .exec(
@@ -574,9 +575,9 @@ async fn extended_query_timestamp_text_fallback_with_binary_sibling() {
         .await
         .unwrap();
 
-    // Extended path: the query carrying a timestamp column must succeed, and
-    // the integer sibling decodes from binary. `n` is declared INT, so it
-    // advertises OID 23 and decodes as i32.
+    // Extended path: `tokio-postgres` requests binary for every result
+    // column. `n` is declared INT, so it advertises OID 23 and decodes as
+    // i32; `ts` decodes as the stored instant, 2024-01-01T00:00:00Z.
     let rows = server
         .client
         .query("SELECT n, ts FROM ev WHERE id = $1", &[&"a"])
@@ -585,18 +586,19 @@ async fn extended_query_timestamp_text_fallback_with_binary_sibling() {
     assert_eq!(rows.len(), 1);
     let n: i32 = rows[0].get("n");
     assert_eq!(n, 7);
+    let ts: std::time::SystemTime = rows[0].get("ts");
+    assert_eq!(
+        ts,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_704_067_200),
+        "binary timestamp must decode to the stored instant"
+    );
 
-    // Simple-query path returns every column as text, including the timestamp.
+    // Simple-query path renders the timestamp as ISO-8601 text.
     let text_rows = server
         .query_text("SELECT ts FROM ev WHERE id = 'a'")
         .await
         .expect("simple-query text select should succeed");
-    assert_eq!(text_rows.len(), 1);
-    assert!(
-        !text_rows[0].is_empty(),
-        "timestamp must be present as text on the simple-query path, got {:?}",
-        text_rows[0]
-    );
+    assert_eq!(text_rows, vec!["2024-01-01T00:00:00.000000Z".to_string()]);
 }
 
 /// Regression lock: when the client declares a parameter's type (via

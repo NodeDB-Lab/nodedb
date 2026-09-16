@@ -5,31 +5,14 @@
 //! These operate on decoded `nodedb_types::Value` rows — no pgwire wire
 //! types — so they are shared across any protocol-specific response shaper.
 //! Protocol-specific encode glue that turns these into wire rows (e.g.
-//! pgwire's `DataRow`) lives in each protocol's own handler code.
-//! `json_value_to_text` is the one JSON helper here: pgwire converts a cell
-//! to JSON at its edge and renders that JSON as PostgreSQL text.
+//! pgwire's `DataRow`) lives in each protocol's own handler code; the
+//! per-cell text form lives in `response_shape::cell`.
 
 use std::collections::HashMap;
 
 use nodedb_types::Value;
 
 use super::types::ShapedRow;
-
-/// Convert a JSON scalar value to its PostgreSQL text-format string.
-///
-/// - `String` values are returned as-is (no extra quoting).
-/// - `Bool` uses PostgreSQL text format: `t` for true, `f` for false.
-/// - All other scalars (`Number`, `Array`, `Object`) use their JSON
-///   `Display` representation; arrays/objects should not normally appear
-///   as individual cell values but are rendered faithfully.
-pub fn json_value_to_text(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        // PostgreSQL text format for boolean is `t`/`f`.
-        serde_json::Value::Bool(b) => if *b { "t" } else { "f" }.to_string(),
-        other => other.to_string(),
-    }
-}
 
 /// Flatten a decoded Data-Plane value into typed row objects.
 ///

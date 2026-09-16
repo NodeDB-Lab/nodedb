@@ -5,13 +5,12 @@
 //!
 //! A Bind message carries the client's requested result-column format codes
 //! (via `portal.result_column_format`). NodeDB honors a binary request only
-//! for the scalar types whose binary wire encoding is available under the
-//! current pgwire feature set: the integers, floats, `bool`, `bytea`, and the
-//! string types. Columns whose binary encoding is feature-gated
-//! (`Timestamp`/`Timestamptz`/`Json`/`Jsonb`) or that map to no dedicated
-//! scalar wire type stay in text format even when binary was requested — this
-//! is protocol-legal (the RowDescription advertises text, the client decodes
-//! text).
+//! for the scalar types the cell encoder (`shape_encode::encode_cell`) has a
+//! binary arm for: the integers, floats, `bool`, the string types, and the
+//! timestamps. Every other column (`Bytea`/`Json`/`Jsonb`, the arrays, and
+//! anything mapping to no dedicated scalar wire type) stays in text format
+//! even when binary was requested — this is protocol-legal (the
+//! RowDescription advertises text, the client decodes text).
 
 use pgwire::api::Type;
 use pgwire::api::portal::Format;
@@ -59,10 +58,9 @@ pub(super) fn pg_type_to_ddl_col_type(t: &Type) -> DdlColType {
     }
 }
 
-/// Whether a column of this neutral type can be encoded in binary result
-/// format under the current pgwire feature set. Timestamp/Numeric/Json/Jsonb
-/// and the array types are excluded — their binary encoders are feature-gated
-/// or client-library-specific — and stay text even when binary is requested.
+/// Whether a column of this neutral type has a binary arm in the cell
+/// encoder. Bytea/Json/Jsonb and the array types have none and stay text
+/// even when binary is requested.
 pub(super) fn binary_supported(ct: DdlColType) -> bool {
     matches!(
         ct,
@@ -74,6 +72,8 @@ pub(super) fn binary_supported(ct: DdlColType) -> bool {
             | DdlColType::Bool
             | DdlColType::Text
             | DdlColType::Varchar
+            | DdlColType::Timestamp
+            | DdlColType::Timestamptz
     )
 }
 
@@ -154,14 +154,15 @@ mod tests {
     }
 
     #[test]
-    fn binary_supported_excludes_feature_blocked() {
+    fn binary_supported_excludes_types_without_a_binary_arm() {
         assert!(binary_supported(DdlColType::Int8));
         assert!(binary_supported(DdlColType::Bool));
         assert!(binary_supported(DdlColType::Text));
-        // bytea binary is not supported in v1 (ambiguous JSON representation):
-        // it downgrades to text-format like timestamp/numeric/json.
+        assert!(binary_supported(DdlColType::Timestamp));
+        assert!(binary_supported(DdlColType::Timestamptz));
+        // bytea has no binary arm (a byte cell renders as base64 text): it
+        // downgrades to text-format like json and the arrays.
         assert!(!binary_supported(DdlColType::Bytea));
-        assert!(!binary_supported(DdlColType::Timestamp));
         assert!(!binary_supported(DdlColType::Json));
         assert!(!binary_supported(DdlColType::Float8Array));
     }
@@ -170,12 +171,15 @@ mod tests {
     fn unified_binary_downgrades_blocked_types() {
         let fields = vec![
             FieldInfo::new("a".into(), None, None, Type::INT8, FieldFormat::Text),
-            FieldInfo::new("b".into(), None, None, Type::TIMESTAMP, FieldFormat::Text),
+            FieldInfo::new("b".into(), None, None, Type::JSON, FieldFormat::Text),
+            FieldInfo::new("c".into(), None, None, Type::TIMESTAMP, FieldFormat::Text),
         ];
         let formats = resolve_result_formats(&fields, &Format::UnifiedBinary);
         assert_eq!(formats[0], FieldFormat::Binary);
-        // TIMESTAMP is feature-blocked -> stays text even under UnifiedBinary.
+        // JSON has no binary arm -> stays text even under UnifiedBinary.
         assert_eq!(formats[1], FieldFormat::Text);
+        // TIMESTAMP has one -> honoured.
+        assert_eq!(formats[2], FieldFormat::Binary);
     }
 
     #[test]

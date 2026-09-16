@@ -34,7 +34,7 @@
 //! a schemaless row carries fields no catalog column declares — which is the
 //! same answer `SELECT *` gives for the same row.
 
-use nodedb_types::{NativeCell, NodeDbError, Value};
+use nodedb_types::{NativeCell, NdbDateTime, NodeDbError, Value};
 
 use crate::data::executor::response_codec::{RowsPayload, decode_payload_to_json};
 
@@ -168,22 +168,25 @@ fn project_onto_announced(schema: &OutputSchema, rows: &[ShapedRow]) -> ShapedRo
 /// (a schemaless row can hold `"42"` under a declared `INT`), and the
 /// RowDescription this response is held to announces the catalog type — a
 /// client that asked for BINARY result format is handed the scalar's wire
-/// bytes, which have to come from a number or a bool, not from the digits
-/// of its text form.
+/// bytes, which have to come from a number, a bool or an instant, not from
+/// the digits of its text form.
 ///
-/// A cell that does not parse as its announced type is left as text, which
-/// both encoders render verbatim.
+/// A cell that does not parse as its announced type is left as text. The
+/// numeric and bool encoders render such text verbatim; a timestamp column
+/// refuses it, because a cell under a timestamp column renders only from an
+/// instant.
 fn retype_cell(ct: DdlColType, cell: &mut Value) {
     let Value::String(text) = cell else {
         return;
     };
     let retyped = match ct {
-        DdlColType::Int8
-        | DdlColType::Int4
-        | DdlColType::Int2
-        // Epoch microseconds; the encoder formats the number as ISO-8601.
-        | DdlColType::Timestamp
-        | DdlColType::Timestamptz => text.parse::<i64>().ok().map(Value::Integer),
+        DdlColType::Int8 | DdlColType::Int4 | DdlColType::Int2 => {
+            text.parse::<i64>().ok().map(Value::Integer)
+        }
+        // ISO-8601 text becomes the instant it denotes; an integer string
+        // carries no unit and stays text.
+        DdlColType::Timestamp => NdbDateTime::parse(text).map(Value::NaiveDateTime),
+        DdlColType::Timestamptz => NdbDateTime::parse(text).map(Value::DateTime),
         // A float that parses but is not finite has no JSON form, so it stays
         // text.
         DdlColType::Float8 | DdlColType::Float4 => text
@@ -238,7 +241,6 @@ mod tests {
     use super::*;
     use crate::control::server::response_shape::cell::value_to_wire_json;
     use crate::control::server::response_shape::schema::OutputColumn;
-    use nodedb_types::NdbDateTime;
 
     fn text(s: &str) -> Value {
         Value::String(s.to_string())
@@ -356,6 +358,31 @@ mod tests {
         assert_eq!(shaped.rows[0]["b"], Value::Bool(true));
         // A TEXT column keeps its text even when it looks like a number.
         assert_eq!(shaped.rows[0]["s"], text("42"));
+    }
+
+    /// ISO-8601 text under a timestamp column becomes the instant it denotes,
+    /// naive under `TIMESTAMP` and UTC under `TIMESTAMPTZ`; an integer string
+    /// carries no unit and stays text.
+    #[test]
+    fn timestamp_text_is_retyped_to_an_instant() {
+        let at = NdbDateTime::from_micros(1_583_402_400_000_000);
+        let bytes = payload(
+            &["ts", "tstz", "digits"],
+            &[&[
+                Some("2020-03-05 10:00:00"),
+                Some("2020-03-05T10:00:00Z"),
+                Some("1583402400000000"),
+            ]],
+        );
+        let schema = announced(&[
+            ("ts", DdlColType::Timestamp),
+            ("tstz", DdlColType::Timestamptz),
+            ("digits", DdlColType::Timestamp),
+        ]);
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        assert_eq!(shaped.rows[0]["ts"], Value::NaiveDateTime(at));
+        assert_eq!(shaped.rows[0]["tstz"], Value::DateTime(at));
+        assert_eq!(shaped.rows[0]["digits"], text("1583402400000000"));
     }
 
     /// A typed cell passes through as itself: an integer stays a number under

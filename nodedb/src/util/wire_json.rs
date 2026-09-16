@@ -2,7 +2,8 @@
 
 //! Edge conversion of a typed cell to the JSON a text protocol emits.
 //!
-//! pgwire and HTTP render JSON text, and `control::security` redacts a
+//! HTTP renders JSON text, pgwire renders a composite cell's JSON text
+//! (`response_shape::cell::cell_text`), and `control::security` redacts a
 //! typed cell before rendering it into a redaction preview; each converts
 //! through [`value_to_wire_json`], and nowhere else: the one place a byte
 //! cell picks its text form is here. This lives outside

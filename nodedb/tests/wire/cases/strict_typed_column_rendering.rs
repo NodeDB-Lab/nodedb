@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A `document_strict` `TIMESTAMP` column renders the stored instant the same
-//! way whichever route reads it, and the same way a timeseries time key does.
-//! A `columnar` `TIMESTAMP` column renders the same instant from the live
-//! memtable and from a flushed segment.
+//! A `document_strict` `TIMESTAMP` or `TIMESTAMPTZ` column renders the
+//! stored instant as ISO-8601 whichever route reads it, and the same way a
+//! timeseries time key does. A `columnar` `TIMESTAMP` column renders the
+//! same instant from the live memtable and from a flushed segment. An
+//! integer literal written into a `TIMESTAMP` column is epoch milliseconds
+//! on every engine, and a literal that carries no instant is refused.
 
 use crate::harness::TestServer;
 
 /// The instant every test in this file stores.
 const EARLY: &str = "2020-03-05 10:00:00";
-/// `EARLY` as a declared `TIMESTAMP` column renders it. The engine stores
-/// 1583402400000 epoch milliseconds; a `TIMESTAMP` cell carries epoch
-/// microseconds, which the pgwire encoder writes as ISO-8601 UTC.
+/// `EARLY` as a declared timestamp column renders it: the engine stores the
+/// instant as epoch microseconds and hands the encoder a typed instant,
+/// which renders as ISO-8601 UTC.
 const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
-/// `EARLY` as epoch microseconds — 1583402400000 milliseconds times 1000.
-/// A projection that announces no catalog type leaves its cells this number.
-const EARLY_MICROS: &str = "1583402400000000";
+/// `EARLY` as seconds since the Unix epoch.
+const EARLY_UNIX_SECS: u64 = 1_583_402_400;
+/// `EARLY` as milliseconds since the Unix epoch, the unit an integer literal
+/// written into a timestamp column denotes.
+const EARLY_UNIX_MILLIS: i64 = 1_583_402_400_000;
 
 /// A strict `document_strict` collection carrying a `TIMESTAMP` column, read
-/// back with a direct `SELECT`, denotes the stored instant. Epoch
-/// milliseconds — 1583402400000 — read as microseconds denote 1970-01-19, so
-/// a millisecond value fails both arms.
+/// back with a direct `SELECT`, renders the stored instant as ISO-8601 —
+/// never as an epoch integer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_strict_timestamp_column_renders_the_stored_instant() {
     let server = TestServer::start().await;
@@ -43,12 +46,83 @@ async fn a_strict_timestamp_column_renders_the_stored_instant() {
         .query_text("SELECT created_at FROM strict_ts_direct WHERE id = 'r1'")
         .await
         .expect("SELECT of a strict TIMESTAMP column must succeed");
-    assert_eq!(rows.len(), 1, "one stored row: {rows:?}");
+    assert_eq!(
+        rows,
+        vec![EARLY_ISO.to_string()],
+        "a strict TIMESTAMP column must render {EARLY} as {EARLY_ISO}"
+    );
+}
 
-    assert!(
-        rows[0] == EARLY_ISO || rows[0] == EARLY_MICROS,
-        "a strict TIMESTAMP column must denote {EARLY}: expected {EARLY_ISO} \
-         or {EARLY_MICROS}, got {rows:?}"
+/// The `TIMESTAMPTZ` sibling renders the same instant the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_strict_timestamptz_column_renders_the_stored_instant() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION strict_tstz_direct \
+             (id TEXT PRIMARY KEY, created_at TIMESTAMPTZ) \
+             WITH (engine='document_strict')",
+        )
+        .await
+        .expect("create strict_tstz_direct");
+    server
+        .exec(&format!(
+            "INSERT INTO strict_tstz_direct (id, created_at) VALUES ('r1', '{EARLY}')"
+        ))
+        .await
+        .expect("insert into strict_tstz_direct");
+
+    let rows = server
+        .query_text("SELECT created_at FROM strict_tstz_direct WHERE id = 'r1'")
+        .await
+        .expect("SELECT of a strict TIMESTAMPTZ column must succeed");
+    assert_eq!(
+        rows,
+        vec![EARLY_ISO.to_string()],
+        "a strict TIMESTAMPTZ column must render {EARLY} as {EARLY_ISO}"
+    );
+}
+
+/// Over the extended protocol the driver requests binary results, and a
+/// timestamp column honours that: both `TIMESTAMP` and `TIMESTAMPTZ` decode
+/// through the driver's `SystemTime` reader to the stored instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_strict_timestamp_column_decodes_from_binary() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION strict_ts_binary \
+             (id TEXT PRIMARY KEY, at TIMESTAMP, at_tz TIMESTAMPTZ) \
+             WITH (engine='document_strict')",
+        )
+        .await
+        .expect("create strict_ts_binary");
+    server
+        .exec(&format!(
+            "INSERT INTO strict_ts_binary (id, at, at_tz) VALUES ('r1', '{EARLY}', '{EARLY}')"
+        ))
+        .await
+        .expect("insert into strict_ts_binary");
+
+    let rows = server
+        .client
+        .query(
+            "SELECT at, at_tz FROM strict_ts_binary WHERE id = $1",
+            &[&"r1"],
+        )
+        .await
+        .expect("extended-protocol SELECT of timestamp columns must succeed");
+    assert_eq!(rows.len(), 1, "one stored row");
+    let expected = std::time::UNIX_EPOCH + std::time::Duration::from_secs(EARLY_UNIX_SECS);
+    assert_eq!(
+        rows[0].get::<_, std::time::SystemTime>("at"),
+        expected,
+        "binary TIMESTAMP must decode to {EARLY}"
+    );
+    assert_eq!(
+        rows[0].get::<_, std::time::SystemTime>("at_tz"),
+        expected,
+        "binary TIMESTAMPTZ must decode to {EARLY}"
     );
 }
 
@@ -75,12 +149,10 @@ async fn a_strict_timestamp_column_returned_by_insert_renders_the_stored_instant
         ))
         .await
         .expect("INSERT ... RETURNING of a strict TIMESTAMP column must succeed");
-    assert_eq!(rows.len(), 1, "one inserted row: {rows:?}");
-
-    assert!(
-        rows[0] == EARLY_ISO || rows[0] == EARLY_MICROS,
-        "a strict TIMESTAMP column returned by INSERT must denote {EARLY}: expected \
-         {EARLY_ISO} or {EARLY_MICROS}, got {rows:?}"
+    assert_eq!(
+        rows,
+        vec![EARLY_ISO.to_string()],
+        "a strict TIMESTAMP column returned by INSERT must render {EARLY} as {EARLY_ISO}"
     );
 }
 
@@ -234,5 +306,92 @@ async fn a_columnar_timestamp_column_renders_the_same_before_and_after_flush() {
         vec![EARLY_ISO.to_string(); 3],
         "a flushed-segment cell and a live-memtable cell must render the one \
          instant identically: before={before_flush:?} after={after_flush:?}"
+    );
+}
+
+/// An integer literal written into a `TIMESTAMP` column is epoch
+/// milliseconds, resolved once in the planner, so the four engines that
+/// store a declared column — strict, key-value, columnar, and schemaless
+/// document — all render the one instant it denotes. No engine stores the
+/// bare integer, and no read path picks a unit for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_integer_literal_into_a_timestamp_column_is_epoch_milliseconds() {
+    let server = TestServer::start().await;
+    let collections = [
+        ("int_ts_strict", "id", "document_strict"),
+        ("int_ts_kv", "key", "kv"),
+        ("int_ts_columnar", "id", "columnar"),
+        ("int_ts_document", "id", "document_schemaless"),
+    ];
+    for (name, key, engine) in collections {
+        server
+            .exec(&format!(
+                "CREATE COLLECTION {name} \
+                 ({key} TEXT PRIMARY KEY, created_at TIMESTAMP) \
+                 WITH (engine='{engine}')"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("create {name} on {engine}: {e}"));
+        server
+            .exec(&format!(
+                "INSERT INTO {name} ({key}, created_at) VALUES ('r1', {EARLY_UNIX_MILLIS})"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("insert an integer literal into {name}: {e}"));
+
+        let rows = server
+            .query_text(&format!("SELECT created_at FROM {name} WHERE {key} = 'r1'"))
+            .await
+            .unwrap_or_else(|e| panic!("SELECT of {name}.created_at: {e}"));
+        assert_eq!(
+            rows,
+            vec![EARLY_ISO.to_string()],
+            "{engine}: an integer literal into a TIMESTAMP column must render \
+             {EARLY_UNIX_MILLIS} epoch milliseconds as {EARLY_ISO}"
+        );
+    }
+}
+
+/// A literal that carries no instant is refused at the statement, naming
+/// the column, rather than stored under the `TIMESTAMP` column for a read
+/// to fail on later. Text that spells no date and a boolean are both
+/// refused, on an engine that persists the planner's value verbatim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_non_datetime_literal_into_a_timestamp_column_is_refused() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION refused_ts \
+             (id TEXT PRIMARY KEY, created_at TIMESTAMP) \
+             WITH (engine='document_schemaless')",
+        )
+        .await
+        .expect("create refused_ts");
+
+    let text_error = server
+        .exec("INSERT INTO refused_ts (id, created_at) VALUES ('r2', 'not a date')")
+        .await
+        .expect_err("text that spells no date must be refused");
+    assert!(
+        text_error.contains("created_at"),
+        "the refusal must name the column: {text_error}"
+    );
+
+    let bool_error = server
+        .exec("INSERT INTO refused_ts (id, created_at) VALUES ('r3', true)")
+        .await
+        .expect_err("a boolean carries no instant and must be refused");
+    assert!(
+        bool_error.contains("created_at"),
+        "the refusal must name the column: {bool_error}"
+    );
+
+    let rows = server
+        .query_text("SELECT id FROM refused_ts")
+        .await
+        .expect("SELECT from refused_ts must succeed");
+    assert!(
+        rows.is_empty(),
+        "a refused INSERT must store nothing: {rows:?}"
     );
 }
