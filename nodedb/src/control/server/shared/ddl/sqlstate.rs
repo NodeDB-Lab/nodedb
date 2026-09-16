@@ -190,6 +190,7 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
         ErrorCode::Unsupported { detail } => {
             ("ERROR", sqlstate::FEATURE_NOT_SUPPORTED, detail.clone())
         }
+        ErrorCode::BadRequest { detail } => ("ERROR", sqlstate::SYNTAX_ERROR, detail.clone()),
         ErrorCode::RollbackFailed {
             entry_index,
             detail,

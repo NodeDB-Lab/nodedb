@@ -136,6 +136,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::UndefinedColumn { column } => Self::UndefinedColumn { column },
             ErrorCode::Internal { detail } => Self::Internal { detail },
             ErrorCode::Unsupported { detail } => Self::Unsupported { detail },
+            ErrorCode::BadRequest { detail } => Self::BadRequest { detail },
             ErrorCode::RollbackFailed {
                 entry_index,
                 detail,
@@ -235,6 +236,7 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::UndefinedColumn { column } => Self::UndefinedColumn { column },
             DataPlaneErrorCode::Internal { detail } => Self::Internal { detail },
             DataPlaneErrorCode::Unsupported { detail } => Self::Unsupported { detail },
+            DataPlaneErrorCode::BadRequest { detail } => Self::BadRequest { detail },
             DataPlaneErrorCode::RollbackFailed {
                 entry_index,
                 detail,
