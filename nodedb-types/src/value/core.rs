@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::array_cell::ArrayCell;
 use crate::datetime::{NdbDateTime, NdbDuration};
 use crate::geometry::Geometry;
+use crate::json_msgpack::InstantKind;
 
 /// A dynamic value that can represent any field type in a document
 /// or any parameter in a SQL query.
@@ -191,6 +192,15 @@ impl Value {
     pub fn as_naive_datetime(&self) -> Option<&NdbDateTime> {
         match self {
             Value::NaiveDateTime(dt) => Some(dt),
+            _ => None,
+        }
+    }
+
+    /// Try to extract as an instant of either kind.
+    pub fn as_instant(&self) -> Option<(InstantKind, NdbDateTime)> {
+        match self {
+            Value::DateTime(dt) => Some((InstantKind::Utc, *dt)),
+            Value::NaiveDateTime(dt) => Some((InstantKind::Naive, *dt)),
             _ => None,
         }
     }

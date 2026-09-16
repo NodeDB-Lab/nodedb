@@ -7,6 +7,8 @@
 //! Follow the timeseries ingest pattern: `SqlValue → row_to_msgpack()` at ingress,
 //! raw msgpack throughout, `msgpack_to_json_string()` at outermost pgwire/HTTP layer.
 
+use nodedb_types::InstantKind;
+
 /// Write a msgpack map header.
 #[inline]
 pub fn write_map_header(buf: &mut Vec<u8>, len: usize) {
@@ -96,6 +98,12 @@ pub fn write_null(buf: &mut Vec<u8>) {
     buf.push(0xC0);
 }
 
+/// Write a typed instant as the ten-byte instant ext (`fixext8` type 1 / 2).
+#[inline]
+pub fn write_instant(buf: &mut Vec<u8>, kind: InstantKind, micros: i64) {
+    nodedb_types::write_instant(buf, kind, micros);
+}
+
 /// Write a msgpack binary blob (bin 8/16/32).
 #[inline]
 pub fn write_bin(buf: &mut Vec<u8>, data: &[u8]) {
@@ -159,6 +167,13 @@ pub fn write_kv_raw(buf: &mut Vec<u8>, key: &str, raw_value: &[u8]) {
 pub fn write_kv_null(buf: &mut Vec<u8>, key: &str) {
     write_str(buf, key);
     write_null(buf);
+}
+
+/// Write a key-value pair (string key, instant value).
+#[inline]
+pub fn write_kv_instant(buf: &mut Vec<u8>, key: &str, kind: InstantKind, micros: i64) {
+    write_str(buf, key);
+    write_instant(buf, kind, micros);
 }
 
 /// Inject a string field into a msgpack map without full decode.
@@ -351,5 +366,21 @@ mod tests {
         buf.clear();
         write_i64(&mut buf, -100);
         assert_eq!(buf, vec![0xD0, (-100i8) as u8]);
+    }
+
+    #[test]
+    fn instant_cell_reads_back() {
+        let mut buf = Vec::new();
+        write_map_header(&mut buf, 1);
+        write_kv_instant(&mut buf, "ts", InstantKind::Naive, -42);
+
+        let field = crate::msgpack_scan::field::extract_field(&buf, 0, "ts").unwrap();
+        assert_eq!(field.1 - field.0, 10);
+        assert_eq!(
+            crate::msgpack_scan::reader::read_value(&buf, field.0),
+            Some(nodedb_types::Value::NaiveDateTime(
+                nodedb_types::NdbDateTime::from_micros(-42)
+            ))
+        );
     }
 }

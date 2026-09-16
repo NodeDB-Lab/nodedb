@@ -8,6 +8,8 @@
 use std::cmp::Ordering;
 use std::hash::{BuildHasher, Hasher};
 
+use nodedb_types::read_instant;
+
 use crate::msgpack_scan::reader::{read_f64, read_i64, read_null, str_bounds};
 
 /// Hash the raw bytes of a MessagePack value at `range` within `buf`.
@@ -46,11 +48,12 @@ pub fn hash_field_bytes_with(
 /// Compare two MessagePack values by their decoded content.
 ///
 /// Comparison order:
-/// 1. Null < Bool < Number < String < Binary < Array < Map
+/// 1. Null < Bool < Number < Instant < String < Binary < Array < Map < Ext
 /// 2. Within numbers: compare as f64
-/// 3. Within strings: lexicographic on raw bytes (valid UTF-8 guarantees
+/// 3. Within instants: by kind (UTC before naive), then signed epoch micros
+/// 4. Within strings: lexicographic on raw bytes (valid UTF-8 guarantees
 ///    byte order = Unicode code-point order for ASCII/Latin-1)
-/// 4. Fallback: raw byte comparison
+/// 5. Fallback: raw byte comparison
 pub fn compare_field_bytes(
     a_buf: &[u8],
     a_range: (usize, usize),
@@ -69,23 +72,22 @@ pub fn compare_field_bytes(
         None => return Ordering::Greater,
     };
 
-    let a_type = type_rank(a_tag);
-    let b_type = type_rank(b_tag);
+    let a_type = type_rank(a_buf, a_off, a_tag);
+    let b_type = type_rank(b_buf, b_off, b_tag);
 
     if a_type != b_type {
         return a_type.cmp(&b_type);
     }
 
     match a_type {
-        0 => Ordering::Equal, // both null
-        1 => {
-            // bool
+        RANK_NULL => Ordering::Equal,
+        RANK_BOOL => {
             let a_val = a_tag == 0xc3; // true
             let b_val = b_tag == 0xc3;
             a_val.cmp(&b_val)
         }
-        2 => {
-            // number — compare as f64
+        RANK_NUMBER => {
+            // compare as f64
             match (read_f64(a_buf, a_off), read_f64(b_buf, b_off)) {
                 (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
                 (Some(_), None) => Ordering::Greater,
@@ -93,7 +95,20 @@ pub fn compare_field_bytes(
                 (None, None) => Ordering::Equal,
             }
         }
-        3 => {
+        RANK_INSTANT => {
+            // Both sides decoded as instants by `type_rank`. Kind first, then
+            // signed micros: the raw payload is not byte-comparable below 0.
+            match (read_instant(a_buf, a_off), read_instant(b_buf, b_off)) {
+                (Some((a_kind, a_us)), Some((b_kind, b_us))) => a_kind
+                    .ext_type()
+                    .cmp(&b_kind.ext_type())
+                    .then(a_us.cmp(&b_us)),
+                (Some(_), None) => Ordering::Greater,
+                (None, Some(_)) => Ordering::Less,
+                (None, None) => Ordering::Equal,
+            }
+        }
+        RANK_STRING => {
             // string — compare raw bytes
             match (str_bounds(a_buf, a_off), str_bounds(b_buf, b_off)) {
                 (Some((a_s, a_l)), Some((b_s, b_l))) => {
@@ -148,20 +163,41 @@ pub fn is_field_null(buf: &[u8], range: (usize, usize)) -> bool {
     read_null(buf, range.0)
 }
 
+const RANK_NULL: u8 = 0;
+const RANK_BOOL: u8 = 1;
+const RANK_NUMBER: u8 = 2;
+const RANK_INSTANT: u8 = 3;
+const RANK_STRING: u8 = 4;
+const RANK_BINARY: u8 = 5;
+const RANK_ARRAY: u8 = 6;
+const RANK_MAP: u8 = 7;
+const RANK_EXT: u8 = 8;
+const RANK_UNKNOWN: u8 = 9;
+
 /// Type rank for cross-type ordering. Lower rank = sorts first.
-/// Null(0) < Bool(1) < Number(2) < String(3) < Binary(4) < Array(5) < Map(6) < Ext(7)
-fn type_rank(tag: u8) -> u8 {
+/// Null < Bool < Number < Instant < String < Binary < Array < Map < Ext
+///
+/// An instant is a complete `fixext8` of type 1 / 2 at `off`. A `fixext8`
+/// of any other type, or a truncated one, ranks as ext.
+fn type_rank(buf: &[u8], off: usize, tag: u8) -> u8 {
     match tag {
-        0xc0 => 0,                      // nil
-        0xc2 | 0xc3 => 1,               // bool
-        0x00..=0x7f | 0xe0..=0xff => 2, // fixint
-        0xca..=0xd3 => 2,               // float/uint/int
-        0xa0..=0xbf | 0xd9..=0xdb => 3, // string
-        0xc4..=0xc6 => 4,               // binary
-        0x90..=0x9f | 0xdc | 0xdd => 5, // array
-        0x80..=0x8f | 0xde | 0xdf => 6, // map
-        0xc7..=0xc9 | 0xd4..=0xd8 => 7, // ext
-        _ => 8,                         // unknown
+        0xc0 => RANK_NULL,
+        0xc2 | 0xc3 => RANK_BOOL,
+        0x00..=0x7f | 0xe0..=0xff => RANK_NUMBER, // fixint
+        0xca..=0xd3 => RANK_NUMBER,               // float/uint/int
+        0xa0..=0xbf | 0xd9..=0xdb => RANK_STRING,
+        0xc4..=0xc6 => RANK_BINARY,
+        0x90..=0x9f | 0xdc | 0xdd => RANK_ARRAY,
+        0x80..=0x8f | 0xde | 0xdf => RANK_MAP,
+        0xd7 => {
+            if read_instant(buf, off).is_some() {
+                RANK_INSTANT
+            } else {
+                RANK_EXT
+            }
+        }
+        0xc7..=0xc9 | 0xd4..=0xd6 | 0xd8 => RANK_EXT,
+        _ => RANK_UNKNOWN,
     }
 }
 
@@ -288,6 +324,77 @@ mod tests {
         let b = encode(&json!(2.5));
         assert_eq!(
             compare_field_bytes(&a, val_range(&a), &b, val_range(&b)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_instants_negative_micros() {
+        use nodedb_types::{InstantKind, write_instant};
+        let mut a = Vec::new();
+        write_instant(&mut a, InstantKind::Utc, -10);
+        let mut b = Vec::new();
+        write_instant(&mut b, InstantKind::Utc, -5);
+        let mut c = Vec::new();
+        write_instant(&mut c, InstantKind::Utc, 1);
+        assert_eq!(
+            compare_field_bytes(&a, val_range(&a), &b, val_range(&b)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_field_bytes(&a, val_range(&a), &c, val_range(&c)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_field_bytes(&c, val_range(&c), &b, val_range(&b)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_field_bytes(&a, val_range(&a), &a, val_range(&a)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn compare_instant_kinds_order_utc_first() {
+        use nodedb_types::{InstantKind, write_instant};
+        let mut utc = Vec::new();
+        write_instant(&mut utc, InstantKind::Utc, 100);
+        let mut naive = Vec::new();
+        write_instant(&mut naive, InstantKind::Naive, 1);
+        assert_eq!(
+            compare_field_bytes(&utc, val_range(&utc), &naive, val_range(&naive)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compare_instant_vs_integer_uses_rank() {
+        use nodedb_types::{InstantKind, write_instant};
+        // A negative instant has a payload starting 0xff, above any fixint
+        // byte. Rank places it after every number and before every string.
+        let mut inst = Vec::new();
+        write_instant(&mut inst, InstantKind::Naive, -1);
+        let int = encode(&json!(i64::MAX));
+        let s = encode(&json!(""));
+        assert_eq!(
+            compare_field_bytes(&int, val_range(&int), &inst, val_range(&inst)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_field_bytes(&inst, val_range(&inst), &s, val_range(&s)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn unknown_fixext8_ranks_as_ext() {
+        use nodedb_types::{InstantKind, write_instant};
+        let mut inst = Vec::new();
+        write_instant(&mut inst, InstantKind::Utc, 0);
+        let other = [0xd7, 0x09, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            compare_field_bytes(&inst, val_range(&inst), &other, val_range(&other)),
             Ordering::Less
         );
     }

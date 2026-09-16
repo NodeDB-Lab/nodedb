@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Msgpack serialization for `serde_json::Value` and `nodedb_types::Value`.
+//!
+//! `Value::DateTime` and `Value::NaiveDateTime` are written as the instant
+//! ext (`fixext8`, see `instant_ext`). `Duration`, `Decimal`, and `Geometry`
+//! are written as strings. `Vector` is a float64 array, `ArrayCell` a map,
+//! and `Range` / `Record` are `nil`.
 
+use super::instant_ext::{InstantKind, write_instant};
 use super::json_value::JsonValue;
 
 /// Serialize a `serde_json::Value` to MessagePack bytes.
@@ -60,9 +66,8 @@ fn write_native_value(buf: &mut Vec<u8>, value: &crate::Value) {
                 write_native_value(buf, v);
             }
         }
-        crate::Value::DateTime(dt) | crate::Value::NaiveDateTime(dt) => {
-            write_native_str(buf, &dt.to_string())
-        }
+        crate::Value::DateTime(dt) => write_instant(buf, InstantKind::Utc, dt.micros),
+        crate::Value::NaiveDateTime(dt) => write_instant(buf, InstantKind::Naive, dt.micros),
         crate::Value::Duration(d) => write_native_str(buf, &d.to_string()),
         crate::Value::Decimal(d) => write_native_str(buf, &d.to_string()),
         crate::Value::Geometry(g) => {
