@@ -267,6 +267,7 @@ mod streaming_select;
 mod strict_bitemporal_audit_query;
 mod strict_bitemporal_select_star;
 mod strict_schema_restart;
+mod strict_typed_column_rendering;
 mod timeseries_declared_time_key;
 mod timeseries_join_time_rendering;
 mod timeseries_write_row_level_security;

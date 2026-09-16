@@ -26,6 +26,18 @@ async fn count_rows(client: &tokio_postgres::Client, sql: &str) -> usize {
         .count()
 }
 
+/// Helper: run a simple query and return the first column of every data row,
+/// as the pgwire text encoder rendered it.
+async fn first_column_text(client: &tokio_postgres::Client, sql: &str) -> Vec<String> {
+    let msgs = client.simple_query(sql).await.expect("simple_query");
+    msgs.into_iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A cross-node inner join between two single-vShard-homed collections must
 /// return every matching row, regardless of which node the SELECT is issued
 /// from. Before the build-side gather fix this returned 0 rows when the build
@@ -148,6 +160,152 @@ async fn cross_node_join_returns_all_matches() {
         from_node_1, 6,
         "cross-node join from node 1 must return all 6 matches; got {from_node_1}"
     );
+
+    cluster.shutdown().await;
+}
+
+/// A distributed join gathers the remote (build) side through the coordinator
+/// while scanning the local (probe) side directly. When the `ON` predicate
+/// compares two TIME_KEY columns, both sides must reach that comparison
+/// expressed in the same unit — the gathered side must not arrive pre-decoded
+/// into a different representation than the locally scanned side. This holds
+/// for every node the query runs from, whichever side that node hosts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn cross_node_join_compares_time_keys_in_one_unit() {
+    use nodedb_cluster::routing::vshard_for_collection;
+    use nodedb_types::DatabaseId;
+    const EVENTS: &str = "ts_events";
+    const FEATURES: &str = "ts_features";
+    assert_ne!(
+        vshard_for_collection(DatabaseId::DEFAULT, EVENTS),
+        vshard_for_collection(DatabaseId::DEFAULT, FEATURES),
+        "test collections must hash to different vShards to exercise cross-node join"
+    );
+
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(&format!(
+            "CREATE COLLECTION {EVENTS} \
+             (captured_at TIMESTAMP TIME_KEY, host TEXT, v FLOAT) \
+             WITH (engine='timeseries')"
+        ))
+        .await
+        .expect("CREATE COLLECTION ts_events");
+    cluster
+        .exec_ddl_on_any_leader(&format!(
+            "CREATE COLLECTION {FEATURES} \
+             (captured_at TIMESTAMP TIME_KEY, host TEXT, v FLOAT) \
+             WITH (engine='timeseries')"
+        ))
+        .await
+        .expect("CREATE COLLECTION ts_features");
+
+    wait_for(
+        "all 3 nodes see both collections",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.cached_collection_count() >= 2)
+        },
+    )
+    .await;
+
+    cluster.nodes[0]
+        .client
+        .simple_query(&format!(
+            "INSERT INTO {EVENTS} (captured_at, host, v) VALUES ('2020-03-05 10:00:00', 'h1', 1.5)"
+        ))
+        .await
+        .expect("insert event row");
+    cluster.nodes[0]
+        .client
+        .simple_query(&format!(
+            "INSERT INTO {FEATURES} (captured_at, host, v) VALUES ('2020-03-05 09:00:00', 'h1', 2.5)"
+        ))
+        .await
+        .expect("insert feature row");
+
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        wait_for(
+            &format!("node {idx} sees the event row"),
+            Duration::from_secs(15),
+            Duration::from_millis(50),
+            || {
+                let n = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(count_rows(
+                        &node.client,
+                        &format!("SELECT host FROM {EVENTS}"),
+                    ))
+                });
+                n >= 1
+            },
+        )
+        .await;
+        wait_for(
+            &format!("node {idx} sees the feature row"),
+            Duration::from_secs(15),
+            Duration::from_millis(50),
+            || {
+                let n = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(count_rows(
+                        &node.client,
+                        &format!("SELECT host FROM {FEATURES}"),
+                    ))
+                });
+                n >= 1
+            },
+        )
+        .await;
+    }
+
+    // The join's ON predicate compares the two TIME_KEY columns directly
+    // (`FEATURES.captured_at <= EVENTS.captured_at`). This only matches the
+    // single feature row when both sides land in the comparison expressed
+    // in the same unit, regardless of which node the coordinator gathers the
+    // build side from.
+    let value_sql = format!(
+        "SELECT {FEATURES}.v FROM {EVENTS} INNER JOIN {FEATURES} \
+         ON {EVENTS}.host = {FEATURES}.host \
+         AND {FEATURES}.captured_at <= {EVENTS}.captured_at"
+    );
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = first_column_text(&node.client, &value_sql).await;
+        assert_eq!(
+            rows,
+            vec!["2.5".to_string()],
+            "node {idx}: join comparing time keys must return the one matching feature row"
+        );
+    }
+
+    // The joined TIME_KEY itself must denote the stored instant, whichever
+    // unit the coordinator's gather step renders it in: ISO-8601 UTC (a
+    // typed TIMESTAMP cell) or epoch microseconds (an untyped cell). Epoch
+    // MILLISECONDS denote 1970-01-19 under either reading, so a millisecond
+    // value fails both arms and reveals the gather step decoded the wrong
+    // unit.
+    const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
+    const EARLY_MICROS: &str = "1583402400000000";
+    let time_key_sql = format!(
+        "SELECT {EVENTS}.captured_at FROM {EVENTS} INNER JOIN {FEATURES} \
+         ON {EVENTS}.host = {FEATURES}.host"
+    );
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        let rows = first_column_text(&node.client, &time_key_sql).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "node {idx}: the join must yield one row: {rows:?}"
+        );
+        assert!(
+            rows[0] == EARLY_ISO || rows[0] == EARLY_MICROS,
+            "node {idx}: joined time key must denote 2020-03-05T10:00:00Z: \
+             expected {EARLY_ISO} or {EARLY_MICROS}, got {rows:?}"
+        );
+    }
 
     cluster.shutdown().await;
 }
