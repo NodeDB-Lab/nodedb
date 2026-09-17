@@ -63,6 +63,19 @@ impl CompiledDefault {
         &self.column
     }
 
+    /// The constant this DEFAULT spells, when it is a bare literal.
+    ///
+    /// A generator or a parsed expression has no value until evaluation, so
+    /// it yields `None`. The DDL gate checks a literal against the declared
+    /// column type through this, so a DEFAULT the column cannot hold is
+    /// refused where it is declared.
+    pub fn literal(&self) -> Option<&nodedb_types::Value> {
+        match &self.kind {
+            DefaultKind::Literal(value) => Some(value),
+            DefaultKind::Generator(_) | DefaultKind::Expr(_) => None,
+        }
+    }
+
     /// Whether this DEFAULT produces a fresh value on every evaluation.
     ///
     /// A plan carrying one is never admitted to the plan cache, or the cache

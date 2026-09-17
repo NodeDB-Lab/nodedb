@@ -45,12 +45,18 @@ impl SqlPlan {
         match self {
             Self::ConstantResult { volatile: true, .. } => DataDependent,
             Self::Insert {
-                column_defaults, ..
+                volatile_defaults: true,
+                ..
             }
             | Self::Upsert {
-                column_defaults, ..
-            } if super::volatility_scan::defaults_are_volatile(column_defaults) => DataDependent,
-            Self::KvInsert {
+                volatile_defaults: true,
+                ..
+            }
+            | Self::TimeseriesIngest {
+                volatile_defaults: true,
+                ..
+            }
+            | Self::KvInsert {
                 volatile_defaults: true,
                 ..
             }

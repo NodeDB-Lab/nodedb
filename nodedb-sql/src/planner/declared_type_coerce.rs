@@ -62,8 +62,32 @@
 use nodedb_types::datetime::NdbDateTime;
 use rust_decimal::prelude::ToPrimitive;
 
+use super::dml_helpers::{check_declared_float_ranges, check_declared_int_ranges};
 use crate::error::{Result, SqlError};
 use crate::types::{ColumnInfo, SqlDataType, SqlExpr, SqlValue};
+
+/// Coerce one literal bound for `column` by the write-side rule, then
+/// range-check it against the column's declared width.
+///
+/// The one entry a caller outside the planner uses for a literal that will
+/// reach storage under `column`: a DDL gate checks a column `DEFAULT` through
+/// it, so a default is accepted or refused exactly as the same literal in a
+/// `VALUES` clause is. The primary-key column keeps its literal as written,
+/// the same exemption every `VALUES` and `SET` path carries — see
+/// [`coerce_rows_to_declared_types`].
+///
+/// Errors name the column and the literal.
+pub fn coerce_write_literal(column: &ColumnInfo, value: SqlValue) -> Result<SqlValue> {
+    if column.is_primary_key {
+        return Ok(value);
+    }
+    let coerced = coerce_value(&column.name, value, &column.data_type)?;
+    let row = [vec![(column.name.clone(), coerced)]];
+    check_declared_int_ranges(std::slice::from_ref(column), &row)?;
+    check_declared_float_ranges(std::slice::from_ref(column), &row)?;
+    let [mut row] = row;
+    Ok(row.swap_remove(0).1)
+}
 
 /// Coerce every value in one `(column, value)` row to its declared column
 /// type, in place.
@@ -667,6 +691,48 @@ mod tests {
         };
         assert_eq!(literal(&assignments[0].1), decimal("1.5"));
         assert_eq!(literal(&assignments[1].1), SqlValue::Float(1.5));
+    }
+
+    /// The public write-side entry coerces, then range-checks: a numeric
+    /// literal on a TIMESTAMP column becomes the instant, text that spells
+    /// no instant is refused naming the column, and an integer past the
+    /// declared SMALLINT width is refused naming the column.
+    #[test]
+    fn write_literal_coerces_then_range_checks() {
+        let at = column("at", SqlDataType::Timestamp);
+        assert_eq!(
+            coerce_write_literal(&at, SqlValue::Int(1_583_402_400_000))
+                .expect("an integer is epoch milliseconds"),
+            SqlValue::Timestamp(early())
+        );
+        let err = coerce_write_literal(&at, SqlValue::String("not a date".into()))
+            .expect_err("text with no instant is refused");
+        assert!(err.to_string().contains("'at'"), "{err}");
+
+        let mut small = column("s", SqlDataType::Int64);
+        small.int_width = Some(nodedb_types::columnar::IntWidth::I16);
+        assert_eq!(
+            coerce_write_literal(&small, SqlValue::Int(7)).expect("7 fits SMALLINT"),
+            SqlValue::Int(7)
+        );
+        let err = coerce_write_literal(&small, SqlValue::Int(999_999))
+            .expect_err("999999 does not fit SMALLINT");
+        assert!(
+            matches!(err, SqlError::IntegerOutOfRange { ref column, .. } if column == "s"),
+            "{err}"
+        );
+    }
+
+    /// The write-side entry keeps the primary key as written, like every
+    /// `VALUES` and `SET` path.
+    #[test]
+    fn write_literal_exempts_the_primary_key() {
+        let mut id = column("id", SqlDataType::Int64);
+        id.is_primary_key = true;
+        assert_eq!(
+            coerce_write_literal(&id, decimal("5.0")).expect("an exempt key is never re-typed"),
+            decimal("5.0")
+        );
     }
 
     /// A column the catalog does not declare (the KV `key`/`value`

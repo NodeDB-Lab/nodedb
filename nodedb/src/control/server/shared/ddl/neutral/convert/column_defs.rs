@@ -14,7 +14,7 @@ use nodedb_sql::parser::preprocess::lex::{
 use crate::control::server::shared::ddl::sql_parse::{parse_ident_token, split_values};
 
 use super::super::super::result::DdlError;
-use super::super::column_default::validate_column_default;
+use super::super::column_default::{DeclaredColumn, validate_column_default};
 use super::support::err;
 use super::type_map::sql_type_to_column_type;
 
@@ -165,7 +165,14 @@ fn parse_column_defs(s: &str) -> Result<Vec<nodedb_types::columnar::ColumnDef>, 
             col = col.with_primary_key();
         }
         if let Some(expr) = default_expr {
-            validate_column_default(&col.name, &expr)?;
+            validate_column_default(
+                &DeclaredColumn {
+                    name: &col.name,
+                    declared_type: &col_type,
+                    primary_key,
+                },
+                &expr,
+            )?;
             col = col.with_default(expr);
         }
         columns.push(col);

@@ -9,11 +9,10 @@ use crate::types::*;
 
 /// Materialize declared DEFAULTs across a whole `VALUES` row set.
 ///
-/// The key-value and vector-primary engines store the values they are handed
-/// and have no typed write path, so a DEFAULT that is not materialized HERE is
-/// materialized nowhere: the catalog would keep the declaration and every read
-/// return nothing for it. Documents and columnar rows expand theirs through the
-/// same [`ColumnDefaults`], so one expression yields one value on every engine.
+/// This is the one place a declared DEFAULT becomes a value, for every
+/// engine. The plan an engine receives carries the materialized cell like a
+/// supplied one, and nothing downstream reads the catalog's DEFAULT text
+/// again, so one expression yields one value on every engine.
 ///
 /// Two rules the ordering encodes:
 ///

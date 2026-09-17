@@ -97,7 +97,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             engine,
             route,
             rows,
-            column_defaults,
+            volatile_defaults: _,
             if_absent,
             column_schema,
             primary_key,
@@ -106,7 +106,6 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             engine: *engine,
             route: *route,
             rows,
-            column_defaults,
             if_absent: *if_absent,
             column_schema,
             primary_key: primary_key.as_deref(),
@@ -124,7 +123,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             engine,
             route,
             rows,
-            column_defaults,
+            volatile_defaults: _,
             on_conflict_updates,
             column_schema,
             primary_key,
@@ -133,7 +132,6 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             engine: *engine,
             route: *route,
             rows,
-            column_defaults,
             on_conflict_updates,
             column_schema,
             primary_key: primary_key.as_deref(),
@@ -253,9 +251,11 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             tiered: *tiered,
             temporal,
         }),
-        SqlPlan::TimeseriesIngest { collection, rows } => {
-            visitor.timeseries_ingest(collection, rows)
-        }
+        SqlPlan::TimeseriesIngest {
+            collection,
+            rows,
+            volatile_defaults: _,
+        } => visitor.timeseries_ingest(collection, rows),
         SqlPlan::VectorSearch {
             collection,
             field,

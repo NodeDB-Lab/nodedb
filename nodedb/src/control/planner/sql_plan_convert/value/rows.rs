@@ -6,10 +6,11 @@ use nodedb_sql::types::SqlValue;
 
 use super::convert::sql_value_to_nodedb_value;
 
-/// Encode already-expanded rows as one msgpack array of maps.
+/// Encode planner-typed rows as one msgpack array of maps.
 ///
-/// Callers materialize DEFAULTs through `expand_row_defaults` before routing,
-/// so every column the declaration promises is already present in `rows`.
+/// The planner materializes every declared DEFAULT before the plan reaches
+/// conversion, so every column the declaration promises is already present
+/// in `rows`.
 pub(crate) fn rows_to_msgpack_array(rows: &[&Vec<(String, SqlValue)>]) -> crate::Result<Vec<u8>> {
     let mut arr: Vec<nodedb_types::Value> = Vec::with_capacity(rows.len());
     for row in rows {

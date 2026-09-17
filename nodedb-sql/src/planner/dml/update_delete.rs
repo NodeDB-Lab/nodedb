@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! UPDATE, DELETE, and TRUNCATE planning — extracted from `dml.rs`.
+//! UPDATE, DELETE, and TRUNCATE planning.
 
 use nodedb_types::DatabaseId;
 use sqlparser::ast;
@@ -38,8 +38,8 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
     }
 
     // Delegate to the UPDATE...FROM path when a FROM clause is present.
-    if update.from.is_some() {
-        return plan_update_from(update, catalog);
+    if let Some(from_kind) = update.from.as_ref() {
+        return plan_update_from(update, from_kind, catalog);
     }
 
     let table_name = extract_table_name_from_table_with_joins(&update.table)?;
@@ -88,7 +88,11 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
 }
 
 /// Plan `UPDATE target SET ... FROM src WHERE target.col = src.col ...`.
-fn plan_update_from(update: &ast::Update, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+fn plan_update_from(
+    update: &ast::Update,
+    from_kind: &ast::UpdateTableFromKind,
+    catalog: &dyn SqlCatalog,
+) -> Result<Vec<SqlPlan>> {
     let target_name = extract_table_name_from_table_with_joins(&update.table)?;
 
     // Extract alias for the target table if present.
@@ -101,7 +105,6 @@ fn plan_update_from(update: &ast::Update, catalog: &dyn SqlCatalog) -> Result<Ve
     };
     let target_ref = target_alias.as_deref().unwrap_or(target_name.as_str());
 
-    let from_kind = update.from.as_ref().expect("caller ensures from.is_some()");
     let from_tables: &Vec<ast::TableWithJoins> = match from_kind {
         ast::UpdateTableFromKind::AfterSet(tables)
         | ast::UpdateTableFromKind::BeforeSet(tables) => tables,

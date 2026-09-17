@@ -15,4 +15,4 @@ pub use merge_types::{MergeClauseKind, MergePlanAction, MergePlanClause};
 pub use row_types::{KvInsertIntent, VectorPrimaryRow, WriteRoute};
 pub use variants::{DistanceMetric, SqlPlan};
 pub use vector_opts::{ArrayPrefilter, VectorAnnOptions, VectorQuantization};
-pub use volatility_scan::{default_expr_is_volatile, defaults_are_volatile, expr_is_volatile};
+pub use volatility_scan::expr_is_volatile;

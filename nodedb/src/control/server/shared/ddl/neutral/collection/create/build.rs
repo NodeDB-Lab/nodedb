@@ -87,9 +87,10 @@ pub async fn build_and_persist(
         ));
     }
 
-    // Refuse a DEFAULT the server cannot evaluate here, not at the first
-    // INSERT. It runs before any lifecycle guard or predecessor purge, so a
-    // rejected declaration leaves the existing state untouched. A SERIAL
+    // Refuse a DEFAULT the server cannot evaluate, or that the declared
+    // column type cannot hold, here, not at the first INSERT. It runs before
+    // any lifecycle guard or predecessor purge, so a rejected declaration
+    // leaves the existing state untouched. A SERIAL
     // column carries no DEFAULT text yet; the `nextval` this build generates
     // for it names a registered function and clears the same gate.
     validate_column_defaults(columns)?;

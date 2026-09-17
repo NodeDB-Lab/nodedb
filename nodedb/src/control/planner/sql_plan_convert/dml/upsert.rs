@@ -14,9 +14,7 @@ use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::*;
 
 use super::super::convert::ConvertContext;
-use super::super::value::{
-    assignments_to_update_values, expand_row_defaults, row_to_msgpack, rows_to_msgpack_array,
-};
+use super::super::value::{assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array};
 use super::insert::{
     build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, is_auto_rowid_pk,
     resolve_doc_identity_with_declared,
@@ -28,8 +26,9 @@ pub(in super::super) struct ConvertUpsertArgs<'a> {
     pub collection: &'a str,
     /// The lowering these rows take, decided by `nodedb-sql`.
     pub route: WriteRoute,
+    /// Rows with every declared DEFAULT already materialized and every
+    /// literal coerced to its declared column type by the planner.
     pub rows: &'a [Vec<(String, SqlValue)>],
-    pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
     pub on_conflict_updates: &'a [(String, SqlExpr)],
     pub primary_key: &'a str,
@@ -44,7 +43,6 @@ pub(in super::super) fn convert_upsert(
         collection,
         route,
         rows,
-        column_defaults,
         column_schema,
         on_conflict_updates,
         primary_key,
@@ -79,11 +77,6 @@ pub(in super::super) fn convert_upsert(
 
     let mut columnar_rows: Vec<&Vec<(String, SqlValue)>> = Vec::new();
 
-    // Every engine's rows expand their DEFAULTs here, ahead of identity
-    // derivation, so the primary-key NOT NULL gate reads the row the
-    // declaration promises — see `expand_row_defaults`.
-    let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
-
     // One catalog read for the whole statement, mirroring `convert_insert`.
     // `_rowid` carries no declaration, so it skips the read.
     let declared_pk = if is_auto_rowid_pk(primary_key) {
@@ -92,7 +85,7 @@ pub(in super::super) fn convert_upsert(
         declared_primary_key_name(ctx, collection)?
     };
 
-    for row in &expanded_rows {
+    for row in rows {
         match route {
             WriteRoute::Document => {
                 let value_bytes = row_to_msgpack(row)?;

@@ -15,6 +15,9 @@ use nodedb_types::DatabaseId;
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::neutral::collection::helpers::parse_origin_column_def;
+use crate::control::server::shared::ddl::neutral::column_default::{
+    DeclaredColumn, validate_column_default,
+};
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 use crate::control::state::SharedState;
 
@@ -51,6 +54,18 @@ pub(super) async fn alter_table_add_column(
                 column.name
             ),
         ));
+    }
+    // A DEFAULT passes the same gate `CREATE` applies: evaluable, and a
+    // literal the declared type can hold.
+    if let Some(expr) = &column.default {
+        validate_column_default(
+            &DeclaredColumn {
+                name: &column.name,
+                declared_type: &declared_type,
+                primary_key: column.primary_key,
+            },
+            expr,
+        )?;
     }
 
     let updated = {

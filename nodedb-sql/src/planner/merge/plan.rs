@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! MERGE statement planning.
+//! MERGE statement planning: target and source resolution, the ON clause,
+//! and dispatch to the engine rules.
 //!
 //! Translates `sqlparser::ast::Statement::Merge` into `SqlPlan::Merge`.
 //! Supported engines: `document_schemaless`, `document_strict`.
 //! All other engines return `SqlError::Unsupported`.
 
 use nodedb_types::DatabaseId;
-use sqlparser::ast::{self, MergeAction, MergeClauseKind as AstMergeClauseKind, MergeInsertKind};
+use sqlparser::ast;
 
-use super::ast_helpers::{qualified_ident_pair, strip_and_convert_filters};
+use super::super::ast_helpers::qualified_ident_pair;
+use super::actions::convert_merge_clauses;
 use crate::engine_rules::{self, MergeParams, ScanParams};
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{normalize_ident, normalize_object_name_checked};
-use crate::resolver::ColumnScope;
 use crate::resolver::columns::{ResolvedTable, TableScope};
-use crate::resolver::expr::convert_expr;
 use crate::temporal::TemporalScope;
 use crate::types::*;
-use crate::types::{MergeClauseKind, MergePlanAction, MergePlanClause, SqlPlan};
 
 /// Plan a `MERGE INTO target USING source ON ... WHEN ... THEN ...` statement.
 pub fn plan_merge(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
@@ -73,9 +72,9 @@ pub fn plan_merge(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec
     let clauses = convert_merge_clauses(
         &merge.clauses,
         target_ref,
-        &source_alias,
         &scope,
         &target_scope,
+        &target_info,
     )?;
 
     // ── Dispatch to engine rules ──
@@ -295,133 +294,9 @@ fn extract_merge_equijoin(
     })
 }
 
-// ── WHEN clause conversion ─────────────────────────────────────────────────
-
-fn convert_merge_clauses(
-    clauses: &[ast::MergeClause],
-    target_ref: &str,
-    source_ref: &str,
-    scope: &TableScope,
-    target_scope: &TableScope,
-) -> Result<Vec<MergePlanClause>> {
-    clauses
-        .iter()
-        .map(|c| convert_one_clause(c, target_ref, source_ref, scope, target_scope))
-        .collect()
-}
-
-fn convert_one_clause(
-    clause: &ast::MergeClause,
-    target_ref: &str,
-    source_ref: &str,
-    scope: &TableScope,
-    target_scope: &TableScope,
-) -> Result<MergePlanClause> {
-    let kind = match clause.clause_kind {
-        AstMergeClauseKind::Matched => MergeClauseKind::Matched,
-        AstMergeClauseKind::NotMatched | AstMergeClauseKind::NotMatchedByTarget => {
-            MergeClauseKind::NotMatched
-        }
-        AstMergeClauseKind::NotMatchedBySource => MergeClauseKind::NotMatchedBySource,
-    };
-
-    let extra_predicate = match &clause.predicate {
-        Some(expr) => strip_and_convert_filters(vec![expr.clone()], target_ref, scope)?,
-        None => Vec::new(),
-    };
-
-    let action = convert_merge_action(&clause.action, source_ref, scope, target_scope)?;
-
-    Ok(MergePlanClause {
-        kind,
-        extra_predicate,
-        action,
-    })
-}
-
-fn convert_merge_action(
-    action: &MergeAction,
-    source_ref: &str,
-    scope: &TableScope,
-    target_scope: &TableScope,
-) -> Result<MergePlanAction> {
-    match action {
-        MergeAction::Update(update_expr) => {
-            let assignments = update_expr
-                .assignments
-                .iter()
-                .map(|a| {
-                    let col = match &a.target {
-                        ast::AssignmentTarget::ColumnName(name) => {
-                            normalize_object_name_checked(name)
-                        }
-                        ast::AssignmentTarget::Tuple(_) => Err(SqlError::Unsupported {
-                            detail: "tuple assignment target in MERGE UPDATE is not supported"
-                                .into(),
-                        }),
-                    }?;
-                    target_scope.check_name(None, &col)?;
-                    let val = convert_expr(&a.value, &ColumnScope::Relations(scope))?;
-                    Ok((col, val))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(MergePlanAction::Update { assignments })
-        }
-        MergeAction::Delete { .. } => Ok(MergePlanAction::Delete),
-        MergeAction::Insert(insert_expr) => {
-            let columns: Vec<String> = insert_expr
-                .columns
-                .iter()
-                .map(|c| {
-                    let col = normalize_object_name_checked(c)?;
-                    target_scope.check_name(None, &col)?;
-                    Ok(col)
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            let values: Vec<crate::types_expr::SqlExpr> = match &insert_expr.kind {
-                MergeInsertKind::Values(vals) => {
-                    if vals.rows.len() != 1 {
-                        return Err(SqlError::Unsupported {
-                            detail: format!(
-                                "MERGE INSERT VALUES must have exactly one row; got {}",
-                                vals.rows.len()
-                            ),
-                        });
-                    }
-                    vals.rows[0]
-                        .iter()
-                        .map(|e| convert_expr(e, &ColumnScope::Relations(scope)))
-                        .collect::<Result<Vec<_>>>()?
-                }
-                MergeInsertKind::Row => {
-                    return Err(SqlError::Unsupported {
-                        detail: "MERGE INSERT ROW is not supported; use explicit VALUES".into(),
-                    });
-                }
-            };
-
-            if !columns.is_empty() && columns.len() != values.len() {
-                return Err(SqlError::Parse {
-                    detail: format!(
-                        "MERGE INSERT column list ({}) and VALUES ({}) lengths do not match",
-                        columns.len(),
-                        values.len()
-                    ),
-                });
-            }
-
-            let _ = source_ref; // for future multi-row insert support
-            Ok(MergePlanAction::Insert { columns, values })
-        }
-    }
-}
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-pub(super) fn extract_table_factor_name_alias(
-    factor: &ast::TableFactor,
-) -> Result<(String, Option<String>)> {
+fn extract_table_factor_name_alias(factor: &ast::TableFactor) -> Result<(String, Option<String>)> {
     match factor {
         ast::TableFactor::Table { name, alias, .. } => {
             let table_name = normalize_object_name_checked(name)?;
