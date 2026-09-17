@@ -151,7 +151,10 @@ pub fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         PhysicalPlan::Document(DocumentOp::PointPut { .. })
         | PhysicalPlan::Document(DocumentOp::PointInsert { .. })
         | PhysicalPlan::Document(DocumentOp::BatchInsert { .. })
+        | PhysicalPlan::Kv(KvOp::Insert { .. })
         | PhysicalPlan::Kv(KvOp::InsertIfAbsent { .. })
+        | PhysicalPlan::Kv(KvOp::Put { .. })
+        | PhysicalPlan::Kv(KvOp::BatchPut { .. })
         | PhysicalPlan::Columnar(ColumnarOp::Insert { .. }) => DmlResult("INSERT"),
 
         PhysicalPlan::Document(DocumentOp::PointUpdate {

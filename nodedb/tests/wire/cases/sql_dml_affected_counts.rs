@@ -286,6 +286,52 @@ async fn kv_multi_key_delete_reports_matched_key_count() {
     );
 }
 
+/// A key-value `INSERT` of a new key writes exactly one row, so its command tag
+/// must report `1`. A kv write that answers with no affected count renders as a
+/// bare `OK` tag, which the client's tag parser reads as `0` rows — the count is
+/// the only signal distinguishing "wrote" from "matched nothing".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kv_insert_of_new_key_reports_one() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION kv_probe (key TEXT PRIMARY KEY, n INT) WITH (engine='kv')")
+        .await
+        .unwrap();
+
+    let count = affected(&server, "INSERT INTO kv_probe (key, n) VALUES ('a', 1)").await;
+    assert_eq!(
+        count, 1,
+        "a KV INSERT that wrote one key must report 1, not a bare tag the client reads as 0"
+    );
+    assert_eq!(
+        live_rows(&server, "SELECT count(*) FROM kv_probe WHERE key = 'a'").await,
+        1,
+        "the key must really be present, so the reported count is the honest one"
+    );
+}
+
+/// A key-value `UPSERT` overwrites or writes exactly one key, so its tag must
+/// report `1` for the same reason: the PUT path always writes the key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kv_upsert_of_new_key_reports_one() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION kv_probe (key TEXT PRIMARY KEY, n INT) WITH (engine='kv')")
+        .await
+        .unwrap();
+
+    let count = affected(&server, "UPSERT INTO kv_probe (key, n) VALUES ('a', 1)").await;
+    assert_eq!(
+        count, 1,
+        "a KV UPSERT that wrote one key must report 1, not a bare tag the client reads as 0"
+    );
+    assert_eq!(
+        live_rows(&server, "SELECT count(*) FROM kv_probe WHERE key = 'a'").await,
+        1,
+        "the upserted key must really be present"
+    );
+}
+
 /// A CRDT document collection routes its PK-targeted delete through the CRDT
 /// engine, which shares the count contract: a delete that removed the row
 /// reports `1`.
