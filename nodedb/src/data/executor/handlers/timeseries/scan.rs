@@ -3,7 +3,9 @@
 //! Data Plane timeseries scan parameters and execution.
 
 use crate::bridge::envelope::{Payload, Response, Status};
+use crate::bridge::scan_filter::{ScanFilter, decode_scan_filters};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_read::filter::decode_rls_filters;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_query::agg_key::canonical_agg_key;
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
@@ -18,6 +20,14 @@ pub(in crate::data::executor) struct TimeseriesScanParams<'a> {
     pub time_range: (i64, i64),
     pub limit: usize,
     pub filters: &'a [u8],
+    /// The caller's read policy as a MessagePack `Vec<ScanFilter>`, injected
+    /// by the planner. Empty when no policy governs the caller. The raw scan
+    /// evaluates it per row after `filters`, before computed columns, sort,
+    /// and limit, on memtable, partition, and in-transaction overlay rows
+    /// alike. The aggregate branch pushes it into the grouped scan so it
+    /// excludes rows before aggregation, and fails when the grouped scan
+    /// cannot lower it.
+    pub rls_filters: &'a [u8],
     /// `ORDER BY` keys as `(column, ascending)`. Applied to the materialized
     /// result before `limit`, on both the raw and the aggregate branch.
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
@@ -54,6 +64,7 @@ impl CoreLoop {
             time_range,
             limit,
             filters,
+            rls_filters,
             sort_keys,
             bucket_interval_ms,
             group_by,
@@ -71,6 +82,7 @@ impl CoreLoop {
         // projection pushdown. Resolved once here and threaded through both
         // branches; nothing downstream guesses it from a column name.
         let time_key = self.ts_time_column(task.request.database_id, tid, collection);
+        let time_key_kind = self.ts_time_key_kind(task.request.database_id, tid, collection);
 
         // Lazy-load partition registry from disk if not yet loaded.
         if let Err(e) = self.ensure_ts_registry(tid, task.request.database_id, collection) {
@@ -82,12 +94,20 @@ impl CoreLoop {
             );
         }
 
-        let mut filter_predicates: Vec<crate::bridge::scan_filter::ScanFilter> =
-            if filters.is_empty() {
-                Vec::new()
-            } else {
-                zerompk::from_msgpack(filters).unwrap_or_default()
+        // Both predicate sets are decoded before any row is read. A payload
+        // the Data Plane cannot decode fails the statement: for the policy
+        // that is the difference between hiding governed rows and returning
+        // them, and for the WHERE clause it is the difference between the
+        // asked-for rows and every row.
+        let mut filter_predicates: Vec<ScanFilter> =
+            match decode_scan_filters(filters, "timeseries filter") {
+                Ok(p) => p,
+                Err(e) => return self.response_error(task, e),
             };
+        let rls_predicates: Vec<ScanFilter> = match decode_rls_filters(rls_filters) {
+            Ok(p) => p,
+            Err(e) => return self.response_error(task, e),
+        };
         // Bitemporal cutoffs: translate to column-level predicates on
         // `_ts_system` / `_ts_valid_from` / `_ts_valid_until`. The
         // segment reader's block-skip infrastructure applies these
@@ -123,18 +143,21 @@ impl CoreLoop {
         let time_range = super::time_range::narrow_time_range(
             time_range,
             &filter_predicates,
-            Some(time_key.as_str()),
+            Some((time_key.as_str(), time_key_kind)),
         );
 
         let has_filters = !filter_predicates.is_empty();
         let is_aggregate = !aggregates.is_empty();
         let has_time_range = time_range.0 > 0 || time_range.1 < i64::MAX;
 
-        // Fast path: COUNT(*) with no GROUP BY, no filters.
+        // Fast path: COUNT(*) with no GROUP BY, no filters, no read policy.
+        // The metadata count covers every stored row, so a governed read
+        // takes the grouped scan, where the policy excludes rows first.
         if is_aggregate
             && bucket_interval_ms == 0
             && group_by.is_empty()
             && !has_filters
+            && rls_predicates.is_empty()
             && !has_time_range
             && aggregates.len() == 1
             && aggregates[0].0 == "count"
@@ -158,7 +181,7 @@ impl CoreLoop {
                     needed.push(field.clone());
                 }
             }
-            for fp in &filter_predicates {
+            for fp in filter_predicates.iter().chain(&rls_predicates) {
                 if !needed.contains(&fp.field) {
                     needed.push(fp.field.clone());
                 }
@@ -170,13 +193,23 @@ impl CoreLoop {
 
         // Mode dispatch.
         if is_aggregate || bucket_interval_ms > 0 {
+            // The policy joins the WHERE predicates so the grouped scan
+            // excludes governed rows before any accumulator sees them. The
+            // grouped scan fails on a predicate it cannot lower, so a policy
+            // shape it does not support fails the statement rather than
+            // aggregating ungoverned rows.
+            let governed_predicates: Vec<ScanFilter> = filter_predicates
+                .iter()
+                .chain(&rls_predicates)
+                .cloned()
+                .collect();
             self.execute_ts_aggregate(aggregate::TsAggregateParams {
                 task,
                 tid,
                 collection,
                 time_range,
                 limit,
-                filter_predicates: &filter_predicates,
+                filter_predicates: &governed_predicates,
                 bucket_interval_ms,
                 group_by,
                 aggregates,
@@ -202,6 +235,7 @@ impl CoreLoop {
                 limit,
                 filter_predicates: &filter_predicates,
                 has_filters,
+                rls_predicates: &rls_predicates,
                 computed_columns,
                 all_versions,
                 txn_id: overlay_txn,

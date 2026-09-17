@@ -317,7 +317,7 @@ fn where_predicate_filters_count() {
         0,
         vec![nodedb::bridge::scan_filter::ScanFilter {
             field: "qtype".into(),
-            op: "eq".into(),
+            op: nodedb::bridge::scan_filter::FilterOp::Eq,
             value: nodedb_types::Value::String("A".into()),
             clauses: vec![],
             expr: None,

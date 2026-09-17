@@ -6,7 +6,7 @@
 //! reads the collection's active typeguards instead.
 
 use super::super::super::result::DdlError;
-use super::super::column_default::validate_column_default;
+use super::super::column_default::{DeclaredColumn, validate_column_default};
 use super::support::err;
 use super::type_map::typeguard_type_to_column_type;
 
@@ -50,7 +50,17 @@ pub(super) fn typeguards_to_column_defs(
         // A guard carries either DEFAULT or VALUE, never both. Strict schema
         // has one materialization slot, so both land on the column `DEFAULT`.
         if let Some(expr) = guard.default_expr.clone().or(guard.value_expr.clone()) {
-            validate_column_default(&col.name, &expr)?;
+            // The resolved type's own spelling stands in for the declaration:
+            // a guard names no numeric width, so the canonical name resolves
+            // to the same width-less type the column will carry.
+            validate_column_default(
+                &DeclaredColumn {
+                    name: &col.name,
+                    declared_type: &col.column_type.to_string(),
+                    primary_key: col.primary_key,
+                },
+                &expr,
+            )?;
             col.default = Some(expr);
         }
         columns.push(col);

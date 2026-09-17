@@ -1,67 +1,78 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Pure JSON/plan projection and flattening helpers for SELECT responses.
+//! Pure projection and flattening helpers for SELECT responses.
 //!
-//! These operate purely on parsed SQL and `serde_json::Value` — no pgwire
-//! wire types — so they are shared across any protocol-specific response
-//! shaper. Protocol-specific encode glue that turns these into wire rows
-//! (e.g. pgwire's `DataRow`) lives in each protocol's own handler code.
+//! These operate on decoded `nodedb_types::Value` rows — no pgwire wire
+//! types — so they are shared across any protocol-specific response shaper.
+//! Protocol-specific encode glue that turns these into wire rows (e.g.
+//! pgwire's `DataRow`) lives in each protocol's own handler code; the
+//! per-cell text form lives in `response_shape::cell`.
 
-/// Convert a JSON scalar value to its PostgreSQL text-format string.
-///
-/// - `String` values are returned as-is (no extra quoting).
-/// - `Bool` uses PostgreSQL text format: `t` for true, `f` for false.
-/// - All other scalars (`Number`, `Array`, `Object`) use their JSON
-///   `Display` representation; arrays/objects should not normally appear
-///   as individual cell values but are rendered faithfully.
-pub fn json_value_to_text(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        // PostgreSQL text format for boolean is `t`/`f`.
-        serde_json::Value::Bool(b) => if *b { "t" } else { "f" }.to_string(),
-        other => other.to_string(),
-    }
-}
+use std::collections::HashMap;
 
-/// Flatten a parsed JSON value into row objects.
+use nodedb_types::Value;
+
+use super::types::ShapedRow;
+
+/// Flatten a decoded Data-Plane value into typed row objects.
 ///
 /// The envelope `id` is a rendered [`StorageKey`](crate::engine::document::store::StorageKey)
 /// by construction.
 /// A value that fails `StorageKey::parse` is surfaced as `Err`, never accommodated.
-pub fn push_flat_rows(
-    value: serde_json::Value,
-    out: &mut Vec<serde_json::Map<String, serde_json::Value>>,
-) -> crate::Result<()> {
+pub fn push_flat_rows(value: Value, out: &mut Vec<ShapedRow>) -> crate::Result<()> {
     match value {
-        serde_json::Value::Array(items) => {
+        Value::Array(items) => {
             for item in items {
                 push_flat_rows(item, out)?;
             }
         }
-        serde_json::Value::Object(mut map) => {
+        Value::Object(mut map) => {
             if is_scan_wrapper(&map)
-                && let Some(serde_json::Value::Object(mut inner)) = map.remove("data")
+                && let Some(Value::Object(inner)) = map.remove("data")
             {
+                let mut inner: ShapedRow = inner.into_iter().collect();
                 // The envelope carries the row's storage key, which is
                 // internal. A body with no `id` field carries identity
                 // nowhere else, so the key renders to an identity at this
                 // boundary. `or_insert` leaves a declared primary key as the
                 // authority.
-                if let Some(serde_json::Value::String(key)) = map.remove("id") {
+                if let Some(Value::String(key)) = map.remove("id") {
                     let identity = crate::engine::document::store::StorageKey::parse(&key)
                         .ok_or_else(|| crate::Error::Internal {
                             detail: format!("scan envelope id is not a storage key: '{key}'"),
                         })?
                         .to_identity();
                     inner
-                        .entry("id")
-                        .or_insert(serde_json::Value::String(identity.into_string()));
+                        .entry("id".to_string())
+                        .or_insert(Value::String(identity.into_string()));
                 }
                 out.push(inner);
                 return Ok(());
             }
-            out.push(map);
+            out.push(map.into_iter().collect());
         }
+        // A scalar is not a row: the shaper only ever answers with objects.
+        Value::Null
+        | Value::Bool(_)
+        | Value::Integer(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::Bytes(_)
+        | Value::Uuid(_)
+        | Value::Ulid(_)
+        | Value::DateTime(_)
+        | Value::NaiveDateTime(_)
+        | Value::Duration(_)
+        | Value::Decimal(_)
+        | Value::Geometry(_)
+        | Value::Set(_)
+        | Value::Regex(_)
+        | Value::Range { .. }
+        | Value::Record { .. }
+        | Value::ArrayCell(_)
+        | Value::Vector(_) => {}
+        // `Value` is `#[non_exhaustive]`: a variant this crate cannot name is
+        // not a row either.
         _ => {}
     }
     Ok(())
@@ -70,7 +81,17 @@ pub fn push_flat_rows(
 /// The Data Plane's raw document-scan codec emits objects with exactly
 /// the keys `id` (string) and `data` (object). This is the wire shape
 /// we unwrap before column projection.
-pub fn is_scan_wrapper(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+pub fn is_scan_wrapper(map: &HashMap<String, Value>) -> bool {
+    map.len() == 2
+        && matches!(map.get("id"), Some(Value::String(_)))
+        && matches!(map.get("data"), Some(Value::Object(_)))
+}
+
+/// [`is_scan_wrapper`] for a row still held as JSON: the same two-key
+/// `{id: string, data: object}` shape, read off a `serde_json::Map`. The
+/// JSON-only redaction paths (`redact_envelope_row`) check the envelope
+/// without lifting the row to a typed value.
+pub fn is_scan_wrapper_json(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     map.len() == 2
         && matches!(map.get("id"), Some(serde_json::Value::String(_)))
         && matches!(map.get("data"), Some(serde_json::Value::Object(_)))

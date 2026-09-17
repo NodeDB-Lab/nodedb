@@ -11,6 +11,9 @@
 use std::cmp::Ordering;
 
 use nodedb_physical::physical_plan::SortKeySpec;
+use nodedb_types::json_msgpack::instant_from_ext;
+
+use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
 
 /// Sort materialized result rows by the planner's ORDER BY terms.
 ///
@@ -70,54 +73,6 @@ fn eval_row_keys(row: &rmpv::Value, sort_keys: &[SortKeySpec]) -> crate::Result<
     Ok(out)
 }
 
-fn rmpv_to_value(row: &rmpv::Value) -> nodedb_types::Value {
-    let rmpv::Value::Map(entries) = row else {
-        return nodedb_types::Value::Null;
-    };
-    let mut map = std::collections::HashMap::with_capacity(entries.len());
-    for (key, value) in entries {
-        if let rmpv::Value::String(name) = key
-            && let Some(name) = name.as_str()
-        {
-            map.insert(name.to_string(), rmpv_value_to_value(value));
-        }
-    }
-    nodedb_types::Value::Object(map)
-}
-
-fn rmpv_value_to_value(value: &rmpv::Value) -> nodedb_types::Value {
-    match value {
-        rmpv::Value::Nil => nodedb_types::Value::Null,
-        rmpv::Value::Boolean(b) => nodedb_types::Value::Bool(*b),
-        rmpv::Value::Integer(n) => n
-            .as_i64()
-            .map(nodedb_types::Value::Integer)
-            .or_else(|| n.as_f64().map(nodedb_types::Value::Float))
-            .unwrap_or(nodedb_types::Value::Null),
-        rmpv::Value::F32(f) => nodedb_types::Value::Float(*f as f64),
-        rmpv::Value::F64(f) => nodedb_types::Value::Float(*f),
-        rmpv::Value::String(s) => s
-            .as_str()
-            .map(|s| nodedb_types::Value::String(s.to_string()))
-            .unwrap_or(nodedb_types::Value::Null),
-        rmpv::Value::Array(items) => {
-            nodedb_types::Value::Array(items.iter().map(rmpv_value_to_value).collect())
-        }
-        _ => nodedb_types::Value::Null,
-    }
-}
-
-fn value_to_rmpv(value: &nodedb_types::Value) -> rmpv::Value {
-    match value {
-        nodedb_types::Value::Null => rmpv::Value::Nil,
-        nodedb_types::Value::Bool(b) => rmpv::Value::Boolean(*b),
-        nodedb_types::Value::Integer(n) => rmpv::Value::Integer((*n).into()),
-        nodedb_types::Value::Float(f) => rmpv::Value::F64(*f),
-        nodedb_types::Value::String(s) => rmpv::Value::String(s.clone().into()),
-        other => rmpv::Value::String(format!("{other:?}").into()),
-    }
-}
-
 fn compare_key_rows(a: &[rmpv::Value], b: &[rmpv::Value], sort_keys: &[SortKeySpec]) -> Ordering {
     for (idx, key) in sort_keys.iter().enumerate() {
         let av = a.get(idx).filter(|v| !matches!(v, rmpv::Value::Nil));
@@ -167,6 +122,15 @@ fn compare_values(a: Option<&rmpv::Value>, b: Option<&rmpv::Value>) -> Ordering 
             x.as_str().unwrap_or("").cmp(y.as_str().unwrap_or(""))
         }
         (rmpv::Value::Boolean(x), rmpv::Value::Boolean(y)) => x.cmp(y),
+        // A declared instant column, and a computed key that evaluates to an
+        // instant, arrive as the instant ext; two instants order by their
+        // epoch microseconds.
+        (rmpv::Value::Ext(tx, px), rmpv::Value::Ext(ty, py)) => {
+            match (instant_from_ext(*tx, px), instant_from_ext(*ty, py)) {
+                (Some((_, x)), Some((_, y))) => x.cmp(&y),
+                _ => Ordering::Equal,
+            }
+        }
         // Exotic shapes never appear in a timeseries result row; keep the
         // order stable rather than inventing one.
         _ => Ordering::Equal,

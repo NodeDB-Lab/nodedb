@@ -331,7 +331,7 @@ pub struct AggregateInfo {
 mod tests {
     use super::*;
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
     };
     use crate::engine::timeseries::continuous_agg::definition::{
         AggFunction, AggregateExpr, RefreshPolicy,
@@ -451,7 +451,7 @@ mod tests {
 
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("value".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],

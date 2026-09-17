@@ -1,12 +1,46 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Row emission helpers — build `rmpv::Value` directly, plus value conversions.
+//! Row emission helpers — build `rmpv::Value` directly.
 
 use std::collections::HashMap;
 
 use nodedb_types::columnar::schema::TS_SYSTEM;
 
+use crate::bridge::scan_filter::ScanFilter;
+use crate::data::executor::handlers::columnar_read::filter::value_matches_filters;
+use crate::data::executor::handlers::columnar_read::{emit_column_value, rmpv_time_cell};
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
+use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
+
+/// Whether an emitted row passes `where_predicates` and then the caller's
+/// read policy.
+///
+/// Both sets empty admits the row without touching it. Otherwise the row is
+/// converted once and both sets are evaluated by the predicate matcher the
+/// columnar read path and the write gate use, so a policy means one thing
+/// on every engine. `where_predicates` carries the WHERE clause only when
+/// the typed-column evaluator could not lower it. `Err` when a predicate
+/// expression divides by zero.
+pub(super) fn row_admitted(
+    row: &rmpv::Value,
+    where_predicates: &[ScanFilter],
+    rls_predicates: &[ScanFilter],
+) -> crate::Result<bool> {
+    if where_predicates.is_empty() && rls_predicates.is_empty() {
+        return Ok(true);
+    }
+    let doc = rmpv_to_value(row);
+    Ok(value_matches_filters(&doc, where_predicates)?
+        && value_matches_filters(&doc, rls_predicates)?)
+}
+
+/// [`row_admitted`] for a row whose WHERE clause was already applied.
+pub(super) fn row_admitted_by_policy(
+    row: &rmpv::Value,
+    rls_predicates: &[ScanFilter],
+) -> crate::Result<bool> {
+    row_admitted(row, &[], rls_predicates)
+}
 
 /// Extract the `_ts_system` value from an rmpv-encoded row for audit-log
 /// ordering. Rows without the column sort first (treated as `i64::MIN`).
@@ -39,10 +73,12 @@ pub(super) fn rmpv_system_time(row: &rmpv::Value) -> i64 {
 /// An index past the memtable's row count is skipped rather than panicking:
 /// the caller reads indices recorded before a flush, and a flush in between
 /// would invalidate them. Callers must project before flushing.
+///
+/// `Err` when a stored time cell cannot be read as its column's instant.
 pub(in crate::data::executor) fn emit_memtable_rows_at(
     mt: &crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
     row_indices: &[usize],
-) -> Vec<rmpv::Value> {
+) -> crate::Result<Vec<rmpv::Value>> {
     let schema = mt.schema().clone();
     let columns: Vec<_> = schema
         .columns
@@ -59,30 +95,34 @@ pub(in crate::data::executor) fn emit_memtable_rows_at(
 }
 
 /// Emit a single row from the memtable as rmpv::Value::Map.
+///
+/// Every cell is written by [`emit_column_value`], so a time cell carries
+/// the type its column kind declares. `Err` when a stored time cell cannot
+/// be read as its column's instant.
 pub(super) fn emit_memtable_row(
     mt: &crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
     columns: &[(usize, &String, &ColumnType, &ColumnData)],
     idx: usize,
-) -> rmpv::Value {
+) -> crate::Result<rmpv::Value> {
     // Build raw msgpack bytes, then decode to rmpv::Value.
     let mut buf = Vec::with_capacity(columns.len() * 32);
     nodedb_query::msgpack_scan::write_map_header(&mut buf, columns.len());
     for (col_idx, col_name, col_type, col_data) in columns {
         nodedb_query::msgpack_scan::write_str(&mut buf, col_name);
-        crate::data::executor::handlers::columnar_read::emit_column_value(
-            &mut buf, mt, *col_idx, col_type, col_data, idx,
-        );
+        emit_column_value(&mut buf, mt, *col_idx, col_type, col_data, idx)?;
     }
-    crate::util::bounded_msgpack::read_value(&buf).unwrap_or(rmpv::Value::Nil)
+    Ok(crate::util::bounded_msgpack::read_value(&buf).unwrap_or(rmpv::Value::Nil))
 }
 
 /// Emit a single row from a disk partition as rmpv::Value::Map.
+///
+/// `Err` when a stored time cell cannot be read as its column's instant.
 pub(super) fn emit_partition_row(
     schema: &[(String, ColumnType)],
     col_data: &[Option<ColumnData>],
     sym_dicts: &HashMap<usize, nodedb_types::timeseries::SymbolDictionary>,
     idx: usize,
-) -> rmpv::Value {
+) -> crate::Result<rmpv::Value> {
     let mut fields: Vec<(rmpv::Value, rmpv::Value)> = Vec::with_capacity(schema.len());
     for (col_i, (col_name, col_type)) in schema.iter().enumerate() {
         // A column whose file could not be read is emitted as NULL, never
@@ -99,7 +139,7 @@ pub(super) fn emit_partition_row(
             continue;
         };
         let val = match col_type {
-            ColumnType::Timestamp => rmpv::Value::Integer(data.as_timestamps()[idx].into()),
+            ColumnType::Timestamp(kind) => rmpv_time_cell(*kind, data.as_timestamps()[idx])?,
             ColumnType::Float64 => {
                 let v = data.as_f64()[idx];
                 if v.is_nan() {
@@ -129,15 +169,27 @@ pub(super) fn emit_partition_row(
         };
         fields.push((rmpv::Value::String(col_name.as_str().into()), val));
     }
-    rmpv::Value::Map(fields)
+    Ok(rmpv::Value::Map(fields))
 }
 
-/// Extract timestamp from a row (first integer field) for sort-merge.
+/// Extract the sort key of a partition row for the merge across partitions:
+/// the first time-shaped field, an integer or an instant ext, as `i64`.
+///
+/// Every row of one collection carries the same kind in that field, so the
+/// key is comparable across the rows being merged.
 pub(super) fn extract_timestamp(row: &rmpv::Value) -> i64 {
     if let rmpv::Value::Map(fields) = row {
         for (_, v) in fields {
-            if let rmpv::Value::Integer(n) = v {
-                return n.as_i64().unwrap_or(0);
+            match v {
+                rmpv::Value::Integer(n) => return n.as_i64().unwrap_or(0),
+                rmpv::Value::Ext(ext_type, payload) => {
+                    if let Some((_, micros)) =
+                        nodedb_types::json_msgpack::instant_from_ext(*ext_type, payload)
+                    {
+                        return micros;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -154,7 +206,7 @@ pub(super) fn apply_computed_columns_rmpv(
     row: rmpv::Value,
     computed_cols: &[crate::bridge::expr_eval::ComputedColumn],
 ) -> crate::Result<rmpv::Value> {
-    let doc = rmpv_to_nodedb_value(&row);
+    let doc = rmpv_to_value(&row);
     let mut fields: Vec<(rmpv::Value, rmpv::Value)> = Vec::with_capacity(computed_cols.len());
     for cc in computed_cols {
         // A computed column is projection-shaped: a division/modulo-by-zero
@@ -163,175 +215,8 @@ pub(super) fn apply_computed_columns_rmpv(
         let result = cc.expr.eval(&doc)?;
         fields.push((
             rmpv::Value::String(cc.alias.as_str().into()),
-            nodedb_value_to_rmpv(&result),
+            value_to_rmpv(&result),
         ));
     }
     Ok(rmpv::Value::Map(fields))
-}
-
-/// Convert rmpv row to nodedb_types::Value for expression evaluation.
-pub(super) fn rmpv_to_nodedb_value(row: &rmpv::Value) -> nodedb_types::Value {
-    match row {
-        rmpv::Value::Map(fields) => {
-            let mut map = std::collections::HashMap::new();
-            for (k, v) in fields {
-                let key = match k {
-                    rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
-                    _ => continue,
-                };
-                let val = match v {
-                    rmpv::Value::Integer(n) => {
-                        nodedb_types::Value::Integer(n.as_i64().unwrap_or(0))
-                    }
-                    rmpv::Value::F64(f) => nodedb_types::Value::Float(*f),
-                    rmpv::Value::String(s) => {
-                        nodedb_types::Value::String(s.as_str().unwrap_or("").to_string())
-                    }
-                    rmpv::Value::Nil => nodedb_types::Value::Null,
-                    rmpv::Value::Boolean(b) => nodedb_types::Value::Bool(*b),
-                    _ => nodedb_types::Value::Null,
-                };
-                map.insert(key, val);
-            }
-            nodedb_types::Value::Object(map)
-        }
-        _ => nodedb_types::Value::Null,
-    }
-}
-
-/// Convert nodedb_types::Value back to rmpv::Value for response encoding.
-pub(super) fn nodedb_value_to_rmpv(v: &nodedb_types::Value) -> rmpv::Value {
-    match v {
-        nodedb_types::Value::Integer(n) => rmpv::Value::Integer((*n).into()),
-        nodedb_types::Value::Float(f) => rmpv::Value::F64(*f),
-        nodedb_types::Value::String(s) => rmpv::Value::String(s.as_str().into()),
-        nodedb_types::Value::Bool(b) => rmpv::Value::Boolean(*b),
-        nodedb_types::Value::Null => rmpv::Value::Nil,
-        _ => rmpv::Value::Nil,
-    }
-}
-
-/// Rescale every declared-instant cell of `rows` from the milliseconds the
-/// memtable and the partitions store to the epoch microseconds a `TIMESTAMP`
-/// cell carries on the wire.
-///
-/// The engine's own unit stays milliseconds: partition ranges, retention,
-/// `time_bucket` and every scan predicate read it. The scale therefore runs
-/// once, as rows leave the scan — after filtering, sorting and computed
-/// columns — so nothing inside the engine sees the wire unit.
-///
-/// `instant_columns` comes from `CoreLoop::ts_instant_columns`, which lists
-/// the columns declared `TIMESTAMP` or `TIMESTAMPTZ`. A `BIGINT TIME_KEY`
-/// lives in the same millisecond column and is not in that list, so it keeps
-/// the integer the client inserted.
-///
-/// SQL NULL cells pass through untouched. A stored value that cannot be
-/// expressed in microseconds fails the read rather than wrapping.
-pub(in crate::data::executor) fn scale_instant_cells(
-    rows: &mut [rmpv::Value],
-    instant_columns: &[String],
-) -> crate::Result<()> {
-    if instant_columns.is_empty() {
-        return Ok(());
-    }
-    for row in rows.iter_mut() {
-        let rmpv::Value::Map(fields) = row else {
-            continue;
-        };
-        for (key, value) in fields.iter_mut() {
-            let Some(name) = key.as_str() else { continue };
-            if !instant_columns.iter().any(|c| c == name) {
-                continue;
-            }
-            let rmpv::Value::Integer(stored) = value else {
-                continue;
-            };
-            let millis = stored.as_i64().ok_or_else(|| crate::Error::Internal {
-                detail: format!(
-                    "timeseries column {name} holds {stored}, which is not a millisecond \
-                     count an instant can be read from"
-                ),
-            })?;
-            let micros = nodedb_types::NdbDateTime::from_millis(millis)
-                .map_err(|e| crate::Error::Internal {
-                    detail: format!("timeseries column {name} at {millis} ms: {e}"),
-                })?
-                .micros;
-            *value = rmpv::Value::Integer(micros.into());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::scale_instant_cells;
-
-    fn row(cells: &[(&str, i64)]) -> rmpv::Value {
-        rmpv::Value::Map(
-            cells
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        rmpv::Value::String((*k).into()),
-                        rmpv::Value::Integer((*v).into()),
-                    )
-                })
-                .collect(),
-        )
-    }
-
-    fn cell(row: &rmpv::Value, name: &str) -> Option<i64> {
-        let rmpv::Value::Map(fields) = row else {
-            return None;
-        };
-        fields
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(name))
-            .and_then(|(_, v)| v.as_i64())
-    }
-
-    /// A declared `TIMESTAMP` column is read as epoch microseconds, so the
-    /// millisecond value storage holds is scaled on the way out. 2020-03-05
-    /// stays 2020-03-05 instead of landing 50 years earlier.
-    #[test]
-    fn a_declared_instant_column_leaves_the_scan_in_microseconds() {
-        let mut rows = vec![row(&[("captured_at", 1_583_402_400_000)])];
-        scale_instant_cells(&mut rows, &["captured_at".to_string()]).expect("scale");
-        assert_eq!(cell(&rows[0], "captured_at"), Some(1_583_402_400_000_000));
-    }
-
-    /// A `BIGINT TIME_KEY` shares the millisecond storage column but is not a
-    /// declared instant, so its value is handed back exactly as inserted.
-    #[test]
-    fn a_column_that_is_not_a_declared_instant_keeps_its_value() {
-        let mut rows = vec![row(&[("ts", 1000), ("n", 7)])];
-        scale_instant_cells(&mut rows, &["other".to_string()]).expect("scale");
-        assert_eq!(cell(&rows[0], "ts"), Some(1000));
-        assert_eq!(cell(&rows[0], "n"), Some(7));
-    }
-
-    /// A NULL instant cell stays NULL — there is no instant to scale.
-    #[test]
-    fn a_null_instant_cell_passes_through() {
-        let mut rows = vec![rmpv::Value::Map(vec![(
-            rmpv::Value::String("captured_at".into()),
-            rmpv::Value::Nil,
-        )])];
-        scale_instant_cells(&mut rows, &["captured_at".to_string()]).expect("scale");
-        assert_eq!(cell(&rows[0], "captured_at"), None);
-    }
-
-    /// A stored millisecond count past the microsecond range fails the read.
-    /// Wrapping it would hand back an instant that is not the stored one.
-    #[test]
-    fn a_millisecond_value_beyond_the_microsecond_range_fails_the_read() {
-        let mut rows = vec![row(&[("captured_at", i64::MAX)])];
-        let err = scale_instant_cells(&mut rows, &["captured_at".to_string()])
-            .expect_err("i64::MAX ms cannot be expressed in microseconds");
-        assert!(
-            err.to_string().contains("captured_at"),
-            "the error must name the column: {err}"
-        );
-    }
 }

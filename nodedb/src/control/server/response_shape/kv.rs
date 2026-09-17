@@ -4,12 +4,13 @@
 //! into the stored value(s) before the protocol layer turns them into
 //! SQL rows.
 
-use serde_json::{Map, Value as JsonValue};
+use std::collections::HashMap;
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::decode_payload_value;
 use nodedb_physical::physical_plan::KvOp;
 use nodedb_query::msgpack_scan;
+use nodedb_types::Value;
 
 /// When `plan` is a KV point-get or batch-get, turn the engine's stored
 /// bytes into row-shaped msgpack.
@@ -47,32 +48,70 @@ pub fn apply_kv_wrap(plan: &PhysicalPlan, payload: &[u8]) -> Vec<u8> {
 /// Zip `KvOp::BatchGet`'s `keys` with the Data Plane's positional
 /// `[value_or_null, ...]` array and wrap each pair into a `{key, value}`
 /// row, msgpack-encoded so the rest of the shaping pipeline
-/// (`decode_payload_to_json` -> `push_flat_rows`) treats it exactly like
+/// (`decode_payload_value` -> `push_flat_rows`) treats it exactly like
 /// any other row-array payload.
 ///
 /// Falls back to the raw payload (rather than panicking) if the Data
 /// Plane payload is not the expected JSON/msgpack array — a malformed
-/// upstream payload degrades to the pre-fix (empty-looking) shape instead
-/// of taking down the connection.
+/// upstream payload degrades to an empty-looking shape instead of taking
+/// down the connection.
 fn wrap_batch_get(keys: &[Vec<u8>], payload: &[u8]) -> Vec<u8> {
-    let decoded = decode_payload_to_json(payload);
-    let Ok(JsonValue::Array(values)) = sonic_rs::from_str::<JsonValue>(&decoded) else {
+    let Ok(Value::Array(values)) = decode_payload_value(payload) else {
         return payload.to_vec();
     };
 
-    let rows: Vec<JsonValue> = keys
+    let rows: Vec<Value> = keys
         .iter()
         .zip(values)
         .map(|(key, value)| {
-            let mut row = Map::new();
+            let mut row = HashMap::with_capacity(2);
             row.insert(
                 "key".to_string(),
-                JsonValue::String(String::from_utf8_lossy(key).into_owned()),
+                Value::String(String::from_utf8_lossy(key).into_owned()),
             );
             row.insert("value".to_string(), value);
-            JsonValue::Object(row)
+            Value::Object(row)
         })
         .collect();
 
-    nodedb_types::json_to_msgpack(&JsonValue::Array(rows)).unwrap_or_else(|_| payload.to_vec())
+    nodedb_types::value_to_msgpack(&Value::Array(rows)).unwrap_or_else(|_| payload.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each positional result is paired with its key into a `{key, value}`
+    /// row; a missing key stays `null` and the value keeps its type.
+    #[test]
+    fn wrap_batch_get_pairs_keys_with_positional_values() {
+        let keys = vec![b"k1".to_vec(), b"k2".to_vec()];
+        let payload = nodedb_types::value_to_msgpack(&Value::Array(vec![
+            Value::String("dmFs".into()),
+            Value::Null,
+        ]))
+        .expect("encode");
+
+        let wrapped = wrap_batch_get(&keys, &payload);
+        let Value::Array(rows) = decode_payload_value(&wrapped).expect("decode") else {
+            panic!("wrapped payload must be an array");
+        };
+        let Value::Object(first) = &rows[0] else {
+            panic!("row must be an object");
+        };
+        assert_eq!(first["key"], Value::String("k1".into()));
+        assert_eq!(first["value"], Value::String("dmFs".into()));
+        let Value::Object(second) = &rows[1] else {
+            panic!("row must be an object");
+        };
+        assert_eq!(second["key"], Value::String("k2".into()));
+        assert_eq!(second["value"], Value::Null);
+    }
+
+    /// A payload that is not an array passes through unchanged.
+    #[test]
+    fn wrap_batch_get_passes_a_non_array_payload_through() {
+        let payload = nodedb_types::value_to_msgpack(&Value::Integer(1)).expect("encode");
+        assert_eq!(wrap_batch_get(&[b"k".to_vec()], &payload), payload);
+    }
 }

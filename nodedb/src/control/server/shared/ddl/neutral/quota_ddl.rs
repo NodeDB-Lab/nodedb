@@ -221,7 +221,6 @@ pub fn show_quotas(
         "enforcement".to_string(),
         "warning_threshold".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = state
         .quota_manager
@@ -250,10 +249,5 @@ pub fn show_quotas(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

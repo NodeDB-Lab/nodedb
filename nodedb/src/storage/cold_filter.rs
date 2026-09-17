@@ -22,13 +22,14 @@ use std::sync::{Arc, Mutex};
 use arrow::array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::DataType;
 use bytes::Bytes;
+use nodedb_types::Value;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::file::metadata::RowGroupMetaData;
 use parquet::file::statistics::Statistics;
 use tracing::debug;
 
-use crate::bridge::scan_filter::ScanFilter;
+use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 
 /// Read a Parquet file with both row-group pruning and row-level filtering.
 ///
@@ -221,19 +222,41 @@ fn row_group_might_match(rg: &RowGroupMetaData, filter: &ScanFilter) -> bool {
         return true; // No statistics — can't prune.
     };
 
-    // Use min/max statistics to prune.
-    use nodedb_query::scan_filter::FilterOp;
-    let json_val: serde_json::Value = filter.value.clone().into();
-    match &filter.op {
-        FilterOp::Eq => stat_might_contain(stats, &json_val),
-        FilterOp::Gt | FilterOp::Gte => stat_max_gte(stats, &json_val),
-        FilterOp::Lt | FilterOp::Lte => stat_min_lte(stats, &json_val),
-        _ => true, // Complex operators (contains, like, etc.) — can't prune.
+    // Use min/max statistics to prune. Only a scalar range predicate has a
+    // min/max form; every other operator keeps the row group.
+    match filter.op {
+        FilterOp::Eq => stat_might_contain(stats, &filter.value),
+        FilterOp::Gt | FilterOp::Gte => stat_max_gte(stats, &filter.value),
+        FilterOp::Lt | FilterOp::Lte => stat_min_lte(stats, &filter.value),
+        FilterOp::Ne
+        | FilterOp::Contains
+        | FilterOp::Like
+        | FilterOp::NotLike
+        | FilterOp::Ilike
+        | FilterOp::NotIlike
+        | FilterOp::In
+        | FilterOp::NotIn
+        | FilterOp::IsNull
+        | FilterOp::IsNotNull
+        | FilterOp::ArrayContains
+        | FilterOp::ArrayContainsAll
+        | FilterOp::ArrayOverlap
+        | FilterOp::MatchAll
+        | FilterOp::Exists
+        | FilterOp::NotExists
+        | FilterOp::Or
+        | FilterOp::Expr
+        | FilterOp::GtColumn
+        | FilterOp::GteColumn
+        | FilterOp::LtColumn
+        | FilterOp::LteColumn
+        | FilterOp::EqColumn
+        | FilterOp::NeColumn => true,
     }
 }
 
 /// Check if column statistics allow an equality match.
-fn stat_might_contain(stats: &Statistics, value: &serde_json::Value) -> bool {
+fn stat_might_contain(stats: &Statistics, value: &Value) -> bool {
     match stats {
         Statistics::Int64(s) => {
             let (Some(min), Some(max)) = (s.min_opt(), s.max_opt()) else {
@@ -272,7 +295,7 @@ fn stat_might_contain(stats: &Statistics, value: &serde_json::Value) -> bool {
 }
 
 /// Check if the column max >= value (for gt/gte predicates).
-fn stat_max_gte(stats: &Statistics, value: &serde_json::Value) -> bool {
+fn stat_max_gte(stats: &Statistics, value: &Value) -> bool {
     match stats {
         Statistics::Int64(s) => {
             let Some(max) = s.max_opt() else { return true };
@@ -287,7 +310,7 @@ fn stat_max_gte(stats: &Statistics, value: &serde_json::Value) -> bool {
 }
 
 /// Check if the column min <= value (for lt/lte predicates).
-fn stat_min_lte(stats: &Statistics, value: &serde_json::Value) -> bool {
+fn stat_min_lte(stats: &Statistics, value: &Value) -> bool {
     match stats {
         Statistics::Int64(s) => {
             let Some(min) = s.min_opt() else { return true };
@@ -481,7 +504,7 @@ mod tests {
 
         let filters = vec![ScanFilter {
             field: "age".into(),
-            op: "gt".into(),
+            op: crate::bridge::scan_filter::FilterOp::Gt,
             value: nodedb_types::Value::Integer(25),
             clauses: vec![],
             expr: None,
@@ -509,7 +532,7 @@ mod tests {
 
         let filters = vec![ScanFilter {
             field: String::new(),
-            op: "expr".into(),
+            op: crate::bridge::scan_filter::FilterOp::Expr,
             value: nodedb_types::Value::Null,
             clauses: vec![],
             expr: Some(SqlExpr::BinaryOp {
@@ -538,7 +561,7 @@ mod tests {
         // `10 / age > 1` is true only for d1 (10/2 = 5 > 1); d2 (10/30 = 0) fails.
         let filters = vec![ScanFilter {
             field: String::new(),
-            op: "expr".into(),
+            op: crate::bridge::scan_filter::FilterOp::Expr,
             value: nodedb_types::Value::Null,
             clauses: vec![],
             expr: Some(SqlExpr::BinaryOp {

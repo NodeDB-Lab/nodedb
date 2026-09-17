@@ -148,6 +148,10 @@ pub const UNDEFINED_COLUMN: &str = "42703";
 /// more than one relation in scope.
 pub const AMBIGUOUS_COLUMN: &str = "42702";
 
+/// `42804` — `datatype_mismatch` (a literal the declared column type cannot
+/// represent, such as a column `DEFAULT` refused at `CREATE`)
+pub const DATATYPE_MISMATCH: &str = "42804";
+
 /// `42846` — `cannot_coerce`
 pub const CANNOT_COERCE: &str = "42846";
 
@@ -363,6 +367,7 @@ mod tests {
             UNDEFINED_COLUMN,
             AMBIGUOUS_COLUMN,
             UNDEFINED_OBJECT,
+            DATATYPE_MISMATCH,
             CANNOT_COERCE,
             UNDEFINED_TABLE,
             UNDEFINED_FUNCTION,

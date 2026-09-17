@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Decoded column data from a segment scan.
+///
+/// The variant set is the closed set of physical column encodings, so a
+/// reader matches it exhaustively and the compiler names every site an added
+/// encoding must handle.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum DecodedColumn {
     Int64 {
         values: Vec<i64>,

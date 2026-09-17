@@ -108,7 +108,7 @@ pub(in crate::data::executor::handlers) fn extract_group_key_part(
                 GroupKeyPart::Null
             }
         }
-        ColumnType::Timestamp => {
+        ColumnType::Timestamp(_) => {
             if let ColumnData::Timestamp(vals) = col_data {
                 GroupKeyPart::Int64(vals[row_idx])
             } else {

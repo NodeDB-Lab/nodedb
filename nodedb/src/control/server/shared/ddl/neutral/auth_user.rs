@@ -199,7 +199,6 @@ pub fn show_auth_users(
         "is_active".to_string(),
         "last_seen".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = users
         .iter()
@@ -235,12 +234,7 @@ pub fn show_auth_users(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Public re-export of duration parser for use by other DDL modules.

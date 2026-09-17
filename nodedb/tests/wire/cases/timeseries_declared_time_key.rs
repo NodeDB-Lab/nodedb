@@ -18,10 +18,10 @@
 //! (`ts`, `timestamp`, `time`) is not special: it is the user's column.
 //!
 //! A declared `TIMESTAMP` time key reads back as the instant that was
-//! inserted: the engine stores epoch milliseconds and a `TIMESTAMP` cell is
-//! read as epoch microseconds, so the two units meet as the row leaves the
-//! scan. A `BIGINT` time key shares that storage column and is not a
-//! timestamp, so it reads back as the number that was inserted.
+//! inserted: the engine stores epoch milliseconds and emits the cell as a
+//! typed instant from the column's own kind. A `BIGINT` time key shares
+//! that storage column and is not a timestamp, so it reads back as the
+//! number that was inserted.
 
 use crate::harness::TestServer;
 
@@ -34,13 +34,10 @@ const LATE: &str = "2020-03-05 13:00:00";
 /// wall-clock time ever will.
 const AFTER_BOTH: &str = "2021-01-01 00:00:00";
 /// `EARLY` as a declared `TIMESTAMP` column renders it. The engine stores
-/// 1583402400000 epoch milliseconds; a `TIMESTAMP` cell carries epoch
-/// microseconds, which the pgwire encoder writes as ISO-8601 UTC.
+/// 1583402400000 epoch milliseconds and emits the cell as a typed instant,
+/// which the pgwire encoder writes as ISO-8601 UTC. A star projection reads
+/// the same typed cell, so it renders the same.
 const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
-/// `EARLY` as `SELECT *` renders it: a star projection announces no catalog
-/// type, so its cells stay the raw stored number — here the same instant in
-/// epoch microseconds.
-const EARLY_MICROS: &str = "1583402400000000";
 
 #[tokio::test]
 async fn time_key_named_ts_round_trips() {
@@ -126,7 +123,7 @@ async fn select_star_projects_declared_columns_only() {
     );
     assert_eq!(
         rows[0].get("ts").map(String::as_str),
-        Some(EARLY_MICROS),
+        Some(EARLY_ISO),
         "`SELECT *` must carry the inserted event time under `ts`: {rows:?}"
     );
 }

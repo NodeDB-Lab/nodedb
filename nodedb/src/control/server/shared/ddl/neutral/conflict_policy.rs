@@ -84,12 +84,10 @@ pub async fn alter_set_on_conflict(
 
     let mut row = Map::new();
     row.insert("result".to_string(), JsonValue::String("OK".to_string()));
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["result".to_string()],
+        vec![row],
+    ))])
 }
 
 /// Handle `SHOW CONFLICT POLICY ON <collection>`.
@@ -118,12 +116,10 @@ pub async fn show_conflict_policy(
 
     let mut row = Map::new();
     row.insert("policy".to_string(), JsonValue::String(text));
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["policy".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["policy".to_string()],
+        vec![row],
+    ))])
 }
 
 fn resolve_policy_kind(kind: &ConflictPolicyKind) -> ConflictPolicy {

@@ -46,7 +46,9 @@ pub fn build_column_mappings(
             {
                 Some(idx) => {
                     let (_, p_type) = &partition_schema.columns[idx];
-                    if p_type == q_type {
+                    // Every time kind shares one millisecond storage, so a
+                    // time column is present whatever kind either side names.
+                    if p_type == q_type || (p_type.is_time() && q_type.is_time()) {
                         ColumnMapping::Present(idx)
                     } else if can_widen(*p_type, *q_type) {
                         ColumnMapping::Widen {
@@ -98,7 +100,7 @@ pub fn apply_mappings(
 /// Create a NULL-equivalent column of the given type and length.
 fn null_column(ty: ColumnType, rows: usize) -> ColumnData {
     match ty {
-        ColumnType::Timestamp => ColumnData::Timestamp(vec![0; rows]),
+        ColumnType::Timestamp(_) => ColumnData::Timestamp(vec![0; rows]),
         ColumnType::Float64 => ColumnData::Float64(vec![f64::NAN; rows]),
         ColumnType::Int64 => ColumnData::Int64(vec![0; rows]),
         ColumnType::Symbol => ColumnData::Symbol(vec![u32::MAX; rows]), // sentinel
@@ -188,12 +190,15 @@ pub fn apply_schema_changes(
 
 #[cfg(test)]
 mod tests {
+    use super::super::columnar_memtable::TimeKind;
     use super::*;
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     fn schema_v1() -> ColumnarSchema {
         ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],
@@ -205,7 +210,7 @@ mod tests {
     fn schema_v2_added_column() -> ColumnarSchema {
         ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
                 ("mem".into(), ColumnType::Float64),
@@ -258,7 +263,7 @@ mod tests {
     fn widen_int64_to_float64() {
         let query = ColumnarSchema {
             columns: vec![
-                ("ts".into(), ColumnType::Timestamp),
+                ("ts".into(), MILLIS),
                 ("val".into(), ColumnType::Float64), // query expects f64
             ],
             timestamp_idx: 0,
@@ -266,7 +271,7 @@ mod tests {
         };
         let partition = ColumnarSchema {
             columns: vec![
-                ("ts".into(), ColumnType::Timestamp),
+                ("ts".into(), MILLIS),
                 ("val".into(), ColumnType::Int64), // partition has i64
             ],
             timestamp_idx: 0,
@@ -282,6 +287,27 @@ mod tests {
         let result = apply_mappings(&mappings, &query, &partition_data, 1);
         let val = result[1].as_f64();
         assert!((val[0] - 42.0).abs() < f64::EPSILON);
+    }
+
+    /// A partition whose time column carries another kind still maps as
+    /// present: the kind is how a cell is read, not what is stored.
+    #[test]
+    fn time_column_maps_present_across_kinds() {
+        let query = ColumnarSchema {
+            columns: vec![(
+                "ts".into(),
+                ColumnType::Timestamp(TimeKind::Instant(nodedb_types::InstantKind::Naive)),
+            )],
+            timestamp_idx: 0,
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 1],
+        };
+        let partition = ColumnarSchema {
+            columns: vec![("ts".into(), MILLIS)],
+            timestamp_idx: 0,
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 1],
+        };
+        let mappings = build_column_mappings(&query, &partition);
+        assert!(matches!(mappings[0], ColumnMapping::Present(0)));
     }
 
     #[test]

@@ -40,7 +40,7 @@ const COLLECTION: &str = "ollp_items";
 fn filter_active() -> Vec<u8> {
     let f = ScanFilter {
         field: "active".into(),
-        op: "eq".into(),
+        op: nodedb::bridge::scan_filter::FilterOp::Eq,
         value: nodedb_types::Value::Bool(true),
         clauses: Vec::new(),
         expr: None,

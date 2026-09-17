@@ -103,11 +103,12 @@ fn nodedb_exits_nonzero_on_catalog_integrity_violation() {
         catalog
             .put_rls_policy(&StoredRlsPolicy {
                 tenant_id: 1,
+                database_id: 0,
                 collection: "collection_that_was_never_created".to_string(),
                 display_collection: "collection_that_was_never_created".to_string(),
                 name: "dangling_policy".to_string(),
                 policy_type_tag: 0,
-                compiled_predicate_json: String::new(),
+                predicate_text: String::new(),
                 mode_tag: 0,
                 on_deny_json: r#""Silent""#.to_string(),
                 enabled: true,

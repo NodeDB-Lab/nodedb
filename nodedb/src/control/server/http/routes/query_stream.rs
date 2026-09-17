@@ -26,12 +26,13 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::exchange::gather::gather_all_cores_stream_authorized;
 use crate::control::server::exchange::streamable::streamable_gather_child;
+use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::compose::shape_decoded_rows;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::result_stream::ResultStream;
 use crate::control::server::shared::metering::DetachedMeterGuard;
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::decode_payload_value;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::auth::AppState;
@@ -171,8 +172,7 @@ pub(super) fn ndjson_body_stream(
                 }
             };
 
-            let json_str = decode_payload_to_json(&batch.payload);
-            let value = match sonic_rs::from_str::<serde_json::Value>(&json_str) {
+            let value = match decode_payload_value(&batch.payload) {
                 Ok(v) => v,
                 Err(e) => {
                     // A malformed batch payload is surfaced as an in-band error
@@ -187,12 +187,13 @@ pub(super) fn ndjson_body_stream(
                 }
             };
             // Row maps are keyed by `ShapedRows::cell_keys`, so each NDJSON
-            // line serializes as-is; two output columns sharing a name emit
-            // `{"id": …, "id_1": …}` rather than collapsing to one cell.
+            // line serializes key for key, each typed cell converted at this
+            // edge; two output columns sharing a name emit `{"id": …,
+            // "id_1": …}` rather than collapsing to one cell.
             // Only re-borrows the once-resolved inputs, so the very first
             // batch is redacted under the same policy as the last.
             let shaped = match shape_decoded_rows(
-                &value,
+                value,
                 projection.as_ref(),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
             ) {
@@ -205,11 +206,11 @@ pub(super) fn ndjson_body_stream(
                     return;
                 }
             };
-            for row in shaped.rows {
+            for row in &shaped.rows {
                 if emitted >= limit {
                     break;
                 }
-                let line = format!("{}\n", serde_json::Value::Object(row));
+                let line = format!("{}\n", serde_json::Value::Object(row_to_wire_json(row)));
                 emitted += 1;
                 // Incremented for the row this line actually carries, right
                 // before it is handed to the body sink below — a client that
@@ -232,8 +233,8 @@ mod tests {
     use crate::control::state::SharedState;
     use crate::types::Lsn;
 
-    /// A JSON-text array of `n` `{"id": i}` objects. `decode_payload_to_json`
-    /// returns a JSON-leading payload as-is, so this exercises the same
+    /// A JSON-text array of `n` `{"id": i}` objects. `decode_payload_value`
+    /// parses a JSON-leading payload as JSON, so this exercises the same
     /// array-of-objects → per-line decode path a Data-Plane scan chunk drives.
     fn json_object_batch(start: usize, n: usize) -> Vec<u8> {
         let items: Vec<serde_json::Value> = (start..start + n)

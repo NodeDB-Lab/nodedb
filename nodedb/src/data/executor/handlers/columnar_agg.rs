@@ -436,14 +436,14 @@ fn build_results_from_groups(
 mod tests {
     use super::*;
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnType, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+        ColumnType, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
     };
     use nodedb_types::timeseries::SeriesId;
 
     fn make_test_memtable() -> ColumnarMemtable {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("value".into(), ColumnType::Float64),
                 ("qname".into(), ColumnType::Symbol),
                 ("qtype".into(), ColumnType::Symbol),
@@ -542,7 +542,7 @@ mod tests {
         let mt = make_test_memtable();
         let filter = crate::bridge::scan_filter::ScanFilter {
             field: "value".into(),
-            op: "gt".into(),
+            op: crate::bridge::scan_filter::FilterOp::Gt,
             value: nodedb_types::Value::Float(5000.0),
             clauses: vec![],
             expr: None,

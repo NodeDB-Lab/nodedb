@@ -70,7 +70,7 @@ pub fn detect_timestamp(
 ) -> TsDetection {
     // Tier 1: Column type is Timestamp.
     for (i, (name, ty)) in columns.iter().enumerate() {
-        if *ty == ColumnType::Timestamp {
+        if ty.is_time() {
             return TsDetection::ByType {
                 column_index: i,
                 column_name: name.clone(),
@@ -133,13 +133,16 @@ fn looks_epoch_like(values: &[i64]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::columnar_memtable::TimeKind;
     use super::*;
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     #[test]
     fn detect_by_type() {
         let cols = vec![
             ("id".into(), ColumnType::Int64),
-            ("ts".into(), ColumnType::Timestamp),
+            ("ts".into(), MILLIS),
             ("value".into(), ColumnType::Float64),
         ];
         let result = detect_timestamp(&cols, None);
@@ -238,7 +241,7 @@ mod tests {
     fn type_takes_priority_over_name() {
         let cols = vec![
             ("timestamp".into(), ColumnType::Int64), // name match
-            ("t".into(), ColumnType::Timestamp),     // type match
+            ("t".into(), MILLIS),                    // type match
         ];
         let result = detect_timestamp(&cols, None);
         // Type should win.

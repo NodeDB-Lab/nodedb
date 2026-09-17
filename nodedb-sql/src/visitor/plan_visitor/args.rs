@@ -68,7 +68,6 @@ pub struct InsertVisitArgs<'a> {
     /// The lowering these rows take, decided by the engine's `EngineRules`.
     pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
-    pub column_defaults: &'a [(String, String)],
     pub if_absent: bool,
     pub column_schema: &'a [(String, String)],
     pub primary_key: Option<&'a str>,
@@ -81,7 +80,6 @@ pub struct UpsertVisitArgs<'a> {
     /// The lowering these rows take, decided by the engine's `EngineRules`.
     pub route: WriteRoute,
     pub rows: &'a [Vec<(String, SqlValue)>],
-    pub column_defaults: &'a [(String, String)],
     pub on_conflict_updates: &'a [(String, SqlExpr)],
     pub column_schema: &'a [(String, String)],
     pub primary_key: Option<&'a str>,

@@ -141,7 +141,6 @@ impl QueryContext {
                 .load(std::sync::atomic::Ordering::Relaxed),
             database_id,
             tenant_id,
-            sql_catalog: Some(Arc::clone(&catalog) as _),
         };
         let output_schema =
             crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
@@ -423,7 +422,6 @@ impl QueryContext {
                 .load(std::sync::atomic::Ordering::Relaxed),
             database_id,
             tenant_id,
-            sql_catalog: Some(Arc::clone(&catalog) as _),
         };
         let output_schema =
             crate::control::planner::sql_plan_convert::output_schema::build_output_schema(

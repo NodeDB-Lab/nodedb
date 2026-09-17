@@ -25,6 +25,21 @@ pub fn put_owner_sync(stored: &StoredCollection, shared: Arc<SharedState>) {
         tenant_id: stored.tenant_id,
         owner_username: stored.owner.clone(),
     });
+    // The collection's declared columns type its RLS policies' literals, so
+    // every node recompiles them against the schema this entry carries.
+    if let Err(e) = shared.rls.recompile_for_collection(
+        shared.credentials.catalog(),
+        stored.database_id,
+        stored.tenant_id,
+        &stored.name,
+    ) {
+        tracing::error!(
+            collection = %stored.name,
+            tenant = stored.tenant_id,
+            error = %e,
+            "post_apply: RLS policies could not be re-read for recompilation"
+        );
+    }
 }
 
 /// Register-dispatch half: dispatch a `Register` request to this node's

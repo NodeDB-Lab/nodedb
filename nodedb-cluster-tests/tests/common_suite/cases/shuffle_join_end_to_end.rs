@@ -24,6 +24,14 @@ use nodedb_types::DatabaseId;
 
 use crate::common::cluster_harness::{TestCluster, wait_for};
 
+/// The instant [`a_shuffle_join_renders_a_time_key_as_the_stored_instant`]
+/// stores in its timeseries collection.
+const EARLY: &str = "2020-03-05 10:00:00";
+/// `EARLY` as a declared `TIMESTAMP` time key renders it. The engine stores
+/// 1583402400000 epoch milliseconds and emits the cell as a typed instant,
+/// which the pgwire encoder writes as ISO-8601 UTC.
+const EARLY_ISO: &str = "2020-03-05T10:00:00.000000Z";
+
 /// Run `sql` and collect the `id` column of every returned data row, sorted, so
 /// the result is order-independent for equality assertions.
 async fn collect_ids(client: &tokio_postgres::Client, sql: &str, col: &str) -> Vec<String> {
@@ -207,6 +215,135 @@ async fn distributed_shuffle_join_matches_inner_join() {
     assert_eq!(
         after, expected,
         "join after disabling the override must still return the 6 matches; got {after:?}"
+    );
+
+    cluster.shutdown().await;
+}
+
+/// A timeseries `TIMESTAMP` time key projected through a shuffle join denotes
+/// the stored instant, the same as a direct read does. The shuffle path
+/// repartitions rows through its own coordinator-side encode/decode hop, so
+/// it is a route to the cell distinct from the local join and the direct
+/// `SELECT` both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_shuffle_join_renders_a_time_key_as_the_stored_instant() {
+    const LEFT: &str = "ts_shuffle_events";
+    const RIGHT: &str = "ts_shuffle_hosts";
+    assert_ne!(
+        vshard_for_collection(DatabaseId::DEFAULT, LEFT),
+        vshard_for_collection(DatabaseId::DEFAULT, RIGHT),
+        "test collections must hash to different vShards to exercise cross-node shuffle"
+    );
+
+    let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
+
+    cluster
+        .exec_ddl_on_any_leader(&format!(
+            "CREATE COLLECTION {LEFT} \
+             (captured_at TIMESTAMP TIME_KEY, host TEXT, v FLOAT) \
+             WITH (engine='timeseries')"
+        ))
+        .await
+        .expect("CREATE COLLECTION for the timeseries side");
+    cluster
+        .exec_ddl_on_any_leader(&format!(
+            "CREATE COLLECTION {RIGHT} (id TEXT PRIMARY KEY, region TEXT) \
+             WITH (engine='document_strict')"
+        ))
+        .await
+        .expect("CREATE COLLECTION for the document side");
+
+    wait_for(
+        "all 3 nodes see both collections",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || {
+            cluster
+                .nodes
+                .iter()
+                .all(|n| n.cached_collection_count() >= 2)
+        },
+    )
+    .await;
+
+    cluster.nodes[0]
+        .client
+        .simple_query(&format!(
+            "INSERT INTO {LEFT} (captured_at, host, v) VALUES ('{EARLY}', 'h1', 1.5)"
+        ))
+        .await
+        .expect("insert timeseries row");
+    cluster.nodes[0]
+        .client
+        .simple_query(&format!(
+            "INSERT INTO {RIGHT} (id, region) VALUES ('h1', 'eu')"
+        ))
+        .await
+        .expect("insert document row");
+
+    for (idx, node) in cluster.nodes.iter().enumerate() {
+        wait_for(
+            &format!("node {idx} sees the timeseries row"),
+            Duration::from_secs(15),
+            Duration::from_millis(50),
+            || {
+                let n = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(count_rows(
+                        &node.client,
+                        &format!("SELECT host FROM {LEFT}"),
+                    ))
+                });
+                n >= 1
+            },
+        )
+        .await;
+        wait_for(
+            &format!("node {idx} sees the document row"),
+            Duration::from_secs(15),
+            Duration::from_millis(50),
+            || {
+                let n = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(count_rows(&node.client, &format!("SELECT id FROM {RIGHT}")))
+                });
+                n >= 1
+            },
+        )
+        .await;
+    }
+
+    cluster.nodes[1]
+        .client
+        .simple_query("SET nodedb.force_shuffle_join = on")
+        .await
+        .expect("SET nodedb.force_shuffle_join");
+    cluster.nodes[1]
+        .client
+        .simple_query("SET nodedb.shuffle_num_parts = 4")
+        .await
+        .expect("SET nodedb.shuffle_num_parts");
+
+    let join_sql = format!(
+        "SELECT {LEFT}.captured_at FROM {LEFT} \
+         INNER JOIN {RIGHT} ON {LEFT}.host = {RIGHT}.id"
+    );
+    let msgs = cluster.nodes[1]
+        .client
+        .simple_query(&join_sql)
+        .await
+        .expect("a shuffle join over a time key must succeed");
+    let values: Vec<String> = msgs
+        .into_iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(values.len(), 1, "one event matches one host: {values:?}");
+    assert_eq!(
+        values[0], EARLY_ISO,
+        "a shuffle-joined time key must denote {EARLY}: got {values:?}"
     );
 
     cluster.shutdown().await;

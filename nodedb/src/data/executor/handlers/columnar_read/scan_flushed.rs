@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Phase-1 flushed-segment scanning, extracted from `scan.rs` to keep that
-//! file within the 500-line non-test limit. Logic is verbatim from
-//! `execute_columnar_scan`; only the parameterisation changes.
-
-use nodedb_types::columnar::schema::TS_SYSTEM;
+//! The flushed-segment pass of the columnar base scan.
 
 use crate::bridge::expr_eval::ComputedColumn;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::overlay::ColumnarMatchedRow;
 use crate::data::executor::scan_normalize::decoded_col_to_value;
 
 use super::bitemporal::bitemporal_row_visible;
-use super::convert::value_to_json;
-use super::filter::row_matches_filters;
+use super::convert::row_to_projected_value;
+use super::filter::row_matches_filters_and_policy;
 
 /// Read-only context for the flushed-segment scan phase. All fields are
 /// borrowed from locals already computed in `execute_columnar_scan`.
@@ -25,6 +22,8 @@ pub(in crate::data::executor) struct FlushedScanCtx<'a> {
     pub limit: usize,
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub filter_predicates: &'a [ScanFilter],
+    /// The caller's decoded read policy; empty admits every row.
+    pub rls_predicates: &'a [ScanFilter],
     pub prefilter: Option<&'a nodedb_types::surrogate_bitmap::SurrogateBitmap>,
     pub computed_cols: &'a [ComputedColumn],
     pub all_versions: bool,
@@ -40,18 +39,14 @@ impl CoreLoop {
     /// rows to `matched`. This is Phase 1 of `execute_columnar_scan`; Phase 2
     /// (live memtable) continues in the caller with the same `matched` Vec.
     ///
-    /// The body is verbatim from the `// ── Phase 1: flushed segments ──` block
-    /// in `scan.rs`. Only local variables that were defined earlier in
-    /// `execute_columnar_scan` are now method parameters (borrowed read-only via
-    /// `FlushedScanCtx`) or the mutable `matched` accumulator.
+    /// Each cell is decoded by `decoded_col_to_value` with its declared column
+    /// type, and each row is projected by `row_to_projected_value` — the same
+    /// two steps the live-memtable phase applies — so a row reads identically
+    /// from a segment and from the memtable.
     pub(in crate::data::executor) fn scan_flushed_columnar_segments(
         &self,
         ctx: FlushedScanCtx<'_>,
-        matched: &mut Vec<(
-            Option<nodedb_types::Surrogate>,
-            Vec<nodedb_types::value::Value>,
-            serde_json::Value,
-        )>,
+        matched: &mut Vec<ColumnarMatchedRow>,
     ) -> crate::Result<()> {
         let FlushedScanCtx {
             collection,
@@ -61,6 +56,7 @@ impl CoreLoop {
             limit,
             sort_keys,
             filter_predicates,
+            rls_predicates,
             prefilter,
             computed_cols,
             all_versions,
@@ -179,10 +175,14 @@ impl CoreLoop {
                         }
                     }
 
-                    // Build the row as Vec<Value> using the shared decoder.
+                    // Build the row as Vec<Value> using the shared decoder,
+                    // typing each cell by its declared column type.
                     let row: Vec<nodedb_types::value::Value> = decoded_cols
                         .iter()
-                        .map(|dc| decoded_col_to_value(dc, row_idx))
+                        .zip(&schema.columns)
+                        .map(|(dc, col_def)| {
+                            decoded_col_to_value(dc, row_idx, &col_def.column_type)
+                        })
                         .collect();
 
                     if !bitemporal_row_visible(
@@ -195,49 +195,28 @@ impl CoreLoop {
                     ) {
                         continue;
                     }
-                    if !filter_predicates.is_empty()
-                        && !row_matches_filters(&row, schema, filter_predicates)?
-                    {
+                    // The query's WHERE predicates, then the caller's read
+                    // policy, before projection so a limit counts admitted
+                    // rows only.
+                    if !row_matches_filters_and_policy(
+                        &row,
+                        schema,
+                        filter_predicates,
+                        rls_predicates,
+                    )? {
                         continue;
                     }
 
-                    let mut obj = serde_json::Map::new();
-                    for (i, col_def) in schema.columns.iter().enumerate() {
-                        let force_system_col = all_versions && col_def.name == TS_SYSTEM;
-                        if !projection.is_empty()
-                            && !force_system_col
-                            && !projection.iter().any(|p| p == &col_def.name)
-                            && !computed_cols.iter().any(|cc| cc.alias == col_def.name)
-                        {
-                            continue;
-                        }
-                        if i < row.len() {
-                            obj.insert(col_def.name.clone(), value_to_json(&row[i]));
-                        }
-                    }
-                    if !computed_cols.is_empty() {
-                        let doc_val =
-                            nodedb_types::Value::from(serde_json::Value::Object(obj.clone()));
-                        for cc in computed_cols {
-                            let existing = obj.get(&cc.alias);
-                            if matches!(existing, Some(v) if !v.is_null()) {
-                                continue;
-                            }
-                            // Computed-column projection is
-                            // projection-shaped: a division/modulo-by-zero
-                            // fails the whole scan.
-                            let v = cc.expr.eval(&doc_val)?;
-                            obj.insert(cc.alias.clone(), serde_json::Value::from(v));
-                        }
-                        if !projection.is_empty() {
-                            obj.retain(|k, _| {
-                                projection.iter().any(|p| p == k)
-                                    || computed_cols.iter().any(|cc| &cc.alias == k)
-                                    || (all_versions && k == TS_SYSTEM)
-                            });
-                        }
-                    }
-                    matched.push((row_surrogate, row, serde_json::Value::Object(obj)));
+                    // Computed-column projection is projection-shaped: a
+                    // division/modulo-by-zero fails the whole scan.
+                    let obj = row_to_projected_value(
+                        &row,
+                        schema,
+                        projection,
+                        computed_cols,
+                        all_versions,
+                    )?;
+                    matched.push((row_surrogate, row, obj));
                     if sort_keys.is_empty() && matched.len() >= limit {
                         break;
                     }

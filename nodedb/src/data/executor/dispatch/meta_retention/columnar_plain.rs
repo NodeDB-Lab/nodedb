@@ -93,9 +93,16 @@ impl CoreLoop {
                         engine: "columnar".into(),
                         detail: format!("read _ts_system: {e}"),
                     })?;
-                let pk_cols: Vec<nodedb_columnar::reader::DecodedColumn> = pk_indices
+                let pk_cols: Vec<(
+                    nodedb_columnar::reader::DecodedColumn,
+                    &nodedb_types::columnar::ColumnType,
+                )> = pk_indices
                     .iter()
-                    .map(|&i| reader.read_column(i))
+                    .map(|&i| {
+                        reader
+                            .read_column(i)
+                            .map(|col| (col, &schema.columns[i].column_type))
+                    })
                     .collect::<Result<_, _>>()
                     .map_err(|e| crate::Error::Storage {
                         engine: "columnar".into(),
@@ -201,13 +208,19 @@ fn int64_from_decoded(col: &nodedb_columnar::reader::DecodedColumn, row_idx: usi
     }
 }
 
+/// Encode the primary key of one flushed row. Each cell is typed by its
+/// declared column type, so the key bytes match what the memtable path
+/// encodes for the same row: a `TIMESTAMP` key cell is an instant on both.
 fn encode_pk_from_decoded_cols(
-    cols: &[nodedb_columnar::reader::DecodedColumn],
+    cols: &[(
+        nodedb_columnar::reader::DecodedColumn,
+        &nodedb_types::columnar::ColumnType,
+    )],
     row_idx: usize,
 ) -> Vec<u8> {
     let values: Vec<nodedb_types::value::Value> = cols
         .iter()
-        .map(|c| decoded_col_to_value(c, row_idx))
+        .map(|(c, declared)| decoded_col_to_value(c, row_idx, declared))
         .collect();
     if values.len() == 1 {
         nodedb_columnar::pk_index::encode_pk(&values[0])

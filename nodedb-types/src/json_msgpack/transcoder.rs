@@ -5,11 +5,16 @@
 //! Walks msgpack bytes and writes JSON text directly into a String.
 //! No intermediate `serde_json::Value` or `nodedb_types::Value`.
 //! Used ONLY at the outermost pgwire/HTTP layer for client compatibility.
+//!
+//! Instant ext values (fixext8 type 1 / 2) render as ISO 8601 strings.
+//! Every other ext type renders as `null`.
 
 use std::fmt::Write as _;
 
 use super::error::MsgpackResult;
+use super::instant_ext::instant_from_ext;
 use super::reader::{Cursor, base64_encode};
+use crate::datetime::NdbDateTime;
 
 /// Transcode raw msgpack bytes to a JSON string without intermediate types.
 ///
@@ -139,7 +144,20 @@ fn transcode_value(c: &mut Cursor<'_>, out: &mut String) -> zerompk::Result<()> 
             transcode_map(c, out, l)?;
         }
 
-        // ext types — render as null
+        // fixext8: instants render as ISO 8601, other types as null
+        0xD7 => {
+            let (ext_type, payload) = c.take_fixext8()?;
+            match instant_from_ext(ext_type, payload) {
+                Some((_, micros)) => {
+                    out.push('"');
+                    out.push_str(&NdbDateTime::from_micros(micros).to_iso8601());
+                    out.push('"');
+                }
+                None => out.push_str("null"),
+            }
+        }
+
+        // other ext types — render as null
         0xD4 => {
             c.take_n(2)?;
             out.push_str("null");
@@ -150,10 +168,6 @@ fn transcode_value(c: &mut Cursor<'_>, out: &mut String) -> zerompk::Result<()> 
         }
         0xD6 => {
             c.take_n(5)?;
-            out.push_str("null");
-        }
-        0xD7 => {
-            c.take_n(9)?;
             out.push_str("null");
         }
         0xD8 => {
@@ -308,6 +322,18 @@ mod tests {
     #[test]
     fn empty() {
         assert_eq!(msgpack_to_json_string(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn instant_ext_renders_iso8601() {
+        use crate::json_msgpack::instant_ext::{InstantKind, write_instant};
+        let mut mp = vec![0x81, 0xA2, b't', b's'];
+        write_instant(&mut mp, InstantKind::Naive, 1_710_498_600_000_000);
+        let json_str = msgpack_to_json_string(&mp).unwrap();
+        assert_eq!(json_str, "{\"ts\":\"2024-03-15T10:30:00.000000Z\"}");
+
+        let unknown = [0xD7, 0x09, 0, 0, 0, 0, 0, 0, 0, 1];
+        assert_eq!(msgpack_to_json_string(&unknown).unwrap(), "null");
     }
 
     #[test]

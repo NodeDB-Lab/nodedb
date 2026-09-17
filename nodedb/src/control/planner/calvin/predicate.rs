@@ -268,13 +268,15 @@ mod tests {
             field: "balance".into(),
             op: FilterOp::Gt,
             value: Value::Integer(1000),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let f2 = vec![ScanFilter {
             field: "balance".into(),
             op: FilterOp::Gt,
             value: Value::Integer(9999),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let h1 = predicate_class_for_filters(&encode_filters(&f1), "accounts");
         let h2 = predicate_class_for_filters(&encode_filters(&f2), "accounts");
@@ -290,13 +292,15 @@ mod tests {
             field: "name".into(),
             op: FilterOp::Eq,
             value: Value::String("alice".into()),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let f2 = vec![ScanFilter {
             field: "name".into(),
             op: FilterOp::Eq,
             value: Value::String("bob".into()),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let h1 = predicate_class_for_filters(&encode_filters(&f1), "users");
         let h2 = predicate_class_for_filters(&encode_filters(&f2), "users");
@@ -312,13 +316,15 @@ mod tests {
             field: "balance".into(),
             op: FilterOp::Gt,
             value: Value::Integer(100),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let f2 = vec![ScanFilter {
             field: "age".into(),
             op: FilterOp::Gt,
             value: Value::Integer(100),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let h1 = predicate_class_for_filters(&encode_filters(&f1), "accounts");
         let h2 = predicate_class_for_filters(&encode_filters(&f2), "accounts");
@@ -331,13 +337,15 @@ mod tests {
             field: "score".into(),
             op: FilterOp::Gt,
             value: Value::Integer(5),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let f2 = vec![ScanFilter {
             field: "score".into(),
             op: FilterOp::Lt,
             value: Value::Integer(5),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let h1 = predicate_class_for_filters(&encode_filters(&f1), "items");
         let h2 = predicate_class_for_filters(&encode_filters(&f2), "items");
@@ -350,7 +358,8 @@ mod tests {
             field: "x".into(),
             op: FilterOp::Eq,
             value: Value::Integer(1),
-            ..Default::default()
+            clauses: Vec::new(),
+            expr: None,
         }];
         let bytes = encode_filters(&filters);
         let h1 = predicate_class_for_filters(&bytes, "col_a");
@@ -369,13 +378,15 @@ mod tests {
                     field: "status".into(),
                     op: FilterOp::Eq,
                     value: Value::String("active".into()),
-                    ..Default::default()
+                    clauses: Vec::new(),
+                    expr: None,
                 }],
                 vec![ScanFilter {
                     field: "status".into(),
                     op: FilterOp::Eq,
                     value: Value::String("pending".into()),
-                    ..Default::default()
+                    clauses: Vec::new(),
+                    expr: None,
                 }],
             ],
             expr: None,

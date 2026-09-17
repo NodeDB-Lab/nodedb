@@ -113,12 +113,11 @@ pub async fn select_diff(
     );
     row.insert("delta_hex".to_string(), JsonValue::String(hex));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }
 
 /// Parse function arguments from `SELECT DIFF('a', 'b', 'c', 'd')`.

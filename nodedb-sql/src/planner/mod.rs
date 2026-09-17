@@ -27,6 +27,7 @@ pub mod index_ddl;
 pub mod join;
 pub mod lateral;
 pub mod merge;
+pub mod predicate_coerce;
 pub mod select;
 
 pub use select::qualified_name;

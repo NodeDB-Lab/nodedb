@@ -25,14 +25,20 @@ impl GroupedAggResult {
 
     pub fn merge(&mut self, other: &GroupedAggResult) {
         for (key, other_accums) in &other.groups {
-            let accums = self
-                .groups
-                .entry(key.clone())
-                .or_insert_with(|| (0..self.num_aggs).map(|_| AggAccum::default()).collect());
-            for (i, a) in other_accums.iter().enumerate() {
-                if i < accums.len() {
-                    accums[i].merge(a);
-                }
+            self.merge_group(key.clone(), other_accums);
+        }
+    }
+
+    /// Merge one group's accumulators into this result, creating the group's
+    /// entry if it is not already present.
+    pub(super) fn merge_group(&mut self, key: String, accums: &[AggAccum]) {
+        let entry = self
+            .groups
+            .entry(key)
+            .or_insert_with(|| (0..self.num_aggs).map(|_| AggAccum::default()).collect());
+        for (i, a) in accums.iter().enumerate() {
+            if i < entry.len() {
+                entry[i].merge(a);
             }
         }
     }
@@ -91,10 +97,10 @@ pub(super) fn resolve_schema(
                     AggColInfo::CountField
                 } else {
                     match ty {
-                        ColumnType::Float64 | ColumnType::Int64 | ColumnType::Timestamp => {
+                        ColumnType::Float64 | ColumnType::Int64 | ColumnType::Timestamp(_) => {
                             AggColInfo::Numeric(idx)
                         }
-                        _ => AggColInfo::Skip,
+                        ColumnType::Symbol => AggColInfo::Skip,
                     }
                 }
             } else if op == "count" {

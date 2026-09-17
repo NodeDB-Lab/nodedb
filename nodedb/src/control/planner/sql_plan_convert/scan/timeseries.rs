@@ -14,7 +14,7 @@ use super::super::aggregate::{
 use super::super::expr::convert_sort_keys;
 use super::super::filter::serialize_filters;
 use super::super::scan_params::TimeseriesScanParams;
-use super::super::value::{row_to_msgpack, write_msgpack_array_header};
+use super::super::value::{InstantForm, row_to_msgpack_with, write_msgpack_array_header};
 use super::helpers::valid_at_from_scope;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
@@ -105,7 +105,10 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_ingest(
     write_msgpack_array_header(&mut payload, rows.len());
     let mut surrogates: Vec<nodedb_types::Surrogate> = Vec::with_capacity(rows.len());
     for row in rows {
-        let row_bytes = row_to_msgpack(row)?;
+        // A declared `TIMESTAMP` / `TIMESTAMPTZ` value travels as the typed
+        // instant ext: the ingest decoder takes it on the same arm a restore
+        // reissue's typed cell takes, so both spellings converge there.
+        let row_bytes = row_to_msgpack_with(row, InstantForm::Ext)?;
         payload.extend_from_slice(&row_bytes);
         // A timeseries row's natural identity is its (timestamp, tag-set)
         // tuple, which is not a cross-engine surrogate and carries no PK

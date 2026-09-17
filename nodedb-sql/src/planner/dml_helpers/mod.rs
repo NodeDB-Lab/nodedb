@@ -29,8 +29,8 @@ pub(super) use insert_select_bind::bind_insert_select_columns;
 pub(super) use kv_insert::build_kv_insert_plan;
 pub(super) use params::KvInsertParams;
 pub(super) use range_check::{
-    check_declared_float_ranges_in_assignments, check_declared_int_ranges_in_assignments,
-    coerce_and_check_rows,
+    check_declared_float_ranges, check_declared_float_ranges_in_assignments,
+    check_declared_int_ranges, check_declared_int_ranges_in_assignments, coerce_and_check_rows,
 };
 pub(super) use value_convert::convert_value_rows;
 pub(super) use vector_primary_insert::build_vector_primary_insert_plan;

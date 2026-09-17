@@ -16,10 +16,11 @@ use nodedb_columnar::predicate::ScanPredicate;
 use nodedb_columnar::reader::{DecodedColumn, SegmentReader};
 use nodedb_columnar::writer::SegmentWriter;
 use nodedb_mem::ScopedMemory;
+use nodedb_types::InstantKind;
 use nodedb_types::columnar::{ColumnDef, ColumnType as SharedColumnType, ColumnarSchema};
 
 use super::columnar_memtable::{
-    ColumnData as TsColumnData, ColumnType as TsColumnType, ColumnarDrainResult,
+    ColumnData as TsColumnData, ColumnType as TsColumnType, ColumnarDrainResult, TimeKind,
 };
 
 /// Convert a timeseries ColumnarSchema to a shared ColumnarSchema.
@@ -46,9 +47,19 @@ pub fn ts_schema_to_shared(ts_schema: &super::columnar_memtable::ColumnarSchema)
 }
 
 /// Map a timeseries ColumnType to a shared ColumnType.
+///
+/// A time column maps by its kind: a naive instant is `Timestamp`, a UTC
+/// instant is `Timestamptz`, and a `Millis` column is the `Int64` its
+/// declaration named. All three share `i64` storage on both sides.
 fn ts_column_type_to_shared(ts_type: TsColumnType) -> SharedColumnType {
     match ts_type {
-        TsColumnType::Timestamp => SharedColumnType::Timestamp,
+        TsColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive)) => {
+            SharedColumnType::Timestamp
+        }
+        TsColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc)) => {
+            SharedColumnType::Timestamptz
+        }
+        TsColumnType::Timestamp(TimeKind::Millis) => SharedColumnType::Int64,
         TsColumnType::Float64 => SharedColumnType::Float64,
         TsColumnType::Int64 => SharedColumnType::Int64,
         // Symbol columns store u32 IDs — represented as Int64 in shared format.
@@ -79,10 +90,18 @@ fn ts_column_to_shared(
     row_count: usize,
 ) -> SharedColumnData {
     match (ts_col, ts_type) {
-        (TsColumnData::Timestamp(values), TsColumnType::Timestamp) => SharedColumnData::Timestamp {
-            values: values.clone(),
-            valid: None, // Timeseries columns are non-nullable.
-        },
+        (TsColumnData::Timestamp(values), TsColumnType::Timestamp(TimeKind::Instant(_))) => {
+            SharedColumnData::Timestamp {
+                values: values.clone(),
+                valid: None, // Timeseries columns are non-nullable.
+            }
+        }
+        (TsColumnData::Timestamp(values), TsColumnType::Timestamp(TimeKind::Millis)) => {
+            SharedColumnData::Int64 {
+                values: values.clone(),
+                valid: None,
+            }
+        }
         (TsColumnData::Float64(values), TsColumnType::Float64) => SharedColumnData::Float64 {
             values: values.clone(),
             valid: None,
@@ -297,20 +316,34 @@ mod tests {
     fn schema_conversion() {
         let ts_schema = super::super::columnar_memtable::ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), TsColumnType::Timestamp),
+                (
+                    "timestamp".into(),
+                    TsColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive)),
+                ),
                 ("value".into(), TsColumnType::Float64),
                 ("host".into(), TsColumnType::Symbol),
+                (
+                    "seen_at".into(),
+                    TsColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc)),
+                ),
+                (
+                    "_ts_system".into(),
+                    TsColumnType::Timestamp(TimeKind::Millis),
+                ),
             ],
             timestamp_idx: 0,
-            codecs: vec![nodedb_codec::ColumnCodec::Auto; 3],
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 5],
         };
 
         let shared = ts_schema_to_shared(&ts_schema);
-        assert_eq!(shared.columns.len(), 3);
+        assert_eq!(shared.columns.len(), 5);
         assert_eq!(shared.columns[0].column_type, SharedColumnType::Timestamp);
         assert_eq!(shared.columns[1].column_type, SharedColumnType::Float64);
         // Symbol → Int64 in shared format.
         assert_eq!(shared.columns[2].column_type, SharedColumnType::Int64);
+        assert_eq!(shared.columns[3].column_type, SharedColumnType::Timestamptz);
+        // A millisecond integer time column is the integer it was declared as.
+        assert_eq!(shared.columns[4].column_type, SharedColumnType::Int64);
     }
 
     #[test]

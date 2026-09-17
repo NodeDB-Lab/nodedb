@@ -107,10 +107,14 @@ pub enum SqlPlan {
         /// The lowering these rows take, chosen by the engine's `EngineRules`.
         /// The conversion layer reads it instead of re-deciding from `engine`.
         route: WriteRoute,
+        /// Every declared DEFAULT already materialized and every literal
+        /// coerced to its declared column type by the planner.
         rows: Vec<Vec<(String, SqlValue)>>,
-        /// Column defaults from schema: `(column_name, default_expr)`.
-        /// Used to auto-generate values for missing columns (e.g. `id` with `UUID_V7`).
-        column_defaults: Vec<(String, String)>,
+        /// Whether a DEFAULT materialized into `rows` was volatile. The
+        /// planner evaluates declared defaults while building this plan, so a
+        /// cached plan would replay one execution's value; a volatile plan is
+        /// never cached.
+        volatile_defaults: bool,
         /// `ON CONFLICT DO NOTHING` semantics: when true, duplicate-PK rows
         /// are silently skipped instead of raising `unique_violation`. Plain
         /// `INSERT` (no `ON CONFLICT` clause) sets this to `false`.
@@ -157,8 +161,10 @@ pub enum SqlPlan {
         engine: EngineType,
         /// The lowering these rows take. Mirrors `Insert::route`.
         route: WriteRoute,
+        /// Defaults materialized and literals coerced, as in `Insert::rows`.
         rows: Vec<Vec<(String, SqlValue)>>,
-        column_defaults: Vec<(String, String)>,
+        /// Mirrors `Insert::volatile_defaults`.
+        volatile_defaults: bool,
         /// `ON CONFLICT (...) DO UPDATE SET field = expr` assignments.
         /// When empty, upsert is a plain merge: new columns overwrite existing.
         /// When non-empty, the engine applies these per-row against the
@@ -296,7 +302,13 @@ pub enum SqlPlan {
     },
     TimeseriesIngest {
         collection: String,
+        /// Defaults materialized and literals coerced, as in `Insert::rows`.
+        /// A row that omits the `TIME_KEY` column carries its declared
+        /// default here when one exists; only a row with no time value at
+        /// all takes the ingest clock.
         rows: Vec<Vec<(String, SqlValue)>>,
+        /// Mirrors `Insert::volatile_defaults`.
+        volatile_defaults: bool,
     },
 
     // ── Search (first-class) ──

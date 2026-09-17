@@ -268,7 +268,6 @@ pub fn show_blacklist(
         "created_at".to_string(),
         "expires_at".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = entries
         .iter()
@@ -297,12 +296,7 @@ pub fn show_blacklist(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Extract UNTIL timestamp from parts. Returns 0 (permanent) if not present.

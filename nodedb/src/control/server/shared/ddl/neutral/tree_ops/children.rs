@@ -96,10 +96,8 @@ pub async fn tree_children(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["child_id".to_string()],
-        column_types: ShapedRows::text_types(1),
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["child_id".to_string()],
         rows,
-        notice: None,
-    })])
+    ))])
 }

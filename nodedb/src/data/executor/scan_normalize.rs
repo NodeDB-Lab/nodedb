@@ -55,10 +55,7 @@ impl CoreLoop {
             return Ok(docs);
         }
 
-        let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-            zerompk::from_msgpack(filter_bytes).map_err(|e| crate::Error::PlanError {
-                detail: format!("{context} deserialization failed: {e}"),
-            })?;
+        let filters = crate::bridge::scan_filter::decode_scan_filters(filter_bytes, context)?;
 
         let mut kept = Vec::with_capacity(docs.len());
         for (id, bytes) in docs {
@@ -83,10 +80,7 @@ impl CoreLoop {
         if rls_filters.is_empty() {
             return Ok(true);
         }
-        let filters: Vec<crate::bridge::scan_filter::ScanFilter> =
-            zerompk::from_msgpack(rls_filters).map_err(|e| crate::Error::PlanError {
-                detail: format!("RLS filter deserialization failed: {e}"),
-            })?;
+        let filters = crate::bridge::scan_filter::decode_scan_filters(rls_filters, "RLS filter")?;
         Ok(crate::bridge::scan_filter::ScanFilter::all_match_binary(
             &filters, row,
         )?)
@@ -116,7 +110,7 @@ impl CoreLoop {
         }
 
         // 2. Columnar memtable
-        let col_docs = self.scan_columnar(did, tid, collection, limit);
+        let col_docs = self.scan_columnar(did, tid, collection, limit)?;
         if !col_docs.is_empty() {
             return Ok(col_docs);
         }
@@ -182,7 +176,7 @@ impl CoreLoop {
         // 2. Columnar — materializes internally; iterate the batch per-row.
         // columnar stays materialized — per-row segment streaming is a separate
         // follow-up (flushed-segment decode).
-        let col_docs = self.scan_columnar(did, tid, collection, usize::MAX);
+        let col_docs = self.scan_columnar(did, tid, collection, usize::MAX)?;
         if !col_docs.is_empty() {
             for (id, bytes) in &col_docs {
                 f(id, bytes)?;
@@ -238,13 +232,16 @@ impl CoreLoop {
     }
 
     /// Scan columnar rows → standard msgpack.
+    ///
+    /// A timeseries memtable's time cells are typed by their column kind.
+    /// `Err` when a stored time cell cannot be read as its column's instant.
     fn scan_columnar(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
         limit: usize,
-    ) -> Vec<(String, Vec<u8>)> {
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let columnar_key = (
             nodedb_types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
@@ -282,15 +279,15 @@ impl CoreLoop {
                     }
                     super::handlers::columnar_read::emit_column_value(
                         &mut mp, mt, *col_idx, col_type, col_data, idx,
-                    );
+                    )?;
                 }
                 results.push((id, mp));
             }
-            return results;
+            return Ok(results);
         }
 
         let Some(engine) = self.columnar_engines.get(&columnar_key) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
 
         let schema = engine.schema();
@@ -348,7 +345,11 @@ impl CoreLoop {
                     let mut map = std::collections::HashMap::new();
                     let mut id = String::new();
                     for (col_idx, col_def) in schema.columns.iter().enumerate() {
-                        let val = decoded_col_to_value(&decoded_cols[col_idx], row_idx);
+                        let val = decoded_col_to_value(
+                            &decoded_cols[col_idx],
+                            row_idx,
+                            &col_def.column_type,
+                        );
                         if col_def.name == "id"
                             && let nodedb_types::value::Value::String(s) = &val
                         {
@@ -386,7 +387,7 @@ impl CoreLoop {
             }
         }
 
-        results
+        Ok(results)
     }
 
     /// Scan sparse/document engine → standard msgpack.

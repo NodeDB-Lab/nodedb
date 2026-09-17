@@ -13,7 +13,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 
 use super::super::super::result::{DdlError, DdlResult};
@@ -146,10 +146,8 @@ pub fn create_api_key(
     let mut row = Map::new();
     row.insert("api_key".to_string(), JsonValue::String(token));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["api_key".to_string()],
-        column_types: vec![DdlColType::Text],
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["api_key".to_string()],
+        vec![row],
+    ))])
 }

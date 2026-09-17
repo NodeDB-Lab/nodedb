@@ -71,16 +71,13 @@ pub async fn select_at_version(
     let text = String::from_utf8_lossy(&payload).into_owned();
 
     let columns = vec!["document".to_string()];
-    let column_types = ShapedRows::text_types(columns.len());
     let mut row = Map::new();
     row.insert("document".to_string(), JsonValue::String(text));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }
 
 /// Resolve a checkpoint name to its version vector JSON.

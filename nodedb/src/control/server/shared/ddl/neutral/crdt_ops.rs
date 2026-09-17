@@ -17,7 +17,7 @@ use crate::control::crdt_post_image_policy::ExternalCrdtPostImagePolicy;
 use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::authorization::{authorize_collection, authorize_task_set};
 use crate::control::server::shared::ddl::sql_parse::hex_decode;
 use crate::control::state::SharedState;
@@ -99,27 +99,22 @@ pub async fn crdt_state(
     .map_err(|e| DdlError::new("XX000", e.to_string()))?;
 
     let columns = vec!["crdt_state".to_string()];
-    let column_types = vec![DdlColType::Text];
 
     if result.is_empty() {
-        return Ok(vec![DdlResult::Rows(ShapedRows {
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
             columns,
-            column_types,
-            rows: Vec::new(),
-            notice: None,
-        })]);
+            Vec::new(),
+        ))]);
     }
 
     let text = String::from_utf8_lossy(&result).into_owned();
     let mut row = Map::new();
     row.insert("crdt_state".to_string(), JsonValue::String(text));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }
 
 /// `SELECT crdt_apply('collection', 'doc_id', 'delta_hex')`
@@ -234,14 +229,11 @@ pub async fn crdt_apply(
     .map_err(|e| DdlError::new("XX000", e.to_string()))?;
 
     let columns = vec!["result".to_string()];
-    let column_types = vec![DdlColType::Text];
     let mut row = Map::new();
     row.insert("result".to_string(), JsonValue::String("OK".to_string()));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }

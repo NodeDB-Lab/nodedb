@@ -66,7 +66,7 @@ pub enum ColumnSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Column conversion helpers (called from memtable.rs)
+// Column conversion helpers (called from `export_snapshot`)
 // ---------------------------------------------------------------------------
 
 /// Convert a single [`ColumnData`] value into its [`ColumnSnapshot`] wire form.
@@ -94,7 +94,7 @@ pub(super) fn column_to_snapshot(col: &ColumnData) -> ColumnSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Column rebuild helper (called from memtable.rs `from_snapshot`)
+// Column rebuild helper (called from `from_snapshot`)
 // ---------------------------------------------------------------------------
 
 /// Rebuild a `Vec<ColumnData>` from the snapshot columns and validate

@@ -213,7 +213,6 @@ pub fn show_scope_grants(
         "conditions".to_string(),
         "granted_by".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = grants
         .iter()
@@ -254,12 +253,7 @@ pub fn show_scope_grants(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 // ── Parse helpers for time-bound GRANT SCOPE syntax ────────────────

@@ -194,7 +194,7 @@ pub struct MergeResult {
 impl ColumnData {
     pub(super) fn new_empty(ty: ColumnType) -> Self {
         match ty {
-            ColumnType::Timestamp => Self::Timestamp(Vec::new()),
+            ColumnType::Timestamp(_) => Self::Timestamp(Vec::new()),
             ColumnType::Float64 => Self::Float64(Vec::new()),
             ColumnType::Int64 => Self::Int64(Vec::new()),
             ColumnType::Symbol => Self::Symbol(Vec::new()),
@@ -258,10 +258,12 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
     };
 
     use super::*;
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     fn test_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
@@ -305,13 +307,8 @@ mod tests {
 
         // Read back merged data.
         let merged_dir = tmp.path().join("ts-merged");
-        let ts_col = ColumnarSegmentReader::read_column(
-            &merged_dir,
-            "timestamp",
-            ColumnType::Timestamp,
-            None,
-        )
-        .unwrap();
+        let ts_col =
+            ColumnarSegmentReader::read_column(&merged_dir, "timestamp", MILLIS, None).unwrap();
         let timestamps = ts_col.as_timestamps();
         assert_eq!(timestamps.len(), 100);
         // Should be sorted.
@@ -325,7 +322,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],
@@ -384,13 +381,8 @@ mod tests {
         );
 
         let merged_dir = tmp.path().join("ts-sorted");
-        let ts_col = ColumnarSegmentReader::read_column(
-            &merged_dir,
-            "timestamp",
-            ColumnType::Timestamp,
-            None,
-        )
-        .unwrap();
+        let ts_col =
+            ColumnarSegmentReader::read_column(&merged_dir, "timestamp", MILLIS, None).unwrap();
         let timestamps = ts_col.as_timestamps();
         // All timestamps from partition 2 (1000-1019) should come before partition 1 (5000-5019).
         assert_eq!(timestamps[0], 1000);

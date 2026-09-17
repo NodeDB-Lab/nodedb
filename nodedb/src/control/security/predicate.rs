@@ -31,9 +31,12 @@
 //! - **Restrictive**: AND-combined. ALL restrictive policies must pass.
 //! - Final: `(any permissive passes) AND (all restrictive pass)`
 
+use nodedb_types::datetime::NdbDateTime;
+use nodedb_types::json_msgpack::InstantKind;
 use serde::{Deserialize, Serialize};
 
 use super::auth_context::AuthContext;
+use crate::bridge::scan_filter::FilterOp;
 
 /// A compiled RLS predicate expression.
 ///
@@ -101,21 +104,21 @@ pub enum CompareOp {
 }
 
 impl CompareOp {
-    /// Convert to the ScanFilter operator string.
-    pub fn as_filter_op(&self) -> &'static str {
+    /// The `ScanFilter` operator this comparison lowers to.
+    pub fn as_filter_op(&self) -> FilterOp {
         match self {
-            Self::Eq => "eq",
-            Self::Ne => "ne",
-            Self::Gt => "gt",
-            Self::Gte => "gte",
-            Self::Lt => "lt",
-            Self::Lte => "lte",
-            Self::In => "in",
-            Self::NotIn => "not_in",
-            Self::Like => "like",
-            Self::ILike => "ilike",
-            Self::IsNull => "is_null",
-            Self::IsNotNull => "is_not_null",
+            Self::Eq => FilterOp::Eq,
+            Self::Ne => FilterOp::Ne,
+            Self::Gt => FilterOp::Gt,
+            Self::Gte => FilterOp::Gte,
+            Self::Lt => FilterOp::Lt,
+            Self::Lte => FilterOp::Lte,
+            Self::In => FilterOp::In,
+            Self::NotIn => FilterOp::NotIn,
+            Self::Like => FilterOp::Like,
+            Self::ILike => FilterOp::Ilike,
+            Self::IsNull => FilterOp::IsNull,
+            Self::IsNotNull => FilterOp::IsNotNull,
         }
     }
 
@@ -149,6 +152,13 @@ impl CompareOp {
 pub enum PredicateValue {
     /// A literal JSON value (string, number, bool, array, null).
     Literal(serde_json::Value),
+    /// A literal typed against the declared `TIMESTAMP` / `TIMESTAMPTZ`
+    /// column it is compared with. Policy compilation resolves a numeric
+    /// (epoch milliseconds) or text (ISO-8601) literal to this at
+    /// `CREATE RLS POLICY` and again at every load, by the same rule the
+    /// planner applies to a query predicate, so the Data Plane compares an
+    /// instant with an instant.
+    Instant { at: NdbDateTime, kind: InstantKind },
     /// A document field reference (resolved at Data Plane scan time).
     Field(String),
     /// A session variable reference: `$auth.id`, `$auth.roles`, etc.
@@ -168,7 +178,8 @@ impl PredicateValue {
     /// Resolve this value using the given `AuthContext`.
     ///
     /// - `Literal`: returned as-is.
-    /// - `Field`: returned as-is (resolved at scan time by Data Plane).
+    /// - `Instant`: its ISO-8601 rendering.
+    /// - `Field`: `None` (resolved at scan time by the Data Plane).
     /// - `AuthRef`: resolved via `AuthContext::resolve_variable()`.
     /// - `AuthFunc`: resolved via `AuthContext` metadata (pre-computed).
     ///
@@ -176,6 +187,7 @@ impl PredicateValue {
     pub fn resolve(&self, auth: &AuthContext) -> Option<serde_json::Value> {
         match self {
             Self::Literal(v) => Some(v.clone()),
+            Self::Instant { at, .. } => Some(serde_json::Value::String(at.to_iso8601())),
             Self::Field(_) => None,
             Self::AuthRef(field) => auth.resolve_variable(field),
             Self::AuthFunc { func, args } => {
@@ -184,6 +196,21 @@ impl PredicateValue {
                 let arg = args.first().map(|s| s.as_str()).unwrap_or("");
                 let key = format!("{func}.{arg}");
                 auth.resolve_variable(&format!("metadata.{key}"))
+            }
+        }
+    }
+
+    /// Resolve this value to the `nodedb_types::Value` a `ScanFilter` carries.
+    ///
+    /// An `Instant` keeps its typed kind (`Value::NaiveDateTime` for a
+    /// `TIMESTAMP` column, `Value::DateTime` for `TIMESTAMPTZ`); every other
+    /// variant goes through [`Self::resolve`]. Returns `None` when a `Field`
+    /// is asked for a value, or an `$auth.*` reference cannot be resolved.
+    pub fn resolve_scan_value(&self, auth: &AuthContext) -> Option<nodedb_types::Value> {
+        match self {
+            Self::Instant { at, kind } => Some(kind.value(*at)),
+            Self::Literal(_) | Self::Field(_) | Self::AuthRef(_) | Self::AuthFunc { .. } => {
+                self.resolve(auth).map(nodedb_types::Value::from)
             }
         }
     }
@@ -327,7 +354,7 @@ mod tests {
         assert_eq!(filters[0].field, "allowed_users");
         assert_eq!(
             filters[0].op,
-            crate::bridge::scan_filter::FilterOp::Contains
+            crate::bridge::scan_filter::FilterOp::ArrayContains
         );
         assert_eq!(filters[0].value, nodedb_types::Value::String("123".into()));
     }

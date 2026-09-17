@@ -46,7 +46,7 @@ pub(super) struct MergeDeleteArms<'a> {
 pub(super) struct MergeDeleteTally<'a> {
     pub(super) affected: &'a mut u64,
     pub(super) write_set: &'a mut Vec<WriteSetEntry>,
-    pub(super) returned_docs: &'a mut Vec<serde_json::Value>,
+    pub(super) returned_docs: &'a mut Vec<nodedb_types::Value>,
 }
 
 impl CoreLoop {

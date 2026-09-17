@@ -97,12 +97,11 @@ pub fn show_versions(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// Parse: SHOW VERSIONS OF collection WHERE id = 'doc-id' [LIMIT N]

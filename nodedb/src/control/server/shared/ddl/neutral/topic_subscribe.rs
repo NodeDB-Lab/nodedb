@@ -127,13 +127,10 @@ pub fn subscribe_to(
         JsonValue::String(backlog.len().to_string()),
     );
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }
 
 #[cfg(test)]
@@ -221,7 +218,10 @@ mod tests {
         let DdlResult::Rows(rows) = &result[0] else {
             panic!("expected rows");
         };
-        assert_eq!(rows.rows[0]["backlog"], JsonValue::String("1".into()));
+        assert_eq!(
+            rows.rows[0]["backlog"],
+            nodedb_types::Value::String("1".into())
+        );
         assert_eq!(state.ep_topic_registry.receiver_count(), 0);
     }
 }

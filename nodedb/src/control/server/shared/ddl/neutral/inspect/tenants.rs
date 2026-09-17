@@ -33,12 +33,11 @@ pub fn show_tenants(
     }
 
     let (columns, column_types, rows) = tenant_rows(state, |_, _| true);
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW TENANT <name|id> — single-tenant introspection by identifier.
@@ -71,12 +70,11 @@ pub fn show_tenant_by_identifier(
         return Err(ddl_err("42704", format!("tenant '{ident}' not found")));
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW TENANTS WITH NAME <name> — filtered list form. Returns a row
@@ -102,12 +100,11 @@ pub fn show_tenants_filtered_by_name(
         return Err(ddl_err("42704", format!("tenant '{name}' not found")));
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// Build the `(columns, column_types, rows)` triple shared by `SHOW TENANTS`

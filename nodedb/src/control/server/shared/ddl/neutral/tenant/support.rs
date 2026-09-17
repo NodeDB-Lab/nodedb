@@ -7,7 +7,7 @@
 //! and `tenant_exists` are byte-identical except for the error type
 //! (`DdlError` instead of `PgWireError`).
 
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
@@ -31,13 +31,7 @@ pub(super) fn text_rows(
     columns: Vec<String>,
     rows: Vec<serde_json::Map<String, serde_json::Value>>,
 ) -> Vec<DdlResult> {
-    let column_types = vec![DdlColType::Text; columns.len()];
-    vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))]
 }
 
 /// Resolve a tenant reference token to a [`TenantId`], accepting either a

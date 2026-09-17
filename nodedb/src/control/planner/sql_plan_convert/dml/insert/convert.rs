@@ -8,7 +8,7 @@ use crate::types::{TenantId, VShardId};
 use nodedb_physical::physical_plan::*;
 
 use super::super::super::convert::ConvertContext;
-use super::super::super::value::{expand_row_defaults, row_to_msgpack, rows_to_msgpack_array};
+use super::super::super::value::{row_to_msgpack, rows_to_msgpack_array};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::identity::{
@@ -22,8 +22,9 @@ pub(in super::super::super) struct ConvertInsertArgs<'a> {
     pub collection: &'a str,
     /// The lowering these rows take, decided by `nodedb-sql`.
     pub route: WriteRoute,
+    /// Rows with every declared DEFAULT already materialized and every
+    /// literal coerced to its declared column type by the planner.
     pub rows: &'a [Vec<(String, SqlValue)>],
-    pub column_defaults: &'a [(String, String)],
     pub column_schema: &'a [(String, String)],
     pub if_absent: bool,
     pub primary_key: &'a str,
@@ -38,7 +39,6 @@ pub(in super::super::super) fn convert_insert(
         collection,
         route,
         rows,
-        column_defaults,
         column_schema,
         if_absent,
         primary_key,
@@ -89,11 +89,6 @@ pub(in super::super::super) fn convert_insert(
     let mut balanced_documents: Vec<(String, Vec<u8>)> = Vec::new();
     let mut balanced_surrogates: Vec<Surrogate> = Vec::new();
 
-    // Every engine's rows expand their DEFAULTs here, ahead of identity
-    // derivation. A DEFAULT materialized after the primary-key NOT NULL gate
-    // refuses a key the declaration supplies.
-    let expanded_rows = expand_row_defaults(rows, column_defaults, tenant_id, ctx)?;
-
     // One catalog read for the whole statement. `_rowid` carries no
     // declaration, so it skips the read.
     let declared_pk = if is_auto_rowid_pk(primary_key) {
@@ -102,7 +97,7 @@ pub(in super::super::super) fn convert_insert(
         declared_primary_key_name(ctx, collection)?
     };
 
-    for row in &expanded_rows {
+    for row in rows {
         match route {
             WriteRoute::ColumnarFamily => {
                 columnar_rows.push(row);
@@ -283,7 +278,6 @@ mod tests {
             shuffle_agg_num_parts: 0,
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
-            sql_catalog: None,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         };
@@ -305,7 +299,6 @@ mod tests {
             collection: "crdt_coll",
             route: WriteRoute::Document,
             rows: &rows,
-            column_defaults: &[],
             column_schema: &[],
             if_absent: false,
             primary_key: "id",
@@ -337,7 +330,6 @@ mod tests {
             collection: "plain",
             route: WriteRoute::Document,
             rows: &rows,
-            column_defaults: &[],
             column_schema: &[],
             if_absent: false,
             primary_key: "id",

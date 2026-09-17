@@ -66,8 +66,6 @@ pub fn describe_collection(
         "type".to_string(),
         "nullable".to_string(),
     ];
-    let column_types = vec![DdlColType::Text, DdlColType::Text, DdlColType::Text];
-
     let mut rows = Vec::new();
 
     // Synthesize the implicit 'id' field only when the collection does not
@@ -147,12 +145,7 @@ pub fn describe_collection(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// SHOW COLLECTIONS
@@ -242,10 +235,9 @@ pub fn show_collections(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }

@@ -5,13 +5,24 @@
 use nodedb_query::agg_key::canonical_agg_key;
 
 use crate::data::executor::core_loop::TsGroupKeyKind;
+use crate::data::executor::handlers::columnar_read::rmpv_time_cell;
+use crate::engine::timeseries::columnar_memtable::TimeKind;
+
+/// The wire types of a grouped result's key columns.
+pub(in crate::data::executor) struct GroupedKeyTypes<'a> {
+    /// One kind per GROUP BY column, in `group_by` order.
+    pub group_key_kinds: &'a [TsGroupKeyKind],
+    /// The kind of the collection's time key, which the `bucket` column
+    /// derives from.
+    pub bucket_kind: TimeKind,
+}
 
 /// Render one GROUP BY key part with the type its column carries ungrouped.
 ///
 /// The grouped scan reduces every key to a string, so the column's own type
 /// is put back here. An empty part is SQL NULL. A declared instant is stored
-/// in milliseconds and read in microseconds, exactly as row emission reads
-/// it, so the two routes to one stored instant render it identically.
+/// in milliseconds and rendered as a typed instant, exactly as row emission
+/// renders it, so the two routes to one stored instant render it identically.
 ///
 /// A part that does not parse as its column's type falls back to the text it
 /// holds: the key is data the scan produced, and dropping the group would
@@ -21,15 +32,8 @@ fn group_key_value(part: Option<&&str>, kind: TsGroupKeyKind) -> crate::Result<r
         return Ok(rmpv::Value::Nil);
     };
     let value = match kind {
-        TsGroupKeyKind::Instant => match text.parse::<i64>() {
-            Ok(millis) => {
-                let micros = nodedb_types::NdbDateTime::from_millis(millis)
-                    .map_err(|e| crate::Error::Internal {
-                        detail: format!("grouped timeseries key at {millis} ms: {e}"),
-                    })?
-                    .micros;
-                rmpv::Value::Integer(micros.into())
-            }
+        TsGroupKeyKind::Instant(k) => match text.parse::<i64>() {
+            Ok(millis) => rmpv_time_cell(TimeKind::Instant(k), millis)?,
             Err(_) => rmpv::Value::String((*text).into()),
         },
         TsGroupKeyKind::Integer => match text.parse::<i64>() {
@@ -54,6 +58,9 @@ fn group_key_value(part: Option<&&str>, kind: TsGroupKeyKind) -> crate::Result<r
 /// - GROUP BY only: "group1\0group2"
 /// - time_bucket only: "bucket_ts"
 /// - time_bucket + GROUP BY: "bucket_ts\0group1\0group2"
+///
+/// The `bucket` column is derived from the collection's time key and renders
+/// with that column's own kind, `key_types.bucket_kind`.
 pub(in crate::data::executor) fn encode_grouped_results(
     result: &crate::engine::timeseries::grouped_scan::GroupedAggResult,
     group_by: &[String],
@@ -61,8 +68,12 @@ pub(in crate::data::executor) fn encode_grouped_results(
     limit: usize,
     bucket_interval_ms: i64,
     sort_keys: &[nodedb_physical::physical_plan::SortKeySpec],
-    group_key_kinds: &[TsGroupKeyKind],
+    key_types: GroupedKeyTypes<'_>,
 ) -> crate::Result<Vec<u8>> {
+    let GroupedKeyTypes {
+        group_key_kinds,
+        bucket_kind,
+    } = key_types;
     let has_bucket = bucket_interval_ms > 0;
     // An ordered query has to see every group before cutting to `limit`:
     // groups arrive in hash-map order, so the first `limit` of them are an
@@ -100,7 +111,7 @@ pub(in crate::data::executor) fn encode_grouped_results(
                 .unwrap_or(0);
             fields.push((
                 rmpv::Value::String("bucket".into()),
-                rmpv::Value::Integer(bucket_ts.into()),
+                rmpv_time_cell(bucket_kind, bucket_ts)?,
             ));
 
             for (i, field) in group_by.iter().enumerate() {
@@ -151,4 +162,85 @@ pub(in crate::data::executor) fn encode_grouped_results(
     let mut buf = Vec::new();
     rmpv::encode::write_value(&mut buf, &array).unwrap_or(());
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::timeseries::grouped_scan::GroupedAggResult;
+    use nodedb_types::InstantKind;
+
+    const BUCKET_MS: i64 = 1_583_402_400_000;
+
+    fn one_bucket() -> GroupedAggResult {
+        let mut result = GroupedAggResult::new(1);
+        result
+            .groups
+            .insert(BUCKET_MS.to_string(), vec![Default::default()]);
+        result
+    }
+
+    fn bucket_cell(bucket_kind: TimeKind) -> rmpv::Value {
+        let bytes = encode_grouped_results(
+            &one_bucket(),
+            &[],
+            &[("count".to_string(), "v".to_string())],
+            usize::MAX,
+            60_000,
+            &[],
+            GroupedKeyTypes {
+                group_key_kinds: &[],
+                bucket_kind,
+            },
+        )
+        .expect("encode");
+        let rmpv::Value::Array(rows) =
+            crate::util::bounded_msgpack::read_value(&bytes).expect("decode")
+        else {
+            panic!("not an array");
+        };
+        let rmpv::Value::Map(fields) = &rows[0] else {
+            panic!("not a map");
+        };
+        fields
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("bucket"))
+            .map(|(_, v)| v.clone())
+            .expect("bucket column")
+    }
+
+    #[test]
+    fn bucket_over_an_instant_time_key_is_a_typed_instant() {
+        assert_eq!(
+            bucket_cell(TimeKind::Instant(InstantKind::Naive)),
+            rmpv::Value::Ext(
+                InstantKind::Naive.ext_type(),
+                (BUCKET_MS * 1000).to_be_bytes().to_vec()
+            )
+        );
+    }
+
+    #[test]
+    fn bucket_over_a_millis_time_key_is_the_integer_stored() {
+        assert_eq!(
+            bucket_cell(TimeKind::Millis),
+            rmpv::Value::Integer(BUCKET_MS.into())
+        );
+    }
+
+    #[test]
+    fn an_instant_group_key_is_a_typed_instant() {
+        let cell = group_key_value(
+            Some(&BUCKET_MS.to_string().as_str()),
+            TsGroupKeyKind::Instant(InstantKind::Utc),
+        )
+        .expect("group key");
+        assert_eq!(
+            cell,
+            rmpv::Value::Ext(
+                InstantKind::Utc.ext_type(),
+                (BUCKET_MS * 1000).to_be_bytes().to_vec()
+            )
+        );
+    }
 }

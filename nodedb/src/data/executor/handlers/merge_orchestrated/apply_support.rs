@@ -90,9 +90,9 @@ pub(super) fn gate_merge_arms(
     Ok(())
 }
 
-/// Decode one merge row body into the JSON document a RETURNING projection
-/// reads. Same shape the point and bulk DML RETURNING paths emit, so a MERGE
-/// row projects identically.
+/// Decode one merge row body into the `Value` document a RETURNING
+/// projection reads. Same shape the point and bulk DML RETURNING paths
+/// emit, so a MERGE row projects identically.
 ///
 /// `key` is the row's storage key: every caller's `MergeUpdate::key`,
 /// `MergeDelete::key`, or a freshly minted insert key. This function converts
@@ -102,7 +102,7 @@ pub(super) fn gate_merge_arms(
 /// bodies are MessagePack for BOTH storage modes (`collect_merge_plan` decodes
 /// a strict target's Binary Tuple and re-encodes the resolved row before the
 /// apply pass ever sees it), so the strict decoder would have nothing to read.
-pub(super) fn returning_doc(body: &[u8], key: &StorageKey) -> crate::Result<serde_json::Value> {
+pub(super) fn returning_doc(body: &[u8], key: &StorageKey) -> crate::Result<nodedb_types::Value> {
     let identity = key.to_identity();
     super::super::returning_doc::from_stored(body, &identity, None)
 }

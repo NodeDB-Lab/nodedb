@@ -80,16 +80,15 @@ pub async fn query_last_values(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec![
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
+        vec![
             "series_id".to_string(),
             "timestamp_ms".to_string(),
             "value".to_string(),
         ],
-        column_types: vec![DdlColType::Int8, DdlColType::Int8, DdlColType::Text],
+        vec![DdlColType::Int8, DdlColType::Int8, DdlColType::Text],
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// `SELECT LAST_VALUE('<collection>', <series_id>)` — returns single series value.
@@ -143,12 +142,11 @@ pub async fn query_last_value(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["timestamp_ms".to_string(), "value".to_string()],
-        column_types: vec![DdlColType::Int8, DdlColType::Text],
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
+        vec!["timestamp_ms".to_string(), "value".to_string()],
+        vec![DdlColType::Int8, DdlColType::Text],
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 fn ddl_err(sqlstate: &str, message: impl Into<String>) -> DdlError {

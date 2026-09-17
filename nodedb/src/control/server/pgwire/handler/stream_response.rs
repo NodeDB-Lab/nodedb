@@ -19,7 +19,7 @@ use crate::control::server::response_shape::types::DdlColType;
 use crate::control::server::result_stream::ResultStream;
 use crate::control::server::shared::metering::DetachedMeterGuard;
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec::decode_payload_to_json;
+use crate::data::executor::response_codec::{decode_payload_to_json, decode_payload_value};
 
 use super::super::ddl_encode::col_type_to_field_with_format;
 use super::super::types::{error_to_sqlstate, text_field};
@@ -214,8 +214,7 @@ pub(crate) fn streaming_shaped_response(
                 break;
             }
 
-            let text = decode_payload_to_json(&batch.payload);
-            let value = sonic_rs::from_str::<serde_json::Value>(&text).map_err(|e| {
+            let value = decode_payload_value(&batch.payload).map_err(|e| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
                     "XX000".to_owned(),
@@ -225,7 +224,7 @@ pub(crate) fn streaming_shaped_response(
             // Resolved once before the first batch was pulled; this only
             // re-borrows it, so no batch can slip out ahead of the policy.
             let shaped = shape_decoded_rows(
-                &value,
+                value,
                 Some(&schema_out),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
             )
@@ -279,7 +278,7 @@ pub(crate) async fn streaming_star_response(
 ) -> Response {
     use futures::StreamExt;
 
-    let mut values: Vec<serde_json::Value> = Vec::new();
+    let mut values: Vec<nodedb_types::Value> = Vec::new();
     let mut batches = stream;
     while let Some(batch) = batches.next().await {
         let batch = match batch {
@@ -298,9 +297,8 @@ pub(crate) async fn streaming_star_response(
             break;
         }
 
-        let text = decode_payload_to_json(&batch.payload);
-        match sonic_rs::from_str::<serde_json::Value>(&text) {
-            Ok(serde_json::Value::Array(items)) => {
+        match decode_payload_value(&batch.payload) {
+            Ok(nodedb_types::Value::Array(items)) => {
                 for item in items {
                     if values.len() >= limit {
                         break;
@@ -312,7 +310,7 @@ pub(crate) async fn streaming_star_response(
                 return single_pgwire_error(PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
                     "XX000".to_owned(),
-                    "streamed batch payload was not a JSON array".to_owned(),
+                    "streamed batch payload was not a row array".to_owned(),
                 ))));
             }
             Err(e) => {
@@ -340,7 +338,7 @@ pub(crate) async fn streaming_star_response(
     }
 
     let shaped = match shape_decoded_rows(
-        &serde_json::Value::Array(values),
+        nodedb_types::Value::Array(values),
         None,
         redaction.as_ref().map(|r| r.ctx(&state.redaction)),
     ) {

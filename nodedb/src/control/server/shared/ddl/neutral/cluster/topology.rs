@@ -92,12 +92,11 @@ pub fn show_nodes(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW NODE <node_id> — detailed info for a specific node.
@@ -124,7 +123,6 @@ pub fn show_node(
         .map_err(|_| ddl_err("42601", format!("invalid node_id: '{}'", parts[2])))?;
 
     let columns = vec!["property".to_string(), "value".to_string()];
-    let column_types = vec![DdlColType::Text, DdlColType::Text];
 
     let props = match &state.cluster_topology {
         Some(t) => {
@@ -182,12 +180,7 @@ pub fn show_node(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// REMOVE NODE <node_id> — mark a node as decommissioned.
@@ -255,7 +248,6 @@ pub fn show_cluster(
     }
 
     let columns = vec!["property".to_string(), "value".to_string()];
-    let column_types = vec![DdlColType::Text, DdlColType::Text];
 
     let mut props = vec![("node_id", state.node_id.to_string())];
 
@@ -292,10 +284,5 @@ pub fn show_cluster(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

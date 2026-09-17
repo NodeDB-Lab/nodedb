@@ -179,6 +179,8 @@ pub fn code_for_sqlstate(sqlstate_str: &str) -> ErrorCode {
         // Invalid/incompatible object definition or a caller reaching a
         // dependent object still in use — all client-actionable, non-retriable.
         "42P17" | "42809" | "42P16" | "2BP01" => ErrorCode::BAD_REQUEST,
+        // A declared literal the column type cannot represent.
+        sqlstate::DATATYPE_MISMATCH => ErrorCode::BAD_REQUEST,
         // Default "object not in prerequisite state" meaning of `55006`;
         // `CLONE_DEPENDENCY` and `CLONE_WRITE_REQUIRES_MATERIALIZE` are
         // ambiguous-typed and cannot reach this function.

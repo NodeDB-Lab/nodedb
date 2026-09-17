@@ -16,7 +16,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::catalog::StoredIndexRecord;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::ddl::sql_parse::parse_ident_token;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -51,14 +51,6 @@ pub fn show_indexes(
         "fields".to_string(),
         "owner".to_string(),
     ];
-    let column_types = vec![
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-    ];
-
     let mut records = state
         .credentials
         .catalog()
@@ -105,10 +97,5 @@ pub fn show_indexes(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

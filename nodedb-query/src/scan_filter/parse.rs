@@ -2,7 +2,7 @@
 
 use nodedb_types::find_ascii_case_insensitive;
 
-use super::ScanFilter;
+use super::{FilterOp, ScanFilter};
 
 /// Parse simple SQL predicates into `ScanFilter` values.
 ///
@@ -33,17 +33,17 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
             let field = clause[..pos].trim().to_string();
             let raw_value = clause[pos + op_str.len()..].trim();
             let op = match *op_str {
-                "=" => "eq",
-                "!=" | "<>" => "ne",
-                ">" => "gt",
-                ">=" => "gte",
-                "<" => "lt",
-                "<=" => "lte",
+                "=" => FilterOp::Eq,
+                "!=" | "<>" => FilterOp::Ne,
+                ">" => FilterOp::Gt,
+                ">=" => FilterOp::Gte,
+                "<" => FilterOp::Lt,
+                "<=" => FilterOp::Lte,
                 _ => return None,
             };
             return Some(ScanFilter {
                 field,
-                op: super::FilterOp::parse_op(op),
+                op,
                 value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
                 clauses: Vec::new(),
                 expr: None,
@@ -56,7 +56,7 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
         let raw_value = clause[pos + 6..].trim();
         return Some(ScanFilter {
             field,
-            op: super::FilterOp::Like,
+            op: FilterOp::Like,
             value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
             clauses: Vec::new(),
             expr: None,
@@ -67,7 +67,7 @@ fn parse_single_predicate(clause: &str) -> Option<ScanFilter> {
         let raw_value = clause[pos + 7..].trim();
         return Some(ScanFilter {
             field,
-            op: super::FilterOp::Ilike,
+            op: FilterOp::Ilike,
             value: nodedb_types::Value::from(parse_predicate_value(raw_value)),
             clauses: Vec::new(),
             expr: None,

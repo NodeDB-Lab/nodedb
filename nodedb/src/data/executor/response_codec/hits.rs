@@ -9,6 +9,7 @@
 //! score under a dynamic key. Without this the alias would be lost and the
 //! response would always carry `rrf_score` regardless of what the SQL named it.
 
+use nodedb_types::NativeCell;
 use serde::Serialize;
 
 use crate::data::executor::handlers::hybrid_key::HybridFusionKey;
@@ -86,15 +87,19 @@ pub(in crate::data::executor) struct GraphRagResult {
 /// Carries one entry per affected row, with the projected column values.
 /// The Control Plane decodes this to build a multi-column pgwire QueryResponse
 /// (one pgwire field per entry in `columns`).
-#[derive(Serialize, serde::Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+///
+/// Cells are typed `Value`s in plain msgpack (`NativeCell`), so an instant
+/// crosses as the instant ext and the JSON transcoder renders the payload as
+/// `{"columns": [...], "rows": [[cell, ...], ...]}` with plain cells.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[msgpack(map)]
 pub(crate) struct RowsPayload {
     /// Projected column names (output names, respecting AS aliases).
     pub columns: Vec<String>,
     /// One inner Vec per affected row; each inner Vec has one cell per
-    /// column in the same order as `columns`. `None` denotes SQL NULL
-    /// (missing field or JSON null); `Some` carries the TEXT representation.
-    pub rows: Vec<Vec<Option<String>>>,
+    /// column in the same order as `columns`. `Value::Null` denotes SQL NULL
+    /// (missing field or a stored null).
+    pub rows: Vec<Vec<NativeCell>>,
 }
 
 /// Carries the row payload alongside a flag that signals whether the
@@ -214,5 +219,34 @@ mod tests {
         let json = decode_payload_to_json(&bytes);
         assert!(json.contains("\"id\""));
         assert!(json.contains("\"distance\""));
+    }
+
+    /// A `RowsPayload` transcodes to JSON with plain cells: a typed instant
+    /// renders as ISO-8601, an integer as a number, SQL NULL as `null`.
+    #[test]
+    fn rows_payload_cells_transcode_plain() {
+        use nodedb_types::{NdbDateTime, Value};
+
+        let payload = RowsPayload {
+            columns: vec!["id".into(), "n".into(), "at".into(), "gone".into()],
+            rows: vec![vec![
+                NativeCell(Value::String("r1".into())),
+                NativeCell(Value::Integer(7)),
+                NativeCell(Value::NaiveDateTime(NdbDateTime::from_micros(
+                    1_583_402_400_000_000,
+                ))),
+                NativeCell(Value::Null),
+            ]],
+        };
+        let bytes = zerompk::to_msgpack_vec(&payload).unwrap();
+        let json = decode_payload_to_json(&bytes);
+        assert_eq!(
+            json,
+            "{\"columns\":[\"id\",\"n\",\"at\",\"gone\"],\"rows\":[[\"r1\",7,\"2020-03-05T10:00:00.000000Z\",null]]}"
+        );
+
+        let back: RowsPayload = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(back.columns, payload.columns);
+        assert_eq!(back.rows, payload.rows);
     }
 }

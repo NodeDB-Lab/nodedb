@@ -79,12 +79,11 @@ pub fn show_trigger_dlq(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: COLUMNS.iter().map(|c| (*c).to_owned()).collect(),
-        column_types: column_types(),
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
+        COLUMNS.iter().map(|c| (*c).to_owned()).collect(),
+        column_types(),
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// REQUEUE TRIGGER DLQ <entry_id> — hand one dead-lettered action back to the

@@ -15,6 +15,8 @@ mod tests {
     use nodedb_types::timeseries::*;
     use tempfile::TempDir;
 
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
+
     fn test_memtable_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
             max_memory_bytes: 10 * 1024 * 1024,
@@ -188,13 +190,8 @@ mod tests {
         let mut total_rows = 0;
         for entry in &matching {
             let part_dir = tmp.path().join(&entry.dir_name);
-            let ts_col = ColumnarSegmentReader::read_column(
-                &part_dir,
-                "timestamp",
-                ColumnType::Timestamp,
-                None,
-            )
-            .unwrap();
+            let ts_col =
+                ColumnarSegmentReader::read_column(&part_dir, "timestamp", MILLIS, None).unwrap();
             total_rows += ts_col.len();
         }
         assert_eq!(total_rows, 300, "all 300 rows should be readable");
@@ -240,7 +237,7 @@ mod tests {
         // V1 schema: timestamp + cpu
         let schema_v1 = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -262,7 +259,7 @@ mod tests {
         // V2 schema: timestamp + cpu + mem (added)
         let schema_v2 = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
                 ("mem".into(), ColumnType::Float64),
             ],
@@ -295,7 +292,7 @@ mod tests {
             ColumnarSegmentReader::read_column(
                 &tmp.path().join("ts-v1"),
                 "timestamp",
-                ColumnType::Timestamp,
+                MILLIS,
                 None,
             )
             .unwrap(),
@@ -332,7 +329,7 @@ mod tests {
     fn symbol_cardinality_breaker_rejects_with_message() {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
                 ("uuid_tag".into(), ColumnType::Symbol),
             ],

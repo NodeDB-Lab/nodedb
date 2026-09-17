@@ -15,9 +15,7 @@
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::response_codec;
-use crate::engine::timeseries::columnar_memtable::{
-    ColumnType, ColumnarMemtable, ColumnarMemtableConfig,
-};
+use crate::engine::timeseries::columnar_memtable::{ColumnarMemtable, ColumnarMemtableConfig};
 use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::ilp_ingest;
 
@@ -327,22 +325,19 @@ impl CoreLoop {
         // missing float field is stored as NaN and both paths render it as SQL
         // NULL, which a hand-written projection over the ingest values would
         // have printed as "NaN".
-        let mut returned_rows: Vec<rmpv::Value> = match returning {
+        let returned_rows: Vec<rmpv::Value> = match returning {
             Some(_) => match self.columnar_memtables.get(&key) {
                 Some(mt) => {
-                    super::raw_scan::emit_memtable_rows_at(mt, &outcome.accepted_row_indices)
+                    match super::raw_scan::emit_memtable_rows_at(mt, &outcome.accepted_row_indices)
+                    {
+                        Ok(rows) => rows,
+                        Err(e) => return self.response_error(task, e),
+                    }
                 }
                 None => Vec::new(),
             },
             None => Vec::new(),
         };
-        // Same scan-unit rule `SELECT` applies: a declared `TIMESTAMP` cell
-        // leaves the engine as epoch microseconds, not the milliseconds
-        // storage holds.
-        let instant_columns = self.ts_instant_columns(task.request.database_id, tid, collection);
-        if let Err(e) = super::raw_scan::scale_instant_cells(&mut returned_rows, &instant_columns) {
-            return self.response_error(task, e);
-        }
 
         if accepted > 0
             && let Some(lsn) = wal_lsn
@@ -402,15 +397,7 @@ impl CoreLoop {
                 .schema()
                 .columns
                 .iter()
-                .map(|(name, col_type)| {
-                    let type_str = match col_type {
-                        ColumnType::Timestamp => "TIMESTAMP",
-                        ColumnType::Float64 => "FLOAT",
-                        ColumnType::Int64 => "BIGINT",
-                        ColumnType::Symbol => "VARCHAR",
-                    };
-                    serde_json::json!([name, type_str])
-                })
+                .map(|(name, col_type)| serde_json::json!([name, col_type.ddl_type_name()]))
                 .collect();
             serde_json::json!({
                 "accepted": accepted,

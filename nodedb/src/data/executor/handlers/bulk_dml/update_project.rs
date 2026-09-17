@@ -100,7 +100,7 @@ impl CoreLoop {
                     // decoded document's `id` is the row's client-visible
                     // identity, not the storage key.
                     let identity = key.to_identity();
-                    crate::data::executor::handlers::returning_doc::from_stored(
+                    crate::data::executor::handlers::returning_doc::from_stored_json(
                         &current_bytes,
                         &identity,
                         None,

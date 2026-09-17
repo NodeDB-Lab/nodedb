@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Volatility scanning over plan expressions and column DEFAULT strings.
+//! Volatility scanning over plan expressions.
 //!
 //! A plan holding a volatile call must re-plan per execution, so the plan
 //! cache never replays a frozen value.
@@ -41,40 +41,4 @@ pub fn expr_is_volatile(expr: &SqlExpr) -> bool {
             false
         }
     }
-}
-
-/// Column DEFAULT spellings that generate a fresh value per row but name no
-/// registered function. Kept in step with the generator arms of
-/// `crate::planner::defaults`.
-const VOLATILE_DEFAULT_ALIASES: &[&str] =
-    &["uuidv7", "uuidv4", "gen_uuid_v7", "gen_uuid_v4", "gen_ulid"];
-
-/// Whether a stored column DEFAULT expression re-evaluates per execution.
-///
-/// The catalog stores a DEFAULT as text, in either a bare form (`UUID_V7`) or
-/// a call form (`uuid_v7()`, `nextval('s')`), so the leading identifier is
-/// checked before the string is parsed as an expression.
-pub fn default_expr_is_volatile(expr: &str) -> bool {
-    let trimmed = expr.trim();
-    let head: String = trimmed
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect::<String>()
-        .to_ascii_lowercase();
-    if !head.is_empty()
-        && (default_registry().is_volatile(&head)
-            || VOLATILE_DEFAULT_ALIASES.contains(&head.as_str()))
-    {
-        return true;
-    }
-    crate::parse_expr_string(trimmed)
-        .ok()
-        .is_some_and(|parsed| expr_is_volatile(&parsed))
-}
-
-/// Whether any `(column, default_expr)` pair re-evaluates per execution.
-pub fn defaults_are_volatile(defaults: &[(String, String)]) -> bool {
-    defaults
-        .iter()
-        .any(|(_, expr)| default_expr_is_volatile(expr))
 }

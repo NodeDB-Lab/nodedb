@@ -150,7 +150,7 @@ fn cross_model_query_vector_graph_relational() {
     // 6. Relational filter: scan papers with year >= 2023.
     let filter = vec![nodedb::bridge::scan_filter::ScanFilter {
         field: "year".into(),
-        op: "gte".into(),
+        op: nodedb::bridge::scan_filter::FilterOp::Gte,
         value: nodedb_types::Value::Integer(2023),
         clauses: Vec::new(),
         expr: None,

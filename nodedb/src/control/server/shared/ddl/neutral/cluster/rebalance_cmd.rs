@@ -59,12 +59,10 @@ pub fn rebalance(
             "status".to_string(),
             JsonValue::String("cluster is balanced — no moves needed".to_string()),
         );
-        return Ok(vec![DdlResult::Rows(ShapedRows {
-            columns: vec!["status".to_string()],
-            column_types: vec![DdlColType::Text],
-            rows: vec![row],
-            notice: None,
-        })]);
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+            vec!["status".to_string()],
+            vec![row],
+        ))]);
     }
 
     let columns = vec![
@@ -102,10 +100,9 @@ pub fn rebalance(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }

@@ -24,8 +24,11 @@ use nodedb_types::value::Value;
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_read::filter::value_matches_filters;
 use crate::data::executor::handlers::transaction::overlay::Staged;
+use crate::engine::timeseries::columnar_memtable::TimeKind;
 use crate::types::{DatabaseId, TenantId, TxnId};
+use crate::util::rmpv_value::value_to_rmpv;
 
 /// Inputs for [`CoreLoop::merge_overlay_into_timeseries_scan`].
 pub(in crate::data::executor) struct TimeseriesOverlayMergeParams<'a> {
@@ -36,6 +39,9 @@ pub(in crate::data::executor) struct TimeseriesOverlayMergeParams<'a> {
     pub time_range: (i64, i64),
     pub filter_predicates: &'a [ScanFilter],
     pub has_filters: bool,
+    /// The caller's decoded read policy. A staged row the policy excludes is
+    /// dropped exactly like a base row; empty admits every row.
+    pub rls_predicates: &'a [ScanFilter],
     /// Row ceiling for the whole scan (base + staged). Staged rows are only
     /// appended while the result is below this bound, so the merge never
     /// exceeds the SQL `LIMIT`.
@@ -57,39 +63,25 @@ fn decode_staged_row(body: &[u8]) -> Option<Value> {
 ///
 /// A staged row keeps the INSERT's own column names, so the lookup is by the
 /// collection's declared time column — the same name the base scan prunes on.
-/// A row that carries no readable instant under that name falls outside every
-/// bounded range and is treated as non-matching by the caller.
-fn row_timestamp_ms(row: &Value, time_column: &str) -> Option<i64> {
+/// The cell was staged typed by the column's kind, so it lowers to stored
+/// milliseconds by that same kind. A row that carries no such cell under
+/// that name falls outside every bounded range and is treated as
+/// non-matching by the caller.
+fn row_timestamp_ms(row: &Value, time_column: &str, kind: TimeKind) -> Option<i64> {
     let Value::Object(map) = row else {
         return None;
     };
     map.iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(time_column))
-        .and_then(|(_, value)| nodedb_query::scan_filter::value_as_timestamp_ms(value))
+        .and_then(|(_, value)| kind.literal_ms(value))
 }
 
 /// Convert a decoded staged row (`Value::Object`) into the `rmpv::Value::Map`
 /// row shape the base raw scan emits, so a merged staged row is
 /// indistinguishable from a base row downstream (computed columns, encoding).
 fn staged_row_to_rmpv(row: &Value) -> rmpv::Value {
-    let Value::Object(map) = row else {
-        return rmpv::Value::Nil;
-    };
-    let fields: Vec<(rmpv::Value, rmpv::Value)> = map
-        .iter()
-        .map(|(k, v)| (rmpv::Value::String(k.as_str().into()), scalar_to_rmpv(v)))
-        .collect();
-    rmpv::Value::Map(fields)
-}
-
-/// Scalar `nodedb_types::Value` → `rmpv::Value`, matching the raw scan's own
-/// value emission (`row_emit::nodedb_value_to_rmpv`).
-fn scalar_to_rmpv(v: &Value) -> rmpv::Value {
-    match v {
-        Value::Integer(n) => rmpv::Value::Integer((*n).into()),
-        Value::Float(f) => rmpv::Value::F64(*f),
-        Value::String(s) => rmpv::Value::String(s.as_str().into()),
-        Value::Bool(b) => rmpv::Value::Boolean(*b),
+    match row {
+        Value::Object(_) => value_to_rmpv(row),
         _ => rmpv::Value::Nil,
     }
 }
@@ -97,8 +89,8 @@ fn scalar_to_rmpv(v: &Value) -> rmpv::Value {
 impl CoreLoop {
     /// Append this transaction's staged `TimeseriesOp::Ingest` rows to
     /// `results` (base raw-scan rows), each subject to the scan's time-range,
-    /// WHERE predicate, and row limit. No-op when the transaction has no
-    /// overlay entries for this collection.
+    /// WHERE predicate, read policy, and row limit. No-op when the
+    /// transaction has no overlay entries for this collection.
     pub(in crate::data::executor) fn merge_overlay_into_timeseries_scan(
         &self,
         params: TimeseriesOverlayMergeParams<'_>,
@@ -110,10 +102,12 @@ impl CoreLoop {
             time_range,
             filter_predicates,
             has_filters,
+            rls_predicates,
             limit,
         } = params;
 
         let time_column = self.ts_time_column(coll_key.0, coll_key.1, &coll_key.2);
+        let time_kind = self.ts_time_key_kind(coll_key.0, coll_key.1, &coll_key.2);
 
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -137,7 +131,7 @@ impl CoreLoop {
 
             // Time-range prune, mirroring the base memtable scan's
             // `timestamp_range_filter` (inclusive bounds).
-            match row_timestamp_ms(&row, &time_column) {
+            match row_timestamp_ms(&row, &time_column, time_kind) {
                 Some(ts) if ts >= time_range.0 && ts <= time_range.1 => {}
                 _ => continue,
             }
@@ -146,6 +140,11 @@ impl CoreLoop {
             // msgpack), exactly like the raw scan's `need_json_filter` path
             // does per base row.
             if has_filters && !ScanFilter::all_match_binary(filter_predicates, body)? {
+                continue;
+            }
+            // The caller's read policy, on the decoded row, after the WHERE
+            // predicate and before the row takes a limit slot.
+            if !value_matches_filters(&row, rls_predicates)? {
                 continue;
             }
 

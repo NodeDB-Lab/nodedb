@@ -4,25 +4,21 @@
 //! `Response` values.
 //!
 //! This is the pgwire entrypoint's consumer of the shared, protocol-neutral
-//! DDL dispatch result — the mirror of the native and http encoders. It
-//! reproduces the exact wire shape (RowDescription type OIDs, DataRow text
-//! bytes, CommandComplete tag) the pgwire DDL router produced directly,
-//! because the neutral result captured each column's original OID (as a
-//! [`DdlColType`]) and each cell's already-text-rendered value. Values are
-//! re-emitted as captured text — never re-typed or re-parsed — so the field
-//! bytes are byte-identical.
+//! DDL dispatch result — the mirror of the native and http encoders. Each
+//! column's `RowDescription` OID comes from the [`DdlColType`] the neutral
+//! result captured, and each typed cell renders through the one pgwire cell
+//! encoder (`handler::shape_encode::encode_cell`) in that type's text form.
 
 use std::sync::Arc;
 
-use pgwire::api::results::{DataRowEncoder, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use serde_json::Value as JsonValue;
 
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 
 use super::command_tag::dml_tag;
-use super::numeric_narrow::checked_narrow_f32;
+use super::handler::shape_encode::encode_cell;
 use super::types::{
     bool_field, bytea_field, float4_array_field, float4_field, float8_array_field, float8_field,
     int2_field, int4_field, int8_field, json_field, jsonb_field, text_field, timestamp_field,
@@ -111,35 +107,9 @@ fn rows_to_response(shaped: ShapedRows) -> PgWireResult<Response> {
         for (idx, name) in columns.iter().enumerate() {
             let ct = column_types.get(idx).copied().unwrap_or(DdlColType::Text);
             match row.get(name) {
-                // Captured text (the transitional wrapper path, and text-typed
-                // migrated cells): re-emit verbatim so the DataRow bytes match.
-                Some(JsonValue::String(s)) => encoder.encode_field(&s)?,
-                // Explicit NULL (or absent key) → -1 length field.
-                Some(JsonValue::Null) | None => encoder.encode_field(&None::<&str>)?,
-                // A migrated handler may carry a numeric cell typed rather than
-                // pre-rendered. Float columns MUST be encoded through pgwire's
-                // native float path (ryu + extra_float_digits) so the text
-                // bytes match what the original handler's `encode_field(&f64)`
-                // produced — string pre-rendering (`f64::to_string`) diverges
-                // (e.g. `0.0` → "0" vs "0.0"). Integer/other numerics render to
-                // the same decimal text either way.
-                Some(value @ JsonValue::Number(n)) => match ct {
-                    DdlColType::Float8 => match n.as_f64() {
-                        Some(f) => encoder.encode_field(&f)?,
-                        None => encoder.encode_field(&None::<f64>)?,
-                    },
-                    // Narrowing to `real` goes through the shared guard, so a
-                    // finite value beyond f32's range surfaces as SQLSTATE
-                    // 22003 here exactly as it does on the SELECT path,
-                    // instead of reaching the client as `Infinity`.
-                    DdlColType::Float4 => match checked_narrow_f32(value)? {
-                        Some(f) => encoder.encode_field(&f)?,
-                        None => encoder.encode_field(&None::<f32>)?,
-                    },
-                    _ => encoder.encode_field(&n.to_string())?,
-                },
-                // Defensive: any other scalar rendered to its text form.
-                Some(other) => encoder.encode_field(&other.to_string())?,
+                // Absent key → -1 length field.
+                None => encoder.encode_field(&None::<&str>)?,
+                Some(v) => encode_cell(&mut encoder, name, ct, FieldFormat::Text, v)?,
             }
         }
         encoded_rows.push(Ok(encoder.take_row()));

@@ -205,12 +205,10 @@ pub(super) async fn dispatch_and_respond_json(
     let payload_text = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
     let mut row = Map::new();
     row.insert(col_name.to_string(), JsonValue::String(payload_text));
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec![col_name.to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec![col_name.to_string()],
+        vec![row],
+    ))])
 }
 
 /// Dispatch plan and return multi-row response (for TOPK, RANGE).
@@ -240,10 +238,8 @@ pub(super) async fn dispatch_and_respond_rows(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["rank".to_string(), "key".to_string()],
-        column_types: ShapedRows::text_types(2),
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["rank".to_string(), "key".to_string()],
         rows,
-        notice: None,
-    })])
+    ))])
 }

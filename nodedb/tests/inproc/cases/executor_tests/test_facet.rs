@@ -9,7 +9,7 @@
 //! - Zero-match filter returns empty facets
 //! - Limit per facet (top-N truncation)
 
-use nodedb::bridge::scan_filter::ScanFilter;
+use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, QueryOp};
 
 use super::helpers::*;
@@ -133,10 +133,10 @@ fn seed_products(
     );
 }
 
-fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
+fn filter(field: &str, op: FilterOp, value: nodedb_types::Value) -> ScanFilter {
     ScanFilter {
         field: field.into(),
-        op: op.into(),
+        op,
         value,
         clauses: Vec::new(),
         expr: None,
@@ -193,7 +193,7 @@ fn filtered_facet_counts() {
     // Filter: brand = 'Nike' — should only count Nike products.
     let filters = vec![filter(
         "brand",
-        "eq",
+        FilterOp::Eq,
         nodedb_types::Value::String("Nike".into()),
     )];
     let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
@@ -236,7 +236,7 @@ fn zero_match_filter_returns_empty_facets() {
     // Filter: brand = 'NonExistent'.
     let filters = vec![filter(
         "brand",
-        "eq",
+        FilterOp::Eq,
         nodedb_types::Value::String("NonExistent".into()),
     )];
     let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();

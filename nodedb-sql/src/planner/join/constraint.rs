@@ -6,6 +6,7 @@ use sqlparser::ast;
 
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::normalize_ident;
+use crate::planner::predicate_coerce::coerce_predicate_literals;
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
 use crate::resolver::expr::convert_expr;
@@ -74,6 +75,10 @@ fn extract_join_constraint(
                         right: Box::new(convert_expr(pred, &ColumnScope::Relations(scope))?),
                     };
                 }
+                // A non-equi ON predicate is evaluated per candidate pair by
+                // the same comparison the WHERE path uses, so its literals
+                // follow the same declared-instant rule.
+                coerce_predicate_literals(&mut combined, scope)?;
                 Some(combined)
             };
             Ok((keys, cond))

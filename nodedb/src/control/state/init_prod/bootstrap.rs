@@ -158,27 +158,19 @@ pub(super) fn run(
         ep_topic_registry.load_from_catalog(catalog)?;
         mv_registry.load_from_catalog(catalog);
         sequence_registry.load_from_catalog(catalog);
+        // Every stored row is installed: a row that cannot be compiled
+        // against its collection installs as a restrictive deny-all
+        // (`StoredRlsPolicy::rehydrate`), never skipped.
         match catalog.load_all_rls_policies() {
             Ok(stored) => {
-                let mut loaded = 0usize;
                 for s in &stored {
-                    match s.to_runtime() {
-                        Ok(p) => {
-                            rls_store.install_replicated_policy(p);
-                            loaded += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                name = %s.name,
-                                collection = %s.collection,
-                                error = %e,
-                                "boot replay: skipped invalid RLS policy"
-                            );
-                        }
-                    }
+                    rls_store.install_replicated_policy(s.rehydrate(catalog));
                 }
-                if loaded > 0 {
-                    tracing::info!(rls_policies = loaded, "loaded RLS policies from catalog");
+                if !stored.is_empty() {
+                    tracing::info!(
+                        rls_policies = stored.len(),
+                        "loaded RLS policies from catalog"
+                    );
                 }
             }
             Err(e) => tracing::warn!(error = %e, "failed to load RLS policies"),

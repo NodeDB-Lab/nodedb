@@ -51,7 +51,7 @@ impl CoreLoop {
         &mut self,
         cascade: BulkDeleteRowCascade<'_>,
         write_set: &mut Vec<WriteSetEntry>,
-        returned_docs: &mut Vec<serde_json::Value>,
+        returned_docs: &mut Vec<nodedb_types::Value>,
     ) {
         let BulkDeleteRowCascade {
             task,
@@ -185,7 +185,7 @@ impl CoreLoop {
             Some(old_converted.as_deref().unwrap_or(deleted_bytes)),
         );
         if returning && let Some(doc) = pre_delete_doc {
-            returned_docs.push(doc);
+            returned_docs.push(nodedb_types::Value::from(doc));
         }
     }
 }

@@ -11,7 +11,7 @@
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 
 use super::super::super::result::{DdlError, DdlResult};
@@ -31,7 +31,6 @@ pub fn show_schema_version(
     }
 
     let columns = vec!["property".to_string(), "value".to_string()];
-    let column_types = vec![DdlColType::Text, DdlColType::Text];
 
     let mut rows = Vec::new();
 
@@ -73,10 +72,5 @@ pub fn show_schema_version(
     );
     rows.push(row);
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

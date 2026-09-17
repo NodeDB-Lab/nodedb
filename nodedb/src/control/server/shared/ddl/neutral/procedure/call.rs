@@ -130,13 +130,7 @@ fn build_out_response(
         row.insert(param.name.clone(), serde_json::Value::String(text));
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(columns, vec![row]))]
 }
 
 /// Parse `CALL <name>(arg1, arg2, ...)`.

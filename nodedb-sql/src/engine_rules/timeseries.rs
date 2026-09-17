@@ -18,6 +18,7 @@ impl EngineRules for TimeseriesRules {
         Ok(vec![SqlPlan::TimeseriesIngest {
             collection: p.collection,
             rows: p.rows,
+            volatile_defaults: p.volatile_defaults,
         }])
     }
 

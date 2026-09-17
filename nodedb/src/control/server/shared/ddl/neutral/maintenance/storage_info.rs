@@ -13,7 +13,7 @@ use nodedb_types::DatabaseId;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::ddl::sql_parse::parse_ident_token;
 use crate::control::state::SharedState;
 
@@ -65,7 +65,6 @@ pub fn handle_show_storage(
         "row_count".to_string(),
         "last_analyzed".to_string(),
     ];
-    let column_types = vec![DdlColType::Text; 4];
 
     let row_count = stats.first().map(|s| s.row_count).unwrap_or(0);
     let last_analyzed = stats
@@ -97,12 +96,10 @@ pub fn handle_show_storage(
         JsonValue::String(last_analyzed),
     );
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }
 
 /// Handle `SHOW COMPACTION STATUS`.
@@ -115,7 +112,6 @@ pub fn handle_show_compaction_status(
         "pending_jobs".to_string(),
         "compaction_debt".to_string(),
     ];
-    let column_types = vec![DdlColType::Text; 3];
 
     // Compaction runs automatically in the Data Plane. We report the current
     // state as "idle" — detailed stats require Data Plane query support.
@@ -130,12 +126,10 @@ pub fn handle_show_compaction_status(
         JsonValue::String("0".to_string()),
     );
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: vec![row],
-        notice: None,
-    })])
+        vec![row],
+    ))])
 }
 
 fn now_ms() -> u64 {
