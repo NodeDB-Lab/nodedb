@@ -150,7 +150,11 @@ impl CoreLoop {
                             reason: format!("timeseries resolve: msgpack decode error: {error}"),
                         }
                     })?;
-                Ok(normalize::msgpack_rows_to_ilp(&rows, measurement, time_key))
+                normalize::msgpack_rows_to_ilp(&rows, measurement, time_key).map_err(|error| {
+                    ErrorCode::RejectedPrevalidation {
+                        reason: format!("timeseries resolve: {error}"),
+                    }
+                })
             }
             "json" => {
                 let rows: sonic_rs::Array = sonic_rs::from_slice(payload).map_err(|error| {

@@ -154,6 +154,7 @@ mod sql_alter_after_drop;
 mod sql_arithmetic_overflow;
 mod sql_backup_restore_columnar;
 mod sql_backup_restore_columnar_restart;
+mod sql_backup_restore_timeseries;
 mod sql_backup_restore_vector_params;
 mod sql_backup_restore_vector_restart;
 mod sql_backup_restore_wire;

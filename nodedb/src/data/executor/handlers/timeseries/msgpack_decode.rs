@@ -3,13 +3,22 @@
 //! Lightweight msgpack decoder for timeseries ingest rows.
 //!
 //! Decodes a msgpack array of maps into `Vec<Vec<(String, MsgpackValue)>>`.
-//! Only supports the value types produced by `row_to_msgpack` in the planner.
+//! Supports the value types the planner's row writer and the native `Value`
+//! encoder produce for a timeseries row: scalars, strings, and the `fixext8`
+//! instant ext (`nodedb_types::read_instant`). A `bin` value decodes as
+//! `Null`. Any other ext, array, or map value is an error.
+
+use nodedb_types::json_msgpack::INSTANT_EXT_LEN;
+use nodedb_types::read_instant;
 
 pub(super) enum MsgpackValue {
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
+    /// A typed instant, as epoch microseconds. The column's declared kind,
+    /// not the cell's tag, decides how the engine stores and reads it.
+    Instant(i64),
     Null,
 }
 
@@ -165,7 +174,19 @@ fn read_value(buf: &[u8], pos: &mut usize) -> Result<MsgpackValue, &'static str>
             let bytes = read_bytes::<8>(buf, pos)?;
             Ok(MsgpackValue::Int(u64::from_be_bytes(bytes) as i64))
         }
-        // Skip bin/ext/array/map values we don't use for timeseries fields
+        // fixext8: an instant of either kind. Any other ext type is
+        // unsupported, like every other ext marker.
+        0xD7 => {
+            let start = *pos - 1;
+            if buf.len() < start + INSTANT_EXT_LEN {
+                return Err("unexpected EOF in fixext8");
+            }
+            let (_, micros) =
+                read_instant(buf, start).ok_or("unsupported msgpack ext type in timeseries row")?;
+            *pos = start + INSTANT_EXT_LEN;
+            Ok(MsgpackValue::Instant(micros))
+        }
+        // Skip bin values; ext/array/map values are unsupported.
         _ => {
             skip_msgpack_value(b, buf, pos)?;
             Ok(MsgpackValue::Null)
@@ -233,6 +254,59 @@ fn read_be_f64(buf: &[u8], pos: &mut usize) -> Result<f64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::InstantKind;
+
+    /// `2020-03-05T10:00:00Z` in epoch microseconds.
+    const EARLY_MICROS: i64 = 1_583_402_400_000_000;
+
+    /// A row map `{"captured_at": <instant>}` for the given kind.
+    fn row_with_instant(kind: InstantKind) -> Vec<u8> {
+        let mut payload = vec![0x91, 0x81];
+        payload.extend_from_slice(&[0xAB]);
+        payload.extend_from_slice(b"captured_at");
+        nodedb_types::write_instant(&mut payload, kind, EARLY_MICROS);
+        payload
+    }
+
+    /// A `fixext8` instant of either kind decodes as the typed instant.
+    #[test]
+    fn a_fixext8_instant_decodes_as_a_typed_instant() {
+        for kind in [InstantKind::Naive, InstantKind::Utc] {
+            let rows = decode_msgpack_rows(&row_with_instant(kind)).expect("decode");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 1);
+            assert_eq!(rows[0][0].0, "captured_at");
+            assert!(
+                matches!(
+                    rows[0][0].1,
+                    MsgpackValue::Instant(micros) if micros == EARLY_MICROS
+                ),
+                "instant of kind {kind:?} must decode typed"
+            );
+        }
+    }
+
+    /// A `fixext8` of a non-instant type is unsupported, like every other ext.
+    #[test]
+    fn a_fixext8_of_another_type_is_rejected() {
+        let mut payload = vec![0x91, 0x81, 0xA1, b'k'];
+        payload.extend_from_slice(&[0xD7, 0x09, 0, 0, 0, 0, 0, 0, 0, 1]);
+        assert!(matches!(
+            decode_msgpack_rows(&payload),
+            Err("unsupported msgpack ext type in timeseries row")
+        ));
+    }
+
+    /// A truncated instant is an EOF error, never a partial value.
+    #[test]
+    fn a_truncated_instant_is_rejected() {
+        let mut payload = row_with_instant(InstantKind::Utc);
+        payload.truncate(payload.len() - 1);
+        assert!(matches!(
+            decode_msgpack_rows(&payload),
+            Err("unexpected EOF in fixext8")
+        ));
+    }
 
     #[test]
     fn huge_array_count_with_tiny_payload_is_rejected_without_reservation() {

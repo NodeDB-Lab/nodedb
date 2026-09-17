@@ -63,7 +63,8 @@ pub(in crate::data::executor) fn admit_msgpack_rows(
         ),
     };
     let rows = msgpack_decode::decode_msgpack_rows(payload).map_err(|_| undecodable())?;
-    let batch = normalize::msgpack_rows_to_ilp(&rows, measurement, time_key);
+    let batch =
+        normalize::msgpack_rows_to_ilp(&rows, measurement, time_key).map_err(|_| undecodable())?;
     let parsed = ilp::parse_batch(&batch).map_err(|_| undecodable())?;
     admit_ilp_lines(
         rls_write_check,
