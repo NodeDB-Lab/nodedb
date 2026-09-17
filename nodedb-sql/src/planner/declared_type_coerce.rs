@@ -156,7 +156,16 @@ fn is_exempt(exempt_column: Option<&str>, column: &str) -> bool {
 
 /// Coerce one literal to `declared`, returning it unchanged when the declared
 /// type imposes no representation of its own.
-fn coerce_value(column: &str, value: SqlValue, declared: &SqlDataType) -> Result<SqlValue> {
+///
+/// The one rule for a literal bound for a declared column, on the write side
+/// (`VALUES`, `SET`) and on the read side (`predicate_coerce`, for a literal
+/// compared against the column), so a row is found by the same literal that
+/// stored it.
+pub(crate) fn coerce_value(
+    column: &str,
+    value: SqlValue,
+    declared: &SqlDataType,
+) -> Result<SqlValue> {
     match declared {
         SqlDataType::Int64 => coerce_to_int(column, value),
         SqlDataType::Float64 => coerce_to_float(column, value),
@@ -270,7 +279,7 @@ fn coerce_to_instant(column: &str, value: SqlValue, declared: &SqlDataType) -> R
         SqlValue::Bool(_) | SqlValue::Bytes(_) | SqlValue::Array(_) => {
             Err(SqlError::TypeMismatch {
                 detail: format!(
-                    "column '{column}': cannot store {} as {declared_name}",
+                    "column '{column}': {} is not representable as {declared_name}",
                     literal_kind(&value)
                 ),
             })
@@ -319,7 +328,7 @@ fn whole_f64(f: f64) -> Option<i64> {
 
 fn not_representable(column: &str, value: &str, declared: &str) -> SqlError {
     SqlError::TypeMismatch {
-        detail: format!("column '{column}': cannot store '{value}' as {declared}"),
+        detail: format!("column '{column}': '{value}' is not representable as {declared}"),
     }
 }
 
