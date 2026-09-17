@@ -148,6 +148,10 @@ impl RlsPolicyStore {
 
     /// Clear all in-memory policies and reload from the catalog.
     /// Used by the recovery verifier repair path.
+    ///
+    /// Every stored row is installed: a row that cannot be compiled against
+    /// its collection installs as a restrictive deny-all
+    /// (`StoredRlsPolicy::rehydrate`), never dropped.
     pub fn clear_and_reload(
         &self,
         catalog: &crate::control::security::catalog::SystemCatalog,
@@ -160,16 +164,10 @@ impl RlsPolicyStore {
         }
         policies.clear();
         for s in stored {
-            match s.to_runtime() {
-                Ok(rp) => {
-                    affected_tenants.insert(rp.tenant_id);
-                    let key = super::types::policy_key(rp.tenant_id, &rp.collection);
-                    policies.entry(key).or_default().push(rp);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "rls_store.clear_and_reload: skipping unparseable policy");
-                }
-            }
+            let rp = s.rehydrate(catalog);
+            affected_tenants.insert(rp.tenant_id);
+            let key = super::types::policy_key(rp.tenant_id, &rp.collection);
+            policies.entry(key).or_default().push(rp);
         }
         drop(policies);
         for tenant_id in affected_tenants {

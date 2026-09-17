@@ -207,11 +207,12 @@ async fn rls_policy_orphan_refuses_startup() {
 
     let stored = nodedb::control::security::catalog::rls::StoredRlsPolicy {
         tenant_id: 1,
+        database_id: 0,
         collection: "orders".to_string(),
         display_collection: "orders".to_string(),
         name: "only_own_orders".to_string(),
         policy_type_tag: 0,
-        compiled_predicate_json: String::new(),
+        predicate_text: String::new(),
         mode_tag: 0,
         on_deny_json: r#""Silent""#.to_string(),
         enabled: true,
@@ -517,11 +518,12 @@ async fn rls_policy_value_mismatch_detected() {
 
     let stored = nodedb::control::security::catalog::rls::StoredRlsPolicy {
         tenant_id: 1,
+        database_id: 0,
         collection: "docs".to_string(),
         display_collection: "docs".to_string(),
         name: "read_own".to_string(),
         policy_type_tag: 0,
-        compiled_predicate_json: String::new(),
+        predicate_text: String::new(),
         mode_tag: 0,
         on_deny_json: r#""Silent""#.to_string(),
         enabled: true,
@@ -531,7 +533,7 @@ async fn rls_policy_value_mismatch_detected() {
     catalog.put_rls_policy(&stored).unwrap();
 
     // Insert into memory with enabled=false — value mismatch.
-    let mut policy = stored.to_runtime().unwrap();
+    let mut policy = stored.to_runtime(catalog).unwrap();
     policy.enabled = false;
     shared.rls.install_replicated_policy(policy);
 

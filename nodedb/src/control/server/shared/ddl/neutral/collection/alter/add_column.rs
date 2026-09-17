@@ -112,6 +112,7 @@ pub(super) async fn alter_table_add_column(
         super::super::register::dispatch_register_from_stored(state, coll)
             .await
             .map_err(|e| err("XX000", e.to_string()))?;
+        super::strict_schema::recompile_rls_policies(state, coll)?;
     }
 
     state.audit_record(

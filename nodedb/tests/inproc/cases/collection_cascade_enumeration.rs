@@ -24,11 +24,12 @@ use super::catalog_integrity_helpers::{
 fn put_rls(catalog: &nodedb::control::security::catalog::SystemCatalog, name: &str, coll: &str) {
     let p = StoredRlsPolicy {
         tenant_id: TENANT,
+        database_id: 0,
         collection: coll.into(),
         display_collection: coll.into(),
         name: name.into(),
         policy_type_tag: 0,
-        compiled_predicate_json: String::new(),
+        predicate_text: String::new(),
         mode_tag: 0,
         on_deny_json: String::new(),
         enabled: true,

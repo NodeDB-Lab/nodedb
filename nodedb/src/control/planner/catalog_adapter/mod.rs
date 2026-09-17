@@ -36,3 +36,4 @@ mod sql_catalog_impl;
 mod type_convert;
 
 pub use adapter::OriginCatalog;
+pub(crate) use type_convert::convert_collection_type;

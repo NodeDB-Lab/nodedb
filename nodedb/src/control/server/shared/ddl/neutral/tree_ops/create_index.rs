@@ -121,6 +121,7 @@ pub async fn create_graph_index(
     if state
         .rls
         .combined_read_predicate_with_auth(tenant_id.as_u64(), &collection, scope.auth())
+        .map_err(|e| ddl_err("XX000", format!("rls compile: {e}")))?
         .is_none_or(|filters| !filters.is_empty())
     {
         return Err(ddl_err(

@@ -201,12 +201,16 @@ pub fn assert_visible(
     );
     let scope = RequestAuthScope::builder(&target_identity, state.auth_stores()).build();
 
-    // Check if RLS policies would filter this user.
-    let rls_bytes = state.rls.combined_read_predicate_with_auth(
-        target_identity.tenant_id.as_u64(),
-        collection,
-        scope.auth(),
-    );
+    // Check if RLS policies would filter this user. An unencodable policy
+    // is an error, not an answer.
+    let rls_bytes = state
+        .rls
+        .combined_read_predicate_with_auth(
+            target_identity.tenant_id.as_u64(),
+            collection,
+            scope.auth(),
+        )
+        .map_err(|e| DdlError::new("XX000", format!("rls compile: {e}")))?;
 
     let visible = rls_bytes.is_some_and(|b| b.is_empty()); // No filters = visible.
 

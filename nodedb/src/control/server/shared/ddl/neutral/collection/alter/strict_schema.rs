@@ -108,7 +108,8 @@ pub(super) fn add_field(coll: &mut StoredCollection, column: &str, declared_type
 
 /// Replicate the mutated collection through the metadata raft group,
 /// refresh this node's Data Plane register so the in-memory shape
-/// catches up with the new schema, then bump `schema_version`.
+/// catches up with the new schema, recompile the collection's RLS
+/// policies against it, then bump `schema_version`.
 pub(super) async fn persist_schema_change(
     state: &SharedState,
     updated: &StoredCollection,
@@ -120,6 +121,28 @@ pub(super) async fn persist_schema_change(
     super::super::register::dispatch_register_from_stored(state, updated)
         .await
         .map_err(|e| err("XX000", e.to_string()))?;
+    recompile_rls_policies(state, updated)?;
     state.schema_version.bump();
     Ok(())
+}
+
+/// Recompile the RLS policies on `updated` against its new declared columns.
+///
+/// A policy literal is typed against the column it compares with, so a
+/// column the statement added, dropped, or renamed changes what the policy
+/// compiles to. The Raft post-apply recompiles on every node in cluster mode;
+/// this call covers the single-node path, where no post-apply runs.
+pub(super) fn recompile_rls_policies(
+    state: &SharedState,
+    updated: &StoredCollection,
+) -> Result<(), DdlError> {
+    state
+        .rls
+        .recompile_for_collection(
+            state.credentials.catalog(),
+            updated.database_id,
+            updated.tenant_id,
+            &updated.name,
+        )
+        .map_err(|e| err("XX000", format!("rls recompile: {e}")))
 }

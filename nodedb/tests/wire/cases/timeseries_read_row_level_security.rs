@@ -245,3 +245,121 @@ async fn a_join_over_a_governed_timeseries_collection_excludes_policy_filtered_r
         "the join surfaced timeseries rows the read policy excludes: {rows:?}"
     );
 }
+
+/// `2020-03-05T10:00:00Z` as epoch milliseconds: the instant the policies
+/// below compare against.
+const CUTOFF_MS: i64 = 1_583_402_400_000;
+const CUTOFF_TEXT: &str = "2020-03-05 10:00:00";
+
+/// Create a timeseries `collection` with a declared `TIMESTAMP` time key
+/// holding one row before, one at, and one after the cutoff, plus `user`
+/// with the readwrite role. No policy: each test creates its own.
+async fn seed_instant(server: &TestServer, collection: &str, user: &str) {
+    server
+        .exec(&format!(
+            "CREATE COLLECTION {collection} \
+             (captured_at TIMESTAMP TIME_KEY, label TEXT, value FLOAT) \
+             WITH (engine='timeseries')"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("create {collection}: {e}"));
+    for (at, label) in [
+        ("2020-03-05 09:00:00", "before"),
+        (CUTOFF_TEXT, "at"),
+        ("2020-03-05 11:00:00", "after"),
+    ] {
+        server
+            .exec(&format!(
+                "INSERT INTO {collection} (captured_at, label, value) \
+                 VALUES ('{at}', '{label}', 1.0)"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("seed {collection} row {label}: {e}"));
+    }
+    server
+        .exec(&format!("CREATE USER {user} PASSWORD '{PASSWORD}'"))
+        .await
+        .unwrap_or_else(|e| panic!("create user {user}: {e}"));
+    server
+        .exec(&format!("GRANT ROLE readwrite TO {user}"))
+        .await
+        .unwrap_or_else(|e| panic!("grant readwrite to {user}: {e}"));
+}
+
+/// A numeric policy literal compared against a declared `TIMESTAMP` time
+/// key is epoch milliseconds, typed at `CREATE RLS POLICY` by the rule a
+/// query predicate follows: the governed user sees the rows at and after the
+/// cutoff, and the row before it is excluded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_numeric_policy_literal_on_a_timestamp_time_key_is_an_instant() {
+    let server = TestServer::start().await;
+    let user = "ts_rls_ms_reader";
+    seed_instant(&server, "ts_rls_ms", user).await;
+    server
+        .exec(&format!(
+            "CREATE RLS POLICY ts_rls_ms_recent ON ts_rls_ms FOR READ \
+             USING (captured_at >= {CUTOFF_MS})"
+        ))
+        .await
+        .expect("a numeric literal on a TIMESTAMP column is epoch milliseconds");
+
+    let rows = rows_as(
+        &server,
+        user,
+        "SELECT label FROM ts_rls_ms ORDER BY captured_at",
+    )
+    .await;
+    assert_eq!(
+        rows,
+        vec!["at".to_string(), "after".to_string()],
+        "the policy admits the rows at and after the cutoff: {rows:?}"
+    );
+}
+
+/// A text policy literal compared against a declared `TIMESTAMP` time key
+/// is parsed as ISO-8601 and enforced as the same instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_policy_literal_on_a_timestamp_time_key_is_an_instant() {
+    let server = TestServer::start().await;
+    let user = "ts_rls_text_reader";
+    seed_instant(&server, "ts_rls_text", user).await;
+    server
+        .exec(&format!(
+            "CREATE RLS POLICY ts_rls_text_recent ON ts_rls_text FOR READ \
+             USING (captured_at >= '{CUTOFF_TEXT}')"
+        ))
+        .await
+        .expect("a text literal on a TIMESTAMP column is parsed as an instant");
+
+    let rows = rows_as(
+        &server,
+        user,
+        "SELECT label FROM ts_rls_text ORDER BY captured_at",
+    )
+    .await;
+    assert_eq!(
+        rows,
+        vec!["at".to_string(), "after".to_string()],
+        "the policy admits the rows at and after the cutoff: {rows:?}"
+    );
+}
+
+/// A policy literal no instant can be read from is refused at
+/// `CREATE RLS POLICY`, naming the column, so an unenforceable policy is
+/// never stored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_non_instant_policy_literal_on_a_timestamp_time_key_is_refused() {
+    let server = TestServer::start().await;
+    seed_instant(&server, "ts_rls_bool", "ts_rls_bool_reader").await;
+    let error = server
+        .exec(
+            "CREATE RLS POLICY ts_rls_bool_bad ON ts_rls_bool FOR READ \
+             USING (captured_at >= true)",
+        )
+        .await
+        .expect_err("a boolean is not an instant");
+    assert!(
+        error.contains("captured_at"),
+        "the refusal must name the column: {error}"
+    );
+}

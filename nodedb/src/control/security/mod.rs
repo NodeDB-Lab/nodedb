@@ -33,6 +33,7 @@ pub mod permission_tree;
 pub mod predicate;
 pub mod predicate_eval;
 pub mod predicate_parser;
+pub mod predicate_typing;
 pub mod random;
 pub mod ratelimit;
 pub mod redaction;

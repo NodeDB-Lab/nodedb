@@ -19,8 +19,8 @@ use crate::control::security::catalog::StoredRlsPolicy;
 use crate::control::security::deny::{self, DenyMode};
 use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::security::predicate::RlsPredicate;
-use crate::control::security::predicate_parser::{parse_predicate, validate_auth_refs};
 use crate::control::security::rls::RlsPolicy;
+use crate::control::security::rls::compile::{compile_policy_predicate, declared_columns};
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -52,16 +52,38 @@ struct CompiledPredicate {
     on_deny: DenyMode,
 }
 
-/// Compile a predicate string and optional `ON DENY` raw clause into a
+/// Compile a predicate string against the target collection's declared
+/// columns, and the optional `ON DENY` raw clause, into a
 /// `CompiledPredicate`. Called by [`create_rls_policy`] after the typed AST
 /// fields have been validated.
+///
+/// The collection must exist: a literal compared against a declared
+/// `TIMESTAMP` / `TIMESTAMPTZ` column is typed here by the rule the planner
+/// applies to a query predicate, and a literal that type cannot read
+/// refuses the statement naming the column. A policy that cannot be
+/// enforced as written is never stored.
 fn compile_rls_predicate(
+    state: &SharedState,
+    database_id: DatabaseId,
+    tenant_id: u64,
+    collection: &str,
     predicate_str: &str,
     on_deny_raw: Option<&str>,
 ) -> Result<CompiledPredicate, DdlError> {
-    let compiled = parse_predicate(predicate_str)
-        .map_err(|e| DdlError::new("42601", format!("predicate parse error: {e}")))?;
-    validate_auth_refs(&compiled).map_err(|e| DdlError::new("42601", e.to_string()))?;
+    let columns = declared_columns(
+        state.credentials.catalog(),
+        database_id,
+        tenant_id,
+        collection,
+    )
+    .map_err(|e| match e {
+        crate::Error::CollectionNotFound { .. } => {
+            DdlError::new("42P01", format!("collection '{collection}' does not exist"))
+        }
+        other => DdlError::new("XX000", format!("catalog read: {other}")),
+    })?;
+    let compiled = compile_policy_predicate(predicate_str, &columns)
+        .map_err(|e| DdlError::new("42601", e.to_string()))?;
 
     let on_deny = if let Some(deny_text) = on_deny_raw {
         let deny_parts: Vec<&str> = deny_text.split_whitespace().collect();
@@ -166,7 +188,14 @@ pub fn create_rls_policy(
         crate::control::security::predicate::PolicyMode::Permissive
     };
 
-    let compiled = compile_rls_predicate(predicate_raw, on_deny_raw)?;
+    let compiled = compile_rls_predicate(
+        state,
+        database_id,
+        tenant_id,
+        collection,
+        predicate_raw,
+        on_deny_raw,
+    )?;
 
     // Pre-check duplicate so the proposing node fails fast with a
     // clean SQLSTATE instead of going through raft only to be a
@@ -198,7 +227,7 @@ pub fn create_rls_policy(
             .as_secs(),
     };
 
-    let stored = StoredRlsPolicy::from_runtime(&policy)
+    let stored = StoredRlsPolicy::from_runtime(&policy, database_id, predicate_raw)
         .map_err(|e| DdlError::new("XX000", format!("rls serialize: {e}")))?;
 
     let entry = CatalogEntry::PutRlsPolicy(Box::new(stored.clone()));

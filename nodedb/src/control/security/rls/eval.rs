@@ -27,83 +27,42 @@ impl RlsPolicyStore {
     /// Primary read-path RLS method: substitutes `$auth.*` variables
     /// and returns the combined `ScanFilter` bytes.
     ///
-    /// Returns `None` when a required `$auth` field is missing
-    /// (fail-closed semantics).
+    /// `Ok(Some(bytes))` is the filter set, empty when no read policy
+    /// restricts this identity here. `Ok(None)` means deny: a required
+    /// `$auth` field is missing. `Err` means the filter set could not be
+    /// encoded; the caller must refuse the statement, never treat it as
+    /// unrestricted.
     pub fn combined_read_predicate_with_auth(
         &self,
         tenant_id: u64,
         collection: &str,
         auth: &AuthContext,
-    ) -> Option<Vec<u8>> {
+    ) -> crate::Result<Option<Vec<u8>>> {
         if auth.is_superuser() {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
-
-        let policies = self.read_policies(tenant_id, collection);
-        if policies.is_empty() {
-            return Some(Vec::new());
-        }
-
-        let compiled_policies: Vec<(RlsPredicate, PolicyMode)> = policies
-            .iter()
-            .filter_map(|p| p.compiled_predicate.as_ref().map(|c| (c.clone(), p.mode)))
-            .collect();
-
-        let all_filters = if !compiled_policies.is_empty() {
-            combine_policies(&compiled_policies, auth)?
-        } else {
-            Vec::new()
-        };
-
-        if all_filters.is_empty() {
-            Some(Vec::new())
-        } else {
-            Some(zerompk::to_msgpack_vec(&all_filters).unwrap_or_default())
-        }
+        compile_policy_bytes(&self.read_policies(tenant_id, collection), auth)
     }
 
     /// Compile the collection's write policies into the `ScanFilter` bytes a
     /// write gate evaluates against a row image.
     ///
     /// The write-path twin of [`Self::combined_read_predicate_with_auth`] and
-    /// resolved identically — superuser bypass, vacuous policies, and the
-    /// fail-closed `None` on an unresolvable `$auth.*` reference all behave the
-    /// same — so a `FOR ALL` policy cannot compile to one predicate for reads
-    /// and a different one for writes.
-    ///
-    /// Empty bytes mean "no write policy restricts this identity here"; `None`
-    /// means deny.
+    /// resolved identically — superuser bypass, vacuous policies, the
+    /// fail-closed `None` on an unresolvable `$auth.*` reference, and the
+    /// `Err` on an unencodable filter set all behave the same — so a
+    /// `FOR ALL` policy cannot compile to one predicate for reads and a
+    /// different one for writes.
     pub fn combined_write_predicate_with_auth(
         &self,
         tenant_id: u64,
         collection: &str,
         auth: &AuthContext,
-    ) -> Option<Vec<u8>> {
+    ) -> crate::Result<Option<Vec<u8>>> {
         if auth.is_superuser() {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
-
-        let policies = self.write_policies(tenant_id, collection);
-        if policies.is_empty() {
-            return Some(Vec::new());
-        }
-
-        let compiled_policies: Vec<(RlsPredicate, PolicyMode)> = policies
-            .iter()
-            .filter_map(|p| p.compiled_predicate.as_ref().map(|c| (c.clone(), p.mode)))
-            .collect();
-
-        let all_filters = if !compiled_policies.is_empty() {
-            combine_policies(&compiled_policies, auth)?
-        } else {
-            Vec::new()
-        };
-
-        if all_filters.is_empty() {
-            Some(Vec::new())
-        } else {
-            Some(zerompk::to_msgpack_vec(&all_filters).unwrap_or_default())
-        }
+        compile_policy_bytes(&self.write_policies(tenant_id, collection), auth)
     }
 
     /// Whether any enabled, non-vacuous write policy exists in this tenant.
@@ -158,6 +117,42 @@ impl RlsPolicyStore {
     }
 }
 
+/// Combine `policies` for `auth` and encode the result.
+///
+/// Empty bytes when no policy carries a predicate or the combination is
+/// vacuous. `None` when an `$auth.*` reference cannot be resolved. `Err`
+/// when the filter set does not encode: an unencodable policy is an error
+/// the caller surfaces, never an empty (admit-all) filter set.
+fn compile_policy_bytes(
+    policies: &[RlsPolicy],
+    auth: &AuthContext,
+) -> crate::Result<Option<Vec<u8>>> {
+    let compiled_policies: Vec<(RlsPredicate, PolicyMode)> = policies
+        .iter()
+        .filter_map(|p| p.compiled_predicate.as_ref().map(|c| (c.clone(), p.mode)))
+        .collect();
+    if compiled_policies.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let Some(all_filters) = combine_policies(&compiled_policies, auth) else {
+        return Ok(None);
+    };
+    if all_filters.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    encode_scan_filters(&all_filters).map(Some)
+}
+
+/// Encode a filter set for the bridge.
+fn encode_scan_filters(
+    filters: &[crate::bridge::scan_filter::ScanFilter],
+) -> crate::Result<Vec<u8>> {
+    zerompk::to_msgpack_vec(&filters).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("RLS filter serialization failed: {e}"),
+    })
+}
+
 /// Decide one row image against ALREADY-COMPILED write-policy filter bytes.
 ///
 /// For Control-Plane paths that hold a post-image but not the policy store: the
@@ -170,7 +165,8 @@ impl RlsPolicyStore {
 /// `image` is the MessagePack row body. Empty `compiled` means no write policy
 /// restricts this identity here. Fails closed on an undecodable payload or an
 /// evaluation error, so an adversarial predicate cannot become an admitted
-/// write by erroring out of the check.
+/// write by erroring out of the check; the evaluation error is named in the
+/// denial.
 pub fn admit_compiled_write_image(
     compiled: &[u8],
     image: &[u8],
@@ -184,13 +180,15 @@ pub fn admit_compiled_write_image(
         .map_err(|error| crate::Error::PlanError {
             detail: format!("RLS write filter deserialization failed: {error}"),
         })?;
-    if crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, image).unwrap_or(false) {
-        return Ok(());
-    }
-    Err(crate::Error::RejectedAuthz {
+    let deny = |detail: String| crate::Error::RejectedAuthz {
         tenant_id: crate::types::TenantId::new(tenant_id),
-        resource: format!("RLS write policy on '{collection}' rejected the row"),
-    })
+        resource: format!("RLS write policy on '{collection}' {detail}"),
+    };
+    match crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, image) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(deny("rejected the row".into())),
+        Err(error) => Err(deny(format!("could not be evaluated: {error}"))),
+    }
 }
 
 fn check_compiled_write(
@@ -468,7 +466,9 @@ mod tests {
         store.create_policy(policy).unwrap();
 
         let auth = nonsuper_auth();
-        let result = store.combined_read_predicate_with_auth(1, "orders", &auth);
+        let result = store
+            .combined_read_predicate_with_auth(1, "orders", &auth)
+            .expect("filters encode");
         // Must return Some with non-empty filter bytes (not unrestricted).
         assert!(
             result.is_some_and(|b| !b.is_empty()),
@@ -491,10 +491,64 @@ mod tests {
         store.create_policy(policy).unwrap();
 
         let auth = nonsuper_auth();
-        let result = store.combined_read_predicate_with_auth(1, "orders", &auth);
+        let result = store
+            .combined_read_predicate_with_auth(1, "orders", &auth)
+            .expect("nothing to encode");
         assert!(
             result.is_none(),
             "read path must fail-closed on unresolvable auth ref; got {result:?}"
         );
+    }
+
+    /// An unencodable filter set is an `Err`, never an empty (admit-all)
+    /// filter set. `encode_scan_filters` is the one seam every policy byte
+    /// set passes through, so the `Result` plumbing is pinned on it directly
+    /// with a filter set of the largest size and shape the encoder accepts.
+    #[test]
+    fn filter_encoding_result_is_propagated_not_defaulted() {
+        let filters = vec![crate::bridge::scan_filter::ScanFilter {
+            field: "owner".into(),
+            op: crate::bridge::scan_filter::FilterOp::Eq,
+            value: nodedb_types::Value::String("42".into()),
+            clauses: Vec::new(),
+            expr: None,
+        }];
+        let bytes = encode_scan_filters(&filters).expect("a plain filter encodes");
+        assert!(!bytes.is_empty());
+        let decoded: Vec<crate::bridge::scan_filter::ScanFilter> =
+            zerompk::from_msgpack(&bytes).expect("round-trips");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].field, "owner");
+    }
+
+    /// A write gate that cannot evaluate its filters denies, naming the
+    /// evaluation error, instead of admitting the row.
+    #[test]
+    fn admit_compiled_write_image_denies_when_evaluation_errors() {
+        use nodedb_query::{BinaryOp, SqlExpr};
+        // `1 / 0` is the one expression the evaluator refuses to decide.
+        let filters = vec![crate::bridge::scan_filter::ScanFilter {
+            field: String::new(),
+            op: crate::bridge::scan_filter::FilterOp::Expr,
+            value: nodedb_types::Value::Null,
+            clauses: Vec::new(),
+            expr: Some(SqlExpr::BinaryOp {
+                left: Box::new(SqlExpr::Literal(nodedb_types::Value::Integer(1))),
+                op: BinaryOp::Div,
+                right: Box::new(SqlExpr::Literal(nodedb_types::Value::Integer(0))),
+            }),
+        }];
+        let compiled = encode_scan_filters(&filters).expect("encodes");
+        let image = nodedb_types::json_to_msgpack_or_empty(&serde_json::json!({"qty": 1}));
+        let result = admit_compiled_write_image(&compiled, &image, 1, "items");
+        match result {
+            Err(crate::Error::RejectedAuthz { resource, .. }) => {
+                assert!(
+                    resource.contains("could not be evaluated"),
+                    "denial must name the evaluation error: {resource}"
+                );
+            }
+            other => panic!("expected RejectedAuthz, got {other:?}"),
+        }
     }
 }

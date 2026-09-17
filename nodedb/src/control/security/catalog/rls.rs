@@ -2,20 +2,30 @@
 
 //! RLS policy persistence in the system catalog.
 //!
-//! `RlsPolicy` (the runtime shape) carries `Option<RlsPredicate>` and
-//! `DenyMode`, both of which are serde-only and don't fit zerompk's
-//! `ToMessagePack` derive. `StoredRlsPolicy` flattens those parts into
-//! JSON strings (via sonic_rs) so the whole record can be msgpack-encoded
-//! by zerompk like every other catalog row.
+//! `StoredRlsPolicy` is the catalog row: the policy's `USING` text, its
+//! database, and the scalar settings. The compiled predicate is never
+//! persisted. Every reader recompiles the text against the collection's
+//! current declared columns through [`StoredRlsPolicy::to_runtime`], so a
+//! literal compared against a `TIMESTAMP` column is typed the same way at
+//! boot, on Raft apply, and after a schema change as it was at
+//! `CREATE RLS POLICY`. `DenyMode` is serde-only and is carried as a
+//! sonic_rs JSON string so the row can derive zerompk like every other
+//! catalog row.
 //!
 //! Conversions: [`StoredRlsPolicy::from_runtime`] for serialization,
-//! [`StoredRlsPolicy::to_runtime`] for replay on apply / boot.
+//! [`StoredRlsPolicy::to_runtime`] for replay on apply / boot, and
+//! [`StoredRlsPolicy::rehydrate`] for the load paths that must install a
+//! policy whatever happens: a row that cannot be compiled installs as a
+//! restrictive deny-all so it can never widen access.
 
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+use tracing::error;
 
 use crate::control::security::deny::DenyMode;
 use crate::control::security::predicate::{PolicyMode, RlsPredicate};
+use crate::control::security::rls::compile::{compile_policy_predicate, declared_columns};
 use crate::control::security::rls::{PolicyType, RlsPolicy};
+use crate::types::DatabaseId;
 
 use super::types::{SystemCatalog, catalog_err};
 
@@ -24,29 +34,29 @@ use super::types::{SystemCatalog, catalog_err};
 pub(super) const RLS_POLICIES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.rls_policies");
 
-/// Catalog-shape RLS policy. JSON strings are sonic_rs-encoded
-/// versions of the runtime types so zerompk can derive the encoder.
+/// Catalog-shape RLS policy.
 ///
-/// Map-encoded (`#[msgpack(map)]`) so `display_collection` could be added
-/// with `#[msgpack(default)]`: records written before that field decode
-/// with `display_collection = ""` instead of failing outright.
+/// Map-encoded (`#[msgpack(map)]`) so a field can carry `#[msgpack(default)]`.
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 #[msgpack(map)]
 pub struct StoredRlsPolicy {
     pub tenant_id: u64,
+    /// Database the policy's collection lives in. With `display_collection`
+    /// it names the catalog collection whose declared columns type the
+    /// predicate's literals.
+    pub database_id: u64,
     /// Qualified with the owning database ID — the lookup key. Never
     /// shown to a user; see `display_collection`.
     pub collection: String,
     /// The collection name as the user wrote it, unqualified.
-    /// Display-only: falls back to `collection` when empty (records
-    /// written before this field existed).
+    /// Falls back to `collection` when empty.
     #[msgpack(default)]
     pub display_collection: String,
     pub name: String,
     /// 0 = Read, 1 = Write, 2 = All.
     pub policy_type_tag: u8,
-    /// JSON-serialized `Option<RlsPredicate>`. Empty string = None.
-    pub compiled_predicate_json: String,
+    /// The `USING (...)` text as written. Empty = no row filter (vacuous).
+    pub predicate_text: String,
     /// 0 = Permissive, 1 = Restrictive.
     pub mode_tag: u8,
     /// JSON-serialized `DenyMode`.
@@ -57,15 +67,18 @@ pub struct StoredRlsPolicy {
 }
 
 impl StoredRlsPolicy {
-    pub fn from_runtime(p: &RlsPolicy) -> crate::Result<Self> {
-        let compiled_predicate_json = match &p.compiled_predicate {
-            Some(rp) => sonic_rs::to_string(rp).map_err(|e| catalog_err("ser compiled rls", e))?,
-            None => String::new(),
-        };
+    /// The catalog row for `p`, whose predicate was compiled from
+    /// `predicate_text` against the collection in `database_id`.
+    pub fn from_runtime(
+        p: &RlsPolicy,
+        database_id: DatabaseId,
+        predicate_text: &str,
+    ) -> crate::Result<Self> {
         let on_deny_json =
             sonic_rs::to_string(&p.on_deny).map_err(|e| catalog_err("ser deny mode", e))?;
         Ok(Self {
             tenant_id: p.tenant_id,
+            database_id: database_id.as_u64(),
             collection: p.collection.clone(),
             display_collection: p.display_collection.clone(),
             name: p.name.clone(),
@@ -74,7 +87,7 @@ impl StoredRlsPolicy {
                 PolicyType::Write => 1,
                 PolicyType::All => 2,
             },
-            compiled_predicate_json,
+            predicate_text: predicate_text.to_string(),
             mode_tag: match p.mode {
                 PolicyMode::Permissive => 0,
                 PolicyMode::Restrictive => 1,
@@ -86,18 +99,14 @@ impl StoredRlsPolicy {
         })
     }
 
-    pub fn to_runtime(&self) -> crate::Result<RlsPolicy> {
-        let policy_type = match self.policy_type_tag {
-            0 => PolicyType::Read,
-            1 => PolicyType::Write,
-            2 => PolicyType::All,
-            other => {
-                return Err(catalog_err(
-                    "deser rls",
-                    format!("invalid policy_type_tag {other}"),
-                ));
-            }
-        };
+    /// The runtime policy, with `predicate_text` compiled against the
+    /// collection's current declared columns.
+    ///
+    /// Errors when a tag is invalid, the deny mode does not decode, the
+    /// collection is absent from `catalog`, or the text does not compile
+    /// against its columns.
+    pub fn to_runtime(&self, catalog: &SystemCatalog) -> crate::Result<RlsPolicy> {
+        let policy_type = self.policy_type()?;
         let mode = match self.mode_tag {
             0 => PolicyMode::Permissive,
             1 => PolicyMode::Restrictive,
@@ -108,27 +117,23 @@ impl StoredRlsPolicy {
                 ));
             }
         };
-        let compiled_predicate: Option<RlsPredicate> = if self.compiled_predicate_json.is_empty() {
-            None
-        } else {
-            Some(
-                sonic_rs::from_str(&self.compiled_predicate_json)
-                    .map_err(|e| catalog_err("deser compiled rls", e))?,
-            )
-        };
         let on_deny: DenyMode = sonic_rs::from_str(&self.on_deny_json)
             .map_err(|e| catalog_err("deser deny mode", e))?;
-        // Records written before `display_collection` existed decode it
-        // empty; fall back to `collection`, which was unqualified then.
-        let display_collection = if self.display_collection.is_empty() {
-            self.collection.clone()
+        let compiled_predicate = if self.predicate_text.is_empty() {
+            None
         } else {
-            self.display_collection.clone()
+            let columns = declared_columns(
+                catalog,
+                DatabaseId::new(self.database_id),
+                self.tenant_id,
+                self.display_name(),
+            )?;
+            Some(compile_policy_predicate(&self.predicate_text, &columns)?)
         };
         Ok(RlsPolicy {
             name: self.name.clone(),
             collection: self.collection.clone(),
-            display_collection,
+            display_collection: self.display_name().to_string(),
             tenant_id: self.tenant_id,
             policy_type,
             compiled_predicate,
@@ -138,6 +143,70 @@ impl StoredRlsPolicy {
             created_by: self.created_by.clone(),
             created_at: self.created_at,
         })
+    }
+
+    /// [`Self::to_runtime`], or a restrictive deny-all policy under the same
+    /// key when the row cannot be compiled.
+    ///
+    /// For the load paths that install every stored row: a policy that
+    /// cannot be typed against its collection must still govern the
+    /// collection, and the only safe form is one that admits no row. The
+    /// error is logged at `error` level with the policy's key.
+    pub fn rehydrate(&self, catalog: &SystemCatalog) -> RlsPolicy {
+        match self.to_runtime(catalog) {
+            Ok(policy) => policy,
+            Err(e) => {
+                error!(
+                    policy = %self.name,
+                    collection = %self.collection,
+                    tenant = self.tenant_id,
+                    error = %e,
+                    "RLS policy cannot be compiled; installed as restrictive deny-all"
+                );
+                self.deny_all()
+            }
+        }
+    }
+
+    /// The restrictive deny-all form of this row: same key, same enabled
+    /// flag, a predicate no row passes, AND-combined with every other policy.
+    fn deny_all(&self) -> RlsPolicy {
+        RlsPolicy {
+            name: self.name.clone(),
+            collection: self.collection.clone(),
+            display_collection: self.display_name().to_string(),
+            tenant_id: self.tenant_id,
+            // An invalid tag cannot say which path the policy governs, so
+            // the deny-all governs both.
+            policy_type: self.policy_type().unwrap_or(PolicyType::All),
+            compiled_predicate: Some(RlsPredicate::AlwaysFalse),
+            mode: PolicyMode::Restrictive,
+            on_deny: DenyMode::default(),
+            enabled: self.enabled,
+            created_by: self.created_by.clone(),
+            created_at: self.created_at,
+        }
+    }
+
+    fn policy_type(&self) -> crate::Result<PolicyType> {
+        match self.policy_type_tag {
+            0 => Ok(PolicyType::Read),
+            1 => Ok(PolicyType::Write),
+            2 => Ok(PolicyType::All),
+            other => Err(catalog_err(
+                "deser rls",
+                format!("invalid policy_type_tag {other}"),
+            )),
+        }
+    }
+
+    /// The unqualified collection name, falling back to `collection`.
+    fn display_name(&self) -> &str {
+        if self.display_collection.is_empty() {
+            &self.collection
+        } else {
+            &self.display_collection
+        }
     }
 
     fn redb_key(&self) -> String {
@@ -308,11 +377,11 @@ mod tests {
     fn put_get_delete_roundtrip() {
         let catalog = make_catalog();
         let runtime = sample_policy(1, "users", "p1");
-        let stored = StoredRlsPolicy::from_runtime(&runtime).unwrap();
+        let stored = StoredRlsPolicy::from_runtime(&runtime, DatabaseId::DEFAULT, "").unwrap();
         catalog.put_rls_policy(&stored).unwrap();
 
         let loaded = catalog.get_rls_policy(1, "users", "p1").unwrap().unwrap();
-        let runtime2 = loaded.to_runtime().unwrap();
+        let runtime2 = loaded.to_runtime(&catalog).unwrap();
         assert_eq!(runtime2.name, "p1");
         assert_eq!(runtime2.collection, "users");
         assert!(matches!(runtime2.policy_type, PolicyType::Read));
@@ -325,10 +394,38 @@ mod tests {
     fn load_all_returns_every_tenant() {
         let catalog = make_catalog();
         for (tenant, name) in [(1, "a"), (1, "b"), (2, "c")] {
-            let stored = StoredRlsPolicy::from_runtime(&sample_policy(tenant, "x", name)).unwrap();
+            let stored = StoredRlsPolicy::from_runtime(
+                &sample_policy(tenant, "x", name),
+                DatabaseId::DEFAULT,
+                "",
+            )
+            .unwrap();
             catalog.put_rls_policy(&stored).unwrap();
         }
         let all = catalog.load_all_rls_policies().unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    /// A row whose collection is absent from the catalog cannot be typed;
+    /// `rehydrate` installs it as a restrictive deny-all under the same key
+    /// instead of dropping it or admitting every row.
+    #[test]
+    fn rehydrate_without_the_collection_installs_a_restrictive_deny_all() {
+        let catalog = make_catalog();
+        let mut runtime = sample_policy(1, "ghost", "p1");
+        runtime.mode = PolicyMode::Permissive;
+        let stored =
+            StoredRlsPolicy::from_runtime(&runtime, DatabaseId::DEFAULT, "owner = $auth.id")
+                .unwrap();
+
+        assert!(stored.to_runtime(&catalog).is_err());
+        let installed = stored.rehydrate(&catalog);
+        assert_eq!(installed.name, "p1");
+        assert_eq!(installed.collection, "ghost");
+        assert_eq!(installed.mode, PolicyMode::Restrictive);
+        assert!(matches!(
+            installed.compiled_predicate,
+            Some(RlsPredicate::AlwaysFalse)
+        ));
     }
 }
