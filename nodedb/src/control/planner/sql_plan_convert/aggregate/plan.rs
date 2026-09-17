@@ -401,8 +401,8 @@ mod tests {
             vec!["name".to_string(), "rn".to_string()]
         );
 
-        let computed_bytes =
-            extract_computed_columns(&projection, &window_functions).expect("serialize computed");
+        let computed_bytes = extract_computed_columns(&projection, &window_functions, false)
+            .expect("serialize computed");
         let computed: Vec<crate::bridge::expr_eval::ComputedColumn> =
             zerompk::from_msgpack(&computed_bytes).expect("deserialize computed");
 

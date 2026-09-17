@@ -125,10 +125,28 @@ fn encode_computed_columns(
     })
 }
 
+/// Pick the bridge-expression converter for the row shape the expression runs
+/// against. A join / lateral body emits merged documents keyed by `t.col`, so
+/// its column references keep their table qualifier.
+fn bridge_expr_converter(qualified: bool) -> fn(&SqlExpr) -> crate::bridge::expr_eval::SqlExpr {
+    if qualified {
+        sql_expr_to_bridge_expr_qualified
+    } else {
+        sql_expr_to_bridge_expr
+    }
+}
+
+/// Serialize the computed (non-window) projection entries.
+///
+/// `qualified` selects the column-key convention of the rows the columns are
+/// evaluated over: `true` for a join / lateral merged document, `false` for a
+/// single-collection row.
 pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
     proj: &[Projection],
     window_functions: &[WindowSpec],
+    qualified: bool,
 ) -> crate::Result<Vec<u8>> {
+    let convert = bridge_expr_converter(qualified);
     let computed: Vec<crate::bridge::expr_eval::ComputedColumn> = proj
         .iter()
         .filter_map(|p| match p {
@@ -137,7 +155,7 @@ pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
             {
                 Some(crate::bridge::expr_eval::ComputedColumn {
                     alias: alias.clone(),
-                    expr: sql_expr_to_bridge_expr(expr),
+                    expr: convert(expr),
                 })
             }
             _ => None,
@@ -151,23 +169,27 @@ pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
     })
 }
 
+/// Serialize window specs. `qualified` follows the same convention as
+/// [`extract_computed_columns`].
 pub(in crate::control::planner::sql_plan_convert) fn serialize_window_functions(
-    specs: &[nodedb_sql::types::WindowSpec],
+    specs: &[WindowSpec],
+    qualified: bool,
 ) -> crate::Result<Vec<u8>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
+    let convert = bridge_expr_converter(qualified);
     let bridge_specs: Vec<crate::bridge::window_func::WindowFuncSpec> = specs
         .iter()
         .map(|s| crate::bridge::window_func::WindowFuncSpec {
             alias: s.alias.clone(),
             func_name: s.function.clone(),
-            args: s.args.iter().map(sql_expr_to_bridge_expr).collect(),
-            partition_by: s.partition_by.iter().map(sql_expr_to_bridge_expr).collect(),
+            args: s.args.iter().map(convert).collect(),
+            partition_by: s.partition_by.iter().map(convert).collect(),
             order_by: s
                 .order_by
                 .iter()
-                .map(|k| (sql_expr_to_bridge_expr(&k.expr), k.ascending))
+                .map(|k| (convert(&k.expr), k.ascending))
                 .collect(),
             frame: s.frame.clone(),
         })

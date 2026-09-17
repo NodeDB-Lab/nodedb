@@ -2,7 +2,7 @@
 
 //! Set operations and miscellaneous plan conversions (UNION, INTERSECT, EXCEPT, CTE, etc.).
 
-use nodedb_sql::types::{Projection, SortKey, SqlExpr, SqlPlan, SqlValue};
+use nodedb_sql::types::{Projection, SortKey, SqlExpr, SqlPlan, SqlValue, WindowSpec};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{TenantId, VShardId};
@@ -255,6 +255,7 @@ pub(super) fn convert_subquery(
         input,
         filters,
         projection,
+        window_functions,
         sort_keys,
         offset,
         distinct,
@@ -278,10 +279,11 @@ pub(super) fn convert_subquery(
 
     // A join / lateral body emits ONE merged document per output row whose
     // columns keep their table prefix (`a.attnum`), which is why the response
-    // shaper looks those rows up by the qualified name. The tail's sort keys
-    // must address the same shape — an unqualified key resolves to NULL on
-    // every merged row, and a sort where every key is NULL is a no-op that
-    // silently answers an ordered query in the body's own order.
+    // shaper looks those rows up by the qualified name. The tail's sort keys,
+    // computed columns, and window specs must address the same shape — an
+    // unqualified key resolves to NULL on every merged row, and a sort where
+    // every key is NULL is a no-op that silently answers an ordered query in
+    // the body's own order.
     let merged_doc_body = matches!(
         child,
         PhysicalPlan::Query(
@@ -318,9 +320,16 @@ pub(super) fn convert_subquery(
         plan: PhysicalPlan::Query(QueryOp::PostProcess {
             input: Box::new(child),
             filters: super::filter::serialize_filters(filters)?,
-            projection: lower_subquery_projection(projection)?,
-            computed_columns: Vec::new(),
-            window_functions: Vec::new(),
+            projection: lower_subquery_projection(projection, window_functions)?,
+            computed_columns: super::aggregate::extract_computed_columns(
+                projection,
+                window_functions,
+                merged_doc_body,
+            )?,
+            window_functions: super::aggregate::serialize_window_functions(
+                window_functions,
+                merged_doc_body,
+            )?,
             sort_keys: lower_subquery_sort_keys(sort_keys, merged_doc_body),
             limit,
             offset,
@@ -336,14 +345,16 @@ pub(super) fn convert_subquery(
 /// A bare column keeps its unqualified name (the flattened row's column key); a
 /// star selects every column, so no column pruning is applied (empty = all).
 ///
-/// A computed item is projected under its alias: the body evaluates the
-/// expression and emits the value under that name before the tail runs, which
-/// is the same key the response shaper reads it back by. Erroring here instead
-/// would reject `SELECT a, f(b) … ORDER BY c` outright, since the wrapper
-/// carries the original SELECT list whenever the body had to be widened to keep
-/// the sort column.
-fn lower_subquery_projection(projection: &[Projection]) -> crate::Result<Vec<String>> {
-    let mut names = Vec::with_capacity(projection.len());
+/// A computed item is projected under its alias: the tail evaluates the
+/// expression over the materialized rows and emits the value under that name,
+/// which is the same key the response shaper reads it back by. Every window
+/// alias is kept too, so a window output the SELECT list does not repeat as a
+/// computed entry survives the column pruning.
+fn lower_subquery_projection(
+    projection: &[Projection],
+    window_functions: &[WindowSpec],
+) -> crate::Result<Vec<String>> {
+    let mut names = Vec::with_capacity(projection.len() + window_functions.len());
     for p in projection {
         match p {
             Projection::Column(qname) => {
@@ -351,6 +362,11 @@ fn lower_subquery_projection(projection: &[Projection]) -> crate::Result<Vec<Str
             }
             Projection::Star | Projection::QualifiedStar(_) => return Ok(Vec::new()),
             Projection::Computed { alias, .. } => names.push(alias.clone()),
+        }
+    }
+    for spec in window_functions {
+        if !names.contains(&spec.alias) {
+            names.push(spec.alias.clone());
         }
     }
     Ok(names)

@@ -3,11 +3,12 @@
 //! Executor handler for `QueryOp::ProviderScan`.
 //!
 //! Decodes the pre-materialized msgpack row array, applies predicate
-//! filtering, sort, window functions + computed columns, distinct
+//! filtering, window functions + computed columns, sort, distinct
 //! deduplication, offset, column projection, and limit — in that order —
-//! then emits the resulting rows via `response_with_payload`. Sort runs
-//! before offset so `ORDER BY ... OFFSET n` skips the first `n` rows of the
-//! sorted set, not the decoded set.
+//! then emits the resulting rows via `response_with_payload`. Windows and
+//! computed columns run before sort so `ORDER BY` can name their aliases.
+//! Sort runs before offset so `ORDER BY ... OFFSET n` skips the first `n`
+//! rows of the sorted set, not the decoded set.
 
 use nodedb_query::msgpack_scan;
 
@@ -36,8 +37,8 @@ pub(in crate::data::executor) struct ProviderScanParams<'a> {
 impl CoreLoop {
     /// Execute a `ProviderScan` plan node.
     ///
-    /// Processing order: decode rows → filter → sort → windows + computed
-    /// columns → distinct → offset → project → limit → emit.
+    /// Processing order: decode rows → filter → windows + computed columns →
+    /// sort → distinct → offset → project → limit → emit.
     pub(in crate::data::executor) fn execute_provider_scan(
         &mut self,
         task: &ExecutionTask,
@@ -100,18 +101,11 @@ impl CoreLoop {
             }
         }
 
-        // ── 3. Sort. ──────────────────────────────────────────────────────────
-        // Runs before offset: `ORDER BY ... OFFSET n` skips the first `n` rows
-        // of the SORTED set, not the decoded set.
-        if !sort_keys.is_empty()
-            && let Err(e) = sort_msgpack_rows(&mut rows, sort_keys)
-        {
-            return self.response_error(task, crate::Error::from(e));
-        }
-
-        // ── 4. Window functions + computed columns. ─────────────────────────
-        // Skipped entirely (zero-decode msgpack path) when both byte slices
-        // are empty.
+        // ── 3. Window functions + computed columns. ─────────────────────────
+        // Runs before sort so `ORDER BY` can name a window or computed alias.
+        // Each window spec orders its own partitions, so the row order here
+        // does not affect window results. Skipped entirely (zero-decode
+        // msgpack path) when both byte slices are empty.
         if !window_functions_bytes.is_empty() || !computed_columns_bytes.is_empty() {
             rows = match apply_windows_and_computed(
                 rows,
@@ -121,6 +115,15 @@ impl CoreLoop {
                 Ok(r) => r,
                 Err(e) => return self.response_error(task, e),
             };
+        }
+
+        // ── 4. Sort. ──────────────────────────────────────────────────────────
+        // Runs before offset: `ORDER BY ... OFFSET n` skips the first `n` rows
+        // of the SORTED set, not the decoded set.
+        if !sort_keys.is_empty()
+            && let Err(e) = sort_msgpack_rows(&mut rows, sort_keys)
+        {
+            return self.response_error(task, crate::Error::from(e));
         }
 
         // ── 5. Distinct (on the would-be projected row). ──────────────────────

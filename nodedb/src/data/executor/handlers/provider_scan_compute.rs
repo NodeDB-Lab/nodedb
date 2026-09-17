@@ -2,7 +2,7 @@
 
 //! Window-function and computed-column evaluation for `QueryOp::ProviderScan`.
 //!
-//! Runs after sort and before distinct/offset/project/limit in the
+//! Runs after filter and before sort/distinct/offset/project/limit in the
 //! `ProviderScan` pipeline. Each msgpack row decodes to a `serde_json::Value`,
 //! windows evaluate over the full row set, computed columns evaluate
 //! per-row, and the result re-encodes to msgpack. Skipped entirely when both

@@ -37,6 +37,8 @@ pub(in crate::planner::select) fn post_process(
         input: Box::new(input),
         filters: Vec::new(),
         projection,
+        // The body keeps its own window specs; the tail evaluates none.
+        window_functions: Vec::new(),
         sort_keys,
         offset,
         distinct: false,

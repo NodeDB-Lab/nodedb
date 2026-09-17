@@ -43,8 +43,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
     // `rows` is left empty here; the coordinator fills it post-cache via
     // `materialize_providers`. Using an empty-coordinator vshard (empty
     // collection string) keeps the task coordinator-local.
-    let computed_bytes = extract_computed_columns(projection, window_functions)?;
-    let window_bytes = serialize_window_functions(window_functions)?;
+    let computed_bytes = extract_computed_columns(projection, window_functions, false)?;
+    let window_bytes = serialize_window_functions(window_functions, false)?;
 
     if crate::control::server::pgwire::catalog::schema::catalog_collection_info(collection)
         .is_some()
