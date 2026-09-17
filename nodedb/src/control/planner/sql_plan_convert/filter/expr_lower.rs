@@ -1,168 +1,27 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Filter serialization: SqlPlan filters → ScanFilter msgpack bytes.
+//! Raw WHERE `SqlExpr` → `ScanFilter` list.
 //!
-//! This is the boundary between the Control Plane planner and the Data Plane
-//! scan evaluator. Filter expressions the planner can reduce to simple
-//! `(field, op, value)` triples travel as native `ScanFilter` records; any
-//! expression the planner cannot reduce — scalar functions in WHERE,
-//! non-literal BETWEEN bounds, column arithmetic, `NOT(...)`, IN with
-//! computed elements — is shipped verbatim as a `FilterOp::Expr` carrying
-//! a `nodedb_query::expr::SqlExpr`. The Data Plane evaluates that against
-//! each candidate row via the shared evaluator.
+//! Filter expressions the planner can reduce to simple `(field, op, value)`
+//! triples travel as native `ScanFilter` records; any expression the planner
+//! cannot reduce — scalar functions in WHERE, non-literal BETWEEN bounds,
+//! column arithmetic, `NOT(...)`, IN with computed elements — is shipped
+//! verbatim as a `FilterOp::Expr` carrying a `nodedb_query::expr::SqlExpr`.
+//! The Data Plane evaluates that against each candidate row via the shared
+//! evaluator.
 
 use nodedb_sql::planner::qualified_name;
-use nodedb_sql::types::{Filter, FilterExpr, SqlExpr, SqlValue};
+use nodedb_sql::types::{SqlExpr, SqlValue};
 
-use super::expr::sql_expr_to_bridge_expr;
-use super::value::sql_value_to_nodedb_value;
-
-/// Convert SqlPlan filters to ScanFilter msgpack bytes.
-pub(super) fn serialize_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {
-    if filters.is_empty() {
-        return Ok(Vec::new());
-    }
-    let scan_filters: Vec<nodedb_query::scan_filter::ScanFilter> = filters
-        .iter()
-        .flat_map(|f| filter_to_scan_filters(&f.expr))
-        .collect();
-    if scan_filters.is_empty() {
-        return Ok(Vec::new());
-    }
-    encode_scan_filters(&scan_filters)
-}
-
-/// Serialize post-join WHERE filters, preserving table qualifiers inside full
-/// expression predicates so they resolve against alias-prefixed merged rows.
-pub(super) fn serialize_join_post_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {
-    if filters.is_empty() {
-        return Ok(Vec::new());
-    }
-    let scan_filters = filters
-        .iter()
-        .flat_map(|filter| filter_to_join_scan_filters(&filter.expr))
-        .collect::<Vec<_>>();
-    encode_scan_filters(&scan_filters)
-}
-
-pub(super) fn encode_scan_filters(
-    filters: &Vec<nodedb_query::scan_filter::ScanFilter>,
-) -> crate::Result<Vec<u8>> {
-    if filters.is_empty() {
-        return Ok(Vec::new());
-    }
-    zerompk::to_msgpack_vec(filters).map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("filter serialization: {e}"),
-    })
-}
-
-fn filter_to_join_scan_filters(expr: &FilterExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
-    use nodedb_query::scan_filter::{FilterOp, ScanFilter};
-
-    match expr {
-        FilterExpr::And(filters) => filters
-            .iter()
-            .flat_map(|filter| filter_to_join_scan_filters(&filter.expr))
-            .collect(),
-        FilterExpr::Or(filters) => vec![ScanFilter {
-            field: String::new(),
-            op: FilterOp::Or,
-            value: nodedb_types::Value::Null,
-            clauses: filters
-                .iter()
-                .map(|filter| filter_to_join_scan_filters(&filter.expr))
-                .collect(),
-            expr: None,
-        }],
-        FilterExpr::Expr(sql_expr) => sql_expr_to_join_scan_filters(sql_expr),
-        _ => filter_to_scan_filters(expr),
-    }
-}
-
-pub(super) fn filter_to_scan_filters(
-    expr: &FilterExpr,
-) -> Vec<nodedb_query::scan_filter::ScanFilter> {
-    use nodedb_query::scan_filter::{FilterOp, ScanFilter};
-
-    match expr {
-        FilterExpr::Comparison { field, op, value } => {
-            let filter_op = match op {
-                nodedb_sql::types::CompareOp::Eq => FilterOp::Eq,
-                nodedb_sql::types::CompareOp::Ne => FilterOp::Ne,
-                nodedb_sql::types::CompareOp::Gt => FilterOp::Gt,
-                nodedb_sql::types::CompareOp::Ge => FilterOp::Gte,
-                nodedb_sql::types::CompareOp::Lt => FilterOp::Lt,
-                nodedb_sql::types::CompareOp::Le => FilterOp::Lte,
-            };
-            vec![ScanFilter {
-                field: field.clone(),
-                op: filter_op,
-                value: sql_value_to_nodedb_value(value),
-                clauses: Vec::new(),
-                expr: None,
-            }]
-        }
-        FilterExpr::InList { field, values } => {
-            let arr = values.iter().map(sql_value_to_nodedb_value).collect();
-            vec![ScanFilter {
-                field: field.clone(),
-                op: FilterOp::In,
-                value: nodedb_types::Value::Array(arr),
-                clauses: Vec::new(),
-                expr: None,
-            }]
-        }
-        FilterExpr::IsNull { field } => {
-            vec![ScanFilter {
-                field: field.clone(),
-                op: FilterOp::IsNull,
-                value: nodedb_types::Value::Null,
-                clauses: Vec::new(),
-                expr: None,
-            }]
-        }
-        FilterExpr::IsNotNull { field } => {
-            vec![ScanFilter {
-                field: field.clone(),
-                op: FilterOp::IsNotNull,
-                value: nodedb_types::Value::Null,
-                clauses: Vec::new(),
-                expr: None,
-            }]
-        }
-        FilterExpr::And(filters) => filters
-            .iter()
-            .flat_map(|f| filter_to_scan_filters(&f.expr))
-            .collect(),
-        FilterExpr::Or(filters) => {
-            let clauses: Vec<Vec<ScanFilter>> = filters
-                .iter()
-                .map(|f| filter_to_scan_filters(&f.expr))
-                .collect();
-            vec![ScanFilter {
-                field: String::new(),
-                op: FilterOp::Or,
-                value: nodedb_types::Value::Null,
-                clauses,
-                expr: None,
-            }]
-        }
-        FilterExpr::Expr(sql_expr) => sql_expr_to_scan_filters(sql_expr),
-        _ => vec![ScanFilter {
-            field: String::new(),
-            op: FilterOp::MatchAll,
-            value: nodedb_types::Value::Null,
-            clauses: Vec::new(),
-            expr: None,
-        }],
-    }
-}
+use crate::control::planner::sql_plan_convert::expr::{
+    sql_expr_to_bridge_expr, sql_expr_to_bridge_expr_qualified,
+};
+use crate::control::planner::sql_plan_convert::value::sql_value_to_nodedb_value;
 
 /// Build a `ScanFilter` carrying a full expression predicate. Used whenever
 /// the planner cannot reduce the WHERE expression to a simple
 /// `(field, op, value)` tuple.
-pub(super) fn expr_filter(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
+pub(crate) fn expr_filter(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
     nodedb_query::scan_filter::ScanFilter {
         field: String::new(),
         op: nodedb_query::scan_filter::FilterOp::Expr,
@@ -174,13 +33,13 @@ pub(super) fn expr_filter(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilt
 
 /// Like [`expr_filter`] but qualifies column references with table names
 /// for evaluation against join-merged documents.
-pub(super) fn expr_filter_qualified(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
+pub(crate) fn expr_filter_qualified(expr: &SqlExpr) -> nodedb_query::scan_filter::ScanFilter {
     nodedb_query::scan_filter::ScanFilter {
         field: String::new(),
         op: nodedb_query::scan_filter::FilterOp::Expr,
         value: nodedb_types::Value::Null,
         clauses: Vec::new(),
-        expr: Some(super::expr::sql_expr_to_bridge_expr_qualified(expr)),
+        expr: Some(sql_expr_to_bridge_expr_qualified(expr)),
     }
 }
 
@@ -191,7 +50,9 @@ pub(super) fn expr_filter_qualified(expr: &SqlExpr) -> nodedb_query::scan_filter
 /// use its fast pre-filtered path. Anything that doesn't fit — scalar
 /// functions on the LHS, arithmetic, NOT, non-literal bounds — is shipped
 /// as a single `FilterOp::Expr` carrying the whole expression tree.
-fn sql_expr_to_join_scan_filters(root: &SqlExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
+pub(super) fn sql_expr_to_join_scan_filters(
+    root: &SqlExpr,
+) -> Vec<nodedb_query::scan_filter::ScanFilter> {
     use nodedb_query::scan_filter::{FilterOp, ScanFilter};
 
     match root {
@@ -229,7 +90,9 @@ fn sql_expr_to_join_scan_filters(root: &SqlExpr) -> Vec<nodedb_query::scan_filte
     }
 }
 
-fn sql_expr_to_scan_filters(root: &SqlExpr) -> Vec<nodedb_query::scan_filter::ScanFilter> {
+pub(super) fn sql_expr_to_scan_filters(
+    root: &SqlExpr,
+) -> Vec<nodedb_query::scan_filter::ScanFilter> {
     use nodedb_query::scan_filter::{FilterOp, ScanFilter};
 
     match root {
