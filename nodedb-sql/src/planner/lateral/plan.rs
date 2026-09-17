@@ -11,6 +11,7 @@ use super::subquery::{
     reject_lateral_offset,
 };
 use crate::error::{Result, SqlError};
+use crate::functions::registry::FunctionRegistry;
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::{ResolvedTable, TableScope};
 use crate::resolver::expr::convert_expr;
@@ -39,6 +40,7 @@ pub struct LateralJoinArgs<'a> {
     /// so a correlated reference to an outer relation resolves.
     pub outer_scope: &'a TableScope,
     pub catalog: &'a dyn SqlCatalog,
+    pub functions: &'a FunctionRegistry,
     pub temporal: TemporalScope,
 }
 
@@ -56,6 +58,7 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
         outer_projection,
         outer_scope,
         catalog,
+        functions,
         temporal,
     } = args;
     let select = match subquery.body.as_ref() {
@@ -103,6 +106,8 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
             outer_projection,
             outer_scope,
             catalog,
+            functions,
+            temporal,
         })
     } else if has_equi && analysis.non_equi.is_empty() {
         // Equi-correlated, no LIMIT: rewrite as a regular hash join.
@@ -255,6 +260,8 @@ struct LateralTopKPlanArgs<'a> {
     outer_projection: Vec<Projection>,
     outer_scope: &'a TableScope,
     catalog: &'a dyn SqlCatalog,
+    functions: &'a FunctionRegistry,
+    temporal: TemporalScope,
 }
 
 /// Plan the `LateralTopK` variant: equi-correlated + ORDER BY + LIMIT k.
@@ -271,6 +278,8 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
         outer_projection,
         outer_scope,
         catalog,
+        functions,
+        temporal,
     } = args;
     // Build a bare inner Scan without correlation filters (those are injected
     // at runtime per outer row).
@@ -283,8 +292,8 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
     // The Top-K plan does not retain the inner alias, but it must still reject
     // malformed aliases before expressions referencing them are lowered.
     let _inner_alias = extract_inner_alias(select)?;
-    let inner_scope =
-        TableScope::resolve_from(catalog, &select.from)?.nested_in(outer_scope.clone());
+    let inner_scope = TableScope::resolve_from(catalog, functions, temporal, &select.from)?
+        .nested_in(outer_scope.clone());
     let inner_filters =
         inner_non_correlated_filters(select, outer_alias.as_deref().unwrap_or(""), &inner_scope)?;
 

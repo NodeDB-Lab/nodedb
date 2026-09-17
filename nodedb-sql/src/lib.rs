@@ -146,7 +146,7 @@ fn plan_statements(
                 let mut dml_plans = if is_upsert {
                     planner::dml::plan_upsert(ins, catalog)?
                 } else {
-                    planner::dml::plan_insert(ins, catalog)?
+                    planner::dml::plan_insert(ins, catalog, &functions, temporal)?
                 };
                 plans.append(&mut dml_plans);
             }
