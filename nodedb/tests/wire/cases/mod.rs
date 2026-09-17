@@ -213,6 +213,8 @@ mod sql_rls_predicate_parse;
 mod sql_schedules;
 mod sql_search_subquery_composition;
 mod sql_security_e2e;
+mod sql_sequence_row_scope;
+mod sql_sequence_row_scope_refusals;
 mod sql_sequences;
 mod sql_spatial_index_ddl;
 mod sql_subquery_from;

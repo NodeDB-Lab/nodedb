@@ -66,6 +66,12 @@ pub enum Projection {
     QualifiedStar(String),
     /// Computed expression: `SELECT price * qty AS total`
     Computed { expr: SqlExpr, alias: String },
+    /// Expression the Control Plane evaluates per output row after the Data
+    /// Plane returns the rows (a sequence accessor, possibly inside a larger
+    /// expression). The Data Plane projects the base columns the expression
+    /// references; the response stage evaluates `expr`, writes `alias`, and
+    /// drops those base columns.
+    CpComputed { expr: SqlExpr, alias: String },
 }
 
 /// Sort key for ORDER BY.

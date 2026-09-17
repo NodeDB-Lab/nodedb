@@ -3,6 +3,7 @@
 use crate::types::query::EngineType;
 
 use super::SqlPlan;
+use super::expr_scan::projection_is_cp_computed;
 
 /// Whether a logical plan may be lowered once and reused from the physical-plan cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,30 @@ impl SqlPlan {
 
         match self {
             Self::ConstantResult { volatile: true, .. } => DataDependent,
+            // A Control-Plane-computed projection entry holds a sequence
+            // accessor, which allocates per execution: the lowered tasks
+            // must not replay one execution's rows for another.
+            Self::Scan { projection, .. }
+            | Self::PointGet { projection, .. }
+            | Self::DocumentIndexLookup { projection, .. }
+            | Self::RangeScan { projection, .. }
+            | Self::Join { projection, .. }
+            | Self::TimeseriesScan { projection, .. }
+            | Self::VectorSearch { projection, .. }
+            | Self::MultiVectorSearch { projection, .. }
+            | Self::SparseSearch { projection, .. }
+            | Self::TextSearch { projection, .. }
+            | Self::HybridSearch { projection, .. }
+            | Self::HybridSearchTriple { projection, .. }
+            | Self::SpatialScan { projection, .. }
+            | Self::RecursiveScan { projection, .. }
+            | Self::Subquery { projection, .. }
+            | Self::LateralTopK { projection, .. }
+            | Self::LateralLoop { projection, .. }
+                if projection_is_cp_computed(projection) =>
+            {
+                DataDependent
+            }
             Self::Insert {
                 volatile_defaults: true,
                 ..
@@ -227,6 +252,55 @@ mod tests {
                 vec![SqlValue::String("k".into())]
             )
             .cache_eligibility(),
+            PlanCacheEligibility::DataDependent
+        );
+    }
+
+    #[test]
+    fn cp_computed_projection_is_data_dependent() {
+        use crate::types::query::Projection;
+        use crate::types_expr::SqlExpr;
+        let cp = Projection::CpComputed {
+            expr: SqlExpr::Function {
+                name: "nextval".into(),
+                args: vec![SqlExpr::Literal(SqlValue::String("s".into()))],
+                distinct: false,
+            },
+            alias: "nextval".into(),
+        };
+        let scan = |projection: Vec<Projection>| SqlPlan::Scan {
+            collection: "docs".into(),
+            alias: None,
+            engine: EngineType::KeyValue,
+            filters: Vec::new(),
+            projection,
+            sort_keys: Vec::new(),
+            limit: None,
+            offset: 0,
+            distinct: false,
+            window_functions: Vec::new(),
+            temporal: crate::temporal::TemporalScope::default(),
+        };
+        assert_eq!(
+            scan(vec![Projection::Column("id".into()), cp.clone()]).cache_eligibility(),
+            PlanCacheEligibility::DataDependent
+        );
+        assert_eq!(
+            scan(vec![Projection::Column("id".into())]).cache_eligibility(),
+            PlanCacheEligibility::Cacheable
+        );
+        let wrapped = SqlPlan::Subquery {
+            input: Box::new(scan(Vec::new())),
+            filters: Vec::new(),
+            projection: vec![cp],
+            window_functions: Vec::new(),
+            sort_keys: Vec::new(),
+            offset: 0,
+            distinct: false,
+            limit: None,
+        };
+        assert_eq!(
+            wrapped.cache_eligibility(),
             PlanCacheEligibility::DataDependent
         );
     }

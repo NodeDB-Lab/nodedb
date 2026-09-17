@@ -51,6 +51,19 @@ pub struct TableScope {
     /// `ON CONFLICT DO UPDATE` are both qualified-only, so a bare name in a
     /// WHEN or SET clause names the target column.
     qualified_only: Vec<String>,
+    /// Whether the SELECT this scope backs produces the statement's result
+    /// rows. Only such a SELECT list may hold a Control-Plane-computed item:
+    /// the Control Plane evaluates the statement's output rows and nothing
+    /// deeper. A subquery, CTE, UNION branch, derived table, INSERT source,
+    /// or MERGE source keeps the default. A scope nested inside this one
+    /// never inherits the flag.
+    statement_output: bool,
+    /// Whether a sequence accessor resolves here although rows are in scope.
+    /// Set for a SELECT-list item over a relation: the Control Plane
+    /// evaluates that item once per output row. Every other row-scope clause
+    /// keeps the default and refuses the call. A scope nested inside this one
+    /// never inherits the flag.
+    cp_functions: bool,
 }
 
 impl TableScope {
@@ -133,10 +146,38 @@ impl TableScope {
     }
 
     /// A copy of this scope nested inside `outer`, for planning a correlated
-    /// subquery body.
+    /// subquery body. The body's own clauses refuse a sequence accessor even
+    /// when the enclosing SELECT list allows one.
     pub fn nested_in(mut self, outer: TableScope) -> Self {
         self.outer = Some(Box::new(outer));
+        self.statement_output = false;
+        self.cp_functions = false;
         self
+    }
+
+    /// This scope marked as backing the SELECT that produces the statement's
+    /// result rows.
+    pub fn as_statement_output(mut self) -> Self {
+        self.statement_output = true;
+        self
+    }
+
+    /// Whether the SELECT this scope backs produces the statement's result
+    /// rows.
+    pub fn is_statement_output(&self) -> bool {
+        self.statement_output
+    }
+
+    /// This scope with sequence accessors allowed: the expression it resolves
+    /// is a SELECT-list item the Control Plane evaluates per output row.
+    pub fn allowing_cp_functions(mut self) -> Self {
+        self.cp_functions = true;
+        self
+    }
+
+    /// Whether a sequence accessor resolves here despite rows being in scope.
+    pub fn allows_cp_functions(&self) -> bool {
+        self.cp_functions
     }
 
     /// A copy of this scope widened with output column names.

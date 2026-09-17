@@ -80,6 +80,37 @@ pub(super) fn projection_to_column(
                 ty: infer_computed_expr_type(expr, types),
             })
         }
+        // The Control Plane writes the evaluated value under the alias. A
+        // bare sequence accessor yields a bigint; any wider expression is
+        // typed like a computed entry.
+        Projection::CpComputed { expr, alias } => {
+            let ty = match expr {
+                SqlExpr::Function { name, .. }
+                    if nodedb_sql::functions::sequence_accessor::is_sequence_accessor(name) =>
+                {
+                    DdlColType::Int8
+                }
+                SqlExpr::Function { .. }
+                | SqlExpr::Column { .. }
+                | SqlExpr::Literal(_)
+                | SqlExpr::BinaryOp { .. }
+                | SqlExpr::UnaryOp { .. }
+                | SqlExpr::Case { .. }
+                | SqlExpr::Cast { .. }
+                | SqlExpr::Subquery(_)
+                | SqlExpr::Wildcard
+                | SqlExpr::IsNull { .. }
+                | SqlExpr::InList { .. }
+                | SqlExpr::Between { .. }
+                | SqlExpr::Like { .. }
+                | SqlExpr::ArrayLiteral(_) => infer_computed_expr_type(expr, types),
+            };
+            Some(OutputColumn {
+                display_name: alias.clone(),
+                lookup_key: alias.clone(),
+                ty,
+            })
+        }
         Projection::Star | Projection::QualifiedStar(_) => None,
     }
 }
@@ -262,6 +293,38 @@ mod tests {
         assert_eq!(col.lookup_key, "total");
         assert_eq!(col.display_name, "total");
         assert_eq!(col.ty, DdlColType::Text);
+    }
+
+    #[test]
+    fn cp_computed_accessor_is_int8_under_its_alias() {
+        let types = HashMap::new();
+        let nextval = SqlExpr::Function {
+            name: "nextval".to_string(),
+            args: vec![SqlExpr::Literal(nodedb_sql::types_expr::SqlValue::String(
+                "s".to_string(),
+            ))],
+            distinct: false,
+        };
+        let bare = Projection::CpComputed {
+            expr: nextval.clone(),
+            alias: "nextval".to_string(),
+        };
+        let col = projection_to_column(&bare, &types).expect("Some for CpComputed");
+        assert_eq!(col.display_name, "nextval");
+        assert_eq!(col.lookup_key, "nextval");
+        assert_eq!(col.ty, DdlColType::Int8);
+
+        let wider = Projection::CpComputed {
+            expr: SqlExpr::BinaryOp {
+                left: Box::new(nextval),
+                op: nodedb_sql::types_expr::BinaryOp::Gt,
+                right: Box::new(SqlExpr::Literal(nodedb_sql::types_expr::SqlValue::Int(0))),
+            },
+            alias: "positive".to_string(),
+        };
+        let col = projection_to_column(&wider, &types).expect("Some for CpComputed");
+        assert_eq!(col.lookup_key, "positive");
+        assert_eq!(col.ty, DdlColType::Bool);
     }
 
     #[test]

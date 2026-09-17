@@ -138,7 +138,8 @@ fn plan_statements(
     for stmt in statements {
         match classify(stmt) {
             StatementKind::Select(query) => {
-                let plan = planner::select::plan_query(query, catalog, &functions, temporal)?;
+                let plan =
+                    planner::select::plan_statement_query(query, catalog, &functions, temporal)?;
                 let plan = optimizer::optimize(plan, catalog);
                 plans.push(plan);
             }

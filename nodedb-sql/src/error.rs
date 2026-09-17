@@ -19,19 +19,21 @@ pub enum SqlError {
     #[error("function {name}(...) does not exist")]
     UndefinedFunction { name: String },
 
-    /// A sequence accessor appeared where every output row needs its own
-    /// allocation, such as a SELECT list over a FROM clause.
+    /// A sequence accessor appeared in a row-scope clause the row evaluator
+    /// runs: WHERE, ORDER BY, GROUP BY, HAVING, JOIN ON, SET, an aggregate or
+    /// window argument, or a subquery.
     ///
     /// Rendered as SQLSTATE `0A000` (feature_not_supported). Constant
     /// contexts evaluate the call for real: a FROM-less `SELECT`, a column
-    /// `DEFAULT`, a `VALUES` list. The refusal keeps a per-row call from
-    /// reaching the row evaluator, which has no sequence state and would
-    /// return `NULL` for every row.
+    /// `DEFAULT`, a `VALUES` list. A SELECT-list item over a FROM relation
+    /// is evaluated by the Control Plane once per output row. The refusal
+    /// keeps every other per-row call from reaching the row evaluator, which
+    /// has no sequence state and would return `NULL` for every row.
     #[error(
-        "{name}(...) is not supported in a per-row context; \
-         a SELECT list, WHERE clause, or SET clause over a FROM relation \
-         evaluates once per row. Call it in a FROM-less SELECT or a column \
-         DEFAULT instead"
+        "{name}(...) is not supported in this clause; over a FROM relation \
+         only a SELECT-list item that holds no aggregate evaluates it, once \
+         per output row. Call it there, in a FROM-less SELECT, or in a \
+         column DEFAULT instead"
     )]
     SequencePerRowUnsupported { name: String },
 

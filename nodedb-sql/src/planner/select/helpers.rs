@@ -7,6 +7,7 @@ use sqlparser::ast;
 
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{SCHEMA_QUALIFIED_MSG, normalize_ident};
+use crate::planner::cp_projection::{convert_cp_item, cp_projection_scope};
 use crate::planner::predicate_coerce::coerce_predicate_literals;
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
@@ -27,15 +28,27 @@ pub(super) fn source_projection(plan: &SqlPlan) -> Vec<Projection> {
 }
 
 /// Convert SELECT projection items.
+///
+/// An item over a relation that calls a sequence accessor becomes
+/// [`Projection::CpComputed`]: the Control Plane evaluates it once per
+/// output row. Every other item resolves against `scope` unchanged, so an
+/// accessor nested where it must not be (an aggregate argument, a subquery)
+/// still refuses through that clause's own scope.
 pub fn convert_projection(
     items: &[ast::SelectItem],
     scope: &TableScope,
 ) -> Result<Vec<Projection>> {
+    let cp_scope = cp_projection_scope(scope);
     let scope = ColumnScope::Relations(scope);
     let mut result = Vec::new();
     for item in items {
         match item {
             ast::SelectItem::UnnamedExpr(expr) => {
+                let alias = format!("{expr}").to_lowercase();
+                if let Some(cp) = convert_cp_item(expr, alias.clone(), cp_scope.as_ref())? {
+                    result.push(cp);
+                    continue;
+                }
                 let sql_expr = convert_expr(expr, &scope)?;
                 match &sql_expr {
                     SqlExpr::Column { table, name } => {
@@ -47,16 +60,21 @@ pub fn convert_projection(
                     _ => {
                         result.push(Projection::Computed {
                             expr: sql_expr,
-                            alias: format!("{expr}").to_lowercase(),
+                            alias,
                         });
                     }
                 }
             }
             ast::SelectItem::ExprWithAlias { expr, alias } => {
+                let alias = normalize_ident(alias);
+                if let Some(cp) = convert_cp_item(expr, alias.clone(), cp_scope.as_ref())? {
+                    result.push(cp);
+                    continue;
+                }
                 let sql_expr = convert_expr(expr, &scope)?;
                 result.push(Projection::Computed {
                     expr: sql_expr,
-                    alias: normalize_ident(alias),
+                    alias,
                 });
             }
             // `expr AS (a, b)` binds one expression to several output names,

@@ -29,9 +29,12 @@ pub fn optimize(plan: SqlPlan, catalog: &dyn SqlCatalog) -> SqlPlan {
             ..
         } if filters.len() == 1
             && !temporal.is_temporal()
-            && !projection
-                .iter()
-                .any(|p| matches!(p, Projection::Computed { .. })) =>
+            && !projection.iter().any(|p| {
+                matches!(
+                    p,
+                    Projection::Computed { .. } | Projection::CpComputed { .. }
+                )
+            }) =>
         {
             let pk = catalog
                 .get_collection(DatabaseId::DEFAULT, collection)

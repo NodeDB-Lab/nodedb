@@ -11,7 +11,7 @@ use super::cte_catalog::CteCatalog;
 use super::limit::apply_limit;
 use super::order_by::{apply_order_by, try_hybrid_from_projection};
 use super::query_tail::QueryTail;
-use super::select_stmt::plan_select;
+use super::select_stmt::{has_aggregation, plan_select};
 use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
 use crate::reserved::check_ast_identifier;
@@ -48,18 +48,50 @@ fn is_pure_vector_projection(projection: &[Projection]) -> bool {
                     return false;
                 }
             }
-            Projection::Star | Projection::QualifiedStar(_) => return false,
+            // A Control-Plane-computed item is evaluated over the fetched
+            // payload, so the payload must be fetched.
+            Projection::CpComputed { .. } | Projection::Star | Projection::QualifiedStar(_) => {
+                return false;
+            }
         }
     }
     true
 }
 
-/// Plan a SELECT query.
+/// Plan a SELECT query that produces the statement's result rows.
+///
+/// Only this SELECT list may hold a Control-Plane-computed item (a sequence
+/// accessor over a relation): the Control Plane evaluates the statement's
+/// output rows and nothing deeper.
+pub fn plan_statement_query(
+    query: &Query,
+    catalog: &dyn SqlCatalog,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
+) -> Result<SqlPlan> {
+    plan_query_at(query, catalog, functions, temporal, true)
+}
+
+/// Plan a nested SELECT query: a subquery, CTE body, UNION branch, derived
+/// table, INSERT source, or MERGE source. Its SELECT list refuses a
+/// sequence accessor over a relation.
 pub fn plan_query(
     query: &Query,
     catalog: &dyn SqlCatalog,
     functions: &FunctionRegistry,
     temporal: TemporalScope,
+) -> Result<SqlPlan> {
+    plan_query_at(query, catalog, functions, temporal, false)
+}
+
+/// Plan a SELECT query. `statement_output` says whether its rows are the
+/// statement's result; a WITH clause passes it to the outer query only.
+fn plan_query_at(
+    query: &Query,
+    catalog: &dyn SqlCatalog,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
+    statement_output: bool,
 ) -> Result<SqlPlan> {
     // Handle CTEs (WITH clause).
     if let Some(with) = &query.with
@@ -106,7 +138,13 @@ pub fn plan_query(
             inner: catalog,
             relations,
         };
-        let outer = plan_query(&inner_query, &cte_catalog, functions, temporal)?;
+        let outer = plan_query_at(
+            &inner_query,
+            &cte_catalog,
+            functions,
+            temporal,
+            statement_output,
+        )?;
 
         return Ok(SqlPlan::Cte {
             definitions,
@@ -125,7 +163,14 @@ pub fn plan_query(
                 limit_clause: &query.limit_clause,
                 fetch: query.fetch.as_ref(),
             };
-            let planned = plan_select(select, catalog, functions, temporal, &tail)?;
+            let planned = plan_select(
+                select,
+                catalog,
+                functions,
+                temporal,
+                &tail,
+                statement_output,
+            )?;
             let scope = planned.scope;
             let mut plan = planned.plan;
             // Snapshot the projection before ORDER BY transforms the plan,
@@ -359,7 +404,16 @@ pub fn plan_query(
                     }
                 }
             }
-            apply_limit(plan, &tail)
+            let plan = apply_limit(plan, &tail)?;
+            // ORDER BY and LIMIT sit on the aggregate by now, so the wrap
+            // only restates the output columns around it.
+            crate::planner::aggregate_cp_wrap::wrap_aggregate_cp_items(
+                plan,
+                &select.projection,
+                has_aggregation(select, functions),
+                functions,
+                &scope,
+            )
         }
         SetExpr::SetOperation {
             op,

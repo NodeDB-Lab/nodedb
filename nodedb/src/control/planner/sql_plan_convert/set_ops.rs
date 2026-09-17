@@ -375,6 +375,10 @@ fn is_merged_doc_body(plan: &PhysicalPlan) -> bool {
 /// which is the same key the response shaper reads it back by. Every window
 /// alias is kept too, so a window output the SELECT list does not repeat as a
 /// computed entry survives the column pruning.
+///
+/// A Control-Plane-computed item keeps the base columns its expression reads,
+/// not its alias: the Control Plane evaluates it once the tail returns, then
+/// drops those columns.
 fn lower_subquery_projection(
     projection: &[Projection],
     window_functions: &[WindowSpec],
@@ -387,6 +391,14 @@ fn lower_subquery_projection(
             }
             Projection::Star | Projection::QualifiedStar(_) => return Ok(Vec::new()),
             Projection::Computed { alias, .. } => names.push(alias.clone()),
+            Projection::CpComputed { expr, .. } => {
+                for column in nodedb_sql::types::plan::referenced_columns(expr) {
+                    let bare = column.rsplit('.').next().unwrap_or(&column).to_string();
+                    if !names.contains(&bare) {
+                        names.push(bare);
+                    }
+                }
+            }
         }
     }
     for spec in window_functions {

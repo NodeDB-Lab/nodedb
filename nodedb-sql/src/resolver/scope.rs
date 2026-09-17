@@ -42,4 +42,16 @@ impl ColumnScope<'_> {
             Self::Relations(scope) => scope.is_row_scope(),
         }
     }
+
+    /// Whether a sequence accessor resolves here although rows are in scope.
+    ///
+    /// Only a SELECT-list scope over a relation says yes; the Control Plane
+    /// evaluates that item per output row. `Unchecked` never iterates rows,
+    /// so the question does not arise there.
+    pub fn allows_cp_functions(&self) -> bool {
+        match self {
+            Self::Unchecked => false,
+            Self::Relations(scope) => scope.allows_cp_functions(),
+        }
+    }
 }

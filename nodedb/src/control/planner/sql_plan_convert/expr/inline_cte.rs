@@ -157,11 +157,16 @@ pub(in crate::control::planner::sql_plan_convert) fn inline_cte(
 }
 
 /// `true` if any projection entry is a computed expression (`price * qty AS
-/// total`) rather than a bare column or star.
+/// total`) rather than a bare column or star. A Control-Plane-computed entry
+/// counts too: merging it into a scan body would drop the column the
+/// Control Plane evaluates.
 fn has_computed_projection(projection: &[Projection]) -> bool {
-    projection
-        .iter()
-        .any(|p| matches!(p, Projection::Computed { .. }))
+    projection.iter().any(|p| {
+        matches!(
+            p,
+            Projection::Computed { .. } | Projection::CpComputed { .. }
+        )
+    })
 }
 
 /// The outer constraints carried on a `Scan` that references the CTE by
