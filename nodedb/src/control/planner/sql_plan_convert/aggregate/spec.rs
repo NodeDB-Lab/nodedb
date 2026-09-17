@@ -6,8 +6,9 @@
 use nodedb_sql::types::{AggregateExpr, SqlExpr, SqlPlan};
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::types::TenantId;
+use crate::types::{TenantId, VShardId};
 use nodedb_physical::physical_plan::*;
+use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::convert::{ConvertContext, convert_one, db_qualified};
 use super::super::expr::sql_expr_to_bridge_expr;
@@ -86,26 +87,31 @@ pub(in crate::control::planner::sql_plan_convert) fn join_side_collection(
     plan: &SqlPlan,
     database_id: crate::types::DatabaseId,
 ) -> String {
-    let raw = extract_collection_name(plan);
-    if scan_is_catalog(&raw) {
-        String::new()
-    } else {
-        db_qualified(database_id, &raw)
+    // An input-sourced join side carries no routing collection; its rows come
+    // from `left_input` / `right_input`.
+    match extract_collection_name(plan) {
+        Some(raw) if !scan_is_catalog(&raw) => db_qualified(database_id, &raw),
+        Some(_) | None => String::new(),
     }
 }
 
+/// Routing collection for a scan-shaped input. `None` for an input-sourced
+/// (materialized) body.
+///
+/// A `Join` yields its left side's collection as the routing hint for a join
+/// over scans. An `Aggregate` input is a materialized relation, not a scan.
 pub(in crate::control::planner::sql_plan_convert) fn extract_collection_name(
     plan: &SqlPlan,
-) -> String {
+) -> Option<String> {
     match plan {
-        SqlPlan::Scan { collection, .. } => collection.clone(),
-        SqlPlan::PointGet { collection, .. } => collection.clone(),
+        SqlPlan::Scan { collection, .. } => Some(collection.clone()),
+        SqlPlan::PointGet { collection, .. } => Some(collection.clone()),
         SqlPlan::Join { left, .. } => extract_collection_name(left),
-        SqlPlan::Aggregate { input, .. } => extract_collection_name(input),
-        _ => String::new(),
+        _ => None,
     }
 }
 
+/// Scan alias for a scan-shaped input. `None` for an input-sourced body.
 pub(in crate::control::planner::sql_plan_convert) fn extract_scan_alias(
     plan: &SqlPlan,
 ) -> Option<String> {
@@ -113,7 +119,6 @@ pub(in crate::control::planner::sql_plan_convert) fn extract_scan_alias(
         SqlPlan::Scan { alias, .. } => alias.clone(),
         SqlPlan::PointGet { alias, .. } => alias.clone(),
         SqlPlan::Join { left, .. } => extract_scan_alias(left),
-        SqlPlan::Aggregate { input, .. } => extract_scan_alias(input),
         _ => None,
     }
 }
@@ -195,6 +200,70 @@ pub(super) fn group_by_to_strings(exprs: &[SqlExpr]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// Build the coordinator-local `Aggregate{input: Some(child)}` task shared by
+/// the catalog and derived-table-body lowerings: an aggregate that runs once
+/// over an already-materialized `child` plan instead of scanning a per-shard
+/// collection. `raw_collection` is the RAW catalog source name for a catalog
+/// body, or `String::new()` for a body with no routing collection (derived
+/// table, constant result, union) — either way the task's vshard is the
+/// coordinator's empty-collection vshard, so it is never broadcast.
+/// Inputs to [`build_input_sourced_aggregate_task`].
+pub(in crate::control::planner::sql_plan_convert) struct InputSourcedTaskParams<'a> {
+    pub tenant_id: TenantId,
+    pub ctx: &'a ConvertContext,
+    pub raw_collection: String,
+    pub child: PhysicalPlan,
+    pub group_by: &'a [SqlExpr],
+    pub aggregates: &'a [AggregateExpr],
+    pub having_bytes: Vec<u8>,
+    pub limit: usize,
+    pub sort_keys: Vec<SortKeySpec>,
+}
+
+pub(in crate::control::planner::sql_plan_convert) fn build_input_sourced_aggregate_task(
+    p: InputSourcedTaskParams<'_>,
+) -> PhysicalTask {
+    let InputSourcedTaskParams {
+        tenant_id,
+        ctx,
+        raw_collection,
+        child,
+        group_by,
+        aggregates,
+        having_bytes,
+        limit,
+        sort_keys,
+    } = p;
+    let group_specs = group_by_to_specs(group_by);
+    let agg_specs: Vec<AggregateSpec> = aggregates.iter().map(agg_expr_to_spec).collect();
+    PhysicalTask {
+        tenant_id,
+        // Coordinator-local: empty collection keeps the task on the
+        // coordinator vshard (the child's rows are not per-shard).
+        vshard_id: VShardId::from_collection_in_database(ctx.database_id, ""),
+        database_id: ctx.database_id,
+        plan: PhysicalPlan::Query(QueryOp::Aggregate {
+            collection: nodedb_types::QualifiedCollection::from_stored(raw_collection),
+            input: Some(Box::new(child)),
+            group_by: group_specs,
+            aggregates: agg_specs,
+            // The child carries its own WHERE / ProviderScan filters; the
+            // aggregate node applies none of its own.
+            filters: Vec::new(),
+            having: having_bytes,
+            limit,
+            sub_group_by: Vec::new(),
+            sub_aggregates: Vec::new(),
+            // Guarded by the caller: input-sourced aggregates never carry
+            // grouping sets.
+            grouping_sets: Vec::new(),
+            sort_keys,
+        }),
+        post_set_op: PostSetOp::None,
+        txn_id: None,
+    }
 }
 
 /// Lower GROUP BY expressions to Data-Plane group-key specs.

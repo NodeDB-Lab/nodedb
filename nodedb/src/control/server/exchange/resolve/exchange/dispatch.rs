@@ -9,10 +9,11 @@ use crate::control::server::exchange::resolve::capture::DistributedReadCapture;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 
+use super::aggregate_input_arm::AggregateFields;
 use super::entry::Resolved;
 use super::hash_join_arm::HashJoinFields;
 use super::post_process_arm::PostProcessFields;
-use super::{gather_arm, hash_join_arm, post_process_arm, shuffle_arm};
+use super::{aggregate_input_arm, gather_arm, hash_join_arm, post_process_arm, shuffle_arm};
 
 /// Request-scoped identifiers threaded through every arm resolver, bundled
 /// to keep each resolver's argument list within the clippy default arity.
@@ -32,6 +33,8 @@ pub(super) struct ResolveCtx {
 /// - Root-level `Shuffle` wrapping a `HashJoin` → orchestrate a cross-node
 ///   grace hash join, return `Resolved::Gathered`. `Shuffle` as a join input is
 ///   a typed error.
+/// - `Aggregate{input: Some}` → materialize the child on the coordinator and
+///   embed it as `ProviderScan{None, rows}`, return `Resolved::Plan`.
 /// - Anything else → `Resolved::Plan` unchanged.
 ///
 /// `captures` accumulates one [`DistributedReadCapture`] per base collection an
@@ -178,6 +181,44 @@ pub(super) async fn resolve_exchange(
                     limit,
                     offset,
                     distinct,
+                },
+            )
+            .await
+        }
+
+        // Input-sourced Aggregate: materialize the child on the coordinator
+        // (unless it is already a `ProviderScan` of rows) and aggregate over
+        // those rows once. The aggregate is coordinator-local, so the root
+        // Gather arm never sees it; the child is gathered here instead.
+        PhysicalPlan::Query(QueryOp::Aggregate {
+            collection,
+            input: Some(input),
+            group_by,
+            aggregates,
+            filters,
+            having,
+            limit,
+            sub_group_by,
+            sub_aggregates,
+            grouping_sets,
+            sort_keys,
+        }) => {
+            aggregate_input_arm::resolve_aggregate_input(
+                state,
+                ctx,
+                captures,
+                AggregateFields {
+                    collection,
+                    input,
+                    group_by,
+                    aggregates,
+                    filters,
+                    having,
+                    limit,
+                    sub_group_by,
+                    sub_aggregates,
+                    grouping_sets,
+                    sort_keys,
                 },
             )
             .await

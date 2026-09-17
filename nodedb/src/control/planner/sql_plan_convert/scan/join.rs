@@ -108,6 +108,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     // keys its persisted column stats by the bare collection name, so the
     // shuffle cost model must look them up by the same raw name (not the
     // db-qualified token used for storage routing).
+    // An input-sourced join side carries no routing collection; its rows come
+    // from `left_input` / `right_input`.
     let mut left_raw = super::super::aggregate::extract_collection_name(left);
     let mut right_raw = super::super::aggregate::extract_collection_name(right);
     let mut left_alias = extract_scan_alias(left);
@@ -210,7 +212,11 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
         );
     let shuffle_eligible = structurally_shufflable
         && (p.ctx.force_shuffle_join
-            || super::join_cost::cost_model_picks_shuffle(p.ctx, &left_raw, &right_raw));
+            || super::join_cost::cost_model_picks_shuffle(
+                p.ctx,
+                left_raw.as_deref().unwrap_or(""),
+                right_raw.as_deref().unwrap_or(""),
+            ));
 
     // Shuffle hash keys mirror the resolver's per-side split: the LEFT column of
     // each `on` pair partitions the probe side, the RIGHT column the build side

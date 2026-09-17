@@ -12,8 +12,12 @@
 //!   cross-node grace hash join (`super::shuffle`) and return the merged rows
 //!   as `Resolved::Gathered`. `Shuffle` as a join INPUT is a typed error (it
 //!   only ever wraps a complete join).
+//! - `Aggregate{input: Some}` whose child is not yet materialized rows →
+//!   materialize the child on the coordinator and embed it as
+//!   `ProviderScan{provider: None, rows}`; return `Resolved::Plan`.
 //! - No Exchange / no empty ProviderScan → `Resolved::Plan` unchanged.
 
+mod aggregate_input_arm;
 mod dispatch;
 mod entry;
 mod gather_arm;

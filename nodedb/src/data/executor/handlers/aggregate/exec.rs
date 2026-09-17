@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::cache_key::{AggregateCacheKeyInputs, aggregate_cache_key, legacy_aggregate_pairs};
 use super::rows::{apply_user_aliases_to_rows, sort_aggregated_rows};
-use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
@@ -58,22 +58,41 @@ impl CoreLoop {
 
         debug!(core = self.core_id, %collection, has_input = input.is_some(), group_fields = group_by.len(), aggs = aggregates.len(), "aggregate");
 
-        // Input-sourced aggregate (catalog): the rows come from executing the
-        // sub-plan (a coordinator-materialized `ProviderScan`), not from a
-        // per-shard collection scan. Decode the sub-plan rows and aggregate
-        // over them using the same streaming logic, then short-circuit before
-        // the per-shard fast paths (cache / index-backed / columnar memtable),
-        // none of which apply to coordinator-local catalog data.
+        // Input-sourced aggregate: the rows come from executing the sub-plan
+        // (a coordinator-materialized `ProviderScan` over catalog rows or a
+        // derived-table body), not from a per-shard collection scan. Decode
+        // the sub-plan rows and aggregate over them using the same streaming
+        // logic, then short-circuit before the per-shard fast paths (cache /
+        // index-backed / columnar memtable), none of which apply to
+        // coordinator-local rows.
         if let Some(sub_plan) = input {
             let sub_response = self.execute_plan(task, sub_plan);
-            // Empty / undecodable payload → aggregate over zero rows, the same as
-            // a per-shard scan that matched nothing. Feeding an empty doc set
-            // through the shared path keeps behavior identical to the scan path
-            // rather than surfacing the sub-plan Response (which may be a
-            // non-row payload).
-            let docs =
-                crate::data::executor::response_codec::decode_response_to_docs(&sub_response)
-                    .unwrap_or_default();
+            // A child error (22012 from a computed column, a resolver refusal)
+            // fails the statement.
+            if sub_response.status == Status::Error {
+                return sub_response;
+            }
+            // An empty payload is zero rows. A non-empty payload that is not
+            // a MessagePack row array is an internal error, never an empty
+            // aggregate.
+            let docs = if sub_response.payload.is_empty() {
+                Vec::new()
+            } else {
+                match crate::data::executor::response_codec::decode_response_to_docs(&sub_response)
+                {
+                    Some(docs) => docs,
+                    None => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: "aggregate input rows failed to decode: payload is not \
+                                         a MessagePack row array"
+                                    .to_string(),
+                            },
+                        );
+                    }
+                }
+            };
             return self.aggregate_over_docs(
                 super::streaming::over_docs::AggregateOverDocsParams {
                     task,

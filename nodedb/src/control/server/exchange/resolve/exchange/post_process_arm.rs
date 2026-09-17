@@ -5,12 +5,14 @@
 
 use nodedb_physical::physical_plan::{
     ExchangeMode, ExchangeOp, PhysicalPlan, QueryOp, SortKeySpec, TextOp, VectorOp,
+    plan_contains_cluster_partitioned_leaf,
 };
 
 use crate::control::server::exchange::full_scan::{ScanSide, full_scan_plan_for_collection};
 use crate::control::server::exchange::gather::{
     GatherOutcome, finalize_aggregate, gather_all_vshards,
 };
+use crate::control::server::exchange::owning_core::gather_single_owning_core;
 use crate::control::server::exchange::resolve::capture::DistributedReadCapture;
 use crate::control::server::response_translate::hit_key::parse_surrogate_hex;
 use crate::control::server::response_translate::vector::resolve_surrogate_pk;
@@ -19,6 +21,7 @@ use crate::data::executor::response_codec::{
     flatten_hybrid_hits_to_relational_rows, flatten_to_relational_rows,
     flatten_vector_hits_to_relational_rows,
 };
+use crate::types::VShardId;
 
 use super::dispatch::{ResolveCtx, resolve_exchange};
 use super::entry::Resolved;
@@ -88,39 +91,41 @@ fn hit_collection_name(plan: &PhysicalPlan) -> Option<String> {
     }
 }
 
-/// Resolve a `QueryOp::PostProcess` node: materialize the child's rows on the
-/// coordinator, then lower to a `ProviderScan` that applies filter → offset →
-/// sort → distinct → project → limit on a single core (its existing tail).
-/// This keeps "run exactly once over the full union" correct: the child is
-/// gathered here, so the relational tail never runs per-shard.
-pub(super) async fn resolve_post_process(
+/// Rows of a materialized child, or a resolution the caller returns as-is.
+pub(super) enum ChildRows {
+    /// The child's rows, flattened to the bare relational row shape a
+    /// `ProviderScan{provider: None}` consumes.
+    Rows(Vec<u8>),
+    /// The child resolved to a root `Gathered` / `Stream` result. The caller
+    /// returns it unchanged.
+    Passthrough(Resolved),
+}
+
+/// Materialize a coordinator-side child plan into relational rows.
+///
+/// Unwraps the converter's `Exchange{Gather}` wrapper, resolves any Exchange
+/// nested inside the body (a `HashJoin` build-side `Broadcast`), gathers the
+/// body across all vShards, finalizes a partial-aggregate payload, and
+/// flattens hit-shaped payloads (vector / hybrid) to columned rows with the
+/// surrogate resolved to the user PK. An in-transaction read records the
+/// child's base collection in `captures` at its observed read-version.
+pub(super) async fn materialize_child_rows(
     state: &SharedState,
     ctx: ResolveCtx,
     captures: &mut Vec<DistributedReadCapture>,
-    fields: PostProcessFields,
-) -> crate::Result<Resolved> {
+    input: PhysicalPlan,
+) -> crate::Result<ChildRows> {
     let ResolveCtx {
         database_id,
         tenant_id,
         trace_id,
         txn_id,
     } = ctx;
-    let PostProcessFields {
-        input,
-        filters,
-        projection,
-        computed_columns,
-        window_functions,
-        sort_keys,
-        limit,
-        offset,
-        distinct,
-    } = fields;
 
     // The converter wraps a sharded body in `Exchange{Gather}`; unwrap
     // it so the child is the real body plan (a plain body has no
     // wrapper and routes to its owning vShard directly).
-    let (child, as_aggregate) = match *input {
+    let (child, as_aggregate) = match input {
         PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
             child,
             mode: ExchangeMode::Gather { as_aggregate },
@@ -144,11 +149,11 @@ pub(super) async fn resolve_post_process(
     {
         Resolved::Plan(p) => *p,
         // The unwrapped body is not itself a root Gather / stream;
-        // surface these defensively without dropping post-processing.
+        // surface these without dropping the caller's tail.
         Resolved::Gathered(resp, wms, caps) => {
-            return Ok(Resolved::Gathered(resp, wms, caps));
+            return Ok(ChildRows::Passthrough(Resolved::Gathered(resp, wms, caps)));
         }
-        Resolved::Stream(s) => return Ok(Resolved::Stream(s)),
+        Resolved::Stream(s) => return Ok(ChildRows::Passthrough(Resolved::Stream(s))),
     };
 
     // Classify the body's row shape so the gathered payload is
@@ -178,8 +183,27 @@ pub(super) async fn resolve_post_process(
         None
     };
 
-    let outcome: GatherOutcome =
-        gather_all_vshards(state, tenant_id, database_id, child, trace_id, txn_id).await?;
+    // A coordinator-local body (a `ProviderScan` carrying embedded rows, a
+    // nested `PostProcess`) reads no per-shard collection. It runs exactly
+    // once on the coordinator vshard: fanning it to every core returns its
+    // rows once per core.
+    let coordinator_local = child.collection().is_none()
+        && !child.is_sharded_source()
+        && !plan_contains_cluster_partitioned_leaf(&child);
+    let outcome: GatherOutcome = if coordinator_local {
+        gather_single_owning_core(
+            state,
+            tenant_id,
+            database_id,
+            child,
+            VShardId::from_collection_in_database(database_id, ""),
+            trace_id,
+            txn_id,
+        )
+        .await?
+    } else {
+        gather_all_vshards(state, tenant_id, database_id, child, trace_id, txn_id).await?
+    };
 
     if let Some(coll) = probe_collection
         && let Some(scan_plan) = full_scan_plan_for_collection(
@@ -220,6 +244,36 @@ pub(super) async fn resolve_post_process(
             resolve_surrogate_pk(state, database_id, tenant_id, &coll, surrogate)
         }),
         HitShape::None => flatten_to_relational_rows(&merged),
+    };
+    Ok(ChildRows::Rows(rows))
+}
+
+/// Resolve a `QueryOp::PostProcess` node: materialize the child's rows on the
+/// coordinator, then lower to a `ProviderScan` that applies filter → offset →
+/// sort → distinct → project → limit on a single core (its existing tail).
+/// This keeps "run exactly once over the full union" correct: the child is
+/// gathered here, so the relational tail never runs per-shard.
+pub(super) async fn resolve_post_process(
+    state: &SharedState,
+    ctx: ResolveCtx,
+    captures: &mut Vec<DistributedReadCapture>,
+    fields: PostProcessFields,
+) -> crate::Result<Resolved> {
+    let PostProcessFields {
+        input,
+        filters,
+        projection,
+        computed_columns,
+        window_functions,
+        sort_keys,
+        limit,
+        offset,
+        distinct,
+    } = fields;
+
+    let rows = match materialize_child_rows(state, ctx, captures, *input).await? {
+        ChildRows::Rows(rows) => rows,
+        ChildRows::Passthrough(resolved) => return Ok(resolved),
     };
     Ok(Resolved::Plan(Box::new(PhysicalPlan::Query(
         QueryOp::ProviderScan {

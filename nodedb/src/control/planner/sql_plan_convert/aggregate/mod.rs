@@ -4,11 +4,13 @@
 //!
 //! Split by concern so each file stays under the project's hard size limit:
 //! `plan` (the `convert_aggregate` entry point and its join / catalog /
-//! timeseries lowering), `spec` (aggregate-spec + collection/alias helpers and
+//! timeseries lowering), `input_sourced` (aggregate over a materialized
+//! derived-table body), `spec` (aggregate-spec + collection/alias helpers and
 //! join-side embedding), and `projection` (projection / computed-column /
 //! window-function serialization).
 
 mod cost;
+mod input_sourced;
 mod plan;
 mod projection;
 mod spec;

@@ -328,11 +328,11 @@ async fn aggregate_over_grouped_derived_table_evaluates() {
         .await
         .expect("aggregate over a grouped derived table must plan");
 
-    assert_eq!(
-        rows,
-        vec![vec!["15".to_string(), "3".to_string()]],
-        "got {rows:?}"
-    );
+    // SUM renders as a float text today; compare numerically.
+    assert_eq!(rows.len(), 1, "got {rows:?}");
+    let grand: f64 = rows[0][0].parse().expect("grand total must be numeric");
+    assert_eq!(grand, 15.0, "got {rows:?}");
+    assert_eq!(rows[0][1], "3", "got {rows:?}");
 }
 
 /// An aggregate over a UNION ALL derived table must run over the union rows.
@@ -345,7 +345,10 @@ async fn aggregate_over_union_derived_table_evaluates() {
         .await
         .expect("aggregate over a UNION ALL derived table must plan");
 
-    assert_eq!(rows, vec![vec!["3".to_string()]], "got {rows:?}");
+    // SUM renders as a float text today; compare numerically.
+    assert_eq!(rows.len(), 1, "got {rows:?}");
+    let total: f64 = rows[0][0].parse().expect("total must be numeric");
+    assert_eq!(total, 3.0, "got {rows:?}");
 }
 
 /// A window function over a grouped derived table must rank the inner group

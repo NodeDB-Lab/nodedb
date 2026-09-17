@@ -153,14 +153,14 @@ pub enum QueryOp {
     Aggregate {
         collection: QualifiedCollection,
         /// Optional sub-plan whose decoded rows are aggregated instead of
-        /// scanning `collection` per-shard. `Some` currently means EXACTLY a
-        /// catalog source (a `ProviderScan` lowered by the converter): the
-        /// aggregate runs over the coordinator-materialized catalog rows and is
-        /// therefore coordinator-local (never broadcast — see
-        /// `is_sharded_source`). `None` = legacy path: scan the named
-        /// `collection` on every shard. `collection` stays populated in both
-        /// cases so downstream RLS / permission / classification continue to
-        /// read it; the executor simply prefers `input` when present.
+        /// scanning `collection` per-shard. `Some` = an input-sourced
+        /// aggregate over a materialized relation: a catalog `ProviderScan`,
+        /// or any derived-table body the coordinator materializes into a
+        /// `ProviderScan` before dispatch. Coordinator-local, never broadcast
+        /// (see `is_sharded_source`). `None` = scan the named `collection` on
+        /// every shard. `collection` stays populated in both cases so
+        /// downstream RLS / permission / classification continue to read it;
+        /// the executor prefers `input` when present.
         #[serde(default)]
         input: Option<Box<crate::physical_plan::PhysicalPlan>>,
         group_by: Vec<GroupKeySpec>,
