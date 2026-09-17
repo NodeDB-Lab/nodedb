@@ -118,12 +118,11 @@ pub fn show_retention_policy(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// Format tiers into a compact human-readable string.

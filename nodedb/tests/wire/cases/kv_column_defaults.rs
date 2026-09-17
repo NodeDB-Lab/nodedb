@@ -177,29 +177,17 @@ async fn upsert_materializes_an_omitted_columns_default() {
     );
 }
 
-/// A materialized default is validated exactly like a supplied literal: it is
-/// appended to the row BEFORE the declared-type coercion and range checks run.
-/// Were it filled in afterwards, a DEFAULT would be a way to store a value the
-/// same literal is rejected for.
+/// A `DEFAULT` beyond the declared width is refused where it is declared,
+/// so no insert can reach it: the `CREATE` fails with the same range error a
+/// supplied literal gets, naming the column.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_default_beyond_the_declared_width_is_rejected_like_a_supplied_literal() {
     let server = TestServer::start().await;
-    create_kv(
-        &server,
-        "kv_def_range",
-        "key TEXT PRIMARY KEY, n SMALLINT DEFAULT 999999",
-    )
-    .await;
-
-    // The same literal supplied directly is rejected...
     server
         .expect_error(
-            "INSERT INTO kv_def_range (key, n) VALUES ('k1', 999999)",
+            "CREATE COLLECTION kv_def_range (key TEXT PRIMARY KEY, n SMALLINT DEFAULT 999999) \
+             WITH (engine='kv')",
             "range",
         )
-        .await;
-    // ...so arriving via the DEFAULT must not be a way around it.
-    server
-        .expect_error("INSERT INTO kv_def_range (key) VALUES ('k2')", "range")
         .await;
 }

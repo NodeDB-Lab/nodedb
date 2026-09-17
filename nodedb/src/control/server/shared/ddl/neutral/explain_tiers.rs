@@ -8,7 +8,7 @@
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::ddl::sql_parse::parse_ident_token;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -65,7 +65,6 @@ pub fn explain_tiers(
         crate::control::planner::auto_tier::explain_tier_selection(&policy, time_range);
 
     let columns = vec!["plan".to_string()];
-    let column_types = vec![DdlColType::Text];
     let mut rows = Vec::new();
     for line in explanation.lines() {
         let mut row = Map::new();
@@ -73,12 +72,7 @@ pub fn explain_tiers(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Build a [`DdlError`] from a SQLSTATE + message.

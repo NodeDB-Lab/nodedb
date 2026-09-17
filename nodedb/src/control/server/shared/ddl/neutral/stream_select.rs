@@ -146,13 +146,10 @@ pub async fn select_from_stream(
         Err(ConsumeError::BufferEmpty(_)) => {
             // Return empty result set.
             let columns = result_columns();
-            let column_types = ShapedRows::text_types(columns.len());
-            return Ok(vec![DdlResult::Rows(ShapedRows {
+            return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
                 columns,
-                column_types,
-                rows: Vec::new(),
-                notice: None,
-            })]);
+                Vec::new(),
+            ))]);
         }
         Err(e) => {
             return Err(err("42704", e.to_string()));
@@ -221,13 +218,7 @@ pub async fn select_from_stream(
         rows.push(row);
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Column schema for stream SELECT results.

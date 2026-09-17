@@ -22,11 +22,15 @@ pub(crate) fn extract_row_value(
     use nodedb_types::value::Value;
 
     let v = match col {
-        DecodedColumn::Int64 { values, valid } => {
+        // The reader infers a column's physical kind from its codec, so a
+        // time column decodes as `Int64`. The declared type decides the cell:
+        // an instant column yields the variant its declared type names;
+        // every other type yields the integer stored.
+        DecodedColumn::Int64 { values, valid } | DecodedColumn::Timestamp { values, valid } => {
             if !valid[row_idx] {
                 Value::Null
             } else {
-                Value::Integer(values[row_idx])
+                col_type.time_cell(values[row_idx])
             }
         }
         DecodedColumn::Float64 { values, valid } => {
@@ -34,20 +38,6 @@ pub(crate) fn extract_row_value(
                 Value::Null
             } else {
                 Value::Float(values[row_idx])
-            }
-        }
-        DecodedColumn::Timestamp { values, valid } => {
-            if !valid[row_idx] {
-                Value::Null
-            } else {
-                let micros = values[row_idx];
-                let dt = nodedb_types::datetime::NdbDateTime::from_micros(micros);
-                match col_type {
-                    nodedb_types::columnar::ColumnType::Timestamptz
-                    | nodedb_types::columnar::ColumnType::SystemTimestamp => Value::DateTime(dt),
-                    // Timestamp (naive) and anything else that maps to i64 storage.
-                    _ => Value::NaiveDateTime(dt),
-                }
             }
         }
         DecodedColumn::Bool { values, valid } => {

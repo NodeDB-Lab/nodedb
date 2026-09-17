@@ -101,6 +101,20 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// Spawn a single-core NodeDB server with a lowered timeseries memtable
+    /// budget so every ingest flushes its rows to a partition, and a read
+    /// exercises the partition path on a handful of rows.
+    pub async fn start_with_timeseries_memtable_budget(bytes: usize) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::timeseries_memtable_budget(bytes),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Open a server backed by an existing data directory, reopened in place
     /// so a previous server's data is visible after boot. `dir` is not
     /// consumed — ownership stays with the caller.

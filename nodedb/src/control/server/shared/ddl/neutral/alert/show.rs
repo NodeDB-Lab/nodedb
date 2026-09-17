@@ -107,12 +107,11 @@ pub fn show_alerts(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW ALERT STATUS ON <name> — per-group active/cleared state.
@@ -209,12 +208,11 @@ pub fn show_alert_status(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 fn format_duration_ms(ms: u64) -> String {

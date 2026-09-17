@@ -104,8 +104,10 @@ pub fn should_use_tag_projection(
 mod tests {
     use super::*;
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig,
+        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
     };
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     fn test_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
@@ -119,7 +121,7 @@ mod tests {
     fn sort_by_tag_then_timestamp() {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],
@@ -158,7 +160,7 @@ mod tests {
     fn identity_permutation_for_sorted_data() {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -182,7 +184,7 @@ mod tests {
     fn tag_projection_heuristic() {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("host".into(), ColumnType::Symbol),
             ],
             timestamp_idx: 0,

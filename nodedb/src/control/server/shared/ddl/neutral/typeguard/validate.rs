@@ -53,13 +53,10 @@ pub async fn validate_typeguard(
 
     if coll.type_guards.is_empty() {
         // No type guards — return empty result.
-        let column_types = ShapedRows::text_types(columns.len());
-        return Ok(vec![DdlResult::Rows(ShapedRows {
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
             columns,
-            column_types,
-            rows: Vec::new(),
-            notice: None,
-        })]);
+            Vec::new(),
+        ))]);
     }
 
     let guards = coll.type_guards.clone();
@@ -164,11 +161,5 @@ pub async fn validate_typeguard(
         })
         .collect();
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

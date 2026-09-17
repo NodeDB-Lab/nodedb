@@ -38,13 +38,17 @@ pub fn merge_o3_into_partition(
     // Read existing partition data.
     let existing_meta = ColumnarSegmentReader::read_meta(&partition_dir, None)?;
     let existing_schema = ColumnarSegmentReader::read_schema(&partition_dir, None)?;
+    let ts_type = existing_schema
+        .columns
+        .get(existing_schema.timestamp_idx)
+        .map(|(_, ty)| *ty)
+        .ok_or_else(|| {
+            SegmentError::Corrupt(format!(
+                "partition {partition_dir_name} schema has no designated time column"
+            ))
+        })?;
 
-    let ts_col = ColumnarSegmentReader::read_column(
-        &partition_dir,
-        "timestamp",
-        ColumnType::Timestamp,
-        None,
-    )?;
+    let ts_col = ColumnarSegmentReader::read_column(&partition_dir, "timestamp", ts_type, None)?;
     let val_col =
         ColumnarSegmentReader::read_column(&partition_dir, "value", ColumnType::Float64, None)?;
 

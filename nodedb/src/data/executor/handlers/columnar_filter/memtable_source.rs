@@ -22,9 +22,9 @@ impl ColumnarSource for ColumnarMemtable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::scan_filter::ScanFilter;
+    use crate::bridge::scan_filter::{FilterOp, ScanFilter};
     use crate::engine::timeseries::columnar_memtable::{
-        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema, TimeKind,
     };
     use nodedb_types::timeseries::SeriesId;
 
@@ -33,7 +33,7 @@ mod tests {
     fn make_test_mt() -> ColumnarMemtable {
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("value".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
             ],
@@ -62,7 +62,7 @@ mod tests {
         let mt = make_test_mt();
         let f = ScanFilter {
             field: "value".into(),
-            op: "gt".into(),
+            op: FilterOp::Gt,
             value: nodedb_types::Value::Float(200.0),
             clauses: vec![],
             expr: None,
@@ -78,7 +78,7 @@ mod tests {
         let indices: Vec<u32> = (0..30).collect();
         let f = ScanFilter {
             field: "host".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("db-1".into()),
             clauses: vec![],
             expr: None,
@@ -94,7 +94,7 @@ mod tests {
         let indices: Vec<u32> = (0..30).collect();
         let f = ScanFilter {
             field: "host".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("nonexistent".into()),
             clauses: vec![],
             expr: None,
@@ -111,14 +111,14 @@ mod tests {
         let filters = vec![
             ScanFilter {
                 field: "value".into(),
-                op: "gte".into(),
+                op: FilterOp::Gte,
                 value: nodedb_types::Value::Float(100.0),
                 clauses: vec![],
                 expr: None,
             },
             ScanFilter {
                 field: "host".into(),
-                op: "eq".into(),
+                op: FilterOp::Eq,
                 value: nodedb_types::Value::String("web-1".into()),
                 clauses: vec![],
                 expr: None,
@@ -134,11 +134,11 @@ mod tests {
         let mt = make_test_mt();
         let f = ScanFilter {
             field: "value".into(),
-            op: "or".into(),
+            op: FilterOp::Or,
             value: nodedb_types::Value::Null,
             clauses: vec![vec![ScanFilter {
                 field: "value".into(),
-                op: "gt".into(),
+                op: FilterOp::Gt,
                 value: nodedb_types::Value::Float(100.0),
                 clauses: vec![],
                 expr: None,

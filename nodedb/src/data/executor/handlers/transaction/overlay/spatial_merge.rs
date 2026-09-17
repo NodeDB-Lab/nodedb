@@ -37,7 +37,7 @@ use nodedb_types::value::Value;
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_read::convert::row_to_projected_json;
+use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
 use crate::data::executor::handlers::spatial_refine::{
     apply_predicate, extract_geometry, project_doc,
 };
@@ -64,20 +64,17 @@ pub(in crate::data::executor) struct SpatialOverlayMergeParams<'a> {
 /// staged row whose collection has no known columnar schema (defensively
 /// treated as "does not match" rather than surfacing a panic). Returns
 /// `Err` only when the row *does* decode but its computed-column projection
-/// hits a division/modulo-by-zero — `row_to_projected_json` is called with
+/// hits a division/modulo-by-zero — `row_to_projected_value` is called with
 /// no computed columns here (`&[]`), so this is currently unreachable, but
 /// the `Result` return keeps the signature honest about what
-/// `row_to_projected_json` can do.
+/// `row_to_projected_value` can do.
 fn decode_staged_spatial_row(
     body: &[u8],
     schema: Option<&ColumnarSchema>,
 ) -> crate::Result<Option<Value>> {
     Ok(match nodedb_types::value_from_msgpack(body).ok() {
         Some(Value::Array(row)) => match schema {
-            Some(schema) => {
-                let json = row_to_projected_json(&row, schema, &[], &[], false)?;
-                Some(Value::from(json))
-            }
+            Some(schema) => Some(row_to_projected_value(&row, schema, &[], &[], false)?),
             None => None,
         },
         Some(obj @ Value::Object(_)) => Some(obj),

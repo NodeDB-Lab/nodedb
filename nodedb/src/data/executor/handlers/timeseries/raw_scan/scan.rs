@@ -3,12 +3,15 @@
 //! Raw scan entry point: `RawScanParams` and `execute_ts_raw_scan`.
 
 use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 
 use super::partition_scan::scan_partitions_parallel;
-use super::row_emit::{apply_computed_columns_rmpv, emit_memtable_row, rmpv_system_time};
+use super::row_emit::{
+    apply_computed_columns_rmpv, emit_memtable_row, rmpv_system_time, row_admitted_by_policy,
+};
 
 /// Parameters for a timeseries raw scan (no aggregation).
 pub(in crate::data::executor) struct RawScanParams<'a> {
@@ -17,8 +20,13 @@ pub(in crate::data::executor) struct RawScanParams<'a> {
     pub collection: &'a str,
     pub time_range: (i64, i64),
     pub limit: usize,
-    pub filter_predicates: &'a [crate::bridge::scan_filter::ScanFilter],
+    pub filter_predicates: &'a [ScanFilter],
     pub has_filters: bool,
+    /// The caller's decoded read policy; empty admits every row. Evaluated
+    /// per row after `filter_predicates` and before a row is gathered, so a
+    /// row the policy excludes never counts toward `limit`, on memtable,
+    /// partition, and in-transaction overlay rows alike.
+    pub rls_predicates: &'a [ScanFilter],
     pub computed_columns: &'a [u8],
     /// `AS OF SYSTEM TIME NULL`: emit every `_ts_system` version ordered
     /// ascending by system time (audit-log semantics).
@@ -49,6 +57,7 @@ impl CoreLoop {
             limit,
             filter_predicates,
             has_filters,
+            rls_predicates,
             computed_columns: computed_columns_bytes,
             all_versions,
             txn_id,
@@ -144,7 +153,10 @@ impl CoreLoop {
                 if results.len() >= gather_limit {
                     break;
                 }
-                let row = emit_memtable_row(mt, &columns, idx as usize);
+                let row = match emit_memtable_row(mt, &columns, idx as usize) {
+                    Ok(row) => row,
+                    Err(e) => return self.response_error(task, e),
+                };
                 if need_json_filter {
                     // Encode rmpv row to msgpack bytes for binary filter eval.
                     let mut buf = Vec::new();
@@ -159,6 +171,14 @@ impl CoreLoop {
                             return self.response_error(task, ErrorCode::DivisionByZero);
                         }
                     }
+                }
+                // The caller's read policy, after the WHERE predicates and
+                // before the row is gathered, so the limit counts admitted
+                // rows only.
+                match row_admitted_by_policy(&row, rls_predicates) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => return self.response_error(task, e),
                 }
                 results.push(row);
             }
@@ -186,13 +206,17 @@ impl CoreLoop {
 
                 let remaining = gather_limit.saturating_sub(results.len());
                 if remaining > 0 && !partition_dirs.is_empty() {
-                    let partition_rows = scan_partitions_parallel(
+                    let partition_rows = match scan_partitions_parallel(
                         &partition_dirs,
                         time_range,
                         remaining,
                         filter_predicates,
                         has_filters,
-                    );
+                        rls_predicates,
+                    ) {
+                        Ok(rows) => rows,
+                        Err(e) => return self.response_error(task, e),
+                    };
                     results.extend(partition_rows);
                     results.truncate(gather_limit);
                 }
@@ -214,6 +238,7 @@ impl CoreLoop {
                     time_range,
                     filter_predicates,
                     has_filters,
+                    rls_predicates,
                     limit: gather_limit,
                 },
                 &mut results,
@@ -270,15 +295,6 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
         results.truncate(limit);
-
-        // The engine stores its timestamp columns in milliseconds; a client
-        // reads a `TIMESTAMP` cell as epoch microseconds. Scale here, once
-        // every predicate, sort and computed column has run against the
-        // engine's own unit.
-        let instant_columns = self.ts_instant_columns(task.request.database_id, tid, collection);
-        if let Err(e) = super::row_emit::scale_instant_cells(&mut results, &instant_columns) {
-            return self.response_error(task, e);
-        }
 
         let array = rmpv::Value::Array(results);
         let mut buf = Vec::new();

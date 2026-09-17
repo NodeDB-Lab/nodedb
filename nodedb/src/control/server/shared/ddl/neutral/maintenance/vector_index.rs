@@ -20,7 +20,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 use crate::types::TraceId;
@@ -72,7 +72,6 @@ pub async fn handle_show_vector_index(
         .map_err(|e| ddl_err("XX000", format!("decode vector stats: {e}")))?;
 
     let columns = vec!["property".to_string(), "value".to_string()];
-    let column_types = vec![DdlColType::Text; 2];
 
     let pairs: Vec<(&str, String)> = vec![
         ("dimensions", stats.dimensions.to_string()),
@@ -115,12 +114,7 @@ pub async fn handle_show_vector_index(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Handle `ALTER VECTOR INDEX ON collection.column SEAL`.

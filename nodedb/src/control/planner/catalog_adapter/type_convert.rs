@@ -6,7 +6,7 @@ use nodedb_sql::types::{ColumnInfo, EngineType, SqlDataType};
 use nodedb_types::columnar::{FloatWidth, IntWidth};
 
 /// Convert a StoredCollection to engine type, columns, and primary key.
-pub(super) fn convert_collection_type(
+pub(crate) fn convert_collection_type(
     stored: &crate::control::security::catalog::StoredCollection,
 ) -> (EngineType, Vec<ColumnInfo>, Option<String>) {
     use nodedb_types::CollectionType;
@@ -84,16 +84,7 @@ pub(super) fn convert_collection_type(
                 if name.eq_ignore_ascii_case(&pk_name) {
                     continue;
                 }
-                columns.push(ColumnInfo {
-                    name: name.clone(),
-                    data_type: parse_type_str(type_str),
-                    nullable: true,
-                    is_primary_key: false,
-                    default: declared_default(type_str),
-                    raw_type: None,
-                    int_width: IntWidth::from_declared_type(type_str),
-                    float_width: FloatWidth::from_declared_type(type_str),
-                });
+                columns.push(declared_column_info(name, type_str));
             }
             (EngineType::DocumentSchemaless, columns, Some(pk_name))
         }
@@ -174,16 +165,9 @@ pub(super) fn convert_collection_type(
                 if !profile.is_timeseries() && name.eq_ignore_ascii_case(pk_name) {
                     continue;
                 }
-                columns.push(ColumnInfo {
-                    name: name.clone(),
-                    data_type: parse_type_str(type_str),
-                    nullable: true,
-                    is_primary_key: false,
-                    default: declared_default(type_str),
-                    raw_type: Some(type_str.clone()),
-                    int_width: IntWidth::from_declared_type(type_str),
-                    float_width: FloatWidth::from_declared_type(type_str),
-                });
+                let mut column = declared_column_info(name, type_str);
+                column.raw_type = Some(type_str.clone());
+                columns.push(column);
             }
             let pk = if profile.is_timeseries() {
                 None
@@ -192,6 +176,28 @@ pub(super) fn convert_collection_type(
             };
             (engine, columns, pk)
         }
+    }
+}
+
+/// The planner-facing column a raw DDL declaration (`name`, `type_str`)
+/// resolves to: its SQL type, declared numeric width, and DEFAULT text.
+///
+/// `type_str` is the text that followed the column name in the DDL, modifiers
+/// included (`SMALLINT DEFAULT 5`, `TIMESTAMP TIME_KEY`). The schemaless and
+/// columnar-family catalog arms read their tracked fields through this, and
+/// the DDL gate checks a declared DEFAULT against the same resolution, so a
+/// default is judged against exactly the type its column will carry at
+/// INSERT time.
+pub(crate) fn declared_column_info(name: &str, type_str: &str) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: parse_type_str(type_str),
+        nullable: true,
+        is_primary_key: false,
+        default: declared_default(type_str),
+        raw_type: None,
+        int_width: IntWidth::from_declared_type(type_str),
+        float_width: FloatWidth::from_declared_type(type_str),
     }
 }
 

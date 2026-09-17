@@ -7,6 +7,9 @@ use crate::control::security::rls::RlsPolicyStore;
 use crate::types::TenantId;
 
 /// Fetch RLS bytes for a (tenant, collection) pair.
+///
+/// An unresolvable `$auth.*` reference is the deny error; an unencodable
+/// filter set is its own error. Both refuse the statement.
 pub(super) fn get_rls(
     rls_store: &RlsPolicyStore,
     tenant_id: u64,
@@ -14,15 +17,16 @@ pub(super) fn get_rls(
     auth: &AuthContext,
 ) -> crate::Result<Vec<u8>> {
     rls_store
-        .combined_read_predicate_with_auth(tenant_id, collection, auth)
+        .combined_read_predicate_with_auth(tenant_id, collection, auth)?
         .ok_or_else(|| rls_deny_error(tenant_id, collection))
 }
 
 /// Fetch the compiled write-policy bytes for a (tenant, collection) pair.
 ///
 /// Fails closed on an unresolvable `$auth.*` reference through the same deny
-/// error the read fetch raises, so a write can never proceed on a predicate
-/// that could not be resolved.
+/// error the read fetch raises, and on an unencodable filter set through
+/// its own error, so a write can never proceed on a predicate that could
+/// not be resolved or encoded.
 pub(super) fn get_rls_write(
     rls_store: &RlsPolicyStore,
     tenant_id: u64,
@@ -30,7 +34,7 @@ pub(super) fn get_rls_write(
     auth: &AuthContext,
 ) -> crate::Result<Vec<u8>> {
     rls_store
-        .combined_write_predicate_with_auth(tenant_id, collection, auth)
+        .combined_write_predicate_with_auth(tenant_id, collection, auth)?
         .ok_or_else(|| rls_deny_error(tenant_id, collection))
 }
 

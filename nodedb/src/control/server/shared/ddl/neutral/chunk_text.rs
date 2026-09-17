@@ -10,7 +10,7 @@
 use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
 use serde_json::{Map, Value as JsonValue};
 
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 
 use super::super::result::{DdlError, DdlResult};
 
@@ -135,13 +135,6 @@ pub fn execute_chunk_text(sql: &str) -> Result<Vec<DdlResult>, DdlError> {
         "end".to_string(),
         "text".to_string(),
     ];
-    let column_types = vec![
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-        DdlColType::Text,
-    ];
-
     let rows: Vec<Map<String, JsonValue>> = chunks
         .iter()
         .map(|c| {
@@ -154,12 +147,7 @@ pub fn execute_chunk_text(sql: &str) -> Result<Vec<DdlResult>, DdlError> {
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Build a [`DdlError`] from a SQLSTATE + message.

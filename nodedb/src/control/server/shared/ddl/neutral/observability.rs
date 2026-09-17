@@ -38,12 +38,10 @@ fn key_value_result(rows_in: Vec<(String, String)>) -> Result<Vec<DdlResult>, Dd
         row.insert("value".to_string(), JsonValue::String(v));
         rows.push(row);
     }
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["name".to_string(), "value".to_string()],
-        column_types: ShapedRows::text_types(2),
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["name".to_string(), "value".to_string()],
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// Build the canonical `(name, value)` rows for `SHOW STATS` and
@@ -250,10 +248,9 @@ pub fn show_memory(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }

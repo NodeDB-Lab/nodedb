@@ -12,6 +12,7 @@ use nodedb_types::backup_envelope::{
 
 use crate::Error;
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::shared::ddl::neutral::collection::dispatch_register_from_stored;
 use crate::control::server::shared::ddl::sync_dispatch;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
@@ -84,7 +85,27 @@ pub async fn restore_tenant(
     };
 
     if !dry_run {
-        apply_metadata_sections(state, tenant_id, &env)?;
+        let restored_collections = apply_metadata_sections(state, tenant_id, &env)?;
+        // Every restored collection's declaration reaches this node's Data
+        // Plane before any of its rows do. The catalog row alone leaves
+        // `doc_configs` empty for the collection, and the re-issue below
+        // would then ingest a timeseries collection's rows into an inferred
+        // shape: the declared time key becomes an integer field and the row
+        // is stamped with the restore-time clock. This is the same
+        // registration a committed DDL and the boot rehydration dispatch,
+        // and it replaces any registration already present, so a cluster
+        // applier's own register hook and a later boot seed are both
+        // idempotent with it. A registration failure fails the restore.
+        for coll in &restored_collections {
+            dispatch_register_from_stored(state, coll)
+                .await
+                .map_err(|e| Error::Internal {
+                    detail: format!(
+                        "restore: Data Plane registration of collection '{}' failed: {e}",
+                        coll.name
+                    ),
+                })?;
+        }
     }
 
     let mut merged = merge_sections(&env.sections)?;

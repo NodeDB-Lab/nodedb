@@ -6,6 +6,7 @@
 //! Anything reasoning about the persisted row (RLS gate, resolve pass) must
 //! go through here, not the submitted values.
 
+use nodedb_types::datetime::NdbDateTime;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use super::msgpack_decode::MsgpackValue;
@@ -14,6 +15,16 @@ use crate::engine::timeseries::ilp::{self, IlpError};
 /// Nanoseconds per millisecond — line protocol timestamps are nanoseconds, the
 /// stored time column is milliseconds.
 const NANOS_PER_MILLI: i64 = 1_000_000;
+
+/// Nanoseconds per microsecond — a typed instant carries epoch microseconds.
+const NANOS_PER_MICRO: i64 = 1_000;
+
+/// The ISO 8601 text of a typed instant, for a non-time column that stores
+/// it: the ILP line carries it as a string field, the same way a client
+/// that spells the instant as text sends it.
+fn instant_to_iso8601(micros: i64) -> String {
+    NdbDateTime::from_micros(micros).to_iso8601()
+}
 
 /// Is `column` the time column of the row being ingested? Matches only the
 /// declared `TIME_KEY` when DDL exists; falls back to conventional names
@@ -68,30 +79,25 @@ fn push_line(buf: &mut String, measurement: &str, fields: &[String], timestamp_n
 }
 
 /// Normalize decoded MessagePack rows into line protocol.
+///
+/// A row whose time column is absent or NULL carries no timestamp, and the
+/// ingest clock stamps it. A time column that holds a value the line cannot
+/// carry — text that is not a datetime, a boolean, or an instant past the
+/// nanosecond range — is an error: stamping such a row with the clock would
+/// store a point at a time the client never wrote.
 pub(in crate::data::executor) fn msgpack_rows_to_ilp(
     rows: &[Vec<(String, MsgpackValue)>],
     measurement: &str,
     time_key: Option<&str>,
-) -> String {
+) -> Result<String, IlpError> {
     let mut ilp_buf = String::new();
-    for row in rows {
+    for (line_number, row) in rows.iter().enumerate() {
         let mut fields = Vec::new();
         let mut timestamp_ns: Option<i64> = None;
 
         for (key, val) in row {
             if is_time_column(key, time_key) {
-                match val {
-                    MsgpackValue::Str(s) => {
-                        timestamp_ns = parse_ts_string_to_nanos(s);
-                    }
-                    MsgpackValue::Int(n) => {
-                        timestamp_ns = Some(*n * NANOS_PER_MILLI);
-                    }
-                    MsgpackValue::Float(f) => {
-                        timestamp_ns = Some(*f as i64 * NANOS_PER_MILLI);
-                    }
-                    _ => {}
-                }
+                timestamp_ns = time_column_nanos(val, key, line_number + 1)?;
                 continue;
             }
 
@@ -111,14 +117,58 @@ pub(in crate::data::executor) fn msgpack_rows_to_ilp(
                         fields.push(format!("{key}=\"{}\"", s.replace('\"', "\\\"")));
                     }
                 }
+                // An instant in a non-time column is carried as ISO 8601 text,
+                // the form a text-spelled instant field takes above.
+                MsgpackValue::Instant(micros) => {
+                    fields.push(format!("{key}=\"{}\"", instant_to_iso8601(*micros)));
+                }
                 MsgpackValue::Bool(b) => fields.push(format!("{key}={b}")),
-                _ => {}
+                MsgpackValue::Null => {}
             }
         }
 
         push_line(&mut ilp_buf, measurement, &fields, timestamp_ns);
     }
-    ilp_buf
+    Ok(ilp_buf)
+}
+
+/// The nanosecond timestamp a time-column cell denotes: `None` when the cell
+/// is NULL (the clock stamps the row), an error when the cell holds a value
+/// no timestamp can carry.
+fn time_column_nanos(
+    val: &MsgpackValue,
+    column: &str,
+    line_number: usize,
+) -> Result<Option<i64>, IlpError> {
+    let invalid = |detail: &str| {
+        IlpError::new(
+            line_number,
+            &format!("{column}={detail}"),
+            0..0,
+            ilp::IlpErrorKind::InvalidTimestamp,
+        )
+    };
+    match val {
+        MsgpackValue::Null => Ok(None),
+        MsgpackValue::Str(s) => parse_ts_string_to_nanos(s)
+            .map(Some)
+            .ok_or_else(|| invalid(&format!("\"{s}\""))),
+        MsgpackValue::Int(n) => n
+            .checked_mul(NANOS_PER_MILLI)
+            .map(Some)
+            .ok_or_else(|| invalid(&n.to_string())),
+        MsgpackValue::Float(f) => (*f as i64)
+            .checked_mul(NANOS_PER_MILLI)
+            .map(Some)
+            .ok_or_else(|| invalid(&f.to_string())),
+        // A typed instant of either kind: the stored time column is the
+        // instant's millisecond count whatever the kind.
+        MsgpackValue::Instant(micros) => micros
+            .checked_mul(NANOS_PER_MICRO)
+            .map(Some)
+            .ok_or_else(|| invalid(&instant_to_iso8601(*micros))),
+        MsgpackValue::Bool(b) => Err(invalid(&b.to_string())),
+    }
 }
 
 /// Normalize decoded JSON rows into line protocol. The JSON value model
@@ -194,6 +244,84 @@ pub(in crate::data::executor) fn stamp_timestamps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `2020-03-05T10:00:00Z` in epoch microseconds.
+    const EARLY_MICROS: i64 = 1_583_402_400_000_000;
+
+    fn instant() -> MsgpackValue {
+        MsgpackValue::Instant(EARLY_MICROS)
+    }
+
+    /// A typed instant under the declared time key is the line's timestamp —
+    /// the same nanosecond count its text spelling gives.
+    #[test]
+    fn a_typed_instant_time_key_is_the_line_timestamp() {
+        let rows = vec![vec![
+            ("captured_at".to_string(), instant()),
+            ("v".to_string(), MsgpackValue::Float(1.5)),
+        ]];
+        let ilp = msgpack_rows_to_ilp(&rows, "m", Some("captured_at")).expect("ilp");
+        assert_eq!(ilp, "m v=1.5 1583402400000000000\n");
+        let text = vec![vec![
+            (
+                "captured_at".to_string(),
+                MsgpackValue::Str("2020-03-05 10:00:00".into()),
+            ),
+            ("v".to_string(), MsgpackValue::Float(1.5)),
+        ]];
+        assert_eq!(
+            msgpack_rows_to_ilp(&text, "m", Some("captured_at")).expect("ilp"),
+            "m v=1.5 1583402400000000000\n"
+        );
+    }
+
+    /// A typed instant in a non-time column is a string field carrying its
+    /// ISO 8601 text.
+    #[test]
+    fn a_typed_instant_field_is_iso8601_text() {
+        let rows = vec![vec![
+            ("ts".to_string(), MsgpackValue::Int(7)),
+            ("seen".to_string(), instant()),
+        ]];
+        assert_eq!(
+            msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp"),
+            "m seen=\"2020-03-05T10:00:00.000000Z\" 7000000\n"
+        );
+    }
+
+    /// A time-column value the nanosecond timestamp cannot carry is an
+    /// error naming the column: the row is neither wrapped nor stamped with
+    /// the clock.
+    #[test]
+    fn a_time_key_the_line_cannot_carry_is_an_error() {
+        for bad in [
+            MsgpackValue::Int(i64::MAX),
+            MsgpackValue::Str("not a date".into()),
+            MsgpackValue::Bool(true),
+        ] {
+            let rows = vec![vec![
+                ("ts".to_string(), bad),
+                ("v".to_string(), MsgpackValue::Int(1)),
+            ]];
+            let err = msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect_err("refused");
+            assert_eq!(err.kind, ilp::IlpErrorKind::InvalidTimestamp);
+            assert!(err.raw.starts_with("ts="), "{err:?}");
+        }
+    }
+
+    /// A NULL time column carries no timestamp, so the ingest clock stamps
+    /// the row.
+    #[test]
+    fn a_null_time_key_carries_no_timestamp() {
+        let rows = vec![vec![
+            ("ts".to_string(), MsgpackValue::Null),
+            ("v".to_string(), MsgpackValue::Int(1)),
+        ]];
+        assert_eq!(
+            msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp"),
+            "m v=1i\n"
+        );
+    }
 
     /// A line without a timestamp takes the batch default; one that carries its
     /// own keeps it byte for byte.

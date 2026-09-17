@@ -338,8 +338,15 @@ impl CoreLoop {
 
         // A staged row is read back by name, so the line's timestamp must be
         // keyed under the collection's own time column — the same name the
-        // base scan and the overlay merge resolve.
+        // base scan and the overlay merge resolve — and typed by that
+        // column's kind, so a predicate literal coerced for the column
+        // compares against the staged cell exactly as against a base cell.
         let time_column = self.ts_time_column(
+            task.request.database_id,
+            crate::types::TenantId::new(tid),
+            collection,
+        );
+        let time_kind = self.ts_time_key_kind(
             task.request.database_id,
             crate::types::TenantId::new(tid),
             collection,
@@ -374,7 +381,21 @@ impl CoreLoop {
                 object.insert(name.to_string(), value);
             }
             if let Some(timestamp) = row.timestamp_ns {
-                object.insert(time_column.clone(), Value::Integer(timestamp / 1_000_000));
+                let cell = match time_kind.cell_value(timestamp / 1_000_000) {
+                    Ok(cell) => cell,
+                    Err(error) => {
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!(
+                                    "canonical ILP overlay row time cell {}: {error}",
+                                    timestamp / 1_000_000
+                                ),
+                            },
+                        );
+                    }
+                };
+                object.insert(time_column.clone(), cell);
             }
             images.push(Value::Object(object));
         }

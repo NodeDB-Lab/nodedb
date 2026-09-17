@@ -4,7 +4,7 @@
 //!
 //! `ScanFilter::matches_binary(doc: &[u8])` evaluates a filter predicate
 //! directly on msgpack bytes without decoding to `serde_json::Value`.
-//! Uses `Value::eq_coerced`/`cmp_coerced` for type coercion — single
+//! Uses `Value::eq_coerced`/`partial_cmp_coerced` for type coercion — single
 //! source of truth shared with the JSON filter path.
 
 use std::cmp::Ordering;
@@ -16,6 +16,7 @@ use crate::msgpack_scan::reader::{
     array_header, map_header, read_null, read_str, read_value, skip_value,
 };
 use crate::scan_filter::like::sql_like_match;
+use crate::scan_filter::types::column_compare;
 use crate::scan_filter::{FilterOp, ScanFilter};
 
 impl ScanFilter {
@@ -79,7 +80,30 @@ impl ScanFilter {
                     _ => Ok(false),
                 };
             }
-            _ => {}
+            FilterOp::Eq
+            | FilterOp::Ne
+            | FilterOp::Gt
+            | FilterOp::Gte
+            | FilterOp::Lt
+            | FilterOp::Lte
+            | FilterOp::Contains
+            | FilterOp::Like
+            | FilterOp::NotLike
+            | FilterOp::Ilike
+            | FilterOp::NotIlike
+            | FilterOp::In
+            | FilterOp::NotIn
+            | FilterOp::IsNull
+            | FilterOp::IsNotNull
+            | FilterOp::ArrayContains
+            | FilterOp::ArrayContainsAll
+            | FilterOp::ArrayOverlap
+            | FilterOp::GtColumn
+            | FilterOp::GteColumn
+            | FilterOp::LtColumn
+            | FilterOp::LteColumn
+            | FilterOp::EqColumn
+            | FilterOp::NeColumn => {}
         }
 
         let (start, end) = match extract_field(doc, 0, &self.field) {
@@ -117,7 +141,30 @@ impl ScanFilter {
                     _ => Ok(false),
                 };
             }
-            _ => {}
+            FilterOp::Eq
+            | FilterOp::Ne
+            | FilterOp::Gt
+            | FilterOp::Gte
+            | FilterOp::Lt
+            | FilterOp::Lte
+            | FilterOp::Contains
+            | FilterOp::Like
+            | FilterOp::NotLike
+            | FilterOp::Ilike
+            | FilterOp::NotIlike
+            | FilterOp::In
+            | FilterOp::NotIn
+            | FilterOp::IsNull
+            | FilterOp::IsNotNull
+            | FilterOp::ArrayContains
+            | FilterOp::ArrayContainsAll
+            | FilterOp::ArrayOverlap
+            | FilterOp::GtColumn
+            | FilterOp::GteColumn
+            | FilterOp::LtColumn
+            | FilterOp::LteColumn
+            | FilterOp::EqColumn
+            | FilterOp::NeColumn => {}
         }
 
         let (start, end) = match idx.get(&self.field) {
@@ -136,16 +183,16 @@ fn eval_op(filter: &ScanFilter, doc: &[u8], start: usize, _end: usize) -> bool {
         FilterOp::IsNotNull => !read_null(doc, start),
         FilterOp::Eq => eq_value(doc, start, &filter.value),
         FilterOp::Ne => !eq_value(doc, start, &filter.value),
-        FilterOp::Gt => cmp_value(doc, start, &filter.value) == Ordering::Greater,
-        FilterOp::Gte => {
-            let c = cmp_value(doc, start, &filter.value);
-            c == Ordering::Greater || c == Ordering::Equal
-        }
-        FilterOp::Lt => cmp_value(doc, start, &filter.value) == Ordering::Less,
-        FilterOp::Lte => {
-            let c = cmp_value(doc, start, &filter.value);
-            c == Ordering::Less || c == Ordering::Equal
-        }
+        FilterOp::Gt => cmp_value(doc, start, &filter.value) == Some(Ordering::Greater),
+        FilterOp::Gte => matches!(
+            cmp_value(doc, start, &filter.value),
+            Some(Ordering::Greater | Ordering::Equal)
+        ),
+        FilterOp::Lt => cmp_value(doc, start, &filter.value) == Some(Ordering::Less),
+        FilterOp::Lte => matches!(
+            cmp_value(doc, start, &filter.value),
+            Some(Ordering::Less | Ordering::Equal)
+        ),
         FilterOp::Contains => {
             if let (Some(s), Some(pattern)) = (read_str(doc, start), filter.value.as_str()) {
                 s.contains(pattern)
@@ -214,17 +261,11 @@ fn eval_op(filter: &ScanFilter, doc: &[u8], start: usize, _end: usize) -> bool {
             // Read both sides as Value and compare.
             let left = read_value(doc, start).unwrap_or(nodedb_types::Value::Null);
             let right = read_value(doc, other_start).unwrap_or(nodedb_types::Value::Null);
-            match filter.op {
-                FilterOp::GtColumn => left.cmp_coerced(&right) == Ordering::Greater,
-                FilterOp::GteColumn => left.cmp_coerced(&right) != Ordering::Less,
-                FilterOp::LtColumn => left.cmp_coerced(&right) == Ordering::Less,
-                FilterOp::LteColumn => left.cmp_coerced(&right) != Ordering::Greater,
-                FilterOp::EqColumn => left.eq_coerced(&right),
-                FilterOp::NeColumn => !left.eq_coerced(&right),
-                _ => false,
-            }
+            column_compare(filter.op, &left, &right)
         }
-        _ => false,
+        // Handled before field extraction by both `matches_binary` paths.
+        FilterOp::MatchAll | FilterOp::Exists | FilterOp::NotExists => true,
+        FilterOp::Or | FilterOp::Expr => false,
     }
 }
 
@@ -262,15 +303,14 @@ fn eq_value(buf: &[u8], offset: usize, filter_val: &nodedb_types::Value) -> bool
 }
 
 /// Coerced ordering: read msgpack value at offset → compare with `Value`.
-/// Uses `Value::cmp_coerced` — single source of truth for ordering.
+/// Uses `Value::partial_cmp_coerced` — single source of truth for ordering.
 ///
-/// Returns ordering of field_val relative to filter_val (field <=> filter).
+/// Returns ordering of field_val relative to filter_val (field <=> filter),
+/// or `None` when the cell cannot be read or the pair has no defined order,
+/// so a range predicate over it matches nothing.
 #[inline]
-fn cmp_value(buf: &[u8], offset: usize, filter_val: &nodedb_types::Value) -> Ordering {
-    match read_value(buf, offset) {
-        Some(field_val) => field_val.cmp_coerced(filter_val),
-        None => Ordering::Equal,
-    }
+fn cmp_value(buf: &[u8], offset: usize, filter_val: &nodedb_types::Value) -> Option<Ordering> {
+    read_value(buf, offset)?.partial_cmp_coerced(filter_val)
 }
 
 /// LIKE/ILIKE/NOT LIKE/NOT ILIKE helper.
@@ -319,7 +359,7 @@ mod tests {
     fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
         ScanFilter {
             field: field.into(),
-            op: op.into(),
+            op: FilterOp::parse(op).expect(op),
             value,
             clauses: vec![],
             expr: None,
@@ -338,6 +378,52 @@ mod tests {
             !filter("age", "eq", nodedb_types::Value::Integer(30))
                 .matches_binary(&doc)
                 .unwrap()
+        );
+    }
+
+    /// An instant cell compares by epoch microseconds against a typed
+    /// instant literal and against an ISO-8601 string literal.
+    #[test]
+    fn instant_cell_compares_by_micros() {
+        use nodedb_types::{InstantKind, NdbDateTime, Value};
+        const MICROS: i64 = 1_583_402_400_000_000;
+        let mut doc = Vec::new();
+        crate::msgpack_scan::write_map_header(&mut doc, 1);
+        crate::msgpack_scan::write_kv_instant(&mut doc, "ts", InstantKind::Naive, MICROS);
+
+        let same = Value::NaiveDateTime(NdbDateTime::from_micros(MICROS));
+        let later = Value::NaiveDateTime(NdbDateTime::from_micros(MICROS + 1));
+        assert!(
+            filter("ts", "eq", same.clone())
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        assert!(
+            !filter("ts", "eq", later.clone())
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        assert!(filter("ts", "lt", later).matches_binary(&doc).unwrap());
+        assert!(filter("ts", "gte", same).matches_binary(&doc).unwrap());
+        assert!(
+            filter("ts", "eq", Value::String("2020-03-05T10:00:00Z".into()))
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        assert!(
+            filter("ts", "gt", Value::String("2020-03-05 09:00:00".into()))
+                .matches_binary(&doc)
+                .unwrap()
+        );
+        let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
+        assert!(
+            filter(
+                "ts",
+                "eq",
+                Value::NaiveDateTime(NdbDateTime::from_micros(MICROS))
+            )
+            .matches_binary_indexed(&doc, &idx)
+            .unwrap()
         );
     }
 
@@ -539,7 +625,7 @@ mod tests {
         assert!(
             ScanFilter {
                 field: "status".into(),
-                op: "in".into(),
+                op: FilterOp::In,
                 value: vals.clone(),
                 clauses: vec![],
                 expr: None
@@ -552,7 +638,7 @@ mod tests {
         assert!(
             ScanFilter {
                 field: "status".into(),
-                op: "not_in".into(),
+                op: FilterOp::NotIn,
                 value: vals,
                 clauses: vec![],
                 expr: None
@@ -595,7 +681,7 @@ mod tests {
         assert!(
             ScanFilter {
                 field: "tags".into(),
-                op: "array_contains_all".into(),
+                op: FilterOp::ArrayContainsAll,
                 value: needles,
                 clauses: vec![],
                 expr: None
@@ -615,7 +701,7 @@ mod tests {
         assert!(
             ScanFilter {
                 field: "tags".into(),
-                op: "array_overlap".into(),
+                op: FilterOp::ArrayOverlap,
                 value: needles,
                 clauses: vec![],
                 expr: None
@@ -630,7 +716,7 @@ mod tests {
         let doc = encode(&json!({"x": 5}));
         let f = ScanFilter {
             field: String::new(),
-            op: "or".into(),
+            op: FilterOp::Or,
             value: nodedb_types::Value::Null,
             clauses: vec![
                 vec![filter("x", "eq", nodedb_types::Value::Integer(10))],

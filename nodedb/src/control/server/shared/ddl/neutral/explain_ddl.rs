@@ -110,12 +110,7 @@ pub fn explain_permission(
     );
     rows.push(row);
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types: ShapedRows::text_types(3),
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// EXPLAIN SCOPE FOR AUTH USER '<id>'
@@ -169,12 +164,7 @@ pub fn explain_scope(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types: ShapedRows::text_types(3),
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// `SELECT nodedb_assert_visible('<collection>', '<row_id>', '<user_id>')`
@@ -211,12 +201,16 @@ pub fn assert_visible(
     );
     let scope = RequestAuthScope::builder(&target_identity, state.auth_stores()).build();
 
-    // Check if RLS policies would filter this user.
-    let rls_bytes = state.rls.combined_read_predicate_with_auth(
-        target_identity.tenant_id.as_u64(),
-        collection,
-        scope.auth(),
-    );
+    // Check if RLS policies would filter this user. An unencodable policy
+    // is an error, not an answer.
+    let rls_bytes = state
+        .rls
+        .combined_read_predicate_with_auth(
+            target_identity.tenant_id.as_u64(),
+            collection,
+            scope.auth(),
+        )
+        .map_err(|e| DdlError::new("XX000", format!("rls compile: {e}")))?;
 
     let visible = rls_bytes.is_some_and(|b| b.is_empty()); // No filters = visible.
 
@@ -226,10 +220,8 @@ pub fn assert_visible(
         JsonValue::String(visible.to_string()),
     );
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["visible".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["visible".to_string()],
+        vec![row],
+    ))])
 }

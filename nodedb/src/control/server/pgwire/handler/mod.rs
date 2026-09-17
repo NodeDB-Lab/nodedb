@@ -19,7 +19,7 @@ mod routing;
 mod session_cmds;
 mod session_explain;
 mod session_show;
-mod shape_encode;
+pub(in crate::control::server::pgwire) mod shape_encode;
 mod sql_exec;
 mod sql_prepared;
 mod sql_split;

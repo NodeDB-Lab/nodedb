@@ -140,10 +140,10 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
                 // Only the designated time column takes the line's timestamp.
                 // Any other timestamp column is an ordinary column and carries
                 // whatever the row itself supplied.
-                ColumnType::Timestamp if col_idx == schema.timestamp_idx => {
+                ColumnType::Timestamp(_) if col_idx == schema.timestamp_idx => {
                     values.push(ColumnValue::Timestamp(ts_ms));
                 }
-                ColumnType::Timestamp => {
+                ColumnType::Timestamp(_) => {
                     values.push(ColumnValue::Timestamp(find_field_timestamp_ms(
                         &line.fields,
                         col_name,
@@ -325,7 +325,9 @@ fn find_field_i64_opt<'a>(fields: &[(Cow<'a, str>, FieldValue<'a>)], name: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnarMemtableConfig};
+    use crate::engine::timeseries::columnar_memtable::{
+        ColumnData, ColumnarMemtableConfig, TimeKind,
+    };
     use crate::engine::timeseries::ilp::parse_batch;
 
     fn default_config() -> ColumnarMemtableConfig {
@@ -347,7 +349,7 @@ mod tests {
         assert_eq!(schema.columns.len(), 5);
         assert_eq!(
             schema.columns[0],
-            ("timestamp".into(), ColumnType::Timestamp)
+            ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis))
         );
         assert_eq!(schema.columns[1].1, ColumnType::Symbol); // host
         assert_eq!(schema.columns[2].1, ColumnType::Symbol); // dc

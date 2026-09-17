@@ -7,6 +7,7 @@ use sqlparser::ast;
 
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{SCHEMA_QUALIFIED_MSG, normalize_ident};
+use crate::planner::predicate_coerce::coerce_predicate_literals;
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
 use crate::resolver::expr::convert_expr;
@@ -95,8 +96,15 @@ pub fn qualified_name(table: Option<&str>, name: &str) -> String {
 }
 
 /// Convert a WHERE expression into a list of Filter.
+///
+/// The one choke point every predicate passes through: `SELECT ... WHERE`,
+/// `UPDATE` / `DELETE ... WHERE`, a join's post-filter, `HAVING`, a LATERAL
+/// body, and a MERGE `WHEN ... AND` predicate. Literals compared against a
+/// declared instant column are coerced here, so no downstream path sees a
+/// bare integer where an instant is stored.
 pub fn convert_where_to_filters(expr: &ast::Expr, scope: &TableScope) -> Result<Vec<Filter>> {
-    let sql_expr = canonicalize_predicate(convert_expr(expr, &ColumnScope::Relations(scope))?);
+    let mut sql_expr = canonicalize_predicate(convert_expr(expr, &ColumnScope::Relations(scope))?);
+    coerce_predicate_literals(&mut sql_expr, scope)?;
     Ok(vec![Filter {
         expr: FilterExpr::Expr(sql_expr),
     }])

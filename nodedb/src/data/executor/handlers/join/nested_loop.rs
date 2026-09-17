@@ -30,7 +30,6 @@ impl CoreLoop {
             limit,
             left_rls_filters,
             right_rls_filters,
-            instant_columns,
         } = p;
         debug!(
             core = self.core_id,
@@ -223,18 +222,6 @@ impl CoreLoop {
         // rather than silently dropping the excess rows.
         if enforce_output_budget && results.len() >= probe_limit {
             return self.response_error(task, ErrorCode::ResourcesExhausted);
-        }
-
-        // Last step before emission: the scans above compared the
-        // milliseconds storage holds, and the client reads microseconds.
-        if let Err(e) = super::instant_scale::scale_join_instant_rows(&mut results, instant_columns)
-        {
-            return self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: e.to_string(),
-                },
-            );
         }
 
         let payload = super::super::super::response_codec::encode_binary_rows(&results);

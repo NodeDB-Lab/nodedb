@@ -125,8 +125,8 @@ impl NodeDbPgHandler {
         // holds those rows to exactly the announced columns, so the DataRow
         // field count equals the RowDescription column count by construction.
         // Resolve the client's requested per-column result formats (from the
-        // Bind message), downgrading any column whose binary encoding is
-        // feature-blocked back to text. Parallel to `stmt.result_fields`.
+        // Bind message), downgrading any column the cell encoder has no
+        // binary arm for back to text. Parallel to `stmt.result_fields`.
         let result_formats =
             resolve_result_formats(&stmt.result_fields, &portal.result_column_format);
 

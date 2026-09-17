@@ -7,6 +7,8 @@
 //!
 //! Layout:
 //! - [`types`] — `RlsPolicy`, `PolicyType` data shapes.
+//! - [`compile`] — `USING` text → typed `RlsPredicate` against the
+//!   collection's declared columns.
 //! - [`store`] — `RlsPolicyStore` in-memory CRUD + query methods.
 //! - [`eval`] — read/write predicate evaluation on `RlsPolicyStore`
 //!   (including `$auth.*` substitution).
@@ -14,6 +16,7 @@
 //!   to sync replicated policies into the in-memory store.
 //! - [`namespace`] — namespace-scoped `check_namespace_authz` helper.
 
+pub mod compile;
 pub mod eval;
 pub mod namespace;
 pub mod replication;

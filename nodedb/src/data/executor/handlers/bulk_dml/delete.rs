@@ -225,7 +225,7 @@ impl CoreLoop {
         // replay soft-deletes the HNSW node through `apply_point_delete`. Only
         // populated when the collection has a vector index.
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
-        let mut returned_docs: Vec<serde_json::Value> = if returning.is_some() {
+        let mut returned_docs: Vec<nodedb_types::Value> = if returning.is_some() {
             Vec::with_capacity(apply_ids.len())
         } else {
             Vec::new()
@@ -241,33 +241,35 @@ impl CoreLoop {
             // will not decode is a different answer: it would silently drop out
             // of RETURNING and, worse, contribute no removed index tuples, so
             // its old secondary-index entries would survive the delete.
-            let pre_delete_doc: Option<serde_json::Value> = if returning.is_some()
-                || !index_paths.is_empty()
-            {
-                match self
-                    .sparse
-                    .get(
-                        task.request.database_id.as_u64(),
-                        tid,
-                        collection,
-                        storage_key,
-                    )
-                    .ok()
-                    .flatten()
-                {
-                    Some(bytes) => {
-                        let identity = storage_key.to_identity();
-                        match returning_doc::from_stored(&bytes, &identity, strict_schema.as_ref())
-                        {
-                            Ok(doc) => Some(doc),
-                            Err(e) => return self.response_error(task, e),
+            let pre_delete_doc: Option<serde_json::Value> =
+                if returning.is_some() || !index_paths.is_empty() {
+                    match self
+                        .sparse
+                        .get(
+                            task.request.database_id.as_u64(),
+                            tid,
+                            collection,
+                            storage_key,
+                        )
+                        .ok()
+                        .flatten()
+                    {
+                        Some(bytes) => {
+                            let identity = storage_key.to_identity();
+                            match returning_doc::from_stored_json(
+                                &bytes,
+                                &identity,
+                                strict_schema.as_ref(),
+                            ) {
+                                Ok(doc) => Some(doc),
+                                Err(e) => return self.response_error(task, e),
+                            }
                         }
+                        None => None,
                     }
-                    None => None,
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
 
             // The removal and the materialized-sum deltas it owes share ONE
             // transaction, so a debited target row can never outlive a removal

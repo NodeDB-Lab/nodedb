@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_types::InstantKind;
 use nodedb_types::columnar::schema::TS_SYSTEM;
 use nodedb_types::timeseries::{SeriesId, SymbolDictionary};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,25 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
+
+/// What a millisecond time column denotes when its cells are read.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub enum TimeKind {
+    /// An integer count of milliseconds, read back as the integer stored.
+    Millis,
+    /// A declared TIMESTAMP (naive) or TIMESTAMPTZ (utc) instant.
+    Instant(InstantKind),
+}
 
 /// Column data type in a columnar memtable.
 #[derive(
@@ -25,14 +45,35 @@ use serde::{Deserialize, Serialize};
     zerompk::FromMessagePack,
 )]
 pub enum ColumnType {
-    /// Designated timestamp column (i64 millis).
-    Timestamp,
+    /// Time column (i64 millis). The kind says how a cell is read back.
+    Timestamp(TimeKind),
     /// Floating-point metric value.
     Float64,
     /// Integer metric value.
     Int64,
     /// Tag column — stored as u32 symbol IDs.
     Symbol,
+}
+
+impl ColumnType {
+    /// Whether this is a time column of any kind.
+    pub fn is_time(&self) -> bool {
+        matches!(self, ColumnType::Timestamp(_))
+    }
+
+    /// The SQL DDL type name a client sees for this column (schema-preview
+    /// responses, catalog field lists).
+    pub fn ddl_type_name(&self) -> &'static str {
+        match self {
+            ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc)) => "TIMESTAMPTZ",
+            ColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive) | TimeKind::Millis) => {
+                "TIMESTAMP"
+            }
+            ColumnType::Float64 => "FLOAT",
+            ColumnType::Int64 => "BIGINT",
+            ColumnType::Symbol => "VARCHAR",
+        }
+    }
 }
 
 /// Schema for a columnar memtable (column names + types, in order).
@@ -51,7 +92,7 @@ impl ColumnarSchema {
     pub fn metric_default() -> Self {
         Self {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("value".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -106,7 +147,7 @@ pub enum ColumnData {
 impl ColumnData {
     pub(super) fn new(ty: ColumnType) -> Self {
         match ty {
-            ColumnType::Timestamp => Self::Timestamp(Vec::with_capacity(4096)),
+            ColumnType::Timestamp(_) => Self::Timestamp(Vec::with_capacity(4096)),
             ColumnType::Float64 => Self::Float64(Vec::with_capacity(4096)),
             ColumnType::Int64 => Self::Int64(Vec::with_capacity(4096)),
             ColumnType::Symbol => Self::Symbol(Vec::with_capacity(4096)),

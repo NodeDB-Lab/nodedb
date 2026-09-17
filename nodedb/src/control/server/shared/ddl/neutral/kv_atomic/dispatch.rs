@@ -178,12 +178,7 @@ fn data_plane_error(code: Option<crate::bridge::envelope::ErrorCode>) -> DdlErro
 pub(crate) fn single_text_col(col: &str, text: String) -> DdlResult {
     let mut row = Map::new();
     row.insert(col.to_string(), JsonValue::String(text));
-    DdlResult::Rows(ShapedRows {
-        columns: vec![col.to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })
+    DdlResult::Rows(ShapedRows::text_rows(vec![col.to_string()], vec![row]))
 }
 
 /// Parse function arguments from `SELECT FUNC_NAME(arg1, arg2, ...)`.

@@ -13,13 +13,15 @@
 
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 
-use super::columnar_memtable::{ColumnType, ColumnarMemtable, ColumnarSchema};
+use super::columnar_memtable::{ColumnType, ColumnarMemtable, ColumnarSchema, TimeKind};
 use super::ilp::{FieldValue, IlpLine};
 
 /// Infers a columnar schema from a batch of ILP lines.
 ///
 /// Scans all lines to discover tag keys and field keys, then builds
 /// a schema: timestamp + tag columns (Symbol) + field columns (typed).
+/// The inferred time column is `Millis`: no declaration names it an
+/// instant, so it reads back as the integer the line carried.
 pub fn infer_schema(lines: &[IlpLine<'_>]) -> ColumnarSchema {
     let mut tag_keys: Vec<String> = Vec::new();
     let mut field_keys: Vec<(String, ColumnType)> = Vec::new();
@@ -46,7 +48,10 @@ pub fn infer_schema(lines: &[IlpLine<'_>]) -> ColumnarSchema {
     }
 
     let mut columns = Vec::with_capacity(1 + tag_keys.len() + field_keys.len());
-    columns.push(("timestamp".to_string(), ColumnType::Timestamp));
+    columns.push((
+        "timestamp".to_string(),
+        ColumnType::Timestamp(TimeKind::Millis),
+    ));
     for tag in &tag_keys {
         columns.push((tag.clone(), ColumnType::Symbol));
     }

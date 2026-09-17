@@ -312,11 +312,11 @@ async fn columnar_where_clause_division_by_zero_errors_22012() {
 }
 
 /// Columnar engine, computed SELECT column division by zero:
-/// `row_to_projected_json`'s `Err` arm in `execute_columnar_scan`'s
+/// `row_to_projected_value`'s `Err` arm in `execute_columnar_scan`'s
 /// live-memtable phase (a real, non-empty `computed_cols`).
 ///
 /// `denom` must be listed explicitly alongside the computed `ratio` column
-/// (not just referenced inside the expression): `row_to_projected_json`
+/// (not just referenced inside the expression): `row_to_projected_value`
 /// only includes a stored column in the row object it hands to the computed
 /// expression evaluator when that column is itself in the projection list
 /// (or force-included) — an explicit, non-computed `SELECT` entry for every

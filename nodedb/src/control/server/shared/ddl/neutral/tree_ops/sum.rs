@@ -179,10 +179,8 @@ pub async fn tree_sum(
     let mut row = Map::new();
     row.insert("tree_sum".to_string(), JsonValue::String(total.to_string()));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["tree_sum".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["tree_sum".to_string()],
+        vec![row],
+    ))])
 }

@@ -305,12 +305,11 @@ fn encode_compact_response(rows: Vec<CollectionStats>) -> Vec<DdlResult> {
         data_rows.push(row);
     }
 
-    vec![DdlResult::Rows(ShapedRows {
+    vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
-        rows: data_rows,
-        notice: None,
-    })]
+        data_rows,
+    ))]
 }
 
 fn encode_verbose_response(rows: Vec<CollectionStats>) -> Vec<DdlResult> {
@@ -338,10 +337,9 @@ fn encode_verbose_response(rows: Vec<CollectionStats>) -> Vec<DdlResult> {
         }
     }
 
-    vec![DdlResult::Rows(ShapedRows {
+    vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
-        rows: data_rows,
-        notice: None,
-    })]
+        data_rows,
+    ))]
 }

@@ -198,19 +198,18 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<RlsPredicate, Predic
 
     if *pos >= tokens.len() {
         // Standalone value — treat as boolean (truthy).
-        return match left_value {
-            PredicateValue::AuthRef(_)
-            | PredicateValue::Field(_)
-            | PredicateValue::AuthFunc { .. } => Ok(RlsPredicate::Compare {
-                field: match &left_value {
-                    PredicateValue::Field(f) => f.clone(),
-                    _ => String::new(),
-                },
-                op: CompareOp::IsNotNull,
-                value: left_value,
-            }),
-            PredicateValue::Literal(_) => Ok(RlsPredicate::AlwaysTrue),
+        let field = match &left_value {
+            PredicateValue::Field(f) => f.clone(),
+            PredicateValue::AuthRef(_) | PredicateValue::AuthFunc { .. } => String::new(),
+            PredicateValue::Literal(_) | PredicateValue::Instant { .. } => {
+                return Ok(RlsPredicate::AlwaysTrue);
+            }
         };
+        return Ok(RlsPredicate::Compare {
+            field,
+            op: CompareOp::IsNotNull,
+            value: left_value,
+        });
     }
 
     let op_token = tokens[*pos].to_uppercase();
@@ -430,7 +429,9 @@ pub fn validate_auth_refs(predicate: &RlsPredicate) -> crate::Result<()> {
                     });
                 }
             }
-            _ => {}
+            PredicateValue::Literal(_)
+            | PredicateValue::Instant { .. }
+            | PredicateValue::Field(_) => {}
         }
         Ok(())
     }

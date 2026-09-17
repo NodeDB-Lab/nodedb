@@ -17,7 +17,7 @@
 use serde_json::{Map, Value as JsonValue};
 
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 
 use super::super::result::{DdlError, DdlResult};
@@ -99,12 +99,10 @@ pub fn create_auth_key(
 
     let mut row = Map::new();
     row.insert("auth_api_key".to_string(), JsonValue::String(token));
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["auth_api_key".to_string()],
-        column_types: vec![DdlColType::Text],
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["auth_api_key".to_string()],
+        vec![row],
+    ))])
 }
 
 /// ROTATE AUTH KEY '<key_id>' [OVERLAP 24h]
@@ -144,12 +142,10 @@ pub fn rotate_auth_key(
 
     let mut row = Map::new();
     row.insert("new_auth_api_key".to_string(), JsonValue::String(new_token));
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["new_auth_api_key".to_string()],
-        column_types: vec![DdlColType::Text],
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["new_auth_api_key".to_string()],
+        vec![row],
+    ))])
 }
 
 /// LIST AUTH KEYS [FOR AUTH USER '<id>']
@@ -179,7 +175,6 @@ pub fn list_auth_keys(
         "last_used_at".to_string(),
         "last_used_ip".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = keys
         .iter()
@@ -219,10 +214,5 @@ pub fn list_auth_keys(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

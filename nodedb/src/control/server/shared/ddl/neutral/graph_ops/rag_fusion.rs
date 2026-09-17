@@ -16,7 +16,7 @@ use nodedb_sql::ddl_ast::GraphDirection;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::ddl::user_dispatch;
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec;
@@ -140,10 +140,8 @@ pub async fn rag_fusion(
     let mut row = Map::new();
     row.insert("result".to_string(), JsonValue::String(json_text));
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: vec![DdlColType::Text],
-        rows: vec![row],
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["result".to_string()],
+        vec![row],
+    ))])
 }

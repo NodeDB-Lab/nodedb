@@ -111,12 +111,11 @@ pub fn show_audit_log(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW AUDIT WHERE event_type = '<snake_name>'
@@ -206,12 +205,11 @@ pub fn show_audit_where(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// `SHOW AUDIT IN DATABASE <name> [LIMIT <n>]`
@@ -329,12 +327,11 @@ pub fn show_audit_in_database(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// Audit entries are read with a regular `SELECT` query against

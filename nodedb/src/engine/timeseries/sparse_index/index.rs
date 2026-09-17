@@ -356,7 +356,7 @@ fn compute_block_stats(
     row_end: usize,
 ) -> BlockColumnStats {
     match (col, col_type) {
-        (ColumnData::Timestamp(v), ColumnType::Timestamp) => {
+        (ColumnData::Timestamp(v), ColumnType::Timestamp(_)) => {
             let slice = &v[row_start..row_end];
             if slice.is_empty() {
                 return BlockColumnStats::none();
@@ -424,8 +424,12 @@ fn compute_block_stats(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::columnar_memtable::{ColumnData, ColumnType, ColumnarSchema};
+    use super::super::super::columnar_memtable::{
+        ColumnData, ColumnType, ColumnarSchema, TimeKind,
+    };
     use super::*;
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     fn make_test_columns(row_count: usize) -> (Vec<ColumnData>, ColumnarSchema) {
         let timestamps: Vec<i64> = (0..row_count as i64)
@@ -439,7 +443,7 @@ mod tests {
         ];
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -475,7 +479,7 @@ mod tests {
         let columns = vec![ColumnData::Timestamp(vec![]), ColumnData::Float64(vec![])];
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -570,7 +574,7 @@ mod tests {
         ];
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,

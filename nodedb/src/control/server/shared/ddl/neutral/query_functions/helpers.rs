@@ -9,9 +9,11 @@
 //! of a pgwire `QueryResponse`. SQLSTATE codes and messages are unchanged.
 
 use nodedb_sql::parser::preprocess::lex::find_ascii_case_insensitive;
+use nodedb_types::Value;
 use serde_json::{Map, Value as JsonValue};
 
-use crate::control::server::response_shape::project::{is_scan_wrapper, push_flat_rows};
+use crate::control::server::response_shape::cell::row_to_wire_json;
+use crate::control::server::response_shape::project::{is_scan_wrapper_json, push_flat_rows};
 use crate::control::server::response_shape::types::ShapedRows;
 
 use super::super::super::result::{DdlError, DdlResult};
@@ -73,12 +75,10 @@ pub fn json_to_decimal(v: &serde_json::Value) -> Option<rust_decimal::Decimal> {
 pub fn single_result(value: &str) -> Vec<DdlResult> {
     let mut row = Map::new();
     row.insert("result".to_string(), JsonValue::String(value.to_string()));
-    vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: vec![row],
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["result".to_string()],
+        vec![row],
+    ))]
 }
 
 /// Unwrap the `DocumentOp::Scan` raw-passthrough envelope (`{"id": ..,
@@ -87,14 +87,16 @@ pub fn single_result(value: &str) -> Vec<DdlResult> {
 ///
 /// Reuses `response_shape::project::push_flat_rows` — the same unwrap the
 /// pgwire/HTTP row shaper applies — so there is exactly one definition of
-/// "unwrap a scan envelope" in the tree. Rows that are not `{id, data}`
+/// "unwrap a scan envelope" in the tree. Each JSON document is lifted to a
+/// typed value for the unwrap and its rows rendered back to JSON for the
+/// callers, which read fields as JSON. Rows that are not `{id, data}`
 /// wrapped (already-flat producers) pass through unchanged.
 pub fn unwrap_scan_docs(docs: Vec<JsonValue>) -> Result<Vec<Map<String, JsonValue>>, DdlError> {
-    let mut out = Vec::with_capacity(docs.len());
+    let mut rows = Vec::with_capacity(docs.len());
     for doc in docs {
-        push_flat_rows(doc, &mut out).map_err(|e| err("XX000", &e.to_string()))?;
+        push_flat_rows(Value::from(doc), &mut rows).map_err(|e| err("XX000", &e.to_string()))?;
     }
-    Ok(out)
+    Ok(rows.iter().map(row_to_wire_json).collect())
 }
 
 /// Unwrap a `DocumentOp::Scan` envelope while also returning the row's wire
@@ -104,15 +106,15 @@ pub fn unwrap_scan_docs(docs: Vec<JsonValue>) -> Result<Vec<Map<String, JsonValu
 /// at insert time, not a same-named field inside the document body, which
 /// may not exist).
 ///
-/// Reuses `response_shape::project::is_scan_wrapper` for the shape check —
-/// the same predicate `push_flat_rows` and the pgwire/HTTP row shaper use —
-/// so the wrapper shape is defined in exactly one place. Rows that are not
-/// `{id, data}` wrapped are returned with an empty id and their fields as-is.
+/// Reuses `response_shape::project::is_scan_wrapper_json` for the shape
+/// check — the JSON form of the predicate `push_flat_rows` and the
+/// pgwire/HTTP row shaper use. Rows that are not `{id, data}` wrapped are
+/// returned with an empty id and their fields as-is.
 pub fn unwrap_scan_doc_with_id(doc: JsonValue) -> (String, Map<String, JsonValue>) {
     let JsonValue::Object(mut map) = doc else {
         return (String::new(), Map::new());
     };
-    if is_scan_wrapper(&map) {
+    if is_scan_wrapper_json(&map) {
         let id = map
             .get("id")
             .and_then(|v| v.as_str())
@@ -132,10 +134,8 @@ pub fn unwrap_scan_doc_with_id(doc: JsonValue) -> (String, Map<String, JsonValue
 /// Mirrors the pgwire empty-`QueryResponse` case (one text column named
 /// `result`, no rows).
 pub fn empty_result() -> Vec<DdlResult> {
-    vec![DdlResult::Rows(ShapedRows {
-        columns: vec!["result".to_string()],
-        column_types: ShapedRows::text_types(1),
-        rows: Vec::new(),
-        notice: None,
-    })]
+    vec![DdlResult::Rows(ShapedRows::text_rows(
+        vec!["result".to_string()],
+        Vec::new(),
+    ))]
 }

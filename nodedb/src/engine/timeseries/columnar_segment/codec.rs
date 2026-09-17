@@ -10,7 +10,7 @@ use super::error::SegmentError;
 /// Legacy default codecs for partitions written before V2 codec metadata.
 pub(super) fn legacy_default_codec(col_type: ColumnType) -> ResolvedColumnCodec {
     match col_type {
-        ColumnType::Timestamp => ResolvedColumnCodec::Gorilla,
+        ColumnType::Timestamp(_) => ResolvedColumnCodec::Gorilla,
         ColumnType::Float64 => ResolvedColumnCodec::Gorilla,
         ColumnType::Int64 => ResolvedColumnCodec::Raw,
         ColumnType::Symbol => ResolvedColumnCodec::Raw,
@@ -28,7 +28,7 @@ pub(super) fn encode_column(
     requested_codec: ColumnCodec,
 ) -> Result<(Vec<u8>, ResolvedColumnCodec, ColumnStatistics), SegmentError> {
     match col_type {
-        ColumnType::Timestamp => {
+        ColumnType::Timestamp(_) => {
             let values = col_data.as_timestamps();
             let codec = if requested_codec == ColumnCodec::Auto {
                 nodedb_codec::detect::detect_i64_codec(values)
@@ -99,7 +99,7 @@ pub(super) fn decode_column(
     let map_err = |e: nodedb_codec::CodecError| SegmentError::Corrupt(format!("{codec}: {e}"));
 
     match col_type {
-        ColumnType::Timestamp => {
+        ColumnType::Timestamp(_) => {
             let values = nodedb_codec::decode_i64_pipeline(data, codec.into_column_codec())
                 .map_err(map_err)?;
             Ok(ColumnData::Timestamp(values))

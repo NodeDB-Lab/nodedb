@@ -91,8 +91,8 @@ pub fn show_partitions(
         }
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns: vec![
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
+        vec![
             "partition".to_string(),
             "min_ts".to_string(),
             "max_ts".to_string(),
@@ -100,7 +100,7 @@ pub fn show_partitions(
             "size".to_string(),
             "state".to_string(),
         ],
-        column_types: vec![
+        vec![
             DdlColType::Text,
             DdlColType::Int8,
             DdlColType::Int8,
@@ -109,6 +109,5 @@ pub fn show_partitions(
             DdlColType::Text,
         ],
         rows,
-        notice: None,
-    })])
+    ))])
 }

@@ -15,6 +15,9 @@ use nodedb_types::DatabaseId;
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::neutral::collection::helpers::parse_origin_column_def;
+use crate::control::server::shared::ddl::neutral::column_default::{
+    DeclaredColumn, validate_column_default,
+};
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
 use crate::control::state::SharedState;
 
@@ -32,15 +35,6 @@ pub(super) async fn alter_table_add_column(
 
     let column = parse_origin_column_def(col_def_str).map_err(|e| err("42601", e.to_string()))?;
     let column_name = column.name.clone();
-    // The declared DEFAULT passes the same gate a CREATE column passes: an
-    // unregistered function name, or an expression that names another column,
-    // is refused at the declaration rather than at the first insert. The gate
-    // reads the parsed default text, never the whole definition: the type
-    // parser finds the clause by substring, so a column name that contains the
-    // word `default` would otherwise be read as that clause.
-    if let Some(default_expr) = column.default.as_deref() {
-        super::super::super::column_default::validate_column_default(&column_name, default_expr)?;
-    }
     // The declared type as written, e.g. `SMALLINT` from `age SMALLINT NOT
     // NULL`. `ColumnDef::column_type` cannot supply this: it has one `Int64`
     // variant for every integer width. Falls back to the resolved type's own
@@ -60,6 +54,21 @@ pub(super) async fn alter_table_add_column(
                 column.name
             ),
         ));
+    }
+    // A DEFAULT passes the same gate `CREATE` applies: evaluable, constant, and
+    // a literal the declared type can hold. The gate reads the parsed default
+    // text, never the whole definition: the type parser finds the clause by
+    // substring, so a column name that contains the word `default` would
+    // otherwise be read as that clause.
+    if let Some(expr) = &column.default {
+        validate_column_default(
+            &DeclaredColumn {
+                name: &column.name,
+                declared_type: &declared_type,
+                primary_key: column.primary_key,
+            },
+            expr,
+        )?;
     }
 
     let updated = {
@@ -121,6 +130,7 @@ pub(super) async fn alter_table_add_column(
         super::super::register::dispatch_register_from_stored(state, coll)
             .await
             .map_err(|e| err("XX000", e.to_string()))?;
+        super::strict_schema::recompile_rls_policies(state, coll)?;
     }
 
     state.audit_record(

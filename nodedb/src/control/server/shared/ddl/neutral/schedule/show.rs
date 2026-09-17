@@ -95,13 +95,7 @@ pub fn show_schedules(
         rows.push(row);
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Handle `SHOW SCHEDULE HISTORY name`
@@ -164,13 +158,7 @@ pub fn show_schedule_history(
         rows.push(row);
     }
 
-    let column_types = ShapedRows::text_types(columns.len());
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// Format epoch seconds as ISO 8601 UTC string.

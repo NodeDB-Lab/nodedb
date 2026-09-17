@@ -6,7 +6,7 @@
 //! reads the collection's active typeguards instead.
 
 use super::super::super::result::DdlError;
-use super::super::column_default::validate_constant_clause_expr;
+use super::super::column_default::{DeclaredColumn, validate_column_default_clause};
 use super::support::err;
 use super::type_map::typeguard_type_to_column_type;
 
@@ -16,8 +16,9 @@ use super::type_map::typeguard_type_to_column_type;
 /// REQUIRED fields become NOT NULL. DEFAULT expressions carry over.
 ///
 /// A carried-over expression becomes a column `DEFAULT`, so it passes the gate
-/// every declared column `DEFAULT` passes. An unregistered function name
-/// raises `42883`; every other rejection raises `42601`.
+/// every declared column `DEFAULT` passes: an unregistered function name
+/// raises `42883`, a literal the resolved type cannot hold `42804` or `22003`,
+/// and every other rejection `42601`.
 pub(super) fn typeguards_to_column_defs(
     guards: &[nodedb_types::TypeGuardFieldDef],
 ) -> Result<Vec<nodedb_types::columnar::ColumnDef>, DdlError> {
@@ -55,11 +56,23 @@ pub(super) fn typeguards_to_column_defs(
             .map(|expr| ("DEFAULT", expr))
             .or(guard.value_expr.clone().map(|expr| ("VALUE", expr)));
         if let Some((clause, expr)) = carried {
-            // The one gate refuses an unregistered function name and a
-            // column-referencing expression alike, naming the field and the
-            // clause the author wrote. A guard VALUE evaluates per row against
-            // the document; the column DEFAULT it becomes does not.
-            validate_constant_clause_expr(clause, &col.name, &expr)?;
+            // The one gate refuses an unregistered function name, a
+            // column-referencing expression and a literal the declared type
+            // cannot hold alike, naming the field and the clause the author
+            // wrote. A guard VALUE evaluates per row against the document; the
+            // column DEFAULT it becomes does not. The resolved type's own
+            // spelling stands in for the declaration: a guard names no numeric
+            // width, so the canonical name resolves to the same width-less
+            // type the column will carry.
+            validate_column_default_clause(
+                clause,
+                &DeclaredColumn {
+                    name: &col.name,
+                    declared_type: &col.column_type.to_string(),
+                    primary_key: col.primary_key,
+                },
+                &expr,
+            )?;
             col.default = Some(expr);
         }
         columns.push(col);

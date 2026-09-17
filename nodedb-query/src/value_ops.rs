@@ -30,26 +30,53 @@ pub fn value_to_f64(v: &Value, coerce_bool: bool) -> Option<f64> {
     }
 }
 
-/// Compare two Values with type coercion.
+/// Whether either side is a typed instant, so the pair compares by epoch
+/// microseconds through `Value::partial_cmp_coerced` (an ISO string on the
+/// other side is parsed).
+fn involves_instant(a: &Value, b: &Value) -> bool {
+    a.as_instant().is_some() || b.as_instant().is_some()
+}
+
+/// Compare two Values with type coercion, for a predicate.
 ///
-/// Tries numeric comparison first (with bool coercion), then falls
-/// back to string comparison.
-pub fn compare_values(a: &Value, b: &Value) -> Ordering {
+/// A typed instant compares by epoch microseconds against another instant
+/// or an ISO-8601 string, and against anything else has no order: `None`,
+/// so `WHERE at >= 5` over an instant matches nothing. Otherwise numeric
+/// comparison first (with bool coercion; `None` for a NaN), then string
+/// comparison of the display forms.
+pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
+    if involves_instant(a, b) {
+        return a.partial_cmp_coerced(b);
+    }
     if let (Some(na), Some(nb)) = (value_to_f64(a, true), value_to_f64(b, true)) {
-        return na.partial_cmp(&nb).unwrap_or(Ordering::Equal);
+        return na.partial_cmp(&nb);
     }
     let sa = value_to_display_string(a);
     let sb = value_to_display_string(b);
-    sa.cmp(&sb)
+    Some(sa.cmp(&sb))
+}
+
+/// Compare two Values with type coercion, for sorting and extremum
+/// selection (ORDER BY, MIN / MAX, GREATEST / LEAST, window frames).
+///
+/// [`partial_compare_values`] with an unordered pair placed as `Equal`, so a
+/// stable sort keeps such rows in their input order. A predicate uses
+/// `partial_compare_values` instead.
+pub fn compare_values(a: &Value, b: &Value) -> Ordering {
+    partial_compare_values(a, b).unwrap_or(Ordering::Equal)
 }
 
 /// Check equality with type coercion.
 ///
-/// Handles `"5" == 5` by coercing both sides to f64 when one is a
-/// number and the other is a numeric string.
+/// A typed instant equals another instant or an ISO-8601 string with the
+/// same epoch microseconds. Handles `"5" == 5` by coercing both sides to
+/// f64 when one is a number and the other is a numeric string.
 pub fn coerced_eq(a: &Value, b: &Value) -> bool {
     if a == b {
         return true;
+    }
+    if involves_instant(a, b) {
+        return a.eq_coerced(b);
     }
     if let (Some(af), Some(bf)) = (value_to_f64(a, true), value_to_f64(b, true)) {
         return (af - bf).abs() < f64::EPSILON;
@@ -136,6 +163,38 @@ mod tests {
             compare_values(&Value::Integer(5), &Value::String("4".into())),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn instants_compare_by_micros_against_instants_and_iso_strings() {
+        let earlier = Value::NaiveDateTime(nodedb_types::NdbDateTime::from_micros(
+            1_583_402_400_000_000,
+        ));
+        let later = Value::DateTime(nodedb_types::NdbDateTime::from_micros(
+            1_583_406_000_000_000,
+        ));
+        assert_eq!(compare_values(&earlier, &later), Ordering::Less);
+        assert_eq!(
+            compare_values(&later, &Value::String("2020-03-05 10:00:00".into())),
+            Ordering::Greater
+        );
+        assert!(coerced_eq(
+            &earlier,
+            &Value::String("2020-03-05T10:00:00Z".into())
+        ));
+        assert!(!coerced_eq(&earlier, &later));
+    }
+
+    /// An instant against a bare integer has no order on the predicate path
+    /// and sorts as equal on the extremum path.
+    #[test]
+    fn an_instant_against_an_integer_is_unordered_for_predicates() {
+        let at = Value::NaiveDateTime(nodedb_types::NdbDateTime::from_micros(
+            1_583_402_400_000_000,
+        ));
+        assert_eq!(partial_compare_values(&at, &Value::Integer(5)), None);
+        assert_eq!(partial_compare_values(&Value::Integer(5), &at), None);
+        assert_eq!(compare_values(&at, &Value::Integer(5)), Ordering::Equal);
     }
 
     #[test]

@@ -14,13 +14,10 @@
 //! The column is never omitted: an omitted column stores NULL where the
 //! declaration promised a value, and nothing reports it.
 //!
-//! Lives in the SQL crate rather than beside one engine's converter because
-//! every engine that materializes a DEFAULT has to produce the SAME value for
-//! the same expression — a `DEFAULT now()` that means one thing on a document
-//! collection and another on a key-value one would be a difference nobody
-//! declared. The key-value planner also needs it BEFORE its declared-type
-//! coercion and range checks run, so a materialized default is validated
-//! exactly like a supplied one.
+//! Lives in the planner because every engine's rows materialize their
+//! DEFAULTs there, before declared-type coercion and range checks run, so a
+//! materialized default is validated exactly like a supplied one and a
+//! `DEFAULT now()` means the same thing on every engine.
 
 mod compiled;
 mod convert;

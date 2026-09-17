@@ -15,5 +15,5 @@ pub mod scan;
 pub mod scan_flushed;
 pub mod sort;
 
-pub(in crate::data::executor) use convert::emit_column_value;
+pub(in crate::data::executor) use convert::{emit_column_value, rmpv_time_cell};
 pub(in crate::data::executor) use scan::ColumnarScanParams;

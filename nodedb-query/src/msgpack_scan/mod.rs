@@ -34,6 +34,7 @@ pub use sidecar::{
 };
 pub use writer::{
     build_str_map, inject_str_field, merge_fields, write_array_header, write_bin, write_bool,
-    write_f64, write_i64, write_kv_bool, write_kv_f64, write_kv_i64, write_kv_null, write_kv_raw,
-    write_kv_str, write_map_header, write_null, write_str,
+    write_f64, write_i64, write_instant, write_kv_bool, write_kv_f64, write_kv_i64,
+    write_kv_instant, write_kv_null, write_kv_raw, write_kv_str, write_map_header, write_null,
+    write_str,
 };

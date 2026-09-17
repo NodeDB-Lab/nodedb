@@ -100,12 +100,11 @@ pub fn show_raft_groups(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::from_json_rows(
         columns,
         column_types,
         rows,
-        notice: None,
-    })])
+    ))])
 }
 
 /// SHOW RAFT GROUP <id> — detailed info for a specific Raft group.
@@ -153,7 +152,6 @@ pub fn show_raft_group(
     };
 
     let columns = vec!["property".to_string(), "value".to_string()];
-    let column_types = vec![DdlColType::Text, DdlColType::Text];
 
     let props = [
         ("group_id", group.group_id.to_string()),
@@ -203,12 +201,7 @@ pub fn show_raft_group(
         rows.push(row);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }
 
 /// ALTER RAFT GROUP <id> ADD|REMOVE NODE <node_id>

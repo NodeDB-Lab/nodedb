@@ -20,6 +20,9 @@ use std::sync::OnceLock;
 
 use nodedb_types::Value;
 
+use super::super::row_identity::inject_row_identity;
+use crate::util::rmpv_value::rmpv_to_value;
+
 /// A single row in a trigger batch.
 ///
 /// Stores raw MessagePack bytes from the WriteEvent and decodes directly
@@ -174,42 +177,6 @@ fn decode_msgpack_to_value_map(bytes: &[u8], row_id: &str) -> Option<HashMap<Str
         return Some(fields);
     }
     None
-}
-
-use super::super::row_identity::inject_row_identity;
-
-/// Convert an rmpv Value directly to nodedb_types::Value (no serde_json intermediate).
-fn rmpv_to_value(val: &rmpv::Value) -> Value {
-    match val {
-        rmpv::Value::Nil => Value::Null,
-        rmpv::Value::Boolean(b) => Value::Bool(*b),
-        rmpv::Value::Integer(i) => {
-            if let Some(n) = i.as_i64() {
-                Value::Integer(n)
-            } else if let Some(n) = i.as_u64() {
-                Value::Integer(n as i64)
-            } else {
-                Value::Null
-            }
-        }
-        rmpv::Value::F32(f) => Value::Float(*f as f64),
-        rmpv::Value::F64(f) => Value::Float(*f),
-        rmpv::Value::String(s) => Value::String(s.as_str().unwrap_or("").to_string()),
-        rmpv::Value::Binary(b) => Value::Bytes(b.clone()),
-        rmpv::Value::Array(arr) => Value::Array(arr.iter().map(rmpv_to_value).collect()),
-        rmpv::Value::Map(pairs) => {
-            let mut map = HashMap::new();
-            for (k, v) in pairs {
-                let key = match k {
-                    rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
-                    other => format!("{other}"),
-                };
-                map.insert(key, rmpv_to_value(v));
-            }
-            Value::Object(map)
-        }
-        rmpv::Value::Ext(_, _) => Value::Null,
-    }
 }
 
 /// A complete batch of rows for trigger dispatch.

@@ -6,6 +6,7 @@ use nodedb_types::DatabaseId;
 use std::sync::Arc;
 
 use crate::Error;
+use crate::control::security::catalog::StoredCollection;
 use crate::control::state::SharedState;
 use crate::types::{SurrogateBindEntry, TenantDataSnapshot};
 
@@ -81,16 +82,23 @@ pub(super) fn is_metadata_section(section: &nodedb_types::backup_envelope::Secti
 /// catalog-propose failure on this path is FATAL: returning the data
 /// restored but unqueryable on non-coordinator nodes is the
 /// silent-partial-success anti-pattern this codebase forbids.
+///
+/// Returns every collection written to the catalog, in section order. The
+/// caller registers each one with this node's Data Plane before any restored
+/// row is installed or reissued: a catalog row alone leaves `doc_configs`
+/// without the collection's declaration, and a reissued timeseries row would
+/// then be ingested into an inferred shape.
 pub(super) fn apply_metadata_sections(
     state: &Arc<SharedState>,
     tenant_id: u64,
     env: &nodedb_types::backup_envelope::Envelope,
-) -> Result<(), Error> {
+) -> Result<Vec<StoredCollection>, Error> {
     use nodedb_types::backup_envelope::{
         SECTION_ORIGIN_CATALOG_ROWS, SECTION_ORIGIN_SOURCE_TOMBSTONES, SourceTombstoneEntry,
         StoredCollectionBlob,
     };
     let catalog = state.credentials.catalog();
+    let mut restored: Vec<StoredCollection> = Vec::new();
 
     for section in &env.sections {
         match section.origin_node_id {
@@ -104,9 +112,7 @@ pub(super) fn apply_metadata_sections(
                     continue;
                 };
                 for blob in blobs {
-                    let Ok(coll) = zerompk::from_msgpack::<
-                        crate::control::security::catalog::StoredCollection,
-                    >(&blob.bytes) else {
+                    let Ok(coll) = zerompk::from_msgpack::<StoredCollection>(&blob.bytes) else {
                         tracing::warn!(
                             tenant_id,
                             name = %blob.name,
@@ -121,8 +127,9 @@ pub(super) fn apply_metadata_sections(
                     // blocks on its local applied-index watcher, so on the
                     // cluster path it has already applied the put via the
                     // same applier — we must NOT also put locally (double-put).
-                    let entry =
-                        crate::control::catalog_entry::CatalogEntry::PutCollection(Box::new(coll));
+                    let entry = crate::control::catalog_entry::CatalogEntry::PutCollection(
+                        Box::new(coll.clone()),
+                    );
                     let outcome =
                         crate::control::metadata_proposer::propose_catalog_entry(state, &entry)?;
                     if outcome.needs_local_apply() {
@@ -131,12 +138,9 @@ pub(super) fn apply_metadata_sections(
                         // applier would have done on a clustered deployment.
                         // A failure here is FATAL — the collection would be
                         // unqueryable otherwise.
-                        if let crate::control::catalog_entry::CatalogEntry::PutCollection(boxed) =
-                            entry
-                        {
-                            catalog.put_collection(DatabaseId::DEFAULT, &boxed)?;
-                        }
+                        catalog.put_collection(DatabaseId::DEFAULT, &coll)?;
                     }
+                    restored.push(coll);
                 }
             }
             SECTION_ORIGIN_SOURCE_TOMBSTONES => {
@@ -184,5 +188,5 @@ pub(super) fn apply_metadata_sections(
             _ => {}
         }
     }
-    Ok(())
+    Ok(restored)
 }

@@ -22,7 +22,6 @@ pub fn show_scopes(
         let name = parts[2].trim_matches('\'');
         let resolved = state.scope_defs.resolve(name);
         let columns = vec!["permission".to_string(), "collection".to_string()];
-        let column_types = ShapedRows::text_types(columns.len());
         let rows: Vec<_> = resolved
             .iter()
             .map(|(perm, coll)| {
@@ -32,12 +31,7 @@ pub fn show_scopes(
                 row
             })
             .collect();
-        return Ok(vec![DdlResult::Rows(ShapedRows {
-            columns,
-            column_types,
-            rows,
-            notice: None,
-        })]);
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))]);
     }
 
     // SHOW SCOPES — list all scope definitions.
@@ -48,7 +42,6 @@ pub fn show_scopes(
         "includes".to_string(),
         "created_by".to_string(),
     ];
-    let column_types = ShapedRows::text_types(columns.len());
 
     let rows: Vec<_> = scopes
         .iter()
@@ -76,10 +69,5 @@ pub fn show_scopes(
         })
         .collect();
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
-        columns,
-        column_types,
-        rows,
-        notice: None,
-    })])
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(columns, rows))])
 }

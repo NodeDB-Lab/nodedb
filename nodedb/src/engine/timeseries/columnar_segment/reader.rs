@@ -229,7 +229,7 @@ impl ColumnarSegmentReader {
         }
 
         let data = match col_type {
-            ColumnType::Timestamp => ColumnData::Timestamp(all_values),
+            ColumnType::Timestamp(_) => ColumnData::Timestamp(all_values),
             ColumnType::Int64 => ColumnData::Int64(all_values),
             ColumnType::Float64 => {
                 let f64_vals: Vec<f64> = all_values
@@ -417,10 +417,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::super::columnar_memtable::{
-        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig,
+        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
     };
     use super::super::writer::ColumnarSegmentWriter;
     use super::*;
+
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
     fn test_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
@@ -459,7 +461,7 @@ mod tests {
 
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
                 ("extra".into(), ColumnType::Int64),
             ],
@@ -492,7 +494,7 @@ mod tests {
         let projected = ColumnarSegmentReader::read_columns(
             &part_dir,
             &[
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("value".into(), ColumnType::Float64),
             ],
             None,
@@ -544,7 +546,7 @@ mod tests {
 
         let schema = ColumnarSchema {
             columns: vec![
-                ("timestamp".into(), ColumnType::Timestamp),
+                ("timestamp".into(), MILLIS),
                 ("cpu".into(), ColumnType::Float64),
             ],
             timestamp_idx: 0,
@@ -720,13 +722,8 @@ mod tests {
         bytes[nodedb_wal::crypto::SEGMENT_ENVELOPE_PREAMBLE_SIZE + 2] ^= 0xFF;
         std::fs::write(&col_path, &bytes).unwrap();
 
-        let err = ColumnarSegmentReader::read_column(
-            &part_dir,
-            "timestamp",
-            ColumnType::Timestamp,
-            Some(&kek),
-        )
-        .unwrap_err();
+        let err = ColumnarSegmentReader::read_column(&part_dir, "timestamp", MILLIS, Some(&kek))
+            .unwrap_err();
         assert!(
             matches!(err, SegmentError::DecryptionFailed(_)),
             "expected DecryptionFailed, got {err:?}"

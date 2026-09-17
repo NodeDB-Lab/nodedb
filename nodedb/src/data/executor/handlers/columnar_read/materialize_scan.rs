@@ -166,7 +166,11 @@ impl CoreLoop {
 
                 // Bitemporal system-time filter.
                 if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of_ms) {
-                    let ts_val = decoded_col_to_value(&decoded_cols[ts_idx], row_idx);
+                    let ts_val = decoded_col_to_value(
+                        &decoded_cols[ts_idx],
+                        row_idx,
+                        &schema.columns[ts_idx].column_type,
+                    );
                     if let Value::Integer(ts) = ts_val
                         && ts > cutoff
                     {
@@ -177,7 +181,8 @@ impl CoreLoop {
                 // Build a Value::Object for this row.
                 let mut map = std::collections::HashMap::new();
                 for (col_idx, col_def) in schema.columns.iter().enumerate() {
-                    let val = decoded_col_to_value(&decoded_cols[col_idx], row_idx);
+                    let val =
+                        decoded_col_to_value(&decoded_cols[col_idx], row_idx, &col_def.column_type);
                     map.insert(col_def.name.clone(), val);
                 }
 

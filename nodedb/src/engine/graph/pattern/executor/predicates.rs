@@ -293,7 +293,7 @@ fn check_property(
     op: &ComparisonOp,
     expected_value: &nodedb_types::Value,
 ) -> Result<bool, crate::Error> {
-    use nodedb_query::value_ops::{coerced_eq, compare_values};
+    use nodedb_query::value_ops::{coerced_eq, partial_compare_values};
     use std::cmp::Ordering;
 
     let collection = props.collection.ok_or_else(|| crate::Error::BadRequest {
@@ -323,18 +323,22 @@ fn check_property(
     let result = match op {
         ComparisonOp::Eq => coerced_eq(field_value, expected_value),
         ComparisonOp::Neq => !coerced_eq(field_value, expected_value),
-        ComparisonOp::Lt => compare_values(field_value, expected_value) == Ordering::Less,
+        ComparisonOp::Lt => {
+            partial_compare_values(field_value, expected_value) == Some(Ordering::Less)
+        }
         ComparisonOp::Lte => {
             matches!(
-                compare_values(field_value, expected_value),
-                Ordering::Less | Ordering::Equal
+                partial_compare_values(field_value, expected_value),
+                Some(Ordering::Less | Ordering::Equal)
             )
         }
-        ComparisonOp::Gt => compare_values(field_value, expected_value) == Ordering::Greater,
+        ComparisonOp::Gt => {
+            partial_compare_values(field_value, expected_value) == Some(Ordering::Greater)
+        }
         ComparisonOp::Gte => {
             matches!(
-                compare_values(field_value, expected_value),
-                Ordering::Greater | Ordering::Equal
+                partial_compare_values(field_value, expected_value),
+                Some(Ordering::Greater | Ordering::Equal)
             )
         }
     };

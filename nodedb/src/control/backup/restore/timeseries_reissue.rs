@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use nodedb_types::RlsWriteCheck;
 use nodedb_types::columnar::schema::TS_SYSTEM;
+use nodedb_types::datetime::NdbDateTimeError;
 use nodedb_types::value::Value;
 
 use crate::Error;
@@ -88,7 +89,8 @@ fn decode_memtable_rows(
             if name == TS_SYSTEM_COLUMN {
                 continue;
             }
-            let cell = memtable_cell(&mt, *col_idx, *ty, idx);
+            let cell = memtable_cell(&mt, *col_idx, *ty, idx)
+                .map_err(|e| instant_cell_error(collection, name, e))?;
             insert_non_null(&mut map, name, cell);
         }
         rows.push(Value::Object(map));
@@ -96,10 +98,30 @@ fn decode_memtable_rows(
     Ok(())
 }
 
+/// A stored millisecond count that the column's instant kind cannot carry.
+fn instant_cell_error(collection: &str, column: &str, e: NdbDateTimeError) -> Error {
+    Error::Storage {
+        engine: "timeseries".into(),
+        detail: format!("restore reissue: time column '{column}' of '{collection}': {e}"),
+    }
+}
+
 /// Extract one cell from a memtable column as a `Value`.
-fn memtable_cell(mt: &ColumnarMemtable, col_idx: usize, ty: ColumnType, idx: usize) -> Value {
-    match ty {
-        ColumnType::Timestamp => Value::Integer(mt.column(col_idx).as_timestamps()[idx]),
+///
+/// A time column yields the value its kind denotes — a typed instant for a
+/// declared `TIMESTAMP` / `TIMESTAMPTZ` key, the integer stored for a
+/// `BIGINT` key — so the reissued row carries the cell a client INSERT
+/// would have sent.
+fn memtable_cell(
+    mt: &ColumnarMemtable,
+    col_idx: usize,
+    ty: ColumnType,
+    idx: usize,
+) -> Result<Value, NdbDateTimeError> {
+    let value = match ty {
+        ColumnType::Timestamp(kind) => {
+            return kind.cell_value(mt.column(col_idx).as_timestamps()[idx]);
+        }
         ColumnType::Int64 => Value::Integer(mt.column(col_idx).as_i64()[idx]),
         ColumnType::Float64 => {
             let v = mt.column(col_idx).as_f64()[idx];
@@ -132,7 +154,8 @@ fn memtable_cell(mt: &ColumnarMemtable, col_idx: usize, ty: ColumnType, idx: usi
             }
             _ => Value::Null,
         },
-    }
+    };
+    Ok(value)
 }
 
 /// Decode one flushed partition directory into row objects, appending to `rows`.
@@ -190,7 +213,8 @@ fn decode_partition_rows(
             if name == TS_SYSTEM_COLUMN {
                 continue;
             }
-            let cell = partition_cell(&col_data[col_i], *ty, col_i, &sym_dicts, idx);
+            let cell = partition_cell(&col_data[col_i], *ty, col_i, &sym_dicts, idx)
+                .map_err(|e| instant_cell_error(collection, name, e))?;
             insert_non_null(&mut map, name, cell);
         }
         rows.push(Value::Object(map));
@@ -198,16 +222,20 @@ fn decode_partition_rows(
     Ok(())
 }
 
-/// Extract one cell from a flushed-segment column as a `Value`.
+/// Extract one cell from a flushed-segment column as a `Value`. The partition
+/// schema carries each time column's kind, so the cell is typed the same way
+/// a memtable cell is.
 fn partition_cell(
     data: &ColumnData,
     ty: ColumnType,
     col_idx: usize,
     sym_dicts: &HashMap<usize, nodedb_types::timeseries::SymbolDictionary>,
     idx: usize,
-) -> Value {
-    match ty {
-        ColumnType::Timestamp => Value::Integer(data.as_timestamps()[idx]),
+) -> Result<Value, NdbDateTimeError> {
+    let value = match ty {
+        ColumnType::Timestamp(kind) => {
+            return kind.cell_value(data.as_timestamps()[idx]);
+        }
         ColumnType::Int64 => Value::Integer(data.as_i64()[idx]),
         ColumnType::Float64 => {
             let v = data.as_f64()[idx];
@@ -240,7 +268,8 @@ fn partition_cell(
             }
             _ => Value::Null,
         },
-    }
+    };
+    Ok(value)
 }
 
 /// Insert a cell, skipping nulls so a re-issued row carries only present fields
@@ -329,4 +358,91 @@ pub async fn reissue_timeseries_durably(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::timeseries::columnar_memtable::{ColumnValue, ColumnarSchema, TimeKind};
+    use nodedb_types::InstantKind;
+    use nodedb_types::datetime::NdbDateTime;
+    use nodedb_types::timeseries::SeriesId;
+
+    /// `2020-03-05T10:00:00Z` in epoch milliseconds.
+    const EARLY_MS: i64 = 1_583_402_400_000;
+
+    const NAIVE: ColumnType = ColumnType::Timestamp(TimeKind::Instant(InstantKind::Naive));
+    const UTC: ColumnType = ColumnType::Timestamp(TimeKind::Instant(InstantKind::Utc));
+    const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
+
+    fn early() -> NdbDateTime {
+        NdbDateTime::from_micros(EARLY_MS * 1_000)
+    }
+
+    /// A one-row memtable whose time column has the given type.
+    fn memtable_with_time_column(ty: ColumnType) -> ColumnarMemtable {
+        let schema = ColumnarSchema {
+            columns: vec![
+                ("captured_at".into(), ty),
+                ("v".into(), ColumnType::Float64),
+            ],
+            timestamp_idx: 0,
+            codecs: vec![],
+        };
+        let mut mt = ColumnarMemtable::new(schema, ColumnarMemtableConfig::default());
+        let series: SeriesId = 1;
+        mt.ingest_row(
+            series,
+            &[ColumnValue::Timestamp(EARLY_MS), ColumnValue::Float64(1.5)],
+        )
+        .expect("ingest one row");
+        mt
+    }
+
+    /// A memtable time cell is reissued as the value its kind denotes.
+    #[test]
+    fn a_memtable_time_cell_is_typed_by_its_kind() {
+        let mt = memtable_with_time_column(NAIVE);
+        assert_eq!(
+            memtable_cell(&mt, 0, NAIVE, 0).expect("in range"),
+            Value::NaiveDateTime(early())
+        );
+        let mt = memtable_with_time_column(UTC);
+        assert_eq!(
+            memtable_cell(&mt, 0, UTC, 0).expect("in range"),
+            Value::DateTime(early())
+        );
+        let mt = memtable_with_time_column(MILLIS);
+        assert_eq!(
+            memtable_cell(&mt, 0, MILLIS, 0).expect("an integer"),
+            Value::Integer(EARLY_MS)
+        );
+    }
+
+    /// A partition time cell is reissued as the value its kind denotes.
+    #[test]
+    fn a_partition_time_cell_is_typed_by_its_kind() {
+        let data = ColumnData::Timestamp(vec![EARLY_MS]);
+        let dicts = HashMap::new();
+        assert_eq!(
+            partition_cell(&data, NAIVE, 0, &dicts, 0).expect("in range"),
+            Value::NaiveDateTime(early())
+        );
+        assert_eq!(
+            partition_cell(&data, UTC, 0, &dicts, 0).expect("in range"),
+            Value::DateTime(early())
+        );
+        assert_eq!(
+            partition_cell(&data, MILLIS, 0, &dicts, 0).expect("an integer"),
+            Value::Integer(EARLY_MS)
+        );
+    }
+
+    /// A millisecond count outside the instant range is an error, never a
+    /// silently wrong cell.
+    #[test]
+    fn an_out_of_range_instant_cell_is_an_error() {
+        let data = ColumnData::Timestamp(vec![i64::MAX]);
+        assert!(partition_cell(&data, NAIVE, 0, &HashMap::new(), 0).is_err());
+    }
 }

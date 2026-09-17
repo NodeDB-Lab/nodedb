@@ -4,10 +4,25 @@
 //!
 //! `FilterOp` is an O(1)-dispatch discriminant used by the scan filter
 //! evaluator. On-wire it travels as a lowercase string tag so physical
-//! plans remain debuggable by hand.
+//! plans remain debuggable by hand. Decoding a tag is fallible: a name
+//! `FilterOp::parse` does not know is an error, never a default operator.
+
+/// An operator name no `FilterOp` variant carries.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown filter operator `{op}`")]
+pub struct UnknownFilterOp {
+    /// The operator text as it arrived.
+    pub op: String,
+}
+
+impl From<UnknownFilterOp> for zerompk::Error {
+    fn from(e: UnknownFilterOp) -> Self {
+        zerompk::Error::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
 
 /// Filter operator enum for O(1) dispatch instead of string comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterOp {
     Eq,
     Ne,
@@ -27,7 +42,8 @@ pub enum FilterOp {
     ArrayContains,
     ArrayContainsAll,
     ArrayOverlap,
-    #[default]
+    /// Every row passes. Emitted by policy lowering for a predicate decided
+    /// true at plan time and by the planner for a filter it cannot lower.
     MatchAll,
     Exists,
     NotExists,
@@ -50,8 +66,10 @@ pub enum FilterOp {
 }
 
 impl FilterOp {
-    pub fn parse_op(s: &str) -> Self {
-        match s {
+    /// Parse a wire operator name. Every name `as_str` emits parses back to
+    /// the same variant. `ne`/`neq`, `gte`/`ge`, and `lte`/`le` are aliases.
+    pub fn parse(name: &str) -> Result<Self, UnknownFilterOp> {
+        Ok(match name {
             "eq" => Self::Eq,
             "ne" | "neq" => Self::Ne,
             "gt" => Self::Gt,
@@ -81,8 +99,12 @@ impl FilterOp {
             "lte_col" => Self::LteColumn,
             "eq_col" => Self::EqColumn,
             "ne_col" => Self::NeColumn,
-            _ => Self::MatchAll,
-        }
+            other => {
+                return Err(UnknownFilterOp {
+                    op: other.to_string(),
+                });
+            }
+        })
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -120,18 +142,6 @@ impl FilterOp {
     }
 }
 
-impl From<&str> for FilterOp {
-    fn from(s: &str) -> Self {
-        Self::parse_op(s)
-    }
-}
-
-impl From<String> for FilterOp {
-    fn from(s: String) -> Self {
-        Self::parse_op(&s)
-    }
-}
-
 impl serde::Serialize for FilterOp {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
@@ -141,6 +151,74 @@ impl serde::Serialize for FilterOp {
 impl<'de> serde::Deserialize<'de> for FilterOp {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(FilterOp::parse_op(&s))
+        FilterOp::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [FilterOp; 29] = [
+        FilterOp::Eq,
+        FilterOp::Ne,
+        FilterOp::Gt,
+        FilterOp::Gte,
+        FilterOp::Lt,
+        FilterOp::Lte,
+        FilterOp::Contains,
+        FilterOp::Like,
+        FilterOp::NotLike,
+        FilterOp::Ilike,
+        FilterOp::NotIlike,
+        FilterOp::In,
+        FilterOp::NotIn,
+        FilterOp::IsNull,
+        FilterOp::IsNotNull,
+        FilterOp::ArrayContains,
+        FilterOp::ArrayContainsAll,
+        FilterOp::ArrayOverlap,
+        FilterOp::MatchAll,
+        FilterOp::Exists,
+        FilterOp::NotExists,
+        FilterOp::Or,
+        FilterOp::Expr,
+        FilterOp::GtColumn,
+        FilterOp::GteColumn,
+        FilterOp::LtColumn,
+        FilterOp::LteColumn,
+        FilterOp::EqColumn,
+        FilterOp::NeColumn,
+    ];
+
+    #[test]
+    fn every_name_round_trips() {
+        for op in ALL {
+            assert_eq!(FilterOp::parse(op.as_str()), Ok(op), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn aliases_parse_to_their_canonical_variant() {
+        assert_eq!(FilterOp::parse("neq"), Ok(FilterOp::Ne));
+        assert_eq!(FilterOp::parse("ge"), Ok(FilterOp::Gte));
+        assert_eq!(FilterOp::parse("le"), Ok(FilterOp::Lte));
+    }
+
+    #[test]
+    fn unknown_name_is_an_error_naming_the_text() {
+        let err = FilterOp::parse("any_in").expect_err("unknown");
+        assert_eq!(err.op, "any_in");
+        assert_eq!(err.to_string(), "unknown filter operator `any_in`");
+        assert!(FilterOp::parse("").is_err());
+        assert!(FilterOp::parse("EQ").is_err());
+    }
+
+    #[test]
+    fn serde_rejects_an_unknown_name() {
+        let ok: FilterOp = serde_json::from_str("\"array_overlap\"").expect("known");
+        assert_eq!(ok, FilterOp::ArrayOverlap);
+        let err = serde_json::from_str::<FilterOp>("\"any_in\"").expect_err("unknown");
+        assert!(err.to_string().contains("any_in"), "{err}");
     }
 }

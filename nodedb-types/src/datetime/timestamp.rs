@@ -133,53 +133,65 @@ impl NdbDateTime {
         )
     }
 
-    /// Parse from ISO 8601 string (basic subset).
+    /// Parse from ISO 8601 text.
     ///
-    /// Supports: `"2024-03-15T10:30:00Z"`, `"2024-03-15T10:30:00.123456Z"`,
-    /// `"2024-03-15"` (midnight UTC).
+    /// Accepts `"2024-03-15T10:30:00Z"`, `"2024-03-15 10:30:00"`,
+    /// `"2024-03-15T10:30:00.123456Z"`, `"2024-03-15"` (midnight UTC), and
+    /// a trailing UTC offset in place of `Z` — `+05:30`, `-0800`, `+02` —
+    /// which shifts the result to UTC. Seconds are optional. Every component
+    /// must parse whole: trailing characters after the seconds, the fraction
+    /// or the offset are refused rather than dropped, so an unrecognised
+    /// spelling is `None`, never a silently different instant.
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim().trim_end_matches('Z').trim_end_matches('z');
+        let (body, offset_secs) = split_utc_offset(s.trim())?;
 
-        if s.len() == 10 {
+        if body.len() == 10 {
             // Date only: "2024-03-15" → midnight UTC.
-            let parts: Vec<&str> = s.split('-').collect();
-            if parts.len() != 3 {
-                return None;
-            }
-            let year: i32 = parts[0].parse().ok()?;
-            let month: u32 = parts[1].parse().ok()?;
-            let day: u32 = parts[2].parse().ok()?;
-            return Self::from_civil(year, month, day, 0, 0, 0, 0);
+            let (year, month, day) = parse_civil_date(body)?;
+            return Self::from_civil(year, month, day, 0, 0, 0, 0)?.shift_secs(-offset_secs);
         }
 
         // Full: "2024-03-15T10:30:00" or "2024-03-15T10:30:00.123456"
-        let (date_part, time_part) = s.split_once('T').or_else(|| s.split_once(' '))?;
-        let date_parts: Vec<&str> = date_part.split('-').collect();
-        if date_parts.len() != 3 {
-            return None;
-        }
-        let year: i32 = date_parts[0].parse().ok()?;
-        let month: u32 = date_parts[1].parse().ok()?;
-        let day: u32 = date_parts[2].parse().ok()?;
+        let (date_part, time_part) = body.split_once('T').or_else(|| body.split_once(' '))?;
+        let (year, month, day) = parse_civil_date(date_part)?;
 
-        let (time_main, frac) = if let Some((t, f)) = time_part.split_once('.') {
-            (t, f)
-        } else {
-            (time_part, "0")
+        let (time_main, frac) = match time_part.split_once('.') {
+            Some((t, f)) => (t, Some(f)),
+            None => (time_part, None),
         };
         let time_parts: Vec<&str> = time_main.split(':').collect();
-        if time_parts.len() < 2 {
+        if time_parts.len() < 2 || time_parts.len() > 3 {
             return None;
         }
         let hour: u32 = time_parts[0].parse().ok()?;
         let minute: u32 = time_parts[1].parse().ok()?;
-        let second: u32 = time_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let second: u32 = match time_parts.get(2) {
+            Some(text) => text.parse().ok()?,
+            None => 0,
+        };
 
-        // Parse fractional seconds (up to microseconds).
-        let frac_padded = format!("{frac:0<6}");
-        let micros: u32 = frac_padded[..6].parse().unwrap_or(0);
+        // Fractional seconds: one to nine digits, read to microseconds.
+        let micros: u32 = match frac {
+            Some(digits) => {
+                if digits.is_empty()
+                    || digits.len() > 9
+                    || !digits.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                let padded = format!("{digits:0<6}");
+                padded[..6].parse().ok()?
+            }
+            None => 0,
+        };
 
-        Self::from_civil(year, month, day, hour, minute, second, micros)
+        Self::from_civil(year, month, day, hour, minute, second, micros)?.shift_secs(-offset_secs)
+    }
+
+    /// Shift by whole seconds, or `None` on overflow.
+    fn shift_secs(self, secs: i64) -> Option<Self> {
+        let micros = self.micros.checked_add(secs.checked_mul(1_000_000)?)?;
+        Some(Self { micros })
     }
 
     /// Build from civil date components.
@@ -262,6 +274,60 @@ impl NdbDateTime {
     }
 }
 
+/// Split a trailing `Z` or `±HH[:MM]` / `±HHMM` UTC offset off `s`, returning
+/// the remaining text and the offset in seconds east of UTC (`0` when there
+/// is none). A `-` inside the date part is never read as an offset: only a
+/// sign after the last `T` / ` ` time separator counts.
+fn split_utc_offset(s: &str) -> Option<(&str, i64)> {
+    if let Some(body) = s.strip_suffix('Z').or_else(|| s.strip_suffix('z')) {
+        return Some((body, 0));
+    }
+    // The offset can only follow the time part, or a bare `YYYY-MM-DD`.
+    let time_start = match s.rfind(['T', ' ']) {
+        Some(i) => i + 1,
+        None => {
+            let at = s.len().min(10);
+            if !s.is_char_boundary(at) {
+                return None;
+            }
+            at
+        }
+    };
+    let Some(sign_at) = s[time_start..].rfind(['+', '-']).map(|i| time_start + i) else {
+        return Some((s, 0));
+    };
+    let sign: i64 = if s.as_bytes()[sign_at] == b'-' { -1 } else { 1 };
+    let rest = &s[sign_at + 1..];
+    let (hh, mm) = match (rest.len(), rest.as_bytes().get(2)) {
+        (2, None) => (rest, "0"),
+        (4, Some(b)) if b.is_ascii_digit() => (&rest[..2], &rest[2..]),
+        (5, Some(&b':')) => (&rest[..2], &rest[3..]),
+        _ => return None,
+    };
+    if !hh.bytes().all(|b| b.is_ascii_digit()) || !mm.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = hh.parse().ok()?;
+    let minutes: i64 = mm.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some((&s[..sign_at], sign * (hours * 3600 + minutes * 60)))
+}
+
+/// Parse `YYYY-MM-DD` into its three components.
+fn parse_civil_date(s: &str) -> Option<(i32, u32, u32)> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+    ))
+}
+
 impl std::fmt::Display for NdbDateTime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.to_iso8601())
@@ -321,6 +387,53 @@ mod tests {
         let dt = NdbDateTime::parse("2024-01-01T00:00:00.123456Z").unwrap();
         let c = dt.components();
         assert_eq!(c.microsecond, 123456);
+    }
+
+    /// A trailing offset shifts the instant to UTC; a space separator and
+    /// missing seconds are accepted.
+    #[test]
+    fn datetime_parse_applies_utc_offset() {
+        let utc = NdbDateTime::parse("2024-06-15T06:30:00Z").unwrap();
+        assert_eq!(
+            NdbDateTime::parse("2024-06-15 12:00:00+05:30").unwrap(),
+            utc
+        );
+        assert_eq!(NdbDateTime::parse("2024-06-15T12:00:00+0530").unwrap(), utc);
+        assert_eq!(
+            NdbDateTime::parse("2024-06-15T04:30:00-02:00").unwrap(),
+            utc
+        );
+        assert_eq!(NdbDateTime::parse("2024-06-15T04:30-02").unwrap(), utc);
+        assert_eq!(
+            NdbDateTime::parse("2024-06-15T06:30:00.250+00:00").unwrap(),
+            NdbDateTime::from_micros(utc.micros + 250_000)
+        );
+        assert_eq!(
+            NdbDateTime::parse("2024-06-16+05:30").unwrap(),
+            NdbDateTime::parse("2024-06-15T18:30:00Z").unwrap()
+        );
+    }
+
+    /// Text that is not a whole timestamp is refused, never read as a
+    /// different instant.
+    #[test]
+    fn datetime_parse_refuses_partial_spellings() {
+        for text in [
+            "yesterday",
+            "1583402400000000",
+            "2024-06-15T12:00:00+05:30:00",
+            "2024-06-15T12:00:xx",
+            "2024-06-15T12:00:00.abc",
+            "2024-06-15T12:00:00.",
+            "2024-06-15T12:00:00.1234567890",
+            "2024-06-15T12",
+            "2024-06-15T12:00:00+25:00",
+        ] {
+            assert!(
+                NdbDateTime::parse(text).is_none(),
+                "{text:?} must not parse"
+            );
+        }
     }
 
     #[test]

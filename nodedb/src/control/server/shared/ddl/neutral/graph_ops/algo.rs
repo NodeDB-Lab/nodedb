@@ -7,7 +7,7 @@ use serde_json::{Map, Value as JsonValue};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::broadcast;
-use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec;
 use crate::engine::graph::algo::GraphAlgorithm;
@@ -235,15 +235,11 @@ fn algo_payload_to_rows(
         .iter()
         .map(|&(name, _)| name.to_string())
         .collect();
-    let column_types = vec![DdlColType::Text; columns.len()];
-
     if payload.is_empty() {
-        return Ok(vec![DdlResult::Rows(ShapedRows {
+        return Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
             columns,
-            column_types,
-            rows: Vec::new(),
-            notice: None,
-        })]);
+            Vec::new(),
+        ))]);
     }
 
     let json_text = response_codec::decode_payload_to_json(payload);
@@ -268,12 +264,10 @@ fn algo_payload_to_rows(
         shaped_rows.push(out);
     }
 
-    Ok(vec![DdlResult::Rows(ShapedRows {
+    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
         columns,
-        column_types,
-        rows: shaped_rows,
-        notice: None,
-    })])
+        shaped_rows,
+    ))])
 }
 
 #[cfg(test)]

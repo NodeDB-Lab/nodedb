@@ -8,8 +8,13 @@ use crate::types::*;
 pub struct InsertParams {
     pub collection: String,
     pub columns: Vec<String>,
+    /// Every declared DEFAULT already materialized and every literal already
+    /// coerced to its declared column type. An engine stores these as they
+    /// are; none re-reads the catalog's DEFAULT text.
     pub rows: Vec<Vec<(String, SqlValue)>>,
-    pub column_defaults: Vec<(String, String)>,
+    /// Whether a DEFAULT materialized into `rows` was volatile. A plan that
+    /// carries one is never admitted to the plan cache.
+    pub volatile_defaults: bool,
     /// `ON CONFLICT DO NOTHING` semantics: duplicate-PK rows are skipped
     /// silently. `false` for plain `INSERT` (raises `unique_violation`).
     pub if_absent: bool,
@@ -109,8 +114,11 @@ pub struct MergeParams {
 pub struct UpsertParams {
     pub collection: String,
     pub columns: Vec<String>,
+    /// Defaults materialized and literals coerced, as in
+    /// `InsertParams::rows`.
     pub rows: Vec<Vec<(String, SqlValue)>>,
-    pub column_defaults: Vec<(String, String)>,
+    /// Mirrors `InsertParams::volatile_defaults`.
+    pub volatile_defaults: bool,
     /// `ON CONFLICT (...) DO UPDATE SET` assignments. Empty for plain
     /// `UPSERT INTO ...`; populated when the caller is
     /// `INSERT ... ON CONFLICT ... DO UPDATE SET`.

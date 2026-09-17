@@ -22,7 +22,7 @@
 //! a decoded payload of unknown shape.
 
 use crate::control::security::redaction::RedactionStore;
-use crate::control::server::response_shape::project::is_scan_wrapper;
+use crate::control::server::response_shape::project::is_scan_wrapper_json;
 
 use super::query::QueryRedaction;
 
@@ -49,7 +49,7 @@ pub fn redact_envelope_row(
     let Some(map) = item.as_object_mut() else {
         return;
     };
-    let target = if is_scan_wrapper(map) {
+    let target = if is_scan_wrapper_json(map) {
         map.get_mut("data")
             .and_then(serde_json::Value::as_object_mut)
     } else {

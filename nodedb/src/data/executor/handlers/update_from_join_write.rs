@@ -27,7 +27,7 @@ pub(in crate::data::executor) struct UpdateFromJoinWriteOutcome {
     pub write_set: Vec<WriteSetEntry>,
     /// Post-image JSON per affected row, populated only when the caller asked
     /// for `RETURNING`.
-    pub returned_docs: Vec<serde_json::Value>,
+    pub returned_docs: Vec<nodedb_types::Value>,
 }
 
 /// Everything the write pass needs about the statement, gathered once by the
@@ -73,7 +73,7 @@ impl CoreLoop {
         );
         let mut affected = 0u64;
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
-        let mut returned_docs: Vec<serde_json::Value> = if want_returning {
+        let mut returned_docs: Vec<nodedb_types::Value> = if want_returning {
             Vec::with_capacity(rows.len())
         } else {
             Vec::new()
@@ -84,7 +84,7 @@ impl CoreLoop {
                 key: storage_key,
                 body: updated_bytes,
                 old_body,
-                mut doc,
+                doc,
             } = row;
 
             // Period lock, both images — matching `execute_point_update`: a
@@ -239,8 +239,9 @@ impl CoreLoop {
                     // `row_identity` only stands in as `id` for a row that
                     // declares no primary key of its own — overwriting a
                     // declared key would return a value the client never wrote.
-                    returning_doc::attach_row_id(&mut doc, &row_identity);
-                    returned_docs.push(doc);
+                    let mut row = nodedb_types::Value::from(doc);
+                    returning_doc::attach_row_id(&mut row, &row_identity);
+                    returned_docs.push(row);
                 }
             }
         }

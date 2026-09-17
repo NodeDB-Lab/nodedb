@@ -268,8 +268,10 @@ pub fn value_to_json(val: &Value) -> serde_json::Value {
             &base64::engine::general_purpose::STANDARD,
             b,
         )),
-        Value::DateTime(dt) | Value::NaiveDateTime(dt) => serde_json::json!(dt.micros / 1000),
-        Value::Duration(d) => serde_json::json!(d.as_millis()),
+        Value::DateTime(dt) | Value::NaiveDateTime(dt) => {
+            serde_json::Value::String(dt.to_iso8601())
+        }
+        Value::Duration(d) => serde_json::Value::String(d.to_string()),
         Value::Decimal(d) => serde_json::Value::String(d.to_string()),
         Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_json).collect()),
         Value::Object(map) => {

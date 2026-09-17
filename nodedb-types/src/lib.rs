@@ -105,8 +105,9 @@ pub use id::{
 };
 pub use identity::KeyRepr;
 pub use json_msgpack::{
-    JsonValue, MsgpackError, MsgpackResult, json_from_msgpack, json_to_msgpack,
-    json_to_msgpack_or_empty, msgpack_to_json_string, value_from_msgpack, value_to_msgpack,
+    InstantKind, JsonValue, MsgpackError, MsgpackResult, NativeCell, json_from_msgpack,
+    json_to_msgpack, json_to_msgpack_or_empty, msgpack_to_json_string, read_instant,
+    value_from_msgpack, value_to_msgpack, write_instant,
 };
 pub use kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy, is_valid_kv_key_type};
 pub use lsn::Lsn;

@@ -10,7 +10,9 @@ mod staged;
 mod timeseries_merge;
 mod vector_merge;
 
-pub(in crate::data::executor) use columnar_merge::{ColumnarOverlayMergeParams, decode_staged_row};
+pub(in crate::data::executor) use columnar_merge::{
+    ColumnarMatchedRow, ColumnarOverlayMergeParams, decode_staged_row,
+};
 pub(in crate::data::executor) use fts_merge::FtsMergeParams;
 pub use graph_staged::{GraphCollKey, GraphTxnOverlay, NodeLabelDelta};
 pub(in crate::data::executor) use merge::IndexOverlayMergeParams;
