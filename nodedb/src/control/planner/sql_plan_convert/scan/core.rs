@@ -43,6 +43,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
     // `rows` is left empty here; the coordinator fills it post-cache via
     // `materialize_providers`. Using an empty-coordinator vshard (empty
     // collection string) keeps the task coordinator-local.
+    let computed_bytes = extract_computed_columns(projection, window_functions)?;
+    let window_bytes = serialize_window_functions(window_functions)?;
+
     if crate::control::server::pgwire::catalog::schema::catalog_collection_info(collection)
         .is_some()
     {
@@ -58,6 +61,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 rows: Vec::new(),
                 filters: filter_bytes,
                 projection: proj_names,
+                computed_columns: computed_bytes,
+                window_functions: window_bytes,
                 sort_keys: sort,
                 limit: *limit,
                 offset: *offset,
@@ -75,8 +80,6 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
     let proj_names = extract_projection_names(projection, window_functions);
     let sort = convert_sort_keys(sort_keys);
     let vshard = VShardId::from_collection_in_database(database_id, collection);
-    let computed_bytes = extract_computed_columns(projection, window_functions)?;
-    let window_bytes = serialize_window_functions(window_functions)?;
 
     let physical = match engine {
         EngineType::Timeseries => {

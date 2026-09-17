@@ -166,6 +166,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
             // before the rows reach the aggregate.
             filters: filter_bytes.clone(),
             projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,

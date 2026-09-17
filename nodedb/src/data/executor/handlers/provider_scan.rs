@@ -2,15 +2,19 @@
 
 //! Executor handler for `QueryOp::ProviderScan`.
 //!
-//! Decodes the pre-materialized msgpack row array, applies predicate filtering,
-//! offset, sort, distinct deduplication, column projection, and limit — in that
-//! order — then emits the resulting rows via `response_with_payload`.
+//! Decodes the pre-materialized msgpack row array, applies predicate
+//! filtering, sort, window functions + computed columns, distinct
+//! deduplication, offset, column projection, and limit — in that order —
+//! then emits the resulting rows via `response_with_payload`. Sort runs
+//! before offset so `ORDER BY ... OFFSET n` skips the first `n` rows of the
+//! sorted set, not the decoded set.
 
 use nodedb_query::msgpack_scan;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::provider_scan_compute::apply_windows_and_computed;
 use crate::data::executor::handlers::sort_utils::sort_msgpack_rows;
 use crate::data::executor::msgpack_utils::write_str;
 use crate::data::executor::response_codec::encode_binary_rows;
@@ -21,6 +25,8 @@ pub(in crate::data::executor) struct ProviderScanParams<'a> {
     pub rows_bytes: &'a [u8],
     pub filters_bytes: &'a [u8],
     pub projection: &'a [String],
+    pub computed_columns_bytes: &'a [u8],
+    pub window_functions_bytes: &'a [u8],
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub limit: Option<usize>,
     pub offset: usize,
@@ -30,8 +36,8 @@ pub(in crate::data::executor) struct ProviderScanParams<'a> {
 impl CoreLoop {
     /// Execute a `ProviderScan` plan node.
     ///
-    /// Processing order: decode rows → filter → offset → sort → distinct →
-    /// project → limit → emit.
+    /// Processing order: decode rows → filter → sort → windows + computed
+    /// columns → distinct → offset → project → limit → emit.
     pub(in crate::data::executor) fn execute_provider_scan(
         &mut self,
         task: &ExecutionTask,
@@ -41,6 +47,8 @@ impl CoreLoop {
             rows_bytes,
             filters_bytes,
             projection,
+            computed_columns_bytes,
+            window_functions_bytes,
             sort_keys,
             limit,
             offset,
@@ -92,20 +100,27 @@ impl CoreLoop {
             }
         }
 
-        // ── 3. Offset. ────────────────────────────────────────────────────────
-        if offset > 0 {
-            if offset >= rows.len() {
-                rows.clear();
-            } else {
-                rows.drain(..offset);
-            }
-        }
-
-        // ── 4. Sort. ──────────────────────────────────────────────────────────
+        // ── 3. Sort. ──────────────────────────────────────────────────────────
+        // Runs before offset: `ORDER BY ... OFFSET n` skips the first `n` rows
+        // of the SORTED set, not the decoded set.
         if !sort_keys.is_empty()
             && let Err(e) = sort_msgpack_rows(&mut rows, sort_keys)
         {
             return self.response_error(task, crate::Error::from(e));
+        }
+
+        // ── 4. Window functions + computed columns. ─────────────────────────
+        // Skipped entirely (zero-decode msgpack path) when both byte slices
+        // are empty.
+        if !window_functions_bytes.is_empty() || !computed_columns_bytes.is_empty() {
+            rows = match apply_windows_and_computed(
+                rows,
+                window_functions_bytes,
+                computed_columns_bytes,
+            ) {
+                Ok(r) => r,
+                Err(e) => return self.response_error(task, e),
+            };
         }
 
         // ── 5. Distinct (on the would-be projected row). ──────────────────────
@@ -124,7 +139,16 @@ impl CoreLoop {
             });
         }
 
-        // ── 6. Project. ───────────────────────────────────────────────────────
+        // ── 6. Offset. ────────────────────────────────────────────────────────
+        if offset > 0 {
+            if offset >= rows.len() {
+                rows.clear();
+            } else {
+                rows.drain(..offset);
+            }
+        }
+
+        // ── 7. Project. ───────────────────────────────────────────────────────
         let rows: Vec<Vec<u8>> = if projection.is_empty() {
             rows
         } else {
@@ -133,14 +157,14 @@ impl CoreLoop {
                 .collect()
         };
 
-        // ── 7. Limit. ─────────────────────────────────────────────────────────
+        // ── 8. Limit. ─────────────────────────────────────────────────────────
         let rows = if let Some(n) = limit {
             rows.into_iter().take(n).collect()
         } else {
             rows
         };
 
-        // ── 8. Emit. ──────────────────────────────────────────────────────────
+        // ── 9. Emit. ──────────────────────────────────────────────────────────
         let payload = encode_binary_rows(&rows);
         self.response_with_payload(task, payload)
     }

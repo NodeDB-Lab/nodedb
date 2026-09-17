@@ -78,6 +78,14 @@ pub enum QueryOp {
         /// Output column names to keep. Empty = emit all columns.
         #[serde(default)]
         projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::computed_columns`. Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
+        /// Serialized `Vec<WindowFuncSpec>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::window_functions`. Empty = none.
+        #[serde(default)]
+        window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,
@@ -118,6 +126,14 @@ pub enum QueryOp {
         /// Output column names to keep. Empty = emit all columns.
         #[serde(default)]
         projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::computed_columns`. Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
+        /// Serialized `Vec<WindowFuncSpec>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::window_functions`. Empty = none.
+        #[serde(default)]
+        window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,

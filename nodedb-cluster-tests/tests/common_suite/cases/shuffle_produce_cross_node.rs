@@ -108,6 +108,8 @@ fn provider_scan_plan(rows: &[Vec<u8>]) -> Vec<u8> {
         rows: msgpack_array(rows),
         filters: Vec::new(),
         projection: Vec::new(),
+        computed_columns: Vec::new(),
+        window_functions: Vec::new(),
         sort_keys: Vec::new(),
         limit: None,
         offset: 0,
