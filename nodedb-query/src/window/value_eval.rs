@@ -12,6 +12,7 @@ use nodedb_types::Value;
 
 use super::spec::WindowFuncSpec;
 use super::value_agg::apply_v_aggregate;
+use super::value_partition::build_value_partitions;
 use crate::expr::types::SqlExpr;
 use crate::value_ops::compare_values;
 
@@ -35,7 +36,9 @@ pub enum WindowError {
 ///
 /// `column_index` maps column name → position in each row slice.
 /// For each spec, one `Value` is appended to every row. Returns the list of
-/// new column names, one per spec in spec order.
+/// new column names, one per spec in spec order. `rows` keeps its input
+/// order; each spec's partitions are ordered by that spec's own ORDER BY,
+/// independent of the row order.
 pub fn evaluate_window_functions_value(
     rows: &mut [Vec<Value>],
     column_index: &HashMap<String, usize>,
@@ -91,48 +94,7 @@ pub fn evaluate_window_functions_value(
     Ok(new_cols)
 }
 
-// ── Partition building ────────────────────────────────────────────────────────
-
-fn build_value_partitions(
-    rows: &[Vec<Value>],
-    column_index: &HashMap<String, usize>,
-    spec: &WindowFuncSpec,
-) -> Result<Vec<Vec<usize>>, WindowError> {
-    if spec.partition_by.is_empty() {
-        return Ok(vec![(0..rows.len()).collect()]);
-    }
-
-    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-
-    for (i, row) in rows.iter().enumerate() {
-        let key = partition_key(row, column_index, &spec.partition_by)?;
-        let entry = groups.entry(key.clone()).or_default();
-        if entry.is_empty() {
-            order.push(key);
-        }
-        entry.push(i);
-    }
-
-    Ok(order.iter().filter_map(|k| groups.remove(k)).collect())
-}
-
-fn partition_key(
-    row: &[Value],
-    column_index: &HashMap<String, usize>,
-    partition_by: &[SqlExpr],
-) -> Result<String, WindowError> {
-    Ok(partition_by
-        .iter()
-        .map(|expr| {
-            let v = eval_arg_for_row(expr, row, column_index)?;
-            Ok(format!("{v:?}"))
-        })
-        .collect::<Result<Vec<_>, WindowError>>()?
-        .join("\x00"))
-}
-
-// ── Value comparison helpers (pub(super) for value_agg) ───────────────────────
+// ── Value comparison helpers (pub(super) for value_agg, value_partition) ─────
 
 pub(super) fn cmp_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
@@ -617,6 +579,19 @@ mod tests {
         evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
         // Two rows in partition g=1 → 1,2; one row in g=2 → 1. Result at idx 2.
         assert_eq!(out_int(&rows, 2), vec![1, 2, 1]);
+    }
+
+    #[test]
+    fn rank_orders_by_spec_order_by_not_row_arrival_order() {
+        // Rows arrive as 10, 30, 20 — not sorted by value. RANK() OVER
+        // (ORDER BY v DESC) must rank 30(1), 20(2), 10(3); the row array
+        // order must stay 10, 30, 20.
+        let mut rows = rows_v(&[10, 30, 20]);
+        let cols = ci(&["v"]);
+        let s = spec("rank", vec![], vec![], vec![(col("v"), false)]);
+        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        assert_eq!(out_int(&rows, 0), vec![10, 30, 20]);
+        assert_eq!(out_int(&rows, 1), vec![3, 1, 2]);
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod running;
 pub mod spec;
 pub mod value_agg;
 pub mod value_eval;
+pub mod value_partition;
 
 pub use eval::evaluate_window_functions;
 pub use spec::{FrameBound, WindowFrame, WindowFuncSpec};
