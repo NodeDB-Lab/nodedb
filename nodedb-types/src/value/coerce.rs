@@ -39,6 +39,15 @@ impl Value {
             (Value::String(s), Value::Float(b)) => s.parse::<f64>().is_ok_and(|n| n == *b),
             // Structural equality on ND cells: same coords and same attrs.
             (Value::ArrayCell(a), Value::ArrayCell(b)) => a == b,
+            // Two exact decimals compare exactly; a decimal against any other
+            // number compares through f64 like the arms above.
+            (Value::Decimal(a), Value::Decimal(b)) => a == b,
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                match (numeric_f64(self), numeric_f64(other)) {
+                    (Some(x), Some(y)) => x == y,
+                    _ => false,
+                }
+            }
             (a, b) => match (datetime_micros(a), datetime_micros(b)) {
                 (Some(x), Some(y)) => x == y,
                 _ => false,
@@ -46,59 +55,71 @@ impl Value {
         }
     }
 
-    /// Coerced ordering: `Value` vs `Value` with numeric/string coercion.
+    /// Coerced partial ordering for predicate evaluation.
     ///
-    /// Single source of truth for ordering in filter/sort evaluation.
-    pub fn cmp_coerced(&self, other: &Value) -> std::cmp::Ordering {
+    /// Two numbers (or numeric strings) order numerically, two instants (or
+    /// ISO-8601 strings) by epoch microseconds, two other strings
+    /// lexicographically, and two ND cells coordinate-major. A pair with no
+    /// defined order — an integer against an instant, text against a number,
+    /// a NaN — is `None`, so a range predicate over it matches nothing rather
+    /// than every row: the row-level counterpart of PostgreSQL refusing to
+    /// compare the two types.
+    pub fn partial_cmp_coerced(&self, other: &Value) -> Option<std::cmp::Ordering> {
         use std::cmp::Ordering;
-        // ND cells: lexicographic on coords, then attrs. Matches array
-        // engine cell ordering (coordinate-major).
         if let (Value::ArrayCell(a), Value::ArrayCell(b)) = (self, other) {
             for (x, y) in a.coords.iter().zip(b.coords.iter()) {
-                match x.cmp_coerced(y) {
+                match x.partial_cmp_coerced(y)? {
                     Ordering::Equal => continue,
-                    non_eq => return non_eq,
+                    non_eq => return Some(non_eq),
                 }
             }
             match a.coords.len().cmp(&b.coords.len()) {
                 Ordering::Equal => {}
-                non_eq => return non_eq,
+                non_eq => return Some(non_eq),
             }
             for (x, y) in a.attrs.iter().zip(b.attrs.iter()) {
-                match x.cmp_coerced(y) {
+                match x.partial_cmp_coerced(y)? {
                     Ordering::Equal => continue,
-                    non_eq => return non_eq,
+                    non_eq => return Some(non_eq),
                 }
             }
-            return a.attrs.len().cmp(&b.attrs.len());
+            return Some(a.attrs.len().cmp(&b.attrs.len()));
         }
-        let self_f64 = match self {
-            Value::Integer(i) => Some(*i as f64),
-            Value::Float(f) => Some(*f),
-            Value::String(s) => s.parse::<f64>().ok(),
-            _ => None,
-        };
-        let other_f64 = match other {
-            Value::Integer(i) => Some(*i as f64),
-            Value::Float(f) => Some(*f),
-            Value::String(s) => s.parse::<f64>().ok(),
-            _ => None,
-        };
-        if let (Some(a), Some(b)) = (self_f64, other_f64) {
-            return a.partial_cmp(&b).unwrap_or(Ordering::Equal);
+        if let (Some(a), Some(b)) = (numeric_f64(self), numeric_f64(other)) {
+            return a.partial_cmp(&b);
         }
         if let (Some(a), Some(b)) = (datetime_micros(self), datetime_micros(other)) {
-            return a.cmp(&b);
+            return Some(a.cmp(&b));
         }
-        let a_str = match self {
-            Value::String(s) => s.as_str(),
-            _ => return Ordering::Equal,
-        };
-        let b_str = match other {
-            Value::String(s) => s.as_str(),
-            _ => return Ordering::Equal,
-        };
-        a_str.cmp(b_str)
+        match (self, other) {
+            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+            _ => None,
+        }
+    }
+
+    /// Coerced total ordering for sorting.
+    ///
+    /// [`Value::partial_cmp_coerced`] with an unordered pair placed as
+    /// `Equal`, so a stable sort keeps such rows in their input order. Only
+    /// for ORDER BY / MIN / MAX style paths that need an `Ordering` for every
+    /// pair; a predicate uses `partial_cmp_coerced` so an unordered pair
+    /// matches nothing.
+    pub fn cmp_coerced(&self, other: &Value) -> std::cmp::Ordering {
+        self.partial_cmp_coerced(other)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// The number a value denotes for coerced ordering: an integer, a float, or
+/// a string that parses as one. `None` for anything else.
+fn numeric_f64(v: &Value) -> Option<f64> {
+    use rust_decimal::prelude::ToPrimitive;
+    match v {
+        Value::Integer(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        Value::Decimal(d) => d.to_f64(),
+        Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
     }
 }
 
@@ -116,6 +137,18 @@ fn datetime_micros(v: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decimal_literal_equals_the_float_it_denotes() {
+        let d = Value::Decimal(rust_decimal::Decimal::from_str_exact("2.5").expect("decimal"));
+        assert!(d.eq_coerced(&Value::Float(2.5)));
+        assert!(Value::Float(2.5).eq_coerced(&d));
+        assert!(!d.eq_coerced(&Value::Float(2.25)));
+        assert_eq!(
+            d.partial_cmp_coerced(&Value::Integer(3)),
+            Some(std::cmp::Ordering::Less)
+        );
+    }
 
     #[test]
     fn eq_coerced_same_type() {
@@ -216,6 +249,59 @@ mod tests {
         assert_eq!(
             Value::String("zed".into()).cmp_coerced(&Value::String("abc".into())),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn partial_cmp_coerced_orders_instants_against_instants_and_iso_text() {
+        use std::cmp::Ordering;
+        let earlier = Value::NaiveDateTime(crate::NdbDateTime::from_micros(1_583_402_400_000_000));
+        let later = Value::DateTime(crate::NdbDateTime::from_micros(1_583_406_000_000_000));
+        assert_eq!(earlier.partial_cmp_coerced(&later), Some(Ordering::Less));
+        assert_eq!(
+            later.partial_cmp_coerced(&Value::String("2020-03-05 10:00:00".into())),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            earlier.partial_cmp_coerced(&Value::String("2020-03-05T10:00:00Z".into())),
+            Some(Ordering::Equal)
+        );
+    }
+
+    /// An integer carries no unit, so it has no order against an instant:
+    /// `WHERE at >= 5` over an instant column matches nothing, in both
+    /// orientations. The same holds for text against a number and for NaN.
+    #[test]
+    fn partial_cmp_coerced_is_none_for_an_unordered_pair() {
+        let instant = Value::NaiveDateTime(crate::NdbDateTime::from_micros(1_583_402_400_000_000));
+        assert_eq!(instant.partial_cmp_coerced(&Value::Integer(5)), None);
+        assert_eq!(Value::Integer(5).partial_cmp_coerced(&instant), None);
+        assert_eq!(
+            Value::Integer(5).partial_cmp_coerced(&Value::String("abc".into())),
+            None
+        );
+        assert_eq!(
+            Value::Bool(true).partial_cmp_coerced(&Value::Integer(1)),
+            None
+        );
+        assert_eq!(Value::Null.partial_cmp_coerced(&Value::Integer(0)), None);
+        assert_eq!(
+            Value::Float(f64::NAN).partial_cmp_coerced(&Value::Float(1.0)),
+            None
+        );
+    }
+
+    /// The sort order places an unordered pair as `Equal` so a stable sort
+    /// keeps its input order; an ordered pair sorts as the predicate orders
+    /// it.
+    #[test]
+    fn cmp_coerced_places_an_unordered_pair_as_equal_for_sorting() {
+        use std::cmp::Ordering;
+        let instant = Value::NaiveDateTime(crate::NdbDateTime::from_micros(1_583_402_400_000_000));
+        assert_eq!(instant.cmp_coerced(&Value::Integer(5)), Ordering::Equal);
+        assert_eq!(
+            Value::Integer(5).cmp_coerced(&Value::Integer(7)),
+            Ordering::Less
         );
     }
 
