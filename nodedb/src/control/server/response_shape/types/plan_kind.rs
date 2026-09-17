@@ -104,6 +104,10 @@ pub fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         // PostProcess reshapes a multi-row subquery; its kind is the child's.
         PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => describe_plan(input),
 
+        // SetOp resolves to a ProviderScan of merged rows; route MultiRow so
+        // each row streams as its own pgwire row.
+        PhysicalPlan::Query(QueryOp::SetOp { .. }) => PlanKind::MultiRow,
+
         // An insert with a projection returns real stored rows and must be decoded
         // and redacted, else it silently leaks unredacted rows like `Merge` did.
         PhysicalPlan::Kv(

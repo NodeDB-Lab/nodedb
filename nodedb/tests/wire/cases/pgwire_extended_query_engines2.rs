@@ -228,8 +228,8 @@ async fn extended_query_array_engine_smoke_and_const_stmt() {
         .await
         .expect("constant execute after Array DDL");
     assert_eq!(const_rows.len(), 1, "constant projection must return 1 row");
-    let x_text: String = const_rows[0].get::<_, String>(0);
-    assert_eq!(x_text, "1");
+    let x: i64 = const_rows[0].get(0);
+    assert_eq!(x, 1);
 }
 
 // ── Cross-engine: parameter error cases ──────────────────────────────────────

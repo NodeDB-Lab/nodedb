@@ -198,6 +198,8 @@ fn walk_query(op: &QueryOp, ctx: &RefusalCtx<'_>) -> crate::Result<()> {
 
         QueryOp::PostProcess { input, .. } => walk(input, ctx),
 
+        QueryOp::SetOp { inputs, .. } => inputs.iter().try_for_each(|input| walk(input, ctx)),
+
         QueryOp::Aggregate {
             collection,
             input,

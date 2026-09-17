@@ -238,6 +238,14 @@ fn collect_sources(plan: &PhysicalPlan, qualifier: &str, out: &mut Vec<(String, 
                 collect_sources(input, qualifier, out);
                 return;
             }
+            // Every set-operation branch contributes rows under the same
+            // derived-table qualifier.
+            QueryOp::SetOp { inputs, .. } => {
+                for input in inputs {
+                    collect_sources(input, qualifier, out);
+                }
+                return;
+            }
             QueryOp::Aggregate {
                 collection, input, ..
             }

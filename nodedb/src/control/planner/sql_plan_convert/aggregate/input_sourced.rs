@@ -7,12 +7,12 @@
 
 use nodedb_sql::types::{AggregateExpr, Filter, SqlExpr, SqlPlan};
 
-use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::*;
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::convert::{ConvertContext, convert_one};
+use super::super::body::convert_body_to_single_plan;
+use super::super::convert::ConvertContext;
 use super::super::filter::serialize_filters;
 use super::spec::{InputSourcedTaskParams, build_input_sourced_aggregate_task};
 
@@ -31,9 +31,10 @@ pub(super) struct InputSourcedAggregateParams<'a> {
 
 /// Lower an aggregate whose input is a materialized relation.
 ///
-/// The body converts through `convert_one` and must produce exactly one task.
-/// A sharded body is wrapped in `Exchange{Gather}` so the coordinator resolves
-/// it to a `ProviderScan` before the aggregate runs. The emitted task is
+/// The body lowers to ONE relation through `convert_body_to_single_plan`: a
+/// set-operation body becomes a coordinator-resolved `SetOp`, and a sharded
+/// body is wrapped in `Exchange{Gather}` so the coordinator resolves it to a
+/// `ProviderScan` before the aggregate runs. The emitted task is
 /// coordinator-local: an empty collection keeps it on the coordinator vshard
 /// and `is_sharded_source` reports the `Some(input)` aggregate as
 /// non-sharded, so it runs once and is never broadcast.
@@ -61,41 +62,9 @@ pub(super) fn convert_input_sourced_aggregate(
         });
     }
 
-    // The body is one relation. A body that lowers to several tasks (a set
-    // operation) has no single row stream to aggregate.
-    let mut body = convert_one(input, tenant_id, ctx)?;
-    if body.len() != 1 {
-        return Err(crate::Error::PlanError {
-            detail: format!(
-                "aggregate over a derived-table body that lowers to {} physical tasks is not \
-                 supported; the body must produce a single relation",
-                body.len()
-            ),
-        });
-    }
-    let mut child = match body.pop() {
-        Some(task) => task.plan,
-        None => {
-            return Err(crate::Error::PlanError {
-                detail: "aggregate over a derived-table body produced no physical task".to_string(),
-            });
-        }
-    };
-
-    // A sharded body is gathered first so the aggregate observes the FULL
-    // union exactly once. The aggregate task is coordinator-local, so the
-    // top-level `convert()` wrap loop does not gather the child.
-    if child.is_sharded_source() {
-        let as_aggregate = matches!(
-            &child,
-            PhysicalPlan::Query(QueryOp::Aggregate { .. })
-                | PhysicalPlan::Query(QueryOp::PartialAggregate { .. })
-        );
-        child = PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
-            child: Box::new(child),
-            mode: ExchangeMode::Gather { as_aggregate },
-        }));
-    }
+    // The body is ONE relation, already gathered when sharded, so the
+    // aggregate observes the full union exactly once.
+    let child = convert_body_to_single_plan(input, tenant_id, ctx)?;
 
     let having_bytes = serialize_filters(having)?;
 

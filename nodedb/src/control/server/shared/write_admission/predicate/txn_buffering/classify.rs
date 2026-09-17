@@ -284,7 +284,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | QueryOp::RecursiveValue { .. }
             | QueryOp::LateralTopK { .. }
             | QueryOp::LateralLoop { .. }
-            | QueryOp::PostProcess { .. },
+            | QueryOp::PostProcess { .. }
+            | QueryOp::SetOp { .. },
         ) => false,
 
         // ---- Meta: control / maintenance ops — internal orchestration, never a client `task.plan`.

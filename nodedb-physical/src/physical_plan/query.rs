@@ -149,6 +149,21 @@ pub enum QueryOp {
         distinct: bool,
     },
 
+    /// Set operation over N materialized children. Coordinator-only: the
+    /// resolver materializes every child and merges the rows into one
+    /// `ProviderScan` before dispatch. A Data-Plane core never sees this node.
+    ///
+    /// Lowered from a derived-table body that is `UNION [ALL]`,
+    /// `INTERSECT [ALL]`, or `EXCEPT [ALL]`, so the body is one relation for
+    /// an outer [`QueryOp::PostProcess`] or input-sourced [`QueryOp::Aggregate`].
+    SetOp {
+        /// Child relations in SQL order. Each sharded child is wrapped in
+        /// `Exchange{Gather}` by the converter so its gather runs once.
+        inputs: Vec<crate::physical_plan::PhysicalPlan>,
+        /// Which set operation merges the inputs.
+        op: crate::physical_plan::SetOpKind,
+    },
+
     /// Aggregate: GROUP BY + aggregate functions.
     Aggregate {
         collection: QualifiedCollection,

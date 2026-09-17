@@ -91,6 +91,24 @@ fn hit_collection_name(plan: &PhysicalPlan) -> Option<String> {
     }
 }
 
+/// A `ProviderScan` carrying final `rows` and an empty relational tail:
+/// no filter, projection, computed column, window, sort, limit, offset, or
+/// distinct. The shape every coordinator-materialized child is embedded as.
+pub(crate) fn provider_scan_of_rows(rows: Vec<u8>) -> PhysicalPlan {
+    PhysicalPlan::Query(QueryOp::ProviderScan {
+        provider: None,
+        rows,
+        filters: Vec::new(),
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
+        window_functions: Vec::new(),
+        sort_keys: Vec::new(),
+        limit: None,
+        offset: 0,
+        distinct: false,
+    })
+}
+
 /// Rows of a materialized child, or a resolution the caller returns as-is.
 pub(super) enum ChildRows {
     /// The child's rows, flattened to the bare relational row shape a

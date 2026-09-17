@@ -14,7 +14,7 @@ use crate::control::state::SharedState;
 
 use super::dispatch::ResolveCtx;
 use super::entry::Resolved;
-use super::post_process_arm::{ChildRows, materialize_child_rows};
+use super::post_process_arm::{ChildRows, materialize_child_rows, provider_scan_of_rows};
 
 /// Fields of a `QueryOp::Aggregate { input: Some(_) }` plan node, carried
 /// through resolution as one value.
@@ -88,18 +88,5 @@ pub(super) async fn resolve_aggregate_input(
         ChildRows::Rows(rows) => rows,
         ChildRows::Passthrough(resolved) => return Ok(resolved),
     };
-    Ok(rebuild(Box::new(PhysicalPlan::Query(
-        QueryOp::ProviderScan {
-            provider: None,
-            rows,
-            filters: Vec::new(),
-            projection: Vec::new(),
-            computed_columns: Vec::new(),
-            window_functions: Vec::new(),
-            sort_keys: Vec::new(),
-            limit: None,
-            offset: 0,
-            distinct: false,
-        },
-    ))))
+    Ok(rebuild(Box::new(provider_scan_of_rows(rows))))
 }

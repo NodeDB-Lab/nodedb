@@ -92,6 +92,14 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         // PostProcess only reshapes child rows; permission is the child's — recurse, don't assume Read.
         PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => required_permission(input),
 
+        // SetOp merges N child relations; it requires the strictest permission
+        // any branch requires. An empty input list is unreachable from the
+        // converter and maps to Read, the weakest tier.
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => inputs
+            .iter()
+            .map(required_permission)
+            .fold(Permission::Read, strictest),
+
         PhysicalPlan::Text(
             TextOp::Search { .. }
             | TextOp::BM25ScoreScan { .. }
@@ -361,5 +369,32 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Meta(MetaOp::PutSynonymGroup { .. } | MetaOp::DeleteSynonymGroup { .. }) => {
             Permission::Alter
         }
+    }
+}
+
+/// The stricter of two permissions under the tier order used to fold a
+/// multi-input node. Exhaustive so a new `Permission` variant forces a
+/// placement here.
+fn strictest(a: Permission, b: Permission) -> Permission {
+    if strictness_rank(b) > strictness_rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
+/// Tier order from weakest to strictest. Read-class tiers come first, then
+/// write, then schema, then cluster-wide control.
+fn strictness_rank(permission: Permission) -> u8 {
+    match permission {
+        Permission::Read => 0,
+        Permission::Monitor => 1,
+        Permission::Execute => 2,
+        Permission::Write => 3,
+        Permission::Create => 4,
+        Permission::Drop => 5,
+        Permission::Alter => 6,
+        Permission::Backup => 7,
+        Permission::Admin => 8,
     }
 }

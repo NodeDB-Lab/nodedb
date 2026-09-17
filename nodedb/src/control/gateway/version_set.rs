@@ -479,6 +479,13 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
                     out.extend(touched_collections(input));
                 }
 
+                // SetOp: every branch is a body that reads its own collections.
+                SetOp { inputs, .. } => {
+                    for input in inputs {
+                        out.extend(touched_collections(input));
+                    }
+                }
+
                 // ProviderScan is a catalog/constant source — no user collection.
                 ProviderScan { .. } => {}
 

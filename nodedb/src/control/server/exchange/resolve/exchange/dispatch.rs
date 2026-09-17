@@ -13,7 +13,9 @@ use super::aggregate_input_arm::AggregateFields;
 use super::entry::Resolved;
 use super::hash_join_arm::HashJoinFields;
 use super::post_process_arm::PostProcessFields;
-use super::{aggregate_input_arm, gather_arm, hash_join_arm, post_process_arm, shuffle_arm};
+use super::{
+    aggregate_input_arm, gather_arm, hash_join_arm, post_process_arm, set_op_arm, shuffle_arm,
+};
 
 /// Request-scoped identifiers threaded through every arm resolver, bundled
 /// to keep each resolver's argument list within the clippy default arity.
@@ -35,6 +37,8 @@ pub(super) struct ResolveCtx {
 ///   a typed error.
 /// - `Aggregate{input: Some}` → materialize the child on the coordinator and
 ///   embed it as `ProviderScan{None, rows}`, return `Resolved::Plan`.
+/// - `SetOp{inputs, op}` → materialize every branch, merge with `op`, and
+///   embed as `ProviderScan{None, rows}`, return `Resolved::Plan`.
 /// - Anything else → `Resolved::Plan` unchanged.
 ///
 /// `captures` accumulates one [`DistributedReadCapture`] per base collection an
@@ -222,6 +226,13 @@ pub(super) async fn resolve_exchange(
                 },
             )
             .await
+        }
+
+        // SetOp: materialize every branch on the coordinator, merge with the
+        // set operation, and lower to a `ProviderScan` of the merged rows.
+        // The node is coordinator-local, so the root Gather arm never sees it.
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, op }) => {
+            set_op_arm::resolve_set_op(state, ctx, captures, inputs, op).await
         }
 
         // All other plan variants: pass through unchanged.

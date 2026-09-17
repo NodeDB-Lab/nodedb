@@ -77,6 +77,11 @@ pub(super) fn collect_query_requirements<'a>(
             pending.push(input);
             true
         }
+        // Every set-operation branch is a body whose collections are authorized.
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => {
+            pending.extend(inputs.iter());
+            true
+        }
         PhysicalPlan::Query(QueryOp::ProviderScan {
             provider: Some(provider),
             ..

@@ -21,6 +21,10 @@ pub(super) fn apply_query(ctx: &PermCtx<'_>, op: &mut QueryOp) -> crate::Result<
         // tree restricts.
         QueryOp::PostProcess { input, .. } => walk(ctx, input),
 
+        // Recurse: every set-operation branch is its own body whose rows the
+        // policy restricts.
+        QueryOp::SetOp { inputs, .. } => inputs.iter_mut().try_for_each(|input| walk(ctx, input)),
+
         // Filter and recurse: the aggregate handler evaluates `filters`
         // against both row sources — the per-shard collection scan and the
         // rows decoded from an embedded sub-plan — so the subtree filter goes

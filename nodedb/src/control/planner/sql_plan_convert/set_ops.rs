@@ -8,10 +8,12 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{TenantId, VShardId};
 use nodedb_physical::physical_plan::*;
 
+use super::body::convert_body_to_single_plan;
 use super::convert::{ConvertContext, convert_one};
 use super::expr::inline_cte;
-use super::value::sql_value_to_string;
+use super::value::{sql_value_to_nodedb_value, sql_value_to_string};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
+use nodedb_types::Value;
 
 pub(super) fn convert_constant_result(
     columns: &[String],
@@ -19,25 +21,38 @@ pub(super) fn convert_constant_result(
     tenant_id: TenantId,
     ctx: &ConvertContext,
 ) -> crate::Result<Vec<PhysicalTask>> {
-    // A constant row is one JSON object, which cannot hold two cells under one
+    // A constant row is one object, which cannot hold two cells under one
     // key. `SELECT nextval('s'), nextval('s')` legally repeats an output name;
     // keying both cells by the name would collapse them to the last value. Use
     // the same unique per-column keys every response encoder derives, so each
     // column keeps its own cell.
     let cell_keys = crate::control::server::response_shape::project::cell_keys(columns);
-    let mut obj = serde_json::Map::new();
-    for ((_col, val), key) in columns.iter().zip(values.iter()).zip(cell_keys.iter()) {
-        let json_val = match val {
-            SqlValue::Null => serde_json::Value::Null,
-            other => serde_json::Value::String(sql_value_to_string(other)),
+    let mut obj = std::collections::HashMap::with_capacity(columns.len());
+    for ((_col, val), key) in columns.iter().zip(values.iter()).zip(cell_keys) {
+        let cell = match val {
+            SqlValue::Int(_)
+            | SqlValue::Float(_)
+            | SqlValue::Bool(_)
+            | SqlValue::Null
+            | SqlValue::String(_) => sql_value_to_nodedb_value(val),
+            // The shaper has no typed renderer that reproduces PostgreSQL's
+            // text form for these — `\x..` for bytes, `{1,2}` for arrays, the
+            // ISO string for timestamps — from a typed value, so they keep
+            // that text form under a `Text` column instead.
+            SqlValue::Decimal(_)
+            | SqlValue::Bytes(_)
+            | SqlValue::Array(_)
+            | SqlValue::Timestamp(_)
+            | SqlValue::Timestamptz(_) => Value::String(sql_value_to_string(val)),
         };
-        obj.insert(key.clone(), json_val);
+        obj.insert(key, cell);
     }
-    let arr = serde_json::Value::Array(vec![serde_json::Value::Object(obj)]);
-    let payload = nodedb_types::json_to_msgpack(&arr).map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("constant result: {e}"),
-    })?;
+    let arr = Value::Array(vec![Value::Object(obj)]);
+    let payload =
+        nodedb_types::value_to_msgpack(&arr).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("constant result: {e}"),
+        })?;
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: VShardId::from_collection_in_database(ctx.database_id, ""),
@@ -243,9 +258,11 @@ pub(super) fn convert_cte(
 /// whose leaf could not absorb the outer constraints — into a coordinator-
 /// resolved `QueryOp::PostProcess`.
 ///
-/// The body is converted to a single physical plan and, when it is a sharded
-/// source, wrapped in `Exchange{Gather}` so the sort/distinct/offset/limit tail
-/// runs exactly once over the full union at resolve time.
+/// The body lowers to ONE physical relation through
+/// `convert_body_to_single_plan`: a set-operation body becomes a
+/// coordinator-resolved `SetOp`, and a sharded body is wrapped in
+/// `Exchange{Gather}` so the sort/distinct/offset/limit tail runs exactly
+/// once over the full union at resolve time.
 pub(super) fn convert_subquery(
     args: nodedb_sql::SubqueryVisitArgs<'_>,
     tenant_id: TenantId,
@@ -262,20 +279,8 @@ pub(super) fn convert_subquery(
         limit,
     } = args;
 
-    // Materialize the body as a single physical plan. A subquery/derived-table
-    // body is one relation; a body that lowers to multiple tasks (e.g. a set
-    // operation) has no single row stream to post-process here.
-    let mut body_tasks = convert_one(input, tenant_id, ctx)?;
-    if body_tasks.len() != 1 {
-        return Err(crate::Error::PlanError {
-            detail: format!(
-                "ORDER BY / OFFSET / DISTINCT over a subquery whose body lowers to {} physical \
-                 tasks is not supported; the body must produce a single relation",
-                body_tasks.len()
-            ),
-        });
-    }
-    let mut child = body_tasks.pop().expect("checked len == 1").plan;
+    // The body is ONE relation, already gathered when sharded.
+    let child = convert_body_to_single_plan(input, tenant_id, ctx)?;
 
     // A join / lateral body emits ONE merged document per output row whose
     // columns keep their table prefix (`a.attnum`), which is why the response
@@ -283,33 +288,9 @@ pub(super) fn convert_subquery(
     // computed columns, and window specs must address the same shape — an
     // unqualified key resolves to NULL on every merged row, and a sort where
     // every key is NULL is a no-op that silently answers an ordered query in
-    // the body's own order.
-    let merged_doc_body = matches!(
-        child,
-        PhysicalPlan::Query(
-            QueryOp::HashJoin { .. }
-                | QueryOp::NestedLoopJoin { .. }
-                | QueryOp::SortMergeJoin { .. }
-                | QueryOp::LateralTopK { .. }
-                | QueryOp::LateralLoop { .. }
-        )
-    );
-
-    // A sharded body must be gathered before the relational tail runs, so the
-    // sort/distinct/offset/limit observe the FULL union exactly once.
-    // PostProcess is itself coordinator-local (`is_sharded_source() == false`),
-    // so the top-level `convert()` wrap loop will not gather the child for us.
-    if child.is_sharded_source() {
-        let as_aggregate = matches!(
-            &child,
-            PhysicalPlan::Query(QueryOp::Aggregate { .. })
-                | PhysicalPlan::Query(QueryOp::PartialAggregate { .. })
-        );
-        child = PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
-            child: Box::new(child),
-            mode: ExchangeMode::Gather { as_aggregate },
-        }));
-    }
+    // the body's own order. The body may sit under the `Exchange{Gather}`
+    // wrapper, so the detection looks through it.
+    let merged_doc_body = is_merged_doc_body(&child);
 
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -338,6 +319,50 @@ pub(super) fn convert_subquery(
         post_set_op: PostSetOp::None,
         txn_id: None,
     }])
+}
+
+/// Whether a body plan is a join / lateral whose rows keep their table
+/// prefix on every column, looking through the converter's
+/// `Exchange{Gather}` wrapper.
+fn is_merged_doc_body(plan: &PhysicalPlan) -> bool {
+    match plan {
+        PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp { child, .. })) => {
+            is_merged_doc_body(child)
+        }
+        PhysicalPlan::Query(
+            QueryOp::HashJoin { .. }
+            | QueryOp::NestedLoopJoin { .. }
+            | QueryOp::SortMergeJoin { .. }
+            | QueryOp::LateralTopK { .. }
+            | QueryOp::LateralLoop { .. },
+        ) => true,
+        PhysicalPlan::Query(
+            QueryOp::ProviderScan { .. }
+            | QueryOp::PostProcess { .. }
+            | QueryOp::SetOp { .. }
+            | QueryOp::Aggregate { .. }
+            | QueryOp::PartialAggregate { .. }
+            | QueryOp::PartialAggregateState { .. }
+            | QueryOp::ShuffleJoinConsume { .. }
+            | QueryOp::ShuffleAggregateConsume { .. }
+            | QueryOp::FacetCounts { .. }
+            | QueryOp::RecursiveScan { .. }
+            | QueryOp::RecursiveValue { .. },
+        )
+        | PhysicalPlan::Document(_)
+        | PhysicalPlan::Vector(_)
+        | PhysicalPlan::Graph(_)
+        | PhysicalPlan::Text(_)
+        | PhysicalPlan::Columnar(_)
+        | PhysicalPlan::Timeseries(_)
+        | PhysicalPlan::Spatial(_)
+        | PhysicalPlan::Kv(_)
+        | PhysicalPlan::Crdt(_)
+        | PhysicalPlan::Meta(_)
+        | PhysicalPlan::Array(_)
+        | PhysicalPlan::ClusterArray(_)
+        | PhysicalPlan::ClusterEvent(_) => false,
+    }
 }
 
 /// Lower outer projection items to the row keys the relational tail matches.

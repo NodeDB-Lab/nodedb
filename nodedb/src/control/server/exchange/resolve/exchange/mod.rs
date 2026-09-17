@@ -23,6 +23,8 @@ mod entry;
 mod gather_arm;
 mod hash_join_arm;
 mod post_process_arm;
+mod set_op_arm;
 mod shuffle_arm;
 
 pub use entry::{Resolved, resolve_and_materialize, resolve_exchange_in_plan};
+pub(crate) use post_process_arm::provider_scan_of_rows;
