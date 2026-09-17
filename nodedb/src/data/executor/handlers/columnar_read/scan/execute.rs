@@ -599,7 +599,7 @@ mod tests {
     fn policy_name_eq(name: &str) -> Vec<u8> {
         let filter = crate::bridge::scan_filter::ScanFilter {
             field: "name".into(),
-            op: "eq".into(),
+            op: crate::bridge::scan_filter::FilterOp::Eq,
             value: Value::String(name.into()),
             clauses: vec![],
             expr: None,

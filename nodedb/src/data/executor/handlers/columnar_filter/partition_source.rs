@@ -28,7 +28,7 @@ impl ColumnarSource for PartitionColumns<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::scan_filter::ScanFilter;
+    use crate::bridge::scan_filter::{FilterOp, ScanFilter};
     use nodedb_types::timeseries::SymbolDictionary;
 
     use super::super::{eval_filters_bitmask, eval_filters_dense, eval_filters_sparse};
@@ -60,7 +60,7 @@ mod tests {
 
         let f = ScanFilter {
             field: "host".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("web-1".into()),
             clauses: vec![],
             expr: None,
@@ -96,7 +96,7 @@ mod tests {
 
         let f = ScanFilter {
             field: "col".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("z".into()),
             clauses: vec![],
             expr: None,
@@ -130,7 +130,7 @@ mod tests {
 
         let f = ScanFilter {
             field: "host".into(),
-            op: "contains".into(),
+            op: FilterOp::Contains,
             value: nodedb_types::Value::String("web".into()),
             clauses: vec![],
             expr: None,
@@ -165,7 +165,7 @@ mod tests {
 
         let f = ScanFilter {
             field: "tag".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("alpha".into()),
             clauses: vec![],
             expr: None,
@@ -200,7 +200,7 @@ mod tests {
 
         let f = ScanFilter {
             field: "tag".into(),
-            op: "ne".into(),
+            op: FilterOp::Ne,
             value: nodedb_types::Value::String("y".into()),
             clauses: vec![],
             expr: None,
@@ -234,7 +234,7 @@ mod tests {
 
         let f = ScanFilter {
             field: "col".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("a".into()),
             clauses: vec![],
             expr: None,
@@ -284,7 +284,7 @@ mod tests {
         // Filter: value > 500
         let f = ScanFilter {
             field: "value".into(),
-            op: "gt".into(),
+            op: FilterOp::Gt,
             value: nodedb_types::Value::Float(500.0),
             clauses: vec![],
             expr: None,
@@ -296,7 +296,7 @@ mod tests {
         // Filter: host = 'alpha'
         let f2 = ScanFilter {
             field: "host".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String("alpha".into()),
             clauses: vec![],
             expr: None,

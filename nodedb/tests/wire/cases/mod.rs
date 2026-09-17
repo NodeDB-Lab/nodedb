@@ -261,6 +261,7 @@ mod sql_update_from;
 mod sql_utf8_expressions;
 mod sql_vector_index_ddl;
 mod sql_where_expressions;
+mod sql_where_instant_literals;
 mod sql_where_vector_search;
 mod sql_window_frames;
 mod sql_window_functions;

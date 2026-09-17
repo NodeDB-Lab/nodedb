@@ -17,20 +17,22 @@
 //! is still evaluated per row afterwards. A too-wide envelope costs I/O; a
 //! too-narrow one loses rows.
 
-use nodedb_query::scan_filter::value_as_timestamp_ms;
-
 use crate::bridge::scan_filter::{FilterOp, ScanFilter};
+use crate::engine::timeseries::columnar_memtable::TimeKind;
 
-/// Narrow `plan_range` with every bound the query places on `time_key`.
+/// Narrow `plan_range` with every bound the query places on the time key
+/// named by `time_key`, lowering each literal to stored milliseconds by the
+/// key's kind.
 ///
 /// Returns `plan_range` unchanged when the collection has no declared time
-/// key, or when no predicate references it.
+/// key, or when no predicate references it. A literal the kind cannot lower
+/// narrows nothing: the exact predicate still decides each row afterwards.
 pub(in crate::data::executor) fn narrow_time_range(
     plan_range: (i64, i64),
     filters: &[ScanFilter],
-    time_key: Option<&str>,
+    time_key: Option<(&str, TimeKind)>,
 ) -> (i64, i64) {
-    let Some(time_key) = time_key else {
+    let Some((time_key, kind)) = time_key else {
         return plan_range;
     };
     let (mut min_ts, mut max_ts) = plan_range;
@@ -38,7 +40,7 @@ pub(in crate::data::executor) fn narrow_time_range(
         if !filter.field.eq_ignore_ascii_case(time_key) {
             continue;
         }
-        let Some(ms) = value_as_timestamp_ms(&filter.value) else {
+        let Some(ms) = kind.literal_ms(&filter.value) else {
             continue;
         };
         match filter.op {
@@ -69,9 +71,11 @@ pub(in crate::data::executor) fn narrow_time_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodedb_types::Value;
+    use nodedb_types::{InstantKind, Value};
 
     const UNBOUNDED: (i64, i64) = (i64::MIN, i64::MAX);
+    const MILLIS: TimeKind = TimeKind::Millis;
+    const NAIVE: TimeKind = TimeKind::Instant(InstantKind::Naive);
 
     fn filter(field: &str, op: FilterOp, value: Value) -> ScanFilter {
         ScanFilter {
@@ -96,21 +100,38 @@ mod tests {
             filter("captured_at", FilterOp::Lt, Value::Integer(900)),
         ];
         assert_eq!(
-            narrow_time_range(UNBOUNDED, &filters, Some("captured_at")),
+            narrow_time_range(UNBOUNDED, &filters, Some(("captured_at", MILLIS))),
             (100, 900)
         );
     }
 
+    /// A declared instant key lowers a typed instant, and text that spells
+    /// one, to stored milliseconds.
     #[test]
-    fn a_datetime_literal_bound_is_understood() {
-        let filters = vec![filter(
-            "captured_at",
-            FilterOp::Lt,
-            Value::String("2020-03-05 10:00:00".into()),
-        )];
+    fn an_instant_key_lowers_instant_literals() {
+        let at = nodedb_types::NdbDateTime::from_micros(1_583_402_400_000_000);
+        let filters = vec![
+            filter("captured_at", FilterOp::Gte, Value::NaiveDateTime(at)),
+            filter(
+                "captured_at",
+                FilterOp::Lt,
+                Value::String("2020-03-05 11:00:00".into()),
+            ),
+        ];
         assert_eq!(
-            narrow_time_range(UNBOUNDED, &filters, Some("captured_at")),
-            (i64::MIN, 1_583_402_400_000)
+            narrow_time_range(UNBOUNDED, &filters, Some(("captured_at", NAIVE))),
+            (1_583_402_400_000, 1_583_406_000_000)
+        );
+    }
+
+    /// A bare integer against an instant key carries no unit, so it narrows
+    /// nothing; the per-row predicate still decides.
+    #[test]
+    fn an_integer_against_an_instant_key_narrows_nothing() {
+        let filters = vec![filter("captured_at", FilterOp::Gt, Value::Integer(100))];
+        assert_eq!(
+            narrow_time_range(UNBOUNDED, &filters, Some(("captured_at", NAIVE))),
+            UNBOUNDED
         );
     }
 
@@ -123,7 +144,7 @@ mod tests {
             filter("value", FilterOp::Lt, Value::Float(1.0)),
         ];
         assert_eq!(
-            narrow_time_range(UNBOUNDED, &filters, Some("captured_at")),
+            narrow_time_range(UNBOUNDED, &filters, Some(("captured_at", MILLIS))),
             UNBOUNDED
         );
     }
@@ -132,7 +153,7 @@ mod tests {
     fn equality_pins_both_ends() {
         let filters = vec![filter("ts", FilterOp::Eq, Value::Integer(4_200))];
         assert_eq!(
-            narrow_time_range(UNBOUNDED, &filters, Some("ts")),
+            narrow_time_range(UNBOUNDED, &filters, Some(("ts", MILLIS))),
             (4_200, 4_200)
         );
     }
@@ -144,7 +165,7 @@ mod tests {
             filter("ts", FilterOp::Lte, Value::Integer(10_000)),
         ];
         assert_eq!(
-            narrow_time_range((100, 900), &filters, Some("ts")),
+            narrow_time_range((100, 900), &filters, Some(("ts", MILLIS))),
             (100, 900)
         );
     }
@@ -153,7 +174,7 @@ mod tests {
     fn case_differences_in_the_predicate_still_match_the_key() {
         let filters = vec![filter("TS", FilterOp::Gt, Value::Integer(7))];
         assert_eq!(
-            narrow_time_range(UNBOUNDED, &filters, Some("ts")),
+            narrow_time_range(UNBOUNDED, &filters, Some(("ts", MILLIS))),
             (7, i64::MAX)
         );
     }

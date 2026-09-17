@@ -243,7 +243,7 @@ mod tests {
     fn owner_policy(value: &str) -> Vec<u8> {
         let filter = ScanFilter {
             field: "owner".into(),
-            op: "eq".into(),
+            op: crate::bridge::scan_filter::FilterOp::Eq,
             value: nodedb_types::Value::String(value.into()),
             clauses: Vec::new(),
             expr: None,

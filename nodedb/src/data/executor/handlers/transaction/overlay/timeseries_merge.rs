@@ -26,6 +26,7 @@ use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_read::filter::value_matches_filters;
 use crate::data::executor::handlers::transaction::overlay::Staged;
+use crate::engine::timeseries::columnar_memtable::TimeKind;
 use crate::types::{DatabaseId, TenantId, TxnId};
 use crate::util::rmpv_value::value_to_rmpv;
 
@@ -62,15 +63,17 @@ fn decode_staged_row(body: &[u8]) -> Option<Value> {
 ///
 /// A staged row keeps the INSERT's own column names, so the lookup is by the
 /// collection's declared time column — the same name the base scan prunes on.
-/// A row that carries no readable instant under that name falls outside every
-/// bounded range and is treated as non-matching by the caller.
-fn row_timestamp_ms(row: &Value, time_column: &str) -> Option<i64> {
+/// The cell was staged typed by the column's kind, so it lowers to stored
+/// milliseconds by that same kind. A row that carries no such cell under
+/// that name falls outside every bounded range and is treated as
+/// non-matching by the caller.
+fn row_timestamp_ms(row: &Value, time_column: &str, kind: TimeKind) -> Option<i64> {
     let Value::Object(map) = row else {
         return None;
     };
     map.iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(time_column))
-        .and_then(|(_, value)| nodedb_query::scan_filter::value_as_timestamp_ms(value))
+        .and_then(|(_, value)| kind.literal_ms(value))
 }
 
 /// Convert a decoded staged row (`Value::Object`) into the `rmpv::Value::Map`
@@ -104,6 +107,7 @@ impl CoreLoop {
         } = params;
 
         let time_column = self.ts_time_column(coll_key.0, coll_key.1, &coll_key.2);
+        let time_kind = self.ts_time_key_kind(coll_key.0, coll_key.1, &coll_key.2);
 
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -127,7 +131,7 @@ impl CoreLoop {
 
             // Time-range prune, mirroring the base memtable scan's
             // `timestamp_range_filter` (inclusive bounds).
-            match row_timestamp_ms(&row, &time_column) {
+            match row_timestamp_ms(&row, &time_column, time_kind) {
                 Some(ts) if ts >= time_range.0 && ts <= time_range.1 => {}
                 _ => continue,
             }

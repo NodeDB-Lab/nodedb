@@ -284,7 +284,7 @@ fn project_row(doc: &Value, source_names: &[String]) -> Vec<NativeCell> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::scan_filter::ScanFilter;
+    use crate::bridge::scan_filter::{FilterOp, ScanFilter};
     use nodedb_physical::physical_plan::ReturningItem;
     use serde_json::json;
 
@@ -292,7 +292,7 @@ mod tests {
     fn owner_policy(value: &str) -> Vec<u8> {
         let filter = ScanFilter {
             field: "owner".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: nodedb_types::Value::String(value.into()),
             clauses: Vec::new(),
             expr: None,

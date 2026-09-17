@@ -83,12 +83,13 @@ fn check_encoded(rls_filters: &[u8], msgpack: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::scan_filter::FilterOp;
     use serde_json::json;
 
-    fn make_rls_bytes(field: &str, op: &str, value: nodedb_types::Value) -> Vec<u8> {
+    fn make_rls_bytes(field: &str, op: FilterOp, value: nodedb_types::Value) -> Vec<u8> {
         let filter = ScanFilter {
             field: field.into(),
-            op: op.into(),
+            op,
             value,
             clauses: Vec::new(),
             expr: None,
@@ -104,28 +105,44 @@ mod tests {
 
     #[test]
     fn matching_filter_allows() {
-        let rls = make_rls_bytes("user_id", "eq", nodedb_types::Value::String("42".into()));
+        let rls = make_rls_bytes(
+            "user_id",
+            FilterOp::Eq,
+            nodedb_types::Value::String("42".into()),
+        );
         let doc = json!({"user_id": "42", "name": "alice"});
         assert!(rls_check_document(&rls, &doc));
     }
 
     #[test]
     fn non_matching_filter_denies() {
-        let rls = make_rls_bytes("user_id", "eq", nodedb_types::Value::String("42".into()));
+        let rls = make_rls_bytes(
+            "user_id",
+            FilterOp::Eq,
+            nodedb_types::Value::String("42".into()),
+        );
         let doc = json!({"user_id": "99", "name": "bob"});
         assert!(!rls_check_document(&rls, &doc));
     }
 
     #[test]
     fn missing_field_denies() {
-        let rls = make_rls_bytes("user_id", "eq", nodedb_types::Value::String("42".into()));
+        let rls = make_rls_bytes(
+            "user_id",
+            FilterOp::Eq,
+            nodedb_types::Value::String("42".into()),
+        );
         let doc = json!({"name": "alice"});
         assert!(!rls_check_document(&rls, &doc));
     }
 
     #[test]
     fn typed_documents_evaluate_the_same_filters() {
-        let rls = make_rls_bytes("user_id", "eq", nodedb_types::Value::String("42".into()));
+        let rls = make_rls_bytes(
+            "user_id",
+            FilterOp::Eq,
+            nodedb_types::Value::String("42".into()),
+        );
         let ok = Value::from(json!({"user_id": "42"}));
         let bad = Value::from(json!({"user_id": "99"}));
         assert!(rls_check_value(&rls, &ok));
@@ -145,14 +162,14 @@ mod tests {
         let filters = vec![
             ScanFilter {
                 field: "user_id".into(),
-                op: "eq".into(),
+                op: crate::bridge::scan_filter::FilterOp::Eq,
                 value: nodedb_types::Value::String("42".into()),
                 clauses: Vec::new(),
                 expr: None,
             },
             ScanFilter {
                 field: "status".into(),
-                op: "eq".into(),
+                op: crate::bridge::scan_filter::FilterOp::Eq,
                 value: nodedb_types::Value::String("active".into()),
                 clauses: Vec::new(),
                 expr: None,

@@ -2,7 +2,7 @@
 
 //! Integration tests for array operators and array aggregate functions.
 
-use nodedb::bridge::scan_filter::ScanFilter;
+use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
 use nodedb_physical::physical_plan::{
     AggregateSpec, DocumentOp, GroupKeySpec, PhysicalPlan, QueryOp,
 };
@@ -45,10 +45,10 @@ fn insert_product(
     );
 }
 
-fn filter(field: &str, op: &str, value: nodedb_types::Value) -> ScanFilter {
+fn filter(field: &str, op: FilterOp, value: nodedb_types::Value) -> ScanFilter {
     ScanFilter {
         field: field.into(),
-        op: op.into(),
+        op,
         value,
         clauses: Vec::new(),
         expr: None,
@@ -106,7 +106,7 @@ fn array_contains_filter() {
     // Products where tags contains "sale".
     let filters = vec![filter(
         "tags",
-        "array_contains",
+        FilterOp::ArrayContains,
         nodedb_types::Value::String("sale".into()),
     )];
     let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();
@@ -145,7 +145,7 @@ fn array_contains_all_filter() {
     // Products where sizes contains ALL of ["S", "M"].
     let filters = vec![filter(
         "sizes",
-        "array_contains_all",
+        FilterOp::ArrayContainsAll,
         nodedb_types::Value::Array(vec![
             nodedb_types::Value::String("S".into()),
             nodedb_types::Value::String("M".into()),
@@ -187,7 +187,7 @@ fn array_overlap_filter() {
     // Products where tags overlaps ["sale", "premium"].
     let filters = vec![filter(
         "tags",
-        "array_overlap",
+        FilterOp::ArrayOverlap,
         nodedb_types::Value::Array(vec![
             nodedb_types::Value::String("sale".into()),
             nodedb_types::Value::String("premium".into()),
@@ -322,7 +322,7 @@ fn no_match_returns_zero() {
     // No product has tag "nonexistent".
     let filters = vec![filter(
         "tags",
-        "array_contains",
+        FilterOp::ArrayContains,
         nodedb_types::Value::String("nonexistent".into()),
     )];
     let filter_bytes = zerompk::to_msgpack_vec(&filters).unwrap();

@@ -114,12 +114,12 @@ fn field_value(value: &FieldValue<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::scan_filter::ScanFilter;
+    use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 
     fn owner_policy(owner: &str) -> Vec<u8> {
         let filter = ScanFilter {
             field: "owner".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: Value::String(owner.into()),
             clauses: Vec::new(),
             expr: None,
@@ -242,7 +242,7 @@ mod tests {
     fn a_msgpack_row_is_decided_on_its_normalized_values() {
         let filter = ScanFilter {
             field: "reading".into(),
-            op: "eq".into(),
+            op: FilterOp::Eq,
             value: Value::Float(1.5),
             clauses: Vec::new(),
             expr: None,

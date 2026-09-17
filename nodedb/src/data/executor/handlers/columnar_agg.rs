@@ -542,7 +542,7 @@ mod tests {
         let mt = make_test_memtable();
         let filter = crate::bridge::scan_filter::ScanFilter {
             field: "value".into(),
-            op: "gt".into(),
+            op: crate::bridge::scan_filter::FilterOp::Gt,
             value: nodedb_types::Value::Float(5000.0),
             clauses: vec![],
             expr: None,

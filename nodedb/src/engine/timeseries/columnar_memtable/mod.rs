@@ -2,6 +2,7 @@
 
 mod memtable;
 mod snapshot;
+mod time_literal;
 mod types;
 
 pub use memtable::ColumnarMemtable;

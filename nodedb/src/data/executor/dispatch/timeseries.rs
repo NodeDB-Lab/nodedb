@@ -186,7 +186,7 @@ mod tests {
     fn policy_owner_eq(owner: &str) -> Vec<u8> {
         let filter = crate::bridge::scan_filter::ScanFilter {
             field: "owner".into(),
-            op: "eq".into(),
+            op: crate::bridge::scan_filter::FilterOp::Eq,
             value: nodedb_types::Value::String(owner.into()),
             clauses: vec![],
             expr: None,
@@ -340,7 +340,7 @@ mod tests {
 
         let filter = crate::bridge::scan_filter::ScanFilter {
             field: "owner".into(),
-            op: "like".into(),
+            op: crate::bridge::scan_filter::FilterOp::Like,
             value: nodedb_types::Value::String("mi%".into()),
             clauses: vec![],
             expr: None,

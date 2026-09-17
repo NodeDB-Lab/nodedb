@@ -82,6 +82,7 @@ impl CoreLoop {
         // projection pushdown. Resolved once here and threaded through both
         // branches; nothing downstream guesses it from a column name.
         let time_key = self.ts_time_column(task.request.database_id, tid, collection);
+        let time_key_kind = self.ts_time_key_kind(task.request.database_id, tid, collection);
 
         // Lazy-load partition registry from disk if not yet loaded.
         if let Err(e) = self.ensure_ts_registry(tid, task.request.database_id, collection) {
@@ -142,7 +143,7 @@ impl CoreLoop {
         let time_range = super::time_range::narrow_time_range(
             time_range,
             &filter_predicates,
-            Some(time_key.as_str()),
+            Some((time_key.as_str(), time_key_kind)),
         );
 
         let has_filters = !filter_predicates.is_empty();

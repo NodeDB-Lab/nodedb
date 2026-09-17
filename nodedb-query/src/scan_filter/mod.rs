@@ -9,11 +9,9 @@
 pub mod like;
 pub mod op;
 pub mod parse;
-pub mod timestamp;
 pub mod types;
 
 pub use like::sql_like_match;
-pub use op::FilterOp;
+pub use op::{FilterOp, UnknownFilterOp};
 pub use parse::parse_simple_predicates;
-pub use timestamp::value_as_timestamp_ms;
 pub use types::ScanFilter;

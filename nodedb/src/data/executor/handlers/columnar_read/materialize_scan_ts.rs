@@ -51,7 +51,7 @@ use nodedb_types::value::Value;
 use super::materialize_scan::{build_response, encode_cursor};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType, TimeKind};
+use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
 
 impl CoreLoop {
@@ -352,17 +352,6 @@ fn instant_read_error(column: &str, e: nodedb_types::NdbDateTimeError) -> crate:
 // Column-to-Value converters
 // ---------------------------------------------------------------------------
 
-/// Read a stored millisecond time cell as the value its kind denotes.
-///
-/// An instant column yields a typed instant, a `Millis` column the integer
-/// stored. `Err` when the milliseconds overflow the microsecond range.
-fn time_cell_value(kind: TimeKind, millis: i64) -> Result<Value, nodedb_types::NdbDateTimeError> {
-    match kind {
-        TimeKind::Instant(k) => k.from_millis(millis),
-        TimeKind::Millis => Ok(Value::Integer(millis)),
-    }
-}
-
 /// Convert a memtable column entry to `nodedb_types::Value`.
 fn memtable_col_to_value(
     col_data: &ColumnData,
@@ -373,7 +362,7 @@ fn memtable_col_to_value(
 ) -> Result<Value, nodedb_types::NdbDateTimeError> {
     let value = match col_type {
         ColumnType::Timestamp(kind) => {
-            return time_cell_value(*kind, col_data.as_timestamps()[row_idx]);
+            return kind.cell_value(col_data.as_timestamps()[row_idx]);
         }
         ColumnType::Float64 => {
             let v = col_data.as_f64()[row_idx];
@@ -405,7 +394,7 @@ fn partition_col_to_value(
 ) -> Result<Value, nodedb_types::NdbDateTimeError> {
     let value = match col_type {
         ColumnType::Timestamp(kind) => {
-            return time_cell_value(*kind, data.as_timestamps()[row_idx]);
+            return kind.cell_value(data.as_timestamps()[row_idx]);
         }
         ColumnType::Float64 => {
             let v = data.as_f64()[row_idx];
