@@ -172,11 +172,11 @@ mod tests {
                 inclusive: false,
             },
         ];
-        for v in scalars {
+        for (index, v) in scalars.iter().enumerate() {
             assert_eq!(
-                cell_text(&v),
-                wire_json_text(&value_to_wire_json(&v)),
-                "{v:?} must render the same text either way"
+                cell_text(v),
+                wire_json_text(&value_to_wire_json(v)),
+                "scalar {index} must render the same text either way"
             );
         }
     }
