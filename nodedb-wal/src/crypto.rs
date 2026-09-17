@@ -399,9 +399,9 @@ fn random_epoch() -> Result<[u8; 4]> {
 /// The epoch is generated randomly per WAL lifetime, so even if LSNs
 /// restart from 1 after a snapshot restore, the nonces remain unique.
 fn lsn_to_nonce(epoch: &[u8; 4], lsn: u64) -> aes_gcm::Nonce<aes_gcm::aead::consts::U12> {
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[..4].copy_from_slice(epoch);
-    nonce_bytes[4..12].copy_from_slice(&lsn.to_le_bytes());
+    let [e0, e1, e2, e3] = *epoch;
+    let [l0, l1, l2, l3, l4, l5, l6, l7] = lsn.to_le_bytes();
+    let nonce_bytes: [u8; 12] = [e0, e1, e2, e3, l0, l1, l2, l3, l4, l5, l6, l7];
     nonce_bytes.into()
 }
 

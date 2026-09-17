@@ -55,7 +55,7 @@ fn a_hole_still_fails_recovery_with_the_same_error() {
         .open(&path)
         .expect("open segment");
     file.seek(SeekFrom::Start(hole)).expect("seek");
-    file.write_all(&vec![0xA5u8; HEADER_SIZE]).expect("write");
+    file.write_all(&[0xA5u8; HEADER_SIZE]).expect("write");
     file.sync_all().expect("sync");
     drop(file);
 
