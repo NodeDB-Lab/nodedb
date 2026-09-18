@@ -6,6 +6,7 @@ use crate::control::planner::context::PlanSecurityContext;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
 use crate::control::security::request_scope::RequestAuthScope;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::pgwire::types::error_to_sqlstate;
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::redaction::QueryRedaction;
@@ -117,9 +118,10 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
     sql: &str,
     txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    // The clause is stripped from the rebuilt statement before planning and
-    // re-attached to each plan below — the planner itself does not parse it.
-    let (sql, returning_spec) = returning::strip_returning(sql).map_err(|error| {
+    // The clause is stripped from the rebuilt statement before planning. The
+    // planner resolves the item text against the planned target and attaches
+    // the Data-Plane spec to every task before they come back here.
+    let (sql, returning_items) = returning::strip_returning(sql).map_err(|error| {
         let (_, sqlstate, message) = error_to_sqlstate(&error);
         ddl_err(sqlstate, message)
     })?;
@@ -131,9 +133,10 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
     // it: read filters would not be injected, and the write gates would decide
     // nothing, on a transport a client can reach directly.
     //
-    // Injection happens HERE, before the task set is consumed: implicit-edge
-    // extraction, authorization, staging, and dispatch all read `tasks` after
-    // this point, and injecting later would hand them un-injected copies.
+    // Injection happens inside planning, before the task set is consumed:
+    // implicit-edge extraction, authorization, staging, and dispatch all read
+    // `tasks` after this point, and injecting later would hand them
+    // un-injected copies.
     let (mut tasks, output_schema, versions) = {
         let scope = RequestAuthScope::for_database(identity, state.auth_stores(), database_id);
         let permission_cache = state.permission_cache.read().await;
@@ -153,7 +156,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
                 tenant_id,
                 database_id,
                 &sec,
-                returning_spec.as_ref(),
+                returning_items.as_deref(),
             )
             .await
             .map_err(|error| {
@@ -162,18 +165,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
             })?;
         (tasks, output_schema, versions)
     };
-
-    // Attach the projection to every planned write, refusing any insert shape
-    // that has nowhere to carry it rather than dropping the clause in silence.
-    if let Some(ref spec) = returning_spec {
-        for task in &mut tasks {
-            returning::refuse_unprojectable_insert_returning(&task.plan).map_err(|error| {
-                let (_, sqlstate, message) = error_to_sqlstate(&error);
-                ddl_err(sqlstate, message)
-            })?;
-            returning::inject_returning_spec(&mut task.plan, spec.clone());
-        }
-    }
+    let has_returning = returning_items.is_some();
 
     // Extraction marks catalog state and allocates surrogates. Reject an
     // unauthorized original DML task set before either side effect can occur.
@@ -287,7 +279,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
         // A cross-shard Calvin dispatch returns no per-task payload here, so
         // there is no stored row to project. Refused rather than answered with
         // an empty row set, which would read as "the write matched nothing".
-        if returning_spec.is_some() {
+        if has_returning {
             return Err(ddl_err(
                 "0A000",
                 "RETURNING is not supported on a write that spans multiple shards",
@@ -358,7 +350,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
                 // here, so the clause cannot be answered on this path. Refused
                 // through the shared rule so this transport's message is the
                 // one the pgwire and native loops give for the same limitation.
-                if returning_spec.is_some() {
+                if has_returning {
                     let (_, sqlstate, message) =
                         error_to_sqlstate(&returning::in_transaction_returning_unsupported());
                     return Err(ddl_err(sqlstate, message));
@@ -426,9 +418,18 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
         // Shape the STORED rows the write returned, redacted for the caller —
         // the same choke point the pgwire dispatch loop uses, so a redaction
         // policy masks identically on both transports.
-        if returning_spec.is_some() {
+        if has_returning {
             let scope = RequestAuthScope::for_database(identity, state.auth_stores(), database_id);
             let redaction = QueryRedaction::for_plan(tenant_id, scope.auth(), &task.plan);
+            // A RETURNING expression is evaluated here, per returned row, and
+            // a sequence accessor in it resolves against this session's
+            // `currval` map exactly as the pgwire loop's does.
+            let sequences = SessionSequenceAccess::for_session(
+                state,
+                txn_ctx.sessions.sequence_values(txn_ctx.session_id),
+                database_id,
+                tenant_id,
+            );
             let outcome = shape_response_materialized(MaterializedShapeRequest {
                 payload: response.payload.as_bytes(),
                 plan: &task.plan,
@@ -440,9 +441,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
                 database_id,
                 tenant_id,
                 redaction: Some(redaction.ctx(&state.redaction)),
-                // A RETURNING list names stored columns only, never a
-                // Control-Plane computed column.
-                sequences: None,
+                sequences: Some(&sequences),
             })
             .map_err(|error| ddl_err("XX000", error.message().to_string()))?;
             // Folded rather than pushed: a statement is ONE result set, however

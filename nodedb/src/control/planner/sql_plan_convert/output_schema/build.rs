@@ -10,11 +10,10 @@
 
 use std::collections::HashMap;
 
-use nodedb_physical::physical_plan::ReturningSpec;
 use nodedb_query::agg_key::canonical_agg_key;
 use nodedb_sql::catalog::SqlCatalog;
 use nodedb_sql::types::SqlPlan;
-use nodedb_sql::types::query::AggOutputSlot;
+use nodedb_sql::types::query::{AggOutputSlot, Projection};
 
 use crate::control::planner::sql_plan_convert::aggregate::agg_expr_to_pair;
 use crate::control::planner::sql_plan_convert::lateral::collection_name_from_plan;
@@ -32,13 +31,14 @@ use super::returning::build_returning_schema;
 /// A read plan announces the columns its projection names. A write plan
 /// announces the columns `returning` projects: the clause is stripped from the
 /// statement text before planning, so the plan itself carries no column list
-/// and the caller supplies the parsed spec. `None` means the statement carries
-/// no `RETURNING` clause, and a write then announces nothing.
+/// and the caller supplies the projection resolved against the target. `None`
+/// means the statement carries no `RETURNING` clause, and a write then
+/// announces nothing.
 pub fn build_output_schema<C: SqlCatalog + ?Sized>(
     plans: &[SqlPlan],
     catalog: &C,
     database_id: nodedb_types::DatabaseId,
-    returning: Option<&ReturningSpec>,
+    returning: Option<&[Projection]>,
 ) -> OutputSchema {
     let Some(plan) = plans.first() else {
         return OutputSchema {

@@ -41,6 +41,7 @@ pub use catalog::{SqlCatalog, SqlCatalogError};
 pub use error::{Result, SqlError};
 pub use params::ParamValue;
 pub use placeholder_types::{InferredParamType, infer_placeholder_types};
+pub use planner::returning::resolve_returning_items;
 pub use types::*;
 
 /// Parse a standalone SQL expression string into an `SqlExpr`.

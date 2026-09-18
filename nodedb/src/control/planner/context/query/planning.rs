@@ -14,7 +14,36 @@ use crate::control::planner::context::security::PlanSecurityContext;
 use crate::control::planner::plan_error_map::map_plan_error;
 use crate::control::planner::sql_plan_convert::PlanningPurpose;
 use crate::control::server::response_shape::schema::OutputSchema;
-use nodedb_physical::physical_plan::ReturningSpec;
+use crate::control::server::shared::returning::{
+    ReturningClause, attach_returning_spec, resolve_returning_for_plans,
+};
+
+/// Resolve a DML `RETURNING` clause against `plans` and build the announced
+/// output schema from it in one step.
+///
+/// Both the fresh-adapter path ([`QueryContext::plan_with_nodedb_sql_for_purpose`])
+/// and the parameterized path ([`QueryContext::plan_sql_with_params_and_rls_and_versions`])
+/// resolve the clause before conversion and need the same output schema built
+/// from it, so the pairing lives here once.
+fn resolve_returning_and_output_schema<C: nodedb_sql::catalog::SqlCatalog>(
+    plans: &[nodedb_sql::types::SqlPlan],
+    returning_items: Option<&str>,
+    catalog: &C,
+    database_id: crate::types::DatabaseId,
+    tenant_id: crate::types::TenantId,
+) -> crate::Result<(OutputSchema, Option<ReturningClause>)> {
+    let returning = resolve_returning_for_plans(plans, returning_items, catalog, tenant_id)?;
+    let output_schema =
+        crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
+            plans,
+            catalog,
+            database_id,
+            returning
+                .as_ref()
+                .map(|clause| clause.projection.as_slice()),
+        );
+    Ok((output_schema, returning))
+}
 
 /// Bundled arguments for [`QueryContext::plan_sql_with_rls`].
 pub struct PlanSqlWithRlsParams<'a> {
@@ -44,13 +73,17 @@ impl QueryContext {
     /// used as the plan-cache key AND as the input to
     /// `SharedState::acquire_plan_lease_scope` so cache hits
     /// and fresh plans share the same lease-acquisition path.
+    ///
+    /// `returning_items` is the raw text after a DML `RETURNING` keyword. It
+    /// resolves here against the planned target: the announced output schema
+    /// carries the projection, and every task carries the Data-Plane spec.
     fn plan_with_nodedb_sql_for_purpose(
         &self,
         sql: &str,
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         purpose: PlanningPurpose,
-        returning: Option<&ReturningSpec>,
+        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -142,16 +175,22 @@ impl QueryContext {
             database_id,
             tenant_id,
         };
-        let output_schema =
-            crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
-                &plans,
-                catalog.as_ref(),
-                database_id,
-                returning,
-            );
+        let (output_schema, returning) = resolve_returning_and_output_schema(
+            &plans,
+            returning_items,
+            catalog.as_ref(),
+            database_id,
+            tenant_id,
+        )?;
         let cache_eligibility =
             crate::control::planner::sql_plan_convert::batch_cache_eligibility(&plans);
-        let tasks = crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
+        let mut tasks =
+            crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
+        // Attached before the tasks leave: RLS injection, caching, expansion,
+        // and dispatch all read the plan after this point.
+        if let Some(clause) = &returning {
+            attach_returning_spec(&mut tasks, &clause.spec)?;
+        }
         Ok((tasks, output_schema, version_set, cache_eligibility))
     }
 
@@ -177,21 +216,21 @@ impl QueryContext {
 
     /// Plan SQL with RLS injection, announcing a DML `RETURNING` clause.
     ///
-    /// `returning` is the spec `strip_returning` parsed off the statement, so
-    /// the write announces the columns it projects. `None` for a statement
-    /// that carries no clause.
+    /// `returning_items` is the item text `strip_returning` split off the
+    /// statement, so the write announces the columns it projects. `None` for
+    /// a statement that carries no clause.
     pub async fn plan_sql_with_rls_returning(
         &self,
         sql: &str,
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: Option<&ReturningSpec>,
+        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
     )> {
-        self.plan_sql_with_rls_and_versions(sql, tenant_id, database_id, sec, returning)
+        self.plan_sql_with_rls_and_versions(sql, tenant_id, database_id, sec, returning_items)
             .await
             .map(|(tasks, schema, _, _)| (tasks, schema))
     }
@@ -208,7 +247,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: Option<&ReturningSpec>,
+        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -220,7 +259,7 @@ impl QueryContext {
             tenant_id,
             database_id,
             sec,
-            returning,
+            returning_items,
             PlanningPurpose::Execute,
         )
         .await
@@ -260,7 +299,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: Option<&ReturningSpec>,
+        returning_items: Option<&str>,
         purpose: PlanningPurpose,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
@@ -268,8 +307,14 @@ impl QueryContext {
         crate::control::planner::descriptor_set::DescriptorVersionSet,
         nodedb_sql::types::PlanCacheEligibility,
     )> {
-        let (mut tasks, output_schema, mut version_set, cache_eligibility) =
-            self.plan_with_nodedb_sql_for_purpose(sql, tenant_id, database_id, purpose, returning)?;
+        let (mut tasks, output_schema, mut version_set, cache_eligibility) = self
+            .plan_with_nodedb_sql_for_purpose(
+                sql,
+                tenant_id,
+                database_id,
+                purpose,
+                returning_items,
+            )?;
 
         // Versions read BEFORE injection, never after: injection reads live
         // policy/grant state under its own lock, and a mutation racing in
@@ -319,7 +364,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: Option<&ReturningSpec>,
+        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -330,7 +375,7 @@ impl QueryContext {
             tenant_id,
             database_id,
             sec,
-            returning,
+            returning_items,
         )
         .await
         .map(|(tasks, schema, _)| (tasks, schema))
@@ -346,7 +391,7 @@ impl QueryContext {
         tenant_id: crate::types::TenantId,
         database_id: crate::types::DatabaseId,
         sec: &PlanSecurityContext<'_>,
-        returning: Option<&ReturningSpec>,
+        returning_items: Option<&str>,
     ) -> crate::Result<(
         Vec<nodedb_physical::physical_task::PhysicalTask>,
         OutputSchema,
@@ -423,15 +468,18 @@ impl QueryContext {
             database_id,
             tenant_id,
         };
-        let output_schema =
-            crate::control::planner::sql_plan_convert::output_schema::build_output_schema(
-                &plans,
-                catalog.as_ref(),
-                database_id,
-                returning,
-            );
+        let (output_schema, returning) = resolve_returning_and_output_schema(
+            &plans,
+            returning_items,
+            catalog.as_ref(),
+            database_id,
+            tenant_id,
+        )?;
         let mut tasks =
             crate::control::planner::sql_plan_convert::convert(&plans, tenant_id, &ctx)?;
+        if let Some(clause) = &returning {
+            attach_returning_spec(&mut tasks, &clause.spec)?;
+        }
 
         // Versions read BEFORE injection — see the comment on the sibling
         // planning path in this file for why a post-injection read is unsafe.

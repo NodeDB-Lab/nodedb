@@ -30,8 +30,10 @@ pub mod join;
 pub mod lateral;
 pub mod merge;
 pub mod predicate_coerce;
+pub mod returning;
 pub mod select;
 
+pub use returning::resolve_returning_items;
 pub use select::qualified_name;
 pub mod sort;
 pub mod subquery;

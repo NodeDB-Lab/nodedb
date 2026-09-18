@@ -239,9 +239,12 @@ TRUNCATE users;
 
 ### RETURNING
 
-Both `UPDATE` and `DELETE` support a `RETURNING` clause to read back affected rows in the same statement:
+`INSERT`, `UPSERT`, `UPDATE`, `DELETE`, and `MERGE` accept a `RETURNING` clause that reads back the affected rows in the same statement:
 
 ```sql
+-- INSERT RETURNING: returns the stored row
+INSERT INTO users (id, name) VALUES ('u2', 'Bo') RETURNING id, name;
+
 -- UPDATE RETURNING: returns the post-update image
 UPDATE users SET role = 'admin' WHERE id = 'u1' RETURNING id, role;
 UPDATE orders SET status = 'shipped' WHERE id = 'o1' RETURNING *;
@@ -249,9 +252,13 @@ UPDATE orders SET status = 'shipped' WHERE id = 'o1' RETURNING *;
 -- DELETE RETURNING: returns the pre-delete image
 DELETE FROM users WHERE id = 'u1' RETURNING id, name;
 DELETE FROM orders WHERE status = 'cancelled' RETURNING *;
+
+-- Expressions: evaluated per returned row against the stored image
+UPDATE orders SET qty = qty + 1 WHERE id = 'o1' RETURNING id, qty * price AS total;
+INSERT INTO events (id, kind) VALUES ('e1', 'click') RETURNING id, nextval('event_seq') AS n;
 ```
 
-`RETURNING *` expands to all columns. Named columns are returned as bare values — arithmetic expressions in `RETURNING` are not supported. Works in both simple-query and extended-query (prepared statement) protocols.
+`RETURNING *` expands to all columns. Every item is a scalar expression over the target collection: a bare column, a column under an alias (`col AS name`), arithmetic, a function call, or a sequence accessor (`nextval`, `currval`, `setval`). The Data Plane returns the base columns an expression reads, and the Control Plane evaluates the expression once per returned row. A sequence accessor advances once per row, in row order. The clause works in both the simple-query and extended-query (prepared statement) protocols, and `Describe` announces an expression under its alias.
 
 ## DDL
 
