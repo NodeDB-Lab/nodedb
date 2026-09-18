@@ -8,7 +8,8 @@
 
 use nodedb_sql::SqlError;
 
-use crate::control::sequence::{SequenceError, SequenceRegistry};
+use crate::control::sequence::SequenceRegistry;
+use crate::control::sequence::error_map::{map_sequence_error, undefined_sequence};
 
 use super::adapter::OriginCatalog;
 
@@ -61,24 +62,5 @@ impl OriginCatalog {
                 detail: "sequence access unavailable: this planner holds no sequence registry"
                     .into(),
             })
-    }
-}
-
-/// The function exists, the object does not — SQLSTATE `42704`, never `42883`.
-fn undefined_sequence(name: &str) -> SqlError {
-    SqlError::UndefinedObject {
-        kind: "sequence",
-        name: name.to_string(),
-    }
-}
-
-/// Map a registry error onto its planner equivalent.
-fn map_sequence_error(name: &str, error: SequenceError) -> SqlError {
-    match error {
-        SequenceError::NotFound { .. } => undefined_sequence(name),
-        other => SqlError::ObjectNotInPrerequisiteState {
-            object: name.to_string(),
-            detail: other.to_string(),
-        },
     }
 }

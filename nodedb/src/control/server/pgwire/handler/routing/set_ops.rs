@@ -8,6 +8,7 @@ use pgwire::error::PgWireResult;
 
 use nodedb_physical::physical_task::PostSetOp;
 
+use crate::control::sequence::SequenceAccess;
 use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::redaction::RedactionCtx;
 use crate::control::server::response_shape::schema::OutputSchema;
@@ -15,18 +16,22 @@ use crate::control::server::set_op_merge::{
     SetMergeMode, dedup_union_payloads, merge_set_op_payloads,
 };
 
-use super::super::super::types::sqlstate_error;
+use super::super::super::types::shape_error_to_pg;
 use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::shape_encode;
 
 /// Apply set operation merging to collected sub-query payloads, then shape and
 /// project the merged result into an already-encoded pgwire response.
+///
+/// `sequences` resolves the projection's Control-Plane computed columns
+/// over the merged rows.
 pub(super) fn apply_set_ops(
     dedup_payloads: &[Vec<u8>],
     dedup_set_op: PostSetOp,
     projection: Option<&OutputSchema>,
     result_formats: &[FieldFormat],
     redaction: Option<RedactionCtx<'_>>,
+    sequences: Option<&dyn SequenceAccess>,
 ) -> PgWireResult<(Response, Option<String>)> {
     let merged = match dedup_set_op {
         PostSetOp::Intersect | PostSetOp::IntersectAll => {
@@ -38,8 +43,14 @@ pub(super) fn apply_set_ops(
         _ => dedup_union_payloads(dedup_payloads),
     };
     Ok(
-        match compose::shape_payload_no_plan(&merged, PlanKind::MultiRow, projection, redaction)
-            .map_err(|e| sqlstate_error("XX000", e.message()))?
+        match compose::shape_payload_no_plan(
+            &merged,
+            PlanKind::MultiRow,
+            projection,
+            redaction,
+            sequences,
+        )
+        .map_err(|e| shape_error_to_pg(&e))?
         {
             ShapeOutcome::Rows(shaped) => {
                 shape_encode::shaped_query_response(shaped, result_formats)

@@ -12,6 +12,7 @@ use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::Status;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
@@ -67,6 +68,15 @@ pub(super) async fn run_dispatch_loop(
     // name) a true no-op on the hot path for every deployment that hasn't
     // turned it on.
     let metering_enabled = ctx.state.metering_config.enabled;
+    // Session-scoped sequence access for the statement's Control-Plane
+    // computed columns: the registry plus this connection's `currval` map.
+    let session_sequences = ctx.sessions.sequence_values(ctx.peer_addr);
+    let sequences = SessionSequenceAccess::for_session(
+        ctx.state,
+        session_sequences,
+        database_id,
+        ctx.tenant_id(),
+    );
 
     for task in tasks {
         if task.tenant_id != ctx.tenant_id() {
@@ -204,6 +214,7 @@ pub(super) async fn run_dispatch_loop(
                         database_id,
                         tenant_id: ctx.tenant_id(),
                         redaction: Some(redaction.ctx(&ctx.state.redaction)),
+                        sequences: Some(&sequences),
                     }) {
                         Ok(ShapeOutcome::Rows(mut shaped)) => {
                             if let Some(notice) = shaped.notice.take() {
@@ -315,6 +326,7 @@ pub(super) async fn run_dispatch_loop(
                 database_id,
                 tenant_id: ctx.tenant_id(),
                 redaction: Some(redaction.ctx(&ctx.state.redaction)),
+                sequences: Some(&sequences),
             }) {
                 Ok(ShapeOutcome::Rows(mut shaped)) => {
                     if let Some(notice) = shaped.notice.take() {

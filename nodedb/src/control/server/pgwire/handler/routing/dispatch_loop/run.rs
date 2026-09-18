@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The per-task dispatch loop for non-Calvin pgwire queries.
+//! The per-task dispatch loop for non-Calvin pgwire queries: tenant check,
+//! in-transaction routing, streaming fast path, pre-dispatch hooks, dispatch,
+//! read tracking, AFTER triggers, and metering. Shaping one task's response
+//! lives in `task.rs`; the statement's tail (folded RETURNING rows and the
+//! set-op merge) lives in `finish.rs`.
 //!
 //! Split out of `execute.rs`, which keeps the plan/authorize/admit entry
 //! points and hands the admitted task list here.
@@ -12,9 +16,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
-use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::redaction::QueryRedaction;
-use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::ddl::neutral::maintenance::auto_analyze;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
@@ -23,26 +25,29 @@ use crate::control::server::shared::session::SessionId;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
-use super::super::super::types::{error_to_sqlstate, response_status_to_sqlstate, sqlstate_error};
-use super::super::core::NodeDbPgHandler;
-use super::super::plan::{PlanKind, describe_plan, payload_to_response};
-use super::super::shape_encode;
-use super::result_shaping::ResultShaping;
-use super::set_ops;
-use super::streaming::StreamSelectContext;
+use super::super::super::super::types::{
+    error_to_sqlstate, response_status_to_sqlstate, sqlstate_error,
+};
+use super::super::super::core::NodeDbPgHandler;
+use super::super::super::plan::{PlanKind, describe_plan};
+use super::super::execute_dml_hooks;
+use super::super::result_shaping::ResultShaping;
+use super::super::streaming::StreamSelectContext;
+use super::finish::StatementTail;
+use super::task::ShapeTaskParams;
 
-pub(super) struct DispatchTaskContext<'a> {
-    pub(super) plan_lease_scope: Arc<crate::control::lease::QueryLeaseScope>,
-    pub(super) tenant_id: TenantId,
-    pub(super) identity: &'a AuthenticatedIdentity,
-    pub(super) auth_ctx: &'a crate::control::security::auth_context::AuthContext,
-    pub(super) session_id: SessionId,
-    pub(super) shaping: ResultShaping<'a>,
+pub(crate) struct DispatchTaskContext<'a> {
+    pub(crate) plan_lease_scope: Arc<crate::control::lease::QueryLeaseScope>,
+    pub(crate) tenant_id: TenantId,
+    pub(crate) identity: &'a AuthenticatedIdentity,
+    pub(crate) auth_ctx: &'a crate::control::security::auth_context::AuthContext,
+    pub(crate) session_id: SessionId,
+    pub(crate) shaping: ResultShaping<'a>,
 }
 
 impl NodeDbPgHandler {
     /// Execute the per-task dispatch loop for non-Calvin queries.
-    pub(super) async fn dispatch_task_loop(
+    pub(crate) async fn dispatch_task_loop(
         &self,
         tasks: Vec<PhysicalTask>,
         context: DispatchTaskContext<'_>,
@@ -72,6 +77,11 @@ impl NodeDbPgHandler {
         // an extended-query client reads as several results for one statement.
         let mut returning_rows: Option<ShapedRows> = None;
         let mut responses = Vec::with_capacity(tasks.len());
+        // Session-scoped sequence access for the statement's Control-Plane
+        // computed columns, resolved once: every task of one statement
+        // targets the same database, so the first task's names it.
+        let session_sequences = self.sessions.sequence_values(session_id);
+        let statement_database_id = tasks.first().map(|t| t.database_id);
         // Checked once rather than per task — metering is disabled by
         // default, so this keeps the per-task extraction below (which clones
         // the collection name) a true no-op on the hot path for every
@@ -107,10 +117,10 @@ impl NodeDbPgHandler {
                 .route_task_in_txn(session_id, identity, task, Arc::clone(&plan_lease_scope))
                 .await?
             {
-                super::execute_dml_hooks::TxnRouteOutcome::Proceed(routed_task) => {
+                execute_dml_hooks::TxnRouteOutcome::Proceed(routed_task) => {
                     task = *routed_task;
                 }
-                super::execute_dml_hooks::TxnRouteOutcome::Handled(resp) => {
+                execute_dml_hooks::TxnRouteOutcome::Handled(resp) => {
                     if returns_rows {
                         let (severity, code, message) = error_to_sqlstate(
                             &crate::control::server::shared::returning::
@@ -222,7 +232,7 @@ impl NodeDbPgHandler {
             // under the size limit; behavior is unchanged).
             let (dml_info, old_row, truncate_restart_collection) = match self
                 .run_pre_dispatch_hooks(
-                    super::execute_dml_hooks::PreDispatchContext {
+                    execute_dml_hooks::PreDispatchContext {
                         identity,
                         auth: auth_ctx,
                         tenant_id,
@@ -234,12 +244,12 @@ impl NodeDbPgHandler {
                 )
                 .await?
             {
-                super::execute_dml_hooks::PreDispatchOutcome::Handled(resp) => {
+                execute_dml_hooks::PreDispatchOutcome::Handled(resp) => {
                     responses.push(resp);
                     continue;
                 }
-                super::execute_dml_hooks::PreDispatchOutcome::Proceed(proceed) => {
-                    let super::execute_dml_hooks::PreDispatchProceed {
+                execute_dml_hooks::PreDispatchOutcome::Proceed(proceed) => {
+                    let execute_dml_hooks::PreDispatchProceed {
                         task: proceeding_task,
                         dml_info,
                         old_row,
@@ -384,53 +394,30 @@ impl NodeDbPgHandler {
             // set-op-deferred branch (its rows are only known after the
             // later cross-task merge) and for `Passthrough` (no row payload
             // to count); `meter_dispatch` charges one unit for `None`.
-            let mut task_rows: Option<u64> = None;
-            if needs_set_op && resp_post_set_op != PostSetOp::None {
+            let task_rows = if needs_set_op && resp_post_set_op != PostSetOp::None {
                 dedup_payloads.push(resp.payload.to_vec());
                 if dedup_set_op == PostSetOp::None {
                     dedup_set_op = resp_post_set_op;
                 }
+                None
             } else {
-                let redaction = QueryRedaction::for_plan(tenant_id, auth_ctx, &plan_for_response);
-                match compose::shape_response_materialized(MaterializedShapeRequest {
-                    payload: &resp.payload,
-                    plan: &plan_for_response,
-                    plan_kind,
-                    projection,
-                    state: &self.state,
-                    database_id: task_database_id,
-                    tenant_id,
-                    redaction: Some(redaction.ctx(&self.state.redaction)),
-                })
-                .map_err(|e| sqlstate_error("XX000", e.message()))?
-                {
-                    ShapeOutcome::Rows(shaped) => {
-                        task_rows = Some(shaped.rows.len() as u64);
-                        if matches!(plan_kind, PlanKind::ReturningRows) {
-                            // Folded, not emitted: the whole statement answers
-                            // with one result set after the loop.
-                            match returning_rows {
-                                Some(ref mut accumulated) => accumulated.append(shaped),
-                                None => returning_rows = Some(shaped),
-                            }
-                        } else {
-                            let (response, notice) =
-                                shape_encode::shaped_query_response(shaped, result_formats);
-                            if let Some(n) = notice {
-                                self.sessions.push_notice(session_id, n);
-                            }
-                            responses.push(response);
-                        }
-                    }
-                    ShapeOutcome::Passthrough => {
-                        let shaped = payload_to_response(&resp.payload, plan_kind)?;
-                        if let Some(notice) = shaped.notice {
-                            self.sessions.push_notice(session_id, notice);
-                        }
-                        responses.push(shaped.response);
-                    }
-                }
-            }
+                self.shape_task_response(
+                    ShapeTaskParams {
+                        response: &resp,
+                        plan: &plan_for_response,
+                        plan_kind,
+                        projection,
+                        result_formats,
+                        session_id,
+                        tenant_id,
+                        database_id: task_database_id,
+                        auth_ctx,
+                        session_sequences: session_sequences.clone(),
+                    },
+                    &mut responses,
+                    &mut returning_rows,
+                )?
+            };
 
             // Metered here, once per successfully dispatched task — every
             // path reaching this point already passed the
@@ -443,31 +430,21 @@ impl NodeDbPgHandler {
             }
         }
 
-        // The statement's RETURNING rows, as one result set.
-        if let Some(shaped) = returning_rows {
-            let (response, notice) = shape_encode::shaped_query_response(shaped, result_formats);
-            if let Some(n) = notice {
-                self.sessions.push_notice(session_id, n);
-            }
-            responses.push(response);
-        }
-
-        // Set operations: merge sub-query payloads.
-        if needs_set_op && !dedup_payloads.is_empty() {
-            let (response, notice) = set_ops::apply_set_ops(
-                &dedup_payloads,
+        self.finish_statement(
+            &mut responses,
+            StatementTail {
+                returning_rows,
+                dedup_payloads,
                 dedup_set_op,
                 projection,
                 result_formats,
-                set_op_redaction
-                    .as_ref()
-                    .map(|r| r.ctx(&self.state.redaction)),
-            )?;
-            if let Some(n) = notice {
-                self.sessions.push_notice(session_id, n);
-            }
-            responses.push(response);
-        }
+                set_op_redaction,
+                session_sequences,
+                statement_database_id,
+                tenant_id,
+                session_id,
+            },
+        )?;
 
         Ok(responses)
     }

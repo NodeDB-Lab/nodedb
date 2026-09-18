@@ -145,9 +145,20 @@ impl NodeDbPgHandler {
         }
 
         // An externally-supplied prepared-statement schema (from the Describe
-        // phase) wins; otherwise use the planner's fresh output schema for this
-        // statement.
-        let effective_schema = shaping.projection.or(Some(&output_schema));
+        // phase) names the columns; otherwise the planner's fresh output
+        // schema for this statement does. The Control-Plane computed list is
+        // known only to this statement's plan, so it rides along under the
+        // Describe-phase columns: the shaper evaluates it before those
+        // columns project, and a computed alias never renders as NULL.
+        let effective_schema_owned = match shaping.projection {
+            Some(described) => crate::control::server::response_shape::schema::OutputSchema {
+                columns: described.columns.clone(),
+                is_star: described.is_star,
+                cp_computed: output_schema.cp_computed,
+            },
+            None => output_schema,
+        };
+        let effective_schema = Some(&effective_schema_owned);
 
         // Implicit-edge dependent predicates must be preempted onto the
         // OLLP/Calvin path before gateway forwarding or ordinary dispatch.

@@ -44,6 +44,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         return OutputSchema {
             columns: Vec::new(),
             is_star: false,
+            cp_computed: Vec::new(),
         };
     };
 
@@ -87,6 +88,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             OutputSchema {
                 columns,
                 is_star: false,
+                cp_computed: Vec::new(),
             }
         }
         SqlPlan::Scan {
@@ -199,6 +201,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                     })
                     .collect(),
                 is_star: false,
+                cp_computed: Vec::new(),
             }
         }
         SqlPlan::Aggregate {
@@ -264,6 +267,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             OutputSchema {
                 columns,
                 is_star: false,
+                cp_computed: Vec::new(),
             }
         }
         // Set operations take their column names/types from the first
@@ -290,6 +294,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                 })
                 .collect(),
             is_star: false,
+            cp_computed: Vec::new(),
         },
         // The outer query determines the final projected shape; the CTE
         // definitions themselves are only inputs to it.
@@ -342,6 +347,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                 })
                 .collect(),
             is_star: false,
+            cp_computed: Vec::new(),
         },
         // A write announces exactly what its `RETURNING` clause projects, from
         // the target collection's declared columns. `RETURNING` is a

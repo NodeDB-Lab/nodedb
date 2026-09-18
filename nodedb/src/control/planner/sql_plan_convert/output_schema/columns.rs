@@ -18,7 +18,7 @@ use nodedb_sql::types_expr::SqlExpr;
 use crate::control::planner::sql_plan_convert::group_key_name::computed_group_key_name;
 use crate::control::planner::sql_plan_convert::output_schema_types::infer_computed_expr_type;
 use crate::control::server::response_shape::schema::{
-    OutputColumn, OutputSchema, sql_data_type_to_ddl_col_type_with_width,
+    CpComputedColumn, OutputColumn, OutputSchema, sql_data_type_to_ddl_col_type_with_width,
 };
 use crate::control::server::response_shape::types::DdlColType;
 
@@ -234,14 +234,25 @@ pub(super) fn ordered_columns_for<C: SqlCatalog + ?Sized>(
 /// appending only entries not already produced by a named projection. When
 /// the projection has no star, `ordered_cols` is ignored and behavior is the
 /// named-columns-only, `is_star=false` case.
+///
+/// A `CpComputed` entry is announced under its alias like any other column
+/// and also recorded in `cp_computed`, in SELECT-list order, so the response
+/// shaper evaluates it on the Control Plane before the projection runs.
 pub(super) fn schema_from_projection(
     projection: &[Projection],
     types: &HashMap<String, DdlColType>,
     ordered_cols: &[OutputColumn],
 ) -> OutputSchema {
     let mut columns = Vec::with_capacity(projection.len());
+    let mut cp_computed = Vec::new();
     let mut is_star = false;
     for p in projection {
+        if let Projection::CpComputed { expr, alias } = p {
+            cp_computed.push(CpComputedColumn {
+                alias: alias.clone(),
+                expr: super::super::expr::sql_expr_to_bridge_expr(expr),
+            });
+        }
         match projection_to_column(p, types) {
             Some(col) => columns.push(col),
             None => {
@@ -254,7 +265,11 @@ pub(super) fn schema_from_projection(
             }
         }
     }
-    OutputSchema { columns, is_star }
+    OutputSchema {
+        columns,
+        is_star,
+        cp_computed,
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +340,43 @@ mod tests {
         let col = projection_to_column(&wider, &types).expect("Some for CpComputed");
         assert_eq!(col.lookup_key, "positive");
         assert_eq!(col.ty, DdlColType::Bool);
+    }
+
+    #[test]
+    fn cp_computed_entries_are_collected_in_select_list_order() {
+        let types = HashMap::new();
+        let accessor = |name: &str| SqlExpr::Function {
+            name: name.to_string(),
+            args: vec![SqlExpr::Literal(nodedb_sql::types_expr::SqlValue::String(
+                "s".to_string(),
+            ))],
+            distinct: false,
+        };
+        let projection = vec![
+            Projection::Column("id".to_string()),
+            Projection::CpComputed {
+                expr: accessor("nextval"),
+                alias: "n".to_string(),
+            },
+            Projection::CpComputed {
+                expr: accessor("currval"),
+                alias: "c".to_string(),
+            },
+        ];
+        let schema = schema_from_projection(&projection, &types, &[]);
+        assert_eq!(schema.columns.len(), 3);
+        assert_eq!(schema.columns[1].display_name, "n");
+        assert_eq!(schema.columns[2].display_name, "c");
+        let aliases: Vec<&str> = schema
+            .cp_computed
+            .iter()
+            .map(|c| c.alias.as_str())
+            .collect();
+        assert_eq!(aliases, ["n", "c"]);
+        assert!(matches!(
+            &schema.cp_computed[0].expr,
+            crate::bridge::expr_eval::SqlExpr::Function { name, .. } if name == "nextval"
+        ));
     }
 
     #[test]

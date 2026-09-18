@@ -21,15 +21,30 @@ pub struct OutputColumn {
     pub ty: super::types::DdlColType,
 }
 
+/// A SELECT-list column the Control Plane computes per output row after
+/// the Data Plane returns the rows. `expr` is the bridge form; sequence
+/// accessor calls inside it are resolved against the session's registry.
+#[derive(Debug, Clone)]
+pub struct CpComputedColumn {
+    /// The output name the evaluated value is written under.
+    pub alias: String,
+    /// The expression to evaluate against the flat row.
+    pub expr: crate::bridge::expr_eval::SqlExpr,
+}
+
 /// The authoritative output schema of a query, resolved by the planner.
 ///
 /// `columns` is the ordered projected column list. `is_star` marks a
 /// `SELECT *` whose concrete columns are only known from the returned rows
-/// (id-first union derivation still applies for that case).
+/// (id-first union derivation still applies for that case). `cp_computed`
+/// lists the columns the response shaper evaluates on the Control Plane
+/// before the projection runs; each one also appears in `columns` under its
+/// alias.
 #[derive(Clone, Debug, Default)]
 pub struct OutputSchema {
     pub columns: Vec<OutputColumn>,
     pub is_star: bool,
+    pub cp_computed: Vec<CpComputedColumn>,
 }
 
 /// Maps the planner's resolved SQL column type to the response shaper's

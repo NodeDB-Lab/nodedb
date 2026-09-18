@@ -42,7 +42,10 @@ use super::super::auth::AppState;
 ///
 /// Mirrors the pgwire `maybe_stream_select` plan-shape predicate via
 /// [`streamable_gather_child`] plus the single-task and no-set-op gates. HTTP
-/// is stateless, so there is no autocommit / transaction-block check.
+/// is stateless, so there is no autocommit / transaction-block check. A
+/// projection with Control-Plane computed columns (`cp_computed`) is not
+/// eligible either: those columns need per-row sequence access the per-batch
+/// shaper does not carry, so the materialized path answers instead.
 ///
 /// Returns `Ok(Some((stream, limit)))` when eligible, `Ok(None)` when the
 /// caller should fall back to the materialized path, or `Err` when the
@@ -52,12 +55,13 @@ pub(super) async fn try_open_stream(
     tasks: &[PhysicalTask],
     identity: &AuthenticatedIdentity,
     database_id: nodedb_types::DatabaseId,
+    output_schema: &OutputSchema,
     trace_id: crate::types::TraceId,
 ) -> crate::Result<Option<(ResultStream, usize)>> {
     let [task] = tasks else {
         return Ok(None);
     };
-    if task.post_set_op != PostSetOp::None {
+    if task.post_set_op != PostSetOp::None || !output_schema.cp_computed.is_empty() {
         return Ok(None);
     }
     let Some((child_plan, limit)) = streamable_gather_child(&task.plan) else {
@@ -196,6 +200,7 @@ pub(super) fn ndjson_body_stream(
                 value,
                 projection.as_ref(),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+                None,
             ) {
                 Ok(s) => s,
                 Err(e) => {

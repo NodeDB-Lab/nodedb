@@ -440,6 +440,9 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
                 database_id,
                 tenant_id,
                 redaction: Some(redaction.ctx(&state.redaction)),
+                // A RETURNING list names stored columns only, never a
+                // Control-Plane computed column.
+                sequences: None,
             })
             .map_err(|error| ddl_err("XX000", error.message().to_string()))?;
             // Folded rather than pushed: a statement is ONE result set, however

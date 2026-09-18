@@ -20,9 +20,9 @@ const TRUNCATED_BEFORE_HORIZON_NOTICE: &str = "AS OF SYSTEM TIME cutoff is older
 /// notice.
 ///
 /// Array slices never carry a SELECT-list projection, so `shape_decoded_rows`
-/// is always called with a `None` projection here — but redaction still
-/// applies to the cells. A payload that decodes to no value shapes as an
-/// empty result set.
+/// is always called with a `None` projection and no sequence access here —
+/// but redaction still applies to the cells. A payload that decodes to no
+/// value shapes as an empty result set.
 pub(super) fn shape_array_slice(
     payload: &[u8],
     redaction: Option<RedactionCtx<'_>>,
@@ -41,7 +41,7 @@ pub(super) fn shape_array_slice(
     let notice = truncated.then(|| TRUNCATED_BEFORE_HORIZON_NOTICE.to_string());
 
     let mut shaped = match rows {
-        Ok(value) => shape_decoded_rows(value, None, redaction)?,
+        Ok(value) => shape_decoded_rows(value, None, redaction, None)?,
         Err(_) => empty_shaped(),
     };
     shaped.notice = notice;

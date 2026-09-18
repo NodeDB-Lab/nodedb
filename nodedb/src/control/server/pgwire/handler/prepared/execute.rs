@@ -148,6 +148,9 @@ impl NodeDbPgHandler {
                     })
                     .collect(),
                 is_star: false,
+                // The Describe-phase fields carry no expressions; the
+                // execute path merges the statement's own computed list in.
+                cp_computed: Vec::new(),
             })
         };
 

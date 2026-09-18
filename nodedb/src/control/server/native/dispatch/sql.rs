@@ -392,7 +392,7 @@ async fn execute_planned(
                 if let Err(error) = stream.attach_lease_scope(scope) {
                     return resp(error_to_native(seq, &error));
                 }
-                return SqlOutcome::Stream(stream);
+                return SqlOutcome::Stream(Box::new(stream));
             }
             Ok(None) => {}
             Err(error) => return resp(error_to_native(seq, &error)),

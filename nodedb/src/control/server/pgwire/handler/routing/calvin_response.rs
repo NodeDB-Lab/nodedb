@@ -81,6 +81,9 @@ pub(super) fn calvin_execution_response(
                 database_id,
                 tenant_id,
                 redaction: Some(redaction.ctx(&state.redaction)),
+                // A RETURNING list names stored columns only, never a
+                // Control-Plane computed column.
+                sequences: None,
             })
     {
         return Ok(CalvinTaskOutcome::Rows(shaped));

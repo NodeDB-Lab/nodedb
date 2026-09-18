@@ -43,7 +43,10 @@ fn decode_batch_to_columns_rows(
 ) -> crate::Result<(Vec<String>, Vec<Vec<Value>>)> {
     match decode_payload_value(payload) {
         Ok(decoded) => {
-            let shaped = shape_decoded_rows(decoded, projection, redaction)?;
+            // A streamed plan never carries Control-Plane computed columns:
+            // `try_open_sql_stream` declines those, so no session access
+            // is needed per batch.
+            let shaped = shape_decoded_rows(decoded, projection, redaction, None)?;
             Ok(to_native_columns_rows(&shaped))
         }
         Err(_) => Ok((
