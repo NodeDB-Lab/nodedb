@@ -199,6 +199,68 @@ pub fn validate_default_expr(expr: &str, column: &str) -> crate::Result<()> {
     CompiledDefault::declare(column, expr).map(|_| ())
 }
 
+/// Whether a declared value-producing expression references a row column.
+///
+/// A column `DEFAULT` and a typeguard `DEFAULT`/`VALUE` are evaluated with no
+/// row in scope, so an expression that names a column can never produce a
+/// value there. Callers that carry such an expression into a column `DEFAULT`
+/// (CONVERT's typeguard path) use this to refuse at declaration time instead
+/// of failing the first insert with [`crate::SqlError::UnevaluableDefault`].
+///
+/// The classification mirrors [`classify`]: a generator (`UUID_V7`,
+/// `gen_uuid_v7()`) or a literal/parametric form carries no expression at all,
+/// so only the `Expr` branch is parsed — and parsed through the same resolver
+/// gate a DEFAULT passes. A second name list or expression walker is not
+/// written.
+pub fn default_expr_references_columns(expr: &str) -> crate::Result<bool> {
+    let upper = expr.trim().to_uppercase();
+    if keyword_generator(&upper).is_some() || parametric_or_literal(expr, &upper)?.is_some() {
+        return Ok(false);
+    }
+    let parsed = crate::parse_expr_string(expr)?;
+    Ok(expr_references_column(&parsed))
+}
+
+/// Recursive column-reference scan over a parsed DEFAULT expression.
+fn expr_references_column(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::Column { .. } => true,
+        SqlExpr::Literal(_) | SqlExpr::Wildcard | SqlExpr::Subquery(_) => false,
+        SqlExpr::BinaryOp { left, right, .. } => {
+            expr_references_column(left) || expr_references_column(right)
+        }
+        SqlExpr::UnaryOp { expr, .. }
+        | SqlExpr::IsNull { expr, .. }
+        | SqlExpr::Cast { expr, .. } => expr_references_column(expr),
+        SqlExpr::Function { args, .. } => args.iter().any(expr_references_column),
+        SqlExpr::Case {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            operand.as_deref().is_some_and(expr_references_column)
+                || when_then
+                    .iter()
+                    .any(|(w, t)| expr_references_column(w) || expr_references_column(t))
+                || else_expr.as_deref().is_some_and(expr_references_column)
+        }
+        SqlExpr::InList { expr, list, .. } => {
+            expr_references_column(expr) || list.iter().any(expr_references_column)
+        }
+        SqlExpr::Between {
+            expr, low, high, ..
+        } => {
+            expr_references_column(expr)
+                || expr_references_column(low)
+                || expr_references_column(high)
+        }
+        SqlExpr::Like { expr, pattern, .. } => {
+            expr_references_column(expr) || expr_references_column(pattern)
+        }
+        SqlExpr::ArrayLiteral(items) => items.iter().any(expr_references_column),
+    }
+}
+
 /// Classify a DEFAULT into its compiled form.
 fn classify(column: &str, expr: &str) -> crate::Result<DefaultKind> {
     let upper = expr.trim().to_uppercase();
@@ -366,5 +428,19 @@ mod tests {
         let error = CompiledDefault::compile("a", "no_such_function_here('x')")
             .expect_err("unknown function refused");
         assert!(matches!(error, SqlError::UnevaluableDefault { .. }));
+    }
+
+    /// A generator or a literal is not a column reference. Only the `Expr`
+    /// branch the classifier parses can carry one.
+    #[test]
+    fn only_the_expression_branch_can_reference_a_column() {
+        for constant in ["UUID_V7", "uuid_v7()", "gen_uuid_v7()", "'active'", "42"] {
+            assert!(
+                !default_expr_references_columns(constant).unwrap(),
+                "{constant} is a constant form"
+            );
+        }
+        assert!(default_expr_references_columns("LOWER(status)").unwrap());
+        assert!(default_expr_references_columns("status || '-x'").unwrap());
     }
 }

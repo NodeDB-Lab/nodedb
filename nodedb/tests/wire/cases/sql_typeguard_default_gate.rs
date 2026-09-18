@@ -98,3 +98,34 @@ async fn typeguard_evaluable_defaults_stay_accepted() {
         "DEFAULT must still inject: {stored:?}"
     );
 }
+
+/// `CREATE TYPEGUARD` resolves its target in the session database. The
+/// handlers read the default database while collections live under the session
+/// one, so a guard declared in another database answered `42P01` for a
+/// collection that exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn typeguard_declares_in_the_session_database() {
+    let server = TestServer::start().await;
+
+    server.exec("CREATE DATABASE tg_session").await.unwrap();
+    server.exec("USE DATABASE tg_session").await.unwrap();
+    server
+        .exec("CREATE COLLECTION tg_here (id TEXT PRIMARY KEY, v TEXT)")
+        .await
+        .unwrap();
+
+    server
+        .exec("CREATE TYPEGUARD ON tg_here (v STRING REQUIRED)")
+        .await
+        .expect("the guard must declare in the session database");
+
+    let rows = server
+        .query_text("SHOW TYPEGUARD ON tg_here")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec!["v".to_string()],
+        "the guard must be stored against the session database: {rows:?}"
+    );
+}

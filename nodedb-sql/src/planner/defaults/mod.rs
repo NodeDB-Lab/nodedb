@@ -23,5 +23,7 @@ mod compiled;
 mod convert;
 mod kind;
 
-pub use compiled::{ColumnDefaults, CompiledDefault, validate_default_expr};
+pub use compiled::{
+    ColumnDefaults, CompiledDefault, default_expr_references_columns, validate_default_expr,
+};
 pub use convert::default_value_to_sql;

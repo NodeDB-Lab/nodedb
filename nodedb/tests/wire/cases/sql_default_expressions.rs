@@ -441,3 +441,75 @@ fn assert_not_null(row: &str, label: &str) {
         "{label}: expected a value, got `{row}`"
     );
 }
+
+/// A column `DEFAULT` is const-folded once, with no row in scope: an
+/// expression that names another column can never produce a value. It is
+/// refused at the declaration, not at the first insert's `UnevaluableDefault`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_column_default_that_names_another_column_is_refused() {
+    let server = TestServer::start().await;
+
+    server
+        .expect_error(
+            "CREATE COLLECTION def_selfref (\
+                id TEXT PRIMARY KEY, \
+                status TEXT, \
+                lowered TEXT DEFAULT LOWER(status)) \
+             WITH (engine='document_strict')",
+            "references another column",
+        )
+        .await;
+
+    // The same rule reaches a CONVERT column list.
+    server
+        .exec("CREATE COLLECTION def_selfref_conv")
+        .await
+        .unwrap();
+    server
+        .expect_error(
+            "CONVERT COLLECTION def_selfref_conv TO document_strict \
+             (id TEXT PRIMARY KEY, status TEXT, lowered TEXT DEFAULT LOWER(status))",
+            "references another column",
+        )
+        .await;
+
+    // And ALTER ... ADD COLUMN.
+    server
+        .exec("CREATE COLLECTION def_selfref_alter (id TEXT PRIMARY KEY, status TEXT)")
+        .await
+        .unwrap();
+    server
+        .expect_error(
+            "ALTER TABLE def_selfref_alter ADD COLUMN lowered TEXT DEFAULT LOWER(status)",
+            "references another column",
+        )
+        .await;
+}
+
+/// The gate reads the parsed DEFAULT, never the definition text: a column name
+/// that contains the word `default` must not be read as the clause, and a
+/// constant DEFAULT beside such a name must pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_column_name_containing_default_is_not_read_as_a_clause() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION def_named (id TEXT PRIMARY KEY, status TEXT)")
+        .await
+        .unwrap();
+
+    server
+        .exec("ALTER TABLE def_named ADD COLUMN is_default BOOLEAN")
+        .await
+        .expect("a column named is_default declares no DEFAULT clause");
+
+    server
+        .exec("ALTER TABLE def_named ADD COLUMN my_default TEXT DEFAULT 'x'")
+        .await
+        .expect("a constant DEFAULT beside a name that contains 'default' is accepted");
+
+    let rows = server
+        .query_text("SELECT is_default FROM def_named")
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "no rows yet, got {rows:?}");
+}

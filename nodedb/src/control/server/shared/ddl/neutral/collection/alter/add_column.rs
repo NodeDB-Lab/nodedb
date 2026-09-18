@@ -55,8 +55,11 @@ pub(super) async fn alter_table_add_column(
             ),
         ));
     }
-    // A DEFAULT passes the same gate `CREATE` applies: evaluable, and a
-    // literal the declared type can hold.
+    // A DEFAULT passes the same gate `CREATE` applies: evaluable, constant, and
+    // a literal the declared type can hold. The gate reads the parsed default
+    // text, never the whole definition: the type parser finds the clause by
+    // substring, so a column name that contains the word `default` would
+    // otherwise be read as that clause.
     if let Some(expr) = &column.default {
         validate_column_default(
             &DeclaredColumn {

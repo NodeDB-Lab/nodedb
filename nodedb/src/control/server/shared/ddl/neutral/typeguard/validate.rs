@@ -30,6 +30,7 @@ use super::super::super::result::{DdlError, DdlResult};
 pub async fn validate_typeguard(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
     sql: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let coll_name = super::parse::extract_collection_name(sql)?;
@@ -38,7 +39,7 @@ pub async fn validate_typeguard(
     let catalog = state.credentials.catalog();
 
     let coll = catalog
-        .get_collection(DatabaseId::DEFAULT, tenant_id.as_u64(), &coll_name)
+        .get_collection(database_id, tenant_id.as_u64(), &coll_name)
         .map_err(|e| super::parse::err("XX000", &format!("catalog error: {e}")))?
         .ok_or_else(|| {
             super::parse::err("42P01", &format!("collection '{coll_name}' not found"))
@@ -67,7 +68,7 @@ pub async fn validate_typeguard(
             state,
             identity,
             &scan_sql,
-            DatabaseId::DEFAULT,
+            database_id,
         )
         .await
         .map_err(|error| super::parse::err(&error.sqlstate, &error.message))?;

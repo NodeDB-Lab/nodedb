@@ -68,6 +68,45 @@ pub(super) fn validate_column_defaults(columns: &[(String, String)]) -> Result<(
 
 /// Refuse one declared column `DEFAULT` the server cannot evaluate, or that
 /// the column's declared type cannot hold.
+pub(super) fn validate_column_default(
+    column: &DeclaredColumn<'_>,
+    expr: &str,
+) -> Result<(), DdlError> {
+    validate_column_default_clause("DEFAULT", column, expr)
+}
+
+/// Refuse a value-producing clause whose value must be constant.
+///
+/// A column `DEFAULT` is const-folded once, with no row in scope, so an
+/// expression that names another column can never produce a value there.
+/// Refusing it at this gate — the one every producer of a column `DEFAULT`
+/// calls — keeps the refusal at the declaration instead of the first insert's
+/// `UnevaluableDefault`.
+pub(super) fn validate_constant_clause_expr(
+    clause: &str,
+    owner: &str,
+    expr: &str,
+) -> Result<(), DdlError> {
+    validate_clause_expr(clause, owner, expr)?;
+    let references_column = nodedb_sql::planner::defaults::default_expr_references_columns(expr)
+        .map_err(|error| clause_error(clause, owner, &error))?;
+    if references_column {
+        return Err(DdlError::new(
+            sqlstate::SYNTAX_ERROR,
+            format!(
+                "{clause} for '{owner}' references another column; it is evaluated with no row \
+                 in scope, so give a constant expression"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a carried guard clause the server cannot evaluate as the column
+/// `DEFAULT` it becomes, or that the column's declared type cannot hold.
+///
+/// `clause` names the keyword the author wrote, so a typeguard `VALUE` reports
+/// itself rather than borrowing the `DEFAULT` wording.
 ///
 /// The expression is classified and parsed, never evaluated, so a
 /// `DEFAULT nextval('s')` column never advances its sequence at DDL time. A
@@ -75,25 +114,28 @@ pub(super) fn validate_column_defaults(columns: &[(String, String)]) -> Result<(
 /// an INSERT coerces the materialized value; a generator or an expression has
 /// no value to check until it is evaluated.
 ///
-/// An unregistered function name raises SQLSTATE `42883`, a literal the
-/// declared type cannot represent `42804`, a literal past the declared
-/// numeric width `22003`, and every other rejection `42601`.
-pub(super) fn validate_column_default(
+/// An unregistered function name raises SQLSTATE `42883`, a column-referencing
+/// expression `42601`, a literal the declared type cannot represent `42804`, a
+/// literal past the declared numeric width `22003`, and every other rejection
+/// `42601`.
+pub(super) fn validate_column_default_clause(
+    clause: &str,
     column: &DeclaredColumn<'_>,
     expr: &str,
 ) -> Result<(), DdlError> {
+    validate_constant_clause_expr(clause, column.name, expr)?;
     let compiled = CompiledDefault::declare(column.name, expr)
-        .map_err(|error| clause_error("DEFAULT", column.name, &error))?;
+        .map_err(|error| clause_error(clause, column.name, &error))?;
     let Some(literal) = compiled.literal() else {
         return Ok(());
     };
     let mut info = declared_column_info(column.name, column.declared_type);
     info.is_primary_key = column.primary_key;
     let value = default_value_to_sql(column.name, literal.clone())
-        .map_err(|error| clause_error("DEFAULT", column.name, &error))?;
+        .map_err(|error| clause_error(clause, column.name, &error))?;
     coerce_write_literal(&info, value)
         .map(|_| ())
-        .map_err(|error| clause_error("DEFAULT", column.name, &error))
+        .map_err(|error| clause_error(clause, column.name, &error))
 }
 
 /// Refuse one declared value-producing clause the server cannot evaluate.

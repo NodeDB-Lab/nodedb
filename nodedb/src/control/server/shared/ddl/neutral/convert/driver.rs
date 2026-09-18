@@ -21,6 +21,7 @@ use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::MetaOp;
 
 use super::super::super::result::{DdlError, DdlResult};
+use super::super::column_default::validate_constant_clause_expr;
 use super::column_defs::parse_convert_sql;
 use super::support::err;
 use super::typeguard_columns::typeguards_to_column_defs;
@@ -47,6 +48,27 @@ pub async fn convert_collection(
     let columns: Option<Vec<nodedb_types::columnar::ColumnDef>> = match target_type.as_str() {
         "document_strict" | "kv" => {
             let cols = if let Some(cols) = explicit_columns {
+                // The list defines the schema; no guard is carried onto it. A
+                // guard the list covers and that names another column has no
+                // column DEFAULT equivalent — evaluated with no row in scope it
+                // would fail every insert, and dropping it would lose the
+                // guard's meaning silently. Refuse it, naming field and clause.
+                for guard in &coll.type_guards {
+                    if !cols.iter().any(|c| c.name == guard.field) {
+                        continue;
+                    }
+                    let carried = guard
+                        .default_expr
+                        .as_deref()
+                        .map(|e| ("DEFAULT", e))
+                        .or(guard.value_expr.as_deref().map(|e| ("VALUE", e)));
+                    if let Some((clause, expr)) = carried {
+                        // The one gate refuses an unregistered function name
+                        // and a column-referencing expression alike, naming
+                        // the field and the clause the author wrote.
+                        validate_constant_clause_expr(clause, &guard.field, expr)?;
+                    }
+                }
                 cols
             } else if !coll.type_guards.is_empty() {
                 typeguards_to_column_defs(&coll.type_guards)?
@@ -60,6 +82,49 @@ pub async fn convert_collection(
         }
         _ => None,
     };
+
+    // Preserve the source collection's declared identity through the
+    // conversion. Without this, a schemaless source declared `id TEXT PRIMARY
+    // KEY` converts to a strict schema whose columns carry no primary key, and
+    // every insert after the conversion fails `no resolved primary key`. A
+    // column list that omits the source key is refused rather than silently
+    // minting new row identities.
+    let mut columns = columns;
+    if let Some(cols) = columns.as_mut() {
+        let source_pk = match &coll.collection_type {
+            nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Strict(schema)) => {
+                schema
+                    .columns
+                    .iter()
+                    .find(|c| c.primary_key)
+                    .map(|c| c.name.clone())
+            }
+            nodedb_types::CollectionType::KeyValue(config) => config
+                .schema
+                .columns
+                .iter()
+                .find(|c| c.primary_key)
+                .map(|c| c.name.clone()),
+            nodedb_types::CollectionType::Document(nodedb_types::DocumentMode::Schemaless) => {
+                coll.declared_primary_key.clone()
+            }
+            nodedb_types::CollectionType::Columnar(_) => None,
+        };
+        if let Some(ref pk) = source_pk {
+            match cols.iter_mut().find(|c| &c.name == pk) {
+                Some(col) => col.primary_key = true,
+                None => {
+                    return Err(err(
+                        "42601",
+                        format!(
+                            "converted schema must keep the source primary key column \
+                             '{pk}'; it is absent from the column list"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 
     let schema_json_for_dp = if let Some(ref cols) = columns {
         sonic_rs::to_string(cols).map_err(|e| err("XX000", format!("schema serialization: {e}")))?
