@@ -49,8 +49,17 @@ pub const CANNOT_DROP_DEFAULT_DATABASE: AmbiguousSqlstate = AmbiguousSqlstate("0
 
 // ── Class 22 — Data Exception ────────────────────────────────────────────────
 
+/// `22000` — `data_exception` (a value-level failure whose specific subclass
+/// the producer does not name — the array family)
+pub const DATA_EXCEPTION: &str = "22000";
+
 /// `22003` — `numeric_value_out_of_range`
 pub const NUMERIC_VALUE_OUT_OF_RANGE: &str = "22003";
+
+/// `22P02` — `invalid_text_representation` (a payload that cannot be decoded
+/// into the representation the reader expected — the response shaper's
+/// `SERIALIZATION` code)
+pub const INVALID_TEXT_REPRESENTATION: &str = "22P02";
 
 /// `22012` — `division_by_zero` (`/` or `%` with a zero divisor —
 /// raised at runtime instead of evaluating to `NULL`)
@@ -109,10 +118,22 @@ pub const TYPE_GUARD_VIOLATION: &str = "23608";
 /// status column; a misconfigured column name, not a locked period.
 pub const PERIOD_LOCK_MISCONFIGURED: &str = "23609";
 
+// ── Class 25 — Invalid Transaction State ─────────────────────────────────────
+
+/// `25006` — `read_only_sql_transaction` (a write against a mirror that is
+/// read-only by design)
+pub const READ_ONLY_SQL_TRANSACTION: &str = "25006";
+
 // ── Class 28 — Invalid Authorization Specification ───────────────────────────
 
 /// `28000` — `invalid_authorization_specification` (no valid credentials)
 pub const INVALID_AUTHORIZATION: &str = "28000";
+
+// ── Class 2B — Dependent Privilege Descriptors Still Exist ───────────────────
+
+/// `2BP01` — `dependent_objects_still_exist` (the built-in `default` database
+/// cannot be dropped)
+pub const DEPENDENT_OBJECTS_STILL_EXIST: &str = "2BP01";
 
 // ── Class 3D — Invalid Catalog Name ──────────────────────────────────────────
 
@@ -132,6 +153,9 @@ pub const SERIALIZATION_FAILURE: &str = "40001";
 
 /// `42501` — `insufficient_privilege`
 pub const INSUFFICIENT_PRIVILEGE: &str = "42501";
+
+/// `42P07` — `duplicate_table` (the named object already exists)
+pub const DUPLICATE_TABLE: &str = "42P07";
 
 /// `42601` — `syntax_error`
 pub const SYNTAX_ERROR: &str = "42601";
@@ -332,6 +356,10 @@ pub const IO_ERROR: &str = "58030";
 /// `XX000` — `internal_error`
 pub const INTERNAL_ERROR: &str = "XX000";
 
+/// `XX001` — `data_corrupted` (a segment or encrypted page failed its
+/// integrity check)
+pub const DATA_CORRUPTED: &str = "XX001";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +418,12 @@ mod tests {
             STALE_READ_NOT_LEADER,
             CONNECTION_FAILURE,
             IO_ERROR,
+            DATA_EXCEPTION,
+            INVALID_TEXT_REPRESENTATION,
+            READ_ONLY_SQL_TRANSACTION,
+            DEPENDENT_OBJECTS_STILL_EXIST,
+            DUPLICATE_TABLE,
+            DATA_CORRUPTED,
         ];
         for code in &codes {
             assert_eq!(
