@@ -289,7 +289,7 @@ impl CoreLoop {
                 &sidecar,
             );
         }
-        self.response_ok(task)
+        self.response_affected(task, 1)
     }
 }
 

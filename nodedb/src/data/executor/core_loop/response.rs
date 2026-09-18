@@ -82,6 +82,23 @@ impl CoreLoop {
         self.response_with_payload(task, payload)
     }
 
+    /// Build the response for a write whose affected count is fixed but whose
+    /// command verb is decided by the handler: `op` is `"insert"` or
+    /// `"update"`. Read by `extract_kv_conflict_op` on the Control Plane to
+    /// render `INSERT 0 n` or `UPDATE n`.
+    pub(in crate::data::executor) fn response_affected_with_op(
+        &self,
+        task: &ExecutionTask,
+        affected: u64,
+        op: &str,
+    ) -> Response {
+        let mut payload = Vec::with_capacity(32);
+        nodedb_query::msgpack_scan::write_map_header(&mut payload, 2);
+        nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", affected as i64);
+        nodedb_query::msgpack_scan::write_kv_str(&mut payload, "op", op);
+        self.response_with_payload(task, payload)
+    }
+
     pub(in crate::data::executor) fn response_partial(
         &self,
         task: &ExecutionTask,

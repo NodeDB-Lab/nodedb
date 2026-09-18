@@ -155,6 +155,11 @@ impl CoreLoop {
                 &[(key, stored_bytes.as_slice())],
             );
         }
-        self.response_ok(task)
+        let op_str = if existing_bytes.is_some() {
+            "update"
+        } else {
+            "insert"
+        };
+        self.response_affected_with_op(task, 1, op_str)
     }
 }

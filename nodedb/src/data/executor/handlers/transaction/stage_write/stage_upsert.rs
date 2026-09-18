@@ -20,7 +20,6 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::handlers::upsert::{apply_on_conflict_updates, merge_values};
-use crate::data::executor::response_codec;
 use crate::data::executor::strict_format;
 use crate::types::TenantId;
 
@@ -78,14 +77,7 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
 
-        let payload = match response_codec::encode_json_as_msgpack(&serde_json::json!({
-            "affected": 1,
-            "op": op,
-        })) {
-            Ok(p) => p,
-            Err(e) => return self.response_error(ctx.task, e),
-        };
-        self.response_with_payload(ctx.task, payload)
+        self.response_affected_with_op(ctx.task, 1, op)
     }
 
     /// Resolve the current stored body for `ctx` under BASE ∪ OVERLAY: a

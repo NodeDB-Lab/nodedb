@@ -19,7 +19,6 @@ use nodedb_physical::physical_plan::UpdateValue;
 use super::context::StageCtx;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::response_codec;
 
 impl CoreLoop {
     // ── InsertOnConflictUpdate: resolve current, merge, tag by outcome ──────
@@ -111,13 +110,6 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
 
-        let payload = match response_codec::encode_json_as_msgpack(&serde_json::json!({
-            "affected": 1,
-            "op": op,
-        })) {
-            Ok(p) => p,
-            Err(e) => return self.response_error(ctx.task, e),
-        };
-        self.response_with_payload(ctx.task, payload)
+        self.response_affected_with_op(ctx.task, 1, op)
     }
 }
