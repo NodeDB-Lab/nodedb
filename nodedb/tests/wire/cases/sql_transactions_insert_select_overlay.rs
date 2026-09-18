@@ -242,3 +242,33 @@ async fn strict_insert_select_sees_source_rows_staged_earlier_in_txn() {
     )
     .await;
 }
+
+/// In-transaction `INSERT ... SELECT` stages through the per-transaction
+/// overlay, so the source read is transactional. The kv materialize-scan
+/// carries no snapshot fields; the read is refused by name rather than copying
+/// committed-only rows the transaction did not ask for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kv_source_refuses_an_in_transaction_read() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION is_kv_tx_src (id STRING PRIMARY KEY, n INT) \
+             WITH (engine='kv')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO is_kv_tx_src (id, n) VALUES ('a', 1)")
+        .await
+        .unwrap();
+    server.exec("CREATE COLLECTION is_kv_tx_tgt").await.unwrap();
+
+    server.exec("BEGIN").await.unwrap();
+    server
+        .expect_error(
+            "INSERT INTO is_kv_tx_tgt SELECT * FROM is_kv_tx_src",
+            "transactional",
+        )
+        .await;
+    server.exec("ROLLBACK").await.unwrap();
+}
