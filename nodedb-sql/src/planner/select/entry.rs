@@ -96,7 +96,14 @@ pub fn plan_query(
                 .map(|column| check_ast_identifier(&column.name))
                 .collect::<Result<_>>()?;
             let cte_plan = plan_query(&cte.query, catalog, functions, temporal)?;
-            let info = infer_subquery_relation(catalog, &name, &cte.query)?;
+            let info = infer_subquery_relation(
+                catalog,
+                &name,
+                &cte.query,
+                Some(&cte_plan),
+                functions,
+                temporal,
+            )?;
             definitions.push((name.clone(), cte_plan));
             relations.push((name, rename_output_columns(info, &declared)));
         }

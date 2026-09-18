@@ -43,7 +43,7 @@ pub(super) fn plan_select(
         // attrs, so ORDER BY and the tail clauses resolve its columns.
         return Ok(PlannedSelect {
             plan,
-            scope: TableScope::resolve_from(catalog, &select.from)?,
+            scope: TableScope::resolve_from(catalog, functions, temporal, &select.from)?,
         });
     }
 
@@ -61,7 +61,7 @@ pub(super) fn plan_select(
     }
 
     // 1. Resolve FROM tables.
-    let scope = TableScope::resolve_from(catalog, &select.from)?;
+    let scope = TableScope::resolve_from(catalog, functions, temporal, &select.from)?;
 
     // 2. Handle constant queries (no FROM clause): SELECT 1, SELECT 'hello', etc.
     if select.from.is_empty() {
@@ -111,7 +111,7 @@ pub(super) fn plan_select(
     }
 
     // 3b. Comma-LATERAL syntax: `FROM t, LATERAL (SELECT ...) x`.
-    if let Some(plan) = try_plan_comma_lateral(select, &scope, catalog, temporal)? {
+    if let Some(plan) = try_plan_comma_lateral(select, &scope, catalog, functions, temporal)? {
         return Ok(PlannedSelect { plan, scope });
     }
 

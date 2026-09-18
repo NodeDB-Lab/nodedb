@@ -24,6 +24,7 @@ pub(super) fn try_plan_comma_lateral(
     select: &Select,
     scope: &TableScope,
     catalog: &dyn SqlCatalog,
+    functions: &crate::functions::registry::FunctionRegistry,
     temporal: TemporalScope,
 ) -> Result<Option<SqlPlan>> {
     if select.from.len() != 2 || !is_lateral_derived(&select.from[1].relation) {
@@ -74,6 +75,7 @@ pub(super) fn try_plan_comma_lateral(
         outer_projection: projection,
         outer_scope: scope,
         catalog,
+        functions,
         temporal,
     })
     .map(Some)

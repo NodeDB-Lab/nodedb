@@ -18,7 +18,12 @@ use crate::error::Result;
 use crate::types::*;
 
 /// Plan an INSERT statement.
-pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
+pub fn plan_insert(
+    ins: &ast::Insert,
+    catalog: &dyn SqlCatalog,
+    functions: &crate::functions::registry::FunctionRegistry,
+    temporal: crate::TemporalScope,
+) -> Result<Vec<SqlPlan>> {
     let (table_name, info) = resolve_target(ins, "INSERT", catalog)?;
     let target_scope = target_scope(&table_name, &info)?;
 
@@ -39,13 +44,9 @@ pub fn plan_insert(ins: &ast::Insert, catalog: &dyn SqlCatalog) -> Result<Vec<Sq
     if let Some(source) = &ins.source
         && let ast::SetExpr::Select(select) = &*source.body
     {
-        let column_map = bind_insert_select_columns(catalog, &columns, select, &info)?;
-        let source_plan = super::super::select::plan_query(
-            source,
-            catalog,
-            &crate::functions::registry::FunctionRegistry::new(),
-            crate::TemporalScope::default(),
-        )?;
+        let column_map =
+            bind_insert_select_columns(catalog, functions, temporal, &columns, select, &info)?;
+        let source_plan = super::super::select::plan_query(source, catalog, functions, temporal)?;
         return Ok(vec![SqlPlan::InsertSelect {
             target: table_name,
             source: Box::new(source_plan),
@@ -173,7 +174,12 @@ mod tests {
         let sqlparser::ast::Statement::Insert(ins) = &statements[0] else {
             panic!("expected an INSERT statement");
         };
-        let mut plans = plan_insert(ins, catalog)?;
+        let mut plans = plan_insert(
+            ins,
+            catalog,
+            &crate::functions::registry::FunctionRegistry::new(),
+            crate::TemporalScope::default(),
+        )?;
         Ok(plans.remove(0))
     }
 

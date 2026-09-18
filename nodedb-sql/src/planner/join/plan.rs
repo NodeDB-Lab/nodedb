@@ -60,6 +60,7 @@ pub fn plan_join_from_select(
                 outer_projection: projection,
                 outer_scope: scope,
                 catalog,
+                functions,
                 temporal,
             })?));
         }

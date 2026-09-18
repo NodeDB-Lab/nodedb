@@ -18,6 +18,8 @@ use crate::types::*;
 /// copies the row unchanged and needs no per-column expression.
 pub(crate) fn bind_insert_select_columns(
     catalog: &dyn SqlCatalog,
+    functions: &crate::functions::registry::FunctionRegistry,
+    temporal: crate::TemporalScope,
     target_columns: &[String],
     select: &ast::Select,
     target: &CollectionInfo,
@@ -55,7 +57,7 @@ pub(crate) fn bind_insert_select_columns(
 
     // The source scope gates every column the SELECT list names: one the
     // source does not carry raises `UnknownColumn` here, at plan time.
-    let source_scope = TableScope::resolve_from(catalog, &select.from)?;
+    let source_scope = TableScope::resolve_from(catalog, functions, temporal, &select.from)?;
     let scope = ColumnScope::Relations(&source_scope);
 
     let mut bound = Vec::with_capacity(names.len());
