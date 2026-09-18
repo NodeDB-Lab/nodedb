@@ -11,7 +11,8 @@
 //! rather than silently dropped.
 
 use nodedb_physical::physical_plan::{
-    ColumnarOp, CrdtOp, DocumentOp, KvOp, QueryOp, ReturningSpec, TimeseriesOp, VectorOp,
+    ArrayOp, ClusterArrayOp, ClusterEventOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp,
+    QueryOp, ReturningSpec, SpatialOp, TextOp, TimeseriesOp, VectorOp,
 };
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -124,11 +125,11 @@ pub fn in_transaction_returning_unsupported() -> Error {
 /// Only `PointInsert`, `PointPut`, `BatchInsert`, `Upsert`, `PointUpdate`,
 /// `BulkUpdate`, `PointDelete`, `BulkDelete`, `UpdateFromJoin`, `Merge`, the KV
 /// `Insert` / `InsertIfAbsent` / `InsertOnConflictUpdate` / `Put` / `BatchPut`
-/// ops, the columnar `Insert`, the timeseries `Ingest`, the vector
-/// `DirectUpsert`, and the CRDT `DocUpsert` / `DocDelete` ops are affected.
-/// Every other variant is left unchanged — an insert shape among them has
-/// already been refused by [`refuse_unprojectable_insert_returning`], which
-/// runs first.
+/// / `FieldSet` / `PredicateUpdate` / `Delete` / `PredicateDelete` ops, the
+/// columnar `Insert`, the timeseries `Ingest`, the vector `DirectUpsert`, and
+/// the CRDT `DocUpsert` / `DocDelete` ops are affected. Every other variant is
+/// left unchanged — an insert shape among them has already been refused by
+/// [`refuse_unprojectable_insert_returning`], which runs first.
 pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
     match plan {
         PhysicalPlan::Document(DocumentOp::PointInsert { returning, .. }) => {
@@ -147,6 +148,18 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             *returning = Some(spec);
         }
         PhysicalPlan::Kv(KvOp::BatchPut { returning, .. }) => {
+            *returning = Some(spec);
+        }
+        PhysicalPlan::Kv(KvOp::FieldSet { returning, .. }) => {
+            *returning = Some(spec);
+        }
+        PhysicalPlan::Kv(KvOp::PredicateUpdate { returning, .. }) => {
+            *returning = Some(spec);
+        }
+        PhysicalPlan::Kv(KvOp::Delete { returning, .. }) => {
+            *returning = Some(spec);
+        }
+        PhysicalPlan::Kv(KvOp::PredicateDelete { returning, .. }) => {
             *returning = Some(spec);
         }
         PhysicalPlan::Columnar(ColumnarOp::Insert { returning, .. }) => {
@@ -191,7 +204,228 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
         PhysicalPlan::Crdt(CrdtOp::DocDelete { returning, .. }) => {
             *returning = Some(spec);
         }
-        _ => {}
+        // Every variant with no `returning` slot, listed so a new variant
+        // forces a decision here instead of inheriting silence.
+        PhysicalPlan::Document(
+            DocumentOp::PointGet { .. }
+            | DocumentOp::Scan { .. }
+            | DocumentOp::RangeScan { .. }
+            | DocumentOp::Register { .. }
+            | DocumentOp::IndexLookup { .. }
+            | DocumentOp::IndexedFetch { .. }
+            | DocumentOp::DropIndex { .. }
+            | DocumentOp::BackfillIndex { .. }
+            | DocumentOp::Truncate { .. }
+            | DocumentOp::EstimateCount { .. }
+            | DocumentOp::InsertSelect { .. }
+            | DocumentOp::MaterializeScan { .. }
+            | DocumentOp::ApplyBalanceDelta { .. }
+            | DocumentOp::ResolveWrite(_)
+            | DocumentOp::ResolvedWrite { .. },
+        )
+        | PhysicalPlan::Kv(
+            KvOp::Get { .. }
+            | KvOp::Scan { .. }
+            | KvOp::Expire { .. }
+            | KvOp::Persist { .. }
+            | KvOp::GetTtl { .. }
+            | KvOp::BatchGet { .. }
+            | KvOp::RegisterIndex { .. }
+            | KvOp::DropIndex { .. }
+            | KvOp::FieldGet { .. }
+            | KvOp::Truncate { .. }
+            | KvOp::Incr { .. }
+            | KvOp::IncrFloat { .. }
+            | KvOp::Cas { .. }
+            | KvOp::GetSet { .. }
+            | KvOp::Transfer { .. }
+            | KvOp::TransferItem { .. }
+            | KvOp::RegisterSortedIndex { .. }
+            | KvOp::DropSortedIndex { .. }
+            | KvOp::SortedIndexRank { .. }
+            | KvOp::SortedIndexTopK { .. }
+            | KvOp::SortedIndexRange { .. }
+            | KvOp::SortedIndexCount { .. }
+            | KvOp::SortedIndexScore { .. }
+            | KvOp::MaterializeScan { .. }
+            | KvOp::ResolveWrite(_)
+            | KvOp::ResolvedWrite { .. },
+        )
+        | PhysicalPlan::Vector(
+            VectorOp::Search { .. }
+            | VectorOp::Insert { .. }
+            | VectorOp::BatchInsert { .. }
+            | VectorOp::MultiSearch { .. }
+            | VectorOp::Delete { .. }
+            | VectorOp::DeleteBySurrogate { .. }
+            | VectorOp::SetParams { .. }
+            | VectorOp::DropIndex { .. }
+            | VectorOp::QueryStats { .. }
+            | VectorOp::Seal { .. }
+            | VectorOp::CompactIndex { .. }
+            | VectorOp::Rebuild { .. }
+            | VectorOp::SparseInsert { .. }
+            | VectorOp::SparseSearch { .. }
+            | VectorOp::SparseDelete { .. }
+            | VectorOp::MultiVectorInsert { .. }
+            | VectorOp::MultiVectorDelete { .. }
+            | VectorOp::MultiVectorScoreSearch { .. },
+        )
+        | PhysicalPlan::Graph(
+            GraphOp::EdgePut { .. }
+            | GraphOp::EdgePutBatch { .. }
+            | GraphOp::EdgeDelete { .. }
+            | GraphOp::EdgeDeleteBatch { .. }
+            | GraphOp::Hop { .. }
+            | GraphOp::Neighbors { .. }
+            | GraphOp::NeighborsMulti { .. }
+            | GraphOp::Path { .. }
+            | GraphOp::Subgraph { .. }
+            | GraphOp::RagFusion { .. }
+            | GraphOp::Algo { .. }
+            | GraphOp::Match { .. }
+            | GraphOp::MatchContinuation { .. }
+            | GraphOp::MatchVarLenResume { .. }
+            | GraphOp::SetNodeLabels { .. }
+            | GraphOp::RemoveNodeLabels { .. }
+            | GraphOp::TemporalNeighbors { .. }
+            | GraphOp::TemporalAlgorithm { .. }
+            | GraphOp::Stats { .. }
+            | GraphOp::ResolveEdgeDelete(_)
+            | GraphOp::BspSuperstep(_)
+            | GraphOp::WccSuperstep(_),
+        )
+        | PhysicalPlan::Text(
+            TextOp::Search { .. }
+            | TextOp::BM25ScoreScan { .. }
+            | TextOp::PhraseSearch { .. }
+            | TextOp::HybridSearch { .. }
+            | TextOp::FtsIndexDoc { .. }
+            | TextOp::FtsDeleteDoc { .. }
+            | TextOp::HybridSearchTriple { .. }
+            | TextOp::SetTextConfig { .. },
+        )
+        | PhysicalPlan::Columnar(
+            ColumnarOp::Scan { .. }
+            | ColumnarOp::Update { .. }
+            | ColumnarOp::Delete { .. }
+            | ColumnarOp::ResolvedUpdate { .. }
+            | ColumnarOp::ResolvedDelete { .. }
+            | ColumnarOp::ResolveDml { .. }
+            | ColumnarOp::MaterializeScan { .. },
+        )
+        | PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_))
+        | PhysicalPlan::Spatial(
+            SpatialOp::Insert { .. } | SpatialOp::Delete { .. } | SpatialOp::Scan { .. },
+        )
+        | PhysicalPlan::Crdt(
+            CrdtOp::Read { .. }
+            | CrdtOp::Apply { .. }
+            | CrdtOp::ApplyAuthenticated { .. }
+            | CrdtOp::ImportSnapshot { .. }
+            | CrdtOp::SetConstraints { .. }
+            | CrdtOp::DropConstraints { .. }
+            | CrdtOp::ReadConstraints { .. }
+            | CrdtOp::SetPolicy { .. }
+            | CrdtOp::GetPolicy { .. }
+            | CrdtOp::ReadAtVersion { .. }
+            | CrdtOp::GetVersionVector { .. }
+            | CrdtOp::ExportDelta { .. }
+            | CrdtOp::RestoreToVersion { .. }
+            | CrdtOp::CompactAtVersion { .. }
+            | CrdtOp::ListInsert { .. }
+            | CrdtOp::ListDelete { .. }
+            | CrdtOp::ListMove { .. }
+            | CrdtOp::PreviewApply { .. },
+        )
+        | PhysicalPlan::Query(
+            QueryOp::ProviderScan { .. }
+            | QueryOp::PostProcess { .. }
+            | QueryOp::SetOp { .. }
+            | QueryOp::Aggregate { .. }
+            | QueryOp::PartialAggregate { .. }
+            | QueryOp::PartialAggregateState { .. }
+            | QueryOp::HashJoin { .. }
+            | QueryOp::ShuffleJoinConsume { .. }
+            | QueryOp::ShuffleAggregateConsume { .. }
+            | QueryOp::NestedLoopJoin { .. }
+            | QueryOp::SortMergeJoin { .. }
+            | QueryOp::FacetCounts { .. }
+            | QueryOp::RecursiveScan { .. }
+            | QueryOp::RecursiveValue { .. }
+            | QueryOp::LateralTopK { .. }
+            | QueryOp::LateralLoop { .. }
+            | QueryOp::Exchange(_),
+        )
+        | PhysicalPlan::Meta(
+            MetaOp::WalAppend { .. }
+            | MetaOp::Cancel { .. }
+            | MetaOp::TransactionBatch { .. }
+            | MetaOp::CreateSnapshot
+            | MetaOp::Compact
+            | MetaOp::Checkpoint
+            | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::UnregisterContinuousAggregate { .. }
+            | MetaOp::ListContinuousAggregates
+            | MetaOp::ConvertCollection { .. }
+            | MetaOp::CreateTenantSnapshot { .. }
+            | MetaOp::RestoreTenantSnapshot { .. }
+            | MetaOp::PurgeTenant { .. }
+            | MetaOp::UnregisterCollection { .. }
+            | MetaOp::UnregisterMaterializedView { .. }
+            | MetaOp::QueryCollectionSize { .. }
+            | MetaOp::EnforceTimeseriesRetention { .. }
+            | MetaOp::TemporalPurgeEdgeStore { .. }
+            | MetaOp::TemporalPurgeDocumentStrict { .. }
+            | MetaOp::TemporalPurgeColumnar { .. }
+            | MetaOp::TemporalPurgeCrdt { .. }
+            | MetaOp::TemporalPurgeArray { .. }
+            | MetaOp::AlterArray { .. }
+            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::QueryAggregateWatermark { .. }
+            | MetaOp::QueryLastValues { .. }
+            | MetaOp::QueryLastValue { .. }
+            | MetaOp::CalvinExecuteStatic { .. }
+            | MetaOp::CalvinExecutePassive { .. }
+            | MetaOp::CalvinExecuteActive { .. }
+            | MetaOp::RebuildIndex { .. }
+            | MetaOp::PutSynonymGroup { .. }
+            | MetaOp::DeleteSynonymGroup { .. }
+            | MetaOp::RenameCollection { .. }
+            | MetaOp::StageWrite { .. }
+            | MetaOp::DropTxnOverlay { .. }
+            | MetaOp::MarkSavepoint { .. }
+            | MetaOp::RollbackToSavepoint { .. }
+            | MetaOp::RecordCalvinWriteVersions { .. }
+            | MetaOp::CalvinFlush { .. }
+            | MetaOp::CalvinDrop { .. }
+            | MetaOp::ResolveTxn { .. }
+            | MetaOp::CalvinResolve { .. },
+        )
+        | PhysicalPlan::Array(
+            ArrayOp::OpenArray { .. }
+            | ArrayOp::Put { .. }
+            | ArrayOp::Delete { .. }
+            | ArrayOp::Slice { .. }
+            | ArrayOp::Project { .. }
+            | ArrayOp::Aggregate { .. }
+            | ArrayOp::Elementwise { .. }
+            | ArrayOp::Flush { .. }
+            | ArrayOp::Compact { .. }
+            | ArrayOp::SurrogateBitmapScan { .. }
+            | ArrayOp::DropArray { .. }
+            | ArrayOp::RestoreArrayDrop { .. }
+            | ArrayOp::PurgeArrayDrop { .. },
+        )
+        | PhysicalPlan::ClusterArray(
+            ClusterArrayOp::Slice { .. }
+            | ClusterArrayOp::Agg { .. }
+            | ClusterArrayOp::Put { .. }
+            | ClusterArrayOp::Delete { .. },
+        )
+        | PhysicalPlan::ClusterEvent(
+            ClusterEventOp::ConsumeStream { .. } | ClusterEventOp::PublishTopic { .. },
+        ) => {}
     }
 }
 

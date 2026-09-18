@@ -132,6 +132,13 @@ pub enum KvOp {
         /// predicate is attached. Only `RlsWriteCheck::Predicate` makes the
         /// handler read the pre-image at all.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return the STORED pre-image of every removed row
+        /// (row as `SELECT` showed it, `key` included).
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Cursor-based scan with optional filter predicate.
@@ -275,6 +282,13 @@ pub enum KvOp {
         /// Write policy evaluated against the merged body, which exists only
         /// after the stored row is read and updates applied.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return the STORED post-image (merged row as `SELECT`
+        /// shows it, `key` included). Never the caller's submitted updates.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Truncate: delete ALL entries in a KV collection.
@@ -497,6 +511,13 @@ pub enum KvOp {
         /// matched row's post-image once the assignments have been applied, or
         /// the reason no predicate is attached.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return one row per matched key — the STORED
+        /// post-image of each, in scan order — projected per spec.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Delete every row matching `filters`.
@@ -510,5 +531,12 @@ pub enum KvOp {
         /// Compiled row-level-security WRITE predicate, evaluated against the
         /// pre-image of every row this removes.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return one row per removed key — the STORED
+        /// pre-image of each, in scan order — projected per spec.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 }

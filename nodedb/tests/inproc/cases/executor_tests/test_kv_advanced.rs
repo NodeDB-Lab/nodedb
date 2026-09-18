@@ -117,6 +117,8 @@ fn kv_protocol_command_sequence() {
             ),
             keys: vec![b"key1".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -193,6 +195,8 @@ fn kv_protocol_command_sequence() {
             ),
             keys: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -458,6 +462,8 @@ fn kv_field_get_and_set() {
             )],
             surrogate: nodedb_types::Surrogate::ZERO,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
 

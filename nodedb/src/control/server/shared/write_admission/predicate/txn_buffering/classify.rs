@@ -1167,17 +1167,23 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 keys: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::PredicateUpdate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 updates: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::PredicateDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::Scan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1230,6 +1236,8 @@ mod tests {
                 updates: Vec::new(),
                 surrogate: Surrogate::ZERO,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::Incr {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

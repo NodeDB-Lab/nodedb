@@ -89,6 +89,10 @@ impl CoreLoop {
                 // keys its own slots (see module doc) and ignores it.
                 surrogate: _,
                 rls_write_check,
+                // The Control Plane refuses `RETURNING` inside a transaction
+                // before the write is staged, so no row image is projected here.
+                returning: _,
+                rls_filters: _,
             } => {
                 let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
                 self.stage_kv_field_set(&ctx, key, updates, rls_write_check)
@@ -160,6 +164,7 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
         match response_codec::encode_json_as_msgpack(&serde_json::json!({
+            "affected": 1,
             "fields_added": computed.fields_added,
         })) {
             Ok(payload) => self.response_with_payload(ctx.task, payload),

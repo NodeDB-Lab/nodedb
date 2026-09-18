@@ -63,6 +63,8 @@ fn kv_put_get_delete() {
             ),
             keys: vec![b"key1".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     let json = payload_value(&payload);

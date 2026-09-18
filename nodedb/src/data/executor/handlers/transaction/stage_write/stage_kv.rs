@@ -104,6 +104,10 @@ impl CoreLoop {
                 collection,
                 keys,
                 rls_write_check,
+                // The Control Plane refuses `RETURNING` inside a transaction
+                // before the write is staged, so no row image is projected here.
+                returning: _,
+                rls_filters: _,
             } => self.stage_kv_delete(task, tid, txn_id, collection.as_str(), keys, rls_write_check),
             KvOp::BatchPut { .. }
             | KvOp::Incr { .. }

@@ -168,6 +168,7 @@ impl CoreLoop {
                 collection,
                 keys,
                 rls_write_check,
+                ..
             } => {
                 let now_ms = current_ms();
                 // Capture prior values for all keys that exist before deleting.
@@ -180,13 +181,19 @@ impl CoreLoop {
                         Some((k.clone(), v))
                     })
                     .collect();
+                // In-transaction writes never carry `RETURNING`: the Control
+                // Plane refuses the clause before staging (see `BatchPut`).
                 let resp = self.execute_kv_delete(
                     task,
-                    did,
-                    tid,
-                    collection.as_str(),
-                    keys,
-                    rls_write_check,
+                    crate::data::executor::handlers::kv::crud::KvDeleteParams {
+                        did,
+                        tid,
+                        collection: collection.as_str(),
+                        keys,
+                        rls_write_check,
+                        returning: None,
+                        rls_filters: &[],
+                    },
                 );
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
@@ -249,6 +256,7 @@ impl CoreLoop {
                 updates,
                 surrogate,
                 rls_write_check,
+                ..
             } => {
                 let now_ms = current_ms();
                 let prior = self
@@ -264,7 +272,11 @@ impl CoreLoop {
                         surrogate: *surrogate,
                         rls_write_check,
                     },
-                    updates,
+                    crate::data::executor::handlers::kv::field::KvFieldSetArgs {
+                        updates,
+                        returning: None,
+                        rls_filters: &[],
+                    },
                 );
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {

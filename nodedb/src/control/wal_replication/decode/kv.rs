@@ -44,11 +44,17 @@ pub(super) fn put(
 /// Every plan reconstructed here carries `RlsWriteCheck::already_decided_elsewhere()`
 /// — the writing identity isn't available on this node, so re-deciding at
 /// recovery time would make it non-deterministic.
-pub(super) fn delete(collection: &str, keys: &[Vec<u8>]) -> PhysicalPlan {
+pub(super) fn delete(
+    collection: &str,
+    keys: &[Vec<u8>],
+    returning: ReturningFields<'_>,
+) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Delete {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         keys: keys.to_vec(),
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+        returning: returning.returning,
+        rls_filters: returning.rls_filters.to_vec(),
     })
 }
 
@@ -59,21 +65,30 @@ pub(super) fn predicate_update(
     collection: &str,
     filters: &[u8],
     updates: &[(String, Vec<u8>)],
+    returning: ReturningFields<'_>,
 ) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::PredicateUpdate {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         filters: filters.to_vec(),
         updates: updates.to_vec(),
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+        returning: returning.returning,
+        rls_filters: returning.rls_filters.to_vec(),
     })
 }
 
 /// Reconstruct a KV predicate `DELETE` plan — see [`predicate_update`].
-pub(super) fn predicate_delete(collection: &str, filters: &[u8]) -> PhysicalPlan {
+pub(super) fn predicate_delete(
+    collection: &str,
+    filters: &[u8],
+    returning: ReturningFields<'_>,
+) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::PredicateDelete {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         filters: filters.to_vec(),
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+        returning: returning.returning,
+        rls_filters: returning.rls_filters.to_vec(),
     })
 }
 
@@ -362,6 +377,7 @@ pub(super) fn field_set(
     key: &[u8],
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
+    returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
     let carried = nodedb_types::Surrogate::new(surrogate);
     let surrogate = bind_or_lookup(ctx, collection, key, carried)?;
@@ -371,6 +387,8 @@ pub(super) fn field_set(
         updates: updates.to_vec(),
         surrogate,
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+        returning: returning.returning,
+        rls_filters: returning.rls_filters.to_vec(),
     }))
 }
 

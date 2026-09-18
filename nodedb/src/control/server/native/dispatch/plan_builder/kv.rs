@@ -186,6 +186,9 @@ pub(crate) fn build_field_set(
         updates,
         surrogate,
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        // The native field-set carries no RETURNING clause.
+        returning: None,
+        rls_filters: Vec::new(),
     }))
 }
 

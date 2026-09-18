@@ -14,7 +14,8 @@ use super::context::{
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::kv::atomic::KvAtomicCtx;
-use crate::data::executor::handlers::kv::crud::KvInsertOnConflictUpdateParams;
+use crate::data::executor::handlers::kv::crud::{KvDeleteParams, KvInsertOnConflictUpdateParams};
+use crate::data::executor::handlers::kv::field::KvFieldSetArgs;
 use crate::data::executor::handlers::kv::rls::admit_kv_row;
 use crate::data::executor::handlers::kv::ttl::KvTtlTarget;
 use crate::data::executor::handlers::returning_rows::kv_stored_rows_payload;
@@ -103,26 +104,42 @@ impl CoreLoop {
     }
 
     /// Resolve a KV `DELETE`. An absent key contributes no mutation and is
-    /// counted as not-deleted, same as `execute_kv_delete`.
-    pub(super) fn resolve_kv_delete(
-        &self,
-        did: u64,
-        tid: u64,
-        collection: &str,
-        keys: &[Vec<u8>],
-        rls_write_check: &nodedb_types::RlsWriteCheck,
-    ) -> ResolveResult {
+    /// counted as not-deleted, same as `execute_kv_delete`. A `RETURNING`
+    /// projects the pre-images the mutations carry, same as the live handler.
+    pub(super) fn resolve_kv_delete(&self, params: KvDeleteParams<'_>) -> ResolveResult {
+        let KvDeleteParams {
+            did,
+            tid,
+            collection,
+            keys,
+            rls_write_check,
+            returning,
+            rls_filters,
+        } = params;
         let now_ms = current_ms();
-        let mut mutations = Vec::new();
+        let mut pre_images: Vec<(&[u8], Vec<u8>)> = Vec::with_capacity(keys.len());
         for key in keys {
             let Some(body) = self.kv_resolve_read(did, tid, collection, key, now_ms) else {
                 continue;
             };
             admit_kv_row(rls_write_check, &body, key, tid, collection)?;
-            mutations.push(delete_mutation(collection, key, Some(body)));
+            pre_images.push((key.as_slice(), body));
         }
 
-        let response_payload = response_codec::encode_count("deleted", mutations.len())?;
+        let response_payload = match returning {
+            Some(spec) => {
+                let rows: Vec<(&[u8], &[u8])> = pre_images
+                    .iter()
+                    .map(|(key, body)| (*key, body.as_slice()))
+                    .collect();
+                kv_stored_rows_payload(spec, rls_filters, &rows)?
+            }
+            None => response_codec::encode_count("deleted", pre_images.len())?,
+        };
+        let mutations = pre_images
+            .into_iter()
+            .map(|(key, body)| delete_mutation(collection, key, Some(body)))
+            .collect();
         Ok(KvResolveOutcome {
             mutations,
             response_payload,
@@ -197,7 +214,7 @@ impl CoreLoop {
     pub(super) fn resolve_kv_field_set(
         &self,
         ctx: KvAtomicCtx<'_>,
-        updates: &[(String, Vec<u8>)],
+        args: KvFieldSetArgs<'_>,
     ) -> ResolveResult {
         let KvAtomicCtx {
             did,
@@ -208,6 +225,11 @@ impl CoreLoop {
             rls_write_check,
             ..
         } = ctx;
+        let KvFieldSetArgs {
+            updates,
+            returning,
+            rls_filters,
+        } = args;
         let now_ms = current_ms();
         let current = self.kv_resolve_read(did, tid, collection, key, now_ms);
         let computed = crate::data::executor::handlers::kv::field_compute::merge_field_updates(
@@ -216,9 +238,13 @@ impl CoreLoop {
         )?;
         admit_kv_row(rls_write_check, &computed.new_value, key, tid, collection)?;
 
-        let response_payload = response_codec::encode_json_as_msgpack(
-            &serde_json::json!({ "fields_added": computed.fields_added }),
-        )?;
+        let response_payload = match returning {
+            Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[(key, &computed.new_value)])?,
+            // Same shape `execute_kv_field_set` reports.
+            None => response_codec::encode_json_as_msgpack(
+                &serde_json::json!({ "affected": 1, "fields_added": computed.fields_added }),
+            )?,
+        };
         Ok(one(
             put_mutation(ResolvedPut {
                 collection,

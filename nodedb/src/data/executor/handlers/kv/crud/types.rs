@@ -25,6 +25,22 @@ pub(in crate::data::executor) struct KvInsertOnConflictUpdateParams<'a> {
     pub rls_filters: &'a [u8],
 }
 
+/// Parameters for a KV `DELETE` by primary key(s).
+pub(in crate::data::executor) struct KvDeleteParams<'a> {
+    pub did: u64,
+    pub tid: u64,
+    pub collection: &'a str,
+    pub keys: &'a [Vec<u8>],
+    /// Compiled row-level-security WRITE predicate. The row a delete removes
+    /// is the image the policy decides.
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// When `Some`, project the STORED pre-image of every removed row per
+    /// spec instead of reporting a bare count.
+    pub returning: Option<&'a nodedb_physical::physical_plan::ReturningSpec>,
+    /// Compiled read policy bounding which of those rows may be shown back.
+    pub rls_filters: &'a [u8],
+}
+
 /// Parameters for a KV point `GET`.
 pub(in crate::data::executor) struct KvGetParams<'a> {
     pub did: u64,

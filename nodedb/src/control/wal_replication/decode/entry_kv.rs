@@ -43,7 +43,19 @@ pub(super) fn decode_arm(
                 },
             )?
         }
-        ReplicatedWrite::KvDelete { collection, keys } => kv::delete(collection, keys),
+        ReplicatedWrite::KvDelete {
+            collection,
+            keys,
+            returning,
+            rls_filters,
+        } => kv::delete(
+            collection,
+            keys,
+            ReturningFields {
+                returning: decode_returning(returning)?,
+                rls_filters,
+            },
+        ),
         ReplicatedWrite::KvInsert {
             collection,
             key,
@@ -215,7 +227,19 @@ pub(super) fn decode_arm(
             key,
             updates,
             surrogate,
-        } => kv::field_set(ctx, collection, key, updates, *surrogate)?,
+            returning,
+            rls_filters,
+        } => kv::field_set(
+            ctx,
+            collection,
+            key,
+            updates,
+            *surrogate,
+            ReturningFields {
+                returning: decode_returning(returning)?,
+                rls_filters,
+            },
+        )?,
         ReplicatedWrite::KvTransfer {
             collection,
             source_key,
@@ -244,11 +268,30 @@ pub(super) fn decode_arm(
             collection,
             filters,
             updates,
-        } => kv::predicate_update(collection, filters, updates),
+            returning,
+            rls_filters,
+        } => kv::predicate_update(
+            collection,
+            filters,
+            updates,
+            ReturningFields {
+                returning: decode_returning(returning)?,
+                rls_filters,
+            },
+        ),
         ReplicatedWrite::KvPredicateDelete {
             collection,
             filters,
-        } => kv::predicate_delete(collection, filters),
+            returning,
+            rls_filters,
+        } => kv::predicate_delete(
+            collection,
+            filters,
+            ReturningFields {
+                returning: decode_returning(returning)?,
+                rls_filters,
+            },
+        ),
         ReplicatedWrite::KvTransferItem {
             source_collection,
             dest_collection,

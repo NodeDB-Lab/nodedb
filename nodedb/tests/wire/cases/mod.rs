@@ -121,6 +121,7 @@ mod pgwire_int_width_range_enforcement;
 mod pgwire_orm_conformance;
 mod pgwire_reset_parameters;
 mod pgwire_returning_dml;
+mod pgwire_returning_dml_kv;
 mod pgwire_returning_dml_strict;
 mod pgwire_show_dispatch;
 mod pgwire_tenant_scoping;

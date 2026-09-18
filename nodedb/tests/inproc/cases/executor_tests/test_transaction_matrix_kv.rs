@@ -190,6 +190,8 @@ fn rollback_matrix_kv_delete_then_doc_fail() {
                     ),
                     keys: vec![b"del_key".to_vec()],
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                    returning: None,
+                    rls_filters: Vec::new(),
                 }),
                 doc_insert_conflict("docs"),
             ],

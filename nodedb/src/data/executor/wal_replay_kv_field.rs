@@ -188,6 +188,8 @@ mod tests {
             updates: vec![("mana".to_string(), json_field_bytes(serde_json::json!(5)))],
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
 
         let records = append_via_autocommit(&[put_p1, field_set]);
@@ -221,6 +223,8 @@ mod tests {
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(100)))],
             surrogate: Surrogate::new(3),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
 
         let records = append_via_autocommit(&[field_set]);
@@ -262,6 +266,8 @@ mod tests {
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(1)))],
             surrogate: Surrogate::new(2),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
 
         let records = append_via_autocommit(&[put_scalar, field_set]);
@@ -293,6 +299,8 @@ mod tests {
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(7)))],
             surrogate: Surrogate::new(99),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
 
         let records = append_via_autocommit(&[field_set]);

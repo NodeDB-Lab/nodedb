@@ -11,7 +11,9 @@ use tracing::debug;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::kv::atomic::KvAtomicCtx;
-use crate::data::executor::handlers::kv::crud::KvInsertOnConflictUpdateParams;
+use crate::data::executor::handlers::kv::crud::{KvDeleteParams, KvInsertOnConflictUpdateParams};
+use crate::data::executor::handlers::kv::field::KvFieldSetArgs;
+use crate::data::executor::handlers::kv::predicate::KvPredicateCtx;
 use crate::data::executor::handlers::kv::transfer::{TransferItemParams, TransferParams};
 use crate::data::executor::handlers::kv::ttl::KvTtlTarget;
 use crate::data::executor::response_codec;
@@ -62,7 +64,17 @@ impl CoreLoop {
                 collection,
                 keys,
                 rls_write_check,
-            } => self.resolve_kv_delete(did, tid, collection.as_str(), keys, rls_write_check),
+                returning,
+                rls_filters,
+            } => self.resolve_kv_delete(KvDeleteParams {
+                did,
+                tid,
+                collection: collection.as_str(),
+                keys,
+                rls_write_check,
+                returning: returning.as_ref(),
+                rls_filters,
+            }),
             KvOp::Expire {
                 collection,
                 key,
@@ -96,6 +108,8 @@ impl CoreLoop {
                 updates,
                 surrogate,
                 rls_write_check,
+                returning,
+                rls_filters,
             } => self.resolve_kv_field_set(
                 KvAtomicCtx {
                     task,
@@ -106,7 +120,11 @@ impl CoreLoop {
                     surrogate: *surrogate,
                     rls_write_check,
                 },
-                updates,
+                KvFieldSetArgs {
+                    updates,
+                    returning: returning.as_ref(),
+                    rls_filters,
+                },
             ),
             KvOp::Incr {
                 collection,
@@ -231,25 +249,35 @@ impl CoreLoop {
                 filters,
                 updates,
                 rls_write_check,
+                returning,
+                rls_filters,
             } => self.resolve_kv_predicate_update(
-                did,
-                tid,
-                collection.as_str(),
-                filters,
+                KvPredicateCtx {
+                    did,
+                    tid,
+                    collection: collection.as_str(),
+                    filters,
+                    rls_write_check,
+                    returning: returning.as_ref(),
+                    rls_filters,
+                },
                 updates,
-                rls_write_check,
             ),
             KvOp::PredicateDelete {
                 collection,
                 filters,
                 rls_write_check,
-            } => self.resolve_kv_predicate_delete(
+                returning,
+                rls_filters,
+            } => self.resolve_kv_predicate_delete(KvPredicateCtx {
                 did,
                 tid,
-                collection.as_str(),
+                collection: collection.as_str(),
                 filters,
                 rls_write_check,
-            ),
+                returning: returning.as_ref(),
+                rls_filters,
+            }),
             // Every other op is unwrapped by `resolver_for_plan` already.
             other => Err(ErrorCode::Internal {
                 detail: format!(

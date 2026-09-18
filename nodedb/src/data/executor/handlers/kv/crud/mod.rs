@@ -9,5 +9,5 @@ mod write_basic;
 mod write_upsert;
 
 pub(in crate::data::executor) use types::{
-    KvGetParams, KvInsertOnConflictUpdateParams, KvWriteParams,
+    KvDeleteParams, KvGetParams, KvInsertOnConflictUpdateParams, KvWriteParams,
 };
