@@ -155,14 +155,15 @@ impl CoreLoop {
             ) {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    return self.response_error(
-                            task,
-                            ErrorCode::Internal {
-                                detail: format!(
-                                    "collection '{collection}': row '{identity}' failed to convert to document_strict: {e}"
-                                ),
-                            },
-                        );
+                    let code = match e {
+                        crate::Error::BadRequest { detail } => ErrorCode::BadRequest { detail },
+                        other => ErrorCode::Internal {
+                            detail: format!(
+                                "collection '{collection}': row '{identity}' failed to convert to document_strict: {other}"
+                            ),
+                        },
+                    };
+                    return self.response_error(task, code);
                 }
             };
 

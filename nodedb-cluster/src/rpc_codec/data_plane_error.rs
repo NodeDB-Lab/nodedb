@@ -121,4 +121,10 @@ pub enum DataPlaneErrorCode {
         status_column: String,
         row_identity: String,
     },
+    /// A request the client can fix (malformed value, unreadable literal
+    /// element). Crosses verbatim so the coordinator answers `42601` instead of
+    /// the generic `XX000` an `Internal` renders.
+    BadRequest {
+        detail: String,
+    },
 }

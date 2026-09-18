@@ -146,3 +146,58 @@ async fn wal_restart_durability() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], "persisted");
 }
+
+/// Create a `document_strict` collection with a `VECTOR(3)` column, the shape
+/// the `ARRAY[...]` literal case needs.
+async fn create_strict_vector(server: &TestServer, name: &str) {
+    server
+        .exec(&format!(
+            "CREATE COLLECTION {name} (id TEXT PRIMARY KEY, embedding VECTOR(3)) \
+             WITH (engine = 'document_strict')"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("create {name}: {e}"));
+}
+
+/// The planner folds `ARRAY[0.1, 0.2, 0.3]` to `Decimal` elements. Coercion
+/// reads Float, Integer, Decimal and numeric String elements, so the literal
+/// keeps its element count and reaches the column intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn document_strict_inserts_a_decimal_array_literal_into_a_vector_column() {
+    let server = TestServer::start().await;
+    create_strict_vector(&server, "vec_array_literal").await;
+
+    server
+        .exec("INSERT INTO vec_array_literal (id, embedding) VALUES ('a1', ARRAY[0.1, 0.2, 0.3])")
+        .await
+        .expect("ARRAY[0.1, 0.2, 0.3] must insert into a VECTOR(3) column");
+
+    let rows = server
+        .query_rows("SELECT id FROM vec_array_literal")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the row must be stored: {rows:?}");
+}
+
+/// An element the coercion cannot read is a value error: it names the element
+/// and its type, and it never surfaces as `XX000`. The house mapping for a
+/// bad request is `42601`; the assertion pins the code so a reclassification
+/// cannot regress silently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn document_strict_reports_a_non_numeric_element_by_index_and_type() {
+    let server = TestServer::start().await;
+    create_strict_vector(&server, "vec_array_bad").await;
+
+    server
+        .expect_error(
+            "INSERT INTO vec_array_bad (id, embedding) VALUES ('b1', ARRAY[0.1, 'nope', 0.3])",
+            "VECTOR element 1",
+        )
+        .await;
+    server
+        .expect_error(
+            "INSERT INTO vec_array_bad (id, embedding) VALUES ('b2', ARRAY[0.1, 'nope', 0.3])",
+            "SQLSTATE 42601",
+        )
+        .await;
+}

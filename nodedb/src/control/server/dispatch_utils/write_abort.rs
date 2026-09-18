@@ -166,6 +166,10 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // * `DuplicateWrite` — the idempotency gate fired because the write
         //   ALREADY applied under the original request; nothing to undo, and
         //   the duplicate record replays to the same state.
+        // * `BadRequest` — a validation verdict on the path that raised it, but
+        //   the same code also comes from a phase that can run after an earlier
+        //   step of a multi-step plan applied, so refusal-without-apply is not
+        //   established by the code alone.
         ErrorCode::DeadlineExceeded
         | ErrorCode::RollbackFailed { .. }
         | ErrorCode::ResourcesExhausted
@@ -173,7 +177,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::CrdtFrontierMismatch { .. }
         | ErrorCode::FanOutExceeded
         | ErrorCode::RecursionDepthExceeded { .. }
-        | ErrorCode::DuplicateWrite => false,
+        | ErrorCode::DuplicateWrite
+        | ErrorCode::BadRequest { .. } => false,
     }
 }
 
@@ -221,5 +226,8 @@ mod tests {
             detail: "io_uring".into(),
         }));
         assert!(!write_definitely_not_applied(&ErrorCode::DuplicateWrite));
+        assert!(!write_definitely_not_applied(&ErrorCode::BadRequest {
+            detail: "column 'embedding': expected a numeric element".into(),
+        }));
     }
 }

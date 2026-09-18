@@ -107,6 +107,12 @@ pub enum ErrorCode {
     /// this op-type. Distinguished from `Internal` so pgwire surfaces it as
     /// `0A000` (feature_not_supported) rather than `XX000`.
     Unsupported { detail: String },
+    /// A request the client can fix: a malformed value, an unreadable literal
+    /// element, a clause that names nothing. Distinct from `Internal` so it
+    /// survives the Data Plane → pgwire boundary and reaches the client as
+    /// `42601` (syntax_error) — the SQLSTATE the direct path already assigns
+    /// `crate::Error::BadRequest` — rather than the generic `XX000`.
+    BadRequest { detail: String },
     /// Transaction rollback failed: at least one undo entry could not be
     /// applied. The shard state is unknown — the client must treat this as a
     /// fatal error and the operator must restart the shard (WAL replay restores
@@ -222,6 +228,7 @@ impl From<crate::Error> for ErrorCode {
                 Self::TxnOverlayMemoryExceeded { limit }
             }
             crate::Error::DivisionByZero => Self::DivisionByZero,
+            crate::Error::BadRequest { detail } => Self::BadRequest { detail },
             crate::Error::UndefinedColumn { column } => Self::UndefinedColumn { column },
             // Same condition an undefined column reports at plan time, raised
             // here by the strict encoder for a transport the planner never

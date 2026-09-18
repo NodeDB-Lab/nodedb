@@ -136,6 +136,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::UndefinedColumn { column } => Self::UndefinedColumn { column },
             ErrorCode::Internal { detail } => Self::Internal { detail },
             ErrorCode::Unsupported { detail } => Self::Unsupported { detail },
+            ErrorCode::BadRequest { detail } => Self::BadRequest { detail },
             ErrorCode::RollbackFailed {
                 entry_index,
                 detail,
@@ -235,6 +236,7 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::UndefinedColumn { column } => Self::UndefinedColumn { column },
             DataPlaneErrorCode::Internal { detail } => Self::Internal { detail },
             DataPlaneErrorCode::Unsupported { detail } => Self::Unsupported { detail },
+            DataPlaneErrorCode::BadRequest { detail } => Self::BadRequest { detail },
             DataPlaneErrorCode::RollbackFailed {
                 entry_index,
                 detail,
@@ -268,6 +270,17 @@ mod tests {
         let original = ErrorCode::RejectedConstraint {
             constraint: "unique".into(),
             detail: "key (id)=(7) already exists".into(),
+        };
+        let wire = DataPlaneErrorCode::from(original.clone());
+        assert_eq!(ErrorCode::from(wire), original);
+    }
+
+    /// A client value error keeps its detail across the node hop, so the
+    /// coordinator renders the same `42601` a single node renders.
+    #[test]
+    fn a_bad_request_roundtrips_verbatim() {
+        let original = ErrorCode::BadRequest {
+            detail: "column 'embedding': VECTOR element 1: expected a numeric element".into(),
         };
         let wire = DataPlaneErrorCode::from(original.clone());
         assert_eq!(ErrorCode::from(wire), original);
