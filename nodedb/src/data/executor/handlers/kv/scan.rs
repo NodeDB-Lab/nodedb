@@ -20,6 +20,8 @@ pub(in crate::data::executor) struct KvScanHandlerParams<'a> {
     pub count: usize,
     pub match_pattern: Option<&'a str>,
     pub filters: &'a [u8],
+    pub projection: &'a [String],
+    pub computed_columns_bytes: &'a [u8],
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub surrogate_ceiling: Option<u32>,
 }
@@ -38,6 +40,8 @@ impl CoreLoop {
             count,
             match_pattern,
             filters,
+            projection,
+            computed_columns_bytes,
             sort_keys,
             surrogate_ceiling,
         } = params;
@@ -148,6 +152,16 @@ impl CoreLoop {
             result_entries.push(entry_mp);
         }
 
+        result_entries = match self.apply_kv_projection_and_computed(
+            task,
+            result_entries,
+            projection,
+            computed_columns_bytes,
+        ) {
+            Ok(rows) => rows,
+            Err(resp) => return resp,
+        };
+
         if !sort_keys.is_empty()
             && let Err(e) =
                 super::super::sort_utils::sort_msgpack_rows(&mut result_entries, sort_keys)
@@ -167,6 +181,64 @@ impl CoreLoop {
             m.record_kv_scan();
         }
         self.response_with_payload(task, payload)
+    }
+
+    /// Apply projection and computed columns to a kv scan's raw msgpack rows.
+    ///
+    /// Runs before sort so `ORDER BY` can name a computed alias. An empty
+    /// projection with non-empty computed columns keeps the full row (kv has
+    /// no fixed schema to project against) and appends the computed aliases;
+    /// a non-empty projection keeps only the named columns plus the computed
+    /// aliases. Returns `Err(Response)` on malformed computed-column bytes
+    /// or a per-row evaluation error, ready to return directly to the caller.
+    fn apply_kv_projection_and_computed(
+        &self,
+        task: &ExecutionTask,
+        result_entries: Vec<Vec<u8>>,
+        projection: &[String],
+        computed_columns_bytes: &[u8],
+    ) -> Result<Vec<Vec<u8>>, Response> {
+        if projection.is_empty() && computed_columns_bytes.is_empty() {
+            return Ok(result_entries);
+        }
+
+        let computed_cols: Vec<crate::bridge::expr_eval::ComputedColumn> =
+            if computed_columns_bytes.is_empty() {
+                Vec::new()
+            } else {
+                match zerompk::from_msgpack(computed_columns_bytes) {
+                    Ok(cols) => cols,
+                    Err(e) => {
+                        return Err(self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("kv scan: malformed computed bytes: {e}"),
+                            },
+                        ));
+                    }
+                }
+            };
+
+        if projection.is_empty() {
+            crate::data::executor::handlers::provider_scan_compute::apply_windows_and_computed(
+                result_entries,
+                &[],
+                computed_columns_bytes,
+            )
+            .map_err(|e| self.response_error(task, e))
+        } else {
+            let mut projected_entries = Vec::with_capacity(result_entries.len());
+            for entry in &result_entries {
+                let row = crate::data::executor::handlers::document::read::projection::apply_projection_msgpack(
+                    entry,
+                    &computed_cols,
+                    projection,
+                )
+                .map_err(|e| self.response_error(task, e))?;
+                projected_entries.push(row);
+            }
+            Ok(projected_entries)
+        }
     }
 }
 

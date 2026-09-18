@@ -132,6 +132,12 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             cursor: Vec::new(),
             count: limit.unwrap_or(usize::MAX),
             filters: filter_bytes,
+            // A kv scan emits the full row: the clone-source merge keys
+            // tombstone suppression on the row key, so the response shaper
+            // projects by output schema instead. Computed columns still
+            // evaluate per row on the Data Plane.
+            projection: Vec::new(),
+            computed_columns: computed_bytes,
             match_pattern: None,
             sort_keys: sort.clone(),
             // Original SQL planner output never carries a clone ceiling;

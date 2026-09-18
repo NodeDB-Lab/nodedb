@@ -24,6 +24,8 @@ pub(crate) fn build_scan(
         cursor,
         count,
         filters,
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
         match_pattern,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,

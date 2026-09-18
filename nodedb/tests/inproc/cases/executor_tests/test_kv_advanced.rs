@@ -608,6 +608,8 @@ fn kv_index_write_amp_ratio_matches() {
             cursor: Vec::new(),
             count: 200,
             filters: Vec::new(),
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,

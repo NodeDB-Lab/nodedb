@@ -241,6 +241,8 @@ async fn scan_all_entries(
         cursor: Vec::new(),
         count: 100_000,
         filters: Vec::new(),
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
         match_pattern: None,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,

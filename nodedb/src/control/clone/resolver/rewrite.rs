@@ -295,6 +295,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
             cursor,
             count,
             filters,
+            projection,
+            computed_columns,
             match_pattern,
             sort_keys,
             // The original target-side scan never carries a ceiling
@@ -307,6 +309,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
                 cursor: cursor.clone(),
                 count: *count,
                 filters: filters.clone(),
+                projection: projection.clone(),
+                computed_columns: computed_columns.clone(),
                 match_pattern: match_pattern.clone(),
                 sort_keys: sort_keys.clone(),
                 surrogate_ceiling: kv_surrogate_ceiling,

@@ -143,6 +143,13 @@ pub enum KvOp {
         count: usize,
         /// Optional filter predicates (same format as DocumentScan filters).
         filters: Vec<u8>,
+        /// Output column names to keep. Empty = emit the full row.
+        #[serde(default)]
+        projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::computed_columns`. Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
         /// Optional glob pattern for key matching (e.g., "user:*").
         match_pattern: Option<String>,
         /// ORDER BY terms, each an expression, applied to the scan result
