@@ -230,6 +230,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             key,
             updates,
             surrogate,
+            if_present,
             rls_write_check: _,
             returning,
             rls_filters,
@@ -238,6 +239,7 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             key,
             updates,
             surrogate.as_u32(),
+            *if_present,
             WireReturning {
                 returning,
                 rls_filters,

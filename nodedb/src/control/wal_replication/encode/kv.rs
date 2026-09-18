@@ -309,6 +309,7 @@ pub(super) fn field_set(
     key: &[u8],
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
+    if_present: bool,
     returning: WireReturning<'_>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvFieldSet {
@@ -316,6 +317,7 @@ pub(super) fn field_set(
         key: key.to_vec(),
         updates: updates.to_vec(),
         surrogate,
+        if_present,
         returning: encode_returning(returning.returning),
         rls_filters: returning.rls_filters.to_vec(),
     }

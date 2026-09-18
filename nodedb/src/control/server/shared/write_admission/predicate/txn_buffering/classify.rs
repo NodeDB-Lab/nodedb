@@ -1235,6 +1235,7 @@ mod tests {
                 key: Vec::new(),
                 updates: Vec::new(),
                 surrogate: Surrogate::ZERO,
+                if_present: false,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),

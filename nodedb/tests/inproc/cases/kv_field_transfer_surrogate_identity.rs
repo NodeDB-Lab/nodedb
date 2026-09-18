@@ -26,7 +26,7 @@ use nodedb_test_support::pgwire_harness::TestServer;
 use nodedb_types::{DatabaseId, Surrogate, TenantId};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn kv_field_set_on_fresh_key_persists_a_real_surrogate() {
+async fn kv_field_set_on_existing_key_persists_a_real_surrogate() {
     let server = TestServer::start().await;
 
     server
@@ -34,14 +34,21 @@ async fn kv_field_set_on_fresh_key_persists_a_real_surrogate() {
         .await
         .expect("create kv collection");
 
+    // SQL `UPDATE` only ever touches an existing row (an absent key is
+    // `UPDATE 0`, never a create), so seed the row first.
+    server
+        .exec("INSERT INTO cf (key, n) VALUES ('fresh', 0)")
+        .await
+        .expect("seed key");
+
     // A KV `UPDATE` with a literal RHS on a PK-equality WHERE lowers to a
-    // `FieldSet` (HSET-style read-modify-write). Run it on a key that was NEVER
-    // inserted: the field merge materializes the row, so its cross-engine
-    // identity must be allocated + persisted on this path.
+    // `FieldSet` (HSET-style read-modify-write) gated to the existing row.
+    // Its write-back must carry the row's real persisted surrogate, not
+    // `Surrogate::ZERO`.
     server
         .exec("UPDATE cf SET n = 5 WHERE key = 'fresh'")
         .await
-        .expect("kv field-set on fresh key");
+        .expect("kv field-set on existing key");
 
     let catalog = server.shared.credentials.catalog();
     let bindings = catalog
@@ -52,7 +59,7 @@ async fn kv_field_set_on_fresh_key_persists_a_real_surrogate() {
         bindings.len(),
         1,
         "the field-atomic op must persist exactly one PK->surrogate binding for \
-         the fresh key (the bug allocated none and stored Surrogate::ZERO), \
+         the key (the bug allocated none and stored Surrogate::ZERO), \
          got: {bindings:?}"
     );
     assert!(

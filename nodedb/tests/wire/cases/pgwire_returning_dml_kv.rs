@@ -68,6 +68,63 @@ async fn kv_keyed_update_returning_ships_the_post_image() {
     );
 }
 
+/// A keyed UPDATE against a key that was never inserted reports `UPDATE 0`
+/// and creates no row — RESP `HSET` semantics (create on absent) do not
+/// leak into SQL `UPDATE`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyed_update_on_absent_key_affects_zero_rows() {
+    let server = TestServer::start().await;
+    seed(&server, "kv_upd_absent").await;
+
+    let messages = server
+        .client
+        .simple_query("UPDATE kv_upd_absent SET n = 5 WHERE id = 'missing'")
+        .await
+        .expect("a keyed UPDATE on an absent key must succeed");
+    let mut count = None;
+    for message in messages {
+        if let tokio_postgres::SimpleQueryMessage::CommandComplete(n) = message {
+            count = Some(n);
+        }
+    }
+    assert_eq!(
+        count,
+        Some(0),
+        "an absent keyed UPDATE must report UPDATE 0, not create the row"
+    );
+    assert_eq!(
+        rows(&server, "SELECT id FROM kv_upd_absent WHERE id = 'missing'").await,
+        Vec::<String>::new(),
+        "the absent key must not be created"
+    );
+}
+
+/// A keyed `UPDATE ... RETURNING` against a key that was never inserted
+/// returns zero rows, never a post-image materialized from nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyed_update_returning_on_absent_key_returns_no_rows() {
+    let server = TestServer::start().await;
+    seed(&server, "kv_upd_absent_ret").await;
+
+    let returned = server
+        .query_rows("UPDATE kv_upd_absent_ret SET n = 5 WHERE id = 'missing' RETURNING *")
+        .await
+        .expect("a keyed UPDATE RETURNING on an absent key must succeed");
+    assert!(
+        returned.is_empty(),
+        "an absent keyed UPDATE RETURNING must return no rows: {returned:?}"
+    );
+    assert_eq!(
+        rows(
+            &server,
+            "SELECT id FROM kv_upd_absent_ret WHERE id = 'missing'"
+        )
+        .await,
+        Vec::<String>::new(),
+        "the absent key must not be created"
+    );
+}
+
 /// A predicate UPDATE returns one post-image per matched row, and only the
 /// matched rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

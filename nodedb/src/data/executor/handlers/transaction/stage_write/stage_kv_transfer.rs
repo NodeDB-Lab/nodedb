@@ -88,6 +88,7 @@ impl CoreLoop {
                 // Durable identity binds at COMMIT-time replay; the overlay
                 // keys its own slots (see module doc) and ignores it.
                 surrogate: _,
+                if_present,
                 rls_write_check,
                 // The Control Plane refuses `RETURNING` inside a transaction
                 // before the write is staged, so no row image is projected here.
@@ -95,7 +96,7 @@ impl CoreLoop {
                 rls_filters: _,
             } => {
                 let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_field_set(&ctx, key, updates, rls_write_check)
+                self.stage_kv_field_set(&ctx, key, updates, *if_present, rls_write_check)
             }
             KvOp::Transfer {
                 collection,
@@ -150,9 +151,23 @@ impl CoreLoop {
         ctx: &StageCtx<'_>,
         key: &[u8],
         updates: &[(String, Vec<u8>)],
+        if_present: bool,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         let current = self.resolve_kv_current(ctx, key);
+
+        // SQL UPDATE against an absent key is `UPDATE 0`, not a create —
+        // mirrors `execute_kv_field_set`'s decision. RETURNING is already
+        // refused inside a transaction, so no empty-projection branch here.
+        if if_present && current.is_none() {
+            return match response_codec::encode_json_as_msgpack(&serde_json::json!({
+                "affected": 0,
+                "fields_added": 0,
+            })) {
+                Ok(payload) => self.response_with_payload(ctx.task, payload),
+                Err(e) => self.response_error(ctx.task, e),
+            };
+        }
         let computed = match merge_field_updates(current.as_deref(), updates) {
             Ok(c) => c,
             Err(e) => return self.response_error(ctx.task, e),

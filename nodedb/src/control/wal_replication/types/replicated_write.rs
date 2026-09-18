@@ -528,6 +528,9 @@ pub enum ReplicatedWrite {
         key: Vec<u8>,
         updates: Vec<(String, Vec<u8>)>,
         surrogate: u32,
+        /// See `KvOp::FieldSet::if_present`.
+        #[serde(default)]
+        if_present: bool,
         /// See `ReplicatedWrite::PointPut::returning`.
         #[serde(default)]
         returning: Option<Vec<u8>>,

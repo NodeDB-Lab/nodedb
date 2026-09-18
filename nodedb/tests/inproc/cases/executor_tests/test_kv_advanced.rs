@@ -461,6 +461,8 @@ fn kv_field_get_and_set() {
                     .unwrap(),
             )],
             surrogate: nodedb_types::Surrogate::ZERO,
+            // HSET semantics: an absent key is created.
+            if_present: false,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),

@@ -132,6 +132,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                     key: key_bytes,
                     updates: field_updates,
                     surrogate,
+                    // SQL UPDATE: an absent key is `UPDATE 0`, never a create.
+                    if_present: true,
                     // Filled by the RLS injection pass, after plan conversion.
                     rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                     // Attached by `inject_returning_spec` after plan conversion.

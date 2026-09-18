@@ -274,11 +274,16 @@ pub enum KvOp {
     FieldSet {
         collection: QualifiedCollection,
         key: Vec<u8>,
-        /// Field name → new value (JSON-encoded bytes).
+        /// Field name → new value (msgpack-encoded bytes; empty = NULL).
         updates: Vec<(String, Vec<u8>)>,
         /// Content-addressed identity on `(collection, key)`, threaded to the
         /// write-back so a field merge keeps the row's original surrogate.
         surrogate: Surrogate,
+        /// Update only an existing row. `true` for SQL UPDATE (an absent key
+        /// is a no-op); `false` for the RESP hash-set family, which creates
+        /// the row.
+        #[serde(default)]
+        if_present: bool,
         /// Write policy evaluated against the merged body, which exists only
         /// after the stored row is read and updates applied.
         rls_write_check: RlsWriteCheck,

@@ -185,6 +185,8 @@ pub(crate) fn build_field_set(
         key,
         updates,
         surrogate,
+        // Native `field_set` is the RESP HSET family: an absent key is created.
+        if_present: false,
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         // The native field-set carries no RETURNING clause.
         returning: None,

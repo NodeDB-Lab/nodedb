@@ -227,6 +227,7 @@ pub(super) fn decode_arm(
             key,
             updates,
             surrogate,
+            if_present,
             returning,
             rls_filters,
         } => kv::field_set(
@@ -235,6 +236,7 @@ pub(super) fn decode_arm(
             key,
             updates,
             *surrogate,
+            *if_present,
             ReturningFields {
                 returning: decode_returning(returning)?,
                 rls_filters,

@@ -377,6 +377,7 @@ pub(super) fn field_set(
     key: &[u8],
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
+    if_present: bool,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
     let carried = nodedb_types::Surrogate::new(surrogate);
@@ -386,6 +387,7 @@ pub(super) fn field_set(
         key: key.to_vec(),
         updates: updates.to_vec(),
         surrogate,
+        if_present,
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),

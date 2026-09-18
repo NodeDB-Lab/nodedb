@@ -174,9 +174,16 @@ pub fn wal_append_kv_op(
             key,
             updates,
             surrogate,
+            if_present,
             ..
         } => {
-            let entry = encode_kv_field_set(collection.as_str(), key, updates, surrogate.as_u32())?;
+            let entry = encode_kv_field_set(
+                collection.as_str(),
+                key,
+                updates,
+                surrogate.as_u32(),
+                *if_present,
+            )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Incr {

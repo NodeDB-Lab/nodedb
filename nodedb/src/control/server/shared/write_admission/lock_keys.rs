@@ -308,6 +308,7 @@ mod tests {
                 key: b"k1".to_vec(),
                 updates: vec![],
                 surrogate: Surrogate::new(1),
+                if_present: false,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 returning: None,
                 rls_filters: Vec::new(),

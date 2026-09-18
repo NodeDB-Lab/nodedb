@@ -255,6 +255,7 @@ impl CoreLoop {
                 key,
                 updates,
                 surrogate,
+                if_present,
                 rls_write_check,
                 ..
             } => {
@@ -274,6 +275,7 @@ impl CoreLoop {
                     },
                     crate::data::executor::handlers::kv::field::KvFieldSetArgs {
                         updates,
+                        if_present: *if_present,
                         returning: None,
                         rls_filters: &[],
                     },

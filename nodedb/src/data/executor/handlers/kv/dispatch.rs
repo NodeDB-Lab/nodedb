@@ -239,6 +239,7 @@ impl CoreLoop {
                 key,
                 updates,
                 surrogate,
+                if_present,
                 rls_write_check,
                 returning,
                 rls_filters,
@@ -254,6 +255,7 @@ impl CoreLoop {
                 },
                 super::field::KvFieldSetArgs {
                     updates,
+                    if_present: *if_present,
                     returning: returning.as_ref(),
                     rls_filters,
                 },

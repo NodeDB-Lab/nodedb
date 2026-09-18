@@ -227,11 +227,28 @@ impl CoreLoop {
         } = ctx;
         let KvFieldSetArgs {
             updates,
+            if_present,
             returning,
             rls_filters,
         } = args;
         let now_ms = current_ms();
         let current = self.kv_resolve_read(did, tid, collection, key, now_ms);
+
+        // SQL UPDATE against an absent key is `UPDATE 0`, not a create —
+        // mirrors `execute_kv_field_set`'s decision.
+        if if_present && current.is_none() {
+            let response_payload = match returning {
+                Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[])?,
+                None => response_codec::encode_json_as_msgpack(
+                    &serde_json::json!({ "affected": 0, "fields_added": 0 }),
+                )?,
+            };
+            return Ok(KvResolveOutcome {
+                mutations: Vec::new(),
+                response_payload,
+            });
+        }
+
         let computed = crate::data::executor::handlers::kv::field_compute::merge_field_updates(
             current.as_deref(),
             updates,

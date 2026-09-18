@@ -363,6 +363,32 @@ async fn hget_reports_policy_excluded_rows_as_absent() {
     );
 }
 
+/// `HSET` on a key that was never inserted creates the row: the RESP
+/// hash-set family is unaffected by SQL `UPDATE`'s absent-key no-op rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hset_on_absent_key_creates_the_row() {
+    let server = TestServer::start().await;
+    seed(&server, "resp_hset_create", "resp_hset_user").await;
+    let addr = start_resp_listener(&server).await;
+
+    let mut client = session(addr, "resp_hset_user", "resp_hset_create").await;
+    let reply = client.cmd(&["HSET", "fresh", "val", "created"]).await;
+    assert!(
+        !reply.is_error(),
+        "HSET on an absent key must succeed: {reply:?}"
+    );
+
+    let rows = server
+        .query_rows("SELECT val FROM resp_hset_create WHERE id = 'fresh'")
+        .await
+        .unwrap_or_else(|e| panic!("read back created row: {e}"));
+    assert_eq!(
+        rows,
+        vec![vec!["created".to_string()]],
+        "HSET on an absent key must create the row"
+    );
+}
+
 /// `SELECT` writes client input straight into the session's collection slot.
 /// The internal catalog collection must be refused where the client names it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

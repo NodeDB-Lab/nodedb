@@ -24,9 +24,10 @@ impl CoreLoop {
     ///
     /// Returns `None` when `payload` does not match the `kv_field_set`
     /// discriminator shape (caller tries the next candidate arm), otherwise
-    /// `Some(puts)` — `1` if the merge and write applied, `0` if tombstoned
-    /// or the merge failed (a re-encode error against the previously-durable
-    /// record, logged and skipped rather than fabricating a partial value).
+    /// `Some(puts)` — `1` if the merge and write applied, `0` if tombstoned,
+    /// a SQL-UPDATE record replayed against a still-absent key, or the merge
+    /// failed (a re-encode error against the previously-durable record,
+    /// logged and skipped rather than fabricating a partial value).
     pub(super) fn try_replay_kv_field_set(
         &mut self,
         payload: &[u8],
@@ -36,9 +37,11 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        let (disc, collection, key, updates, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<(String, Vec<u8>)>, u32)>(payload)
-                .ok()?;
+        let (disc, collection, key, updates, surrogate, if_present) =
+            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<(String, Vec<u8>)>, u32, bool)>(
+                payload,
+            )
+            .ok()?;
         if disc != "kv_field_set" {
             return None;
         }
@@ -50,6 +53,12 @@ impl CoreLoop {
         let current = self
             .kv_engine
             .get(database_id, tenant_id, &collection, &key, now_ms);
+        // Mirrors the live decision in `execute_kv_field_set`: a SQL-UPDATE
+        // record replayed against a key that is still absent is a no-op, not
+        // a create.
+        if if_present && current.is_none() {
+            return Some(0);
+        }
         let computed = match merge_field_updates(current.as_deref(), &updates) {
             Ok(c) => c,
             Err(e) => {
@@ -187,6 +196,7 @@ mod tests {
             key: b"p1".to_vec(),
             updates: vec![("mana".to_string(), json_field_bytes(serde_json::json!(5)))],
             surrogate: Surrogate::new(1),
+            if_present: false,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             returning: None,
             rls_filters: Vec::new(),
@@ -222,6 +232,8 @@ mod tests {
             key: b"fresh".to_vec(),
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(100)))],
             surrogate: Surrogate::new(3),
+            // RESP HSET semantics: proves the create-on-absent path this test names.
+            if_present: false,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             returning: None,
             rls_filters: Vec::new(),
@@ -265,6 +277,7 @@ mod tests {
             key: b"p2".to_vec(),
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(1)))],
             surrogate: Surrogate::new(2),
+            if_present: false,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             returning: None,
             rls_filters: Vec::new(),
@@ -298,6 +311,7 @@ mod tests {
             key: b"p3".to_vec(),
             updates: vec![("hp".to_string(), json_field_bytes(serde_json::json!(7)))],
             surrogate: Surrogate::new(99),
+            if_present: false,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             returning: None,
             rls_filters: Vec::new(),
