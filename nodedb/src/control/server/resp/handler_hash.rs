@@ -2,9 +2,8 @@
 
 //! Hash field RESP command handlers: HGET, HMGET, HSET, FLUSHDB.
 
-use sonic_rs;
-
 use crate::bridge::envelope::{PhysicalPlan, Status};
+use crate::control::server::shared::response_payload::payload_or_typed_error;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::KvOp;
 use nodedb_types::QualifiedCollection;
@@ -117,13 +116,14 @@ pub(super) async fn handle_hset(
     }
 
     let key = cmd.args[0].clone();
+    // Each value is msgpack-encoded: the field-set merge decodes every
+    // update as msgpack, the same encoding the SQL UPDATE lowering emits.
     let updates: Vec<(String, Vec<u8>)> = cmd.args[1..]
         .chunks(2)
         .filter_map(|pair| {
             let field = std::str::from_utf8(&pair[0]).ok()?.to_string();
-            let json_value =
-                serde_json::Value::String(String::from_utf8_lossy(&pair[1]).into_owned());
-            Some((field, sonic_rs::to_vec(&json_value).ok()?))
+            let value = nodedb_types::Value::String(String::from_utf8_lossy(&pair[1]).into_owned());
+            Some((field, nodedb_types::value_to_msgpack(&value).ok()?))
         })
         .collect();
 
@@ -147,16 +147,25 @@ pub(super) async fn handle_hset(
         key,
         updates,
         surrogate,
+        // RESP HSET semantics: an absent key is created.
+        if_present: false,
         // Filled by the RLS injection pass `dispatch_kv_write` runs.
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        // RESP has no RETURNING clause.
+        returning: None,
+        rls_filters: Vec::new(),
     });
 
-    match dispatch_kv_write(state, session, plan).await {
-        Ok(resp) if resp.status == Status::Ok => {
-            let added = payload_field_i64(&resp.payload, "fields_added").unwrap_or(0);
+    // A rejected write surfaces as the error it is, never as `0` fields
+    // added.
+    match dispatch_kv_write(state, session, plan)
+        .await
+        .and_then(payload_or_typed_error)
+    {
+        Ok(payload) => {
+            let added = payload_field_i64(&payload, "fields_added").unwrap_or(0);
             RespValue::integer(added)
         }
-        Ok(_) => RespValue::integer(0),
         Err(e) => RespValue::from_error(&e),
     }
 }

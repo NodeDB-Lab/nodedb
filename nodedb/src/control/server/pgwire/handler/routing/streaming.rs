@@ -22,7 +22,7 @@ use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::shared::session::SessionId;
 
 use super::super::super::types::error_to_sqlstate;
-use super::super::super::types::sqlstate_error;
+use super::super::super::types::shape_error_to_pg;
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::stream_response;
@@ -47,6 +47,9 @@ impl NodeDbPgHandler {
     ///
     /// Eligibility (all required):
     ///   - no post-set-op (UNION/INTERSECT/EXCEPT need the full sets),
+    ///   - no Control-Plane computed column in the projection
+    ///     (`cp_computed` needs per-row session sequence access, which the
+    ///     per-batch shaper does not carry),
     ///   - `PlanKind::MultiRow` (the streamed shape is one TEXT column),
     ///   - autocommit (not inside a BEGIN..COMMIT block — in-block reads
     ///     participate in snapshot-isolation read tracking on the normal path),
@@ -69,6 +72,9 @@ impl NodeDbPgHandler {
             lease_scope,
         } = context;
         if task.post_set_op != PostSetOp::None
+            || shaping
+                .projection
+                .is_some_and(|s| !s.cp_computed.is_empty())
             || !matches!(plan_kind, PlanKind::MultiRow)
             || self.sessions.transaction_state(session_id)
                 == crate::control::server::shared::session::TransactionState::InBlock
@@ -135,13 +141,16 @@ impl NodeDbPgHandler {
                         Response::Execution(Tag::new("OK"))
                     } else {
                         let redaction = QueryRedaction::for_plan(task.tenant_id, auth, &child_plan);
+                        // The gate above admits no Control-Plane computed
+                        // column, so no session sequence access is needed.
                         match compose::shape_payload_no_plan(
                             payload,
                             plan_kind,
                             shaping.projection,
                             Some(redaction.ctx(&state.redaction)),
+                            None,
                         )
-                        .map_err(|e| sqlstate_error("XX000", e.message()))?
+                        .map_err(|e| shape_error_to_pg(&e))?
                         {
                             ShapeOutcome::Rows(shaped) => {
                                 let (response, _notice) = crate::control::server::pgwire::handler::shape_encode::shaped_query_response(

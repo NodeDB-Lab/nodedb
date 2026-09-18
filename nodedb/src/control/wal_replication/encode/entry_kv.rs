@@ -43,7 +43,16 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             keys,
             // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
             rls_write_check: _,
-        } => kv::delete(collection.as_str(), keys),
+            returning,
+            rls_filters,
+        } => kv::delete(
+            collection.as_str(),
+            keys,
+            WireReturning {
+                returning,
+                rls_filters,
+            },
+        ),
         KvOp::Insert {
             collection,
             key,
@@ -221,8 +230,21 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             key,
             updates,
             surrogate,
+            if_present,
             rls_write_check: _,
-        } => kv::field_set(collection.as_str(), key, updates, surrogate.as_u32()),
+            returning,
+            rls_filters,
+        } => kv::field_set(
+            collection.as_str(),
+            key,
+            updates,
+            surrogate.as_u32(),
+            *if_present,
+            WireReturning {
+                returning,
+                rls_filters,
+            },
+        ),
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::Transfer {
             collection,
@@ -277,17 +299,36 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             filters,
             updates,
             rls_write_check,
+            returning,
+            rls_filters,
         } => {
             refuse_governed_predicate_dml(collection.as_str(), rls_write_check)?;
-            kv::predicate_update(collection.as_str(), filters, updates)
+            kv::predicate_update(
+                collection.as_str(),
+                filters,
+                updates,
+                WireReturning {
+                    returning,
+                    rls_filters,
+                },
+            )
         }
         KvOp::PredicateDelete {
             collection,
             filters,
             rls_write_check,
+            returning,
+            rls_filters,
         } => {
             refuse_governed_predicate_dml(collection.as_str(), rls_write_check)?;
-            kv::predicate_delete(collection.as_str(), filters)
+            kv::predicate_delete(
+                collection.as_str(),
+                filters,
+                WireReturning {
+                    returning,
+                    rls_filters,
+                },
+            )
         }
 
         // Not a write — reads/scans/sorted-index queries. `ResolveWrite` mutates

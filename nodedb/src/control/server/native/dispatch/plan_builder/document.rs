@@ -141,6 +141,9 @@ pub(crate) fn build_point_delete(
             keys: vec![doc_id.into_bytes()],
             // Filled by the RLS injection pass this dispatch path runs.
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            // The native point-delete carries no RETURNING clause.
+            returning: None,
+            rls_filters: Vec::new(),
         })),
         Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
             Err(crate::Error::BadRequest {

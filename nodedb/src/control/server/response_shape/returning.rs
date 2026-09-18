@@ -38,7 +38,9 @@ use nodedb_types::{NativeCell, NdbDateTime, NodeDbError, Value};
 
 use crate::data::executor::response_codec::{RowsPayload, decode_payload_to_json};
 
-use super::compose::kernel::{project_row, redact_rows, single_result_row};
+use crate::control::sequence::SequenceAccess;
+
+use super::compose::kernel::{project_row, redact_rows, single_result_row, stamp_computed_columns};
 use super::project::cell_keys;
 use super::redaction::RedactionCtx;
 use super::schema::OutputSchema;
@@ -48,11 +50,14 @@ use super::types::{DdlColType, ShapedRow, ShapedRows};
 ///
 /// `projection` carries the columns already announced to the client for this
 /// statement, when any were. See the module docs for why they win over the
-/// payload's own list.
+/// payload's own list. `sequences` resolves the projection's Control-Plane
+/// computed columns; a projection that carries any and no access is an
+/// error, never a NULL cell.
 pub fn shape_returning_rows(
     payload: &[u8],
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    sequences: Option<&dyn SequenceAccess>,
 ) -> Result<ShapedRows, NodeDbError> {
     let announced = announced_columns(projection);
 
@@ -95,6 +100,9 @@ pub fn shape_returning_rows(
     // does, so the same redaction applies — and it runs on the payload's own
     // names, before any projection renames or drops them.
     redact_rows(redaction.as_ref(), &mut rows);
+    // Stamped after redaction and before the announced projection drops the
+    // pass-through columns an expression reads.
+    stamp_computed_columns(projection, &mut rows, sequences)?;
 
     let Some(schema) = announced else {
         let column_types = ShapedRows::text_types(columns.len());
@@ -286,6 +294,7 @@ mod tests {
                 })
                 .collect(),
             is_star: false,
+            cp_computed: Vec::new(),
         }
     }
 
@@ -298,7 +307,7 @@ mod tests {
             &["id", "name", "score"],
             &[&[Some("a"), Some("x"), Some("1")]],
         );
-        let shaped = shape_returning_rows(&bytes, None, None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, None, None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name", "score"]);
         assert_eq!(shaped.rows.len(), 1);
     }
@@ -312,7 +321,7 @@ mod tests {
             &[&[Some("a"), Some("x"), Some("surprise")]],
         );
         let schema = announced(&[("id", DdlColType::Text), ("name", DdlColType::Text)]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name"]);
         assert_eq!(shaped.column_types.len(), shaped.columns.len());
         let keys = shaped.cell_keys();
@@ -331,7 +340,7 @@ mod tests {
             ("name", DdlColType::Text),
             ("score", DdlColType::Int8),
         ]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "name", "score"]);
         assert_eq!(shaped.rows[0]["id"], text("a"));
         assert_eq!(shaped.rows[0]["name"], Value::Null);
@@ -352,7 +361,7 @@ mod tests {
             ("b", DdlColType::Bool),
             ("s", DdlColType::Text),
         ]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.rows[0]["i"], Value::Integer(42));
         assert_eq!(shaped.rows[0]["f"], Value::Float(1.5));
         assert_eq!(shaped.rows[0]["b"], Value::Bool(true));
@@ -379,7 +388,7 @@ mod tests {
             ("tstz", DdlColType::Timestamptz),
             ("digits", DdlColType::Timestamp),
         ]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.rows[0]["ts"], Value::NaiveDateTime(at));
         assert_eq!(shaped.rows[0]["tstz"], Value::DateTime(at));
         assert_eq!(shaped.rows[0]["digits"], text("1583402400000000"));
@@ -407,7 +416,7 @@ mod tests {
             ("f", DdlColType::Float8),
             ("gone", DdlColType::Text),
         ]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.rows[0]["n"], Value::Integer(7));
         assert_eq!(shaped.rows[0]["at"], Value::NaiveDateTime(at));
         assert_eq!(
@@ -425,7 +434,7 @@ mod tests {
     fn an_instant_cell_renders_iso8601_without_a_projection() {
         let at = NdbDateTime::from_micros(1_583_402_400_000_000);
         let bytes = typed_payload(&["at"], vec![vec![Value::DateTime(at)]]);
-        let shaped = shape_returning_rows(&bytes, None, None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, None, None, None).expect("shape");
         assert_eq!(shaped.rows[0]["at"], Value::DateTime(at));
         assert_eq!(
             value_to_wire_json(&shaped.rows[0]["at"]),
@@ -439,7 +448,7 @@ mod tests {
     fn an_unparseable_cell_stays_text() {
         let bytes = payload(&["i"], &[&[Some("not a number")]]);
         let schema = announced(&[("i", DdlColType::Int8)]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.rows[0]["i"], text("not a number"));
     }
 
@@ -448,7 +457,7 @@ mod tests {
     #[test]
     fn an_empty_payload_keeps_the_announced_columns() {
         let schema = announced(&[("id", DdlColType::Text), ("score", DdlColType::Int8)]);
-        let shaped = shape_returning_rows(&[], Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&[], Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id", "score"]);
         assert!(shaped.rows.is_empty());
     }
@@ -459,7 +468,7 @@ mod tests {
     fn a_rowless_payload_keeps_the_announced_columns() {
         let bytes = payload(&[], &[]);
         let schema = announced(&[("id", DdlColType::Text)]);
-        let shaped = shape_returning_rows(&bytes, Some(&schema), None).expect("shape");
+        let shaped = shape_returning_rows(&bytes, Some(&schema), None, None).expect("shape");
         assert_eq!(shaped.columns, ["id"]);
         assert!(shaped.rows.is_empty());
     }
@@ -470,14 +479,14 @@ mod tests {
     #[test]
     fn a_malformed_payload_fails_when_columns_were_announced() {
         let schema = announced(&[("id", DdlColType::Text)]);
-        assert!(shape_returning_rows(&[0xFF, 0xFE], Some(&schema), None).is_err());
+        assert!(shape_returning_rows(&[0xFF, 0xFE], Some(&schema), None, None).is_err());
     }
 
     /// With nothing announced there is no contract to violate, so the legacy
     /// single-column fallback still applies.
     #[test]
     fn a_malformed_payload_falls_back_when_nothing_was_announced() {
-        let shaped = shape_returning_rows(&[0xFF, 0xFE], None, None).expect("fallback");
+        let shaped = shape_returning_rows(&[0xFF, 0xFE], None, None, None).expect("fallback");
         assert_eq!(shaped.columns, ["result"]);
     }
 }

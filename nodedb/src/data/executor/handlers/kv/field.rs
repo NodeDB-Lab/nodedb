@@ -23,6 +23,20 @@ pub(in crate::data::executor) struct KvFieldGetArgs<'a> {
     pub rls_filters: &'a [u8],
 }
 
+/// Arguments for [`CoreLoop::execute_kv_field_set`] beyond the shared
+/// single-key identity context.
+pub(in crate::data::executor) struct KvFieldSetArgs<'a> {
+    /// Field name → new value (msgpack-encoded bytes).
+    pub updates: &'a [(String, Vec<u8>)],
+    /// See `KvOp::FieldSet::if_present`.
+    pub if_present: bool,
+    /// When `Some`, project the STORED post-image (the merged row) per spec
+    /// instead of reporting the field-count payload.
+    pub returning: Option<&'a nodedb_physical::physical_plan::ReturningSpec>,
+    /// Compiled read policy bounding which of those rows may be shown back.
+    pub rls_filters: &'a [u8],
+}
+
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_kv_field_get(
         &self,
@@ -100,7 +114,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn execute_kv_field_set(
         &mut self,
         ctx: super::atomic::KvAtomicCtx<'_>,
-        updates: &[(String, Vec<u8>)],
+        args: KvFieldSetArgs<'_>,
     ) -> Response {
         let super::atomic::KvAtomicCtx {
             task,
@@ -111,11 +125,37 @@ impl CoreLoop {
             surrogate,
             rls_write_check,
         } = ctx;
+        let KvFieldSetArgs {
+            updates,
+            if_present,
+            returning,
+            rls_filters,
+        } = args;
         debug!(core = self.core_id, %collection, field_count = updates.len(), "kv field set");
         let now_ms = current_ms();
 
         // Read current value.
         let current = self.kv_engine.get(did, tid, collection, key, now_ms);
+
+        // SQL UPDATE against an absent key is `UPDATE 0`, not a create: the
+        // RESP hash-set family (`if_present: false`) is the only caller that
+        // may create a row from nothing.
+        if if_present && current.is_none() {
+            if let Some(spec) = returning {
+                return self.kv_stored_returning_response(task, spec, rls_filters, &[]);
+            }
+            return match response_codec::encode_json_as_msgpack(
+                &serde_json::json!({ "affected": 0, "fields_added": 0 }),
+            ) {
+                Ok(payload) => self.response_with_payload(task, payload),
+                Err(e) => self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: e.to_string(),
+                    },
+                ),
+            };
+        }
 
         // Merge field updates via the pure computation shared with the
         // in-transaction staging handler (`stage_kv_transfer.rs`), so a
@@ -146,8 +186,21 @@ impl CoreLoop {
             surrogate,
         });
         self.note_kv_write_lsn(task, did, tid, collection, key);
+        if let Some(spec) = returning {
+            // `computed.new_value` IS the stored body: the merge is persisted
+            // verbatim, so projecting it is projecting the post-image.
+            return self.kv_stored_returning_response(
+                task,
+                spec,
+                rls_filters,
+                &[(key, computed.new_value.as_slice())],
+            );
+        }
+        // `affected` is the row count the SQL `UPDATE` tag reads;
+        // `fields_added` is what RESP `HSET` reports. The merge always
+        // persists exactly one row.
         match response_codec::encode_json_as_msgpack(
-            &serde_json::json!({ "fields_added": computed.fields_added }),
+            &serde_json::json!({ "affected": 1, "fields_added": computed.fields_added }),
         ) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(

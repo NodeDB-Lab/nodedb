@@ -128,7 +128,16 @@ pub async fn query_ndjson(
 
     // `Body::from_stream` polls the data-plane stream under normal HTTP backpressure
     // while its captured lease scope stays alive until body completion or disconnect.
-    match try_open_stream(&state, &tasks, &identity, database_id, trace_id).await {
+    match try_open_stream(
+        &state,
+        &tasks,
+        &identity,
+        database_id,
+        &output_schema,
+        trace_id,
+    )
+    .await
+    {
         Ok(Some((stream, limit))) => {
             let Some(lease_scope) = lease_scope.take() else {
                 return ApiError::from(crate::Error::Internal {
@@ -317,6 +326,14 @@ pub async fn query_ndjson(
                 // Row count for metering below — a per-row shaping error doesn't
                 // change whether the task is billed, only how many rows count.
                 let mut task_rows: u64 = 0;
+                // HTTP carries no session: `nextval` advances the registry,
+                // `currval` reports "not yet called in this session".
+                let sequences = crate::control::sequence::SessionSequenceAccess::for_session(
+                    &state.shared,
+                    None,
+                    database_id,
+                    tenant_id,
+                );
                 for payload in &payloads {
                     if payload.is_empty() {
                         continue;
@@ -330,6 +347,7 @@ pub async fn query_ndjson(
                         database_id,
                         tenant_id,
                         redaction: Some(redaction.ctx(&state.shared.redaction)),
+                        sequences: Some(&sequences),
                     }) {
                         Ok(HttpShaped::Rows(rows)) => {
                             task_rows += rows.len() as u64;

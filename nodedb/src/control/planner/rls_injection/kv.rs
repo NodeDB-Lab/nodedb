@@ -114,34 +114,47 @@ pub(super) fn inject_kv(ctx: &RlsCtx<'_>, op: &mut KvOp) -> crate::Result<()> {
             ctx.set_post_filters(collection, rls_filters)
         }
 
+        // Ship the predicate and gate `RETURNING` as a read: the removed row
+        // or field merge exists only where it's persisted, and the rows the
+        // clause hands back are bounded by the same read policy a `SELECT`
+        // by this principal is. Row set of the predicate forms is resolved by
+        // the Data Plane scan. Mirrors `ColumnarOp::{Update, Delete}`.
         KvOp::Delete {
             collection,
             rls_write_check,
-            ..
-        }
-        | KvOp::Expire {
-            collection,
-            rls_write_check,
-            ..
-        }
-        | KvOp::Persist {
-            collection,
-            rls_write_check,
+            rls_filters,
             ..
         }
         | KvOp::FieldSet {
             collection,
             rls_write_check,
+            rls_filters,
             ..
         }
-        // Row set resolved by the Data Plane scan; images exist only where
-        // persisted. Mirrors `ColumnarOp::{Update, Delete}`.
         | KvOp::PredicateUpdate {
+            collection,
+            rls_write_check,
+            rls_filters,
+            ..
+        }
+        | KvOp::PredicateDelete {
+            collection,
+            rls_write_check,
+            rls_filters,
+            ..
+        } => {
+            ctx.set_write_check(collection, rls_write_check)?;
+            ctx.set_post_filters(collection, rls_filters)
+        }
+
+        // Ship the predicate: the TTL body is the stored row, which exists
+        // only where it's persisted.
+        KvOp::Expire {
             collection,
             rls_write_check,
             ..
         }
-        | KvOp::PredicateDelete {
+        | KvOp::Persist {
             collection,
             rls_write_check,
             ..
@@ -271,6 +284,8 @@ mod tests {
             ),
             keys: vec![b"k1".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: Vec::new(),
         })
     }
 
@@ -418,10 +433,74 @@ mod tests {
             key: b"k1".to_vec(),
             updates: Vec::new(),
             surrogate: nodedb_types::Surrogate::ZERO,
+            if_present: false,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
         assert!(inject(&mut plan, &store).is_ok());
         assert!(write_check(&plan).has_predicate());
+    }
+
+    /// `RETURNING` on a keyed or predicate UPDATE / DELETE ships rows back,
+    /// so a read policy lands in each op's post-filter slot the same way it
+    /// does for the KV insert ops.
+    #[test]
+    fn kv_update_and_delete_receive_the_read_policy_filter() {
+        let store = store_with_read_policy("sessions");
+        let collection = || {
+            nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, "sessions")
+        };
+        let ops = [
+            KvOp::Delete {
+                collection: collection(),
+                keys: vec![b"k1".to_vec()],
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
+            },
+            KvOp::FieldSet {
+                collection: collection(),
+                key: b"k1".to_vec(),
+                updates: Vec::new(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                if_present: false,
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
+            },
+            KvOp::PredicateUpdate {
+                collection: collection(),
+                filters: Vec::new(),
+                updates: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
+            },
+            KvOp::PredicateDelete {
+                collection: collection(),
+                filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
+            },
+        ];
+        for op in ops {
+            let mut plan = PhysicalPlan::Kv(op);
+            assert!(inject(&mut plan, &store).is_ok());
+            match &plan {
+                PhysicalPlan::Kv(
+                    KvOp::Delete { rls_filters, .. }
+                    | KvOp::FieldSet { rls_filters, .. }
+                    | KvOp::PredicateUpdate { rls_filters, .. }
+                    | KvOp::PredicateDelete { rls_filters, .. },
+                ) => assert!(
+                    !rls_filters.is_empty(),
+                    "the read policy must gate RETURNING output for {plan:?}"
+                ),
+                other => panic!("plan shape changed: {other:?}"),
+            }
+        }
     }
 
     /// The incremented value is computed inside the engine, so the predicate

@@ -86,13 +86,18 @@ pub(super) fn convert_function_depth(
         return Err(SqlError::UndefinedFunction { name });
     }
 
-    // Per-row gate: a sequence accessor is evaluated at plan time, by
-    // `planner::catalog_expr_fold` for a FROM-less SELECT and by
-    // `planner::defaults` for a column DEFAULT. A call over a FROM relation
-    // reaches the row evaluator instead, which holds no sequence state and
-    // answers `NULL` for every row. Refuse it here so the statement fails
-    // loudly at plan time.
-    if scope.is_row_scope() && crate::functions::sequence_accessor::is_sequence_accessor(&name) {
+    // Per-row gate. A sequence accessor is evaluated by the planner for a
+    // FROM-less SELECT (`planner::catalog_expr_fold`) and a column DEFAULT
+    // (`planner::defaults`), and by the Control Plane once per output row
+    // for a SELECT-list item over a relation (the scope allows it there).
+    // Every other row-scope clause (WHERE, ORDER BY, GROUP BY, HAVING, JOIN
+    // ON, SET, aggregate and window arguments, subqueries) reaches the row
+    // evaluator, which holds no sequence state and answers `NULL` for every
+    // row. Refuse the call there so the statement fails at plan time.
+    if scope.is_row_scope()
+        && !scope.allows_cp_functions()
+        && crate::functions::sequence_accessor::is_sequence_accessor(&name)
+    {
         return Err(SqlError::SequencePerRowUnsupported { name });
     }
 
@@ -343,5 +348,25 @@ mod tests {
                 "expected SqlError::SequencePerRowUnsupported for {call}, got {err:?}"
             );
         }
+    }
+
+    /// A SELECT-list scope that allows Control-Plane functions resolves the
+    /// accessor over a relation; a scope nested inside it does not inherit
+    /// the allowance.
+    #[test]
+    fn a_cp_allowing_scope_resolves_the_accessor_and_a_nested_scope_refuses() {
+        let mut depth = 0;
+        let func = function_ast("SELECT nextval('s')");
+        let allowed =
+            crate::resolver::columns::test_support::open_scope("t").allowing_cp_functions();
+        assert!(allowed.is_row_scope());
+        let expr = convert_function_depth(&func, &mut depth, &ColumnScope::Relations(&allowed))
+            .expect("a SELECT-list accessor over a relation must resolve");
+        assert!(matches!(expr, SqlExpr::Function { ref name, .. } if name == "nextval"));
+
+        let nested = crate::resolver::columns::TableScope::new().nested_in(allowed);
+        let err = convert_function_depth(&func, &mut depth, &ColumnScope::Relations(&nested))
+            .unwrap_err();
+        assert!(matches!(err, SqlError::SequencePerRowUnsupported { .. }));
     }
 }

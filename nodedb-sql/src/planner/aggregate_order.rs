@@ -35,15 +35,40 @@ pub fn compute_output_order(
     functions: &FunctionRegistry,
     scope: &TableScope,
 ) -> Result<Vec<AggOutputSlot>> {
+    Ok(
+        compute_output_order_by_item(projection, group_by, functions, scope)?
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+}
+
+/// The output slots each projection item produces, one entry per item in
+/// SELECT-list order. An item that is neither a group key nor an aggregate
+/// (a star, or a bare non-key expression) produces an empty entry.
+///
+/// The flattened entries are exactly [`compute_output_order`]; the per-item
+/// grouping lets a caller interleave other output columns at their
+/// SELECT-list positions.
+pub fn compute_output_order_by_item(
+    projection: &[ast::SelectItem],
+    group_by: &[SqlExpr],
+    functions: &FunctionRegistry,
+    scope: &TableScope,
+) -> Result<Vec<Vec<AggOutputSlot>>> {
     let real_agg_count = extract_aggregates_from_projection(projection, functions, scope)?.len();
-    let mut order = Vec::new();
+    let mut by_item = Vec::with_capacity(projection.len());
     let mut agg_cursor = 0usize;
     let mut grouping_cursor = 0usize;
     for item in projection {
+        let mut order = Vec::new();
         let expr = match item {
             ast::SelectItem::UnnamedExpr(expr) => expr,
             ast::SelectItem::ExprWithAlias { expr, .. } => expr,
-            _ => continue,
+            _ => {
+                by_item.push(order);
+                continue;
+            }
         };
         // Bare column that names one of the GROUP BY keys.
         if let Some(name) = expr_column_name(expr)
@@ -52,6 +77,7 @@ pub fn compute_output_order(
                 .position(|key| key_column_name(key) == Some(name.as_str()))
         {
             order.push(AggOutputSlot::GroupKey(index));
+            by_item.push(order);
             continue;
         }
         // Computed expression that structurally matches a GROUP BY key
@@ -69,6 +95,7 @@ pub fn compute_output_order(
                 .position(|key| format!("{key:?}") == rendered)
             {
                 order.push(AggOutputSlot::GroupKey(index));
+                by_item.push(order);
                 continue;
             }
         }
@@ -81,6 +108,7 @@ pub fn compute_output_order(
                 order.push(AggOutputSlot::Aggregate(real_agg_count + grouping_cursor));
                 grouping_cursor += 1;
             }
+            by_item.push(order);
             continue;
         }
         // Ordinary aggregate expression(s).
@@ -96,8 +124,9 @@ pub fn compute_output_order(
                 agg_cursor += 1;
             }
         }
+        by_item.push(order);
     }
-    Ok(order)
+    Ok(by_item)
 }
 
 /// Count the `GROUPING(col)` calls reachable in `expr`, mirroring the planner's

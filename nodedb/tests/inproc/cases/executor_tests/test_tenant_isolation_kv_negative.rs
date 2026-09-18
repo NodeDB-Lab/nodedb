@@ -125,6 +125,8 @@ fn kv_cross_tenant_delete_does_not_affect_owner() {
             ),
             keys: vec![b"sess_xyz".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     // Either Ok (deleted 0 rows from B's namespace) or NotFound — both correct.

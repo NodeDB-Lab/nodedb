@@ -161,17 +161,27 @@ pub(crate) fn encode_kv_incr_float(
 }
 
 /// Encode a `kv_field_set` WAL payload: `("kv_field_set", collection, key,
-/// updates, surrogate)`. Delta record: `updates` carries field-level inputs,
-/// not the post-merge document — replay re-runs `merge_field_updates`.
+/// updates, surrogate, if_present)`. Delta record: `updates` carries
+/// field-level inputs, not the post-merge document — replay re-runs
+/// `merge_field_updates`. `if_present` pins the SQL-UPDATE-vs-HSET no-op
+/// rule so replay matches the live decision.
 pub(crate) fn encode_kv_field_set(
     collection: &str,
     key: &[u8],
     updates: &[(String, Vec<u8>)],
     surrogate: u32,
+    if_present: bool,
 ) -> crate::Result<Vec<u8>> {
     encode(
         "field set",
-        &("kv_field_set", collection, key, updates, surrogate),
+        &(
+            "kv_field_set",
+            collection,
+            key,
+            updates,
+            surrogate,
+            if_present,
+        ),
     )
 }
 
@@ -578,16 +588,19 @@ mod tests {
             ("score".to_string(), b"42".to_vec()),
             ("name".to_string(), b"alice".to_vec()),
         ];
-        let entry = encode_kv_field_set("players", b"p1", &updates, 11).unwrap();
+        let entry = encode_kv_field_set("players", b"p1", &updates, 11, true).unwrap();
 
-        let (disc, collection, key, decoded_updates, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<(String, Vec<u8>)>, u32)>(&entry)
-                .unwrap();
+        let (disc, collection, key, decoded_updates, surrogate, if_present) =
+            zerompk::from_msgpack::<(&str, String, Vec<u8>, Vec<(String, Vec<u8>)>, u32, bool)>(
+                &entry,
+            )
+            .unwrap();
         assert_eq!(disc, "kv_field_set");
         assert_eq!(collection, "players");
         assert_eq!(key, b"p1");
         assert_eq!(decoded_updates, updates);
         assert_eq!(surrogate, 11);
+        assert!(if_present);
     }
 
     #[test]

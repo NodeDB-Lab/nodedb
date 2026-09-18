@@ -148,6 +148,8 @@ pub fn full_scan_plan_for_collection(
             cursor: Vec::new(),
             count: COMPLETE_SCAN,
             filters: side_filters,
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,

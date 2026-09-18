@@ -198,6 +198,8 @@ fn walk_query(op: &QueryOp, ctx: &RefusalCtx<'_>) -> crate::Result<()> {
 
         QueryOp::PostProcess { input, .. } => walk(input, ctx),
 
+        QueryOp::SetOp { inputs, .. } => inputs.iter().try_for_each(|input| walk(input, ctx)),
+
         QueryOp::Aggregate {
             collection,
             input,
@@ -461,6 +463,8 @@ mod tests {
             input: Box::new(aggregate_plan("users", vec![agg_spec("min", "ssn")])),
             filters: Vec::new(),
             projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,

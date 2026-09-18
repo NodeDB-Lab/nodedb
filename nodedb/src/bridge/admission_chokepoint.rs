@@ -214,6 +214,8 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             keys: vec![b"k".to_vec()],
             rls_write_check: check,
+            returning: None,
+            rls_filters: Vec::new(),
         })
     }
 

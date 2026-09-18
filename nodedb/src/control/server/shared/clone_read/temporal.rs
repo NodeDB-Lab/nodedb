@@ -19,6 +19,9 @@ pub(super) fn extract_system_as_of_ms(
         PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => {
             extract_system_as_of_ms(Some(&**input))
         }
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => inputs
+            .iter()
+            .find_map(|input| extract_system_as_of_ms(Some(input))),
         // Index-only/overlay engines carry no qualifier; compose with a data-bearing collection.
         PhysicalPlan::Vector(_)
         | PhysicalPlan::Graph(_)

@@ -132,6 +132,13 @@ pub enum KvOp {
         /// predicate is attached. Only `RlsWriteCheck::Predicate` makes the
         /// handler read the pre-image at all.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return the STORED pre-image of every removed row
+        /// (row as `SELECT` showed it, `key` included).
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Cursor-based scan with optional filter predicate.
@@ -143,6 +150,13 @@ pub enum KvOp {
         count: usize,
         /// Optional filter predicates (same format as DocumentScan filters).
         filters: Vec<u8>,
+        /// Output column names to keep. Empty = emit the full row.
+        #[serde(default)]
+        projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::computed_columns`. Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
         /// Optional glob pattern for key matching (e.g., "user:*").
         match_pattern: Option<String>,
         /// ORDER BY terms, each an expression, applied to the scan result
@@ -260,14 +274,26 @@ pub enum KvOp {
     FieldSet {
         collection: QualifiedCollection,
         key: Vec<u8>,
-        /// Field name → new value (JSON-encoded bytes).
+        /// Field name → new value (msgpack-encoded bytes; empty = NULL).
         updates: Vec<(String, Vec<u8>)>,
         /// Content-addressed identity on `(collection, key)`, threaded to the
         /// write-back so a field merge keeps the row's original surrogate.
         surrogate: Surrogate,
+        /// Update only an existing row. `true` for SQL UPDATE (an absent key
+        /// is a no-op); `false` for the RESP hash-set family, which creates
+        /// the row.
+        #[serde(default)]
+        if_present: bool,
         /// Write policy evaluated against the merged body, which exists only
         /// after the stored row is read and updates applied.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return the STORED post-image (merged row as `SELECT`
+        /// shows it, `key` included). Never the caller's submitted updates.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Truncate: delete ALL entries in a KV collection.
@@ -490,6 +516,13 @@ pub enum KvOp {
         /// matched row's post-image once the assignments have been applied, or
         /// the reason no predicate is attached.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return one row per matched key — the STORED
+        /// post-image of each, in scan order — projected per spec.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Delete every row matching `filters`.
@@ -503,5 +536,12 @@ pub enum KvOp {
         /// Compiled row-level-security WRITE predicate, evaluated against the
         /// pre-image of every row this removes.
         rls_write_check: RlsWriteCheck,
+        /// When `Some`, return one row per removed key — the STORED
+        /// pre-image of each, in scan order — projected per spec.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// See `Put::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 }

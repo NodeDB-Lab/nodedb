@@ -16,8 +16,11 @@ pub(super) fn validate_projection(
     tenant_id: u64,
 ) -> crate::Result<()> {
     for item in projection {
-        if let Projection::Computed { expr, .. } = item {
-            validate_expr(expr, catalog, database_id, tenant_id)?;
+        match item {
+            Projection::Computed { expr, .. } | Projection::CpComputed { expr, .. } => {
+                validate_expr(expr, catalog, database_id, tenant_id)?;
+            }
+            Projection::Column(_) | Projection::Star | Projection::QualifiedStar(_) => {}
         }
     }
     Ok(())
@@ -70,10 +73,15 @@ pub(super) fn fold_projection(
     database_id: DatabaseId,
     tenant_id: u64,
 ) {
+    // The fold resolves catalog casts (`regclass`, `regtype`) only; a
+    // sequence accessor in a Control-Plane-computed item stays a call.
     for item in projection {
-        if let Projection::Computed { expr, .. } = item {
-            let owned = std::mem::replace(expr, SqlExpr::Wildcard);
-            *expr = fold_expr(owned, catalog, database_id, tenant_id);
+        match item {
+            Projection::Computed { expr, .. } | Projection::CpComputed { expr, .. } => {
+                let owned = std::mem::replace(expr, SqlExpr::Wildcard);
+                *expr = fold_expr(owned, catalog, database_id, tenant_id);
+            }
+            Projection::Column(_) | Projection::Star | Projection::QualifiedStar(_) => {}
         }
     }
 }

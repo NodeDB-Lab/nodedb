@@ -111,6 +111,12 @@ pub(crate) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         PhysicalPlan::Query(QueryOp::Exchange(op)) => extract_collection(&op.child),
         // PostProcess: recurse into the materialized child.
         PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => extract_collection(input),
+        // SetOp: the first branch that names a collection, the same way a
+        // join reports its left side. Callers that need every branch walk
+        // the inputs themselves.
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => {
+            inputs.iter().find_map(extract_collection)
+        }
         // ProviderScan is a catalog/constant source — no user collection.
         PhysicalPlan::Query(QueryOp::ProviderScan { .. }) => None,
         // KV ops carry their own collection (sorted-index-only ops return None).

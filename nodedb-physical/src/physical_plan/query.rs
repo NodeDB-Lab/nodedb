@@ -78,6 +78,14 @@ pub enum QueryOp {
         /// Output column names to keep. Empty = emit all columns.
         #[serde(default)]
         projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::computed_columns`. Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
+        /// Serialized `Vec<WindowFuncSpec>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::window_functions`. Empty = none.
+        #[serde(default)]
+        window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,
@@ -118,6 +126,14 @@ pub enum QueryOp {
         /// Output column names to keep. Empty = emit all columns.
         #[serde(default)]
         projection: Vec<String>,
+        /// Serialized `Vec<ComputedColumn>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::computed_columns`. Empty = none.
+        #[serde(default)]
+        computed_columns: Vec<u8>,
+        /// Serialized `Vec<WindowFuncSpec>` (MessagePack), same encoding as
+        /// `DocumentOp::Scan::window_functions`. Empty = none.
+        #[serde(default)]
+        window_functions: Vec<u8>,
         /// ORDER BY terms, each an expression. Empty = unordered.
         #[serde(default)]
         sort_keys: Vec<crate::physical_plan::SortKeySpec>,
@@ -133,18 +149,33 @@ pub enum QueryOp {
         distinct: bool,
     },
 
+    /// Set operation over N materialized children. Coordinator-only: the
+    /// resolver materializes every child and merges the rows into one
+    /// `ProviderScan` before dispatch. A Data-Plane core never sees this node.
+    ///
+    /// Lowered from a derived-table body that is `UNION [ALL]`,
+    /// `INTERSECT [ALL]`, or `EXCEPT [ALL]`, so the body is one relation for
+    /// an outer [`QueryOp::PostProcess`] or input-sourced [`QueryOp::Aggregate`].
+    SetOp {
+        /// Child relations in SQL order. Each sharded child is wrapped in
+        /// `Exchange{Gather}` by the converter so its gather runs once.
+        inputs: Vec<crate::physical_plan::PhysicalPlan>,
+        /// Which set operation merges the inputs.
+        op: crate::physical_plan::SetOpKind,
+    },
+
     /// Aggregate: GROUP BY + aggregate functions.
     Aggregate {
         collection: QualifiedCollection,
         /// Optional sub-plan whose decoded rows are aggregated instead of
-        /// scanning `collection` per-shard. `Some` currently means EXACTLY a
-        /// catalog source (a `ProviderScan` lowered by the converter): the
-        /// aggregate runs over the coordinator-materialized catalog rows and is
-        /// therefore coordinator-local (never broadcast — see
-        /// `is_sharded_source`). `None` = legacy path: scan the named
-        /// `collection` on every shard. `collection` stays populated in both
-        /// cases so downstream RLS / permission / classification continue to
-        /// read it; the executor simply prefers `input` when present.
+        /// scanning `collection` per-shard. `Some` = an input-sourced
+        /// aggregate over a materialized relation: a catalog `ProviderScan`,
+        /// or any derived-table body the coordinator materializes into a
+        /// `ProviderScan` before dispatch. Coordinator-local, never broadcast
+        /// (see `is_sharded_source`). `None` = scan the named `collection` on
+        /// every shard. `collection` stays populated in both cases so
+        /// downstream RLS / permission / classification continue to read it;
+        /// the executor prefers `input` when present.
         #[serde(default)]
         input: Option<Box<crate::physical_plan::PhysicalPlan>>,
         group_by: Vec<GroupKeySpec>,

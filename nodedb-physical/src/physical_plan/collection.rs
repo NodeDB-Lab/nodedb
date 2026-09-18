@@ -113,6 +113,8 @@ impl PhysicalPlan {
             PhysicalPlan::Query(QueryOp::Exchange(op)) => op.child.collection(),
             // PostProcess: recurse into the materialized input plan.
             PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => input.collection(),
+            // SetOp merges N branches; no single collection names the node.
+            PhysicalPlan::Query(QueryOp::SetOp { .. }) => None,
             // ProviderScan is a catalog/constant source — no user collection.
             PhysicalPlan::Query(QueryOp::ProviderScan { .. }) => None,
             // KV ops carry their own collection (sorted-index-only ops → None).

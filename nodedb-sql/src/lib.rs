@@ -41,6 +41,7 @@ pub use catalog::{SqlCatalog, SqlCatalogError};
 pub use error::{Result, SqlError};
 pub use params::ParamValue;
 pub use placeholder_types::{InferredParamType, infer_placeholder_types};
+pub use planner::returning::resolve_returning_items;
 pub use types::*;
 
 /// Parse a standalone SQL expression string into an `SqlExpr`.
@@ -138,7 +139,8 @@ fn plan_statements(
     for stmt in statements {
         match classify(stmt) {
             StatementKind::Select(query) => {
-                let plan = planner::select::plan_query(query, catalog, &functions, temporal)?;
+                let plan =
+                    planner::select::plan_statement_query(query, catalog, &functions, temporal)?;
                 let plan = optimizer::optimize(plan, catalog);
                 plans.push(plan);
             }

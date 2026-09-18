@@ -7,7 +7,7 @@ use pgwire::api::results::FieldFormat;
 use crate::control::server::response_shape::schema::OutputSchema;
 
 #[derive(Clone, Copy)]
-pub(in crate::control::server::pgwire::handler) struct ResultShaping<'a> {
+pub(crate) struct ResultShaping<'a> {
     pub projection: Option<&'a OutputSchema>,
     pub formats: &'a [FieldFormat],
 }

@@ -64,7 +64,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_scan(
     }
 
     let proj_names = extract_projection_names(projection, &[]);
-    let computed_bytes = extract_computed_columns(projection, &[])?;
+    let computed_bytes = extract_computed_columns(projection, &[], false)?;
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
     Ok(vec![PhysicalTask {
         tenant_id,

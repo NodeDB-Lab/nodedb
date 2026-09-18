@@ -106,12 +106,14 @@ pub(super) fn validate_catalog_exprs(
             input,
             filters,
             projection,
+            window_functions,
             sort_keys,
             ..
         } => {
             validate_catalog_exprs(input, catalog, database_id, tenant_id)?;
             validate_filters(filters, catalog, database_id, tenant_id)?;
             validate_projection(projection, catalog, database_id, tenant_id)?;
+            validate_windows(window_functions, catalog, database_id, tenant_id)?;
             validate_sort_keys(sort_keys, catalog, database_id, tenant_id)?;
         }
         SqlPlan::Join {

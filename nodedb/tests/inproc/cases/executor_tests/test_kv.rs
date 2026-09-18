@@ -63,6 +63,8 @@ fn kv_put_get_delete() {
             ),
             keys: vec![b"key1".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     let json = payload_value(&payload);
@@ -231,6 +233,8 @@ fn kv_scan_returns_entries() {
             cursor: Vec::new(),
             count: 100,
             filters: Vec::new(),
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
@@ -280,6 +284,8 @@ fn kv_scan_with_match_pattern() {
             cursor: Vec::new(),
             count: 100,
             filters: Vec::new(),
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
             match_pattern: Some("user:*".into()),
             sort_keys: Vec::new(),
             surrogate_ceiling: None,

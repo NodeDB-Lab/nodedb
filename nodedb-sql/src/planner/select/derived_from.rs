@@ -29,6 +29,7 @@ pub(in crate::planner::select) fn try_plan_derived_from(
     functions: &FunctionRegistry,
     temporal: TemporalScope,
     tail: &QueryTail<'_>,
+    statement_output: bool,
 ) -> Result<Option<PlannedSelect>> {
     if select.from.len() != 1 {
         return Ok(None);
@@ -88,7 +89,16 @@ pub(in crate::planner::select) fn try_plan_derived_from(
         sample: None,
         index_hints: Vec::new(),
     };
-    let outer = plan_select(&outer_select, &derived_catalog, functions, temporal, tail)?;
+    // The outer SELECT keeps the caller's output standing; the derived body
+    // planned above is nested.
+    let outer = plan_select(
+        &outer_select,
+        &derived_catalog,
+        functions,
+        temporal,
+        tail,
+        statement_output,
+    )?;
 
     Ok(Some(PlannedSelect {
         plan: SqlPlan::Cte {

@@ -633,6 +633,8 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kvc"),
                 keys: vec![b"gone".to_vec()],
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             })],
         );
         let redo = decode_redo(&resp);

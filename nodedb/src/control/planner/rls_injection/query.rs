@@ -21,6 +21,10 @@ pub(super) fn inject_query(ctx: &RlsCtx<'_>, op: &mut QueryOp) -> crate::Result<
         // policy restricts.
         QueryOp::PostProcess { input, .. } => walk(ctx, input),
 
+        // Recurse: every set-operation branch is its own body whose rows the
+        // policy restricts.
+        QueryOp::SetOp { inputs, .. } => inputs.iter_mut().try_for_each(|input| walk(ctx, input)),
+
         // Inject or recurse: a catalog aggregate (`input: Some`) sources rows
         // from the embedded sub-plan, so the policy belongs in that input
         // rather than in the aggregate's own (empty) filters. A legacy

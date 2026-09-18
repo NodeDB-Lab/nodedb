@@ -117,6 +117,8 @@ fn kv_protocol_command_sequence() {
             ),
             keys: vec![b"key1".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -193,6 +195,8 @@ fn kv_protocol_command_sequence() {
             ),
             keys: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -457,7 +461,11 @@ fn kv_field_get_and_set() {
                     .unwrap(),
             )],
             surrogate: nodedb_types::Surrogate::ZERO,
+            // HSET semantics: an absent key is created.
+            if_present: false,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
         }),
     );
 
@@ -608,6 +616,8 @@ fn kv_index_write_amp_ratio_matches() {
             cursor: Vec::new(),
             count: 200,
             filters: Vec::new(),
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,

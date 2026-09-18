@@ -3,6 +3,7 @@
 //! Single-key string commands: GET, SET, DEL, EXISTS, GETSET.
 
 use crate::bridge::envelope::{PhysicalPlan, Status};
+use crate::control::server::shared::response_payload::payload_or_typed_error;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::KvOp;
 use nodedb_types::{DatabaseId, QualifiedCollection};
@@ -141,7 +142,11 @@ pub(in crate::control::server::resp) async fn handle_set(
         rls_filters: Vec::new(),
     });
 
-    match dispatch_kv_write(state, session, plan).await {
+    // A rejected write surfaces as the error it is, never as `OK`.
+    match dispatch_kv_write(state, session, plan)
+        .await
+        .and_then(payload_or_typed_error)
+    {
         Ok(_) => RespValue::ok(),
         Err(e) => RespValue::from_error(&e),
     }
@@ -162,11 +167,18 @@ pub(in crate::control::server::resp) async fn handle_del(
         keys,
         // Filled by the RLS injection pass `dispatch_kv_write` runs.
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        // RESP has no RETURNING clause.
+        returning: None,
+        rls_filters: Vec::new(),
     });
 
-    match dispatch_kv_write(state, session, plan).await {
-        Ok(resp) => {
-            let count = payload_field_i64(&resp.payload, "deleted").unwrap_or(0);
+    // A rejected delete surfaces as the error it is, never as `0` deleted.
+    match dispatch_kv_write(state, session, plan)
+        .await
+        .and_then(payload_or_typed_error)
+    {
+        Ok(payload) => {
+            let count = payload_field_i64(&payload, "deleted").unwrap_or(0);
             RespValue::integer(count)
         }
         Err(e) => RespValue::from_error(&e),
@@ -235,10 +247,13 @@ pub(in crate::control::server::resp) async fn handle_getset(
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
     });
 
-    match dispatch_kv_write(state, session, plan).await {
-        Ok(resp) => {
-            if let Some(serde_json::Value::String(b64)) =
-                payload_json(&resp.payload).get("old_value")
+    // A rejected write surfaces as the error it is, never as `nil`.
+    match dispatch_kv_write(state, session, plan)
+        .await
+        .and_then(payload_or_typed_error)
+    {
+        Ok(payload) => {
+            if let Some(serde_json::Value::String(b64)) = payload_json(&payload).get("old_value")
                 && let Ok(mut data) =
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
             {

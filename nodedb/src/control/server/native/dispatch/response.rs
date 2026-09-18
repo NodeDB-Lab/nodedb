@@ -36,6 +36,8 @@ pub(crate) fn data_plane_response_to_native(
         database_id: ctx.database_id(),
         tenant_id: ctx.tenant_id(),
         redaction: Some(redaction.ctx(&ctx.state.redaction)),
+        // No projection, so no Control-Plane computed column to resolve.
+        sequences: None,
     }) {
         Ok(ShapeOutcome::Rows(shaped)) => {
             let (columns, rows) = to_native_columns_rows(&shaped);

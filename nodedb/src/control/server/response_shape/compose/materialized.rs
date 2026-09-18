@@ -19,6 +19,7 @@
 //! is shared with per-batch lazy streaming callers, which have an
 //! already-decoded batch and only need the envelope-unwrap + projection logic.
 
+use crate::control::sequence::SequenceAccess;
 use crate::control::server::response_translate::dispatch::translate_search_response;
 use crate::data::executor::response_codec::decode_payload_value;
 use nodedb_types::NodeDbError;
@@ -60,6 +61,7 @@ pub fn shape_response_materialized(
         database_id,
         tenant_id,
         redaction,
+        sequences,
     } = request;
 
     match plan_kind {
@@ -79,9 +81,11 @@ pub fn shape_response_materialized(
         PlanKind::ArraySlice => shape_array_slice(&translated, redaction)?,
         // `RETURNING` rows are held to the columns already announced to the
         // client, when any were — see `super::returning`.
-        PlanKind::ReturningRows => shape_returning_rows(&translated, projection, redaction)?,
+        PlanKind::ReturningRows => {
+            shape_returning_rows(&translated, projection, redaction, sequences)?
+        }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
-            shape_generic_rows(&translated, projection, redaction)?
+            shape_generic_rows(&translated, projection, redaction, sequences)?
         }
         // Handled by the early return above; kept exhaustive (no catch-all,
         // no panic) so a future PlanKind desync degrades to passthrough
@@ -99,21 +103,26 @@ pub fn shape_response_materialized(
 /// scan-envelope unwrap + optional SELECT-list projection steps, skipping the
 /// plan-dependent `apply_kv_wrap` / `translate_search_response` transforms those
 /// callers never ran.
+///
+/// `sequences` resolves the projection's Control-Plane computed columns; a
+/// caller with no session in scope passes `None`, and a projection that
+/// carries computed columns then fails rather than shipping NULL.
 pub fn shape_payload_no_plan(
     payload: &[u8],
     plan_kind: PlanKind,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    sequences: Option<&dyn SequenceAccess>,
 ) -> Result<ShapeOutcome, NodeDbError> {
     Ok(match plan_kind {
         PlanKind::Execution | PlanKind::DmlResult(_) => ShapeOutcome::Passthrough,
         PlanKind::ArraySlice => ShapeOutcome::Rows(shape_array_slice(payload, redaction)?),
-        PlanKind::ReturningRows => {
-            ShapeOutcome::Rows(shape_returning_rows(payload, projection, redaction)?)
-        }
-        PlanKind::SingleDocument | PlanKind::MultiRow => {
-            ShapeOutcome::Rows(shape_generic_rows(payload, projection, redaction)?)
-        }
+        PlanKind::ReturningRows => ShapeOutcome::Rows(shape_returning_rows(
+            payload, projection, redaction, sequences,
+        )?),
+        PlanKind::SingleDocument | PlanKind::MultiRow => ShapeOutcome::Rows(shape_generic_rows(
+            payload, projection, redaction, sequences,
+        )?),
     })
 }
 
@@ -127,12 +136,13 @@ fn shape_generic_rows(
     payload: &[u8],
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    sequences: Option<&dyn SequenceAccess>,
 ) -> crate::Result<ShapedRows> {
     if payload.is_empty() {
         return Ok(empty_shaped());
     }
     match decode_payload_value(payload) {
-        Ok(value) => shape_decoded_rows(value, projection, redaction),
+        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences),
         Err(_) => Ok(single_result_row(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -203,6 +213,7 @@ mod tests {
             database_id: DatabaseId::new(1),
             tenant_id: TenantId::new(1),
             redaction: None,
+            sequences: None,
         })
         .expect("execution plan passthrough");
         assert!(matches!(materialized, ShapeOutcome::Passthrough));
@@ -216,7 +227,7 @@ mod tests {
             expected
         );
 
-        let no_plan = shape_payload_no_plan(&payload, kind, None, None);
+        let no_plan = shape_payload_no_plan(&payload, kind, None, None, None);
         assert!(matches!(no_plan, Ok(ShapeOutcome::Passthrough)));
         assert_eq!(
             payload, original_payload,
@@ -244,7 +255,7 @@ mod tests {
         .expect("encode");
 
         let ShapeOutcome::Rows(shaped) =
-            shape_payload_no_plan(&payload, PlanKind::MultiRow, None, None).expect("shape")
+            shape_payload_no_plan(&payload, PlanKind::MultiRow, None, None, None).expect("shape")
         else {
             panic!("multi-row plan must yield rows");
         };

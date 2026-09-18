@@ -21,6 +21,7 @@ pub mod response_shape;
 pub mod response_translate;
 pub mod result_stream;
 pub mod session_auth;
+pub mod set_op_merge;
 pub mod shared;
 pub mod shuffle;
 pub mod surrogate_exchange;

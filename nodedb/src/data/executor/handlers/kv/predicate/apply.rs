@@ -5,13 +5,16 @@
 //! keyed path verbatim — re-deriving either here is how a predicate write
 //! would drift from the keyed one.
 
+use nodedb_physical::physical_plan::ReturningSpec;
 use nodedb_types::{RlsWriteCheck, Surrogate};
 use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::kv::crud::KvDeleteParams;
 use crate::data::executor::handlers::kv::field_compute::merge_field_updates;
 use crate::data::executor::handlers::kv::rls::admit_kv_row;
+use crate::data::executor::handlers::returning_rows::KvStoredRow;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::{KvPutParams, current_ms};
@@ -23,6 +26,12 @@ pub(in crate::data::executor) struct KvPredicateCtx<'a> {
     pub collection: &'a str,
     pub filters: &'a [u8],
     pub rls_write_check: &'a RlsWriteCheck,
+    /// When `Some`, project one STORED row per matched key per spec instead
+    /// of reporting a bare count: the post-image for an update, the
+    /// pre-image for a delete.
+    pub returning: Option<&'a ReturningSpec>,
+    /// Compiled read policy bounding which of those rows may be shown back.
+    pub rls_filters: &'a [u8],
 }
 
 impl CoreLoop {
@@ -41,6 +50,8 @@ impl CoreLoop {
             collection,
             filters,
             rls_write_check,
+            returning,
+            rls_filters,
         } = ctx;
         debug!(core = self.core_id, %collection, "kv predicate update");
         let now_ms = current_ms();
@@ -93,6 +104,17 @@ impl CoreLoop {
             self.note_kv_write_lsn(task, did, tid, collection, key);
         }
 
+        if let Some(spec) = returning {
+            // Each `new_value` IS the stored body: the merge is persisted
+            // verbatim, so projecting it is projecting the post-image. Zero
+            // matches ships an EMPTY row set, never a count.
+            let rows: Vec<KvStoredRow<'_>> = writes
+                .iter()
+                .map(|(key, _old_body, new_value)| (key.as_slice(), new_value.as_slice()))
+                .collect();
+            return self.kv_stored_returning_response(task, spec, rls_filters, &rows);
+        }
+
         match response_codec::encode_count("affected", writes.len()) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
@@ -118,6 +140,8 @@ impl CoreLoop {
             collection,
             filters,
             rls_write_check,
+            returning,
+            rls_filters,
         } = ctx;
         debug!(core = self.core_id, %collection, "kv predicate delete");
         let now_ms = current_ms();
@@ -127,6 +151,17 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
         let keys: Vec<Vec<u8>> = matched.into_iter().map(|(key, _body)| key).collect();
-        self.execute_kv_delete(task, did, tid, collection, &keys, rls_write_check)
+        self.execute_kv_delete(
+            task,
+            KvDeleteParams {
+                did,
+                tid,
+                collection,
+                keys: &keys,
+                rls_write_check,
+                returning,
+                rls_filters,
+            },
+        )
     }
 }

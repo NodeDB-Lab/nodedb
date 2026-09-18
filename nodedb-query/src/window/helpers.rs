@@ -6,35 +6,112 @@ use std::collections::HashMap;
 
 use crate::expr::types::SqlExpr;
 
-/// Group row indices by partition key, preserving first-seen partition order.
+/// Group row indices by partition key, preserving first-seen partition order,
+/// then sort each partition's indices by the spec's ORDER BY.
 ///
-/// A division/modulo-by-zero in a PARTITION BY expression propagates as
-/// `Err(EvalError::DivisionByZero)` rather than being folded to NULL.
+/// The returned index lists are ordered by `order_by`; the `rows` array
+/// itself keeps its input order — only the per-partition index lists move.
+///
+/// A division/modulo-by-zero in a PARTITION BY or ORDER BY expression
+/// propagates as `Err(EvalError::DivisionByZero)` rather than being folded to
+/// NULL.
 pub(super) fn build_partitions(
     rows: &[(String, serde_json::Value)],
     partition_by: &[SqlExpr],
+    order_by: &[(SqlExpr, bool)],
 ) -> Result<Vec<Vec<usize>>, crate::expr::EvalError> {
-    if partition_by.is_empty() {
-        return Ok(vec![(0..rows.len()).collect()]);
-    }
+    let mut partitions = if partition_by.is_empty() {
+        vec![(0..rows.len()).collect::<Vec<usize>>()]
+    } else {
+        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut order = Vec::new();
 
-    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut order = Vec::new();
-
-    for (i, (_id, doc)) in rows.iter().enumerate() {
-        let key: String = partition_by
-            .iter()
-            .map(|expr| eval_expr_on_json(expr, doc).map(|v| v.to_string()))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\x00");
-        let entry = groups.entry(key.clone()).or_default();
-        if entry.is_empty() {
-            order.push(key);
+        for (i, (_id, doc)) in rows.iter().enumerate() {
+            let key: String = partition_by
+                .iter()
+                .map(|expr| eval_expr_on_json(expr, doc).map(|v| v.to_string()))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\x00");
+            let entry = groups.entry(key.clone()).or_default();
+            if entry.is_empty() {
+                order.push(key);
+            }
+            entry.push(i);
         }
-        entry.push(i);
+
+        order.iter().filter_map(|k| groups.remove(k)).collect()
+    };
+
+    if !order_by.is_empty() {
+        let mut keys: Vec<Vec<serde_json::Value>> = Vec::with_capacity(rows.len());
+        for (_id, doc) in rows.iter() {
+            keys.push(
+                order_by
+                    .iter()
+                    .map(|(expr, _)| eval_expr_on_json(expr, doc))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+
+        for partition in &mut partitions {
+            partition.sort_by(|&a, &b| compare_order_keys(&keys[a], &keys[b], order_by));
+        }
     }
 
-    Ok(order.iter().filter_map(|k| groups.remove(k)).collect())
+    Ok(partitions)
+}
+
+/// Decide NULL placement for one ORDER BY column, shared by every window
+/// evaluator's `compare_order_keys`.
+///
+/// NULL placement follows PostgreSQL's default: ASC places NULLs last, DESC
+/// places NULLs first. A window spec carries no explicit NULLS FIRST/LAST
+/// override, so this default is fixed by direction alone. Returns `None`
+/// when neither value is NULL, leaving the non-null comparison to the
+/// caller.
+pub(super) fn null_order(
+    a_null: bool,
+    b_null: bool,
+    ascending: bool,
+) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let nulls_first = !ascending;
+    match (a_null, b_null) {
+        (true, true) => Some(Ordering::Equal),
+        (true, false) => Some(if nulls_first {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }),
+        (false, true) => Some(if nulls_first {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        }),
+        (false, false) => None,
+    }
+}
+
+/// Compare two rows' pre-evaluated ORDER BY keys.
+fn compare_order_keys(
+    a: &[serde_json::Value],
+    b: &[serde_json::Value],
+    order_by: &[(SqlExpr, bool)],
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (idx, (_, ascending)) in order_by.iter().enumerate() {
+        let (Some(va), Some(vb)) = (a.get(idx), b.get(idx)) else {
+            continue;
+        };
+        let ord = null_order(va.is_null(), vb.is_null(), *ascending).unwrap_or_else(|| {
+            let c = crate::json_expr::compare_json(va, vb);
+            if *ascending { c } else { c.reverse() }
+        });
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    Ordering::Equal
 }
 
 pub(super) fn set_window_col(row: &mut serde_json::Value, alias: &str, val: serde_json::Value) {

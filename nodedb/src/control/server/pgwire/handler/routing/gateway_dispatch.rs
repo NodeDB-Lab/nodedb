@@ -22,7 +22,7 @@ use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch}
 use crate::types::{TenantId, TraceId};
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::super::types::sqlstate_error;
+use super::super::super::types::shape_error_to_pg;
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::{PlanKind, multirow_payload_to_response};
 use super::super::shape_encode;
@@ -69,13 +69,16 @@ fn push_shaped_response(
         responses.push(Response::Execution(Tag::new("OK")));
         return Ok(());
     }
+    // Gateway forwarding carries no session: a projection with Control-Plane
+    // computed columns is refused by the shaper rather than NULL-filled.
     match compose::shape_payload_no_plan(
         payload,
         PlanKind::MultiRow,
         projection,
         Some(redaction.ctx(&state.redaction)),
+        None,
     )
-    .map_err(|e| sqlstate_error("XX000", e.message()))?
+    .map_err(|e| shape_error_to_pg(&e))?
     {
         ShapeOutcome::Rows(shaped) => {
             let (response, notice) = shape_encode::shaped_query_response(shaped, result_formats);
@@ -227,8 +230,9 @@ impl NodeDbPgHandler {
                         PlanKind::MultiRow,
                         projection,
                         Some(redaction.ctx(&self.state.redaction)),
+                        None,
                     )
-                    .map_err(|e| sqlstate_error("XX000", e.message()))?
+                    .map_err(|e| shape_error_to_pg(&e))?
                     {
                         ShapeOutcome::Rows(shaped) => {
                             task_rows = Some(task_rows.unwrap_or(0) + shaped.rows.len() as u64);

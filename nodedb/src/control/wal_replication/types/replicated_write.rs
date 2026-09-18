@@ -388,6 +388,12 @@ pub enum ReplicatedWrite {
     KvDelete {
         collection: String,
         keys: Vec<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
     KvInsert {
         collection: String,
@@ -522,6 +528,15 @@ pub enum ReplicatedWrite {
         key: Vec<u8>,
         updates: Vec<(String, Vec<u8>)>,
         surrogate: u32,
+        /// See `KvOp::FieldSet::if_present`.
+        #[serde(default)]
+        if_present: bool,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
     KvTransfer {
         collection: String,
@@ -788,6 +803,12 @@ pub enum ReplicatedWrite {
         /// Serialized `Vec<ScanFilter>`. Empty matches every row.
         filters: Vec<u8>,
         updates: Vec<(String, Vec<u8>)>,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// KV predicate `DELETE` on a collection with NO write policy — see
@@ -796,6 +817,12 @@ pub enum ReplicatedWrite {
         collection: String,
         /// Serialized `Vec<ScanFilter>`. Empty matches every row.
         filters: Vec<u8>,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
     },
 
     /// Resolved form of a deferred document write (`PointUpdate`,

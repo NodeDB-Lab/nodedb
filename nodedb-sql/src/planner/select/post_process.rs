@@ -37,6 +37,8 @@ pub(in crate::planner::select) fn post_process(
         input: Box::new(input),
         filters: Vec::new(),
         projection,
+        // The body keeps its own window specs; the tail evaluates none.
+        window_functions: Vec::new(),
         sort_keys,
         offset,
         distinct: false,
@@ -127,7 +129,9 @@ fn projects_column(projection: &[Projection], table: Option<&str>, name: &str) -
         Projection::Column(projected) => {
             projected.eq_ignore_ascii_case(&qualified) || bare(projected).eq_ignore_ascii_case(name)
         }
-        Projection::Computed { alias, .. } => alias.eq_ignore_ascii_case(name),
+        Projection::Computed { alias, .. } | Projection::CpComputed { alias, .. } => {
+            alias.eq_ignore_ascii_case(name)
+        }
         Projection::Star | Projection::QualifiedStar(_) => true,
     })
 }

@@ -8,6 +8,7 @@
 //! both unreadable and easy to transpose at a call site.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::sequence::SequenceAccess;
 use crate::control::state::SharedState;
 use nodedb_types::{DatabaseId, TenantId};
 
@@ -31,4 +32,9 @@ pub struct MaterializedShapeRequest<'a> {
     /// Column-level redaction for this statement, resolved once per query.
     /// `None` only where the producer has no requester identity at all.
     pub redaction: Option<RedactionCtx<'a>>,
+    /// Session-scoped sequence access for the projection's Control-Plane
+    /// computed columns. `None` only where the producer has no session in
+    /// scope; a projection that carries computed columns then fails rather
+    /// than shipping NULL under the alias.
+    pub sequences: Option<&'a dyn SequenceAccess>,
 }

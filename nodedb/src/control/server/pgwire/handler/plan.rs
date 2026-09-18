@@ -276,6 +276,8 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "items"),
             keys: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
         assert!(!is_calvin_foldable(&delete));
         assert!(calvin_tag_for_plan(&delete).is_err());

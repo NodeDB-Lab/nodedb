@@ -40,6 +40,7 @@ pub(super) mod merge_helpers;
 pub(super) mod merge_orchestrated;
 pub mod point;
 pub(super) mod provider_scan;
+pub(super) mod provider_scan_compute;
 pub mod purge;
 pub mod query_collection_size;
 pub mod reclaim;

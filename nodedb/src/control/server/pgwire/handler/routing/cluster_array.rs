@@ -19,7 +19,7 @@ use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::session::SessionId;
 
-use super::super::super::types::{error_to_sqlstate, sqlstate_error};
+use super::super::super::types::{error_to_sqlstate, shape_error_to_pg};
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::{PlanKind, payload_to_response};
 use super::super::shape_encode;
@@ -122,13 +122,16 @@ impl NodeDbPgHandler {
         };
         let redaction =
             QueryRedaction::for_collections(tenant_id, auth, vec![(String::new(), array_name)]);
+        // A cluster array plan projects attribute names only, never a
+        // Control-Plane computed column, so no session sequence access.
         match compose::shape_payload_no_plan(
             &payload_bytes,
             cluster_plan_kind,
             projection,
             Some(redaction.ctx(&self.state.redaction)),
+            None,
         )
-        .map_err(|e| sqlstate_error("XX000", e.message()))?
+        .map_err(|e| shape_error_to_pg(&e))?
         {
             ShapeOutcome::Rows(shaped) => {
                 let (response, notice) =

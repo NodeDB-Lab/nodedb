@@ -15,7 +15,8 @@ use super::spec::WindowFuncSpec;
 ///
 /// `rows` is the sorted result set. Each row is a `(doc_id, serde_json::Value)`.
 /// The same rows are mutated in place with window columns appended to each
-/// document.
+/// document. The row array keeps its input order; each spec's partitions are
+/// ordered by that spec's own ORDER BY, independent of the row array order.
 ///
 /// Unknown window function names must be rejected by the planner before
 /// reaching this dispatcher; an unrecognised name here is an internal bug
@@ -29,7 +30,7 @@ pub fn evaluate_window_functions(
     specs: &[WindowFuncSpec],
 ) -> Result<(), crate::expr::EvalError> {
     for spec in specs {
-        let partitions = build_partitions(rows, &spec.partition_by)?;
+        let partitions = build_partitions(rows, &spec.partition_by, &spec.order_by)?;
 
         for partition_indices in &partitions {
             match spec.func_name.as_str() {
@@ -146,9 +147,11 @@ mod tests {
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec]).unwrap();
-        assert_eq!(rows[0].1["running_total"], json!(100.0));
-        assert_eq!(rows[1].1["running_total"], json!(220.0));
-        assert_eq!(rows[2].1["running_total"], json!(310.0));
+        // The frame runs in salary order within each dept, not in row
+        // arrival order: eng = Carol(90) → Alice(100) → Bob(120).
+        assert_eq!(rows[0].1["running_total"], json!(190.0));
+        assert_eq!(rows[1].1["running_total"], json!(310.0));
+        assert_eq!(rows[2].1["running_total"], json!(90.0));
         assert_eq!(rows[3].1["running_total"], json!(80.0));
         assert_eq!(rows[4].1["running_total"], json!(190.0));
     }
@@ -260,6 +263,33 @@ mod tests {
         assert_eq!(rows[2].1["nv"], json!(2));
         assert_eq!(rows[3].1["nv"], json!(2));
         assert_eq!(rows[4].1["nv"], json!(2));
+    }
+
+    #[test]
+    fn rank_orders_by_spec_order_by_not_row_arrival_order() {
+        // Rows arrive as Alice(100), Bob(120), Carol(90) within dept "eng" —
+        // not sorted by salary. RANK() OVER (ORDER BY salary DESC) must rank
+        // by salary, and the row array order must stay unchanged.
+        let mut rows = make_rows();
+        let spec = WindowFuncSpec {
+            alias: "rnk".into(),
+            func_name: "rank".into(),
+            args: vec![],
+            partition_by: vec![SqlExpr::Column("dept".into())],
+            order_by: vec![(SqlExpr::Column("salary".into()), false)],
+            frame: WindowFrame::default(),
+        };
+        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        assert_eq!(rows[0].1["name"], json!("Alice"));
+        assert_eq!(rows[1].1["name"], json!("Bob"));
+        assert_eq!(rows[2].1["name"], json!("Carol"));
+        assert_eq!(rows[3].1["name"], json!("Dave"));
+        assert_eq!(rows[4].1["name"], json!("Eve"));
+        assert_eq!(rows[0].1["rnk"], json!(2)); // Alice, salary 100
+        assert_eq!(rows[1].1["rnk"], json!(1)); // Bob, salary 120
+        assert_eq!(rows[2].1["rnk"], json!(3)); // Carol, salary 90
+        assert_eq!(rows[3].1["rnk"], json!(2)); // Dave, salary 80
+        assert_eq!(rows[4].1["rnk"], json!(1)); // Eve, salary 110
     }
 
     #[test]

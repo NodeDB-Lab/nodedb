@@ -3,6 +3,7 @@
 pub mod agg_bind;
 pub mod agg_naming;
 pub mod aggregate;
+pub mod aggregate_cp_wrap;
 pub mod aggregate_order;
 pub mod array_ddl;
 pub mod array_dml;
@@ -14,6 +15,7 @@ pub mod catalog_fold;
 pub mod catalog_plan_shapes;
 pub mod catalog_plan_validate;
 pub mod const_fold;
+pub mod cp_projection;
 pub mod cte;
 pub mod declared_type_coerce;
 pub mod defaults;
@@ -28,8 +30,10 @@ pub mod join;
 pub mod lateral;
 pub mod merge;
 pub mod predicate_coerce;
+pub mod returning;
 pub mod select;
 
+pub use returning::resolve_returning_items;
 pub use select::qualified_name;
 pub mod sort;
 pub mod subquery;

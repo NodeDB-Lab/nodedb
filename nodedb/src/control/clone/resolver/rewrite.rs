@@ -8,7 +8,7 @@ use nodedb_types::TenantId;
 
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::{
-    ColumnarOp, DocumentOp, ExchangeOp, KvOp, PhysicalPlan, QueryOp, TimeseriesOp,
+    ColumnarOp, DocumentOp, ExchangeOp, KvOp, PhysicalPlan, QueryOp, SetOpKind, TimeseriesOp,
 };
 use nodedb_types::SystemTimeScope;
 
@@ -117,6 +117,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
             input,
             filters,
             projection,
+            computed_columns,
+            window_functions,
             sort_keys,
             limit,
             offset,
@@ -139,6 +141,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
                         input: child,
                         filters: filters.clone(),
                         projection: projection.clone(),
+                        computed_columns: computed_columns.clone(),
+                        window_functions: window_functions.clone(),
                         sort_keys: sort_keys.clone(),
                         limit: *limit,
                         offset: *offset,
@@ -147,6 +151,54 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
                 }
                 SourceRewrite::NoSourceTask => SourceRewrite::NoSourceTask,
             })
+        }
+
+        // SetOp: rewrite every branch. Branches that do not read the cloned
+        // collection yield no source task and are dropped, so the source-side
+        // node carries only the rows the target side is missing. That is
+        // sound for `UNION ALL` (the merge appends). Any other kind dedups or
+        // subtracts by exact row match against the target rows, which is
+        // unsound across an unmaterialized clone; refuse it the same way the
+        // task-level `post_set_op` refusal does.
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, op }) => {
+            let mut rewritten_inputs = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let rewritten = rewrite_plan_for_source(RewriteForSourceParams {
+                    plan: input,
+                    target_db_id,
+                    source_db_id,
+                    tenant_id,
+                    target_coll,
+                    source_coll,
+                    effective_source_ms,
+                    kv_surrogate_ceiling,
+                    state,
+                })?;
+                if let SourceRewrite::Task(child) = rewritten {
+                    rewritten_inputs.push(*child);
+                }
+            }
+            if rewritten_inputs.is_empty() {
+                return Ok(SourceRewrite::NoSourceTask);
+            }
+            match op {
+                SetOpKind::UnionAll => {
+                    Ok(SourceRewrite::task(PhysicalPlan::Query(QueryOp::SetOp {
+                        inputs: rewritten_inputs,
+                        op: SetOpKind::UnionAll,
+                    })))
+                }
+                SetOpKind::UnionDistinct
+                | SetOpKind::Intersect
+                | SetOpKind::IntersectAll
+                | SetOpKind::Except
+                | SetOpKind::ExceptAll => Err(crate::Error::PlanError {
+                    detail: format!(
+                        "a set operation over '{target_coll}' cannot be read through an \
+                         unmaterialized clone; run ALTER DATABASE <clone> MATERIALIZE first"
+                    ),
+                }),
+            }
         }
 
         PhysicalPlan::Document(DocumentOp::Scan {
@@ -243,6 +295,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
             cursor,
             count,
             filters,
+            projection,
+            computed_columns,
             match_pattern,
             sort_keys,
             // The original target-side scan never carries a ceiling
@@ -255,6 +309,8 @@ pub fn rewrite_plan_for_source(params: RewriteForSourceParams<'_>) -> crate::Res
                 cursor: cursor.clone(),
                 count: *count,
                 filters: filters.clone(),
+                projection: projection.clone(),
+                computed_columns: computed_columns.clone(),
                 match_pattern: match_pattern.clone(),
                 sort_keys: sort_keys.clone(),
                 surrogate_ceiling: kv_surrogate_ceiling,
@@ -626,6 +682,8 @@ mod tests {
                 input: Box::new(gather(plan)),
                 filters: Vec::new(),
                 projection: Vec::new(),
+                computed_columns: Vec::new(),
+                window_functions: Vec::new(),
                 sort_keys: Vec::new(),
                 limit: None,
                 offset: 0,

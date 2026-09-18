@@ -174,9 +174,16 @@ pub fn wal_append_kv_op(
             key,
             updates,
             surrogate,
+            if_present,
             ..
         } => {
-            let entry = encode_kv_field_set(collection.as_str(), key, updates, surrogate.as_u32())?;
+            let entry = encode_kv_field_set(
+                collection.as_str(),
+                key,
+                updates,
+                surrogate.as_u32(),
+                *if_present,
+            )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Incr {
@@ -273,6 +280,9 @@ pub fn wal_append_kv_op(
             updates,
             // Per-request authorization input, not part of the durable image.
             rls_write_check: _,
+            // Per-request reply projection, not part of the durable image.
+            returning: _,
+            rls_filters: _,
         } => {
             let entry = encode_kv_predicate_update(collection.as_str(), filters, updates)?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
@@ -281,6 +291,8 @@ pub fn wal_append_kv_op(
             collection,
             filters,
             rls_write_check: _,
+            returning: _,
+            rls_filters: _,
         } => {
             let entry = encode_kv_predicate_delete(collection.as_str(), filters)?;
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)

@@ -12,9 +12,12 @@ use std::collections::HashSet;
 use nodedb_types::Value;
 use nodedb_types::columnar::schema::is_reserved_bitemporal_column;
 
+use crate::control::sequence::SequenceAccess;
+
 use super::super::project::push_flat_rows;
 use super::super::redaction::RedactionCtx;
 use super::super::schema::OutputSchema;
+use super::super::stamp::stamp_rows;
 use super::super::types::{DdlColType, ShapedRow, ShapedRows};
 
 /// Pure shaping core: given an already-decoded Data-Plane value, unwrap the
@@ -27,10 +30,15 @@ use super::super::types::{DdlColType, ShapedRow, ShapedRows};
 /// function does none of that. A streamed scan batch has no plan to KV-wrap
 /// or vector-translate but still needs the same envelope-unwrap + projection
 /// logic applied per batch, so streaming callers call this directly.
+///
+/// `sequences` resolves the projection's Control-Plane computed columns
+/// (`cp_computed`). A projection that carries any and a caller that passes
+/// `None` is an error: the alias would otherwise project as NULL.
 pub fn shape_decoded_rows(
     decoded: Value,
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    sequences: Option<&dyn SequenceAccess>,
 ) -> crate::Result<ShapedRows> {
     let mut rows = Vec::new();
     push_flat_rows(decoded, &mut rows)?;
@@ -44,6 +52,12 @@ pub fn shape_decoded_rows(
     // instead of present and null. Both orderings deliver data the policy
     // says to withhold, so the hook belongs exactly here.
     redact_rows(redaction.as_ref(), &mut rows);
+
+    // Control-Plane computed columns are stamped onto the flat rows AFTER
+    // redaction (an expression reads the values the policy lets through)
+    // and BEFORE projection (the projection drops the pass-through base
+    // columns the expression reads and keeps only the alias).
+    stamp_computed_columns(projection, &mut rows, sequences)?;
 
     match projection {
         Some(s) if !s.is_star && !s.columns.is_empty() => {
@@ -81,6 +95,29 @@ pub fn shape_decoded_rows(
             Ok(ShapedRows::from_rows(columns, column_types, rows))
         }
     }
+}
+
+/// Stamp the projection's Control-Plane computed columns onto the flat rows.
+///
+/// A projection with no computed column is a no-op whatever `sequences` is.
+/// One that carries any needs session sequence access: a caller with none
+/// (a per-batch stream, gateway forwarding, a clone merge) cannot answer
+/// the statement, and says so rather than shipping NULL under the alias.
+pub(in crate::control::server::response_shape) fn stamp_computed_columns(
+    projection: Option<&OutputSchema>,
+    rows: &mut [ShapedRow],
+    sequences: Option<&dyn SequenceAccess>,
+) -> crate::Result<()> {
+    let Some(schema) = projection.filter(|s| !s.cp_computed.is_empty()) else {
+        return Ok(());
+    };
+    let Some(access) = sequences else {
+        return Err(crate::Error::FeatureNotSupported {
+            detail: "Control-Plane computed columns need session sequence access on this path"
+                .to_string(),
+        });
+    };
+    stamp_rows(rows, &schema.cp_computed, access)
 }
 
 /// Apply the statement's column-level redaction policy to every flat row.
@@ -281,6 +318,7 @@ mod tests {
                 })
                 .collect(),
             is_star: false,
+            cp_computed: Vec::new(),
         }
     }
 
@@ -306,7 +344,7 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(&[("email", text("a@b.c")), ("name", text("Alice"))]);
 
-        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)))
+        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)), None)
             .expect("shape rows");
         assert_eq!(shaped.rows[0]["email"], text("***"));
         assert_eq!(shaped.rows[0]["name"], text("Alice"));
@@ -326,8 +364,8 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(&[("email", text("a@b.c")), ("name", text("Alice"))]);
 
-        let baseline = shape_decoded_rows(decoded.clone(), None, None).expect("shape rows");
-        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)))
+        let baseline = shape_decoded_rows(decoded.clone(), None, None, None).expect("shape rows");
+        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)), None)
             .expect("shape rows");
         assert_eq!(shaped.rows, baseline.rows);
         assert_eq!(shaped.columns, baseline.columns);
@@ -352,6 +390,7 @@ mod tests {
             decoded,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
+            None,
         )
         .expect("shape rows");
         assert_eq!(shaped.columns, vec!["contact".to_string()]);
@@ -380,6 +419,7 @@ mod tests {
             decoded,
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
+            None,
         )
         .expect("shape rows");
         // `cell_keys` suffixes the duplicate display name.
@@ -401,7 +441,7 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(&[("id", text("u1")), ("email", text("a@b.c"))]);
 
-        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)))
+        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)), None)
             .expect("shape rows");
         assert!(
             shaped.columns.contains(&"email".to_string()),
@@ -434,7 +474,8 @@ mod tests {
         let decoded = one_row(&[("at", Value::NaiveDateTime(at)), ("id", text("r1"))]);
         let projection = named_projection(&[("at", "at")]);
 
-        let shaped = shape_decoded_rows(decoded, Some(&projection), None).expect("shape rows");
+        let shaped =
+            shape_decoded_rows(decoded, Some(&projection), None, None).expect("shape rows");
         assert_eq!(shaped.rows[0]["at"], Value::NaiveDateTime(at));
         assert_eq!(
             crate::control::server::response_shape::cell::value_to_wire_json(&shaped.rows[0]["at"]),
@@ -488,5 +529,60 @@ mod tests {
         ];
 
         assert_eq!(derive_columns(&rows), vec!["id", "name"]);
+    }
+
+    // ── Control-Plane computed columns ──────────────────────────────────
+
+    /// Answers every accessor with a fixed value.
+    struct FixedAccess(i64);
+
+    impl SequenceAccess for FixedAccess {
+        fn nextval(&self, _name: &str) -> crate::Result<i64> {
+            Ok(self.0)
+        }
+        fn currval(&self, _name: &str) -> crate::Result<i64> {
+            Ok(self.0)
+        }
+        fn setval(&self, _name: &str, value: i64) -> crate::Result<i64> {
+            Ok(value)
+        }
+    }
+
+    /// `SELECT id, nextval('s') AS n FROM t`: the projection announces `n`,
+    /// the row carries only `id`, and the stamped value projects under `n`.
+    fn cp_computed_projection() -> OutputSchema {
+        let mut projection = named_projection(&[("id", "id"), ("n", "n")]);
+        projection.cp_computed = vec![
+            crate::control::server::response_shape::schema::CpComputedColumn {
+                alias: "n".to_string(),
+                expr: crate::bridge::expr_eval::SqlExpr::Function {
+                    name: "nextval".to_string(),
+                    args: vec![crate::bridge::expr_eval::SqlExpr::Literal(text("s"))],
+                },
+            },
+        ];
+        projection
+    }
+
+    #[test]
+    fn a_computed_column_is_stamped_before_projection() {
+        let decoded = one_row(&[("id", text("r1"))]);
+        let projection = cp_computed_projection();
+        let access = FixedAccess(41);
+
+        let shaped = shape_decoded_rows(decoded, Some(&projection), None, Some(&access))
+            .expect("shape rows");
+        assert_eq!(shaped.columns, vec!["id".to_string(), "n".to_string()]);
+        assert_eq!(shaped.rows[0]["n"], Value::Integer(41));
+    }
+
+    #[test]
+    fn a_computed_column_without_sequence_access_is_an_error_not_a_null() {
+        let decoded = one_row(&[("id", text("r1"))]);
+        let projection = cp_computed_projection();
+
+        let err =
+            shape_decoded_rows(decoded, Some(&projection), None, None).expect_err("must refuse");
+        assert!(matches!(err, crate::Error::FeatureNotSupported { .. }));
     }
 }

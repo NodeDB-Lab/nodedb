@@ -36,7 +36,7 @@ pub(crate) enum SqlOutcome {
     /// A single materialized response — encoded/chunked by the session loop.
     Response(Box<NativeResponse>),
     /// A lazy row stream to be emitted as multiple frames.
-    Stream(SqlStream),
+    Stream(Box<SqlStream>),
 }
 
 impl SqlOutcome {
@@ -101,6 +101,9 @@ impl SqlStream {
 /// Eligibility mirrors the pgwire `maybe_stream_select` predicate:
 ///   - single task (`tasks.len() == 1`),
 ///   - `post_set_op == PostSetOp::None`,
+///   - no Control-Plane computed column in the projection (`cp_computed`
+///     needs per-row session sequence access, which the per-batch shaper
+///     does not carry),
 ///   - autocommit (not inside a `BEGIN..COMMIT` block), and
 ///   - the plan is `Query(Exchange(Gather{as_aggregate:false}))` over a
 ///     streamable unordered scan (via [`streamable_gather_child`]).
@@ -118,6 +121,7 @@ pub(crate) async fn try_open_sql_stream(
         return Ok(None);
     };
     if task.post_set_op != PostSetOp::None
+        || output_schema.is_some_and(|s| !s.cp_computed.is_empty())
         || ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock
     {
         return Ok(None);

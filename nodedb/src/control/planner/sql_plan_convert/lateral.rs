@@ -187,18 +187,29 @@ fn sort_keys_to_spec(keys: &[SortKey]) -> Vec<SortKeySpec> {
 
 /// Convert `Projection` list to `JoinProjection` list.
 fn projection_to_join_projections(projection: &[Projection]) -> Vec<JoinProjection> {
-    projection
-        .iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(JoinProjection {
-                source: name.clone(),
-                output: name.clone(),
-            }),
-            Projection::Computed { alias, .. } => Some(JoinProjection {
-                source: alias.clone(),
-                output: alias.clone(),
-            }),
-            Projection::Star | Projection::QualifiedStar(_) => None,
-        })
-        .collect()
+    let pass_through = |name: &str| JoinProjection {
+        source: name.to_string(),
+        output: name.to_string(),
+    };
+    let mut specs = Vec::with_capacity(projection.len());
+    for p in projection {
+        match p {
+            Projection::Column(name) => specs.push(pass_through(name)),
+            Projection::Computed { alias, .. } => specs.push(pass_through(alias)),
+            // The Control Plane evaluates the entry over the lateral row, so
+            // every base column it reads passes through under its own name.
+            Projection::CpComputed { expr, .. } => {
+                for column in nodedb_sql::types::plan::referenced_columns(expr) {
+                    if !specs
+                        .iter()
+                        .any(|spec: &JoinProjection| spec.source == column)
+                    {
+                        specs.push(pass_through(&column));
+                    }
+                }
+            }
+            Projection::Star | Projection::QualifiedStar(_) => {}
+        }
+    }
+    specs
 }

@@ -223,10 +223,14 @@ pub(crate) fn streaming_shaped_response(
             })?;
             // Resolved once before the first batch was pulled; this only
             // re-borrows it, so no batch can slip out ahead of the policy.
+            // A streamed plan never carries Control-Plane computed columns:
+            // `maybe_stream_select` declines those, so no session access is
+            // needed per batch.
             let shaped = shape_decoded_rows(
                 value,
                 Some(&schema_out),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+                None,
             )
             .map_err(|e| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
@@ -341,6 +345,7 @@ pub(crate) async fn streaming_star_response(
         nodedb_types::Value::Array(values),
         None,
         redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+        None,
     ) {
         Ok(s) => s,
         Err(e) => {

@@ -62,7 +62,8 @@ impl NodeDbPgHandler {
     }
 
     /// Plan a SQL statement to physical tasks: session auth, RETURNING strip,
-    /// CHECK constraints, plan cache, RETURNING injection. Returns the task list
+    /// CHECK constraints, plan cache. The planner resolves and attaches the
+    /// RETURNING clause, so a cached task set already carries it. Returns the task list
     /// and descriptor versions; errors stay typed to distinguish a descriptor-drain race from terminal failure.
     pub(in crate::control::server::pgwire::handler) async fn plan_statement_to_tasks(
         &self,
@@ -159,8 +160,10 @@ impl NodeDbPgHandler {
         let (statement_sql, scope) =
             crate::control::server::session_auth::apply_per_query_on_deny(sql, scope);
 
-        // Strip RETURNING clause before DataFusion planning.
-        let (clean_sql, returning_spec) =
+        // Strip the RETURNING clause before planning. The item text resolves
+        // inside the planner against the planned target, which announces the
+        // projection and attaches the Data-Plane spec to every task.
+        let (clean_sql, returning_items) =
             returning::strip_returning(&statement_sql).map_err(StatementSetupError::from)?;
 
         // Forwards per-session planning GUCs into the shared query context, protocol-neutral
@@ -246,7 +249,7 @@ impl NodeDbPgHandler {
                     tenant_id,
                     database_id,
                     &sec,
-                    returning_spec.as_ref(),
+                    returning_items.as_deref(),
                 )
                 .await
                 .map_err(StatementSetupError::from)?;
@@ -279,7 +282,7 @@ impl NodeDbPgHandler {
                         tenant_id,
                         database_id,
                         &sec,
-                        returning_spec.as_ref(),
+                        returning_items.as_deref(),
                     )
                     .await
                     .map_err(StatementSetupError::from)?
@@ -297,21 +300,6 @@ impl NodeDbPgHandler {
                 );
             }
             (planned, output_schema, versions)
-        };
-
-        // Inject RETURNING spec into DML plans. An insert shape with no `returning`
-        // slot is refused rather than silently dropped.
-        let tasks = if let Some(ref spec) = returning_spec {
-            let mut injected = Vec::with_capacity(tasks.len());
-            for mut task in tasks {
-                returning::refuse_unprojectable_insert_returning(&task.plan)
-                    .map_err(StatementSetupError::from)?;
-                returning::inject_returning_spec(&mut task.plan, spec.clone());
-                injected.push(task);
-            }
-            injected
-        } else {
-            tasks
         };
 
         // Preauthorize before expansion allocates surrogates; descriptor admission

@@ -36,6 +36,8 @@ pub(super) async fn intercept_kv_clone_write(
             collection,
             keys,
             rls_write_check,
+            returning,
+            rls_filters,
         }) => {
             // Delete may have multiple keys; handle each. We serialize here
             // (one tombstone per key) and return Handled with synthetic OK.
@@ -57,6 +59,18 @@ pub(super) async fn intercept_kv_clone_write(
             match desc.clone_status {
                 CloneStatus::Materialized => return Ok(CloneWriteOutcome::Passthrough),
                 CloneStatus::Shadowed | CloneStatus::Materializing { .. } => {}
+            }
+            // A row this delete hides only by tombstone lives in the source,
+            // so the clone has no stored pre-image to project for it. The
+            // reply below is a synthesized count, which the RETURNING renderer
+            // cannot decode as rows; refusing beats answering the wrong shape.
+            if returning.is_some() {
+                return Err(crate::Error::BadRequest {
+                    detail: "RETURNING is not supported on a DELETE against a shadowed clone: \
+                             rows hidden by tombstone have no stored pre-image to project. \
+                             Materialize the clone first, or SELECT the rows before deleting."
+                        .to_string(),
+                });
             }
 
             let emitter = ArcAuditEmitter(Arc::clone(&state.audit));
@@ -150,6 +164,9 @@ pub(super) async fn intercept_kv_clone_write(
                     // ungoverned one for exactly the keys that resolve to
                     // real target rows.
                     rls_write_check: rls_write_check.clone(),
+                    // Same statement, same projection and read gate.
+                    returning: returning.clone(),
+                    rls_filters: rls_filters.clone(),
                 });
                 let vshard_id = VShardId::from_collection_in_database(db_id, collection_qualified);
                 let resp = dispatch_data_plane_raw(state, tenant_id, vshard_id, db_id, delete_plan)

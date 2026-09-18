@@ -52,3 +52,33 @@ pub fn aggregate_field_name(a: &AggregateExpr) -> String {
 pub fn aggregate_output_key(a: &AggregateExpr) -> String {
     nodedb_query::agg_key::canonical_agg_key(&aggregate_function_name(a), &aggregate_field_name(a))
 }
+
+/// The internal name of a computed (non-column) GROUP BY key: a stable
+/// `group_{index}` placeholder. The executor emits the evaluated key under
+/// it, and the response shaper reads the value back by it. The SELECT alias
+/// never reaches this name; it is a display name only.
+pub fn computed_group_key_name(index: usize) -> String {
+    format!("group_{index}")
+}
+
+/// The key a finalized group row carries one GROUP BY key under. A column
+/// key keeps its bare column name; a computed key uses
+/// [`computed_group_key_name`].
+pub fn group_key_row_name(key: &SqlExpr, index: usize) -> String {
+    match key {
+        SqlExpr::Column { name, .. } => name.clone(),
+        SqlExpr::Function { .. }
+        | SqlExpr::BinaryOp { .. }
+        | SqlExpr::UnaryOp { .. }
+        | SqlExpr::Cast { .. }
+        | SqlExpr::IsNull { .. }
+        | SqlExpr::Case { .. }
+        | SqlExpr::InList { .. }
+        | SqlExpr::Between { .. }
+        | SqlExpr::Like { .. }
+        | SqlExpr::ArrayLiteral(_)
+        | SqlExpr::Literal(_)
+        | SqlExpr::Subquery(_)
+        | SqlExpr::Wildcard => computed_group_key_name(index),
+    }
+}

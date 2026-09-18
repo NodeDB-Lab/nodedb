@@ -42,8 +42,9 @@ impl PhysicalPlan {
                 sort_keys,
                 offset,
                 distinct,
+                window_functions,
                 ..
-            }) => sort_keys.is_empty() && *offset == 0 && !*distinct,
+            }) => sort_keys.is_empty() && *offset == 0 && !*distinct && window_functions.is_empty(),
 
             // Every other Document / Kv / Columnar / Timeseries op, plus all
             // other engines and query ops, are not unordered-streamable.

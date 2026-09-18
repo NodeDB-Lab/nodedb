@@ -99,6 +99,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                     filters: filter_bytes,
                     updates: literal_updates,
                     rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                    // Attached by `inject_returning_spec` after plan conversion.
+                    returning: None,
+                    rls_filters: Vec::new(),
                 }),
                 post_set_op: PostSetOp::None,
                 txn_id: None,
@@ -129,8 +132,13 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                     key: key_bytes,
                     updates: field_updates,
                     surrogate,
+                    // SQL UPDATE: an absent key is `UPDATE 0`, never a create.
+                    if_present: true,
                     // Filled by the RLS injection pass, after plan conversion.
                     rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                    // Attached by `inject_returning_spec` after plan conversion.
+                    returning: None,
+                    rls_filters: Vec::new(),
                 }),
                 post_set_op: PostSetOp::None,
                 txn_id: None,

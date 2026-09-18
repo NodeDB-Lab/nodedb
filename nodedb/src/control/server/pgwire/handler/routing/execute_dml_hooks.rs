@@ -21,7 +21,7 @@ use crate::control::trigger::dml_hook::DmlWriteInfo;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::super::types::{error_to_sqlstate, sqlstate_error};
+use super::super::super::types::{error_to_sqlstate, shape_error_to_pg};
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::PlanKind;
 
@@ -326,13 +326,16 @@ impl NodeDbPgHandler {
                     // A clone write can carry RETURNING rows, which deliver
                     // stored column values just as a SELECT does.
                     let redaction = QueryRedaction::for_plan(tenant_id, auth, &task.plan);
+                    // A clone write's RETURNING list names stored columns
+                    // only, never a Control-Plane computed column.
                     match shape_payload_no_plan(
                         resp.payload.as_ref(),
                         plan_kind,
                         projection,
                         Some(redaction.ctx(&self.state.redaction)),
+                        None,
                     )
-                    .map_err(|e| sqlstate_error("XX000", e.message()))?
+                    .map_err(|e| shape_error_to_pg(&e))?
                     {
                         ShapeOutcome::Rows(shaped) => {
                             // Clone write-path DML result (PointUpdate/PointDelete):

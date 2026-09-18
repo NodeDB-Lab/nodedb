@@ -17,6 +17,14 @@ pub fn sqlstate_error(code: &str, message: &str) -> PgWireError {
     )))
 }
 
+/// Map an error raised while shaping a response to the pgwire error the
+/// client reads, with the SQLSTATE its numeric code maps to. A per-row
+/// sequence accessor refusal (`42704`, `55000`) or a division by zero
+/// (`22012`) keeps its class instead of collapsing to `XX000`.
+pub fn shape_error_to_pg(e: &nodedb_types::NodeDbError) -> PgWireError {
+    sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message())
+}
+
 /// Map a NodeDB `Error` to a PostgreSQL SQLSTATE code + message.
 pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, String) {
     match err {
@@ -215,6 +223,10 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::BAD_REQUEST | Ec::PLAN_ERROR => sqlstate::SYNTAX_ERROR,
         // Mirrors the `UndefinedFunction` arm.
         Ec::UNDEFINED_FUNCTION => sqlstate::UNDEFINED_FUNCTION,
+        // Mirrors the `UndefinedObject` arm.
+        Ec::UNDEFINED_OBJECT => sqlstate::UNDEFINED_OBJECT,
+        // Mirrors the `ObjectNotInPrerequisiteState` arm.
+        Ec::OBJECT_NOT_READY => sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
         // Mirrors the `UndefinedColumn` arm.
         Ec::UNDEFINED_COLUMN => sqlstate::UNDEFINED_COLUMN,
         // Mirrors the `AmbiguousColumn` arm.

@@ -249,6 +249,8 @@ pub async fn rate_reset(
         keys: vec![rate_key.as_bytes().to_vec()],
         // Internal bookkeeping collection — see `rate_gate`'s INCR above.
         rls_write_check: nodedb_types::RlsWriteCheck::system_internal_collection(),
+        returning: None,
+        rls_filters: Vec::new(),
     });
 
     match crate::control::server::dispatch_utils::dispatch_to_data_plane(

@@ -239,9 +239,12 @@ TRUNCATE users;
 
 ### RETURNING
 
-Both `UPDATE` and `DELETE` support a `RETURNING` clause to read back affected rows in the same statement:
+`INSERT`, `UPSERT`, `UPDATE`, `DELETE`, and `MERGE` accept a `RETURNING` clause that reads back the affected rows in the same statement:
 
 ```sql
+-- INSERT RETURNING: returns the stored row
+INSERT INTO users (id, name) VALUES ('u2', 'Bo') RETURNING id, name;
+
 -- UPDATE RETURNING: returns the post-update image
 UPDATE users SET role = 'admin' WHERE id = 'u1' RETURNING id, role;
 UPDATE orders SET status = 'shipped' WHERE id = 'o1' RETURNING *;
@@ -249,9 +252,67 @@ UPDATE orders SET status = 'shipped' WHERE id = 'o1' RETURNING *;
 -- DELETE RETURNING: returns the pre-delete image
 DELETE FROM users WHERE id = 'u1' RETURNING id, name;
 DELETE FROM orders WHERE status = 'cancelled' RETURNING *;
+
+-- Expressions: evaluated per returned row against the stored image
+UPDATE orders SET qty = qty + 1 WHERE id = 'o1' RETURNING id, qty * price AS total;
+INSERT INTO events (id, kind) VALUES ('e1', 'click') RETURNING id, nextval('event_seq') AS n;
 ```
 
-`RETURNING *` expands to all columns. Named columns are returned as bare values — arithmetic expressions in `RETURNING` are not supported. Works in both simple-query and extended-query (prepared statement) protocols.
+`RETURNING *` expands to all columns. Every item is a scalar expression over the target collection: a bare column, a column under an alias (`col AS name`), arithmetic, a function call, or a sequence accessor (`nextval`, `currval`, `setval`). The Data Plane returns the base columns an expression reads, and the Control Plane evaluates the expression once per returned row. A sequence accessor advances once per row, in row order. The clause works in both the simple-query and extended-query (prepared statement) protocols, and `Describe` announces an expression under its alias.
+
+### Sequences
+
+A sequence is a named `bigint` counter, independent of any collection.
+
+```sql
+CREATE SEQUENCE event_seq START WITH 1 INCREMENT BY 1 MINVALUE 1 CYCLE CACHE 20;
+DROP SEQUENCE event_seq;
+DROP SEQUENCE IF EXISTS event_seq;
+SHOW SEQUENCES;
+DESCRIBE SEQUENCE event_seq;
+ALTER SEQUENCE event_seq RESTART WITH 100;
+```
+
+`CREATE SEQUENCE [IF NOT EXISTS] <name>` accepts these options, in any order:
+
+| Option | Effect |
+|---|---|
+| `START [WITH] n` | First value `nextval` returns |
+| `INCREMENT [BY] n` | Step between successive values |
+| `MINVALUE n` | Lower bound |
+| `MAXVALUE n` | Upper bound |
+| `CYCLE` / `NO CYCLE` | Wrap to the bound instead of erroring at exhaustion |
+| `CACHE n` | Values a node pre-allocates per round-trip to the registry |
+| `FORMAT 'template'` | Render template applied to the numeric value |
+| `RESET period` | Period after which the counter restarts |
+| `GAP_FREE` | Accepted and stored; allocation is not yet serialized or rolled back per transaction |
+| `SCOPE name` | Named allocation scope |
+
+`DROP SEQUENCE [IF EXISTS] <name>` removes it. `SHOW SEQUENCES` lists every sequence. `DESCRIBE SEQUENCE <name>` reports one sequence's current state. `ALTER SEQUENCE <name> RESTART [WITH n]` and `ALTER SEQUENCE <name> FORMAT '<template>'` change it in place.
+
+Three functions read and move a sequence:
+
+| Function | Effect |
+|---|---|
+| `nextval('s')` | Advances `s` and returns the new value; records it as this session's `currval` |
+| `currval('s')` | The last value THIS session obtained from `nextval('s')` |
+| `setval('s', n)` | Positions `s` so the next `nextval` returns `n + increment` |
+
+`currval` before this session ever called `nextval` on that sequence fails with SQLSTATE `55000` (`object_not_in_prerequisite_state`). Any accessor naming an unknown sequence fails with SQLSTATE `42704` (`undefined_object`).
+
+A sequence accessor is allowed only where the plan controls how many times it runs:
+
+| Context | Evaluates |
+|---|---|
+| FROM-less `SELECT nextval('s')` | Once, at plan time |
+| `VALUES` list | Once, at plan time |
+| Column `DEFAULT nextval('s')` | Once per inserted row |
+| SELECT list of a top-level SELECT over a relation | Once per output row, in output order, after `ORDER BY`/`LIMIT` — on the Control Plane, after the Data Plane returns the rows. `LIMIT n` consumes exactly `n` values |
+| `RETURNING` | Once per returned row |
+
+`WHERE`, `ORDER BY`, `GROUP BY`, `HAVING`, `JOIN ... ON`, `UPDATE ... SET`, an aggregate or window argument, an `INSERT ... SELECT` source, and any nested subquery all refuse a sequence accessor with SQLSTATE `0A000` (`feature_not_supported`) — those clauses run on the per-row evaluator, which holds no sequence state.
+
+A plan whose SELECT list holds a sequence accessor is never cached: each execution must call the accessor again, not replay a cached row. `EXPLAIN` and `Describe` plan the statement without executing it, so neither advances a sequence.
 
 ## DDL
 

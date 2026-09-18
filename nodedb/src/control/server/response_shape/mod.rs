@@ -10,6 +10,7 @@ pub mod redaction;
 pub mod request;
 pub mod returning;
 pub mod schema;
+pub mod stamp;
 pub mod types;
 
 pub use cell::{row_to_wire_json, value_to_wire_json};

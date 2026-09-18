@@ -104,6 +104,10 @@ pub fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
         // PostProcess reshapes a multi-row subquery; its kind is the child's.
         PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => describe_plan(input),
 
+        // SetOp resolves to a ProviderScan of merged rows; route MultiRow so
+        // each row streams as its own pgwire row.
+        PhysicalPlan::Query(QueryOp::SetOp { .. }) => PlanKind::MultiRow,
+
         // An insert with a projection returns real stored rows and must be decoded
         // and redacted, else it silently leaks unredacted rows like `Merge` did.
         PhysicalPlan::Kv(
@@ -183,12 +187,31 @@ pub fn describe_plan(plan: &PhysicalPlan) -> PlanKind {
 
         PhysicalPlan::Document(DocumentOp::Truncate { .. }) => DmlResult("TRUNCATE"),
 
+        // A KV update/delete with a projection returns real stored rows and
+        // must be decoded and redacted, exactly like the KV insert ops above.
+        PhysicalPlan::Kv(
+            KvOp::FieldSet {
+                returning: Some(_), ..
+            }
+            | KvOp::PredicateUpdate {
+                returning: Some(_), ..
+            }
+            | KvOp::Delete {
+                returning: Some(_), ..
+            }
+            | KvOp::PredicateDelete {
+                returning: Some(_), ..
+            },
+        ) => PlanKind::ReturningRows,
         // KV delete/truncate count the keys removed — `Execution` would discard that.
         PhysicalPlan::Kv(KvOp::Delete { .. }) | PhysicalPlan::Kv(KvOp::PredicateDelete { .. }) => {
             DmlResult("DELETE")
         }
         // Reports `{"affected": n}` — `Execution` would discard that count.
-        PhysicalPlan::Kv(KvOp::PredicateUpdate { .. }) => DmlResult("UPDATE"),
+        // `FieldSet` is the keyed UPDATE, so it tags the same way.
+        PhysicalPlan::Kv(KvOp::FieldSet { .. }) | PhysicalPlan::Kv(KvOp::PredicateUpdate { .. }) => {
+            DmlResult("UPDATE")
+        }
         PhysicalPlan::Kv(KvOp::Truncate { .. }) => DmlResult("TRUNCATE"),
 
         PhysicalPlan::Document(DocumentOp::InsertSelect { .. }) => DmlResult("INSERT"),

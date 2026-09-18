@@ -237,10 +237,12 @@ pub enum ReturningColumns {
     Named(Vec<ReturningItem>),
 }
 
-/// Parsed representation of a RETURNING clause carried through the bridge.
+/// The Data-Plane projection of a RETURNING clause carried through the bridge.
 ///
-/// Produced by the Control Plane's `strip_returning()` and injected into
-/// `PointUpdate`, `BulkUpdate`, `PointDelete`, and `BulkDelete` variants
+/// Derived on the Control Plane from the resolved clause: every stored column
+/// the clause names or an expression in it reads, by bare name. The Control
+/// Plane evaluates expressions and applies display names after the rows
+/// return. Injected into the DML plan variants that carry a `returning` slot
 /// before crossing the SPSC bridge.
 #[derive(
     Debug,

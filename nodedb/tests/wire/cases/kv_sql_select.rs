@@ -165,3 +165,86 @@ async fn kv_sql_single_column_projection() {
     assert_eq!(row.len(), 1);
     assert_eq!(row[0], "world");
 }
+
+/// A computed column over a kv scan evaluates per row instead of returning
+/// NULL, matching the document/columnar/timeseries scan handlers.
+#[tokio::test]
+async fn computed_column_over_kv_evaluates_per_row() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION t (key STRING PRIMARY KEY, id INT) WITH (engine='kv')")
+        .await
+        .unwrap();
+    for i in 1..=3i64 {
+        server
+            .exec(&format!("INSERT INTO t (key, id) VALUES ('k{i}', {i})"))
+            .await
+            .unwrap();
+    }
+
+    let rows = server
+        .query_rows("SELECT id, id * 2 AS d FROM t ORDER BY id")
+        .await
+        .expect("computed-column SELECT should succeed");
+
+    assert_eq!(rows.len(), 3);
+    let pairs: Vec<(i64, i64)> = rows
+        .iter()
+        .map(|r| (r[0].parse().unwrap(), r[1].parse().unwrap()))
+        .collect();
+    assert_eq!(pairs, vec![(1, 2), (2, 4), (3, 6)]);
+}
+
+/// A division-by-zero inside a computed column over a kv scan raises
+/// SQLSTATE 22012 instead of materializing NULL into the response.
+#[tokio::test]
+async fn computed_column_division_by_zero_over_kv_errors_22012() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION t (key STRING PRIMARY KEY, id INT) WITH (engine='kv')")
+        .await
+        .unwrap();
+    for i in 1..=3i64 {
+        server
+            .exec(&format!("INSERT INTO t (key, id) VALUES ('k{i}', {i})"))
+            .await
+            .unwrap();
+    }
+
+    server
+        .expect_error("SELECT id, 1 / (id - 2) AS d FROM t", "22012")
+        .await;
+}
+
+/// A function call in the projection list over a kv scan evaluates per row.
+#[tokio::test]
+async fn function_projection_over_kv_evaluates() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION t (key STRING PRIMARY KEY, id INT, v STRING) WITH (engine='kv')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO t (key, id, v) VALUES ('k1', 1, 'a')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO t (key, id, v) VALUES ('k2', 2, 'b')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO t (key, id, v) VALUES ('k3', 3, 'c')")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows("SELECT upper(v) AS u FROM t ORDER BY id")
+        .await
+        .expect("function-projection SELECT should succeed");
+
+    let values: Vec<String> = rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        values,
+        vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
+}

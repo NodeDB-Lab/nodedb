@@ -4,6 +4,7 @@ pub mod aggregate;
 pub mod array_alter_convert;
 pub mod array_convert;
 pub mod array_fn_convert;
+pub mod body;
 pub mod cache_verdict;
 pub mod convert;
 pub mod dml;

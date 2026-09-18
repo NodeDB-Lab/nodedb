@@ -68,6 +68,11 @@ pub fn plan_contains_cluster_partitioned_leaf(plan: &PhysicalPlan) -> bool {
             plan_contains_cluster_partitioned_leaf(input)
         }
 
+        // Recurse through every SetOp branch for the same reason.
+        PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => {
+            inputs.iter().any(plan_contains_cluster_partitioned_leaf)
+        }
+
         // Recurse through lateral outer plans.
         PhysicalPlan::Query(QueryOp::LateralTopK { outer_plan, .. })
         | PhysicalPlan::Query(QueryOp::LateralLoop { outer_plan, .. }) => {
@@ -159,6 +164,9 @@ impl PhysicalPlan {
                         right_bitmap,
                     )
             }
+            // Coordinator-local: the resolver materializes every branch and
+            // merges on the coordinator, so the node itself is never fanned out.
+            PhysicalPlan::Query(QueryOp::SetOp { .. }) => false,
             _ => self.is_sharded_source_leaf(),
         }
     }

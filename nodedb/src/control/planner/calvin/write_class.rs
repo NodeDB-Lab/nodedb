@@ -433,7 +433,10 @@ mod tests {
             key: b"k".to_vec(),
             updates: vec![("field".to_owned(), b"v".to_vec())],
             surrogate: Surrogate::new(1),
+            if_present: false,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: Vec::new(),
         });
         assert!(is_write_plan(&plan), "KvOp::FieldSet must be a write");
     }

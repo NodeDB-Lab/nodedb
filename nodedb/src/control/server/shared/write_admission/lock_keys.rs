@@ -308,7 +308,10 @@ mod tests {
                 key: b"k1".to_vec(),
                 updates: vec![],
                 surrogate: Surrogate::new(1),
+                if_present: false,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             LockKey::Kv {
                 collection: Arc::from("counters"),
@@ -339,6 +342,8 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 keys: vec![b"k1".to_vec(), b"k2".to_vec()],
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             None
         );

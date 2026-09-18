@@ -25,7 +25,7 @@ use nodedb_types::error::NodeDbError;
 use nodedb_types::{NdbDateTime, Value};
 
 use crate::control::server::pgwire::numeric_narrow::{checked_narrow, checked_narrow_f32};
-use crate::control::server::pgwire::types::error_map::{numeric_code_to_sqlstate, sqlstate_error};
+use crate::control::server::pgwire::types::error_map::shape_error_to_pg;
 use crate::control::server::response_shape::cell::{cell_text, instant_of, shape_mismatch};
 use crate::control::server::response_shape::types::DdlColType;
 
@@ -169,7 +169,7 @@ fn float_of(column: &str, v: &Value) -> PgWireResult<f64> {
 /// Map a cell error to the pgwire error the client reads, with the SQLSTATE
 /// its numeric code maps to.
 fn to_pg_error(e: NodeDbError) -> PgWireError {
-    sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message())
+    shape_error_to_pg(&e)
 }
 
 /// An instant as pgwire encodes it under a `timestamp`/`timestamptz`

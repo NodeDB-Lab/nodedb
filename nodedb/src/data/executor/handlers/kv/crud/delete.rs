@@ -4,8 +4,10 @@
 
 use tracing::debug;
 
+use super::types::KvDeleteParams;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::returning_rows::KvStoredRow;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
@@ -13,36 +15,51 @@ use crate::engine::kv::current_ms;
 impl CoreLoop {
     /// `rls_write_check` is the compiled RLS write policy. The row a delete
     /// removes is the image the policy decides, and a delete otherwise reads
-    /// nothing at all — so a non-empty check is what makes the pre-image be
-    /// read in the first place, and one rejected key fails the whole statement
-    /// before any key is removed.
+    /// nothing at all — so a non-empty check, or a `RETURNING` clause, is what
+    /// makes the pre-image be read in the first place, and one rejected key
+    /// fails the whole statement before any key is removed.
     pub(in crate::data::executor) fn execute_kv_delete(
         &mut self,
         task: &ExecutionTask,
-        did: u64,
-        tid: u64,
-        collection: &str,
-        keys: &[Vec<u8>],
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        params: KvDeleteParams<'_>,
     ) -> Response {
+        let KvDeleteParams {
+            did,
+            tid,
+            collection,
+            keys,
+            rls_write_check,
+            returning,
+            rls_filters,
+        } = params;
         debug!(core = self.core_id, %collection, count = keys.len(), "kv delete");
         let now_ms = current_ms();
 
-        if !matches!(
+        let gated = !matches!(
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
-        ) {
+        );
+        // Pre-images of the keys that exist, in `keys` order: the rows the
+        // write gate decides and the rows `RETURNING` projects. An absent key
+        // removes no row, so it has no image and counts as not-deleted.
+        let mut pre_images: Vec<(&[u8], Vec<u8>)> = Vec::with_capacity(keys.len());
+        if gated || returning.is_some() {
             for key in keys {
-                // An absent key removes no row, so there is no image to decide;
-                // the delete simply counts it as not-deleted.
                 let Some(body) = self.kv_engine.get(did, tid, collection, key, now_ms) else {
                     continue;
                 };
-                if let Err(e) =
-                    super::super::rls::admit_kv_row(rls_write_check, &body, key, tid, collection)
+                if gated
+                    && let Err(e) = super::super::rls::admit_kv_row(
+                        rls_write_check,
+                        &body,
+                        key,
+                        tid,
+                        collection,
+                    )
                 {
                     return self.response_error(task, e);
                 }
+                pre_images.push((key.as_slice(), body));
             }
         }
 
@@ -64,6 +81,18 @@ impl CoreLoop {
                     None,
                 );
             }
+        }
+
+        if let Some(spec) = returning {
+            // The pre-images ARE the removed rows: the core loop runs ops
+            // serially, so nothing slips between the read and the delete. A
+            // delete that matched no key ships an EMPTY row set, never a
+            // count, so the RETURNING renderer decodes the shape it asked for.
+            let rows: Vec<KvStoredRow<'_>> = pre_images
+                .iter()
+                .map(|(key, body)| (*key, body.as_slice()))
+                .collect();
+            return self.kv_stored_returning_response(task, spec, rls_filters, &rows);
         }
 
         match response_codec::encode_count("deleted", count) {

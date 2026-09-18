@@ -27,12 +27,17 @@ pub(in crate::planner::select) struct PlannedSelect {
 /// `tail` carries the enclosing query's ORDER BY / LIMIT so the base scan can
 /// be built with them in place — see [`QueryTail`] for why the engine rules
 /// need them before `plan_scan` runs.
+///
+/// `statement_output` says whether this SELECT produces the statement's
+/// result rows. Only such a SELECT list may hold a Control-Plane-computed
+/// item; the flag lands on the scope, and every clause reads it from there.
 pub(super) fn plan_select(
     select: &Select,
     catalog: &dyn SqlCatalog,
     functions: &FunctionRegistry,
     temporal: TemporalScope,
     tail: &QueryTail<'_>,
+    statement_output: bool,
 ) -> Result<PlannedSelect> {
     // 0. Intercept array table-valued functions before catalog resolution
     //    so a name like `ARRAY_SLICE` is not looked up as a collection.
@@ -56,12 +61,19 @@ pub(super) fn plan_select(
     // dropped non-LATERAL derived factors silently, the scope ended
     // up empty, and the planner errored with "multi-table FROM
     // without JOIN".
-    if let Some(planned) = try_plan_derived_from(select, catalog, functions, temporal, tail)? {
+    if let Some(planned) =
+        try_plan_derived_from(select, catalog, functions, temporal, tail, statement_output)?
+    {
         return Ok(planned);
     }
 
     // 1. Resolve FROM tables.
     let scope = TableScope::resolve_from(catalog, functions, temporal, &select.from)?;
+    let scope = if statement_output {
+        scope.as_statement_output()
+    } else {
+        scope
+    };
 
     // 2. Handle constant queries (no FROM clause): SELECT 1, SELECT 'hello', etc.
     if select.from.is_empty() {
@@ -367,7 +379,10 @@ fn has_column_comparison(expr: &SqlExpr) -> bool {
 }
 
 /// Check if a SELECT has aggregation (GROUP BY or aggregate functions in projection).
-fn has_aggregation(select: &Select, functions: &FunctionRegistry) -> bool {
+pub(in crate::planner::select) fn has_aggregation(
+    select: &Select,
+    functions: &FunctionRegistry,
+) -> bool {
     let group_by_non_empty = match &select.group_by {
         ast::GroupByExpr::All(_) => true,
         ast::GroupByExpr::Expressions(exprs, _) => !exprs.is_empty(),

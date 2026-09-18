@@ -46,6 +46,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                     collection: qualified_collection.clone(),
                     filters: filter_bytes,
                     rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                    // Attached by `inject_returning_spec` after plan conversion.
+                    returning: None,
+                    rls_filters: Vec::new(),
                 }),
                 post_set_op: PostSetOp::None,
                 txn_id: None,
@@ -62,6 +65,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 // Filled by the RLS injection pass, which runs after plan
                 // conversion.
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                // Attached by `inject_returning_spec` after plan conversion.
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,

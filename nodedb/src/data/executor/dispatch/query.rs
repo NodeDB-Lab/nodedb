@@ -67,10 +67,21 @@ impl CoreLoop {
                 },
             ),
 
+            QueryOp::SetOp { .. } => self.response_error(
+                task,
+                crate::bridge::envelope::ErrorCode::Internal {
+                    detail: "SetOp must be resolved by the coordinator (materialized and \
+                             merged into a ProviderScan) before dispatch"
+                        .to_string(),
+                },
+            ),
+
             QueryOp::ProviderScan {
                 rows,
                 filters,
                 projection,
+                computed_columns,
+                window_functions,
                 sort_keys,
                 limit,
                 offset,
@@ -82,6 +93,8 @@ impl CoreLoop {
                     rows_bytes: rows,
                     filters_bytes: filters,
                     projection,
+                    computed_columns_bytes: computed_columns,
+                    window_functions_bytes: window_functions,
                     sort_keys,
                     limit: *limit,
                     offset: *offset,

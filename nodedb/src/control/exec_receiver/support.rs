@@ -55,6 +55,9 @@ pub(super) fn plan_contains_exchange(plan: &PhysicalPlan) -> bool {
             // resolution, still carries an `Exchange{Gather}` — recurse so an
             // unresolved PostProcess is correctly flagged as Exchange-bearing.
             QueryOp::PostProcess { input, .. } => plan_contains_exchange(input),
+            // SetOp inputs are unresolved bodies; any of them can carry a
+            // Gather.
+            QueryOp::SetOp { inputs, .. } => inputs.iter().any(plan_contains_exchange),
             // Aggregate may carry a sub-plan input (catalog `ProviderScan`),
             // which could in principle nest an Exchange — recurse when present.
             QueryOp::Aggregate { input, .. } => {

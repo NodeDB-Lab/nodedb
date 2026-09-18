@@ -284,7 +284,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | QueryOp::RecursiveValue { .. }
             | QueryOp::LateralTopK { .. }
             | QueryOp::LateralLoop { .. }
-            | QueryOp::PostProcess { .. },
+            | QueryOp::PostProcess { .. }
+            | QueryOp::SetOp { .. },
         ) => false,
 
         // ---- Meta: control / maintenance ops — internal orchestration, never a client `task.plan`.
@@ -1166,23 +1167,31 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 keys: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::PredicateUpdate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 updates: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::PredicateDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::Scan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 cursor: Vec::new(),
                 count: 0,
                 filters: Vec::new(),
+                projection: Vec::new(),
+                computed_columns: Vec::new(),
                 match_pattern: None,
                 sort_keys: Vec::new(),
                 surrogate_ceiling: None,
@@ -1226,7 +1235,10 @@ mod tests {
                 key: Vec::new(),
                 updates: Vec::new(),
                 surrogate: Surrogate::ZERO,
+                if_present: false,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
             }),
             PhysicalPlan::Kv(KvOp::Incr {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1520,6 +1532,8 @@ mod tests {
                 rows: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
+                computed_columns: Vec::new(),
+                window_functions: Vec::new(),
                 sort_keys: Vec::new(),
                 limit: None,
                 offset: 0,

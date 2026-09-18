@@ -537,20 +537,55 @@ async fn unicode_identifier_before_returning_preserves_connection() {
 // Arithmetic expression in RETURNING — error path
 // ---------------------------------------------------------------------------
 
-/// A RETURNING clause containing an arithmetic expression must be rejected
-/// with a typed error. NodeDB only supports column references and aliases
-/// in RETURNING, not computed expressions.
+/// An arithmetic `RETURNING` expression evaluates on the Control Plane
+/// against the stored post-image, once per returned row.
 #[tokio::test]
-async fn returning_arithmetic_expression_rejected() {
+async fn returning_arithmetic_expression_evaluates() {
     let server = TestServer::start().await;
     seed_docs(&server).await;
 
-    server
-        .expect_error(
-            "UPDATE items SET score = 1 WHERE id = 'a' RETURNING score + 1",
-            "not supported",
-        )
-        .await;
+    let rows = server
+        .query_rows("UPDATE items SET score = 1 WHERE id = 'a' RETURNING score + 1 AS next_score")
+        .await
+        .expect("an arithmetic RETURNING expression must evaluate");
+    assert_eq!(rows, vec![vec!["2".to_string()]]);
+}
+
+/// A function call in `RETURNING` evaluates against the returned row.
+#[tokio::test]
+async fn returning_function_expression_evaluates() {
+    let server = TestServer::start().await;
+    seed_docs(&server).await;
+
+    let rows = server
+        .query_rows("UPDATE items SET score = 5 WHERE id = 'b' RETURNING id, upper(name) AS u")
+        .await
+        .expect("a function RETURNING expression must evaluate");
+    assert_eq!(rows, vec![vec!["b".to_string(), "BETA".to_string()]]);
+}
+
+/// The base columns an expression reads never leak into the result: the
+/// client sees exactly the announced list.
+#[tokio::test]
+async fn returning_expression_keeps_only_requested_columns() {
+    let server = TestServer::start().await;
+    seed_docs(&server).await;
+
+    let msgs = server
+        .client
+        .simple_query("UPDATE items SET score = 7 WHERE id = 'c' RETURNING score * 2 AS d")
+        .await
+        .expect("an expression-only RETURNING must succeed");
+    let row = msgs
+        .iter()
+        .find_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .expect("one returned row");
+    assert_eq!(row.len(), 1, "only the requested column is shipped");
+    assert_eq!(row.columns()[0].name(), "d");
+    assert_eq!(row.get(0), Some("14"));
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ use crate::config::auth::AuthMode;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::response_shape::types::DdlColType;
 use crate::control::server::shared::authorization::{authorize_database, authorize_task_set};
+use crate::control::server::shared::returning;
 use crate::control::server::shared::session::{SessionId, SessionStore};
 use crate::control::state::SharedState;
 
@@ -193,11 +194,10 @@ impl NodeDbQueryParser {
         database_id: crate::types::DatabaseId,
         emitter: &ArcAuditEmitter,
     ) -> PgWireResult<bool> {
-        let (sql_without_returning, _) =
-            match crate::control::server::shared::returning::strip_returning(sql) {
-                Ok(parts) => parts,
-                Err(_) => return Ok(false),
-            };
+        let (sql_without_returning, _) = match returning::strip_returning(sql) {
+            Ok(parts) => parts,
+            Err(_) => return Ok(false),
+        };
         let sql_for_planning = substitute_placeholders_with_null(&sql_without_returning);
         let query_ctx =
             crate::control::planner::context::QueryContext::for_state_with_lease(&self.state);
@@ -271,6 +271,7 @@ impl NodeDbQueryParser {
         client_types: &[Option<Type>],
         catalog: &crate::control::planner::catalog_adapter::OriginCatalog,
         database_id: crate::types::DatabaseId,
+        tenant_id: crate::types::TenantId,
     ) -> (Vec<Option<Type>>, Vec<FieldInfo>) {
         // Placeholder *counting* runs unconditionally so an unplannable SQL
         // string (e.g. `WHERE id = $1` where the planner needs bound params
@@ -280,13 +281,12 @@ impl NodeDbQueryParser {
         // pass below and survives that pass failing.
         let param_types = Self::param_types_with_inference(sql, client_types, catalog);
 
-        // Strip RETURNING from DML before passing to DataFusion. Retain the
-        // parsed spec so we can build result fields for Describe.
-        let (sql_stripped, returning_spec) =
-            match crate::control::server::shared::returning::strip_returning(sql) {
-                Ok(pair) => pair,
-                Err(_) => return (param_types, Vec::new()),
-            };
+        // Strip RETURNING from DML before planning. The item text is kept so
+        // the result fields for Describe are built from the resolved clause.
+        let (sql_stripped, returning_items) = match returning::strip_returning(sql) {
+            Ok(pair) => pair,
+            Err(_) => return (param_types, Vec::new()),
+        };
 
         // Parse and plan to get collection info for result schema.
         //
@@ -302,10 +302,24 @@ impl NodeDbQueryParser {
             Err(_) => return (param_types, Vec::new()),
         };
 
+        // The RETURNING clause resolves against the planned target exactly as
+        // it does at execute time, so Describe announces the same columns —
+        // an expression under its alias, a column under its name. A clause
+        // that fails to resolve yields no fields; Execute reports the error.
+        let returning = match returning::resolve_returning_for_plans(
+            &plans,
+            returning_items.as_deref(),
+            catalog,
+            tenant_id,
+        ) {
+            Ok(clause) => clause,
+            Err(_) => return (param_types, Vec::new()),
+        };
+
         // Infer result fields from the planner's authoritative output
         // schema — the same derivation used to shape response rows, so
         // Describe's RowDescription always matches what Execute returns.
-        // A write plan announces what its `RETURNING` spec projects, through
+        // A write plan announces what its `RETURNING` clause projects, through
         // that same derivation, so Describe and the simple-query path can
         // never disagree on a column's type. Empty `plans` (already handled
         // above) or a plan variant with no resolvable projection yields an
@@ -316,7 +330,9 @@ impl NodeDbQueryParser {
                 &plans,
                 catalog,
                 database_id,
-                returning_spec.as_ref(),
+                returning
+                    .as_ref()
+                    .map(|clause| clause.projection.as_slice()),
             );
         let result_fields: Vec<FieldInfo> = output_schema
             .columns
@@ -384,7 +400,7 @@ impl QueryParser for NodeDbQueryParser {
         // whole could be planned.
         let catalog = self.build_catalog(identity.tenant_id.as_u64(), database_id);
         let (param_types, result_fields) = if can_infer_schema {
-            self.try_infer_types(sql, types, &catalog, database_id)
+            self.try_infer_types(sql, types, &catalog, database_id, identity.tenant_id)
         } else {
             (
                 Self::param_types_with_inference(sql, types, &catalog),

@@ -2,50 +2,79 @@
 
 //! Projection-name, computed-column, and window-function serialization helpers.
 
+use nodedb_sql::types::plan::referenced_columns;
 use nodedb_sql::types::{Projection, SqlExpr, WindowSpec};
 
 use nodedb_physical::physical_plan::JoinProjection;
 
 use super::super::expr::{sql_expr_to_bridge_expr, sql_expr_to_bridge_expr_qualified};
 
+/// The row keys a projection keeps. A Control-Plane-computed entry keeps the
+/// base columns its expression reads: the Control Plane evaluates it after
+/// the rows return, then drops those columns.
 pub(in crate::control::planner::sql_plan_convert) fn extract_projection_names(
     proj: &[Projection],
     window_functions: &[WindowSpec],
 ) -> Vec<String> {
-    proj.iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(name.clone()),
+    let mut names = Vec::with_capacity(proj.len());
+    for p in proj {
+        match p {
+            Projection::Column(name) => names.push(name.clone()),
             Projection::Computed { alias, .. }
                 if window_functions.iter().any(|spec| spec.alias == *alias) =>
             {
-                Some(alias.clone())
+                names.push(alias.clone());
             }
-            _ => None,
-        })
-        .collect()
+            Projection::CpComputed { expr, .. } => {
+                for column in referenced_columns(expr) {
+                    if !names.contains(&column) {
+                        names.push(column);
+                    }
+                }
+            }
+            Projection::Computed { .. } | Projection::Star | Projection::QualifiedStar(_) => {}
+        }
+    }
+    names
+}
+
+/// A pass-through join projection for one row key.
+fn pass_through(name: &str) -> JoinProjection {
+    JoinProjection {
+        source: name.to_string(),
+        output: name.to_string(),
+    }
 }
 
 pub(in crate::control::planner::sql_plan_convert) fn extract_join_projection_specs(
     proj: &[Projection],
 ) -> Vec<JoinProjection> {
-    proj.iter()
-        .filter_map(|p| match p {
-            Projection::Column(name) => Some(JoinProjection {
-                source: name.clone(),
-                output: name.clone(),
-            }),
+    let mut specs = Vec::with_capacity(proj.len());
+    for p in proj {
+        match p {
+            Projection::Column(name) => specs.push(pass_through(name)),
             Projection::Computed {
                 expr: SqlExpr::Column { table, name },
                 alias,
-            } => Some(JoinProjection {
+            } => specs.push(JoinProjection {
                 source: table
                     .as_deref()
                     .map_or_else(|| name.clone(), |table| format!("{table}.{name}")),
                 output: alias.clone(),
             }),
-            _ => None,
-        })
-        .collect()
+            // The Control Plane evaluates the entry over the joined row, so
+            // every base column it reads passes through under its own name.
+            Projection::CpComputed { expr, .. } => {
+                for column in referenced_columns(expr) {
+                    if !specs.iter().any(|spec| spec.source == column) {
+                        specs.push(pass_through(&column));
+                    }
+                }
+            }
+            Projection::Computed { .. } | Projection::Star | Projection::QualifiedStar(_) => {}
+        }
+    }
+    specs
 }
 
 pub(in crate::control::planner::sql_plan_convert) fn serialize_join_computed_projection(
@@ -70,25 +99,39 @@ pub(in crate::control::planner::sql_plan_convert) fn serialize_join_computed_pro
         });
     }
 
-    let computed = proj
-        .iter()
-        .map(|item| match item {
-            Projection::Column(name) => Some(crate::bridge::expr_eval::ComputedColumn {
+    let mut computed = Vec::with_capacity(proj.len());
+    for item in proj {
+        match item {
+            Projection::Column(name) => computed.push(crate::bridge::expr_eval::ComputedColumn {
                 alias: name.clone(),
                 expr: crate::bridge::expr_eval::SqlExpr::Column(name.clone()),
             }),
             Projection::Computed { expr, alias } => {
-                Some(crate::bridge::expr_eval::ComputedColumn {
+                computed.push(crate::bridge::expr_eval::ComputedColumn {
                     alias: alias.clone(),
                     expr: sql_expr_to_bridge_expr_qualified(expr),
-                })
+                });
             }
-            Projection::Star | Projection::QualifiedStar(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "wildcard join projection reached computed-expression lowering".into(),
-        })?;
+            // Nothing is computed on the Data Plane for a Control-Plane
+            // entry; its base columns pass through under their own names.
+            Projection::CpComputed { expr, .. } => {
+                for column in referenced_columns(expr) {
+                    if computed.iter().any(|c| c.alias == column) {
+                        continue;
+                    }
+                    computed.push(crate::bridge::expr_eval::ComputedColumn {
+                        alias: column.clone(),
+                        expr: crate::bridge::expr_eval::SqlExpr::Column(column),
+                    });
+                }
+            }
+            Projection::Star | Projection::QualifiedStar(_) => {
+                return Err(crate::Error::BadRequest {
+                    detail: "wildcard join projection reached computed-expression lowering".into(),
+                });
+            }
+        }
+    }
     encode_computed_columns(computed, "join computed projection")
 }
 
@@ -125,10 +168,28 @@ fn encode_computed_columns(
     })
 }
 
+/// Pick the bridge-expression converter for the row shape the expression runs
+/// against. A join / lateral body emits merged documents keyed by `t.col`, so
+/// its column references keep their table qualifier.
+fn bridge_expr_converter(qualified: bool) -> fn(&SqlExpr) -> crate::bridge::expr_eval::SqlExpr {
+    if qualified {
+        sql_expr_to_bridge_expr_qualified
+    } else {
+        sql_expr_to_bridge_expr
+    }
+}
+
+/// Serialize the computed (non-window) projection entries.
+///
+/// `qualified` selects the column-key convention of the rows the columns are
+/// evaluated over: `true` for a join / lateral merged document, `false` for a
+/// single-collection row.
 pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
     proj: &[Projection],
     window_functions: &[WindowSpec],
+    qualified: bool,
 ) -> crate::Result<Vec<u8>> {
+    let convert = bridge_expr_converter(qualified);
     let computed: Vec<crate::bridge::expr_eval::ComputedColumn> = proj
         .iter()
         .filter_map(|p| match p {
@@ -137,10 +198,16 @@ pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
             {
                 Some(crate::bridge::expr_eval::ComputedColumn {
                     alias: alias.clone(),
-                    expr: sql_expr_to_bridge_expr(expr),
+                    expr: convert(expr),
                 })
             }
-            _ => None,
+            // A Control-Plane-computed entry never reaches the Data Plane
+            // evaluator; a window alias is served by its window spec.
+            Projection::Computed { .. }
+            | Projection::CpComputed { .. }
+            | Projection::Column(_)
+            | Projection::Star
+            | Projection::QualifiedStar(_) => None,
         })
         .collect();
     if computed.is_empty() {
@@ -151,23 +218,27 @@ pub(in crate::control::planner::sql_plan_convert) fn extract_computed_columns(
     })
 }
 
+/// Serialize window specs. `qualified` follows the same convention as
+/// [`extract_computed_columns`].
 pub(in crate::control::planner::sql_plan_convert) fn serialize_window_functions(
-    specs: &[nodedb_sql::types::WindowSpec],
+    specs: &[WindowSpec],
+    qualified: bool,
 ) -> crate::Result<Vec<u8>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
+    let convert = bridge_expr_converter(qualified);
     let bridge_specs: Vec<crate::bridge::window_func::WindowFuncSpec> = specs
         .iter()
         .map(|s| crate::bridge::window_func::WindowFuncSpec {
             alias: s.alias.clone(),
             func_name: s.function.clone(),
-            args: s.args.iter().map(sql_expr_to_bridge_expr).collect(),
-            partition_by: s.partition_by.iter().map(sql_expr_to_bridge_expr).collect(),
+            args: s.args.iter().map(convert).collect(),
+            partition_by: s.partition_by.iter().map(convert).collect(),
             order_by: s
                 .order_by
                 .iter()
-                .map(|k| (sql_expr_to_bridge_expr(&k.expr), k.ascending))
+                .map(|k| (convert(&k.expr), k.ascending))
                 .collect(),
             frame: s.frame.clone(),
         })

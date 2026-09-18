@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The `convert_aggregate` entry point: join-sourced, catalog (input-sourced),
-//! timeseries, and standard single-collection aggregate lowering.
+//! The `convert_aggregate` entry point. Four lowering shapes:
+//!
+//! - join: `HashJoin` with post-join grouping
+//! - input-sourced body (derived table, constant result, union): the body is
+//!   materialized and the aggregate runs over its rows on the coordinator
+//!   (`input_sourced.rs`)
+//! - catalog: `ProviderScan` input, coordinator-local
+//! - single collection: per-shard `Aggregate` (timeseries routes through
+//!   `TimeseriesOp::Scan`)
 
 use nodedb_sql::types::{EngineType, Filter, SortKey, SqlExpr, SqlPlan};
 
@@ -14,8 +21,9 @@ use super::super::convert::{ConvertContext, db_qualified};
 use super::super::expr::convert_sort_keys;
 use super::super::filter::serialize_filters;
 use super::spec::{
-    agg_expr_to_pair, agg_expr_to_spec, extract_collection_name, extract_scan_alias,
-    group_by_to_specs, group_by_to_strings, inline_join_side, join_side_collection,
+    InputSourcedTaskParams, agg_expr_to_pair, agg_expr_to_spec, build_input_sourced_aggregate_task,
+    extract_collection_name, extract_scan_alias, group_by_to_specs, group_by_to_strings,
+    inline_join_side, join_side_collection,
 };
 use nodedb_sql::types::AggregateExpr;
 
@@ -123,8 +131,23 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
         }]);
     }
 
-    // Standard aggregate on a single collection.
-    let raw_collection = extract_collection_name(input);
+    // A body with no routing collection (derived table, constant result,
+    // union) is materialized and aggregated on the coordinator.
+    let Some(raw_collection) = extract_collection_name(input) else {
+        return super::input_sourced::convert_input_sourced_aggregate(
+            super::input_sourced::InputSourcedAggregateParams {
+                input,
+                group_by,
+                aggregates,
+                having,
+                limit,
+                grouping_sets,
+                sort_keys: bridge_sort_keys,
+                tenant_id,
+                ctx,
+            },
+        );
+    };
     let (filters_ref, engine) = match input {
         SqlPlan::Scan {
             filters, engine, ..
@@ -157,45 +180,33 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
                 ),
             });
         }
-        let group_specs = group_by_to_specs(group_by);
-        let agg_specs: Vec<AggregateSpec> = aggregates.iter().map(agg_expr_to_spec).collect();
         let provider_scan = PhysicalPlan::Query(QueryOp::ProviderScan {
             provider: Some(raw_collection.clone()),
             rows: Vec::new(),
             // WHERE predicates on the catalog are applied by the ProviderScan
             // before the rows reach the aggregate.
-            filters: filter_bytes.clone(),
+            filters: filter_bytes,
             projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
             sort_keys: Vec::new(),
             limit: None,
             offset: 0,
             distinct: false,
         });
-        return Ok(vec![PhysicalTask {
-            tenant_id,
-            // Coordinator-local: empty collection keeps the task on the
-            // coordinator vshard (catalog rows are not per-shard).
-            vshard_id: VShardId::from_collection_in_database(ctx.database_id, ""),
-            database_id: ctx.database_id,
-            plan: PhysicalPlan::Query(QueryOp::Aggregate {
-                collection: nodedb_types::QualifiedCollection::from_stored(raw_collection),
-                input: Some(Box::new(provider_scan)),
-                group_by: group_specs,
-                aggregates: agg_specs,
-                // Filters live on the ProviderScan input; the aggregate node
-                // applies none of its own over the already-filtered rows.
-                filters: Vec::new(),
-                having: having_bytes,
+        return Ok(vec![build_input_sourced_aggregate_task(
+            InputSourcedTaskParams {
+                tenant_id,
+                ctx,
+                raw_collection,
+                child: provider_scan,
+                group_by,
+                aggregates,
+                having_bytes,
                 limit,
-                sub_group_by: Vec::new(),
-                sub_aggregates: Vec::new(),
-                // Guarded above: catalog aggregates never carry grouping sets.
-                grouping_sets: Vec::new(),
                 sort_keys: bridge_sort_keys,
-            }),
-            post_set_op: PostSetOp::None,
-            txn_id: None,
-        }]);
+            },
+        )]);
     }
 
     let collection = db_qualified(ctx.database_id, &raw_collection);
@@ -217,7 +228,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
                 collection: qualified_collection,
                 // Derived in the Data Plane against the declared TIME_KEY.
                 time_range: UNBOUNDED_TIME_RANGE,
-                sort_keys: bridge_sort_keys.clone(),
+                sort_keys: bridge_sort_keys,
                 projection: Vec::new(),
                 limit,
                 filters: filter_bytes,
@@ -399,8 +410,8 @@ mod tests {
             vec!["name".to_string(), "rn".to_string()]
         );
 
-        let computed_bytes =
-            extract_computed_columns(&projection, &window_functions).expect("serialize computed");
+        let computed_bytes = extract_computed_columns(&projection, &window_functions, false)
+            .expect("serialize computed");
         let computed: Vec<crate::bridge::expr_eval::ComputedColumn> =
             zerompk::from_msgpack(&computed_bytes).expect("deserialize computed");
 

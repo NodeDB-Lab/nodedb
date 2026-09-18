@@ -15,6 +15,7 @@ use crate::control::server::exchange::gather::{
 };
 
 use super::capture::DistributedReadCapture;
+use super::exchange::provider_scan_of_rows;
 
 /// Resolve a `HashJoin` input slot.
 ///
@@ -55,16 +56,8 @@ pub(super) async fn resolve_join_input(
             // Response as a msgpack array — so the two shapes match.
             let outcome =
                 gather_all_cores(state, tenant_id, database_id, *child, trace_id, txn_id).await?;
-            let provider_scan = PhysicalPlan::Query(QueryOp::ProviderScan {
-                provider: None,
-                rows: flatten_to_relational_rows(&outcome.merged_array),
-                filters: Vec::new(),
-                projection: Vec::new(),
-                sort_keys: Vec::new(),
-                limit: None,
-                offset: 0,
-                distinct: false,
-            });
+            let provider_scan =
+                provider_scan_of_rows(flatten_to_relational_rows(&outcome.merged_array));
             Ok(Some(Box::new(provider_scan)))
         }
 
@@ -129,16 +122,7 @@ pub(super) async fn resolve_join_input(
             } else {
                 outcome.merged_array
             };
-            let provider_scan = PhysicalPlan::Query(QueryOp::ProviderScan {
-                provider: None,
-                rows: flatten_to_relational_rows(&merged),
-                filters: Vec::new(),
-                projection: Vec::new(),
-                sort_keys: Vec::new(),
-                limit: None,
-                offset: 0,
-                distinct: false,
-            });
+            let provider_scan = provider_scan_of_rows(flatten_to_relational_rows(&merged));
             Ok(Some(Box::new(provider_scan)))
         }
 
@@ -231,14 +215,7 @@ pub(super) async fn gather_join_build_side(
         });
     }
 
-    Ok(Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
-        provider: None,
-        rows: flatten_to_relational_rows(&outcome.merged_array),
-        filters: Vec::new(),
-        projection: Vec::new(),
-        sort_keys: Vec::new(),
-        limit: None,
-        offset: 0,
-        distinct: false,
-    }))))
+    Ok(Some(Box::new(provider_scan_of_rows(
+        flatten_to_relational_rows(&outcome.merged_array),
+    ))))
 }

@@ -12,6 +12,10 @@
 //! purely internal executor↔shaper handshake. The alias only ever reaches the
 //! shaper's `display_name`, derived separately from `SqlPlan::Aggregate`'s
 //! `group_by_aliases`.
+//!
+//! The rule itself lives in `nodedb_sql::planner::agg_naming`, because the
+//! planner projects these names when it wraps an aggregate in a
+//! Control-Plane-computed projection. Both sides call the same function.
 
 use nodedb_sql::types_expr::SqlExpr;
 
@@ -21,7 +25,7 @@ use nodedb_sql::types_expr::SqlExpr;
 pub(in crate::control::planner::sql_plan_convert) fn computed_group_key_name(
     index: usize,
 ) -> String {
-    format!("group_{index}")
+    nodedb_sql::planner::agg_naming::computed_group_key_name(index)
 }
 
 /// The output/lookup name for one GROUP BY key. A bare column keeps its own
@@ -31,8 +35,5 @@ pub(in crate::control::planner::sql_plan_convert) fn group_key_output_name(
     expr: &SqlExpr,
     index: usize,
 ) -> String {
-    match expr {
-        SqlExpr::Column { name, .. } => name.clone(),
-        _ => computed_group_key_name(index),
-    }
+    nodedb_sql::planner::agg_naming::group_key_row_name(expr, index)
 }

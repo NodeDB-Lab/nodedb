@@ -24,6 +24,8 @@ pub(crate) fn build_scan(
         cursor,
         count,
         filters,
+        projection: Vec::new(),
+        computed_columns: Vec::new(),
         match_pattern,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
@@ -183,7 +185,12 @@ pub(crate) fn build_field_set(
         key,
         updates,
         surrogate,
+        // Native `field_set` is the RESP HSET family: an absent key is created.
+        if_present: false,
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        // The native field-set carries no RETURNING clause.
+        returning: None,
+        rls_filters: Vec::new(),
     }))
 }
 
