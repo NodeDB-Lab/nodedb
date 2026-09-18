@@ -3,6 +3,7 @@
 //! Hash field RESP command handlers: HGET, HMGET, HSET, FLUSHDB.
 
 use crate::bridge::envelope::{PhysicalPlan, Status};
+use crate::control::server::shared::response_payload::payload_or_typed_error;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::KvOp;
 use nodedb_types::QualifiedCollection;
@@ -155,12 +156,16 @@ pub(super) async fn handle_hset(
         rls_filters: Vec::new(),
     });
 
-    match dispatch_kv_write(state, session, plan).await {
-        Ok(resp) if resp.status == Status::Ok => {
-            let added = payload_field_i64(&resp.payload, "fields_added").unwrap_or(0);
+    // A rejected write surfaces as the error it is, never as `0` fields
+    // added.
+    match dispatch_kv_write(state, session, plan)
+        .await
+        .and_then(payload_or_typed_error)
+    {
+        Ok(payload) => {
+            let added = payload_field_i64(&payload, "fields_added").unwrap_or(0);
             RespValue::integer(added)
         }
-        Ok(_) => RespValue::integer(0),
         Err(e) => RespValue::from_error(&e),
     }
 }
