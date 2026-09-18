@@ -7,7 +7,9 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::sequence::SessionSequenceAccess;
-use crate::control::server::pgwire::types::error_to_sqlstate;
+use crate::control::server::pgwire::types::{
+    error_to_sqlstate, numeric_code_to_sqlstate, shaping_error_message,
+};
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
@@ -443,7 +445,12 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
                 redaction: Some(redaction.ctx(&state.redaction)),
                 sequences: Some(&sequences),
             })
-            .map_err(|error| ddl_err("XX000", error.message().to_string()))?;
+            .map_err(|error| {
+                ddl_err(
+                    numeric_code_to_sqlstate(error.code()),
+                    shaping_error_message(error.code(), error.message()),
+                )
+            })?;
             // Folded rather than pushed: a statement is ONE result set, however
             // many tasks it planned to.
             if let ShapeOutcome::Rows(shaped) = outcome {
