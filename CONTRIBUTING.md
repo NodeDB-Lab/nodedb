@@ -87,7 +87,8 @@ cd nodedb
 cargo build --release
 
 # Run the full test suite
-cargo nextest run --all-features
+# Debug-profile test binaries overflow the 2 MiB thread default; 32 MiB is the value CI sets.
+RUST_MIN_STACK=33554432 cargo nextest run --all-features
 ```
 
 **Why nextest, not `cargo test`?** The `.config/nextest.toml` defines a `cluster` test group that serializes 3-node integration tests and retries known-flaky ones. `cargo test` ignores all of that and will hang or fail on the cluster suite.

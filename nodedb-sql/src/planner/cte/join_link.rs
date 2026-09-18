@@ -7,9 +7,11 @@
 use sqlparser::ast::{self, SetExpr};
 
 use crate::error::{Result, SqlError};
+use crate::functions::registry::FunctionRegistry;
 use crate::parser::normalize::{normalize_ident, table_name_from_factor};
 use crate::planner::select::CteCatalog;
 use crate::resolver::columns::TableScope;
+use crate::temporal::TemporalScope;
 use crate::types::*;
 
 /// Extract recursive info from the AST when normal planning fails
@@ -24,6 +26,8 @@ pub(super) fn extract_recursive_info(
     expr: &SetExpr,
     cte_name: &str,
     catalog: &dyn SqlCatalog,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
 ) -> Result<RecursiveInfo> {
     let select = match expr {
         SetExpr::Select(s) => s,
@@ -69,7 +73,7 @@ pub(super) fn extract_recursive_info(
     // The working table is absent from the ordinary catalog, so the CTE name
     // resolves as an open relation for the duration of this arm.
     let arm_catalog = CteCatalog::open(catalog, cte_name);
-    let scope = TableScope::resolve_from(&arm_catalog, &select.from)?;
+    let scope = TableScope::resolve_from(&arm_catalog, functions, temporal, &select.from)?;
 
     // Extract the join link from the ON condition.
     let join_link = if let (Some(real_alias), Some(cte_al), Some(on_expr)) =

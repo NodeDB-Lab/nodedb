@@ -6,6 +6,7 @@ mod cacheability;
 mod expr_scan;
 mod merge_types;
 mod row_types;
+mod search_cells;
 mod variant_name;
 mod variants;
 mod vector_opts;

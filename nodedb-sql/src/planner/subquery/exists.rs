@@ -50,7 +50,7 @@ pub(super) fn plan_exists_subquery(
         });
     };
 
-    let local = TableScope::resolve_from(catalog, &select.from)?;
+    let local = TableScope::resolve_from(catalog, functions, temporal, &select.from)?;
     let nested = local.clone().nested_in(outer.clone());
 
     // EXISTS discards the projected values. The conversion still runs so a

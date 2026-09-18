@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use nodedb_types::DatabaseId;
 
 use crate::error::{Result, SqlError};
+use crate::functions::registry::FunctionRegistry;
 use crate::parser::normalize::table_name_from_factor;
+use crate::temporal::TemporalScope;
 use crate::types::{CollectionInfo, ColumnInfo, SqlCatalog};
 
 /// Synthetic temporal columns an audit read injects into every version row.
@@ -284,15 +286,21 @@ impl TableScope {
     }
 
     /// Resolve tables from a FROM clause.
+    ///
+    /// A derived-subquery factor is planned here so its relation carries the
+    /// search cells its plan produces; the planner context (`functions`,
+    /// `temporal`) is required for that and for no other arm.
     pub fn resolve_from(
         catalog: &dyn SqlCatalog,
+        functions: &FunctionRegistry,
+        temporal: TemporalScope,
         from: &[sqlparser::ast::TableWithJoins],
     ) -> Result<Self> {
         let mut scope = Self::new();
         for table_with_joins in from {
-            scope.resolve_table_factor(catalog, &table_with_joins.relation)?;
+            scope.resolve_table_factor(catalog, functions, temporal, &table_with_joins.relation)?;
             for join in &table_with_joins.joins {
-                scope.resolve_table_factor(catalog, &join.relation)?;
+                scope.resolve_table_factor(catalog, functions, temporal, &join.relation)?;
             }
         }
         Ok(scope)
@@ -301,6 +309,8 @@ impl TableScope {
     fn resolve_table_factor(
         &mut self,
         catalog: &dyn SqlCatalog,
+        functions: &FunctionRegistry,
+        temporal: TemporalScope,
         factor: &sqlparser::ast::TableFactor,
     ) -> Result<()> {
         // ARRAY_*(...) table-valued function: synthesize a ResolvedTable
@@ -311,10 +321,13 @@ impl TableScope {
             return Ok(());
         }
         // Derived subquery, LATERAL or not: register the alias as the relation
-        // its projection list exposes, so a column reference on the alias
-        // resolves without a catalog lookup. The inner plan is built
-        // separately.
+        // its projection list exposes — a column reference on the alias
+        // resolves without a catalog lookup. A non-LATERAL subquery is planned
+        // so its relation carries the search cells the plan produces; a
+        // correlated LATERAL one cannot be planned at scope time, and the
+        // lateral planner routes its shapes without those cells.
         if let sqlparser::ast::TableFactor::Derived {
+            lateral,
             subquery,
             alias: Some(alias),
             ..
@@ -326,8 +339,21 @@ impl TableScope {
                 .iter()
                 .map(|column| crate::reserved::check_ast_identifier(&column.name))
                 .collect::<Result<_>>()?;
-            let info =
-                crate::resolver::derived::infer_subquery_relation(catalog, &alias_str, subquery)?;
+            let plan = if *lateral {
+                None
+            } else {
+                Some(crate::planner::select::plan_query(
+                    subquery, catalog, functions, temporal,
+                )?)
+            };
+            let info = crate::resolver::derived::infer_subquery_relation(
+                catalog,
+                &alias_str,
+                subquery,
+                plan.as_ref(),
+                functions,
+                temporal,
+            )?;
             self.add(ResolvedTable {
                 name: alias_str.clone(),
                 alias: Some(alias_str),

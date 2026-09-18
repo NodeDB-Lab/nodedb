@@ -59,8 +59,14 @@ pub(in crate::planner::select) fn try_plan_derived_from(
     // Replan the outer SELECT against a catalog that resolves the alias to
     // the columns the subquery projects. The outer can reference `alias.col`
     // qualified or unqualified.
-    let relation =
-        crate::resolver::derived::infer_subquery_relation(catalog, &alias_name, subquery)?;
+    let relation = crate::resolver::derived::infer_subquery_relation(
+        catalog,
+        &alias_name,
+        subquery,
+        Some(&inner_plan),
+        functions,
+        temporal,
+    )?;
     let derived_catalog = CteCatalog {
         inner: catalog,
         relations: vec![(

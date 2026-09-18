@@ -264,3 +264,331 @@ async fn outer_order_by_distance_then_limit_takes_farthest() {
         "LIMIT after an outer ORDER BY must cut the reordered rows, got: {rows:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outer_order_by_vector_distance_declares_distance() {
+    let server = TestServer::start().await;
+    create_vector_collection(&server, "vec_implicit").await;
+
+    // A hand-written `ORDER BY vector_distance(...)` derived table (no SEARCH
+    // keyword) takes the same sort-trigger rewrite as the SEARCH form, so the
+    // synthetic `distance` column must resolve AND carry a value: declaring
+    // the column without producing a cell would make `s.distance` a phantom.
+    let rows = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM vec_implicit \
+              ORDER BY vector_distance(embedding, ARRAY[0.1, 0.2, 0.3, 0.4]) LIMIT 2) s",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two rows expected, got: {rows:?}");
+    let first: f64 = rows[0]
+        .parse()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got: {rows:?}"));
+    let second: f64 = rows[1]
+        .parse()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got: {rows:?}"));
+    assert!(
+        first <= second,
+        "distance must be ordered nearest-first, got: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outer_order_by_vector_distance_without_index_stays_consistent() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION vec_no_index").await.unwrap();
+    for (id, v) in [
+        ("r0", [0.10f32, 0.20, 0.30, 0.40]),
+        ("r1", [0.11, 0.21, 0.31, 0.41]),
+    ] {
+        server
+            .exec(&format!(
+                "INSERT INTO vec_no_index (id, embedding) VALUES ('{id}', ARRAY[{},{},{},{}])",
+                v[0], v[1], v[2], v[3]
+            ))
+            .await
+            .unwrap();
+    }
+
+    // The sort-trigger rewrite does not consult the index, so the plan is the
+    // same `VectorSearch` a collection with an index gets — but the search
+    // itself serves no hits without one. The pinned outcome is an empty
+    // result: a declared `distance` cell is never NULL, and a row only ever
+    // appears with a value.
+    let rows = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM vec_no_index \
+              ORDER BY vector_distance(embedding, ARRAY[0.1, 0.2, 0.3, 0.4]) LIMIT 2) s",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("the rewrite serves distances without an index: {e}"));
+    assert!(
+        rows.is_empty(),
+        "no index serves no hits; a returned row would carry a numeric distance: {rows:?}"
+    );
+}
+
+/// The filed defect: a closed-schema source declares no `distance` column, so
+/// the synthetic cell the response layer appends resolves only when
+/// derived-relation inference adds the name. On an open source the same
+/// projection always resolved, which is why this case pins the closed schema.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_over_a_closed_schema_resolves_a_synthetic_distance_column() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION sp_strict (id TEXT PRIMARY KEY, embedding VECTOR(3)) \
+             WITH (engine = 'document_strict')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("CREATE VECTOR INDEX idx_sp_strict ON sp_strict (embedding) METRIC COSINE DIM 3")
+        .await
+        .unwrap();
+    // The string form: an `ARRAY[...]` literal on a strict schema is a separate
+    // defect and not what this case measures.
+    server
+        .exec("INSERT INTO sp_strict (id, embedding) VALUES ('s1', '[0.1, 0.2, 0.3]')")
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_text(
+            "SELECT s.distance \
+             FROM (SEARCH sp_strict USING VECTOR(embedding, ARRAY[0.1, 0.2, 0.3], 2)) s",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one row expected, got: {rows:?}");
+    rows[0]
+        .parse::<f64>()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got: {rows:?}"));
+}
+
+/// A closed-schema collection with a vector index and one row: the shape every
+/// distance-column case below needs.
+async fn create_closed_vector(server: &TestServer, name: &str) {
+    server
+        .exec(&format!(
+            "CREATE COLLECTION {name} (id TEXT PRIMARY KEY, embedding VECTOR(3)) \
+             WITH (engine = 'document_strict')"
+        ))
+        .await
+        .unwrap();
+    server
+        .exec(&format!(
+            "CREATE VECTOR INDEX idx_{name}_emb ON {name} (embedding) METRIC COSINE DIM 3"
+        ))
+        .await
+        .unwrap();
+    server
+        .exec(&format!(
+            "INSERT INTO {name} (id, embedding) VALUES ('s1', '[0.1, 0.2, 0.3]')"
+        ))
+        .await
+        .unwrap();
+}
+
+/// Every function that routes an ORDER BY to a vector search appends a
+/// `distance` cell, so each one must resolve over a closed schema — not only
+/// `vector_distance`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_vector_search_form_resolves_the_distance_column() {
+    let server = TestServer::start().await;
+    create_closed_vector(&server, "sp_forms").await;
+
+    for order_by in [
+        "vector_cosine_distance(embedding, ARRAY[0.1, 0.2, 0.3])",
+        "vector_neg_inner_product(embedding, ARRAY[0.1, 0.2, 0.3])",
+        "embedding <=> ARRAY[0.1, 0.2, 0.3]",
+    ] {
+        let sql = format!(
+            "SELECT s.distance FROM \
+             (SELECT * FROM sp_forms ORDER BY {order_by} LIMIT 2) s"
+        );
+        let rows = server.query_text(&sql).await.unwrap_or_else(|e| {
+            panic!("ORDER BY {order_by} must resolve s.distance: {e}");
+        });
+        assert_eq!(rows.len(), 1, "ORDER BY {order_by}: one row, got {rows:?}");
+        rows[0].parse::<f64>().unwrap_or_else(|_| {
+            panic!("ORDER BY {order_by}: distance must be numeric, got {rows:?}")
+        });
+    }
+}
+
+/// A search also answers with `_surrogate`. A WHERE operator form routes to a
+/// search (the preprocessor rewrites it to a bare call that
+/// `try_extract_where_search` dispatches), so its cells are declared; a
+/// comparison wrapped around the call does not route, so the projection must
+/// refuse `42703` instead of reading a NULL cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_projections_resolve_surrogate_and_a_where_trigger() {
+    let server = TestServer::start().await;
+    create_closed_vector(&server, "sp_cells").await;
+
+    let rows = server
+        .query_text(
+            "SELECT s._surrogate FROM \
+             (SELECT * FROM sp_cells ORDER BY vector_distance(embedding, ARRAY[0.1, 0.2, 0.3]) LIMIT 2) s",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("s._surrogate must resolve over a closed schema: {e}"));
+    assert_eq!(rows.len(), 1, "one row, got {rows:?}");
+    rows[0]
+        .parse::<i64>()
+        .unwrap_or_else(|_| panic!("_surrogate must be an integer id, got {rows:?}"));
+
+    let rows = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM sp_cells \
+              WHERE embedding <=> ARRAY[0.1, 0.2, 0.3] LIMIT 2) s",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a routing WHERE form must declare s.distance: {e}"));
+    assert_eq!(rows.len(), 1, "one row expected, got {rows:?}");
+    rows[0]
+        .parse::<f64>()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got {rows:?}"));
+
+    let error = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM sp_cells \
+              WHERE vector_cosine_distance(embedding, ARRAY[0.1, 0.2, 0.3]) < 2.0) s",
+        )
+        .await
+        .expect_err("a comparison around the call routes no search");
+    assert!(
+        error.contains("42703"),
+        "the undeclared cell must refuse, got: {error}"
+    );
+}
+
+/// A sparse trigger routes an ORDER BY to `SqlPlan::SparseSearch`, so
+/// `s.distance` resolves with a value per returned hit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sparse_order_by_resolves_the_distance_column() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE TABLE sp_sparse (id TEXT PRIMARY KEY, terms SPARSEVECTOR)")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO sp_sparse (id, terms) VALUES ('s1', '{3: 1.0, 7: 0.5}')")
+        .await
+        .unwrap();
+
+    let sql = "SELECT s.distance FROM \
+               (SELECT * FROM sp_sparse ORDER BY sparse_score(terms, '{3: 1.0}') LIMIT 2) s";
+    let rows = server
+        .query_text(sql)
+        .await
+        .unwrap_or_else(|e| panic!("a sparse ORDER BY declares s.distance: {e}"));
+    assert_eq!(rows.len(), 1, "one row expected, got {rows:?}");
+    rows[0]
+        .parse::<f64>()
+        .unwrap_or_else(|_| panic!("distance must be numeric, got {rows:?}"));
+}
+
+/// A WHERE `sparse_score(...)` is a scalar fallback in the planner
+/// (`where_search`'s dispatch sends every non-WHERE trigger to `Ok(None)`),
+/// so the plan carries no search cells. The projection must refuse `42703`
+/// instead of declaring a cell whose rows read NULL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sparse_where_trigger_refuses_the_distance_cell() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE TABLE sp_sparse_where (id TEXT PRIMARY KEY, terms SPARSEVECTOR)")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO sp_sparse_where (id, terms) VALUES ('s1', '{3: 1.0, 7: 0.5}')")
+        .await
+        .unwrap();
+
+    let error = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM sp_sparse_where WHERE sparse_score(terms, '{3: 1.0}') > 0.1) s",
+        )
+        .await
+        .expect_err("the scalar fallback carries no distance cell");
+    assert!(
+        error.contains("42703"),
+        "expected 42703 for the undeclared cell, got: {error}"
+    );
+}
+
+/// A one-argument `vector_distance` does not route to a search
+/// (`order_by/triggers.rs` returns `Ok(None)` below two arguments), so no
+/// cell is declared and `s.distance` must refuse `42703`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_argument_order_by_refuses_the_distance_cell() {
+    let server = TestServer::start().await;
+    create_closed_vector(&server, "sp_one_arg").await;
+
+    let error = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM sp_one_arg ORDER BY vector_distance(embedding) LIMIT 2) s",
+        )
+        .await
+        .expect_err("a one-argument call routes no search");
+    assert!(
+        error.contains("42703") || error.contains("42883"),
+        "expected 42703 (undeclared cell) or 42883 (arity), got: {error}"
+    );
+}
+
+/// A body whose FROM is a derived relation gives `try_extract_sort_search` no
+/// `Scan` or `Join` to read (`Ok(None)`), so its order-by trigger routes no
+/// search and the outer projection must refuse `42703`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_body_off_a_derived_relation_refuses_the_distance_cell() {
+    let server = TestServer::start().await;
+    create_closed_vector(&server, "sp_nested").await;
+
+    let error = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM (SELECT * FROM sp_nested LIMIT 2) inner_s \
+              ORDER BY vector_distance(embedding, ARRAY[0.1, 0.2, 0.3]) LIMIT 2) s",
+        )
+        .await
+        .expect_err("a non-Scan body routes no search");
+    assert!(
+        error.contains("42703") || error.contains("42883"),
+        "expected 42703 (undeclared cell) or 42883 (arity), got: {error}"
+    );
+}
+
+/// `WHERE multi_vector_search(field, query)` plans `SqlPlan::MultiVectorSearch`,
+/// whose rows carry the search cells: `s.distance` is declared, so planning
+/// passes and any refusal belongs to the lowering step, never `42703`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_multi_vector_where_trigger_declares_the_distance_cell() {
+    let server = TestServer::start().await;
+    create_closed_vector(&server, "sp_multi").await;
+
+    let error = server
+        .query_text(
+            "SELECT s.distance FROM \
+             (SELECT * FROM sp_multi \
+              WHERE multi_vector_search(embedding, ARRAY[0.1, 0.2, 0.3])) s",
+        )
+        .await
+        .expect_err("the variant is not lowered yet; the cell declaration still happens");
+    assert!(
+        !error.contains("42703"),
+        "the cell follows the plan and must resolve; got: {error}"
+    );
+    assert!(
+        error.contains("42601") && error.contains("MultiVectorSearch"),
+        "expected the lowering refusal (42601, variant), got: {error}"
+    );
+}

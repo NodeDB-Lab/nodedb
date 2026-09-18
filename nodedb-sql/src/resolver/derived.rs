@@ -5,21 +5,48 @@
 use sqlparser::ast::{self, Expr, SelectItem, SelectItemQualifiedWildcardKind, SetExpr};
 
 use crate::error::{Result, SqlError};
+use crate::functions::registry::FunctionRegistry;
 use crate::parser::normalize::{normalize_ident, normalize_object_name_checked};
 use crate::resolver::columns::TableScope;
-use crate::types::{CollectionInfo, ColumnInfo, EngineType, SqlCatalog, SqlDataType};
+use crate::temporal::TemporalScope;
+use crate::types::{CollectionInfo, ColumnInfo, EngineType, SqlCatalog, SqlDataType, SqlPlan};
 
 /// The relation a subquery alias exposes.
 ///
 /// A synthesized relation carries `EngineType::DocumentSchemaless`: it is a
 /// MessagePack row stream, and the CTE lowering depends on that. Openness
 /// rides on `CollectionInfo::open_schema`, not on the engine.
+///
+/// `plan` is the subquery's own plan. The search cells (`distance`,
+/// `_surrogate`) are read from it, never re-derived from the AST: the planner
+/// is the only layer that decides whether an operator form routes to a search.
+/// A correlated LATERAL subquery cannot be planned at scope time and carries
+/// no plan: it routes no search cells either (the lateral planner handles its
+/// shapes directly).
 pub fn infer_subquery_relation(
     catalog: &dyn SqlCatalog,
     alias: &str,
     query: &ast::Query,
+    plan: Option<&SqlPlan>,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
 ) -> Result<CollectionInfo> {
-    let (columns, open_schema) = infer_projection(catalog, query)?;
+    let (mut columns, open_schema) = infer_projection(catalog, query, functions, temporal)?;
+    // A search-shaped plan answers with the source columns plus two synthetic
+    // cells: `distance` (Float64) and `_surrogate`, the internal row id
+    // resolved to the user primary key. Neither is a declared column of a
+    // closed-schema source, so derived-relation inference must declare them:
+    // without it `s.distance` and `s._surrogate` resolve against no relation
+    // and are refused with 42703, while the same projection over an
+    // open-schema source runs.
+    if plan.is_some_and(SqlPlan::carries_search_cells) {
+        if !columns.iter().any(|c| c.name == "distance") {
+            columns.push(synthetic_column("distance"));
+        }
+        if !columns.iter().any(|c| c.name == "_surrogate") {
+            columns.push(synthetic_column("_surrogate"));
+        }
+    }
     Ok(CollectionInfo {
         name: alias.to_string(),
         engine: EngineType::DocumentSchemaless,
@@ -85,16 +112,23 @@ pub fn rename_output_columns(mut info: CollectionInfo, names: &[String]) -> Coll
 fn infer_projection(
     catalog: &dyn SqlCatalog,
     query: &ast::Query,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
 ) -> Result<(Vec<ColumnInfo>, bool)> {
-    infer_body(catalog, &query.body)
+    infer_body(catalog, &query.body, functions, temporal)
 }
 
-fn infer_body(catalog: &dyn SqlCatalog, body: &SetExpr) -> Result<(Vec<ColumnInfo>, bool)> {
+fn infer_body(
+    catalog: &dyn SqlCatalog,
+    body: &SetExpr,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
+) -> Result<(Vec<ColumnInfo>, bool)> {
     match body {
-        SetExpr::Select(select) => infer_select_projection(catalog, select),
-        SetExpr::Query(query) => infer_projection(catalog, query),
+        SetExpr::Select(select) => infer_select_projection(catalog, select, functions, temporal),
+        SetExpr::Query(query) => infer_projection(catalog, query, functions, temporal),
         // A set operation takes its output names from the left arm.
-        SetExpr::SetOperation { left, .. } => infer_body(catalog, left),
+        SetExpr::SetOperation { left, .. } => infer_body(catalog, left, functions, temporal),
         // A row constructor, a `TABLE` command, and a DML body carry no
         // projection list to read names from.
         SetExpr::Values(_)
@@ -109,8 +143,10 @@ fn infer_body(catalog: &dyn SqlCatalog, body: &SetExpr) -> Result<(Vec<ColumnInf
 fn infer_select_projection(
     catalog: &dyn SqlCatalog,
     select: &ast::Select,
+    functions: &FunctionRegistry,
+    temporal: TemporalScope,
 ) -> Result<(Vec<ColumnInfo>, bool)> {
-    let scope = TableScope::resolve_from(catalog, &select.from)?;
+    let scope = TableScope::resolve_from(catalog, functions, temporal, &select.from)?;
     let mut columns = Vec::new();
     let mut open = false;
 
@@ -266,7 +302,24 @@ mod tests {
     }
 
     fn infer(sql: &str) -> CollectionInfo {
-        infer_subquery_relation(&TestCatalog, "t", &parse_query(sql)).expect("inference failed")
+        let query = parse_query(sql);
+        let functions = crate::functions::registry::FunctionRegistry::new();
+        let plan = crate::planner::select::plan_query(
+            &query,
+            &TestCatalog,
+            &functions,
+            TemporalScope::default(),
+        )
+        .expect("plan failed");
+        infer_subquery_relation(
+            &TestCatalog,
+            "t",
+            &query,
+            Some(&plan),
+            &functions,
+            TemporalScope::default(),
+        )
+        .expect("inference failed")
     }
 
     #[test]
@@ -319,5 +372,38 @@ mod tests {
         let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["p", "q"]);
         assert_eq!(info.columns[0].data_type, SqlDataType::Int64);
+    }
+
+    #[test]
+    fn vector_search_projection_declares_the_synthetic_distance_column() {
+        // `SEARCH c USING VECTOR(...)` preprocesses to `ORDER BY
+        // vector_distance(...)`; the response layer appends a `distance`
+        // cell, so the derived relation must name it even when the source
+        // schema is closed.
+        let info = infer("SELECT * FROM src ORDER BY vector_distance(b, ARRAY[0.1, 0.2]) LIMIT 2");
+        let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"distance"), "columns: {names:?}");
+    }
+
+    #[test]
+    fn plain_ordered_projection_has_no_distance_column() {
+        let info = infer("SELECT * FROM src ORDER BY b LIMIT 2");
+        let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(!names.contains(&"distance"), "columns: {names:?}");
+    }
+
+    /// Every function that routes an ORDER BY to a vector search produces a
+    /// `distance` cell, so every one of them must declare it.
+    #[test]
+    fn every_vector_search_function_declares_the_distance_column() {
+        for call in [
+            "vector_distance(b, ARRAY[0.1])",
+            "vector_cosine_distance(b, ARRAY[0.1])",
+            "vector_neg_inner_product(b, ARRAY[0.1])",
+        ] {
+            let info = infer(&format!("SELECT * FROM src ORDER BY {call} LIMIT 2"));
+            let names: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
+            assert!(names.contains(&"distance"), "{call}: columns {names:?}");
+        }
     }
 }
