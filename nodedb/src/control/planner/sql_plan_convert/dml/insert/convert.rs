@@ -126,6 +126,7 @@ pub(in super::super::super) fn convert_insert(
                         fields_json: super::super::crdt_gate::row_to_fields_json(row)?,
                         surrogate,
                         partial: false,
+                        verb: CrdtWriteVerb::Insert,
                         returning: None,
                         rls_filters: Vec::new(),
                     })

@@ -272,6 +272,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                     fields_json: fields_json.clone(),
                     surrogate,
                     partial: true,
+                    verb: CrdtWriteVerb::Update,
                     returning: None,
                     rls_filters: Vec::new(),
                 })

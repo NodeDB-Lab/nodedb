@@ -14,7 +14,7 @@ use crate::data::executor::response_codec::decode_payload_to_json;
 use nodedb_physical::physical_plan::DocumentOp;
 
 use crate::control::server::shared::sql::staging_predicates::{
-    StagedTagKind, require_affected_count,
+    StagedTagKind, extract_kv_conflict_op, require_affected_count,
 };
 
 use super::super::command_tag::dml_tag;
@@ -34,7 +34,8 @@ pub(super) use crate::control::server::response_shape::types::{PlanKind, describ
 ///
 /// **Foldable** — writes that unconditionally apply one row:
 ///   - `PointPut` (Document) → INSERT 0 1 (upsert: always writes)
-///   - `KvOp::Put` → INSERT 0 1 (upsert: always writes)
+///   - `KvOp::Put` → UPSERT 1 (upsert: always writes; tagged like
+///     `DocumentOp::Upsert`, the SQL `UPSERT` statement both lower from)
 ///
 /// **Not foldable**:
 ///   - `PointDelete`, `PointUpdate`, `KvOp::Delete` — no-op when the target row
@@ -97,11 +98,12 @@ pub(super) fn tag_from_staged(kind: StagedTagKind, affected: usize) -> Tag {
         StagedTagKind::Delete => dml_tag("DELETE", affected),
         StagedTagKind::KvUpsert { updated: true } => dml_tag("UPDATE", affected),
         StagedTagKind::KvUpsert { updated: false } => dml_tag("INSERT", affected),
-        // Matches the autocommit `DocumentOp::Upsert` tag exactly: always the
-        // literal `UPSERT` command, regardless of insert-vs-update outcome
-        // (see `response_shape::types::describe_plan`'s `DmlResult("UPSERT")`
-        // arm and `payload_to_response`'s `PlanKind::DmlResult` rendering).
-        StagedTagKind::DocUpsert => dml_tag("UPSERT", affected),
+        // Matches the autocommit `DocumentOp::Upsert` / `KvOp::Put` tag
+        // exactly: always the literal `UPSERT` command, regardless of
+        // insert-vs-update outcome (see `response_shape::types::describe_plan`'s
+        // `DmlResult("UPSERT")` arms and `payload_to_response`'s
+        // `PlanKind::DmlResult` rendering).
+        StagedTagKind::Upsert => dml_tag("UPSERT", affected),
         // Statement-time in-transaction MERGE: the Postgres command tag for a
         // MERGE is `MERGE <total-rows-affected>` across all arms.
         StagedTagKind::Merge => dml_tag("MERGE", affected),
@@ -128,8 +130,10 @@ pub(super) fn calvin_tag_for_plan(plan: &PhysicalPlan) -> PgWireResult<Tag> {
     use nodedb_physical::physical_plan::KvOp;
 
     match plan {
-        PhysicalPlan::Document(DocumentOp::PointPut { .. })
-        | PhysicalPlan::Kv(KvOp::Put { .. }) => Ok(dml_tag("INSERT", 1)),
+        PhysicalPlan::Document(DocumentOp::PointPut { .. }) => Ok(dml_tag("INSERT", 1)),
+        // The SQL `UPSERT` statement: same tag as its `DocumentOp::Upsert`
+        // sibling and as `describe_plan`'s `DmlResult("UPSERT")` arm.
+        PhysicalPlan::Kv(KvOp::Put { .. }) => Ok(dml_tag("UPSERT", 1)),
 
         other => Err(invalid_plan_shape(format!(
             "calvin_tag_for_plan called on non-foldable plan: {other:?}"
@@ -168,6 +172,27 @@ pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> PgWireResul
             let count = require_affected_count(payload).map_err(|e| {
                 invalid_plan_shape(format!("{tag} response is missing its affected count: {e}"))
             })? as usize;
+            Ok(Response::Execution(dml_tag(tag, count)).into())
+        }
+        PlanKind::DmlResultByOp => {
+            let count = require_affected_count(payload).map_err(|e| {
+                invalid_plan_shape(format!(
+                    "DmlResultByOp response is missing its affected count: {e}"
+                ))
+            })? as usize;
+            // The handler decides insert-vs-update at apply time and reports
+            // it as `op`. A missing or unknown verb is a handler bug, never a
+            // default tag.
+            let tag = match extract_kv_conflict_op(payload).as_deref() {
+                Some("insert") => "INSERT",
+                Some("update") => "UPDATE",
+                other => {
+                    return Err(invalid_plan_shape(format!(
+                        "DmlResultByOp response carries no usable `op` verb \
+                         (got {other:?}); the handler must report `insert` or `update`"
+                    )));
+                }
+            };
             Ok(Response::Execution(dml_tag(tag, count)).into())
         }
         PlanKind::ArraySlice | PlanKind::ReturningRows | PlanKind::SingleDocument => {
@@ -264,7 +289,43 @@ mod tests {
             rls_filters: Vec::new(),
         });
         assert!(is_calvin_foldable(&plan));
-        assert!(calvin_tag_for_plan(&plan).is_ok());
+        let tag: pgwire::messages::response::CommandComplete = calvin_tag_for_plan(&plan)
+            .expect("foldable plan renders a tag")
+            .into();
+        assert_eq!(tag.tag, "UPSERT 1");
+    }
+
+    /// `KvOp::InsertOnConflictUpdate` reports the verb it resolved to; the tag
+    /// follows it, and a payload with no verb is refused rather than defaulted.
+    #[test]
+    fn dml_result_by_op_follows_the_reported_verb() {
+        let update = nodedb_types::json_to_msgpack(&serde_json::json!({
+            "affected": 1,
+            "op": "update"
+        }))
+        .expect("encode payload");
+        let shaped = payload_to_response(&update, PlanKind::DmlResultByOp).expect("update tag");
+        let Response::Execution(tag) = shaped.response else {
+            panic!("expected an execution tag");
+        };
+        let tag: pgwire::messages::response::CommandComplete = tag.into();
+        assert_eq!(tag.tag, "UPDATE 1");
+
+        let insert = nodedb_types::json_to_msgpack(&serde_json::json!({
+            "affected": 1,
+            "op": "insert"
+        }))
+        .expect("encode payload");
+        let shaped = payload_to_response(&insert, PlanKind::DmlResultByOp).expect("insert tag");
+        let Response::Execution(tag) = shaped.response else {
+            panic!("expected an execution tag");
+        };
+        let tag: pgwire::messages::response::CommandComplete = tag.into();
+        assert_eq!(tag.tag, "INSERT 0 1");
+
+        let no_verb = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 1 }))
+            .expect("encode payload");
+        assert!(payload_to_response(&no_verb, PlanKind::DmlResultByOp).is_err());
     }
 
     /// A write that can legitimately touch nothing must NOT be folded: its count

@@ -209,6 +209,8 @@ impl CoreLoop {
                 fields_json,
                 surrogate,
                 partial,
+                // Decides the client's command tag only; the write is the same.
+                verb: _,
                 returning,
                 rls_filters,
             } => self.execute_crdt_doc_upsert(

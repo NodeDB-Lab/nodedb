@@ -97,7 +97,18 @@ pub(super) fn calvin_execution_response(
     // submit's RPC reply), so a count-bearing plan ALWAYS has one here. If it
     // does not, the deposit path regressed: fail loudly rather than synthesise a
     // count, which is what made a delete of an absent row report a removed row.
-    if let PlanKind::DmlResult(tag) = describe_plan(&task.plan) {
+    let plan_kind = describe_plan(&task.plan);
+    let count_bearing_tag = match plan_kind {
+        PlanKind::DmlResult(tag) => Some(tag),
+        // The verb is in the payload; the error text below only names the kind.
+        PlanKind::DmlResultByOp => Some("insert-or-update"),
+        PlanKind::Execution
+        | PlanKind::ArraySlice
+        | PlanKind::ReturningRows
+        | PlanKind::SingleDocument
+        | PlanKind::MultiRow => None,
+    };
+    if let Some(tag) = count_bearing_tag {
         let resp = apply_resp.ok_or_else(|| {
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
@@ -109,11 +120,7 @@ pub(super) fn calvin_execution_response(
             )))
         })?;
         return Ok(CalvinTaskOutcome::Tag(
-            super::super::plan::payload_to_response(
-                resp.payload.as_bytes(),
-                describe_plan(&task.plan),
-            )?
-            .response,
+            super::super::plan::payload_to_response(resp.payload.as_bytes(), plan_kind)?.response,
         ));
     }
 

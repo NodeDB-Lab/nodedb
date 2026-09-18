@@ -138,17 +138,19 @@ pub(super) fn encode(op: &CrdtOp) -> Option<ReplicatedWrite> {
             fields_json,
             surrogate,
             partial,
+            verb,
             returning,
             rls_filters,
-        } => doc_upsert(
-            collection.as_str(),
-            document_id,
-            surrogate.as_u32(),
-            fields_json,
-            *partial,
-            super::entry::encode_returning(returning),
-            rls_filters,
-        ),
+        } => ReplicatedWrite::CrdtDocUpsert {
+            collection: collection.as_str().to_owned(),
+            document_id: document_id.clone(),
+            surrogate: surrogate.as_u32(),
+            fields_json: fields_json.clone(),
+            partial: *partial,
+            verb: *verb,
+            returning: super::entry::encode_returning(returning),
+            rls_filters: rls_filters.clone(),
+        },
         CrdtOp::DocDelete {
             collection,
             document_id,
@@ -321,26 +323,6 @@ pub(super) fn list_move(
         from_index: from_index as u64,
         to_index: to_index as u64,
         surrogate,
-    }
-}
-
-pub(super) fn doc_upsert(
-    collection: &str,
-    document_id: &str,
-    surrogate: u32,
-    fields_json: &str,
-    partial: bool,
-    returning: Option<Vec<u8>>,
-    rls_filters: &[u8],
-) -> ReplicatedWrite {
-    ReplicatedWrite::CrdtDocUpsert {
-        collection: collection.to_owned(),
-        document_id: document_id.to_owned(),
-        surrogate,
-        fields_json: fields_json.to_owned(),
-        partial,
-        returning,
-        rls_filters: rls_filters.to_vec(),
     }
 }
 

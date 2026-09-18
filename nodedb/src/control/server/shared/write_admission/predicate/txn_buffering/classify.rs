@@ -948,6 +948,7 @@ mod tests {
                 fields_json: "{}".into(),
                 surrogate: Surrogate::ZERO,
                 partial: false,
+                verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
                 returning: None,
                 rls_filters: Vec::new(),
             }),

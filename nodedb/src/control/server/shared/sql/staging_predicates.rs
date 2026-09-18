@@ -131,7 +131,9 @@ pub enum StagedTagKind {
     KvUpsert {
         updated: bool,
     },
-    DocUpsert,
+    /// The SQL `UPSERT` statement (`DocumentOp::Upsert`, `KvOp::Put`): the
+    /// literal `UPSERT n` tag whatever the insert-vs-update outcome.
+    Upsert,
     /// In-transaction `MERGE`, staged as concrete point ops; `affected` is the
     /// total across arms. pgwire renders `MERGE <n>`.
     Merge,
@@ -156,7 +158,7 @@ pub fn staged_tag_kind(plan: &PhysicalPlan, payload: &[u8]) -> StagedTagKind {
         PhysicalPlan::Document(DocumentOp::PointDelete { .. } | DocumentOp::BulkDelete { .. }) => {
             StagedTagKind::Delete
         }
-        PhysicalPlan::Document(DocumentOp::Upsert { .. }) => StagedTagKind::DocUpsert,
+        PhysicalPlan::Document(DocumentOp::Upsert { .. }) => StagedTagKind::Upsert,
         PhysicalPlan::Kv(op) => staged_kv_tag_kind(op, payload),
         PhysicalPlan::Columnar(ColumnarOp::Insert { .. }) => StagedTagKind::Insert,
         // Same Update/Delete tags as the Document bulk predicate-DML arms above.
@@ -190,9 +192,10 @@ pub fn staged_tag_kind(plan: &PhysicalPlan, payload: &[u8]) -> StagedTagKind {
 /// must be a stageable KV write — the enclosing plan already passed [`is_stageable_write`].
 fn staged_kv_tag_kind(op: &KvOp, payload: &[u8]) -> StagedTagKind {
     match op {
-        KvOp::Put { .. } | KvOp::Insert { .. } | KvOp::InsertIfAbsent { .. } => {
-            StagedTagKind::Insert
-        }
+        // The SQL `UPSERT` statement, tagged like its `DocumentOp::Upsert`
+        // sibling and like the autocommit `describe_plan` arm.
+        KvOp::Put { .. } => StagedTagKind::Upsert,
+        KvOp::Insert { .. } | KvOp::InsertIfAbsent { .. } => StagedTagKind::Insert,
         KvOp::InsertOnConflictUpdate { .. } => StagedTagKind::KvUpsert {
             updated: extract_kv_conflict_op(payload).as_deref() == Some("update"),
         },
@@ -419,6 +422,21 @@ mod tests {
                 "{op:?} must classify as RawPayload"
             );
         }
+    }
+
+    #[test]
+    fn staged_kv_put_is_the_upsert_tag() {
+        let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 1 })).unwrap();
+        let op = KvOp::Put {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            key: b"k".to_vec(),
+            value: Vec::new(),
+            ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::ZERO,
+            returning: None,
+            rls_filters: Vec::new(),
+        };
+        assert_eq!(staged_kv_tag_kind(&op, &payload), StagedTagKind::Upsert);
     }
 
     #[test]

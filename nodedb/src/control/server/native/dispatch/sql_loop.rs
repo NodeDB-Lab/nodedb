@@ -296,7 +296,9 @@ pub(super) async fn run_dispatch_loop(
         // the loop.
         let mut task_rows: Option<u64> = None;
         let plan_kind = describe_plan(&plan_for_response);
-        if let crate::control::server::response_shape::types::PlanKind::DmlResult(_) = plan_kind {
+        if let crate::control::server::response_shape::types::PlanKind::DmlResult(_)
+        | crate::control::server::response_shape::types::PlanKind::DmlResultByOp = plan_kind
+        {
             // A count-bearing write must report the rows it actually touched.
             // Adding 1 per dispatched task instead, as the empty-payload
             // branch below does, would report a row for a delete that removed

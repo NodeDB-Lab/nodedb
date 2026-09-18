@@ -219,9 +219,12 @@ pub(crate) fn calvin_native_response(
     let returning_plan = plans
         .iter()
         .find(|p| matches!(describe_plan(p), PlanKind::ReturningRows));
-    let dml_plan = plans
-        .iter()
-        .find(|p| matches!(describe_plan(p), PlanKind::DmlResult(_)));
+    let dml_plan = plans.iter().find(|p| {
+        matches!(
+            describe_plan(p),
+            PlanKind::DmlResult(_) | PlanKind::DmlResultByOp
+        )
+    });
 
     let redaction = returning_plan.map(|plan| QueryRedaction::for_plan(tenant_id, auth, plan));
     if let (Some(resp), Some(plan)) = (apply_result.as_ref(), returning_plan)

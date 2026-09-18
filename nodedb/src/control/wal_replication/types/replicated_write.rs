@@ -9,7 +9,7 @@ use super::wire_shapes::{
     ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire, KvResolvedMutationWire,
     ReplicatedBatchEdge, ReplicatedSumTarget,
 };
-use nodedb_physical::physical_plan::{ColumnarInsertIntent, UpdateValue};
+use nodedb_physical::physical_plan::{ColumnarInsertIntent, CrdtWriteVerb, UpdateValue};
 use nodedb_types::{PayloadIndexKind, VectorQuantization, VectorStorageDtype};
 
 #[derive(
@@ -646,6 +646,8 @@ pub enum ReplicatedWrite {
         surrogate: u32,
         fields_json: String,
         partial: bool,
+        /// The statement verb, so a decoded plan matches the proposed one.
+        verb: CrdtWriteVerb,
         /// See `ReplicatedWrite::PointPut::returning`.
         #[serde(default)]
         returning: Option<Vec<u8>>,

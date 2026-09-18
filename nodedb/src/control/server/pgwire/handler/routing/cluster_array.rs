@@ -107,9 +107,11 @@ impl NodeDbPgHandler {
 
         let cluster_plan_kind = match &cluster_op {
             ClusterArrayOp::Slice { .. } => PlanKind::ArraySlice,
-            ClusterArrayOp::Agg { .. }
-            | ClusterArrayOp::Put { .. }
-            | ClusterArrayOp::Delete { .. } => PlanKind::MultiRow,
+            ClusterArrayOp::Agg { .. } => PlanKind::MultiRow,
+            // The coordinator reports `{"inserted": n}` / `{"deleted": n}`,
+            // the same count map the local array handlers emit.
+            ClusterArrayOp::Put { .. } => PlanKind::DmlResult("INSERT"),
+            ClusterArrayOp::Delete { .. } => PlanKind::DmlResult("DELETE"),
         };
         // This coordinator path never builds a `PhysicalPlan`, so the source
         // collection comes straight off the op's array name. A single source

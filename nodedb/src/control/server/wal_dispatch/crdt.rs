@@ -167,6 +167,7 @@ pub(super) fn wal_append_crdt_op(
             fields_json,
             surrogate,
             partial,
+            verb: _,
             returning: _,
             rls_filters: _,
         } => {
@@ -332,6 +333,7 @@ mod tests {
             fields_json: r#"{"a":1}"#.to_string(),
             surrogate: Surrogate::new(3),
             partial: false,
+            verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
             returning: None,
             rls_filters: Vec::new(),
         });

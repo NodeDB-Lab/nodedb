@@ -103,6 +103,7 @@ pub(in super::super) fn convert_upsert(
                         fields_json: super::crdt_gate::row_to_fields_json(row)?,
                         surrogate,
                         partial: false,
+                        verb: CrdtWriteVerb::Upsert,
                         returning: None,
                         rls_filters: Vec::new(),
                     })

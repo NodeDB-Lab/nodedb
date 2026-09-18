@@ -243,34 +243,9 @@ pub(super) fn list_move(
     }))
 }
 
-/// Reconstruct `CrdtOp::DocUpsert` from its wire intent. Unlike the block-list
-/// ops, the row's own top-level `surrogate` is carried across the wire and
-/// rebuilt via `Surrogate::new` — the live dispatch handler uses it to gate +
-/// key the sparse-store materialization.
-pub(super) fn doc_upsert(
-    collection: &str,
-    document_id: &str,
-    surrogate: u32,
-    fields_json: &str,
-    partial: bool,
-    returning: Option<ReturningSpec>,
-    rls_filters: &[u8],
-) -> PhysicalPlan {
-    PhysicalPlan::Crdt(CrdtOp::DocUpsert {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
-        document_id: document_id.to_owned(),
-        fields_json: fields_json.to_owned(),
-        surrogate: nodedb_types::Surrogate::new(surrogate),
-        partial,
-        // Carried on the record — a replay re-executes this write for the
-        // originating request, not just for the follower's own state.
-        returning,
-        rls_filters: rls_filters.to_vec(),
-    })
-}
-
-/// Reconstruct `CrdtOp::DocDelete` from its wire intent. See [`doc_upsert`]
-/// for the surrogate note.
+/// Reconstruct `CrdtOp::DocDelete` from its wire intent. The row's own
+/// top-level `surrogate` is carried across the wire and rebuilt via
+/// `Surrogate::new`.
 pub(super) fn doc_delete(
     collection: &str,
     document_id: &str,
@@ -282,7 +257,8 @@ pub(super) fn doc_delete(
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
         surrogate: nodedb_types::Surrogate::new(surrogate),
-        // Carried on the record — see `doc_upsert`.
+        // Carried on the record — a replay re-executes this write for the
+        // originating request, not just for the follower's own state.
         returning,
         rls_filters: rls_filters.to_vec(),
     })
@@ -313,6 +289,7 @@ mod tests {
     use crate::control::wal_replication::decode;
     use crate::control::wal_replication::types::{ReplicatedEntry, ReplicatedWrite};
     use crate::types::{DatabaseId, TenantId, VShardId};
+    use nodedb_physical::physical_plan::CrdtWriteVerb;
     use nodedb_types::sync::wire::SyncProvenance;
     use nodedb_types::{QualifiedCollection, Surrogate};
 
@@ -684,6 +661,7 @@ mod tests {
             fields_json: "{}".into(),
             surrogate: Surrogate::new(4),
             partial: false,
+            verb: CrdtWriteVerb::Insert,
             returning: Some(spec.clone()),
             rls_filters: b"rls-predicate".to_vec(),
         });

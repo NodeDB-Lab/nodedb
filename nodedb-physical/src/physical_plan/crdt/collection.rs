@@ -179,6 +179,7 @@ mod tests {
                 fields_json: "{}".to_string(),
                 surrogate: Surrogate::ZERO,
                 partial: false,
+                verb: super::write_verb::CrdtWriteVerb::Insert,
                 returning: None,
                 rls_filters: Vec::new(),
             },

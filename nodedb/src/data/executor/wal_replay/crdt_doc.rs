@@ -18,7 +18,7 @@ use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::CrdtDocOpWalRecord;
-use nodedb_physical::physical_plan::CrdtOp;
+use nodedb_physical::physical_plan::{CrdtOp, CrdtWriteVerb};
 use nodedb_types::{RowIdentity, Surrogate};
 
 impl CoreLoop {
@@ -99,6 +99,14 @@ impl CoreLoop {
                     fields_json: fields_json.clone(),
                     surrogate,
                     partial,
+                    // Replay answers no client, so the verb only has to match
+                    // the write shape: a partial write is an UPDATE, a full
+                    // replace an INSERT.
+                    verb: if partial {
+                        CrdtWriteVerb::Update
+                    } else {
+                        CrdtWriteVerb::Insert
+                    },
                     returning: None,
                     rls_filters: Vec::new(),
                 });
@@ -200,7 +208,7 @@ mod tests {
     use crate::control::server::wal_dispatch::wal_append_if_write;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::manager::WalManager;
-    use nodedb_physical::physical_plan::CrdtOp;
+    use nodedb_physical::physical_plan::{CrdtOp, CrdtWriteVerb};
     use nodedb_types::{QualifiedCollection, Surrogate};
 
     const TID: u64 = 1;
@@ -247,6 +255,11 @@ mod tests {
             fields_json: fields_json.to_string(),
             surrogate: Surrogate::new(SURROGATE),
             partial,
+            verb: if partial {
+                CrdtWriteVerb::Update
+            } else {
+                CrdtWriteVerb::Insert
+            },
             returning: None,
             rls_filters: Vec::new(),
         })

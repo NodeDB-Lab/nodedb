@@ -86,7 +86,16 @@ impl CoreLoop {
 
         let response_payload = match returning {
             Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[(key, &stored_bytes)])?,
-            None => Vec::new(),
+            // Same `{affected, op}` shape `execute_kv_insert_on_conflict_update`
+            // reports, so the tag renders identically on both paths.
+            None => response_codec::encode_affected_with_op(
+                1,
+                if existing_bytes.is_some() {
+                    "update"
+                } else {
+                    "insert"
+                },
+            ),
         };
 
         Ok(one(

@@ -20,6 +20,7 @@ use crate::control::cluster::array_cluster_helpers::{
     cluster_err, encode_err, finalize_agg_partials,
 };
 use crate::control::state::SharedState;
+use crate::data::executor::response_codec;
 use nodedb_physical::physical_plan::ClusterArrayOp;
 use zerompk;
 
@@ -320,10 +321,9 @@ impl ClusterArrayExecutor {
         .await
         .map_err(cluster_err)?;
 
-        // Return a simple `{"affected": N}` JSON payload — same shape as the
-        // local ArrayOp::Put response so downstream decode is unchanged.
-        let affected = cells.len() as u64;
-        zerompk::to_msgpack_vec(&affected).map_err(encode_err)
+        // `{"inserted": n}`, the same count map the local `ArrayOp::Put`
+        // handler emits, so `extract_affected_count` reads both.
+        response_codec::encode_count("inserted", cells.len())
     }
 
     async fn execute_delete(
@@ -349,7 +349,7 @@ impl ClusterArrayExecutor {
         .await
         .map_err(cluster_err)?;
 
-        let deleted = coords.len() as u64;
-        zerompk::to_msgpack_vec(&deleted).map_err(encode_err)
+        // `{"deleted": n}`, matching the local `ArrayOp::Delete` handler.
+        response_codec::encode_count("deleted", coords.len())
     }
 }
