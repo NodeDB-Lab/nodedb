@@ -3,7 +3,11 @@
 //! Graph DSL entry point.
 
 use super::super::statement::{GraphStmt, NodedbStatement};
-use super::{tokenizer, variants};
+use super::{
+    cursor::Cursor,
+    tokenizer::{self, Tok},
+    variants,
+};
 use crate::error::SqlError;
 
 /// Parse a graph DSL statement.
@@ -31,23 +35,27 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     let toks = tokenizer::tokenize(trimmed);
 
     let parsed = if upper.starts_with("GRAPH INSERT EDGE ") {
-        variants::parse_insert_edge(&toks)
+        run(toks, 3, "GRAPH INSERT EDGE", variants::parse_insert_edge)
     } else if upper.starts_with("GRAPH DELETE EDGE ") {
-        variants::parse_delete_edge(&toks)
+        run(toks, 3, "GRAPH DELETE EDGE", variants::parse_delete_edge)
     } else if upper.starts_with("GRAPH LABEL ") {
-        variants::parse_set_labels(&toks, false)
+        run(toks, 2, "GRAPH LABEL", |cursor| {
+            variants::parse_set_labels(cursor, false)
+        })
     } else if upper.starts_with("GRAPH UNLABEL ") {
-        variants::parse_set_labels(&toks, true)
+        run(toks, 2, "GRAPH UNLABEL", |cursor| {
+            variants::parse_set_labels(cursor, true)
+        })
     } else if upper.starts_with("GRAPH TRAVERSE ") {
-        variants::parse_traverse(&toks)
+        run(toks, 2, "GRAPH TRAVERSE", variants::parse_traverse)
     } else if upper.starts_with("GRAPH NEIGHBORS ") {
-        variants::parse_neighbors(&toks)
+        run(toks, 2, "GRAPH NEIGHBORS", variants::parse_neighbors)
     } else if upper.starts_with("GRAPH PATH ") {
-        variants::parse_path(&toks)
+        run(toks, 2, "GRAPH PATH", variants::parse_path)
     } else if upper.starts_with("GRAPH ALGO ") {
-        variants::parse_algo(&toks)
+        run(toks, 2, "GRAPH ALGO", variants::parse_algo)
     } else if upper.starts_with("GRAPH RAG FUSION ") {
-        variants::parse_rag_fusion(&toks, trimmed)
+        run(toks, 3, "GRAPH RAG FUSION", variants::parse_rag_fusion)
     } else {
         // Starts with `GRAPH ` but names no known command. Still graph DSL,
         // so report it here rather than letting the SQL parser guess.
@@ -57,6 +65,22 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     };
 
     Some(parsed)
+}
+
+/// Run one variant with a consume-tracking cursor, then refuse any token the
+/// statement left unclaimed.
+///
+/// `prefix_len` counts the command words the dispatcher matched
+/// (`GRAPH TRAVERSE` is two, `GRAPH INSERT EDGE` is three); no clause claims
+/// them.
+fn run<'a>(
+    toks: Vec<Tok<'a>>,
+    prefix_len: usize,
+    statement: &str,
+    parse: impl FnOnce(&mut Cursor<'a>) -> Result<NodedbStatement, SqlError>,
+) -> Result<NodedbStatement, SqlError> {
+    let mut cursor = Cursor::new(toks, prefix_len);
+    parse(&mut cursor).and_then(|stmt| cursor.finish(statement).map(|()| stmt))
 }
 
 #[cfg(test)]
@@ -351,6 +375,28 @@ mod tests {
                 let (k1, k2) = params.rrf_k.expect("RRF_K must be parsed");
                 assert!((k1 - 1.0).abs() < 1e-10, "vector_k must be 1.0, got {k1}");
                 assert!((k2 - 99.5).abs() < 1e-10, "graph_k must be 99.5, got {k2}");
+            }
+            other => panic!("expected GraphRagFusion, got {other:?}"),
+        }
+    }
+
+    /// `ON` introduces both the fusion collection and the BM25 field. The field
+    /// read must anchor on `BM25`, or the collection name is captured as the
+    /// field and the real `ON` is left unclaimed.
+    #[test]
+    fn parse_rag_fusion_three_source_reads_the_bm25_field() {
+        let stmt = parsed(
+            "GRAPH RAG FUSION ON ents \
+             QUERY ARRAY[0.1] \
+             VECTOR_TOP_K 5 \
+             BM25 'attention' ON 'body' \
+             RRF_K (60.0, 35.0, 50.0)",
+        );
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphRagFusion { params, .. }) => {
+                assert_eq!(params.bm25_query.as_deref(), Some("attention"));
+                assert_eq!(params.bm25_field.as_deref(), Some("body"));
+                assert_eq!(params.rrf_k_triple, Some((60.0, 35.0, 50.0)));
             }
             other => panic!("expected GraphRagFusion, got {other:?}"),
         }
