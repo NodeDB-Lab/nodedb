@@ -40,8 +40,15 @@ pub fn error_to_pg(err: &crate::Error) -> PgWireError {
 /// client reads, with the SQLSTATE its numeric code maps to. A per-row
 /// sequence accessor refusal (`42704`, `55000`) or a division by zero
 /// (`22012`) keeps its class instead of collapsing to `XX000`.
+///
+/// An `XX000`-class failure describes server state, so its detail stays in
+/// the server log and the client reads one stable summary
+/// ([`super::shaping_error_message`]); every other class keeps its message.
 pub fn shape_error_to_pg(e: &nodedb_types::NodeDbError) -> PgWireError {
-    sqlstate_error(numeric_code_to_sqlstate(e.code()), e.message())
+    sqlstate_error(
+        numeric_code_to_sqlstate(e.code()),
+        &super::shaping_error_message(e.code(), e.message()),
+    )
 }
 
 /// Map a NodeDB `Error` to a PostgreSQL SQLSTATE code + message.
@@ -273,6 +280,76 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::NOT_LEADER => sqlstate::DATABASE_DROPPED,
         // Mirrors the `CloneWriteRequiresMaterialize` arm.
         Ec::CLONE_WRITE_REQUIRES_MATERIALIZE => sqlstate::CLONE_WRITE_REQUIRES_MATERIALIZE.0,
+        // ── Completion of the classified set ──────────────────────────────
+        //
+        // The families below existed in the `crate::Error` table but not
+        // here, so a remote or shaper-raised code in one of them collapsed to
+        // XX000 at every routed surface.
+        //
+        // Constraint family — mirrors the Data Plane table.
+        Ec::APPEND_ONLY_VIOLATION => sqlstate::APPEND_ONLY_VIOLATION,
+        Ec::BALANCE_VIOLATION => sqlstate::BALANCE_VIOLATION,
+        Ec::INSUFFICIENT_BALANCE => sqlstate::CHECK_VIOLATION,
+        Ec::PERIOD_LOCKED => sqlstate::PERIOD_LOCKED,
+        Ec::PERIOD_LOCK_MISCONFIGURED => sqlstate::PERIOD_LOCK_MISCONFIGURED,
+        Ec::PREVALIDATION_REJECTED => sqlstate::CHECK_VIOLATION,
+        Ec::RETENTION_VIOLATION => sqlstate::RETENTION_VIOLATION,
+        Ec::LEGAL_HOLD_ACTIVE => sqlstate::LEGAL_HOLD_ACTIVE,
+        Ec::STATE_TRANSITION_VIOLATION => sqlstate::STATE_TRANSITION_VIOLATION,
+        Ec::TRANSITION_CHECK_VIOLATION => sqlstate::TRANSITION_CHECK_VIOLATION,
+        Ec::TYPE_GUARD_VIOLATION => sqlstate::TYPE_GUARD_VIOLATION,
+        Ec::TYPE_MISMATCH => sqlstate::DATATYPE_MISMATCH,
+        // The shaper's own code: a payload that cannot be decoded into the
+        // shape the projection requires.
+        Ec::SERIALIZATION => sqlstate::INVALID_TEXT_REPRESENTATION,
+        Ec::CODEC => sqlstate::INVALID_TEXT_REPRESENTATION,
+        Ec::ARRAY => sqlstate::DATA_EXCEPTION,
+        Ec::OVERFLOW => sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,
+        // Read-path absence.
+        Ec::NOT_FOUND => sqlstate::NO_DATA,
+        Ec::DATABASE_NOT_FOUND => sqlstate::INVALID_CATALOG_NAME,
+        // Quota and admission.
+        Ec::QUOTA_OVERCOMMIT => sqlstate::QUOTA_OVERCOMMIT,
+        Ec::TENANT_QUOTA_EXCEEDED | Ec::DATABASE_QUOTA_EXCEEDED => sqlstate::QUOTA_EXCEEDED,
+        Ec::TENANT_VECTOR_DIM_EXCEEDED | Ec::TENANT_GRAPH_DEPTH_EXCEEDED => {
+            sqlstate::PROGRAM_LIMIT_EXCEEDED
+        }
+        Ec::SERVER_OVERLOAD => sqlstate::SERVER_OVERLOAD,
+        Ec::MIGRATION_IN_PROGRESS | Ec::COLLECTION_DRAINING => sqlstate::CANNOT_CONNECT_NOW,
+        // Clone family.
+        Ec::ALREADY_EXISTS => sqlstate::DUPLICATE_TABLE,
+        Ec::CANNOT_CLONE_MIRROR => sqlstate::FEATURE_NOT_SUPPORTED,
+        Ec::CLONE_DEPENDENCY => sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        Ec::CLONE_DEPTH_EXCEEDED => sqlstate::CLONE_DEPTH_EXCEEDED,
+        Ec::CLONE_PREDATES_QUERY_TIME => sqlstate::CLONE_PREDATES_QUERY_TIME,
+        // Move-tenant family.
+        Ec::MOVE_TENANT_DRAIN_TIMEOUT => sqlstate::QUERY_CANCELED,
+        Ec::MOVE_TENANT_PREFLIGHT_FAILED => sqlstate::MOVE_TENANT_PREFLIGHT_FAILED,
+        Ec::MOVE_TENANT_SNAPSHOT_FAILED
+        | Ec::MOVE_TENANT_CUTOVER_FAILED
+        | Ec::MOVE_TENANT_ALREADY_AT_TARGET => sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        // Mirror / read-only family.
+        Ec::MIRROR_READ_ONLY => sqlstate::READ_ONLY_SQL_TRANSACTION,
+        Ec::MIRROR_NOT_PROMOTED => sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        Ec::STALE_READ_NOT_LEADER => sqlstate::STALE_READ_NOT_LEADER,
+        Ec::CANNOT_DROP_DEFAULT_DATABASE => sqlstate::DEPENDENT_OBJECTS_STILL_EXIST,
+        // Credentials and cluster connectivity.
+        Ec::AUTH_EXPIRED | Ec::BACKUP_KEY_MISMATCH => sqlstate::INVALID_AUTHORIZATION,
+        Ec::BACKUP_TENANT_MISMATCH => sqlstate::BACKUP_TENANT_MISMATCH,
+        Ec::HANDSHAKE_FAILED
+        | Ec::SYNC_CONNECTION_FAILED
+        | Ec::SHAPE_SUBSCRIPTION_FAILED
+        | Ec::NODE_UNREACHABLE
+        | Ec::CLUSTER => sqlstate::CONNECTION_FAILURE,
+        Ec::SYNC_DELTA_REJECTED => sqlstate::SERIALIZATION_FAILURE,
+        // Storage and durability.
+        Ec::STORAGE | Ec::COLD_STORAGE | Ec::WAL => sqlstate::IO_ERROR,
+        Ec::SEGMENT_CORRUPTED | Ec::ENCRYPTION => sqlstate::DATA_CORRUPTED,
+        Ec::CONFIG => sqlstate::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        Ec::SQL_NOT_ENABLED => sqlstate::FEATURE_NOT_SUPPORTED,
+        // These three stay internal by decision: the explicit arms document
+        // that the fallback is intended, not an unmapped code.
+        Ec::INTERNAL | Ec::BRIDGE | Ec::DISPATCH => sqlstate::INTERNAL_ERROR,
         _ => sqlstate::INTERNAL_ERROR,
     }
 }
@@ -300,5 +377,117 @@ pub fn response_status_to_sqlstate(
                 Some(("ERROR", "XX000", "unknown data plane error".into()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::error::ErrorCode as Ec;
+
+    /// The completion table: every code the mapper previously left on
+    /// the `XX000` fallback now answers with its decided class.
+    #[test]
+    fn completion_codes_keep_their_class() {
+        let cases = [
+            (Ec::APPEND_ONLY_VIOLATION, "23601"),
+            (Ec::BALANCE_VIOLATION, "23602"),
+            (Ec::PERIOD_LOCKED, "23603"),
+            (Ec::STATE_TRANSITION_VIOLATION, "23604"),
+            (Ec::TRANSITION_CHECK_VIOLATION, "23605"),
+            (Ec::RETENTION_VIOLATION, "23606"),
+            (Ec::LEGAL_HOLD_ACTIVE, "23607"),
+            (Ec::TYPE_GUARD_VIOLATION, "23608"),
+            (Ec::PERIOD_LOCK_MISCONFIGURED, "23609"),
+            (Ec::INSUFFICIENT_BALANCE, "23514"),
+            (Ec::PREVALIDATION_REJECTED, "23514"),
+            (Ec::TYPE_MISMATCH, "42804"),
+            (Ec::SERIALIZATION, "22P02"),
+            (Ec::CODEC, "22P02"),
+            (Ec::ARRAY, "22000"),
+            (Ec::OVERFLOW, "22003"),
+            (Ec::NOT_FOUND, "02000"),
+            (Ec::DATABASE_NOT_FOUND, "3D000"),
+            (Ec::QUOTA_OVERCOMMIT, "53400"),
+            (Ec::TENANT_QUOTA_EXCEEDED, "53400"),
+            (Ec::DATABASE_QUOTA_EXCEEDED, "53400"),
+            (Ec::TENANT_VECTOR_DIM_EXCEEDED, "54000"),
+            (Ec::TENANT_GRAPH_DEPTH_EXCEEDED, "54000"),
+            (Ec::SERVER_OVERLOAD, "57P03"),
+            (Ec::MIGRATION_IN_PROGRESS, "57P03"),
+            (Ec::COLLECTION_DRAINING, "57P03"),
+            (Ec::ALREADY_EXISTS, "42P07"),
+            (Ec::CANNOT_CLONE_MIRROR, "0A000"),
+            (Ec::SQL_NOT_ENABLED, "0A000"),
+            (Ec::CLONE_DEPENDENCY, "55000"),
+            (Ec::CLONE_DEPTH_EXCEEDED, "54011"),
+            (Ec::CLONE_PREDATES_QUERY_TIME, "22023"),
+            (Ec::MOVE_TENANT_DRAIN_TIMEOUT, "57014"),
+            (Ec::MOVE_TENANT_PREFLIGHT_FAILED, "55P02"),
+            (Ec::MOVE_TENANT_SNAPSHOT_FAILED, "55000"),
+            (Ec::MOVE_TENANT_CUTOVER_FAILED, "55000"),
+            (Ec::MOVE_TENANT_ALREADY_AT_TARGET, "55000"),
+            (Ec::MIRROR_READ_ONLY, "25006"),
+            (Ec::MIRROR_NOT_PROMOTED, "55000"),
+            (Ec::STALE_READ_NOT_LEADER, "55P03"),
+            (Ec::CANNOT_DROP_DEFAULT_DATABASE, "2BP01"),
+            (Ec::AUTH_EXPIRED, "28000"),
+            (Ec::BACKUP_KEY_MISMATCH, "28000"),
+            (Ec::BACKUP_TENANT_MISMATCH, "22023"),
+            (Ec::HANDSHAKE_FAILED, "08006"),
+            (Ec::SYNC_CONNECTION_FAILED, "08006"),
+            (Ec::SHAPE_SUBSCRIPTION_FAILED, "08006"),
+            (Ec::NODE_UNREACHABLE, "08006"),
+            (Ec::CLUSTER, "08006"),
+            (Ec::SYNC_DELTA_REJECTED, "40001"),
+            (Ec::STORAGE, "58030"),
+            (Ec::COLD_STORAGE, "58030"),
+            (Ec::WAL, "58030"),
+            (Ec::SEGMENT_CORRUPTED, "XX001"),
+            (Ec::ENCRYPTION, "XX001"),
+            (Ec::CONFIG, "55000"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(
+                numeric_code_to_sqlstate(code),
+                expected,
+                "code {} must keep its decided class",
+                code.0
+            );
+        }
+    }
+
+    /// The three codes that are internal by decision keep the fallback, as an
+    /// explicit arm rather than an implied one.
+    #[test]
+    fn internal_codes_stay_internal() {
+        for code in [Ec::INTERNAL, Ec::BRIDGE, Ec::DISPATCH] {
+            assert_eq!(numeric_code_to_sqlstate(code), sqlstate::INTERNAL_ERROR);
+        }
+    }
+
+    /// An `XX000`-class shaping failure renders the stable summary; the detail
+    /// stays in the log (enforced inside the helper `shape_error_to_pg` uses).
+    #[test]
+    fn shaping_internal_detail_is_not_rendered() {
+        let error = nodedb_types::NodeDbError::internal(
+            "manifest at /var/lib/nodedb/segment-42 is corrupt",
+        );
+        let message = super::super::shaping_error_message(error.code(), error.message());
+
+        assert_eq!(message, "internal error while shaping the response");
+        assert!(!message.contains("segment-42"));
+    }
+
+    /// A client-class shaping failure keeps its actionable message.
+    #[test]
+    fn shaping_client_message_passes_through() {
+        let error = nodedb_types::NodeDbError::serialization(
+            "cell",
+            "column \"ts\" holds an integer where a timestamp is required",
+        );
+        let message = super::super::shaping_error_message(error.code(), error.message());
+
+        assert!(message.contains("timestamp"));
     }
 }
