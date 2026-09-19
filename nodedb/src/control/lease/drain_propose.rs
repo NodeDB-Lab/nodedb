@@ -187,10 +187,13 @@ fn wait_for_lease_drain(
 /// Expiry compares against wall time, not [`HlcClock::peek`]: `peek` stays
 /// frozen on a quiet cluster, which would find every lease unexpired and
 /// reinstate the wedge — and an idle cluster is exactly when a crashed node's
-/// leases are the only ones left. `expires_at.wall_ns` is stamped from
-/// `HlcClock::now()`, local wall time held monotonic; a peer's HLC is never
-/// merged in, so for a lease granted elsewhere the comparison carries that
-/// node's clock offset, unbounded.
+/// leases are the only ones left. `expires_at.wall_ns` is stamped from the
+/// holder's own `HlcClock::now()`, so a raw comparison would carry that node's
+/// clock offset unbounded. [`lease_expired`] gives the deadline the same skew
+/// allowance the HLC ingress enforces ([`nodedb_types::MAX_CLOCK_SKEW_NS`]):
+/// a lease is retired only once even a clock that far ahead of ours would
+/// agree it lapsed, so a fast local clock cannot hand a still-live holder's
+/// descriptor to the DDL early.
 ///
 /// `own_holds` excludes that many local refcount units — the requester's own —
 /// from both the refcount safety net and this node's replicated cache entry,
@@ -220,7 +223,7 @@ fn count_matching_leases(
         .filter(|((lid, holder), l)| {
             lid == id
                 && l.version <= up_to_version
-                && l.expires_at.wall_ns > now_wall_ns
+                && !lease_expired(l.expires_at.wall_ns, now_wall_ns)
                 && lease_holder_is_member(shared, *holder)
                 && !(self_only && *holder == shared.node_id)
         })
@@ -231,6 +234,28 @@ fn count_matching_leases(
         metadata_holds
     } else {
         metadata_holds.saturating_add(1)
+    }
+}
+
+/// Whether a lease stamped `expires_at_wall_ns` on its holder's clock is
+/// certainly past expiry at this node's `now_wall_ns`.
+///
+/// The holder stamped its deadline from its own wall clock and its HLC is
+/// never merged into ours, so the raw comparison would carry that node's clock
+/// offset. Retiring a lease early is the unsafe direction: the drain would
+/// declare the descriptor free while the holder still believes its lease runs,
+/// which is the window the drain exists to close. The comparison therefore
+/// waits out [`nodedb_types::MAX_CLOCK_SKEW_NS`] past the stamped deadline —
+/// the same bound the HLC ingress refuses observations beyond — so only a
+/// clock ahead by more than the cluster's tolerance retires a lease early.
+///
+/// A deadline so far future that adding the bound saturates is never retired:
+/// the filter drops holds only where the lapse is certain, matching
+/// [`lease_holder_is_member`].
+fn lease_expired(expires_at_wall_ns: u64, now_wall_ns: u64) -> bool {
+    match expires_at_wall_ns.checked_add(nodedb_types::MAX_CLOCK_SKEW_NS) {
+        Some(deadline) => deadline <= now_wall_ns,
+        None => false,
     }
 }
 
@@ -404,6 +429,52 @@ mod tests {
             super::super::wall_now_ns().saturating_sub(60_000_000_000),
             0,
         )
+    }
+
+    #[test]
+    fn lease_expired_waits_out_the_skew_bound() {
+        let deadline = 1_000_000_000_000u64;
+        assert!(!lease_expired(deadline, deadline));
+        assert!(!lease_expired(
+            deadline,
+            deadline + nodedb_types::MAX_CLOCK_SKEW_NS - 1
+        ));
+        assert!(lease_expired(
+            deadline,
+            deadline + nodedb_types::MAX_CLOCK_SKEW_NS
+        ));
+        assert!(lease_expired(
+            deadline,
+            deadline + nodedb_types::MAX_CLOCK_SKEW_NS + 1
+        ));
+    }
+
+    #[test]
+    fn lease_expired_saturates_at_the_clock_ceiling() {
+        assert!(!lease_expired(u64::MAX, u64::MAX));
+        assert!(lease_expired(0, u64::MAX));
+    }
+
+    /// A deadline that just passed in our frame is still inside the skew
+    /// window: the drain keeps waiting, because the holder's clock may be
+    /// behind ours and its lease is still live there.
+    #[tokio::test]
+    async fn lease_inside_the_skew_window_still_blocks_the_drain() {
+        let directory = tempfile::tempdir().expect("create drain count test directory");
+        let wal = Arc::new(
+            WalManager::open_for_testing(&directory.path().join("drain-count.wal"))
+                .expect("open drain count test WAL"),
+        );
+        let (dispatcher, _data_sides) = Dispatcher::new(1, 64);
+        let mut state = SharedState::new(dispatcher, wal).expect("construct drain count state");
+        Arc::get_mut(&mut state)
+            .expect("single owner in test")
+            .cluster_topology = Some(Arc::new(std::sync::RwLock::new(topo_with(&[1]))));
+        let descriptor = DescriptorId::new(0, 1, DescriptorKind::Collection, "orders".to_string());
+
+        let just_past = nodedb_types::Hlc::new(super::super::wall_now_ns().saturating_sub(1), 0);
+        insert_lease(&state, &descriptor, 1, 1, just_past);
+        assert_eq!(count_matching_leases(&state, &descriptor, 1, 0), 1);
     }
 
     #[tokio::test]
