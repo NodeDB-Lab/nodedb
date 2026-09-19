@@ -1,89 +1,24 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Static and active (dependent-read) txn dispatch to the Data Plane.
+//! Static-set ready-transaction dispatch: local-plan routing, group-leader
+//! resolution, and the `CalvinExecuteStatic` submit/stage orchestration.
 
 use std::time::Instant;
 
 use tracing::error;
 
 use nodedb_cluster::calvin::types::SequencedTxn;
-
-use super::routing::PlanRouting;
-use super::scheduler::Scheduler;
-use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use crate::types::{DatabaseId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
-/// Whether this vShard's slice carries a PRIMARY user data write — the write
-/// whose applied `Response` (affected-count + any RETURNING rows) the
-/// coordinator surfaces.
-///
-/// A primary write is a Document / KV / Vector / Timeseries / Columnar / Array
-/// write — NOT the implicit graph-edge cleanup (`EdgePut` / `EdgeDelete`) that
-/// dual-homes alongside a document delete/update. For a single-collection user
-/// DML (plus its implicit edges) exactly ONE participant carries the primary
-/// write, so only it deposits the applied `Response` into the coordinator's
-/// sidecar and the edge participants never clobber the entry.
-///
-/// This gate subsumes the RETURNING case (a RETURNING write IS a primary write,
-/// so its rows are still deposited) while ALSO carrying the affected-count of a
-/// plain (non-RETURNING) write — which a RETURNING-only gate dropped, making a
-/// routed plain write report zero rows affected.
-fn participant_change_sets(
-    plans: &[PhysicalPlan],
-    tenant_id: crate::types::TenantId,
-    vshard_id: u32,
-) -> Vec<crate::control::server::dispatch_utils::WriteChangeSet> {
-    plans
-        .iter()
-        .filter(|plan| match plan {
-            // Edge plans are dual-homed; only the source participant publishes
-            // the one logical Control-Plane event.
-            PhysicalPlan::Graph(
-                nodedb_physical::physical_plan::GraphOp::EdgePut { src_id, .. }
-                | nodedb_physical::physical_plan::GraphOp::EdgeDelete { src_id, .. },
-            ) => VShardId::from_key(src_id.as_bytes()).as_u32() == vshard_id,
-            _ => true,
-        })
-        .map(|plan| {
-            crate::control::server::dispatch_utils::extract_write_change_set(plan, tenant_id)
-        })
-        .collect()
-}
-
-/// Whether this vShard's slice carries the USER'S own write, as opposed to a
-/// derived side effect the Control Plane appended alongside it.
-///
-/// It gates the applied-response deposit, and that is the whole reason the
-/// distinction has to be made: a statement's `CommandComplete` is shaped from
-/// ONE deposited response, primary-write participants coalesce first-wins, and
-/// a derived participant's response describes a row the user's statement never
-/// named. A balance write that won that race handed an `INSERT` tag a count —
-/// or, when its flush found the commit already resolved and answered with an
-/// empty payload, no count at all — belonging to a different write entirely.
-///
-/// `is_derived_side_effect` is the named predicate rather than an inline
-/// `!matches!(plan, PhysicalPlan::Graph(_))`: the implicit graph edge and the
-/// cross-shard balance are the same concept, and spelling it inline here is why
-/// the second one never inherited the exclusion.
-pub(crate) fn plans_have_primary_write(plans: &[PhysicalPlan]) -> bool {
-    plans.iter().any(|plan| {
-        crate::control::planner::calvin::is_write_plan(plan)
-            && !crate::control::planner::calvin::write_class::is_derived_side_effect(plan)
-    })
-}
-
-/// Whether this vShard's slice carries a RETURNING-bearing write — a plan whose
-/// applied response is DATA-ROWs rather than a bare affected-count. Uses the
-/// SAME `describe_plan` classification the coordinator's response-shaping uses,
-/// so the two never disagree about which participant owns the returned rows.
-pub(crate) fn plans_have_returning(plans: &[PhysicalPlan]) -> bool {
-    use crate::control::server::response_shape::types::{PlanKind, describe_plan};
-    plans
-        .iter()
-        .any(|plan| matches!(describe_plan(plan), PlanKind::ReturningRows))
-}
+use super::super::routing::PlanRouting;
+use super::super::scheduler::Scheduler;
+use super::primary_write::{
+    participant_change_sets, plans_have_primary_write, plans_have_returning,
+    txn_has_non_derived_write,
+};
+use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
+use crate::types::DatabaseId;
 
 impl Scheduler {
     /// Whether THIS node is currently the leader of the data-group owning this
@@ -115,7 +50,7 @@ impl Scheduler {
     /// full deadline and report a generic timeout. Mirrors the OllpMismatch
     /// broadcast in `handle_executor_response`. Shared by `dispatch_txn` and
     /// `dispatch_active_txn`.
-    fn propose_routing_failure(
+    pub(super) fn propose_routing_failure(
         &self,
         epoch: u64,
         position: u32,
@@ -151,7 +86,7 @@ impl Scheduler {
     ) -> crate::Result<Vec<PhysicalPlan>> {
         let mut local = Vec::new();
         for plan in plans {
-            match super::routing::plan_vshard_in_database(&plan, database_id) {
+            match super::super::routing::plan_vshard_in_database(&plan, database_id) {
                 PlanRouting::Vshards(vshards) => {
                     if vshards.iter().any(|v| v.as_u32() == self.vshard_id) {
                         local.push(plan);
@@ -203,7 +138,7 @@ impl Scheduler {
         let epoch = txn.epoch;
         let position = txn.position;
 
-        let plans = match super::super::helpers::decode_plans(&txn.tx_class.plans) {
+        let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
             Ok(p) => p,
             Err(e) => {
                 error!(
@@ -217,6 +152,7 @@ impl Scheduler {
                 return;
             }
         };
+        let has_non_derived_write = txn_has_non_derived_write(&plans);
         let local = match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position)
         {
             Ok(p) => p,
@@ -240,7 +176,7 @@ impl Scheduler {
         // vote — or a routing bug (neither writes nor reads home here). Only the
         // latter is an error; the former stages a validate-only task below.
         if local.is_empty()
-            && !super::routing::homes_versioned_read(
+            && !super::super::routing::homes_versioned_read(
                 &txn.tx_class.versioned_reads,
                 txn.tx_class.database_id,
                 self.vshard_id,
@@ -270,7 +206,14 @@ impl Scheduler {
         // identical static path so each casts a real commit/abort Vote through
         // stage -> resolve -> verdict. The validate-only task stages no plans;
         // its response carries only the read-set vote.
-        self.dispatch_calvin_static(txn, txn_id, lock_owner, tenant_id, local);
+        self.dispatch_calvin_static(
+            txn,
+            txn_id,
+            lock_owner,
+            tenant_id,
+            local,
+            has_non_derived_write,
+        );
     }
 
     /// Build and dispatch a `CalvinExecuteStatic` task, then park the txn in
@@ -289,6 +232,7 @@ impl Scheduler {
         lock_owner: TxnId,
         tenant_id: crate::types::TenantId,
         plans: Vec<PhysicalPlan>,
+        has_non_derived_write: bool,
     ) {
         // The apply-slot identity (used in the CalvinExecuteStatic task and
         // error logs) is exactly `txn_id`; deriving it here keeps the two in
@@ -296,7 +240,7 @@ impl Scheduler {
         let epoch = txn_id.epoch;
         let position = txn_id.position;
         let request_id = self.next_request_id();
-        let has_primary_write = plans_have_primary_write(&plans);
+        let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
         let has_returning = plans_have_returning(&plans);
         let change_sets = participant_change_sets(&plans, tenant_id, self.vshard_id);
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
@@ -346,7 +290,7 @@ impl Scheduler {
 
         self.pending.insert(
             txn_id,
-            super::super::types::PendingTxn {
+            super::super::super::types::PendingTxn {
                 txn,
                 lock_owner,
                 // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
@@ -357,145 +301,7 @@ impl Scheduler {
                 // This dispatch STAGED the txn (validate + buffer, no apply);
                 // its response carries the local commit vote that drives the
                 // subsequent flush-or-drop.
-                commit_state: Some(super::super::types::CommitState::Staged),
-                // Set only once the txn parks in `AwaitingVerdict`.
-                verdict_deadline: None,
-            },
-        );
-    }
-
-    /// Dispatch an active dependent-read txn once all passive results are in.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn dispatch_active_txn(
-        &mut self,
-        txn: SequencedTxn,
-        txn_id: TxnId,
-        lock_owner: TxnId,
-        injected_reads: std::collections::BTreeMap<
-            nodedb_physical::physical_plan::meta::PassiveReadKeyId,
-            nodedb_types::Value,
-        >,
-    ) {
-        let request_id = self.next_request_id();
-        let tenant_id = txn.tx_class.tenant_id;
-        let epoch = txn.epoch;
-        let position = txn.position;
-
-        let plans = match super::super::helpers::decode_plans(&txn.tx_class.plans) {
-            Ok(p) => p,
-            Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active plan decode failed; releasing locks"
-                );
-                self.on_txn_complete(txn_id);
-                return;
-            }
-        };
-        let plans = match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position)
-        {
-            Ok(p) if !p.is_empty() => p,
-            Ok(_) => {
-                // A dependent-read active txn dispatched here always carries a
-                // local write slice (the OLLP orchestrator only routes the write
-                // participant through this path). An empty local slice is a
-                // routing bug, not a read-only participant — surface it as a
-                // terminal routing failure rather than dispatching an
-                // active task with nothing to apply.
-                let e = crate::Error::Internal {
-                    detail: format!(
-                        "calvin active txn {epoch}/{position} homes no local write plans \
-                         for vshard {}",
-                        self.vshard_id
-                    ),
-                };
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active txn homes no local writes; releasing locks"
-                );
-                self.propose_routing_failure(epoch, position, txn_id, &e);
-                self.on_txn_complete(txn_id);
-                return;
-            }
-            Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active txn routing failed; releasing locks"
-                );
-                self.propose_routing_failure(epoch, position, txn_id, &e);
-                self.on_txn_complete(txn_id);
-                return;
-            }
-        };
-        let has_primary_write = plans_have_primary_write(&plans);
-        let has_returning = plans_have_returning(&plans);
-        let change_sets = participant_change_sets(&plans, tenant_id, self.vshard_id);
-        let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteActive {
-            epoch,
-            position,
-            tenant_id,
-            plans,
-            injected_reads,
-            epoch_system_ms: txn.epoch_system_ms,
-            is_group_leader: self.is_group_leader(),
-        });
-
-        // Calvin allocates the CalvinApplied WAL LSN post-apply (in the
-        // scheduler's response handler), so no committed LSN is known at
-        // dispatch time to stamp here.
-        let request =
-            self.build_exempt_request(request_id, tenant_id, txn.tx_class.database_id, plan, None);
-
-        let resp_rx = self.shared.tracker.register(request_id);
-
-        let dispatch_result = match self.shared.dispatcher.lock() {
-            Ok(mut d) => d.dispatch(request),
-            Err(poisoned) => poisoned.into_inner().dispatch(request),
-        };
-
-        if let Err(e) = dispatch_result {
-            error!(
-                vshard_id = self.vshard_id,
-                epoch,
-                position,
-                error = %e,
-                "calvin scheduler: active dispatch failed; releasing locks"
-            );
-            self.on_txn_complete(txn_id);
-            return;
-        }
-
-        self.metrics.record_dispatch();
-
-        // no-determinism: executor latency observability, off-WAL path
-        let dispatch_instant = Instant::now();
-
-        self.spawn_response_bridge(txn_id, request_id, resp_rx);
-
-        self.pending.insert(
-            txn_id,
-            super::super::types::PendingTxn {
-                txn,
-                lock_owner,
-                // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
-                dispatch_time: dispatch_instant,
-                has_primary_write,
-                has_returning,
-                change_sets,
-                // The dependent-read active path now STAGES (leader-verify OLLP
-                // + buffer, no base apply); its response drives the same
-                // resolve → redo → flush as the static path, restoring
-                // WAL-only-restart durability. `resolve_staged_commit` reads the
-                // `read_set_valid: None` the active handler returns as "commit".
-                commit_state: Some(super::super::types::CommitState::Staged),
+                commit_state: Some(super::super::super::types::CommitState::Staged),
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
             },
