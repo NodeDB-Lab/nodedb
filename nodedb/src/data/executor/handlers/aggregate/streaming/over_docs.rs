@@ -3,6 +3,7 @@
 //! `aggregate_over_docs`: orchestrate accumulate + finalize over an
 //! already-materialized doc set, layering the per-shard result cache on top.
 
+use super::super::cache_entry::AggregateCacheEntry;
 use super::super::cache_key::{AggregateCacheKeyInputs, aggregate_cache_key};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -115,8 +116,19 @@ impl CoreLoop {
                         limit,
                         sort_keys,
                     });
+                    let kv_epoch = self.kv_engine.write_epoch(
+                        task.request.database_id.as_u64(),
+                        tid,
+                        collection,
+                    );
                     if self.aggregate_cache.len() < 256 {
-                        self.aggregate_cache.insert(cache_key, payload.clone());
+                        self.aggregate_cache.insert(
+                            cache_key,
+                            AggregateCacheEntry {
+                                kv_epoch,
+                                payload: payload.clone(),
+                            },
+                        );
                     }
                 }
                 self.response_with_payload(task, payload)

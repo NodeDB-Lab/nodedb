@@ -198,8 +198,16 @@ pub struct CoreLoop {
     /// lookups for repeated dashboard/analytics queries.
     ///
     /// Key: `(TenantId, "{collection}\0{group_by_fields}\0{agg_ops}")`.
-    /// Value: cached result rows as JSON.
-    pub(in crate::data::executor) aggregate_cache: HashMap<(DatabaseId, TenantId, String), Vec<u8>>,
+    /// Value: cached result rows as JSON, stamped with the KV write epoch the
+    /// collection was at when computed — see
+    /// `handlers::aggregate::AggregateCacheEntry`. Document/columnar writes
+    /// still evict explicitly via `invalidate_aggregate_cache_for_collection`;
+    /// KV writes are caught by the epoch stamp instead, since a KV write has
+    /// no equivalent per-write invalidation call site.
+    pub(in crate::data::executor) aggregate_cache: HashMap<
+        (DatabaseId, TenantId, String),
+        super::super::handlers::aggregate::AggregateCacheEntry,
+    >,
 
     /// Last time periodic maintenance (compaction, edge sweep) was run.
     pub(in crate::data::executor) last_maintenance: Option<std::time::Instant>,

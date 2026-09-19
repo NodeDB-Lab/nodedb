@@ -43,7 +43,10 @@ impl KvEngine {
         };
         let count = table.len();
 
-        // Move hash table.
+        // Move hash table, bumping both keys' write epochs: the old key's
+        // rows are gone, the new key's rows just arrived.
+        self.bump_write_epoch(old_key);
+        self.bump_write_epoch(new_key);
         self.tables.insert(new_key, table);
         self.hash_to_tenant.remove(&old_key);
         self.hash_to_tenant.insert(new_key, tenant_id);
