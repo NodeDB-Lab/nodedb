@@ -48,7 +48,7 @@ pub use graph::{
     BatchEdge, BspSuperstepPlan, BspSuperstepResult, GraphOp, WccSuperstepPlan, WccSuperstepResult,
 };
 pub use kv::{KvOp, KvResolveOutcome, KvResolvedMutation};
-pub use meta::MetaOp;
+pub use meta::{MetaOp, SAVEPOINT_MARKER_BYTES};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use routing::plan_contains_cluster_partitioned_leaf;

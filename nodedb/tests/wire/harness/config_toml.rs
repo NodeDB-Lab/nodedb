@@ -46,6 +46,11 @@ pub(super) struct TuningOverrides {
     /// Overrides `[tuning.timeseries] memtable_budget_bytes` so a test can
     /// observe timeseries partition flushes on a handful of rows.
     pub(super) timeseries_memtable_budget_bytes: Option<usize>,
+    /// Sets `[server] single_node_calvin = false` so the server boots with no
+    /// cluster topology. The planner then emits the single-node plan forms
+    /// (`ArrayOp::{Put, Delete, Slice, ...}`) instead of the `ClusterArrayOp`
+    /// routing wrappers a Calvin-backed node plans.
+    pub(super) standalone: bool,
 }
 
 impl TuningOverrides {
@@ -85,6 +90,14 @@ impl TuningOverrides {
             ..Self::default()
         }
     }
+
+    /// Boot without the single-node Calvin stack (no cluster topology).
+    pub(super) fn standalone() -> Self {
+        Self {
+            standalone: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Write `nodedb.toml` into `dir` and return its path.
@@ -105,6 +118,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
          password_expiry_days = 0\n\
          audit_retention_days = 0\n"
     );
+    if tuning.standalone {
+        toml.push_str("\n[server]\nsingle_node_calvin = false\n");
+    }
     // A test's own client connections are still open at shutdown. The
     // production drain outlives the harness's 20s SIGTERM patience, so the
     // server would be force-killed instead of exiting gracefully.

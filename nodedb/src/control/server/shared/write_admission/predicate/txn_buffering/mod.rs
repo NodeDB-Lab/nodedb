@@ -57,7 +57,10 @@
 //! 1. RYOW LOSS: a `Buffered` plan does not stage into the per-transaction
 //!    overlay, so a read later in the SAME transaction does not observe the
 //!    write until COMMIT. This matches how bulk Document DML already behaved
-//!    in a transaction before it was staged.
+//!    in a transaction before it was staged. The single-node
+//!    `ArrayOp::{Put, Delete}` is exempt: `is_stageable_write` routes it
+//!    through `MetaOp::StageWrite` into `ArrayTxnOverlay`, so same-transaction
+//!    array reads see it. The `ClusterArrayOp` wrapper is still `Buffered`.
 //! 2. NO-UNDO GAP (pre-existing, not fixed here): every flipped variant
 //!    reaches `exec_tx_passthrough`
 //!    (`data/executor/handlers/transaction/sub_plan_write.rs`) at COMMIT,

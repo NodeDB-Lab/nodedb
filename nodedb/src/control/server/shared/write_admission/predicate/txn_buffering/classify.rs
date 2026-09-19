@@ -350,7 +350,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | ArrayOp::PurgeArrayDrop { .. },
         ) => false,
         // Buffered and encoded — matches oracle. `to_replicated_entry` emits
-        // `ArrayCellPut`/`ArrayCellDelete`, at the cost of RYOW loss + the no-undo gap.
+        // `ArrayCellPut`/`ArrayCellDelete`. Also stageable (`is_stageable_write`),
+        // so the statement answers with a real count and same-transaction reads
+        // see the cell through `ArrayTxnOverlay`.
         PhysicalPlan::Array(ArrayOp::Put { .. } | ArrayOp::Delete { .. }) => true,
 
         // ---- ClusterArray: coordinator-only, never touched by `to_replicated_entry`.
@@ -1851,6 +1853,7 @@ mod tests {
                 txn_id: TxnId::new(1),
                 value_marker: 0,
                 graph_marker: 0,
+                array_marker: 0,
             }),
             PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
                 tenant_id: tenant(),

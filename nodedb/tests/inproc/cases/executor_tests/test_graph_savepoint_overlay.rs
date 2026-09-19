@@ -90,14 +90,21 @@ fn neighbors(node: &str, label: &str) -> PhysicalPlan {
     })
 }
 
-/// Parse the 16-byte `MarkSavepoint` payload into `(value_marker, graph_marker)`.
-fn parse_markers(payload: &[u8]) -> (u64, u64) {
-    assert_eq!(payload.len(), 16, "MarkSavepoint must return 16 bytes");
+/// Parse the 24-byte `MarkSavepoint` payload into `(value_marker,
+/// graph_marker, array_marker)`.
+fn parse_markers(payload: &[u8]) -> (u64, u64, u64) {
+    assert_eq!(payload.len(), 24, "MarkSavepoint must return 24 bytes");
     let mut v = [0u8; 8];
     v.copy_from_slice(&payload[..8]);
     let mut g = [0u8; 8];
     g.copy_from_slice(&payload[8..16]);
-    (u64::from_le_bytes(v), u64::from_le_bytes(g))
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&payload[16..24]);
+    (
+        u64::from_le_bytes(v),
+        u64::from_le_bytes(g),
+        u64::from_le_bytes(a),
+    )
 }
 
 fn neighbor_nodes(payload: &[u8]) -> Vec<String> {
@@ -133,7 +140,7 @@ fn rollback_to_savepoint_discards_graph_edge_staged_after_marker() {
         PhysicalPlan::Meta(MetaOp::MarkSavepoint { txn_id }),
     );
     assert_eq!(resp.status, Status::Ok);
-    let (value_marker, graph_marker) = parse_markers(resp.payload.as_ref());
+    let (value_marker, graph_marker, array_marker) = parse_markers(resp.payload.as_ref());
 
     // Stage A→C after the savepoint.
     let resp = send_txn(
@@ -163,6 +170,7 @@ fn rollback_to_savepoint_discards_graph_edge_staged_after_marker() {
             txn_id,
             value_marker,
             graph_marker,
+            array_marker,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -227,7 +235,7 @@ fn rollback_to_savepoint_restores_cross_set_cleared_tombstone() {
         txn_id,
         PhysicalPlan::Meta(MetaOp::MarkSavepoint { txn_id }),
     );
-    let (value_marker, graph_marker) = parse_markers(resp.payload.as_ref());
+    let (value_marker, graph_marker, array_marker) = parse_markers(resp.payload.as_ref());
 
     // Re-put X→Y: this CLEARS the tombstone (cross-set), so Y is visible again.
     let resp = send_txn(
@@ -255,6 +263,7 @@ fn rollback_to_savepoint_restores_cross_set_cleared_tombstone() {
             txn_id,
             value_marker,
             graph_marker,
+            array_marker,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -327,11 +336,11 @@ fn one_savepoint_reverts_value_and_graph_overlays_together() {
         txn_id,
         PhysicalPlan::Meta(MetaOp::MarkSavepoint { txn_id }),
     );
-    let (value_marker, graph_marker) = parse_markers(resp.payload.as_ref());
+    let (value_marker, graph_marker, array_marker) = parse_markers(resp.payload.as_ref());
     assert_eq!(
-        (value_marker, graph_marker),
-        (1, 1),
-        "one value + one graph mutation staged"
+        (value_marker, graph_marker, array_marker),
+        (1, 1, 0),
+        "one value + one graph mutation staged, no array mutation"
     );
 
     // Stage more of BOTH after the savepoint: another edge and a PERSIST that
@@ -370,6 +379,7 @@ fn one_savepoint_reverts_value_and_graph_overlays_together() {
             txn_id,
             value_marker,
             graph_marker,
+            array_marker,
         }),
     );
     assert_eq!(resp.status, Status::Ok);

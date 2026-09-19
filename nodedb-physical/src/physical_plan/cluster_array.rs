@@ -110,3 +110,17 @@ pub enum ClusterArrayOp {
         prefix_bits: u8,
     },
 }
+
+impl ClusterArrayOp {
+    /// The array this op targets. Total over every variant, so read-set
+    /// tracking and the commit validator key on the same name a shard-local
+    /// `ArrayOp` reports.
+    pub fn array_id(&self) -> &ArrayId {
+        match self {
+            ClusterArrayOp::Slice { array_id, .. }
+            | ClusterArrayOp::Agg { array_id, .. }
+            | ClusterArrayOp::Put { array_id, .. }
+            | ClusterArrayOp::Delete { array_id, .. } => array_id,
+        }
+    }
+}

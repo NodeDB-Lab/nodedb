@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod array_merge;
+mod array_staged;
 mod columnar_merge;
 mod fts_merge;
 mod fts_score;
 mod graph_staged;
+mod lease;
 mod merge;
 mod spatial_merge;
 mod staged;
 mod timeseries_merge;
 mod vector_merge;
 
+pub(in crate::data::executor) use array_merge::ArrayOverlayMergeParams;
+pub use array_staged::{ArrayTxnOverlay, StagedCellPut};
 pub(in crate::data::executor) use columnar_merge::{
     ColumnarMatchedRow, ColumnarOverlayMergeParams, decode_staged_row,
 };

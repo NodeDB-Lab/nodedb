@@ -16,6 +16,7 @@ mod body;
 mod constraint;
 mod context;
 mod dispatch;
+mod stage_array;
 mod stage_bulk_delete;
 mod stage_bulk_update;
 mod stage_columnar;

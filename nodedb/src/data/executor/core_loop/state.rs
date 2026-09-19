@@ -487,6 +487,13 @@ pub struct CoreLoop {
         crate::types::TxnId,
         crate::data::executor::handlers::transaction::overlay::GraphTxnOverlay,
     >,
+    /// Parallel to `txn_overlays`, for ARRAY writes (cell identity is a
+    /// coordinate tuple, not a surrogate -- see `ArrayTxnOverlay`). Same
+    /// lifecycle.
+    pub(in crate::data::executor) array_txn_overlays: HashMap<
+        crate::types::TxnId,
+        crate::data::executor::handlers::transaction::overlay::ArrayTxnOverlay,
+    >,
     /// Columnar engines THIS txn newly created while staging; `DropTxnOverlay`
     /// drops still-empty entries (rollback) and leaves filled ones (commit).
     pub(in crate::data::executor) txn_created_columnar_engines:

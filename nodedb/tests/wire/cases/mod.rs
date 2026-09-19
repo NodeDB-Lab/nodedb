@@ -224,6 +224,7 @@ mod sql_synonym_group;
 mod sql_temp_tables;
 mod sql_three_source_rrf;
 mod sql_transactions;
+mod sql_transactions_array_overlay;
 mod sql_transactions_bitemporal_rollback;
 mod sql_transactions_buffered_atomicity_fix;
 mod sql_transactions_bulk_dml_overlay;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Stage a Calvin static-execute write plan into the shared per-core
-//! `txn_overlays` (and `graph_txn_overlays`), keyed by a synthetic `TxnId`
+//! `txn_overlays` (and `graph_txn_overlays` / `array_txn_overlays`), keyed by
+//! a synthetic `TxnId`
 //! (see `calvin_txn_id.rs`).
 //!
 //! This is purely additive to
@@ -247,19 +248,20 @@ impl CoreLoop {
     }
 
     /// Discard the synthetic-`TxnId` overlay entries staged for
-    /// `(epoch, position, vshard)`, if any -- both `txn_overlays` (Document /
-    /// KV) and `graph_txn_overlays` (GRAPH edge/label ops route into their
+    /// `(epoch, position, vshard)`, if any -- `txn_overlays` (Document /
+    /// KV), `graph_txn_overlays` (GRAPH edge/label ops route into their
     /// own parallel overlay, same as a session transaction's
-    /// `execute_stage_graph`). Called from both
+    /// `execute_stage_graph`), and `array_txn_overlays` (ARRAY cell ops,
+    /// same as `execute_stage_array`). Called from both
     /// [`CoreLoop::execute_calvin_flush`] and [`CoreLoop::execute_calvin_drop`]
     /// so neither overlay outlives the `commit_pending` entry it shadows.
     /// Idempotent: a missing key (already removed, or the id derivation
     /// itself failing) is a silent no-op — the same shape as the
     /// `commit_pending` removal it accompanies.
     ///
-    /// Mirrors `MetaOp::DropTxnOverlay`'s gauge accounting exactly: both maps
-    /// were populated (if at all) via the `txn_overlay_mut` /
-    /// `graph_txn_overlay_mut` choke points, which bump `active_txn_overlays`
+    /// Mirrors `MetaOp::DropTxnOverlay`'s gauge accounting exactly: every map
+    /// was populated (if at all) via the `txn_overlay_mut` /
+    /// `graph_txn_overlay_mut` / `array_txn_overlay_mut` choke points, which bump `active_txn_overlays`
     /// on first creation, so removal here must decrement by the same count
     /// or the gauge drifts upward forever on every Calvin-staged transaction.
     pub(in crate::data::executor) fn drop_calvin_synthetic_overlay(
@@ -270,7 +272,8 @@ impl CoreLoop {
     ) {
         if let Ok(synthetic_txn_id) = calvin_synthetic_txn_id(epoch, position, vshard) {
             let removed = u64::from(self.txn_overlays.remove(&synthetic_txn_id).is_some())
-                + u64::from(self.graph_txn_overlays.remove(&synthetic_txn_id).is_some());
+                + u64::from(self.graph_txn_overlays.remove(&synthetic_txn_id).is_some())
+                + u64::from(self.array_txn_overlays.remove(&synthetic_txn_id).is_some());
             if removed > 0
                 && let Some(m) = &self.metrics
             {

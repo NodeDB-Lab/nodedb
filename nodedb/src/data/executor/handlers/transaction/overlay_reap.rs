@@ -2,9 +2,9 @@
 
 //! Deterministic lease GC for per-transaction staging overlays.
 //!
-//! Each in-flight transaction stages its not-yet-durable writes into three
+//! Each in-flight transaction stages its not-yet-durable writes into four
 //! per-`TxnId` maps on `CoreLoop` (`txn_overlays`, `graph_txn_overlays`,
-//! `txn_created_columnar_engines`). They are normally released by
+//! `array_txn_overlays`, `txn_created_columnar_engines`). They are normally released by
 //! `MetaOp::DropTxnOverlay`, emitted by COMMIT/ROLLBACK. The teardown hooks
 //! (pgwire `on_connection_end` → reclaim, native `run()` reclaim) drop the
 //! overlay best-effort — they log and continue if the dispatch fails. This
@@ -54,7 +54,7 @@ pub(in crate::data::executor) const OVERLAY_LEASE_NS: i64 = 6 * 3_600 * 1_000_00
 pub(in crate::data::executor) const OVERLAY_REAP_BUDGET: usize = 1_024;
 
 impl CoreLoop {
-    /// Refresh the lease stamp for `txn_id` on whichever of the two staging
+    /// Refresh the lease stamp for `txn_id` on whichever of the three staging
     /// overlays currently hold it. Called from every in-transaction
     /// read-your-own-write path so a long read-only transaction never ages out
     /// (the load-bearing safety property of the reaper). A no-op for a txn with
@@ -67,10 +67,13 @@ impl CoreLoop {
         if let Some(overlay) = self.graph_txn_overlays.get(&txn_id) {
             overlay.touch(ord);
         }
+        if let Some(overlay) = self.array_txn_overlays.get(&txn_id) {
+            overlay.touch(ord);
+        }
     }
 
     /// Release all staging state for `txn_id`: the value/TTL overlay, the
-    /// parallel GRAPH overlay, and any still-empty columnar engines this
+    /// parallel GRAPH and ARRAY overlays, and any still-empty columnar engines this
     /// transaction auto-created during staging. Decrements the
     /// `active_txn_overlays` gauge by the number of overlays removed and
     /// returns that count.
@@ -83,7 +86,8 @@ impl CoreLoop {
     /// a committed txn populated the memtable before this runs, so it survives.
     pub(in crate::data::executor) fn drop_overlay_entry(&mut self, txn_id: TxnId) -> u64 {
         let removed = u64::from(self.txn_overlays.remove(&txn_id).is_some())
-            + u64::from(self.graph_txn_overlays.remove(&txn_id).is_some());
+            + u64::from(self.graph_txn_overlays.remove(&txn_id).is_some())
+            + u64::from(self.array_txn_overlays.remove(&txn_id).is_some());
         if removed > 0
             && let Some(m) = &self.metrics
         {
@@ -105,8 +109,8 @@ impl CoreLoop {
 
     /// Reclaim per-txn staging overlays whose lease has expired.
     ///
-    /// A txn survives when the MAX of its value-overlay and graph-overlay
-    /// stamps is at or above `peek() - OVERLAY_LEASE_NS` — a refresh on either
+    /// A txn survives when the MAX of its value-, graph-, and array-overlay
+    /// stamps is at or above `peek() - OVERLAY_LEASE_NS` — a refresh on any
     /// overlay keeps the whole transaction alive. Capped at
     /// [`OVERLAY_REAP_BUDGET`] per call so a mass leak drains across ticks
     /// without stalling the reactor. Runs between tasks on the single-threaded
@@ -114,12 +118,14 @@ impl CoreLoop {
     pub(in crate::data::executor) fn reap_expired_overlays(&mut self) {
         let threshold = self.hlc.peek().saturating_sub(OVERLAY_LEASE_NS);
 
-        // Union of txn ids across both overlays — a txn may hold only one of
-        // the two (value-only or graph-only), so neither map alone is complete.
+        // Union of txn ids across every overlay — a txn may hold only one of
+        // them (value-only, graph-only, or array-only), so no map alone is
+        // complete.
         let candidates: HashSet<TxnId> = self
             .txn_overlays
             .keys()
             .chain(self.graph_txn_overlays.keys())
+            .chain(self.array_txn_overlays.keys())
             .copied()
             .collect();
 
@@ -127,7 +133,13 @@ impl CoreLoop {
         for txn_id in candidates {
             let value_ord = self.txn_overlays.get(&txn_id).map(|o| o.last_touch());
             let graph_ord = self.graph_txn_overlays.get(&txn_id).map(|o| o.last_touch());
-            let Some(max_ord) = value_ord.into_iter().chain(graph_ord).max() else {
+            let array_ord = self.array_txn_overlays.get(&txn_id).map(|o| o.last_touch());
+            let Some(max_ord) = value_ord
+                .into_iter()
+                .chain(graph_ord)
+                .chain(array_ord)
+                .max()
+            else {
                 continue;
             };
             if max_ord < threshold {

@@ -10,6 +10,13 @@ use nodedb_types::{QualifiedCollection, TenantId, Value};
 
 pub use super::meta_calvin::PassiveReadKeyId;
 
+/// Byte length of the [`MetaOp::MarkSavepoint`] response payload /
+/// [`MetaOp::RollbackToSavepoint`] marker set: three little-endian `u64`s
+/// (value/TTL overlay, GRAPH overlay, ARRAY overlay journal lengths).
+/// Encoder and decoder both key off this constant so the layout can only
+/// change in one place.
+pub const SAVEPOINT_MARKER_BYTES: usize = 24;
+
 /// Meta / maintenance physical operations.
 #[derive(
     Debug,
@@ -461,27 +468,29 @@ pub enum MetaOp {
 
     /// Mark a savepoint in the per-transaction staging overlays.
     ///
-    /// A single savepoint spans BOTH the value/TTL overlay and the parallel
-    /// GRAPH overlay, which keep independent undo journals. The Data Plane
-    /// returns a 16-byte composite marker — two little-endian `u64`s: the
-    /// value overlay's journal length followed by the GRAPH overlay's — so the
-    /// Control Plane can record both as the savepoint's rollback markers.
+    /// A single savepoint spans the value/TTL overlay and the parallel GRAPH
+    /// and ARRAY overlays, which keep independent undo journals. The Data
+    /// Plane returns a 24-byte composite marker — three little-endian `u64`s:
+    /// the value overlay's journal length, then the GRAPH overlay's, then the
+    /// ARRAY overlay's — so the Control Plane can record all three as the
+    /// savepoint's rollback markers.
     /// In-memory only — savepoints append no WAL. Keyed by the request's
     /// `txn_id`.
     MarkSavepoint { txn_id: nodedb_types::id::TxnId },
 
     /// Roll the per-transaction staging overlays back to a savepoint.
     ///
-    /// Replays BOTH overlays' undo journals from their ends down to their
-    /// respective markers in reverse — restoring each recorded prior slot (or
-    /// removing it when absent) in the value/TTL overlay to `value_marker` and
-    /// in the GRAPH overlay to `graph_marker` — then truncates each journal to
-    /// its marker. The transaction stays open. In-memory only. Keyed by
-    /// `txn_id`.
+    /// Replays every overlay's undo journal from its end down to its marker
+    /// in reverse — restoring each recorded prior slot (or removing it when
+    /// absent) in the value/TTL overlay to `value_marker`, in the GRAPH
+    /// overlay to `graph_marker`, and in the ARRAY overlay to `array_marker`
+    /// — then truncates each journal to its marker. The transaction stays
+    /// open. In-memory only. Keyed by `txn_id`.
     RollbackToSavepoint {
         txn_id: nodedb_types::id::TxnId,
         value_marker: u64,
         graph_marker: u64,
+        array_marker: u64,
     },
 
     /// Record the per-key / per-collection write versions of a committed

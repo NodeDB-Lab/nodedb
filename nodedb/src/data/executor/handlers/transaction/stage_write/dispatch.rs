@@ -3,7 +3,9 @@
 //! `StageWrite` dispatch: route a point-write plan to the matching staging
 //! path, compute its real affected-row count, and record it in the overlay.
 
-use nodedb_physical::physical_plan::{ColumnarOp, DocumentOp, GraphOp, SpatialOp, TimeseriesOp};
+use nodedb_physical::physical_plan::{
+    ArrayOp, ColumnarOp, DocumentOp, GraphOp, SpatialOp, TimeseriesOp,
+};
 use nodedb_types::RowIdentity;
 
 use super::constraint::OverlayPk;
@@ -206,11 +208,30 @@ impl CoreLoop {
             ) => {
                 return self.stage_not_point_write(task);
             }
+            PhysicalPlan::Array(op @ (ArrayOp::Put { .. } | ArrayOp::Delete { .. })) => {
+                return self.execute_stage_array(task, txn_id, op);
+            }
+            PhysicalPlan::Array(
+                ArrayOp::OpenArray { .. }
+                | ArrayOp::Slice { .. }
+                | ArrayOp::Project { .. }
+                | ArrayOp::Aggregate { .. }
+                | ArrayOp::Elementwise { .. }
+                | ArrayOp::Flush { .. }
+                | ArrayOp::Compact { .. }
+                | ArrayOp::SurrogateBitmapScan { .. }
+                | ArrayOp::DropArray { .. }
+                | ArrayOp::RestoreArrayDrop { .. }
+                | ArrayOp::PurgeArrayDrop { .. },
+            ) => return self.stage_not_point_write(task),
+            // A `ClusterArrayOp::{Put, Delete}` routing wrapper never reaches
+            // the Data Plane: the coordinator (Control Plane) fans it out into
+            // per-vShard `ArrayOp::{Put, Delete}` tasks, and the cluster
+            // fan-out staging lives with that coordinator.
             PhysicalPlan::Text(_)
             | PhysicalPlan::Crdt(_)
             | PhysicalPlan::Query(_)
             | PhysicalPlan::Meta(_)
-            | PhysicalPlan::Array(_)
             | PhysicalPlan::ClusterArray(_)
             | PhysicalPlan::ClusterEvent(_) => return self.stage_not_point_write(task),
         };
@@ -388,7 +409,7 @@ impl CoreLoop {
         self.response_error(
             task,
             ErrorCode::Internal {
-                detail: "StageWrite is only valid for point-write document operations".into(),
+                detail: "StageWrite is only valid for stageable point-write operations".into(),
             },
         )
     }

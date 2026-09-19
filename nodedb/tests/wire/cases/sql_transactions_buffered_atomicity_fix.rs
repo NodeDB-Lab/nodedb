@@ -9,23 +9,29 @@
 //! transactional write: ROLLBACK discards them, COMMIT is required to
 //! persist them, and — the deliberate trade-off documented in
 //! `control/server/shared/write_admission/predicate/txn_buffering.rs` — a
-//! read later in the SAME transaction no longer observes the buffered write
-//! until COMMIT (read-your-own-writes is lost for these ops specifically).
+//! read later in the SAME transaction no longer observes a buffered write
+//! until COMMIT (read-your-own-writes is lost for the buffered ops). The
+//! single-node `ArrayOp::{Put, Delete}` is the exception: it stages into
+//! `ArrayTxnOverlay` at statement time, so a same-transaction read sees it
+//! (`array_insert_in_txn_visible_to_same_txn_read` below, on a standalone
+//! server; the full contract lives in `sql_transactions_array_overlay.rs`).
 //!
 //! `CrdtOp` and `VectorOp` flipped variants have no direct SQL entry point on
 //! the existing pgwire surface, so the fix is pinned via the Array and
 //! Document cases below, which exercise the identical `exec_tx_passthrough`
 //! COMMIT-replay path.
 //!
-//! `INSERT INTO ARRAY` / `DELETE FROM ARRAY` do not plan as `ArrayOp` here.
-//! Whenever a cluster topology exists -- which the server binary always has,
-//! since `server.single_node_calvin` defaults on -- `plan_sql()` emits the
-//! Control-Plane routing wrapper `ClusterArrayOp::{Put, Delete}` instead
-//! (`array_convert/dml.rs`, gated on `ctx.cluster_enabled`). The wrapper has
-//! no Data-Plane handler, so the staging gate reshapes it into one
-//! `ArrayOp::{Put, Delete}` per owning vShard before buffering
-//! (`session::txn_expand`); COMMIT replays those. The cases below therefore
-//! exercise the wrapper end to end, not just the single-node `ArrayOp` form.
+//! `INSERT INTO ARRAY` / `DELETE FROM ARRAY` do not plan as `ArrayOp` on the
+//! default `TestServer::start()`. Whenever a cluster topology exists -- which
+//! that server has, since `server.single_node_calvin` defaults on --
+//! `plan_sql()` emits the Control-Plane routing wrapper
+//! `ClusterArrayOp::{Put, Delete}` instead (`array_convert/dml.rs`, gated on
+//! `ctx.cluster_enabled`). The wrapper has no Data-Plane handler, so the
+//! staging gate reshapes it into one `ArrayOp::{Put, Delete}` per owning
+//! vShard before buffering (`session::txn_expand`); COMMIT replays those. The
+//! atomicity cases below therefore exercise the wrapper end to end. The
+//! read-your-own-writes case uses `TestServer::start_standalone()`, where the
+//! planner emits the single-node `ArrayOp` form that stages.
 
 use crate::harness::TestServer;
 
@@ -123,16 +129,18 @@ async fn array_delete_rollback_restores_cell() {
     );
 }
 
-/// Pin the RYOW-loss trade-off explicitly: a write buffered by this fix
-/// (`ArrayOp::Put`) is NOT staged into the per-transaction overlay, so a read
-/// later in the SAME transaction does not observe it until COMMIT. This is a
-/// deliberate, documented behavior change (module doc on
-/// `txn_buffering.rs`), not a regression — asserted here so it is proven by
-/// a test rather than discovered later.
+/// On a standalone server the single-node `ArrayOp::Put` stages into
+/// `ArrayTxnOverlay` at statement time, so a read later in the SAME
+/// transaction observes the cell before COMMIT, ROLLBACK removes it, and a
+/// base cell committed before BEGIN survives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn array_insert_in_txn_not_visible_to_same_txn_read() {
-    let server = TestServer::start().await;
+async fn array_insert_in_txn_visible_to_same_txn_read() {
+    let server = TestServer::start_standalone().await;
     setup_array(&server, "arr_atomic_ryow").await;
+    server
+        .exec("INSERT INTO ARRAY arr_atomic_ryow COORDS (5, 5) VALUES (2.0)")
+        .await
+        .unwrap();
 
     server.exec("BEGIN").await.unwrap();
     server
@@ -141,14 +149,26 @@ async fn array_insert_in_txn_not_visible_to_same_txn_read() {
         .unwrap();
 
     let rows = array_cell_rows(&server, "arr_atomic_ryow", 4, 4).await;
-    assert!(
-        rows.is_empty(),
-        "a buffered ArrayOp::Put must NOT be visible to a read in the same \
-         transaction before COMMIT (RYOW loss is the documented trade-off \
-         for closing the atomicity gap); got {rows:?}"
+    assert_eq!(
+        rows.len(),
+        1,
+        "a staged ArrayOp::Put must be visible to a read in the same \
+         transaction before COMMIT (read-your-own-writes); got {rows:?}"
     );
 
     server.client.simple_query("ROLLBACK").await.unwrap();
+
+    let rows = array_cell_rows(&server, "arr_atomic_ryow", 4, 4).await;
+    assert!(
+        rows.is_empty(),
+        "ROLLBACK must discard the staged cell; found {rows:?}"
+    );
+    let base = array_cell_rows(&server, "arr_atomic_ryow", 5, 5).await;
+    assert_eq!(
+        base.len(),
+        1,
+        "base cell must survive the rollback; got {base:?}"
+    );
 }
 
 // ── Document MERGE: rollback discards, commit persists ─────────────────────

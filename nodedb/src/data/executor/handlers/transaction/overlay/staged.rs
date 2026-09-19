@@ -14,11 +14,11 @@
 //! is found by the identity a point read carries. A KV row's identity is
 //! its raw key, hex encoded, taken verbatim (`stage_kv::kv_row_identity`).
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
 use nodedb_types::RowIdentity;
 
+use super::lease::LeaseStamp;
 use crate::types::{DatabaseId, TenantId};
 
 /// Per-core upper bound on the total staged-body bytes a single transaction's
@@ -128,17 +128,10 @@ pub struct TxnOverlay {
     /// appended to by the value/TTL mutators so nothing escapes it; dropped with
     /// the overlay when the transaction resolves.
     journal: Vec<OverlayUndo>,
-    /// Ordinal-clock stamp of the last time this transaction touched its
-    /// overlay — advanced by every staged write AND every in-transaction
+    /// Advanced by every staged write AND every in-transaction
     /// read-your-own-write, so a live transaction's stamp always tracks the
-    /// clock. The overlay lease reaper reclaims overlays whose stamp has aged
-    /// past `OVERLAY_LEASE_NS` (an abandoned txn whose teardown never ran).
-    ///
-    /// `Cell` (interior mutability) so read-your-own-write paths — which hold
-    /// only `&self` while a scan borrows other core state — can refresh the
-    /// stamp without threading `&mut self` through the entire read pipeline.
-    /// Sound because a `CoreLoop` is `!Send` and single-threaded per core.
-    last_touch_ord: Cell<i64>,
+    /// clock. See [`LeaseStamp`].
+    lease: LeaseStamp,
 }
 
 impl TxnOverlay {
@@ -151,13 +144,13 @@ impl TxnOverlay {
     /// value). Called by the write choke point on staging and by every
     /// read-your-own-write path so an active transaction never ages out.
     pub fn touch(&self, ord: i64) {
-        self.last_touch_ord.set(ord);
+        self.lease.touch(ord);
     }
 
     /// The overlay's last lease stamp (0 for a freshly-created overlay that has
     /// not yet been touched). Read by the lease reaper.
     pub fn last_touch(&self) -> i64 {
-        self.last_touch_ord.get()
+        self.lease.last_touch()
     }
 
     /// Record the current slot state for `(coll_key, surrogate, doc_id)` onto

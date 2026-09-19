@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::event::cdc::CdcOffset;
 use crate::types::{TenantId, VShardId};
-use nodedb_physical::physical_plan::MetaOp;
+use nodedb_physical::physical_plan::{MetaOp, SAVEPOINT_MARKER_BYTES};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::connection::SessionId;
 use super::outcome::TxnDataPlane;
-use super::state::TransactionState;
+use super::state::{OverlayMarkers, TransactionState};
 use super::store::SessionStore;
 
 /// Typed savepoint failure. Adapters map each variant to its SQLSTATE.
@@ -68,32 +68,36 @@ async fn dispatch_overlay_savepoint(
     }
 }
 
-/// Decode the 16-byte composite savepoint marker payload: two LE u64s carrying
-/// the value/TTL overlay journal marker followed by the graph overlay marker.
-/// A missing or short payload means empty journals → `(0, 0)`.
-fn decode_markers(payload: Option<Vec<u8>>) -> (usize, usize) {
+/// Decode the 24-byte composite savepoint marker payload: three LE u64s
+/// carrying the value/TTL overlay journal marker, then the graph overlay
+/// marker, then the array overlay marker. A missing or short payload means
+/// empty journals → all-zero markers.
+fn decode_markers(payload: Option<Vec<u8>>) -> OverlayMarkers {
     payload
-        .filter(|bytes| bytes.len() == 16)
+        .filter(|bytes| bytes.len() == SAVEPOINT_MARKER_BYTES)
         .map(|bytes| {
             let mut value = [0u8; 8];
             value.copy_from_slice(&bytes[..8]);
             let mut graph = [0u8; 8];
             graph.copy_from_slice(&bytes[8..16]);
-            (
-                u64::from_le_bytes(value) as usize,
-                u64::from_le_bytes(graph) as usize,
-            )
+            let mut array = [0u8; 8];
+            array.copy_from_slice(&bytes[16..24]);
+            OverlayMarkers {
+                value: u64::from_le_bytes(value) as usize,
+                graph: u64::from_le_bytes(graph) as usize,
+                array: u64::from_le_bytes(array) as usize,
+            }
         })
-        .unwrap_or((0, 0))
+        .unwrap_or_default()
 }
 
 /// Handle SAVEPOINT `<name>`.
 ///
 /// Captures the composite overlay undo-journal marker on EVERY vShard the
 /// transaction has staged writes to, so a later ROLLBACK TO reverts staged
-/// value/TTL AND graph state on all of them to exactly here. A missing/short
-/// payload means empty journals → `(0, 0)`. With no vShard staged yet the
-/// marker map is empty.
+/// value/TTL, graph, AND array state on all of them to exactly here. A
+/// missing/short payload means empty journals → all-zero markers. With no
+/// vShard staged yet the marker map is empty.
 pub async fn run_savepoint(
     sessions: &SessionStore,
     session_id: SessionId,
@@ -103,7 +107,7 @@ pub async fn run_savepoint(
 ) -> Result<(), SavepointError> {
     require_active_txn(sessions, session_id)?;
     let (txn_id, vshards) = sessions.txn_identity(session_id);
-    let mut markers: BTreeMap<VShardId, (usize, usize)> = BTreeMap::new();
+    let mut markers: BTreeMap<VShardId, OverlayMarkers> = BTreeMap::new();
     if let Some(txn_id) = txn_id {
         for vshard_id in vshards {
             let payload = dispatch_overlay_savepoint(
@@ -145,13 +149,13 @@ pub fn run_release_savepoint(
 
 /// Handle ROLLBACK TO SAVEPOINT `<name>`.
 ///
-/// Truncates the write buffer to the saved position and rewinds BOTH the
-/// value/TTL overlay and the graph overlay on every vShard the transaction has
+/// Truncates the write buffer to the saved position and rewinds the
+/// value/TTL, graph, and array overlays on every vShard the transaction has
 /// staged to. Iterates the CURRENT staged set (a superset of the savepoint's,
 /// since writes may have staged to NEW vShards after the savepoint): a vShard
 /// with a saved marker rewinds to it; a vShard first staged AFTER the savepoint
-/// has no saved marker and rewinds to `(0, 0)`, dropping ALL of its staged
-/// writes.
+/// has no saved marker and rewinds to all-zero markers, dropping ALL of its
+/// staged writes.
 pub async fn run_rollback_to_savepoint(
     sessions: &SessionStore,
     session_id: SessionId,
@@ -170,15 +174,16 @@ pub async fn run_rollback_to_savepoint(
     let (txn_id, vshards) = sessions.txn_identity(session_id);
     if let Some(txn_id) = txn_id {
         for vshard_id in vshards {
-            let (value_marker, graph_marker) = markers.get(&vshard_id).copied().unwrap_or((0, 0));
+            let saved = markers.get(&vshard_id).copied().unwrap_or_default();
             dispatch_overlay_savepoint(
                 tenant_id,
                 vshard_id,
                 dp,
                 MetaOp::RollbackToSavepoint {
                     txn_id,
-                    value_marker: value_marker as u64,
-                    graph_marker: graph_marker as u64,
+                    value_marker: saved.value as u64,
+                    graph_marker: saved.graph as u64,
+                    array_marker: saved.array as u64,
                 },
             )
             .await;
@@ -258,7 +263,7 @@ mod tests {
     use crate::types::{DatabaseId, Lsn, RequestId};
 
     /// A `TxnDataPlane` that records every dispatched overlay meta-op (per vShard)
-    /// instead of touching a real core. `MarkSavepoint` replies with a 16-byte
+    /// instead of touching a real core. `MarkSavepoint` replies with a 24-byte
     /// composite marker whose value component is `vshard + 1`, so a later
     /// ROLLBACK TO can be asserted to thread each vShard's own saved marker.
     #[derive(Default)]
@@ -279,9 +284,11 @@ mod tests {
                     MetaOp::MarkSavepoint { .. } => {
                         let value = (vshard.as_u32() as u64) + 1;
                         let graph = 0u64;
-                        let mut bytes = Vec::with_capacity(16);
+                        let array = 0u64;
+                        let mut bytes = Vec::with_capacity(SAVEPOINT_MARKER_BYTES);
                         bytes.extend_from_slice(&value.to_le_bytes());
                         bytes.extend_from_slice(&graph.to_le_bytes());
+                        bytes.extend_from_slice(&array.to_le_bytes());
                         Payload::from_vec(bytes)
                     }
                     _ => Payload::empty(),
@@ -342,7 +349,7 @@ mod tests {
         // Stage on core B (9) AFTER the savepoint.
         assert!(store.buffer_write(addr, staged_task(9)));
 
-        // ROLLBACK TO s1 — A rewinds to its saved marker, B rewinds to (0, 0).
+        // ROLLBACK TO s1 — A rewinds to its saved marker, B rewinds to zero.
         run_rollback_to_savepoint(&store, SessionId::from(&addr), tenant, &dp, "s1")
             .await
             .expect("rollback to savepoint");
@@ -357,25 +364,26 @@ mod tests {
         assert_eq!(marks, vec![3], "only the pre-savepoint vShard is marked");
 
         // Both staged vShards are rewound; A to its saved marker (3+1), B to zero.
-        let rewinds: std::collections::BTreeMap<u32, (u64, u64)> = ops
+        let rewinds: std::collections::BTreeMap<u32, (u64, u64, u64)> = ops
             .iter()
             .filter_map(|(v, op)| match op {
                 MetaOp::RollbackToSavepoint {
                     value_marker,
                     graph_marker,
+                    array_marker,
                     ..
-                } => Some((v.as_u32(), (*value_marker, *graph_marker))),
+                } => Some((v.as_u32(), (*value_marker, *graph_marker, *array_marker))),
                 _ => None,
             })
             .collect();
         assert_eq!(
             rewinds.get(&3),
-            Some(&(4, 0)),
+            Some(&(4, 0, 0)),
             "core A rewinds to its saved marker"
         );
         assert_eq!(
             rewinds.get(&9),
-            Some(&(0, 0)),
+            Some(&(0, 0, 0)),
             "core B (staged after savepoint) rewinds to empty"
         );
     }

@@ -41,6 +41,7 @@ pub(in crate::data::executor) struct SliceParams<'a> {
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeParams;
 use crate::data::executor::task::ExecutionTask;
 
 use super::convert::{cell_value_to_value, coord_value_to_value, sparse_tile_to_array_cells};
@@ -198,7 +199,7 @@ impl CoreLoop {
                         );
                     }
                 };
-                let (resolved_tiles, truncated_before_horizon) =
+                let (mut resolved_tiles, truncated_before_horizon) =
                     match store.scan_tiles_at(cutoff, valid_at_ms) {
                         Ok(r) => r,
                         Err(e) => {
@@ -210,6 +211,27 @@ impl CoreLoop {
                             );
                         }
                     };
+                // Read-your-own-writes: a live read inside a transaction sees
+                // that transaction's staged cells. `AsOf` is a snapshot of
+                // committed history and skips the overlay.
+                if matches!(system_time, SystemTimeScope::Current)
+                    && let Err(e) = self.merge_array_overlay_tiles(
+                        ArrayOverlayMergeParams {
+                            txn_id: task.request.txn_id,
+                            array_id,
+                            schema: &schema,
+                            valid_at_ms,
+                        },
+                        &mut resolved_tiles,
+                    )
+                {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("array slice overlay merge: {e}"),
+                        },
+                    );
+                }
 
                 let mut rows: Vec<Value> = Vec::new();
                 'outer: for (hp, sparse) in resolved_tiles {
@@ -389,7 +411,7 @@ impl CoreLoop {
             }
         };
 
-        let tiles = match self
+        let mut tiles = match self
             .array_engine
             .scan_tiles(array_id, &MbrQueryPredicate::default())
         {
@@ -403,6 +425,23 @@ impl CoreLoop {
                 );
             }
         };
+        // Read-your-own-writes for a same-transaction read.
+        if let Err(e) = self.merge_array_overlay_payloads(
+            ArrayOverlayMergeParams {
+                txn_id: task.request.txn_id,
+                array_id,
+                schema: &schema,
+                valid_at_ms: None,
+            },
+            &mut tiles,
+        ) {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("array project overlay merge: {e}"),
+                },
+            );
+        }
 
         let proj = Projection::new(attr_indices.iter().map(|&i| i as usize).collect());
 

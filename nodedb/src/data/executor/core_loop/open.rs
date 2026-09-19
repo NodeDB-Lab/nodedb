@@ -199,6 +199,7 @@ impl CoreLoop {
             ollp_is_group_leader: true,
             txn_overlays: HashMap::new(),
             graph_txn_overlays: HashMap::new(),
+            array_txn_overlays: HashMap::new(),
             txn_created_columnar_engines: HashMap::new(),
             write_index: super::write_index::WriteVersionIndex::new(),
             commit_pending: HashMap::new(),

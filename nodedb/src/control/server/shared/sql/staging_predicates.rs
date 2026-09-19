@@ -5,7 +5,7 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{
-    ColumnarOp, DocumentOp, GraphOp, KvOp, SpatialOp, TimeseriesOp,
+    ArrayOp, ColumnarOp, DocumentOp, GraphOp, KvOp, SpatialOp, TimeseriesOp,
 };
 
 /// Allow-list of plans the in-transaction path stages at statement time: Document
@@ -27,8 +27,11 @@ pub fn is_point_write(plan: &PhysicalPlan) -> bool {
 }
 
 /// Allow-list of plans staged via `MetaOp::StageWrite`: [`is_point_write`] plus
-/// stageable KV/Columnar/Timeseries/Spatial/Graph writes. `Incr`/`Cas`/`GetSet`/
-/// `BatchPut` also stage TTL into the overlay so a same-txn `GetTtl` sees it.
+/// stageable KV/Columnar/Timeseries/Spatial/Graph/Array writes. `Incr`/`Cas`/
+/// `GetSet`/`BatchPut` also stage TTL into the overlay so a same-txn `GetTtl`
+/// sees it. The single-node `ArrayOp::{Put, Delete}` stages; the
+/// `ClusterArrayOp` routing wrapper does not (it is reshaped into per-vShard
+/// `ArrayOp` tasks and buffered).
 pub fn is_stageable_write(plan: &PhysicalPlan) -> bool {
     is_point_write(plan)
         || matches!(
@@ -76,6 +79,10 @@ pub fn is_stageable_write(plan: &PhysicalPlan) -> bool {
                     | GraphOp::SetNodeLabels { .. }
                     | GraphOp::RemoveNodeLabels { .. }
             )
+        )
+        || matches!(
+            plan,
+            PhysicalPlan::Array(ArrayOp::Put { .. } | ArrayOp::Delete { .. })
         )
 }
 
@@ -181,6 +188,8 @@ pub fn staged_tag_kind(plan: &PhysicalPlan, payload: &[u8]) -> StagedTagKind {
         PhysicalPlan::Graph(GraphOp::SetNodeLabels { .. } | GraphOp::RemoveNodeLabels { .. }) => {
             StagedTagKind::Update
         }
+        PhysicalPlan::Array(ArrayOp::Put { .. }) => StagedTagKind::Insert,
+        PhysicalPlan::Array(ArrayOp::Delete { .. }) => StagedTagKind::Delete,
         other => unreachable!(
             "staged_tag_kind called on a non-stageable-write plan; \
              is_stageable_write invariant broken: {other:?}"
@@ -451,6 +460,36 @@ mod tests {
             rls_filters: Vec::new(),
         };
         assert_eq!(staged_kv_tag_kind(&op, &payload), StagedTagKind::Insert);
+    }
+
+    #[test]
+    fn array_put_and_delete_are_stageable_and_tagged() {
+        use nodedb_array::types::ArrayId;
+        use nodedb_types::TenantId;
+        let put = PhysicalPlan::Array(ArrayOp::Put {
+            array_id: ArrayId::new(TenantId::new(1), "a"),
+            cells_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+        });
+        assert!(is_stageable_write(&put));
+        assert!(!is_point_write(&put));
+        assert_eq!(staged_tag_kind(&put, &[]), StagedTagKind::Insert);
+
+        let delete = PhysicalPlan::Array(ArrayOp::Delete {
+            array_id: ArrayId::new(TenantId::new(1), "a"),
+            coords_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+        });
+        assert!(is_stageable_write(&delete));
+        assert_eq!(staged_tag_kind(&delete, &[]), StagedTagKind::Delete);
+
+        let slice = PhysicalPlan::Array(ArrayOp::Project {
+            array_id: ArrayId::new(TenantId::new(1), "a"),
+            attr_indices: Vec::new(),
+        });
+        assert!(!is_stageable_write(&slice));
     }
 
     #[test]
