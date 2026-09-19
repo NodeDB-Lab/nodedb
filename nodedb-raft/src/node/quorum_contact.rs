@@ -110,6 +110,32 @@ impl<S: LogStorage> RaftNode<S> {
         self.last_quorum_contact
             .is_some_and(|last| now.duration_since(last) >= self.config.election_timeout_max)
     }
+
+    /// The commit index this node may serve a linearizable read at while its
+    /// quorum-contact lease holds, or `None` when the lease is not live.
+    ///
+    /// The lease is the check-quorum window read the other way round: a
+    /// majority acknowledged this leader at `last_quorum_contact`, and any
+    /// successor needs a majority too, so no other node can have won an
+    /// election that moved the log past this commit index before an election
+    /// timeout has elapsed. Inside that window a linearizable read needs no
+    /// ReadIndex round — the round exists to prove the same fact.
+    ///
+    /// Both instants are this node's monotonic clock, so unlike an
+    /// `expires_at` stamped by another node there is no clock-skew bound to
+    /// apply. The window closes at the same threshold
+    /// [`Self::quorum_contact_lost`] demotes at, so a lease-answered read
+    /// never outlives leader state.
+    pub fn leader_lease_index(&self, now: Instant) -> Option<u64> {
+        if self.role != NodeRole::Leader {
+            return None;
+        }
+        let last = self.last_quorum_contact?;
+        if now.duration_since(last) >= self.config.election_timeout_max {
+            return None;
+        }
+        Some(self.commit_index())
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +178,31 @@ mod tests {
     /// Age the contact window past the step-down threshold.
     fn go_silent(node: &mut RaftNode<MemStorage>) {
         node.quorum_contact_at_override(Instant::now() - Duration::from_secs(1));
+    }
+
+    /// Inside the contact window a leader may serve a linearizable read from
+    /// its own commit index; the lease lapses at the same threshold that
+    /// deposes it, so a lease-answered read never outlives leader state.
+    #[test]
+    fn a_leader_holds_a_lease_only_inside_the_contact_window() {
+        let mut node = leader(vec![2, 3]);
+        assert!(
+            node.leader_lease_index(Instant::now()).is_some(),
+            "a freshly elected leader has just proven quorum contact"
+        );
+
+        go_silent(&mut node);
+        assert!(
+            node.leader_lease_index(Instant::now()).is_none(),
+            "the lease must lapse at the step-down threshold"
+        );
+    }
+
+    /// No lease off the leader path.
+    #[test]
+    fn a_follower_holds_no_lease() {
+        let node = RaftNode::new(test_config(1, vec![2, 3]), MemStorage::new());
+        assert!(node.leader_lease_index(Instant::now()).is_none());
     }
 
     /// A rejection is contact. A follower backtracking through a log conflict

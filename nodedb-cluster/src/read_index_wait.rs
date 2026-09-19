@@ -32,6 +32,13 @@ pub async fn confirm_read_index(
 ) -> Result<u64, ClusterError> {
     let probe = {
         let mut mr = multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(index) = mr.leader_lease_index(group_id) {
+            // The quorum window is still open: a majority acknowledged this
+            // leader within an election timeout, so no successor can have
+            // moved the log past this commit index. The read is linearizable
+            // without the round-trip the probe below would pay for.
+            return Ok(index);
+        }
         mr.start_read_index(group_id)
             .ok_or(ClusterError::ReadIndexNotLeader { group_id })?
     };

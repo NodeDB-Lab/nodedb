@@ -37,6 +37,16 @@ impl MultiRaft {
             .get(&group_id)
             .is_some_and(|node| node.within_staleness_bound(max_staleness))
     }
+
+    /// The index a linearizable read may be served at under the leader's
+    /// quorum-contact lease, when the lease is live on a group hosted here.
+    /// `None` falls back to the ReadIndex round, which proves the same fact
+    /// at the cost of a quorum round-trip.
+    pub fn leader_lease_index(&self, group_id: u64) -> Option<u64> {
+        self.groups
+            .get(&group_id)?
+            .leader_lease_index(std::time::Instant::now())
+    }
 }
 
 #[cfg(test)]
