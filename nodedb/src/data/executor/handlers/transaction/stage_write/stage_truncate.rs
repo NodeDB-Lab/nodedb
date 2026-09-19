@@ -21,10 +21,12 @@ use crate::types::{TenantId, TxnId};
 
 impl CoreLoop {
     /// Stage a whole-collection truncate (`DocumentOp::Truncate`,
-    /// `KvOp::Truncate`, `VectorOp::DirectTruncate`) of `collection` into
-    /// `txn_id`'s overlay. KV rows and vector-primary sidecar rows share the
-    /// document overlay, keyed by their row identity, so one marker hides
-    /// every engine's rows.
+    /// `KvOp::Truncate`, `VectorOp::DirectTruncate`, `ColumnarOp::Truncate`,
+    /// `TimeseriesOp::Truncate`) of `collection` into `txn_id`'s overlay. KV
+    /// rows and vector-primary sidecar rows share the document overlay, keyed
+    /// by their row identity, and the columnar-family scans consult the same
+    /// marker through `TxnOverlay::base_visible`, so one marker hides every
+    /// engine's rows.
     pub(in crate::data::executor) fn stage_collection_truncate(
         &mut self,
         task: &ExecutionTask,

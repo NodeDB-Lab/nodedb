@@ -247,7 +247,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | ColumnarOp::Delete { .. }
             | ColumnarOp::Update { .. }
             | ColumnarOp::ResolvedUpdate { .. }
-            | ColumnarOp::ResolvedDelete { .. },
+            | ColumnarOp::ResolvedDelete { .. }
+            | ColumnarOp::Truncate { .. },
         ) => true,
         // ---- Columnar: reads, not encoded ----
         // `ResolveDml` mirrors the oracle: `to_replicated_entry` returns `None` for it.
@@ -258,7 +259,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
         ) => false,
 
         // ---- Timeseries ----
-        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. }) => true,
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. } | TimeseriesOp::Truncate { .. }) => {
+            true
+        }
         // Resolve pass is read-only; `to_replicated_entry` reports `None`.
         PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_)) => {
             false
@@ -2128,6 +2131,14 @@ mod tests {
             PhysicalPlan::Vector(VectorOp::DirectTruncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: "vec".into(),
+                restart_identity: false,
+            }),
+            PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                restart_identity: false,
+            }),
+            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 restart_identity: false,
             }),
         ];

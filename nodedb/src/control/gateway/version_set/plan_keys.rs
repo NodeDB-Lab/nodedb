@@ -249,7 +249,8 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
                 | ResolvedUpdate { collection, .. }
                 | ResolvedDelete { collection, .. }
                 | ResolveDml { collection, .. }
-                | MaterializeScan { collection, .. } => out.push(collection.as_str().to_owned()),
+                | MaterializeScan { collection, .. }
+                | Truncate { collection, .. } => out.push(collection.as_str().to_owned()),
             }
         }
 
@@ -257,9 +258,9 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
         PhysicalPlan::Timeseries(op) => {
             use TimeseriesOp::*;
             match op {
-                Scan { collection, .. } | Ingest { collection, .. } => {
-                    out.push(collection.as_str().to_owned())
-                }
+                Scan { collection, .. }
+                | Ingest { collection, .. }
+                | Truncate { collection, .. } => out.push(collection.as_str().to_owned()),
 
                 // The wrapped ingest is the intercepted write verbatim.
                 ResolveIngest(inner) => {

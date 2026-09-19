@@ -55,7 +55,8 @@ impl CoreLoop {
                     | ColumnarOp::Update { collection, .. }
                     | ColumnarOp::Delete { collection, .. }
                     | ColumnarOp::ResolvedUpdate { collection, .. }
-                    | ColumnarOp::ResolvedDelete { collection, .. } => Some(collection.as_str()),
+                    | ColumnarOp::ResolvedDelete { collection, .. }
+                    | ColumnarOp::Truncate { collection, .. } => Some(collection.as_str()),
                     // Read-only: nothing written, no version to record.
                     ColumnarOp::Scan { .. } | ColumnarOp::MaterializeScan { .. } => None,
                     // Resolve pass reads what a governed write depends on;
@@ -66,7 +67,9 @@ impl CoreLoop {
                     self.note_write_lsn(db, tenant, c, None, lsn);
                 }
             }
-            PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. }) => {
+            PhysicalPlan::Timeseries(
+                TimeseriesOp::Ingest { collection, .. } | TimeseriesOp::Truncate { collection, .. },
+            ) => {
                 self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
             }
             PhysicalPlan::Spatial(op) => {

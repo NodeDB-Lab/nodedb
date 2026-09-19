@@ -193,3 +193,21 @@ pub(super) fn bulk_resolved_delete(
 fn encode_resolved_value(value: &nodedb_types::Value) -> Vec<u8> {
     nodedb_types::value_to_msgpack(value).expect("resolved row Value serialization is infallible")
 }
+
+/// `ColumnarOp::Truncate` replicates as a plain `ColumnarTruncate` entry:
+/// same idempotent-replay contract as `kv::truncate`.
+pub(super) fn truncate(collection: &str, restart_identity: bool) -> ReplicatedWrite {
+    ReplicatedWrite::ColumnarTruncate {
+        collection: collection.to_owned(),
+        restart_identity,
+    }
+}
+
+/// `TimeseriesOp::Truncate` replicates as a plain `TimeseriesTruncate`
+/// entry: same contract as [`truncate`].
+pub(super) fn timeseries_truncate(collection: &str, restart_identity: bool) -> ReplicatedWrite {
+    ReplicatedWrite::TimeseriesTruncate {
+        collection: collection.to_owned(),
+        restart_identity,
+    }
+}

@@ -303,7 +303,7 @@ fn graph_routing(op: &GraphOp) -> PlanRouting {
 
 fn timeseries_routing(op: &TimeseriesOp, database_id: DatabaseId) -> PlanRouting {
     match op {
-        TimeseriesOp::Ingest { collection, .. } => {
+        TimeseriesOp::Ingest { collection, .. } | TimeseriesOp::Truncate { collection, .. } => {
             PlanRouting::Vshards(vec![collection_vshard_in_database(
                 database_id,
                 collection.as_str(),
@@ -321,7 +321,8 @@ fn columnar_routing(op: &ColumnarOp, database_id: DatabaseId) -> PlanRouting {
         | ColumnarOp::Update { collection, .. }
         | ColumnarOp::Delete { collection, .. }
         | ColumnarOp::ResolvedUpdate { collection, .. }
-        | ColumnarOp::ResolvedDelete { collection, .. } => {
+        | ColumnarOp::ResolvedDelete { collection, .. }
+        | ColumnarOp::Truncate { collection, .. } => {
             PlanRouting::Vshards(vec![collection_vshard_in_database(
                 database_id,
                 collection.as_str(),

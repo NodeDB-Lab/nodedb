@@ -78,8 +78,10 @@ impl PhysicalPlan {
             | PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. })
             | PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. })
             | PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. })
+            | PhysicalPlan::Columnar(ColumnarOp::Truncate { collection, .. })
             | PhysicalPlan::Timeseries(TimeseriesOp::Scan { collection, .. })
             | PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. })
+            | PhysicalPlan::Timeseries(TimeseriesOp::Truncate { collection, .. })
             | PhysicalPlan::Spatial(SpatialOp::Scan { collection, .. })
             | PhysicalPlan::Document(DocumentOp::Register { collection, .. })
             | PhysicalPlan::Document(DocumentOp::IndexLookup { collection, .. })
@@ -91,7 +93,8 @@ impl PhysicalPlan {
             // collection, which is what the propose step routes on.
             PhysicalPlan::Timeseries(TimeseriesOp::ResolveIngest(inner)) => match inner.as_ref() {
                 TimeseriesOp::Scan { collection, .. }
-                | TimeseriesOp::Ingest { collection, .. } => Some(collection.as_str()),
+                | TimeseriesOp::Ingest { collection, .. }
+                | TimeseriesOp::Truncate { collection, .. } => Some(collection.as_str()),
                 TimeseriesOp::ResolveIngest(_) => None,
             },
             // Same shape on the graph side, and `EdgeDelete` itself reports

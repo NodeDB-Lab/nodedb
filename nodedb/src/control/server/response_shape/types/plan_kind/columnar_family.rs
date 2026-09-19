@@ -21,6 +21,8 @@ pub(super) fn describe_columnar(op: &ColumnarOp) -> PlanKind {
         // Reports `{"affected": n}`.
         ColumnarOp::Update { .. } => PlanKind::DmlResult("UPDATE"),
         ColumnarOp::Delete { .. } => PlanKind::DmlResult("DELETE"),
+        // Reports `{"truncated": n}`.
+        ColumnarOp::Truncate { .. } => PlanKind::DmlResult("TRUNCATE"),
 
         // Never reach this classifier: write-resolve proposes them and returns
         // the response itself, shaped from the intercepted `Update` / `Delete`.
@@ -43,6 +45,8 @@ pub(super) fn describe_timeseries(op: &TimeseriesOp) -> PlanKind {
 
         // Reports `{"accepted": n}`.
         TimeseriesOp::Ingest { .. } => PlanKind::DmlResult("INSERT"),
+        // Reports `{"truncated": n}`.
+        TimeseriesOp::Truncate { .. } => PlanKind::DmlResult("TRUNCATE"),
 
         // Read-only resolve: payload is the internal admission verdict, never a client row.
         TimeseriesOp::ResolveIngest(_) => PlanKind::Execution,

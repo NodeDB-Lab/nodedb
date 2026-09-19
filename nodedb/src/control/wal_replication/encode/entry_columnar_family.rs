@@ -82,6 +82,13 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
             rls_write_check: _,
         } => columnar::bulk_resolved_delete(collection.as_str(), pks),
 
+        // Refused at injection under a write policy, so no predicate to
+        // resolve; replicates as a plain whole-collection clear.
+        ColumnarOp::Truncate {
+            collection,
+            restart_identity,
+        } => columnar::truncate(collection.as_str(), *restart_identity),
+
         // Not a write — reads/scans. `ResolveDml` only reports the row set a DML would touch.
         ColumnarOp::Scan { .. }
         | ColumnarOp::MaterializeScan { .. }
@@ -155,6 +162,11 @@ pub(super) fn timeseries_write(op: &TimeseriesOp) -> Option<ReplicatedWrite> {
             encode_returning(returning),
             rls_filters,
         ),
+
+        TimeseriesOp::Truncate {
+            collection,
+            restart_identity,
+        } => columnar::timeseries_truncate(collection.as_str(), *restart_identity),
 
         // Not a write — reads / scans, and the read-only resolve pass.
         TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_) => return None,

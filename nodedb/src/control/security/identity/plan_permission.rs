@@ -202,10 +202,13 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | ColumnarOp::ResolvedDelete { .. }
             // Requires the same Write the predicate it resolves requires, though it isn't
             // itself write-class for admission/replication (see `write_class::columnar_is_write`).
-            | ColumnarOp::ResolveDml { .. },
+            | ColumnarOp::ResolveDml { .. }
+            | ColumnarOp::Truncate { .. },
         ) => Permission::Write,
 
-        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. }) => Permission::Write,
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. } | TimeseriesOp::Truncate { .. }) => {
+            Permission::Write
+        }
 
         // Transaction batch: requires write (contains writes).
         PhysicalPlan::Meta(MetaOp::TransactionBatch { .. }) => Permission::Write,

@@ -803,6 +803,24 @@ pub enum ReplicatedWrite {
         rows: Vec<ColumnarResolvedRow>,
     },
 
+    /// Columnar or spatial `TRUNCATE`: every replica clears the collection's
+    /// mutation engine, flushed segments, and R-tree entries.
+    /// `restart_identity` is applied by the applying node's sequence store
+    /// after the clear.
+    ColumnarTruncate {
+        collection: String,
+        #[serde(default)]
+        restart_identity: bool,
+    },
+
+    /// Timeseries `TRUNCATE`: every replica clears the collection's memtable
+    /// and on-disk partitions. `restart_identity` as above.
+    TimeseriesTruncate {
+        collection: String,
+        #[serde(default)]
+        restart_identity: bool,
+    },
+
     /// Resolved form of a state-dependent KV write on a write-policy
     /// collection: mutations and reply, already decided, not an operation to
     /// re-derive. `mutations` may span two collections for `TransferItem`.

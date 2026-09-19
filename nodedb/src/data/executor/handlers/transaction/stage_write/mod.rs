@@ -21,6 +21,7 @@ mod stage_bulk_delete;
 mod stage_bulk_update;
 mod stage_columnar;
 mod stage_columnar_dml;
+mod stage_columnar_family;
 mod stage_columnar_resolved_dml;
 mod stage_crdt;
 mod stage_current_body;

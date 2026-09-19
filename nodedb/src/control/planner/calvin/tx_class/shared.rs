@@ -9,7 +9,7 @@ use nodedb_cluster::calvin::types::{
     VersionedReadSet,
 };
 use nodedb_physical::physical_plan::{
-    DocumentOp, GraphOp, KvOp, PhysicalPlan, TimeseriesOp, VectorOp, VectorWriteTargets,
+    ColumnarOp, DocumentOp, GraphOp, KvOp, PhysicalPlan, TimeseriesOp, VectorOp, VectorWriteTargets,
 };
 
 /// Map the neutral session read-set into the replicated, LSN-versioned
@@ -244,7 +244,10 @@ pub(crate) fn collection_name_from_plan(plan: &PhysicalPlan) -> String {
         PhysicalPlan::Graph(
             GraphOp::EdgePut { collection, .. } | GraphOp::EdgeDelete { collection, .. },
         ) => collection.to_string(),
-        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. }) => {
+        PhysicalPlan::Timeseries(
+            TimeseriesOp::Ingest { collection, .. } | TimeseriesOp::Truncate { collection, .. },
+        )
+        | PhysicalPlan::Columnar(ColumnarOp::Truncate { collection, .. }) => {
             collection.to_string()
         }
         _ => String::new(),

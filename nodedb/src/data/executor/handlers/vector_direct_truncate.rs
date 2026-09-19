@@ -15,7 +15,6 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -71,18 +70,5 @@ impl CoreLoop {
 
         debug!(core = self.core_id, %collection, truncated, "vector direct truncate complete");
         self.truncate_response(task, truncated)
-    }
-
-    /// The `{"truncated": n}` reply every `TRUNCATE` handler returns.
-    fn truncate_response(&self, task: &ExecutionTask, truncated: usize) -> Response {
-        match response_codec::encode_count("truncated", truncated) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: e.to_string(),
-                },
-            ),
-        }
     }
 }

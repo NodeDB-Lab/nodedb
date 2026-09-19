@@ -78,9 +78,11 @@ pub fn stageable_write_shape(plan: &PhysicalPlan) -> Option<StagedWriteShape> {
         PhysicalPlan::Columnar(ColumnarOp::Delete { .. } | ColumnarOp::ResolvedDelete { .. }) => {
             Some(StagedWriteShape::Delete)
         }
+        PhysicalPlan::Columnar(ColumnarOp::Truncate { .. }) => Some(StagedWriteShape::Truncate),
         PhysicalPlan::Columnar(_) => None,
 
         PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. }) => Some(StagedWriteShape::Insert),
+        PhysicalPlan::Timeseries(TimeseriesOp::Truncate { .. }) => Some(StagedWriteShape::Truncate),
         PhysicalPlan::Timeseries(_) => None,
 
         PhysicalPlan::Spatial(SpatialOp::Insert { .. }) => Some(StagedWriteShape::Insert),
@@ -819,6 +821,28 @@ mod tests {
             StagedWriteShape::Truncate.tag_kind(&[]),
             StagedTagKind::Truncate
         );
+    }
+
+    #[test]
+    fn columnar_family_truncate_stages_as_truncate() {
+        let plans = [
+            PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                restart_identity: false,
+            }),
+            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "ts"),
+                restart_identity: true,
+            }),
+        ];
+        for plan in &plans {
+            assert!(is_stageable_write(plan), "{plan:?}");
+            assert_eq!(
+                stageable_write_shape(plan),
+                Some(StagedWriteShape::Truncate),
+                "{plan:?}"
+            );
+        }
     }
 
     #[test]

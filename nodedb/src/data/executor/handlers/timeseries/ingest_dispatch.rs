@@ -146,6 +146,15 @@ impl CoreLoop {
         } else {
             false
         };
+        // A record written before a later truncate describes rows the
+        // truncate removed: the same "nothing to write" answer as a record
+        // already on disk.
+        let already_flushed = already_flushed
+            || wal_lsn.is_some_and(|lsn| {
+                self.ts_truncate_floors
+                    .get(&key)
+                    .is_some_and(|floor| lsn <= *floor)
+            });
 
         if already_flushed {
             if let Some(prov) = provenance

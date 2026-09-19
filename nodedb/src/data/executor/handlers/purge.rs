@@ -130,6 +130,7 @@ impl CoreLoop {
             self.ts_last_value_caches
                 .retain(|(_, t, _), _| *t != tid_key);
             self.ts_series_catalogs.retain(|(_, t, _), _| *t != tid_key);
+            self.ts_truncate_floors.retain(|(_, t, _), _| *t != tid_key);
             before - self.columnar_memtables.len()
         };
 

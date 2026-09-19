@@ -68,6 +68,7 @@ impl CoreLoop {
         database_id: DatabaseId,
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
+        truncate_floors: &super::wal_replay_columnar_truncate::TruncateFloors,
     ) -> Option<usize> {
         let record: ColumnarDmlWalRecord = zerompk::from_msgpack(payload).ok()?;
         if record.kind != "columnar_dml" {
@@ -77,6 +78,15 @@ impl CoreLoop {
         if tombstones.is_tombstoned(
             database_id.as_u64(),
             tenant_id,
+            &record.collection,
+            record_lsn,
+        ) {
+            return Some(0);
+        }
+        // A later truncate removed every row this predicate could touch.
+        if truncate_floors.covers_collection(
+            database_id,
+            TenantId::new(tenant_id),
             &record.collection,
             record_lsn,
         ) {
@@ -216,6 +226,7 @@ impl CoreLoop {
         database_id: DatabaseId,
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
+        truncate_floors: &super::wal_replay_columnar_truncate::TruncateFloors,
     ) -> Option<usize> {
         let record: nodedb_types::columnar::ColumnarResolvedDmlWalRecord =
             zerompk::from_msgpack(payload).ok()?;
@@ -226,6 +237,15 @@ impl CoreLoop {
         if tombstones.is_tombstoned(
             database_id.as_u64(),
             tenant_id,
+            &record.collection,
+            record_lsn,
+        ) {
+            return Some(0);
+        }
+        // A later truncate removed every row this record names.
+        if truncate_floors.covers_collection(
+            database_id,
+            TenantId::new(tenant_id),
             &record.collection,
             record_lsn,
         ) {

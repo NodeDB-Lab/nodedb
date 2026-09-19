@@ -81,6 +81,11 @@ impl CoreLoop {
             TimeseriesOp::ResolveIngest(inner) => {
                 self.execute_timeseries_resolve_ingest(task, inner)
             }
+
+            TimeseriesOp::Truncate {
+                collection,
+                restart_identity: _,
+            } => self.execute_timeseries_truncate(task, collection.as_str(), None),
         }
     }
 }

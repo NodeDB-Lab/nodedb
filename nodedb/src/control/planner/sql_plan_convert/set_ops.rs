@@ -76,9 +76,10 @@ pub(super) fn convert_constant_result(
 
 /// Lower `SqlPlan::Truncate` to the engine that stores the rows. The match
 /// is exhaustive over `EngineType`: a document-family collection clears its
-/// document store, a KV collection clears its hash index, and an engine with
-/// no truncate op yet refuses with a typed error rather than clearing the
-/// empty document store and reporting success.
+/// document store, a KV collection clears its hash index, a columnar or
+/// spatial collection clears its mutation engine (spatial shares the
+/// columnar DML ops, so it shares the truncate op too), and a timeseries
+/// collection clears its memtable and partitions.
 pub(super) fn convert_truncate(
     collection: &str,
     engine: EngineType,
@@ -106,14 +107,16 @@ pub(super) fn convert_truncate(
             collection: qualified_collection,
             restart_identity,
         }),
-        EngineType::Columnar | EngineType::Timeseries | EngineType::Spatial => {
-            return Err(crate::Error::FeatureNotSupported {
-                detail: format!(
-                    "TRUNCATE is not yet routed for engine '{}'",
-                    engine_name(engine)
-                ),
-            });
+        EngineType::Columnar | EngineType::Spatial => {
+            PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: qualified_collection,
+                restart_identity,
+            })
         }
+        EngineType::Timeseries => PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: qualified_collection,
+            restart_identity,
+        }),
         // `ArrayRules::plan_truncate` refuses before a plan is built.
         EngineType::Array => {
             return Err(crate::Error::Internal {
@@ -131,19 +134,6 @@ pub(super) fn convert_truncate(
         post_set_op: PostSetOp::None,
         txn_id: None,
     }])
-}
-
-/// The `WITH (engine='<name>')` spelling of an engine, for error text.
-fn engine_name(engine: EngineType) -> &'static str {
-    match engine {
-        EngineType::DocumentSchemaless => "document_schemaless",
-        EngineType::DocumentStrict => "document_strict",
-        EngineType::KeyValue => "kv",
-        EngineType::Columnar => "columnar",
-        EngineType::Timeseries => "timeseries",
-        EngineType::Spatial => "spatial",
-        EngineType::Array => "array",
-    }
 }
 
 pub(super) fn convert_union(
@@ -543,21 +533,44 @@ mod tests {
     }
 
     #[test]
-    fn convert_truncate_refuses_unrouted_engines_with_a_typed_error() {
-        for (engine, name) in [
-            (EngineType::Columnar, "columnar"),
-            (EngineType::Timeseries, "timeseries"),
-            (EngineType::Spatial, "spatial"),
-        ] {
-            let err = convert_truncate("c", engine, false, TenantId::new(1), &bare_ctx())
-                .expect_err("unrouted engine must refuse");
-            match err {
-                crate::Error::FeatureNotSupported { detail } => assert_eq!(
-                    detail,
-                    format!("TRUNCATE is not yet routed for engine '{name}'")
-                ),
-                other => panic!("expected FeatureNotSupported, got {other:?}"),
+    fn convert_truncate_routes_columnar_and_spatial_to_columnar_op() {
+        for engine in [EngineType::Columnar, EngineType::Spatial] {
+            let tasks = convert_truncate("c", engine, true, TenantId::new(1), &bare_ctx())
+                .expect("columnar-family truncate converts");
+            assert_eq!(tasks.len(), 1);
+            match &tasks[0].plan {
+                PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                    collection,
+                    restart_identity,
+                }) => {
+                    assert_eq!(collection.as_str(), "c");
+                    assert!(*restart_identity, "{engine:?} must carry restart_identity");
+                }
+                other => panic!("{engine:?} must lower to ColumnarOp::Truncate, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn convert_truncate_routes_timeseries_to_timeseries_op() {
+        let tasks = convert_truncate(
+            "ts",
+            EngineType::Timeseries,
+            false,
+            TenantId::new(1),
+            &bare_ctx(),
+        )
+        .expect("timeseries truncate converts");
+        assert_eq!(tasks.len(), 1);
+        match &tasks[0].plan {
+            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection,
+                restart_identity,
+            }) => {
+                assert_eq!(collection.as_str(), "ts");
+                assert!(!*restart_identity);
+            }
+            other => panic!("expected TimeseriesOp::Truncate, got {other:?}"),
         }
     }
 

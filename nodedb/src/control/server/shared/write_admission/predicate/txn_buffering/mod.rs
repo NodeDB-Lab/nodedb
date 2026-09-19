@@ -92,8 +92,8 @@
 //! `assert_buffered_but_unencoded` — and correspondingly excluded from
 //! `kv_variants_match_oracle`.
 //!
-//! `DocumentOp::Truncate`, `KvOp::Truncate`, and `VectorOp::DirectTruncate`
-//! classify `true`: in a
+//! `DocumentOp::Truncate`, `KvOp::Truncate`, `VectorOp::DirectTruncate`,
+//! `ColumnarOp::Truncate`, and `TimeseriesOp::Truncate` classify `true`: in a
 //! transaction they stage as a `TxnOverlay` truncate marker that hides every
 //! base row without a newer overlay entry, and COMMIT replays the live
 //! truncate in statement order. ROLLBACK and ROLLBACK TO SAVEPOINT drop the

@@ -148,7 +148,9 @@ fn to_physical_plan(
         | ReplicatedWrite::SpatialInsert { .. }
         | ReplicatedWrite::SpatialDelete { .. }
         | ReplicatedWrite::ColumnarBulkDml { .. }
-        | ReplicatedWrite::ColumnarBulkDmlResolved { .. } => {
+        | ReplicatedWrite::ColumnarBulkDmlResolved { .. }
+        | ReplicatedWrite::ColumnarTruncate { .. }
+        | ReplicatedWrite::TimeseriesTruncate { .. } => {
             Ok((entry_columnar_family::decode_arm(write)?, None))
         }
         // Raft-native array cell writes — the cluster SQL DML array path.

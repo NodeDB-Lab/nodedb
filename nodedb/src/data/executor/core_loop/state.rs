@@ -315,6 +315,17 @@ pub struct CoreLoop {
         crate::engine::timeseries::partition_registry::PartitionRegistry,
     >,
 
+    /// Aside partition directories of committed timeseries truncates whose
+    /// removal failed at batch finalize; the maintenance tick retries them.
+    pub(in crate::data::executor) ts_truncate_backlog: Vec<std::path::PathBuf>,
+
+    /// WAL LSN of the last truncate applied to each timeseries collection.
+    /// An ingest carrying a `wal_lsn` at or below it was written before the
+    /// truncate (a WAL catch-up redelivery) and is refused, so a row the
+    /// truncate removed can never come back through the catch-up path.
+    /// Key: (DatabaseId, TenantId, collection).
+    pub(in crate::data::executor) ts_truncate_floors: HashMap<(DatabaseId, TenantId, String), u64>,
+
     /// Continuous aggregate manager for this core. Fires on memtable flush.
     pub(in crate::data::executor) continuous_agg_mgr:
         crate::engine::timeseries::continuous_agg::ContinuousAggregateManager,

@@ -37,7 +37,8 @@ pub use write_set_redo::{append_write_set_redo, mint_dispatch_local_redo, plan_p
 pub(crate) use graph_labels::encode_graph_node_label_payload;
 pub(crate) use timeseries::{
     encode_columnar_batch_payload, encode_columnar_dml_payload,
-    encode_columnar_resolved_dml_payload, encode_timeseries_batch_payload_with_format,
+    encode_columnar_resolved_dml_payload, encode_columnar_truncate_payload,
+    encode_timeseries_batch_payload_with_format,
 };
 pub(crate) use vector::{
     VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdatePayload,

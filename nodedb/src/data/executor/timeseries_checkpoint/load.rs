@@ -45,6 +45,10 @@ impl CoreLoop {
         if !ts_root.exists() {
             return Ok(());
         }
+        // An aside directory is the remains of a truncate whose WAL record
+        // precedes it; replay re-applies the truncate, so the aside rows are
+        // never wanted.
+        crate::data::executor::handlers::timeseries::remove_truncating_leftovers(&ts_root)?;
 
         let mut loaded = 0usize;
         let mut partitions = 0usize;
@@ -145,6 +149,11 @@ fn enumerate_ts_collections(ts_root: &std::path::Path) -> Vec<(DatabaseId, Tenan
                 let Some(collection) = coll_dir.file_name().to_str().map(|s| s.to_string()) else {
                     continue;
                 };
+                // Never a collection: a truncate's aside directory.
+                if crate::data::executor::handlers::timeseries::is_truncating_leftover(&collection)
+                {
+                    continue;
+                }
                 out.push((
                     DatabaseId::new(database_id),
                     TenantId::new(tenant_id),

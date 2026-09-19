@@ -7,7 +7,7 @@
 
 use nodedb_types::QualifiedCollection;
 
-use super::{DocumentOp, KvOp, PhysicalPlan, VectorOp};
+use super::{ColumnarOp, DocumentOp, KvOp, PhysicalPlan, TimeseriesOp, VectorOp};
 
 impl PhysicalPlan {
     /// The collection this plan truncates and its `RESTART IDENTITY` flag, or
@@ -29,6 +29,14 @@ impl PhysicalPlan {
                 collection,
                 restart_identity,
                 ..
+            })
+            | PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection,
+                restart_identity,
+            })
+            | PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection,
+                restart_identity,
             }) => Some((collection, *restart_identity)),
             PhysicalPlan::Document(_)
             | PhysicalPlan::Kv(_)
@@ -76,6 +84,28 @@ mod tests {
             restart_identity: false,
         });
         let (c, restart) = plan.truncate_target().expect("vector truncate target");
+        assert_eq!(c.as_str(), "t");
+        assert!(!restart);
+    }
+
+    #[test]
+    fn columnar_truncate_reports_collection_and_flag() {
+        let plan = PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection: coll(),
+            restart_identity: true,
+        });
+        let (c, restart) = plan.truncate_target().expect("columnar truncate target");
+        assert_eq!(c.as_str(), "t");
+        assert!(restart);
+    }
+
+    #[test]
+    fn timeseries_truncate_reports_collection_and_flag() {
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: coll(),
+            restart_identity: false,
+        });
+        let (c, restart) = plan.truncate_target().expect("timeseries truncate target");
         assert_eq!(c.as_str(), "t");
         assert!(!restart);
     }

@@ -75,6 +75,20 @@ pub enum RecordType {
     /// the `VectorDirectUpsert` records that created them are still in the log.
     VectorDirectTruncate = 25 | 0x8000,
 
+    /// Columnar engine: remove every row of a columnar or spatial collection
+    /// (`TRUNCATE`).
+    ///
+    /// Required: skipping on replay resurrects every truncated row, because
+    /// the `TimeseriesBatch` records that created them are still in the log.
+    ColumnarTruncate = 26 | 0x8000,
+
+    /// Timeseries engine: remove every row and partition of a timeseries
+    /// collection (`TRUNCATE`).
+    ///
+    /// Required: skipping on replay resurrects every truncated row, because
+    /// the `TimeseriesBatch` records that created them are still in the log.
+    TimeseriesTruncate = 27 | 0x8000,
+
     /// Vector engine: insert (upsert) a sparse vector into the inverted index.
     ///
     /// Targets the `SparseInvertedIndex` (keyed by document id), a separate
@@ -353,6 +367,8 @@ impl RecordType {
             x if x == 23 | 0x8000 => Some(Self::VectorDirectUpdate),
             x if x == 24 | 0x8000 => Some(Self::VectorResolvedDirectWrite),
             x if x == 25 | 0x8000 => Some(Self::VectorDirectTruncate),
+            x if x == 26 | 0x8000 => Some(Self::ColumnarTruncate),
+            x if x == 27 | 0x8000 => Some(Self::TimeseriesTruncate),
             x if x == 14 | 0x8000 => Some(Self::SparseVectorPut),
             x if x == 15 | 0x8000 => Some(Self::SparseVectorDelete),
             x if x == 16 | 0x8000 => Some(Self::MultiVectorPut),
@@ -435,6 +451,8 @@ mod tests {
             RecordType::VectorDirectUpdate,
             RecordType::VectorResolvedDirectWrite,
             RecordType::VectorDirectTruncate,
+            RecordType::ColumnarTruncate,
+            RecordType::TimeseriesTruncate,
             RecordType::SparseVectorPut,
             RecordType::SparseVectorDelete,
             RecordType::MultiVectorPut,

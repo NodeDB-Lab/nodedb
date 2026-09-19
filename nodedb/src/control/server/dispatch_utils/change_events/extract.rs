@@ -165,13 +165,18 @@ pub(super) fn extract_write_metadata(
         // Remaining DocumentOp variants are reads or catalog/schema DDL — no row changed.
         PhysicalPlan::Document(_) => Vec::new(),
 
-        // Batch write; document_id="*" indicates a batch. High-cardinality metrics
-        // would flood the bus otherwise — subscribe via collection_filter.
+        // Batch write and truncate: document_id="*" names every row. Per-row
+        // events would flood the bus — subscribe via collection_filter.
         PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
-        // TimeseriesOp::Scan is a read — no row changed.
-        PhysicalPlan::Timeseries(_) => Vec::new(),
+        PhysicalPlan::Timeseries(TimeseriesOp::Truncate { collection, .. }) => {
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
+        }
+        // Scan and the resolve pass are reads — no row changed.
+        PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_)) => {
+            Vec::new()
+        }
 
         // KV engine write operations.
         PhysicalPlan::Kv(KvOp::Put {
@@ -285,17 +290,14 @@ pub(super) fn extract_write_metadata(
         PhysicalPlan::Columnar(ColumnarOp::Insert { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
-        PhysicalPlan::Columnar(ColumnarOp::Update { collection, .. }) => {
+        // The resolved-row-set forms are the same statements, same CDC event.
+        PhysicalPlan::Columnar(ColumnarOp::Update { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
-        PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. }) => {
-            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
-        }
-        // Resolved-row-set form of the same UPDATE/DELETE — same CDC event as above.
-        PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. }) => {
-            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
-        }
-        PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. }) => {
+        PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::Truncate { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Scan / MaterializeScan are reads — no row changed.

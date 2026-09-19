@@ -85,8 +85,10 @@ pub(crate) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         | PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. })
         | PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. })
         | PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::Truncate { collection, .. })
         | PhysicalPlan::Timeseries(TimeseriesOp::Scan { collection, .. })
         | PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. })
+        | PhysicalPlan::Timeseries(TimeseriesOp::Truncate { collection, .. })
         | PhysicalPlan::Spatial(SpatialOp::Scan { collection, .. })
         | PhysicalPlan::Document(DocumentOp::Register { collection, .. })
         | PhysicalPlan::Document(DocumentOp::IndexLookup { collection, .. })
@@ -139,9 +141,9 @@ pub(crate) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         }
         // Read-only resolve wrapper: it reports the wrapped ingest's collection.
         PhysicalPlan::Timeseries(TimeseriesOp::ResolveIngest(inner)) => match inner.as_ref() {
-            TimeseriesOp::Scan { collection, .. } | TimeseriesOp::Ingest { collection, .. } => {
-                Some(collection.as_str())
-            }
+            TimeseriesOp::Scan { collection, .. }
+            | TimeseriesOp::Ingest { collection, .. }
+            | TimeseriesOp::Truncate { collection, .. } => Some(collection.as_str()),
             TimeseriesOp::ResolveIngest(_) => None,
         },
         // Remaining ops carry no extractable collection. Exhaustive so a new

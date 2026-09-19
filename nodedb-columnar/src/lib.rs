@@ -46,7 +46,7 @@ pub use format::{
 };
 pub use materialize_rows::materialize_segment_live_rows;
 pub use memtable::{ColumnarMemtable, IngestValue, MemtableRowIter};
-pub use mutation::{ColumnDataSnapshot, ColumnarEngineSnapshot, MutationEngine};
+pub use mutation::{ColumnDataSnapshot, ColumnarEngineSnapshot, MutationEngine, TruncatedRows};
 pub use pk_index::PkIndex;
 pub use predicate::{
     BLOOM_BITS_DEFAULT, BLOOM_BYTES, BLOOM_K_DEFAULT, PredicateOp, PredicateValue, ScanPredicate,

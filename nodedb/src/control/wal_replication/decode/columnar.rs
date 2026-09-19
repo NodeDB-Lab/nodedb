@@ -3,8 +3,26 @@
 //! Decode `ReplicatedWrite` variants that produce `PhysicalPlan::Columnar`.
 
 use crate::bridge::envelope::PhysicalPlan;
-use nodedb_physical::physical_plan::ColumnarOp;
+use nodedb_physical::physical_plan::{ColumnarOp, TimeseriesOp};
 use nodedb_types::RlsWriteCheck;
+
+/// Reconstruct a `ColumnarOp::Truncate` plan. Same idempotent-replay
+/// contract as `kv::truncate`: whole-collection clear, no surrogate binding.
+pub(super) fn truncate(collection: &str, restart_identity: bool) -> PhysicalPlan {
+    PhysicalPlan::Columnar(ColumnarOp::Truncate {
+        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        restart_identity,
+    })
+}
+
+/// Reconstruct a `TimeseriesOp::Truncate` plan. Same contract as
+/// [`truncate`].
+pub(super) fn timeseries_truncate(collection: &str, restart_identity: bool) -> PhysicalPlan {
+    PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        restart_identity,
+    })
+}
 
 /// Reconstruct the columnar predicate-DML plan. The apply re-scans local
 /// columnar state at this committed log position and mutates the predicate
@@ -91,5 +109,71 @@ pub(super) fn bulk_dml_resolved(
             pks,
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::wal_replication::decode;
+    use crate::control::wal_replication::types::ReplicatedEntry;
+    use crate::types::{DatabaseId, TenantId, VShardId};
+    use nodedb_types::QualifiedCollection;
+
+    /// Decide + encode in one call, so each test names only the plan it encodes.
+    fn to_replicated_entry(plan: &PhysicalPlan) -> crate::Result<Option<ReplicatedEntry>> {
+        let write = crate::control::wal_replication::ReplicableWrite::decide_for_replication(plan)?;
+        crate::control::wal_replication::encode::to_replicated_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            &write,
+        )
+    }
+
+    fn round_trip(plan: &PhysicalPlan) -> PhysicalPlan {
+        let entry = to_replicated_entry(plan)
+            .expect("encode must not error")
+            .expect("a truncate must replicate");
+        let (_, _, decoded, _) = decode::from_replicated_entry(&entry.to_bytes(), None)
+            .expect("decode")
+            .expect("a replicated entry");
+        decoded
+    }
+
+    /// A columnar truncate replicates with its `restart_identity` flag, so
+    /// every applying node resets the same sequences.
+    #[test]
+    fn columnar_truncate_round_trips_with_restart_identity() {
+        let plan = PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cols"),
+            restart_identity: true,
+        });
+        let PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection,
+            restart_identity,
+        }) = round_trip(&plan)
+        else {
+            panic!("decoded to the wrong shape");
+        };
+        assert_eq!(collection.as_str(), "cols");
+        assert!(restart_identity);
+    }
+
+    #[test]
+    fn timeseries_truncate_round_trips_with_restart_identity() {
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "ts"),
+            restart_identity: true,
+        });
+        let PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection,
+            restart_identity,
+        }) = round_trip(&plan)
+        else {
+            panic!("decoded to the wrong shape");
+        };
+        assert_eq!(collection.as_str(), "ts");
+        assert!(restart_identity);
     }
 }

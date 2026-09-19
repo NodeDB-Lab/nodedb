@@ -211,7 +211,7 @@ fn graph_is_write(op: &GraphOp) -> bool {
 
 fn timeseries_is_write(op: &TimeseriesOp) -> bool {
     match op {
-        TimeseriesOp::Ingest { .. } => true,
+        TimeseriesOp::Ingest { .. } | TimeseriesOp::Truncate { .. } => true,
         // The resolve pass writes nothing; the ingest it reports is proposed
         // separately by the write-resolve orchestrator.
         TimeseriesOp::ResolveIngest(_) | TimeseriesOp::Scan { .. } => false,
@@ -224,7 +224,8 @@ fn columnar_is_write(op: &ColumnarOp) -> bool {
         | ColumnarOp::Update { .. }
         | ColumnarOp::Delete { .. }
         | ColumnarOp::ResolvedUpdate { .. }
-        | ColumnarOp::ResolvedDelete { .. } => true,
+        | ColumnarOp::ResolvedDelete { .. }
+        | ColumnarOp::Truncate { .. } => true,
         // Read-only: decides the write policy but mutates nothing, so no
         // vshard lock to take.
         ColumnarOp::Scan { .. }

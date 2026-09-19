@@ -295,6 +295,7 @@ mod transactional_ddl_visibility_routines;
 mod transactional_ddl_visibility_sequence;
 mod trigger_e2e;
 mod truncate_engine_conformance;
+mod truncate_engine_conformance_columnar_family;
 mod txn_ddl_commit_registry_sync;
 mod vector_index_bulk_delete_reindex;
 mod vector_index_bulk_update_reindex;

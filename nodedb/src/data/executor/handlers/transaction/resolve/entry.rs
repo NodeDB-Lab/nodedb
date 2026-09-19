@@ -2825,6 +2825,45 @@ mod tests {
         assert!(rec.updates.is_empty(), "DELETE carries no assignments");
     }
 
+    /// Columnar-family truncates resolve to the same dedicated record the
+    /// autocommit path appends, carrying the collection name only.
+    #[test]
+    fn columnar_family_truncate_emits_dedicated_truncate_sub_records() {
+        use nodedb_types::columnar::ColumnarTruncateWalRecord;
+
+        let (mut core, _dir) = make_core();
+        let task = make_task();
+
+        let columnar = PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
+            restart_identity: true,
+        });
+        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(46), &[columnar]);
+        assert_eq!(resp.status, Status::Ok);
+        let redo = decode_redo(&resp);
+        assert_eq!(redo.ops.len(), 1);
+        assert_eq!(redo.ops[0].record_type, RecordType::ColumnarTruncate as u32);
+        let rec: ColumnarTruncateWalRecord =
+            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode columnar truncate");
+        assert_eq!(rec.collection, "cevents");
+
+        let timeseries = PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "tsevents"),
+            restart_identity: false,
+        });
+        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(47), &[timeseries]);
+        assert_eq!(resp.status, Status::Ok);
+        let redo = decode_redo(&resp);
+        assert_eq!(redo.ops.len(), 1);
+        assert_eq!(
+            redo.ops[0].record_type,
+            RecordType::TimeseriesTruncate as u32
+        );
+        let rec: ColumnarTruncateWalRecord =
+            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode timeseries truncate");
+        assert_eq!(rec.collection, "tsevents");
+    }
+
     /// An array `Put` plan resolves to a version-tagged `ArrayPut` sub-record
     /// and replays into a fresh engine, respecting `ArrayFlush` watermarks.
     #[test]

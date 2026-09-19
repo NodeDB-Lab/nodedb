@@ -319,9 +319,14 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | ColumnarOp::ResolvedUpdate { .. }
             | ColumnarOp::ResolvedDelete { .. }
             | ColumnarOp::ResolveDml { .. }
-            | ColumnarOp::MaterializeScan { .. },
+            | ColumnarOp::MaterializeScan { .. }
+            | ColumnarOp::Truncate { .. },
         )
-        | PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_))
+        | PhysicalPlan::Timeseries(
+            TimeseriesOp::Scan { .. }
+            | TimeseriesOp::ResolveIngest(_)
+            | TimeseriesOp::Truncate { .. },
+        )
         | PhysicalPlan::Spatial(
             SpatialOp::Insert { .. } | SpatialOp::Delete { .. } | SpatialOp::Scan { .. },
         )

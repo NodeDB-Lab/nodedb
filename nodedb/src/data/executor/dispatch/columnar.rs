@@ -173,6 +173,11 @@ impl CoreLoop {
                 *is_update,
                 rls_write_check,
             ),
+
+            ColumnarOp::Truncate {
+                collection,
+                restart_identity: _,
+            } => self.execute_columnar_truncate(task, collection.as_str(), None),
         }
     }
 }

@@ -62,6 +62,13 @@ pub(super) fn inject_columnar(ctx: &RlsCtx<'_>, op: &mut ColumnarOp) -> crate::R
         ColumnarOp::ResolvedUpdate { .. }
         | ColumnarOp::ResolvedDelete { .. }
         | ColumnarOp::ResolveDml { .. } => Ok(()),
+
+        // Refuse: removes every row without reading one, so no image
+        // exists to evaluate against. Mirrors `KvOp::Truncate`.
+        ColumnarOp::Truncate { collection, .. } => ctx.refuse_if_write_policy(
+            collection,
+            "a truncate removes every row without reading one, so no row image is available",
+        ),
     }
 }
 
@@ -91,6 +98,13 @@ pub(super) fn inject_timeseries(ctx: &RlsCtx<'_>, op: &mut TimeseriesOp) -> crat
         // Recurse: the resolve pass carries the ingest it is about to decide,
         // and that ingest's own slots are the ones the policy fills.
         TimeseriesOp::ResolveIngest(inner) => inject_timeseries(ctx, inner),
+
+        // Refuse: removes every row without reading one, so no image
+        // exists to evaluate against. Mirrors `KvOp::Truncate`.
+        TimeseriesOp::Truncate { collection, .. } => ctx.refuse_if_write_policy(
+            collection,
+            "a truncate removes every row without reading one, so no row image is available",
+        ),
     }
 }
 
@@ -168,6 +182,45 @@ mod tests {
             updates: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         })
+    }
+
+    fn columnar_truncate(collection: &str) -> PhysicalPlan {
+        PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb_types::DatabaseId::DEFAULT,
+                collection,
+            ),
+            restart_identity: false,
+        })
+    }
+
+    fn timeseries_truncate(collection: &str) -> PhysicalPlan {
+        PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb_types::DatabaseId::DEFAULT,
+                collection,
+            ),
+            restart_identity: false,
+        })
+    }
+
+    /// A truncate reads no row, so nothing exists for the write policy to
+    /// decide against; it is refused like `KvOp::Truncate`.
+    #[test]
+    fn columnar_family_truncate_is_refused_under_a_write_policy() {
+        let store = store_with_write_policy("docs");
+        for mut plan in [columnar_truncate("docs"), timeseries_truncate("docs")] {
+            assert_write_refused(inject(&mut plan, &store), "docs");
+        }
+    }
+
+    #[test]
+    fn columnar_family_truncate_without_a_policy_is_untouched() {
+        for mut plan in [columnar_truncate("docs"), timeseries_truncate("docs")] {
+            let before = plan.clone();
+            assert!(inject_without_policy(&mut plan).is_ok());
+            assert_eq!(plan, before);
+        }
     }
 
     fn ingest(collection: &str, format: &str) -> PhysicalPlan {

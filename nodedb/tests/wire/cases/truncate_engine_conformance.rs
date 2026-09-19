@@ -8,13 +8,15 @@
 //! row. Every peer engine owes this: `plan_truncate_stmt` resolves the
 //! collection's engine through the catalog and routes through
 //! `EngineRules::plan_truncate`, so each engine's own store is cleared.
+//! The columnar family's spatial-index and transaction contracts live in
+//! `truncate_engine_conformance_columnar_family`.
 
 use crate::harness::TestServer;
 use tokio_postgres::SimpleQueryMessage;
 
 /// Every `CommandComplete` tag in `sql`'s simple-query response, in wire
 /// order.
-async fn command_tags(server: &TestServer, sql: &str) -> Vec<u64> {
+pub(super) async fn command_tags(server: &TestServer, sql: &str) -> Vec<u64> {
     let messages = server
         .client
         .simple_query(sql)
@@ -32,7 +34,7 @@ async fn command_tags(server: &TestServer, sql: &str) -> Vec<u64> {
 /// Assert `TRUNCATE <collection>` answers exactly one command tag whose
 /// fallback-parsed count is 0 — the bare `TRUNCATE` tag Postgres sends
 /// (`extract_row_affected` parses a tag with no trailing integer as `0`).
-async fn assert_truncate_tag(server: &TestServer, collection: &str) {
+pub(super) async fn assert_truncate_tag(server: &TestServer, collection: &str) {
     let tags = command_tags(server, &format!("TRUNCATE {collection}")).await;
     assert_eq!(
         tags,
@@ -42,7 +44,7 @@ async fn assert_truncate_tag(server: &TestServer, collection: &str) {
 }
 
 /// Number of rows `SELECT COUNT(*) FROM <collection>` reports.
-async fn row_count(server: &TestServer, collection: &str) -> u64 {
+pub(super) async fn row_count(server: &TestServer, collection: &str) -> u64 {
     server
         .query_rows(&format!("SELECT COUNT(*) FROM {collection}"))
         .await
