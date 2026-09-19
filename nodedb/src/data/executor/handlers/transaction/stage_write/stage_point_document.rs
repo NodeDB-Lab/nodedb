@@ -108,7 +108,7 @@ impl CoreLoop {
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
-            let current = match self.resolve_doc_current(ctx) {
+            let current = match self.stage_current_body(ctx) {
                 Ok(body) => body,
                 Err(e) => return self.response_error(ctx.task, e),
             };
@@ -156,35 +156,12 @@ impl CoreLoop {
             return self.response_error(ctx.task, e);
         }
 
-        // Current body: overlay wins over base; an in-transaction tombstone
-        // means the row is gone (0 rows updated).
-        let overlay_cur = self
-            .txn_overlays
-            .get(&ctx.txn_id)
-            .and_then(|o| o.get(&ctx.coll_key, ctx.surrogate.0))
-            .cloned();
-        let current_bytes = match overlay_cur {
-            Some(Staged::Put(body)) => body,
-            Some(Staged::Tombstone) => return self.stage_count_response(ctx.task, 0),
-            None => {
-                let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
-                let read = if bitemporal {
-                    self.sparse.versioned_get_current(
-                        ctx.database_id,
-                        ctx.tid,
-                        ctx.collection,
-                        &storage_key,
-                    )
-                } else {
-                    self.sparse
-                        .get(ctx.database_id, ctx.tid, ctx.collection, &storage_key)
-                };
-                match read {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => return self.stage_count_response(ctx.task, 0),
-                    Err(e) => return self.response_error(ctx.task, e),
-                }
-            }
+        // Current body: overlay wins over base; an absent or tombstoned row
+        // updates 0 rows.
+        let current_bytes = match self.stage_current_body(ctx) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return self.stage_count_response(ctx.task, 0),
+            Err(e) => return self.response_error(ctx.task, e),
         };
 
         let body = match self.stage_apply_update(

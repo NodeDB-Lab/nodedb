@@ -18,7 +18,6 @@ use nodedb_types::columnar::StrictSchema;
 use super::context::StageCtx;
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::handlers::upsert::{apply_on_conflict_updates, merge_values};
 use crate::data::executor::strict_format;
 use crate::types::TenantId;
@@ -32,7 +31,7 @@ impl CoreLoop {
         on_conflict_updates: &[(String, UpdateValue)],
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
-        let existing_bytes = match self.resolve_doc_current(ctx) {
+        let existing_bytes = match self.stage_current_body(ctx) {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -78,35 +77,6 @@ impl CoreLoop {
         }
 
         self.response_affected_with_op(ctx.task, 1, op)
-    }
-
-    /// Resolve the current stored body for `ctx` under BASE ∪ OVERLAY: a
-    /// staged put wins, a staged tombstone means absent, otherwise fall back
-    /// to durable storage (bitemporal-aware, mirroring `execute_upsert`).
-    pub(super) fn resolve_doc_current(&self, ctx: &StageCtx<'_>) -> crate::Result<Option<Vec<u8>>> {
-        match self
-            .txn_overlays
-            .get(&ctx.txn_id)
-            .and_then(|o| o.get(&ctx.coll_key, ctx.surrogate.0))
-        {
-            Some(Staged::Put(body)) => Ok(Some(body.clone())),
-            Some(Staged::Tombstone) => Ok(None),
-            None => {
-                let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
-                let storage_key = nodedb_types::StorageKey::for_surrogate(ctx.surrogate);
-                if bitemporal {
-                    self.sparse.versioned_get_current(
-                        ctx.database_id,
-                        ctx.tid,
-                        ctx.collection,
-                        &storage_key,
-                    )
-                } else {
-                    self.sparse
-                        .get(ctx.database_id, ctx.tid, ctx.collection, &storage_key)
-                }
-            }
-        }
     }
 
     /// Merge `value` (or apply `on_conflict_updates`) onto an existing body,

@@ -35,7 +35,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::crdt::tenant_state::TenantCrdtEngine;
-use crate::engine::document::crdt_store::loro_value_to_json;
 use crate::engine::document::store::StorageKey;
 
 /// One CRDT row write to materialize into the sparse store.
@@ -74,8 +73,7 @@ impl CoreLoop {
         document_id: &str,
     ) -> Option<Vec<u8>> {
         let loro_val = engine.read_row(collection, document_id)?;
-        let json = loro_value_to_json(&loro_val);
-        nodedb_types::json_to_msgpack(&json).ok()
+        super::convert::crdt_row_body(&loro_val)
     }
 
     /// Write the merged CRDT document into the sparse document store — with the

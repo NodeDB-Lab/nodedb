@@ -224,12 +224,12 @@ impl CoreLoop {
                 | ArrayOp::RestoreArrayDrop { .. }
                 | ArrayOp::PurgeArrayDrop { .. },
             ) => return self.stage_not_point_write(task),
+            PhysicalPlan::Crdt(op) => return self.execute_stage_crdt(task, tid, txn_id, op),
             // A `ClusterArrayOp::{Put, Delete}` routing wrapper never reaches
             // the Data Plane: the coordinator (Control Plane) fans it out into
             // per-vShard `ArrayOp::{Put, Delete}` tasks, and the cluster
             // fan-out staging lives with that coordinator.
             PhysicalPlan::Text(_)
-            | PhysicalPlan::Crdt(_)
             | PhysicalPlan::Query(_)
             | PhysicalPlan::Meta(_)
             | PhysicalPlan::ClusterArray(_)

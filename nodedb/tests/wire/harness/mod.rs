@@ -14,6 +14,7 @@ mod query;
 mod types;
 
 pub mod insert_returning_engines;
+pub mod raw_pgwire;
 
 // Mirrors the `TestServer` API surface `pgwire_harness` exposes, so porting a
 // test file is an import swap.

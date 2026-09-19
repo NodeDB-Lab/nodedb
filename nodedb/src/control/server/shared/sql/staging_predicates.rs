@@ -5,7 +5,8 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{
-    ArrayOp, ColumnarOp, DocumentOp, GraphOp, KvOp, SpatialOp, TimeseriesOp, VectorOp,
+    ArrayOp, ColumnarOp, CrdtOp, CrdtWriteVerb, DocumentOp, GraphOp, KvOp, SpatialOp, TimeseriesOp,
+    VectorOp,
 };
 
 /// Allow-list of plans the in-transaction path stages at statement time: Document
@@ -41,8 +42,9 @@ pub enum StagedWriteShape {
 /// Classify a plan into the [`StagedWriteShape`] the in-transaction staging gate
 /// stages it as, or `None` if the plan is not stageable. `None` covers: Document
 /// scans/reads, KV reads/predicate ops/autocommit-only resolve ops, Columnar/
-/// Timeseries/Spatial/Graph/Array reads and maintenance ops, Vector search, and
-/// every non-write-engine `PhysicalPlan` variant (`Text`, `Crdt`, `Query`, `Meta`,
+/// Timeseries/Spatial/Graph/Array reads and maintenance ops, Vector search, every
+/// `CrdtOp` other than the row writes `DocUpsert`/`DocDelete`, and every
+/// non-write-engine `PhysicalPlan` variant (`Text`, `Query`, `Meta`,
 /// `ClusterArray`, `ClusterEvent`). The single-node `ArrayOp::{Put, Delete}` stages
 /// here; the `ClusterArrayOp::{Put, Delete}` routing wrapper is not listed because
 /// `route_in_tx_write` fans it out per vShard first (`session::array_fanout_stage`),
@@ -113,8 +115,40 @@ pub fn stageable_write_shape(plan: &PhysicalPlan) -> Option<StagedWriteShape> {
         PhysicalPlan::Vector(VectorOp::DirectUpdate { .. }) => Some(StagedWriteShape::Update),
         PhysicalPlan::Vector(_) => None,
 
+        // A CRDT row write stages under the tag of the SQL verb that produced
+        // it: the plan fixes the verb, so the shape is decided here.
+        PhysicalPlan::Crdt(CrdtOp::DocUpsert { verb, .. }) => Some(match verb {
+            CrdtWriteVerb::Insert => StagedWriteShape::Insert,
+            CrdtWriteVerb::Upsert => StagedWriteShape::Upsert,
+            CrdtWriteVerb::Update => StagedWriteShape::Update,
+        }),
+        PhysicalPlan::Crdt(CrdtOp::DocDelete { .. }) => Some(StagedWriteShape::Delete),
+        // `Apply`/`ApplyAuthenticated` are refused inside a transaction by
+        // `route_in_tx_write`. The `List*` edits, snapshot import, constraint
+        // and policy DDL, history ops, and reads buffer for COMMIT or run as
+        // reads.
+        PhysicalPlan::Crdt(
+            CrdtOp::Read { .. }
+            | CrdtOp::Apply { .. }
+            | CrdtOp::ApplyAuthenticated { .. }
+            | CrdtOp::ImportSnapshot { .. }
+            | CrdtOp::SetConstraints { .. }
+            | CrdtOp::DropConstraints { .. }
+            | CrdtOp::ReadConstraints { .. }
+            | CrdtOp::SetPolicy { .. }
+            | CrdtOp::GetPolicy { .. }
+            | CrdtOp::ReadAtVersion { .. }
+            | CrdtOp::GetVersionVector { .. }
+            | CrdtOp::ExportDelta { .. }
+            | CrdtOp::RestoreToVersion { .. }
+            | CrdtOp::CompactAtVersion { .. }
+            | CrdtOp::ListInsert { .. }
+            | CrdtOp::ListDelete { .. }
+            | CrdtOp::ListMove { .. }
+            | CrdtOp::PreviewApply { .. },
+        ) => None,
+
         PhysicalPlan::Text(_)
-        | PhysicalPlan::Crdt(_)
         | PhysicalPlan::Query(_)
         | PhysicalPlan::Meta(_)
         | PhysicalPlan::ClusterArray(_)
@@ -751,5 +785,54 @@ mod tests {
             stageable_write_shape(&patched),
             Some(StagedWriteShape::ConflictUpsert)
         );
+    }
+
+    fn crdt_doc_upsert(verb: CrdtWriteVerb) -> PhysicalPlan {
+        PhysicalPlan::Crdt(CrdtOp::DocUpsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
+            document_id: "a".into(),
+            fields_json: r#"{"title":"t"}"#.into(),
+            surrogate: nodedb_types::Surrogate(7),
+            partial: verb == CrdtWriteVerb::Update,
+            verb,
+            returning: None,
+            rls_filters: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn crdt_doc_upsert_stages_under_its_verb() {
+        for (verb, shape) in [
+            (CrdtWriteVerb::Insert, StagedWriteShape::Insert),
+            (CrdtWriteVerb::Upsert, StagedWriteShape::Upsert),
+            (CrdtWriteVerb::Update, StagedWriteShape::Update),
+        ] {
+            let plan = crdt_doc_upsert(verb);
+            assert!(is_stageable_write(&plan), "{verb:?} must stage");
+            assert_eq!(stageable_write_shape(&plan), Some(shape), "{verb:?}");
+        }
+    }
+
+    #[test]
+    fn crdt_doc_delete_stages_as_delete() {
+        let plan = PhysicalPlan::Crdt(CrdtOp::DocDelete {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
+            document_id: "a".into(),
+            surrogate: nodedb_types::Surrogate(7),
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        assert!(is_stageable_write(&plan));
+        assert_eq!(stageable_write_shape(&plan), Some(StagedWriteShape::Delete));
+    }
+
+    #[test]
+    fn crdt_read_is_not_stageable() {
+        let plan = PhysicalPlan::Crdt(CrdtOp::Read {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
+            document_id: "a".into(),
+        });
+        assert!(!is_stageable_write(&plan));
+        assert_eq!(stageable_write_shape(&plan), None);
     }
 }
