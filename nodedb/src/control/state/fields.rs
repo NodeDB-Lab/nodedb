@@ -64,10 +64,8 @@ pub struct SharedState {
     pub usage_store: Arc<crate::control::security::metering::store::UsageStore>,
     /// Quota manager (enforcement against scope quotas).
     pub quota_manager: crate::control::security::metering::quota::QuotaManager,
-    /// Usage metering configuration (enabled flag, per-operation costs).
-    /// No `RwLock`/atomics — there is no live-mutation DDL for it, only the
-    /// bounds baked into `usage_store` / `quota_manager` at construction and
-    /// the `.enabled` / `.operation_costs` reads at dispatch time.
+    /// Usage metering configuration (enabled flag, per-operation costs); no live
+    /// mutation, so the bounds are baked into `usage_store`/`quota_manager`.
     pub metering_config: crate::control::security::metering::config::MeteringConfig,
     /// Auth-scoped API keys (nda_ format, bound to auth_users).
     pub auth_api_keys: crate::control::security::auth_apikey::AuthApiKeyStore,
@@ -107,6 +105,9 @@ pub struct SharedState {
     pub cluster_transport: Option<Arc<nodedb_cluster::NexarTransport>>,
     /// This node's ID (0 in single-node mode).
     pub node_id: u64,
+
+    /// SWIM incarnation resolved at cluster init; stamped on fenced lease grants (0 standalone).
+    pub node_incarnation: u64,
     /// Live view of the replicated metadata catalog. Falls through to legacy redb in single-node mode.
     pub metadata_cache: Arc<RwLock<nodedb_cluster::MetadataCache>>,
     /// Broadcasts one event per committed metadata entry to subscribers (pgwire cache, CDC, etc.).
@@ -115,8 +116,7 @@ pub struct SharedState {
     >,
     /// Per-Raft-group apply watermark registry for commit-wait and drain paths.
     pub group_watchers: Arc<nodedb_cluster::GroupAppliedWatchers>,
-    /// Serializes this node's attempts to acquire the replicated descriptor
-    /// preparation lease.
+    /// Serializes this node's descriptor preparation lease (replicated).
     pub metadata_ddl_lock: Mutex<()>,
     /// Replicated preparation owner plus local monotonic apply time.
     pub metadata_ddl_owner: Mutex<Option<(u64, std::time::Instant)>>,

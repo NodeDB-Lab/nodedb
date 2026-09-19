@@ -122,8 +122,14 @@ impl FailureDetector {
             None => return outcome,
         };
         if old_state != Some(new_state) {
+            let incarnation = self
+                .membership
+                .get(&update.node_id)
+                .map(|member| member.incarnation.get())
+                .unwrap_or(0);
             for sub in &self.subscribers {
                 sub.on_state_change(&update.node_id, old_state, new_state);
+                sub.on_state_change_with_incarnation(&update.node_id, new_state, incarnation);
             }
         }
         outcome

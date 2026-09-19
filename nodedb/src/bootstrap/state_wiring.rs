@@ -62,6 +62,7 @@ pub async fn wire_state(
         && let Some(state) = Arc::get_mut(shared)
     {
         state.node_id = handle.node_id;
+        state.node_incarnation = handle.node_incarnation;
         state.cluster_topology = Some(Arc::clone(&handle.topology));
         state.cluster_routing = Some(Arc::clone(&handle.routing));
         state.cluster_transport = Some(Arc::clone(&handle.transport));

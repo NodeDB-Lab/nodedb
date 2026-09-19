@@ -62,6 +62,12 @@ pub const DESCRIPTOR_VERSIONING_VERSION: u16 = 1;
 /// compat-mode fallback in `drain_for_ddl`.
 pub const DESCRIPTOR_DRAIN_VERSION: u16 = 1;
 
+/// Wire version that introduced the fenced descriptor-lease grant
+/// (`DescriptorLeaseGrantFenced`, stamped with the holder's incarnation).
+/// Mixed-version clusters below this version keep proposing the unfenced
+/// grant and run without lease fencing.
+pub const LEASE_FENCING_VERSION: u16 = 1;
+
 /// Check if a message from a remote node should be accepted.
 ///
 /// Accepts only messages with the exact current wire format version.

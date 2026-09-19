@@ -350,6 +350,23 @@ pub enum MetadataEntry {
         spki: [u8; 32],
         expires_at_ms: u64,
     },
+
+    /// A descriptor lease grant stamped with the holder's incarnation.
+    ///
+    /// Appended last on purpose: zerompk derives the variant index from
+    /// position, so inserting anywhere earlier would renumber every following
+    /// variant. Proposed only once the cluster reports the fencing version;
+    /// mixed-version clusters keep the plain
+    /// [`DescriptorLeaseGrant`](Self::DescriptorLeaseGrant) and run without
+    /// the fence.
+    ///
+    /// The value fences the release path: a holder marked gone at incarnation
+    /// `N` fences only leases stamped at `<= N`, so a node that restarted (its
+    /// incarnation bumped) and re-acquired is not affected by a stale verdict.
+    DescriptorLeaseGrantFenced {
+        lease: DescriptorLease,
+        holder_incarnation: u64,
+    },
 }
 
 /// The direction of a join-token lifecycle transition.

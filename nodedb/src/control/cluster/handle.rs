@@ -71,4 +71,7 @@ pub struct ClusterHandle {
     /// which releases a Dead/Left holder's descriptor leases without waiting
     /// for topology removal or expiry.
     pub lease_liveness: Arc<nodedb_cluster::LeaseHolderLiveness>,
+    /// This node's SWIM incarnation, resolved at init (the persisted value
+    /// bumped, or zero on a fresh node). Stamped on fenced lease grants.
+    pub node_incarnation: u64,
 }

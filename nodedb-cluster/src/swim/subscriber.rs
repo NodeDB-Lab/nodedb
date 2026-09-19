@@ -29,4 +29,16 @@ pub trait MembershipSubscriber: Send + Sync {
     /// Called after the membership list has accepted a state change
     /// for `node_id`. `old` is `None` on first-time insert.
     fn on_state_change(&self, node_id: &NodeId, old: Option<MemberState>, new: MemberState);
+
+    /// Called with the incarnation the transition landed at, immediately
+    /// after [`on_state_change`](Self::on_state_change). Hooks that need a
+    /// fencing value (lease-holder liveness) implement this; the default
+    /// keeps every existing hook unchanged.
+    fn on_state_change_with_incarnation(
+        &self,
+        _node_id: &NodeId,
+        _new: MemberState,
+        _incarnation: u64,
+    ) {
+    }
 }

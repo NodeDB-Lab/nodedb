@@ -150,6 +150,16 @@ pub async fn init_cluster_with_transport(
         .into_inner()
         .unwrap_or_else(|p| p.into_inner());
 
+    // Mirrors the incarnation `start_cluster_subsystems` resolves for SWIM:
+    // the persisted value bumped, or zero on a fresh node. Resolved before
+    // the handle literal moves `catalog` into it.
+    let node_incarnation = catalog
+        .load_swim_incarnation()
+        .ok()
+        .flatten()
+        .map(|value| nodedb_cluster::Incarnation::new(value).bump().get())
+        .unwrap_or(0);
+
     Ok(ClusterHandle {
         transport,
         topology,
@@ -165,6 +175,7 @@ pub async fn init_cluster_with_transport(
             config: cluster_config,
         })),
         lease_liveness: Arc::new(nodedb_cluster::LeaseHolderLiveness::new()),
+        node_incarnation,
     })
 }
 

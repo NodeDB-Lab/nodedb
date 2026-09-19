@@ -171,6 +171,7 @@ impl SharedState {
             dispatcher: Mutex::new(dispatcher),
             tracker: RequestTracker::new(),
             wal,
+            node_incarnation: 0,
             quiesce,
             http_client,
             credentials: Arc::clone(&credentials),

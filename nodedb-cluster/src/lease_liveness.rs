@@ -18,7 +18,7 @@
 //! set is exactly that cost. The proposal side stays in the raft loop, where
 //! the GC already proposes releases.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use nodedb_types::NodeId;
@@ -29,11 +29,17 @@ use crate::swim::subscriber::MembershipSubscriber;
 
 /// Node ids whose SWIM verdict is `Dead` or `Left`.
 ///
+/// The value is the incarnation the verdict landed at, when the detector
+/// supplied one: a lease stamped at incarnation `<=` that value was granted
+/// before the verdict and may be released; a lease re-acquired later (a
+/// restart bumped the incarnation) is not fenced by it. `None` means gone
+/// without a fencing value — release unconditionally, the phase-1 behaviour.
+///
 /// `Left` is terminal and never revives; `Dead` is cleared by an `Alive`
 /// transition for the same node (a refutation at a higher incarnation).
 #[derive(Debug, Default)]
 pub struct LeaseHolderLiveness {
-    gone: RwLock<BTreeSet<u64>>,
+    gone: RwLock<BTreeMap<u64, Option<u64>>>,
 }
 
 impl LeaseHolderLiveness {
@@ -41,13 +47,22 @@ impl LeaseHolderLiveness {
         Self::default()
     }
 
-    /// Mark `node_id` as gone: its leases may be released without waiting for
-    /// expiry or topology removal.
+    /// Mark `node_id` as gone without a fencing value: its leases may be
+    /// released without waiting for expiry or topology removal.
     pub fn mark_gone(&self, node_id: u64) {
         self.gone
             .write()
             .unwrap_or_else(|poison| poison.into_inner())
-            .insert(node_id);
+            .insert(node_id, None);
+    }
+
+    /// Mark `node_id` as gone at `incarnation`: leases stamped at an
+    /// incarnation `<=` this value are fenced; later re-acquisitions are not.
+    pub fn mark_gone_at(&self, node_id: u64, incarnation: u64) {
+        self.gone
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(node_id, Some(incarnation));
     }
 
     /// Clear the mark for `node_id`: a refuted verdict means the holder is
@@ -64,7 +79,20 @@ impl LeaseHolderLiveness {
         self.gone
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
-            .contains(&node_id)
+            .contains_key(&node_id)
+    }
+
+    /// The incarnation the gone verdict landed at, when one was supplied.
+    ///
+    /// Callers check [`is_gone`](Self::is_gone) first; `None` then means the
+    /// mark carries no fence and the release is unconditional.
+    pub fn fence_at(&self, node_id: u64) -> Option<u64> {
+        self.gone
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&node_id)
+            .copied()
+            .flatten()
     }
 }
 
@@ -109,6 +137,24 @@ impl MembershipSubscriber for LeaseHolderLivenessHook {
             MemberState::Suspect => {}
         }
     }
+
+    fn on_state_change_with_incarnation(
+        &self,
+        node_id: &NodeId,
+        new: MemberState,
+        incarnation: u64,
+    ) {
+        let Some(numeric_id) = (self.resolver)(node_id) else {
+            return;
+        };
+        match new {
+            MemberState::Dead | MemberState::Left => {
+                self.liveness.mark_gone_at(numeric_id, incarnation)
+            }
+            MemberState::Alive => self.liveness.revive(numeric_id),
+            MemberState::Suspect => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +177,23 @@ mod tests {
         assert!(!liveness.is_gone(7));
         hook.on_state_change(&nid("n7"), Some(MemberState::Alive), MemberState::Left);
         assert!(liveness.is_gone(7));
+    }
+
+    #[test]
+    fn a_dead_verdict_carries_the_fencing_incarnation() {
+        let liveness = Arc::new(LeaseHolderLiveness::new());
+        let hook = LeaseHolderLivenessHook::new(liveness.clone(), Arc::new(|_| Some(4)));
+
+        // The detector calls both hooks per transition; the fencing value
+        // from the second must win over the fenceless mark from the first.
+        hook.on_state_change(&nid("n4"), Some(MemberState::Alive), MemberState::Dead);
+        hook.on_state_change_with_incarnation(&nid("n4"), MemberState::Dead, 12);
+        assert_eq!(liveness.fence_at(4), Some(12));
+
+        hook.on_state_change(&nid("n4"), Some(MemberState::Dead), MemberState::Alive);
+        hook.on_state_change_with_incarnation(&nid("n4"), MemberState::Alive, 13);
+        assert!(!liveness.is_gone(4));
+        assert_eq!(liveness.fence_at(4), None);
     }
 
     #[test]
