@@ -27,6 +27,7 @@ use nodedb_physical::physical_plan::VectorOp;
 use nodedb_wal::record::RecordType;
 
 use crate::bridge::envelope::{PhysicalPlan, Status};
+use crate::control::server::wal_dispatch::VectorDirectUpsertRecord;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::DatabaseId;
 
@@ -48,6 +49,9 @@ impl CoreLoop {
             let is_target = matches!(
                 record_type,
                 Some(RecordType::VectorDirectUpsert)
+                    | Some(RecordType::VectorDirectDelete)
+                    | Some(RecordType::VectorDirectUpdate)
+                    | Some(RecordType::VectorResolvedDirectWrite)
                     | Some(RecordType::SparseVectorPut)
                     | Some(RecordType::SparseVectorDelete)
                     | Some(RecordType::MultiVectorPut)
@@ -81,6 +85,28 @@ impl CoreLoop {
                     record_lsn,
                     tombstones,
                 ),
+                Some(RecordType::VectorDirectDelete) => self.replay_direct_delete(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    record_lsn,
+                    tombstones,
+                ),
+                Some(RecordType::VectorDirectUpdate) => self.replay_direct_update(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    record_lsn,
+                    tombstones,
+                ),
+                Some(RecordType::VectorResolvedDirectWrite) => self
+                    .replay_vector_resolved_direct_write(
+                        &record.payload,
+                        tenant_id,
+                        database_id,
+                        record_lsn,
+                        tombstones,
+                    ),
                 Some(RecordType::MultiVectorPut) => self.replay_multi_vector_put(
                     &record.payload,
                     tenant_id,
@@ -145,21 +171,15 @@ impl CoreLoop {
             collection,
             field,
             surrogate_u32,
+            pk_bytes,
             vector,
             payload_bytes,
             quantization,
             storage_dtype,
             payload_indexes,
-        )) = zerompk::from_msgpack::<(
-            String,
-            String,
-            u32,
-            Vec<f32>,
-            Vec<u8>,
-            nodedb_types::VectorQuantization,
-            nodedb_types::VectorStorageDtype,
-            Vec<(String, nodedb_types::PayloadIndexKind)>,
-        )>(payload)
+            intent,
+            on_conflict_updates,
+        )) = zerompk::from_msgpack::<VectorDirectUpsertRecord>(payload)
         else {
             return false;
         };
@@ -187,15 +207,19 @@ impl CoreLoop {
                 collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
                 field: field.clone(),
                 surrogate,
+                pk_bytes,
                 vector: vector.clone(),
                 payload: payload_bytes.clone(),
                 quantization,
                 storage_dtype,
                 payload_indexes: payload_indexes.clone(),
                 // Replay re-applies a durable record; the statement that asked
-                // for rows is long gone.
+                // for rows is long gone, and its write policy was decided when
+                // the record was written.
                 returning: None,
                 rls_filters: Vec::new(),
+                on_conflict_updates: on_conflict_updates.clone(),
+                rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             }),
         );
         let response = self.execute_vector_direct_upsert(
@@ -210,6 +234,9 @@ impl CoreLoop {
                 quantization,
                 storage_dtype,
                 payload_indexes: &payload_indexes,
+                intent,
+                on_conflict_updates: &on_conflict_updates,
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
             },
@@ -523,6 +550,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
             field: "emb".into(),
             surrogate: Surrogate::new(surrogate),
+            pk_bytes: Vec::new(),
             vector,
             payload: Vec::new(),
             quantization: nodedb_types::VectorQuantization::None,
@@ -530,6 +558,8 @@ mod tests {
             payload_indexes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         })
     }
 

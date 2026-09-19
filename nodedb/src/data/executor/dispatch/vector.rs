@@ -4,7 +4,7 @@
 
 use crate::bridge::envelope::Response;
 use nodedb_mem;
-use nodedb_physical::physical_plan::VectorOp;
+use nodedb_physical::physical_plan::{VectorDirectWriteIntent, VectorOp};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
@@ -20,6 +20,10 @@ impl CoreLoop {
                 | VectorOp::SparseInsert { .. }
                 | VectorOp::MultiVectorInsert { .. }
                 | VectorOp::DirectUpsert { .. }
+                | VectorOp::DirectInsert { .. }
+                | VectorOp::DirectInsertIfAbsent { .. }
+                | VectorOp::DirectUpdate { .. }
+                | VectorOp::ResolvedDirectWrite { .. }
         );
         if is_write && let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Vector)
         {
@@ -268,10 +272,46 @@ impl CoreLoop {
                 },
             ),
 
+            // `pk_bytes` binds the surrogate on followers; the Data Plane keys
+            // the row by the surrogate alone.
             VectorOp::DirectUpsert {
                 collection,
                 field,
                 surrogate,
+                pk_bytes: _,
+                vector,
+                payload,
+                quantization,
+                storage_dtype,
+                payload_indexes,
+                returning,
+                rls_filters,
+                on_conflict_updates,
+                rls_write_check,
+            } => self.execute_vector_direct_upsert(
+                super::super::handlers::vector_upsert::VectorDirectUpsertParams {
+                    task,
+                    tid,
+                    collection: collection.as_str(),
+                    field,
+                    surrogate: *surrogate,
+                    vector,
+                    payload,
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    payload_indexes,
+                    intent: VectorDirectWriteIntent::Upsert,
+                    on_conflict_updates,
+                    rls_write_check,
+                    returning: returning.as_ref(),
+                    rls_filters,
+                },
+            ),
+            VectorOp::DirectInsert {
+                collection,
+                field,
+                surrogate,
+                pk_bytes: _,
                 vector,
                 payload,
                 quantization,
@@ -291,8 +331,90 @@ impl CoreLoop {
                     quantization: *quantization,
                     storage_dtype: *storage_dtype,
                     payload_indexes,
+                    intent: VectorDirectWriteIntent::Insert,
+                    on_conflict_updates: &[],
+                    rls_write_check: &nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
                     returning: returning.as_ref(),
                     rls_filters,
+                },
+            ),
+            VectorOp::DirectInsertIfAbsent {
+                collection,
+                field,
+                surrogate,
+                pk_bytes: _,
+                vector,
+                payload,
+                quantization,
+                storage_dtype,
+                payload_indexes,
+                returning,
+                rls_filters,
+            } => self.execute_vector_direct_upsert(
+                super::super::handlers::vector_upsert::VectorDirectUpsertParams {
+                    task,
+                    tid,
+                    collection: collection.as_str(),
+                    field,
+                    surrogate: *surrogate,
+                    vector,
+                    payload,
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    payload_indexes,
+                    intent: VectorDirectWriteIntent::InsertIfAbsent,
+                    on_conflict_updates: &[],
+                    rls_write_check: &nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
+                    returning: returning.as_ref(),
+                    rls_filters,
+                },
+            ),
+            VectorOp::DirectDelete {
+                collection,
+                field,
+                targets,
+                returning,
+                rls_filters,
+                rls_write_check,
+            } => self.execute_vector_direct_delete(
+                super::super::handlers::vector_direct_delete::VectorDirectDeleteParams {
+                    task,
+                    tid,
+                    collection: collection.as_str(),
+                    field,
+                    targets,
+                    returning: returning.as_ref(),
+                    rls_filters,
+                    rls_write_check,
+                },
+            ),
+            VectorOp::DirectUpdate {
+                collection,
+                field,
+                targets,
+                new_vector,
+                payload_patch,
+                quantization,
+                storage_dtype,
+                payload_indexes,
+                returning,
+                rls_filters,
+                rls_write_check,
+            } => self.execute_vector_direct_update(
+                super::super::handlers::vector_direct_update::VectorDirectUpdateParams {
+                    task,
+                    tid,
+                    collection: collection.as_str(),
+                    field,
+                    targets,
+                    new_vector: new_vector.as_deref(),
+                    payload_patch,
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    payload_indexes,
+                    returning: returning.as_ref(),
+                    rls_filters,
+                    rls_write_check,
                 },
             ),
 
@@ -308,6 +430,35 @@ impl CoreLoop {
                 *surrogate,
                 field_name,
                 provenance.as_ref(),
+            ),
+
+            VectorOp::ResolveDirectWrite(inner) => {
+                self.execute_vector_resolve_direct_write(task, tid, inner)
+            }
+            VectorOp::ResolvedDirectWrite {
+                collection,
+                field,
+                quantization,
+                storage_dtype,
+                payload_indexes,
+                mutations,
+                response_payload,
+                rls_write_check,
+            } => self.execute_vector_resolved_direct_write(
+                super::super::handlers::vector_direct_resolve::VectorResolvedApplyParams {
+                    task,
+                    tid,
+                    index: super::super::handlers::vector_direct_resolve::VectorResolvedIndexSpec {
+                        collection: collection.as_str(),
+                        field,
+                        quantization: *quantization,
+                        storage_dtype: *storage_dtype,
+                        payload_indexes,
+                    },
+                    mutations,
+                    response_payload,
+                    rls_write_check,
+                },
             ),
         }
     }

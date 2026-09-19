@@ -36,6 +36,23 @@ pub enum KvInsertIntent {
     Put,
 }
 
+/// Row-existence intent carried on `SqlPlan::VectorPrimaryInsert`.
+///
+/// A vector-primary row is keyed by its declared primary key. The Data
+/// Plane probes the HNSW surrogate map for that key and applies the
+/// statement's intent against the result, the same way `KvInsertIntent`
+/// drives the key-value hash-index probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorPrimaryInsertIntent {
+    /// Plain `INSERT`: an existing key raises `SQLSTATE 23505`.
+    Insert,
+    /// `INSERT ... ON CONFLICT DO NOTHING`: an existing key is a no-op.
+    InsertIfAbsent,
+    /// `UPSERT` / `INSERT ... ON CONFLICT (pk) DO UPDATE`: an existing key
+    /// is replaced (whole row) or patched (`on_conflict_updates`).
+    Upsert,
+}
+
 /// The lowering a row-shaped write takes, carried on `SqlPlan::Insert` and
 /// `SqlPlan::Upsert`.
 ///

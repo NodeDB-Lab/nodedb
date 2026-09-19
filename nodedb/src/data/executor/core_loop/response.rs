@@ -76,9 +76,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         affected: u64,
     ) -> Response {
-        let mut payload = Vec::with_capacity(16);
-        nodedb_query::msgpack_scan::write_map_header(&mut payload, 1);
-        nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", affected as i64);
+        let payload = super::super::response_codec::encode_affected(affected);
         self.response_with_payload(task, payload)
     }
 

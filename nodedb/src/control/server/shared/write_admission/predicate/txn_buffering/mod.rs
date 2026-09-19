@@ -32,9 +32,10 @@
 //! so they do not diverge from the oracle and are covered by
 //! `array_and_cluster_array_variants_match_oracle` below.
 //! `VectorOp::{DeleteBySurrogate, SparseInsert, SparseDelete,
-//! MultiVectorInsert, MultiVectorDelete, DirectUpsert}` are likewise NOT in
+//! MultiVectorInsert, MultiVectorDelete, DirectUpsert, DirectInsert,
+//! DirectInsertIfAbsent, DirectDelete, DirectUpdate}` are likewise NOT in
 //! this exception list: `to_replicated_entry` has encoder arms for
-//! all six (see `control/wal_replication/encode/vector.rs::encode`), so they
+//! all ten (see `control/wal_replication/encode/vector.rs::encode`), so they
 //! do not diverge from the oracle and are covered by
 //! `vector_variants_match_oracle` below.
 //! `CrdtOp::{ListInsert, ListDelete, ListMove}` are likewise NOT in this

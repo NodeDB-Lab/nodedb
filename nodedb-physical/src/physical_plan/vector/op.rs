@@ -7,7 +7,10 @@ use nodedb_types::{
 };
 
 use crate::physical_plan::PhysicalPlan;
-use crate::physical_plan::document::ReturningSpec;
+use crate::physical_plan::document::{ReturningSpec, UpdateValue};
+
+use super::resolved_mutation::VectorResolvedMutation;
+use super::write::VectorWriteTargets;
 
 /// Vector engine physical operations.
 #[derive(
@@ -276,29 +279,31 @@ pub enum VectorOp {
         mode: String,
     },
 
-    /// Direct vector upsert for vector-primary collections.
+    /// Direct vector upsert for vector-primary collections: an existing
+    /// primary key is replaced whole, or patched by `on_conflict_updates`.
     ///
-    /// Bypasses MessagePack document encoding — the Data Plane inserts the
-    /// vector into HNSW directly and updates payload bitmap indexes from
-    /// `payload`. No full-document blob is written.
+    /// Bypasses MessagePack document encoding — the Data Plane binds the
+    /// vector to an HNSW node, updates the payload bitmap indexes from
+    /// `payload`, and stores `payload` as the row's sidecar. No
+    /// full-document blob is written.
     ///
     /// Ordering invariant (enforced by the handler):
-    ///   1. Validate dim.
-    ///   2. Decode `payload` bytes.
-    ///   3. Insert into HNSW (surrogate bound).
-    ///   4. Update payload bitmap indexes.
-    ///
-    /// If step 3 fails, step 4 is not reached — no partial state.
-    /// If step 4 fails (should not happen — pure in-memory), the handler
-    /// attempts to delete the just-inserted HNSW node and returns an error.
+    ///   1. Validate dim and storage dtype.
+    ///   2. Decode `payload` bytes and probe the surrogate.
+    ///   3. Remove the old node, bitmap entries, and sidecar when one exists.
+    ///   4. Insert into HNSW (surrogate bound) and update the bitmap indexes.
+    ///   5. Store the sidecar; a failed store rolls step 4 back.
     DirectUpsert {
         collection: QualifiedCollection,
         /// Vector column name. Used to compute the vector index key so the
         /// SELECT path (which keys by `(tid, collection, field)`) finds the
         /// same index this insert wrote into.
         field: String,
-        /// Global surrogate allocated by the Control Plane.
+        /// Global surrogate the Control Plane bound to `pk_bytes`.
         surrogate: Surrogate,
+        /// UTF-8 of the declared primary-key value. Followers bind the
+        /// leader-assigned surrogate to this exact key.
+        pk_bytes: Vec<u8>,
         /// FP32 vector values.
         vector: Vec<f32>,
         /// Pre-encoded MessagePack of every non-vector column the statement
@@ -327,8 +332,7 @@ pub enum VectorOp {
         /// the sidecar is `zerompk` TAGGED bytes and echoing the request would
         /// report a shape no read of the collection ever produces.
         ///
-        /// This is the only insert op a vector-primary collection plans to —
-        /// the vector goes to HNSW, every other column to the sidecar, and
+        /// The vector goes to HNSW, every other column to the sidecar, and
         /// there is no companion document write to carry the clause instead.
         #[serde(default)]
         returning: Option<ReturningSpec>,
@@ -340,5 +344,131 @@ pub enum VectorOp {
         /// same principal.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// `ON CONFLICT (pk) DO UPDATE SET` assignments applied to the stored
+        /// payload when the key exists. Empty means whole-row replace.
+        #[serde(default)]
+        on_conflict_updates: Vec<(String, UpdateValue)>,
+        /// Write policy for the merged post-image an `on_conflict_updates`
+        /// patch produces; the image exists only on the Data Plane. Decided
+        /// Control-Plane-side when the patch is empty.
+        rls_write_check: nodedb_types::RlsWriteCheck,
+    },
+
+    /// Vector-primary `INSERT`: an existing primary key raises
+    /// `unique_violation`. Same fields as [`VectorOp::DirectUpsert`] minus
+    /// the conflict patch.
+    DirectInsert {
+        collection: QualifiedCollection,
+        field: String,
+        surrogate: Surrogate,
+        pk_bytes: Vec<u8>,
+        vector: Vec<f32>,
+        payload: Vec<u8>,
+        quantization: nodedb_types::VectorQuantization,
+        storage_dtype: nodedb_types::VectorStorageDtype,
+        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+    },
+
+    /// Vector-primary `INSERT ... ON CONFLICT DO NOTHING`: an existing
+    /// primary key leaves the stored row alone and reports zero rows.
+    DirectInsertIfAbsent {
+        collection: QualifiedCollection,
+        field: String,
+        surrogate: Surrogate,
+        pk_bytes: Vec<u8>,
+        vector: Vec<f32>,
+        payload: Vec<u8>,
+        quantization: nodedb_types::VectorQuantization,
+        storage_dtype: nodedb_types::VectorStorageDtype,
+        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+    },
+
+    /// Vector-primary `DELETE`. Removes the HNSW node, its payload bitmap
+    /// entries, and the payload sidecar row of every targeted surrogate.
+    /// Reports the number of rows that existed.
+    DirectDelete {
+        collection: QualifiedCollection,
+        /// Vector column name; keys the HNSW index.
+        field: String,
+        targets: VectorWriteTargets,
+        /// When `Some`, return the removed rows' sidecar images.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// Read filters gating the rows `returning` emits.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+        /// Write policy decided against each removed row's sidecar image.
+        rls_write_check: nodedb_types::RlsWriteCheck,
+    },
+
+    /// Vector-primary `UPDATE`. A `new_vector` rebuilds the HNSW node under
+    /// the same surrogate; `payload_patch` merges into the sidecar and moves
+    /// the payload bitmap entries. Reports the number of rows that existed.
+    DirectUpdate {
+        collection: QualifiedCollection,
+        /// Vector column name; keys the HNSW index.
+        field: String,
+        targets: VectorWriteTargets,
+        /// Replacement vector, when the statement assigns the vector column.
+        new_vector: Option<Vec<f32>>,
+        /// Assignments to non-vector columns, applied to the stored payload.
+        payload_patch: Vec<(String, UpdateValue)>,
+        quantization: nodedb_types::VectorQuantization,
+        storage_dtype: nodedb_types::VectorStorageDtype,
+        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+        /// When `Some`, return the rows' stored post-images.
+        #[serde(default)]
+        returning: Option<ReturningSpec>,
+        /// Read filters gating the rows `returning` emits.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+        /// Write policy decided against each row's post-image.
+        rls_write_check: nodedb_types::RlsWriteCheck,
+    },
+
+    // ── Resolve-before-propose (governed vector-primary writes) ─────────
+    /// Read-only: report every row mutation the wrapped vector-primary write
+    /// would apply, and the response payload it would return, without
+    /// applying anything.
+    ///
+    /// Wraps a [`VectorOp::DirectDelete`], [`VectorOp::DirectUpdate`], or
+    /// [`VectorOp::DirectUpsert`] verbatim, live write predicate included —
+    /// the handler resolves the targets, reads each row's sidecar, computes
+    /// the post-image, and decides the policy here, where the writing
+    /// identity is still available. A follower has none, so the predicate
+    /// can never cross the Raft wire.
+    ResolveDirectWrite(Box<VectorOp>),
+
+    /// Apply exactly the mutations a [`VectorOp::ResolveDirectWrite`]
+    /// reported, then return `response_payload` verbatim.
+    ///
+    /// No predicate is evaluated and no image is recomputed: the Control
+    /// Plane already decided both, and `rls_write_check` carries the verdict
+    /// (`RlsWriteCheck::DecidedEarlierInRequest`). Every mutation's pre-image
+    /// is checked against the stored sidecar before the first one applies,
+    /// so a resolution that drifted under a concurrent write applies nothing
+    /// and asks for a retry.
+    ResolvedDirectWrite {
+        collection: QualifiedCollection,
+        /// Vector column name; keys the HNSW index.
+        field: String,
+        /// Index settings a first write into a new index registers; an
+        /// `Upsert` mutation into an empty collection creates the index.
+        quantization: nodedb_types::VectorQuantization,
+        storage_dtype: nodedb_types::VectorStorageDtype,
+        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+        mutations: Vec<VectorResolvedMutation>,
+        /// The statement's reply, decided while resolving. Applying nodes
+        /// return it unchanged, so leader and follower report the same thing.
+        response_payload: Vec<u8>,
+        rls_write_check: nodedb_types::RlsWriteCheck,
     },
 }

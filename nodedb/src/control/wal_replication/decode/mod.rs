@@ -16,6 +16,7 @@
 //! - [`entry_columnar_family`] / [`columnar`]: `PhysicalPlan::Columnar` /
 //!   `Timeseries` / `Text` / `Spatial`.
 //! - [`vector`]: `PhysicalPlan::Vector` (grouped `decode_arm`).
+//! - [`vector_direct`]: the vector-primary `DELETE` / `UPDATE` decoders.
 
 mod columnar;
 mod crdt;
@@ -31,5 +32,6 @@ mod entry_kv;
 mod graph;
 mod kv;
 mod vector;
+mod vector_direct;
 
 pub use entry::from_replicated_entry;

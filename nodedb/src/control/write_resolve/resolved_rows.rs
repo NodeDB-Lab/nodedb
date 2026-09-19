@@ -2,7 +2,9 @@
 
 //! The decided row set a governed predicate write resolved to.
 
-use nodedb_physical::physical_plan::{DocumentResolvedMutation, KvResolvedMutation};
+use nodedb_physical::physical_plan::{
+    DocumentResolvedMutation, KvResolvedMutation, VectorResolvedMutation,
+};
 use nodedb_types::Value;
 
 /// Concrete rows a governed predicate `UPDATE`/`DELETE` resolved to, after the
@@ -24,6 +26,12 @@ pub enum ResolvedRows {
     /// resolves to one mutation, a bulk op to N, plus the reply payload.
     Document {
         mutations: Vec<DocumentResolvedMutation>,
+        response_payload: Vec<u8>,
+    },
+    /// Row mutations of a governed vector-primary write plus the exact
+    /// response payload, decided against each row's stored sidecar.
+    Vector {
+        mutations: Vec<VectorResolvedMutation>,
         response_payload: Vec<u8>,
     },
     /// Canonical line-protocol lines a governed ingest resolved to, every

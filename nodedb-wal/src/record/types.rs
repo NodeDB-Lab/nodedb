@@ -49,6 +49,25 @@ pub enum RecordType {
     /// Required: skipping on replay loses an acknowledged vector-primary write.
     VectorDirectUpsert = 13 | 0x8000,
 
+    /// Vector engine: delete rows of a vector-primary collection by surrogate
+    /// or by sidecar predicate.
+    ///
+    /// Required: skipping on replay resurrects deleted vector-primary rows.
+    VectorDirectDelete = 19 | 0x8000,
+
+    /// Vector engine: update rows of a vector-primary collection — a new
+    /// vector, a payload patch, or both — by surrogate or by sidecar predicate.
+    ///
+    /// Required: skipping on replay loses an acknowledged vector-primary write.
+    VectorDirectUpdate = 23 | 0x8000,
+
+    /// Vector engine: apply the row mutations a governed vector-primary
+    /// write resolved to — deletes, rewrites, and whole-row upserts, each
+    /// naming its surrogate and carrying its full stored image.
+    ///
+    /// Required: skipping on replay loses an acknowledged vector-primary write.
+    VectorResolvedDirectWrite = 24 | 0x8000,
+
     /// Vector engine: insert (upsert) a sparse vector into the inverted index.
     ///
     /// Targets the `SparseInvertedIndex` (keyed by document id), a separate
@@ -323,6 +342,9 @@ impl RecordType {
             x if x == 11 | 0x8000 => Some(Self::VectorDelete),
             x if x == 12 | 0x8000 => Some(Self::VectorParams),
             x if x == 13 | 0x8000 => Some(Self::VectorDirectUpsert),
+            x if x == 19 | 0x8000 => Some(Self::VectorDirectDelete),
+            x if x == 23 | 0x8000 => Some(Self::VectorDirectUpdate),
+            x if x == 24 | 0x8000 => Some(Self::VectorResolvedDirectWrite),
             x if x == 14 | 0x8000 => Some(Self::SparseVectorPut),
             x if x == 15 | 0x8000 => Some(Self::SparseVectorDelete),
             x if x == 16 | 0x8000 => Some(Self::MultiVectorPut),
@@ -401,6 +423,9 @@ mod tests {
             RecordType::VectorDelete,
             RecordType::VectorParams,
             RecordType::VectorDirectUpsert,
+            RecordType::VectorDirectDelete,
+            RecordType::VectorDirectUpdate,
+            RecordType::VectorResolvedDirectWrite,
             RecordType::SparseVectorPut,
             RecordType::SparseVectorDelete,
             RecordType::MultiVectorPut,

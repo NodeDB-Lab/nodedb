@@ -9,8 +9,10 @@ use super::super::ast_helpers::{
     flatten_and_expr, qualified_ident_pair, strip_and_convert_filters,
 };
 use super::super::dml_helpers::{
+    VectorPrimaryUpdateParams, build_vector_primary_delete_plan, build_vector_primary_update_plan,
     check_declared_float_ranges_in_assignments, check_declared_int_ranges_in_assignments,
-    extract_point_keys, extract_table_name_from_table_with_joins,
+    extract_point_keys, extract_table_name_from_table_with_joins, is_vector_primary,
+    refuse_vector_primary_shape,
 };
 use crate::engine_rules::{self, DeleteParams, UpdateFromParams, UpdateParams};
 use crate::error::{Result, SqlError};
@@ -76,6 +78,22 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
     };
 
     let target_keys = extract_point_keys(update.selection.as_ref(), &info);
+
+    // Vector-primary collection: the row lives in the HNSW index and its
+    // payload sidecar, never in the document store the engine rules target.
+    if is_vector_primary(&info)
+        && let Some(ref vpc) = info.vector_primary
+    {
+        return build_vector_primary_update_plan(VectorPrimaryUpdateParams {
+            collection: &table_name,
+            info: &info,
+            vpc,
+            assignments: assigns,
+            filters,
+            target_keys,
+            returning: update.returning.is_some(),
+        });
+    }
 
     let rules = engine_rules::resolve_engine_rules(info.engine);
     rules.plan_update(UpdateParams {
@@ -169,6 +187,7 @@ fn plan_update_from(
         .ok_or_else(|| SqlError::UnknownTable {
             name: source_name.clone(),
         })?;
+    refuse_vector_primary_shape(&target_info, "UPDATE ... FROM")?;
 
     // The SET target belongs to the update target; its right-hand side can
     // read either relation.
@@ -410,6 +429,19 @@ pub fn plan_delete(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
     };
 
     let target_keys = extract_point_keys(delete.selection.as_ref(), &info);
+
+    // Vector-primary collection: see `plan_update`.
+    if is_vector_primary(&info)
+        && let Some(ref vpc) = info.vector_primary
+    {
+        return Ok(build_vector_primary_delete_plan(
+            &table_name,
+            &info,
+            vpc,
+            filters,
+            target_keys,
+        ));
+    }
 
     let rules = engine_rules::resolve_engine_rules(info.engine);
     rules.plan_delete(DeleteParams {

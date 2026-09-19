@@ -23,6 +23,11 @@ pub(crate) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         // A vector-primary collection stores its row here and nowhere else, so this
         // op is the only source a RETURNING projection can key a redaction policy on.
         | PhysicalPlan::Vector(VectorOp::DirectUpsert { collection, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectInsert { collection, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectInsertIfAbsent { collection, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectDelete { collection, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectUpdate { collection, .. })
+        | PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite { collection, .. })
         | PhysicalPlan::Vector(VectorOp::Delete { collection, .. })
         | PhysicalPlan::Document(DocumentOp::BatchInsert { collection, .. })
         | PhysicalPlan::Document(DocumentOp::PointPut { collection, .. })
@@ -127,6 +132,10 @@ pub(crate) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         // redaction refusal, clone read/write interception, read-set tracking
         // and metering for that op.
         PhysicalPlan::Crdt(op) => Some(op.collection().as_str()),
+        // Read-only resolve wrapper: it reports the wrapped write's collection.
+        PhysicalPlan::Vector(VectorOp::ResolveDirectWrite(inner)) => {
+            inner.direct_write_collection()
+        }
         // Read-only resolve wrapper: it reports the wrapped ingest's collection.
         PhysicalPlan::Timeseries(TimeseriesOp::ResolveIngest(inner)) => match inner.as_ref() {
             TimeseriesOp::Scan { collection, .. } | TimeseriesOp::Ingest { collection, .. } => {

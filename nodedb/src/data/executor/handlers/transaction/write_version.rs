@@ -12,6 +12,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::{Lsn, TenantId};
 use nodedb_physical::physical_plan::{
     ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, SpatialOp, TextOp, TimeseriesOp, VectorOp,
+    VectorWriteTargets,
 };
 use nodedb_types::Surrogate;
 
@@ -159,6 +160,16 @@ impl CoreLoop {
                 surrogate,
                 ..
             }
+            | VectorOp::DirectInsert {
+                collection,
+                surrogate,
+                ..
+            }
+            | VectorOp::DirectInsertIfAbsent {
+                collection,
+                surrogate,
+                ..
+            }
             | VectorOp::DeleteBySurrogate {
                 collection,
                 surrogate,
@@ -212,6 +223,53 @@ impl CoreLoop {
                     self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
                 }
             }
+            // A point-targeted delete or update names its surrogates; a
+            // predicate-targeted one resolves them on apply, so it records the
+            // collection floor only.
+            VectorOp::DirectDelete {
+                collection,
+                targets,
+                ..
+            }
+            | VectorOp::DirectUpdate {
+                collection,
+                targets,
+                ..
+            } => match targets {
+                VectorWriteTargets::Surrogates(surrogates) if !surrogates.is_empty() => {
+                    for s in surrogates {
+                        self.note_write_lsn(
+                            db,
+                            tenant,
+                            collection.as_str(),
+                            Some(KeyRepr::Surrogate(s.as_u32())),
+                            lsn,
+                        );
+                    }
+                }
+                VectorWriteTargets::Surrogates(_) | VectorWriteTargets::Predicate(_) => {
+                    self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                }
+            },
+            // Every resolved mutation names its surrogate.
+            VectorOp::ResolvedDirectWrite {
+                collection,
+                mutations,
+                ..
+            } => {
+                for mutation in mutations {
+                    self.note_write_lsn(
+                        db,
+                        tenant,
+                        collection.as_str(),
+                        Some(KeyRepr::Surrogate(mutation.surrogate().as_u32())),
+                        lsn,
+                    );
+                }
+                if mutations.is_empty() {
+                    self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                }
+            }
             // Sparse (doc_id-keyed) and `Delete` (vector_id isn't the
             // surrogate): collection floor only.
             VectorOp::SparseInsert { collection, .. }
@@ -220,7 +278,9 @@ impl CoreLoop {
                 self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
             }
             // Read / config / query ops: nothing written, no version to record.
-            VectorOp::Search { .. }
+            // The resolve pass reads what a governed write depends on.
+            VectorOp::ResolveDirectWrite(_)
+            | VectorOp::Search { .. }
             | VectorOp::MultiSearch { .. }
             | VectorOp::SetParams { .. }
             | VectorOp::DropIndex { .. }

@@ -29,6 +29,11 @@ impl PhysicalPlan {
             // A vector-primary row lives here only; `None` left it with no
             // collection to key a redaction policy on.
             | PhysicalPlan::Vector(VectorOp::DirectUpsert { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectInsert { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectInsertIfAbsent { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectDelete { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectUpdate { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite { collection, .. })
             | PhysicalPlan::Vector(VectorOp::Delete { collection, .. })
             | PhysicalPlan::Document(DocumentOp::BatchInsert { collection, .. })
             | PhysicalPlan::Document(DocumentOp::PointPut { collection, .. })
@@ -109,6 +114,10 @@ impl PhysicalPlan {
             | PhysicalPlan::Graph(GraphOp::MatchVarLenResume { .. })
             | PhysicalPlan::Graph(GraphOp::BspSuperstep(_))
             | PhysicalPlan::Graph(GraphOp::WccSuperstep(_)) => None,
+            // Read-only resolve wrapper: it reports the wrapped write's collection.
+            PhysicalPlan::Vector(VectorOp::ResolveDirectWrite(inner)) => {
+                inner.direct_write_collection()
+            }
             // Exchange: recurse into the child plan to extract the collection.
             PhysicalPlan::Query(QueryOp::Exchange(op)) => op.child.collection(),
             // PostProcess: recurse into the materialized input plan.

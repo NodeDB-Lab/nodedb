@@ -154,8 +154,16 @@ fn vector_is_write(op: &VectorOp) -> bool {
         | VectorOp::SparseDelete { .. }
         | VectorOp::MultiVectorInsert { .. }
         | VectorOp::MultiVectorDelete { .. }
-        | VectorOp::DirectUpsert { .. } => true,
-        VectorOp::Search { .. }
+        | VectorOp::DirectUpsert { .. }
+        | VectorOp::DirectInsert { .. }
+        | VectorOp::DirectInsertIfAbsent { .. }
+        | VectorOp::DirectDelete { .. }
+        | VectorOp::DirectUpdate { .. }
+        // Mutates the rows its mutation list names, like any other write.
+        | VectorOp::ResolvedDirectWrite { .. } => true,
+        // Read-only: reports what the wrapped write would apply, mutates nothing.
+        VectorOp::ResolveDirectWrite(_)
+        | VectorOp::Search { .. }
         | VectorOp::MultiSearch { .. }
         | VectorOp::QueryStats { .. }
         | VectorOp::SparseSearch { .. }
@@ -528,6 +536,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vecs"),
             field: "emb".to_owned(),
             surrogate: Surrogate::new(3),
+            pk_bytes: Vec::new(),
             vector: vec![0.5, 0.6],
             payload: vec![1, 2, 3],
             quantization: VectorQuantization::None,
@@ -535,6 +544,8 @@ mod tests {
             payload_indexes: vec![("tenant_id".to_owned(), PayloadIndexKind::Equality)],
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         assert!(
             is_write_plan(&plan),

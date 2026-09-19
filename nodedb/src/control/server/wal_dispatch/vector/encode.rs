@@ -94,24 +94,45 @@ pub(crate) fn encode_vector_delete_by_surrogate_payload(
 
 /// Encode the payload of a `VectorDirectUpsert` WAL record.
 ///
-/// Produces the 8-element shape
-/// `(collection, field, surrogate_u32, vector, payload, quantization,
-/// storage_dtype, payload_indexes)` — the full post-image a vector-primary
-/// insert needs so replay can reconstruct the HNSW node, the payload bitmap
-/// indexes, the sparse-store body, and the collection's quantization /
-/// payload-index registration. `dim` is not stored; replay derives it from
-/// `vector.len()`, exactly as the live handler does. This is the ONE encoder
-/// for the shape so producer and replay never drift.
+/// Produces the 11-element shape
+/// `(collection, field, surrogate_u32, pk_bytes, vector, payload,
+/// quantization, storage_dtype, payload_indexes, intent, on_conflict_updates)`
+/// — the full post-image a vector-primary insert needs so replay can
+/// reconstruct the HNSW node, the payload bitmap indexes, the sparse-store
+/// body, and the collection's quantization / payload-index registration.
+/// `intent` lets replay apply the same existence rule the live write did.
+/// `dim` is not stored; replay derives it from `vector.len()`, exactly as
+/// the live handler does. This is the ONE encoder for the shape so producer
+/// and replay never drift.
 pub(crate) struct VectorDirectUpsertPayload<'a> {
     pub collection: &'a str,
     pub field: &'a str,
     pub surrogate: nodedb_types::Surrogate,
+    pub pk_bytes: &'a [u8],
     pub vector: &'a [f32],
     pub payload: &'a [u8],
     pub quantization: nodedb_types::VectorQuantization,
     pub storage_dtype: nodedb_types::VectorStorageDtype,
     pub payload_indexes: &'a [(String, nodedb_types::PayloadIndexKind)],
+    pub intent: nodedb_physical::physical_plan::VectorDirectWriteIntent,
+    pub on_conflict_updates: &'a [(String, nodedb_physical::physical_plan::UpdateValue)],
 }
+
+/// The decoded form of a `VectorDirectUpsert` record, parallel to
+/// [`VectorDirectUpsertPayload`].
+pub(crate) type VectorDirectUpsertRecord = (
+    String,
+    String,
+    u32,
+    Vec<u8>,
+    Vec<f32>,
+    Vec<u8>,
+    nodedb_types::VectorQuantization,
+    nodedb_types::VectorStorageDtype,
+    Vec<(String, nodedb_types::PayloadIndexKind)>,
+    nodedb_physical::physical_plan::VectorDirectWriteIntent,
+    Vec<(String, nodedb_physical::physical_plan::UpdateValue)>,
+);
 
 pub(crate) fn encode_vector_direct_upsert_payload(
     args: VectorDirectUpsertPayload<'_>,
@@ -120,8 +141,99 @@ pub(crate) fn encode_vector_direct_upsert_payload(
         collection,
         field,
         surrogate,
+        pk_bytes,
         vector,
         payload,
+        quantization,
+        storage_dtype,
+        payload_indexes,
+        intent,
+        on_conflict_updates,
+    } = args;
+    zerompk::to_msgpack_vec(&(
+        collection,
+        field,
+        surrogate.as_u32(),
+        pk_bytes,
+        vector,
+        payload,
+        quantization,
+        storage_dtype,
+        payload_indexes,
+        intent,
+        on_conflict_updates,
+    ))
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("wal vector direct upsert: {e}"),
+    })
+}
+
+/// Encode the payload of a `VectorDirectDelete` WAL record.
+///
+/// Produces the 3-element shape `(collection, field, targets)`. Replay
+/// resolves `targets` against the state it rebuilt; a surrogate with no node
+/// is skipped, so re-applying over a restored checkpoint is idempotent.
+pub(crate) fn encode_vector_direct_delete_payload(
+    collection: &str,
+    field: &str,
+    targets: &nodedb_physical::physical_plan::VectorWriteTargets,
+) -> crate::Result<Vec<u8>> {
+    zerompk::to_msgpack_vec(&(collection, field, targets)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("wal vector direct delete: {e}"),
+        }
+    })
+}
+
+/// The decoded form of a `VectorDirectDelete` record.
+pub(crate) type VectorDirectDeleteRecord = (
+    String,
+    String,
+    nodedb_physical::physical_plan::VectorWriteTargets,
+);
+
+/// Fields of a `VectorDirectUpdate` WAL record.
+pub(crate) struct VectorDirectUpdatePayload<'a> {
+    pub collection: &'a str,
+    pub field: &'a str,
+    pub targets: &'a nodedb_physical::physical_plan::VectorWriteTargets,
+    pub new_vector: Option<&'a [f32]>,
+    pub payload_patch: &'a [(String, nodedb_physical::physical_plan::UpdateValue)],
+    pub quantization: nodedb_types::VectorQuantization,
+    pub storage_dtype: nodedb_types::VectorStorageDtype,
+    pub payload_indexes: &'a [(String, nodedb_types::PayloadIndexKind)],
+}
+
+/// The decoded form of a `VectorDirectUpdate` record, parallel to
+/// [`VectorDirectUpdatePayload`].
+pub(crate) type VectorDirectUpdateRecord = (
+    String,
+    String,
+    nodedb_physical::physical_plan::VectorWriteTargets,
+    Option<Vec<f32>>,
+    Vec<(String, nodedb_physical::physical_plan::UpdateValue)>,
+    nodedb_types::VectorQuantization,
+    nodedb_types::VectorStorageDtype,
+    Vec<(String, nodedb_types::PayloadIndexKind)>,
+);
+
+/// Encode the payload of a `VectorDirectUpdate` WAL record.
+///
+/// Produces the 8-element shape `(collection, field, targets, new_vector,
+/// payload_patch, quantization, storage_dtype, payload_indexes)`. Replay
+/// re-runs the update handler, so a row the update already reached before
+/// the crash is patched to the same image again.
+pub(crate) fn encode_vector_direct_update_payload(
+    args: VectorDirectUpdatePayload<'_>,
+) -> crate::Result<Vec<u8>> {
+    let VectorDirectUpdatePayload {
+        collection,
+        field,
+        targets,
+        new_vector,
+        payload_patch,
         quantization,
         storage_dtype,
         payload_indexes,
@@ -129,16 +241,68 @@ pub(crate) fn encode_vector_direct_upsert_payload(
     zerompk::to_msgpack_vec(&(
         collection,
         field,
-        surrogate.as_u32(),
-        vector,
-        payload,
+        targets,
+        new_vector,
+        payload_patch,
         quantization,
         storage_dtype,
         payload_indexes,
     ))
     .map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
-        detail: format!("wal vector direct upsert: {e}"),
+        detail: format!("wal vector direct update: {e}"),
+    })
+}
+
+/// Fields of a `VectorResolvedDirectWrite` WAL record.
+pub(crate) struct VectorResolvedDirectWritePayload<'a> {
+    pub collection: &'a str,
+    pub field: &'a str,
+    pub quantization: nodedb_types::VectorQuantization,
+    pub storage_dtype: nodedb_types::VectorStorageDtype,
+    pub payload_indexes: &'a [(String, nodedb_types::PayloadIndexKind)],
+    pub mutations: &'a [nodedb_physical::physical_plan::VectorResolvedMutation],
+}
+
+/// The decoded form of a `VectorResolvedDirectWrite` record, parallel to
+/// [`VectorResolvedDirectWritePayload`].
+pub(crate) type VectorResolvedDirectWriteRecord = (
+    String,
+    String,
+    nodedb_types::VectorQuantization,
+    nodedb_types::VectorStorageDtype,
+    Vec<(String, nodedb_types::PayloadIndexKind)>,
+    Vec<nodedb_physical::physical_plan::VectorResolvedMutation>,
+);
+
+/// Encode the payload of a `VectorResolvedDirectWrite` WAL record.
+///
+/// Produces the 6-element shape `(collection, field, quantization,
+/// storage_dtype, payload_indexes, mutations)`. Every mutation carries its
+/// full stored image, so replay re-applies the rows verbatim through the
+/// same apply the live write used, with no image recomputed.
+pub(crate) fn encode_vector_resolved_direct_write_payload(
+    args: VectorResolvedDirectWritePayload<'_>,
+) -> crate::Result<Vec<u8>> {
+    let VectorResolvedDirectWritePayload {
+        collection,
+        field,
+        quantization,
+        storage_dtype,
+        payload_indexes,
+        mutations,
+    } = args;
+    zerompk::to_msgpack_vec(&(
+        collection,
+        field,
+        quantization,
+        storage_dtype,
+        payload_indexes,
+        mutations,
+    ))
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("wal vector resolved direct write: {e}"),
     })
 }
 

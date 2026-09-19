@@ -15,7 +15,7 @@ use crate::types::query::{
 };
 
 use super::merge_types::MergePlanClause;
-use super::row_types::{KvInsertIntent, VectorPrimaryRow, WriteRoute};
+use super::row_types::{KvInsertIntent, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute};
 use super::vector_opts::{ArrayPrefilter, VectorAnnOptions};
 
 /// The top-level plan produced by the SQL planner.
@@ -722,17 +722,18 @@ pub enum SqlPlan {
     },
 
     // ── Vector-primary ──────────────────────────────────────────────────
-    /// INSERT into a vector-primary collection.
+    /// INSERT / UPSERT into a vector-primary collection.
     ///
-    /// Emitted by the planner instead of the generic `Insert` variant when the
-    /// target collection has `primary = PrimaryEngine::Vector`. The Data Plane
-    /// routes each row through `VectorOp::DirectUpsert`, bypassing full-document
-    /// MessagePack encoding.
+    /// Emitted by the planner instead of the generic `Insert` / `Upsert`
+    /// variants when the target collection has `primary =
+    /// PrimaryEngine::Vector`. Each row lowers to one of
+    /// `VectorOp::DirectInsert` / `DirectInsertIfAbsent` / `DirectUpsert`
+    /// per `intent`, bypassing full-document MessagePack encoding.
     VectorPrimaryInsert {
         collection: String,
         /// Vector column name (matches `VectorPrimaryConfig::vector_field`).
-        /// Plumbed to `VectorOp::DirectUpsert` so the Data Plane keys its
-        /// HNSW index by `(tid, collection, field)` — the same key the SELECT
+        /// Plumbed to the direct write op so the Data Plane keys its HNSW
+        /// index by `(tid, collection, field)` — the same key the SELECT
         /// path uses.
         field: String,
         /// Collection-level quantization. Applied via `set_quantization` on
@@ -750,6 +751,48 @@ pub enum SqlPlan {
         /// was built, so caching the lowered tasks would replay one
         /// execution's value into every later one.
         volatile_defaults: bool,
+        /// What an existing primary key means for each row. Mirrors
+        /// `KvInsert::intent`.
+        intent: VectorPrimaryInsertIntent,
+        /// `ON CONFLICT (pk) DO UPDATE SET field = expr` assignments, carried
+        /// when `intent == Upsert`. Empty means whole-row replace.
+        on_conflict_updates: Vec<(String, SqlExpr)>,
+        /// Resolved primary-key column name. See `Insert::primary_key`.
+        primary_key: Option<String>,
+    },
+    /// DELETE on a vector-primary collection.
+    ///
+    /// `target_keys` carries the primary keys when the WHERE clause is a
+    /// pure primary-key equality (or IN / OR of equalities). Otherwise
+    /// `filters` is evaluated against every sidecar row on the Data Plane.
+    VectorPrimaryDelete {
+        collection: String,
+        /// Vector column name; keys the HNSW index the rows live in.
+        field: String,
+        filters: Vec<Filter>,
+        target_keys: Vec<SqlValue>,
+        /// Resolved primary-key column name. See `Insert::primary_key`.
+        primary_key: Option<String>,
+    },
+    /// UPDATE on a vector-primary collection.
+    ///
+    /// `new_vector` is the literal the statement assigns to the vector
+    /// column, when it assigns one. Every other assignment stays in
+    /// `assignments` and patches the payload sidecar.
+    VectorPrimaryUpdate {
+        collection: String,
+        /// Vector column name; keys the HNSW index the rows live in.
+        field: String,
+        quantization: nodedb_types::VectorQuantization,
+        storage_dtype: nodedb_types::VectorStorageDtype,
+        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
+        new_vector: Option<Vec<f32>>,
+        assignments: Vec<(String, SqlExpr)>,
+        filters: Vec<Filter>,
+        target_keys: Vec<SqlValue>,
+        returning: bool,
+        /// Resolved primary-key column name. See `Insert::primary_key`.
+        primary_key: Option<String>,
     },
 
     // ── Index DDL ───────────────────────────────────────────────────────

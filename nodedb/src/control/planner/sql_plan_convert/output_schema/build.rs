@@ -361,7 +361,9 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         | SqlPlan::UpdateFrom { collection, .. }
         | SqlPlan::Delete { collection, .. }
         | SqlPlan::TimeseriesIngest { collection, .. }
-        | SqlPlan::VectorPrimaryInsert { collection, .. } => {
+        | SqlPlan::VectorPrimaryInsert { collection, .. }
+        | SqlPlan::VectorPrimaryDelete { collection, .. }
+        | SqlPlan::VectorPrimaryUpdate { collection, .. } => {
             build_returning_schema(returning, collection, catalog, database_id)
         }
         // Same rule, for the two writes that name their target `target`.

@@ -168,7 +168,11 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
         PhysicalPlan::Timeseries(TimeseriesOp::Ingest { returning, .. }) => {
             *returning = Some(spec);
         }
-        PhysicalPlan::Vector(VectorOp::DirectUpsert { returning, .. }) => {
+        PhysicalPlan::Vector(VectorOp::DirectUpsert { returning, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectInsert { returning, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectInsertIfAbsent { returning, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectDelete { returning, .. })
+        | PhysicalPlan::Vector(VectorOp::DirectUpdate { returning, .. }) => {
             *returning = Some(spec);
         }
         PhysicalPlan::Document(DocumentOp::PointPut { returning, .. }) => {
@@ -269,7 +273,9 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | VectorOp::SparseDelete { .. }
             | VectorOp::MultiVectorInsert { .. }
             | VectorOp::MultiVectorDelete { .. }
-            | VectorOp::MultiVectorScoreSearch { .. },
+            | VectorOp::MultiVectorScoreSearch { .. }
+            | VectorOp::ResolveDirectWrite(_)
+            | VectorOp::ResolvedDirectWrite { .. },
         )
         | PhysicalPlan::Graph(
             GraphOp::EdgePut { .. }
@@ -466,6 +472,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vectors"),
             field: "emb".into(),
             surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
             vector: Vec::new(),
             payload: Vec::new(),
             quantization: nodedb_types::VectorQuantization::None,
@@ -473,6 +480,8 @@ mod tests {
             payload_indexes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         assert!(refuse_unprojectable_insert_returning(&plan).is_ok());
     }

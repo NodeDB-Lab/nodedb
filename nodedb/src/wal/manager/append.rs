@@ -102,6 +102,43 @@ impl WalManager {
         self.append_record(RecordType::VectorDirectUpsert, tid, vs, db, p)
     }
 
+    /// Append a `VectorDirectDelete` record for a vector-primary delete.
+    /// Payload is produced by `encode_vector_direct_delete_payload`.
+    pub fn append_vector_direct_delete(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        p: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::VectorDirectDelete, tid, vs, db, p)
+    }
+
+    /// Append a `VectorDirectUpdate` record for a vector-primary update.
+    /// Payload is produced by `encode_vector_direct_update_payload`.
+    pub fn append_vector_direct_update(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        p: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::VectorDirectUpdate, tid, vs, db, p)
+    }
+
+    /// Append a `VectorResolvedDirectWrite` record for a resolved
+    /// vector-primary write. Payload is produced by
+    /// `encode_vector_resolved_direct_write_payload`.
+    pub fn append_vector_resolved_direct_write(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        p: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::VectorResolvedDirectWrite, tid, vs, db, p)
+    }
+
     /// Append a `SparseVectorPut` record. Payload is produced by
     /// `encode_sparse_vector_put_payload`.
     pub fn append_sparse_vector_put(

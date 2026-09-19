@@ -87,7 +87,12 @@ fn to_physical_plan(
         | ReplicatedWrite::MultiVectorInsert { .. }
         | ReplicatedWrite::MultiVectorDelete { .. }
         | ReplicatedWrite::DeleteBySurrogate { .. }
-        | ReplicatedWrite::DirectUpsert { .. } => Ok((vector::decode_arm(ctx, write)?, None)),
+        | ReplicatedWrite::DirectUpsert { .. }
+        | ReplicatedWrite::VectorDirectDelete { .. }
+        | ReplicatedWrite::VectorDirectUpdate { .. }
+        | ReplicatedWrite::VectorResolvedDirectWrite { .. } => {
+            Ok((vector::decode_arm(ctx, write)?, None))
+        }
         // CRDT family (`PhysicalPlan::Crdt`).
         ReplicatedWrite::CrdtApply { .. }
         | ReplicatedWrite::CrdtApplyFenced { .. }

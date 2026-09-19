@@ -110,6 +110,14 @@ impl SqlPlan {
             {
                 DataDependent
             }
+            // A point-key delete or update binds its surrogates while the plan
+            // is lowered, from the catalog state of that moment.
+            Self::VectorPrimaryDelete { target_keys, .. }
+            | Self::VectorPrimaryUpdate { target_keys, .. }
+                if !target_keys.is_empty() =>
+            {
+                DataDependent
+            }
             Self::InsertSelect { source, .. }
             | Self::UpdateFrom { source, .. }
             | Self::Aggregate { input: source, .. }
@@ -166,6 +174,8 @@ impl SqlPlan {
             | Self::ArrayFlush { .. }
             | Self::ArrayCompact { .. }
             | Self::VectorPrimaryInsert { .. }
+            | Self::VectorPrimaryDelete { .. }
+            | Self::VectorPrimaryUpdate { .. }
             | Self::CreateIndex { .. }
             | Self::DropIndex { .. } => Cacheable,
         }

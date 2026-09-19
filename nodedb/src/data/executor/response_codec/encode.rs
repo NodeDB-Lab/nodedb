@@ -113,6 +113,16 @@ pub(crate) fn encode_count(key: &str, count: usize) -> crate::Result<Vec<u8>> {
     })
 }
 
+/// Encode `{"affected": n}` — the count every DML handler reports through
+/// `CoreLoop::response_affected`. Exposed so a resolve pass can decide the
+/// same reply bytes without holding a `Response`.
+pub(crate) fn encode_affected(affected: u64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16);
+    nodedb_query::msgpack_scan::write_map_header(&mut payload, 1);
+    nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", affected as i64);
+    payload
+}
+
 /// Encode `{"affected": n, "op": op}` — the count of a write whose verb the
 /// handler decides at apply time (`"insert"` or `"update"`). The Control Plane
 /// reads `op` via `extract_kv_conflict_op` to render `INSERT 0 n` / `UPDATE n`.

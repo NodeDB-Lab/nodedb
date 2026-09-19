@@ -10,9 +10,38 @@ pub(super) fn describe_vector(op: &VectorOp) -> PlanKind {
     match op {
         VectorOp::DirectUpsert {
             returning: Some(_), ..
+        }
+        | VectorOp::DirectInsert {
+            returning: Some(_), ..
+        }
+        | VectorOp::DirectInsertIfAbsent {
+            returning: Some(_), ..
+        }
+        | VectorOp::DirectDelete {
+            returning: Some(_), ..
+        }
+        | VectorOp::DirectUpdate {
+            returning: Some(_), ..
         } => PlanKind::ReturningRows,
-        // The vector-primary `INSERT`: the handler reports one affected row.
-        VectorOp::DirectUpsert { .. } => PlanKind::DmlResult("INSERT"),
+        // The vector-primary write family: each handler reports its affected
+        // row count. An `ON CONFLICT DO UPDATE` upsert reports the verb it
+        // applied, exactly as `KvOp::InsertOnConflictUpdate` does.
+        VectorOp::DirectInsert { .. } | VectorOp::DirectInsertIfAbsent { .. } => {
+            PlanKind::DmlResult("INSERT")
+        }
+        VectorOp::DirectUpsert {
+            on_conflict_updates,
+            ..
+        } if !on_conflict_updates.is_empty() => PlanKind::DmlResultByOp,
+        VectorOp::DirectUpsert { .. } => PlanKind::DmlResult("UPSERT"),
+        VectorOp::DirectDelete { .. } => PlanKind::DmlResult("DELETE"),
+        VectorOp::DirectUpdate { .. } => PlanKind::DmlResult("UPDATE"),
+
+        // Read-only resolve: payload is the internal mutation list, never a client row.
+        VectorOp::ResolveDirectWrite(_)
+        // Never reaches this classifier: write-resolve returns the response itself,
+        // shaped from the intercepted plan whose `returning` slot decides.
+        | VectorOp::ResolvedDirectWrite { .. } => PlanKind::Execution,
 
         VectorOp::Search { .. }
         | VectorOp::MultiSearch { .. }

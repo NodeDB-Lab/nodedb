@@ -9,7 +9,10 @@ use super::wire_shapes::{
     ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire, KvResolvedMutationWire,
     ReplicatedBatchEdge, ReplicatedSumTarget,
 };
-use nodedb_physical::physical_plan::{ColumnarInsertIntent, CrdtWriteVerb, UpdateValue};
+use nodedb_physical::physical_plan::{
+    ColumnarInsertIntent, CrdtWriteVerb, UpdateValue, VectorDirectWriteIntent,
+    VectorResolvedMutation, VectorWriteTargets,
+};
 use nodedb_types::{PayloadIndexKind, VectorQuantization, VectorStorageDtype};
 
 #[derive(
@@ -220,15 +223,24 @@ pub enum ReplicatedWrite {
         #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
+    /// Vector-primary insert family: `DirectInsert`, `DirectInsertIfAbsent`,
+    /// and `DirectUpsert`, told apart by `intent`. Every replica applies the
+    /// same existence rule the leader did.
     DirectUpsert {
         collection: String,
         field: String,
         surrogate: u32,
+        /// UTF-8 of the declared primary key; followers bind `surrogate` to
+        /// it instead of re-allocating.
+        pk_bytes: Vec<u8>,
         vector: Vec<f32>,
         payload: Vec<u8>,
         quantization: VectorQuantization,
         storage_dtype: VectorStorageDtype,
         payload_indexes: Vec<(String, PayloadIndexKind)>,
+        intent: VectorDirectWriteIntent,
+        /// `ON CONFLICT DO UPDATE SET` patch; empty means whole-row replace.
+        on_conflict_updates: Vec<(String, UpdateValue)>,
         /// See `ReplicatedWrite::PointPut::returning`.
         #[serde(default)]
         returning: Option<Vec<u8>>,
@@ -833,6 +845,56 @@ pub enum ReplicatedWrite {
     /// writing identity, not a predicate a follower could re-judge.
     DocumentResolvedWrite {
         mutations: Vec<DocumentResolvedMutationWire>,
+        /// Statement reply decided at resolve time; every replica returns it
+        /// unchanged.
+        response_payload: Vec<u8>,
+    },
+
+    /// Vector-primary `DELETE` on a collection with NO write policy — the
+    /// targets travel and every replica resolves them against its own state.
+    VectorDirectDelete {
+        collection: String,
+        field: String,
+        targets: VectorWriteTargets,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+    },
+
+    /// Vector-primary `UPDATE` on a collection with NO write policy — see
+    /// [`ReplicatedWrite::VectorDirectDelete`].
+    VectorDirectUpdate {
+        collection: String,
+        field: String,
+        targets: VectorWriteTargets,
+        new_vector: Option<Vec<f32>>,
+        payload_patch: Vec<(String, UpdateValue)>,
+        quantization: VectorQuantization,
+        storage_dtype: VectorStorageDtype,
+        payload_indexes: Vec<(String, PayloadIndexKind)>,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+    },
+
+    /// Resolved form of a vector-primary `DELETE` / `UPDATE` /
+    /// conflict-patching `UPSERT` on a write-policy collection: row
+    /// mutations and reply, already decided against the live writing
+    /// identity, not a predicate a follower could re-judge. Surrogates are
+    /// the leader's; an `Upsert` mutation carries the key it binds to.
+    VectorResolvedDirectWrite {
+        collection: String,
+        field: String,
+        quantization: VectorQuantization,
+        storage_dtype: VectorStorageDtype,
+        payload_indexes: Vec<(String, PayloadIndexKind)>,
+        mutations: Vec<VectorResolvedMutation>,
         /// Statement reply decided at resolve time; every replica returns it
         /// unchanged.
         response_payload: Vec<u8>,

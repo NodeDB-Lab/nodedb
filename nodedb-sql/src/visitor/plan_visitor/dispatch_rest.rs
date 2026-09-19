@@ -9,6 +9,7 @@
 //! `SqlPlan` enum without repeating their field lists.
 use super::args::{
     CreateArrayVisitArgs, LateralLoopVisitArgs, LateralTopKVisitArgs, MergeVisitArgs,
+    VectorPrimaryDeleteVisitArgs, VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs,
 };
 use super::trait_def::PlanVisitor;
 use crate::types::SqlPlan;
@@ -166,14 +167,58 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             rows,
             // Cache eligibility only; lowering does not read it.
             volatile_defaults: _,
-        } => visitor.vector_primary_insert(
+            intent,
+            on_conflict_updates,
+            primary_key,
+        } => visitor.vector_primary_insert(VectorPrimaryInsertVisitArgs {
+            collection,
+            field,
+            quantization: *quantization,
+            storage_dtype: *storage_dtype,
+            payload_indexes,
+            rows,
+            intent: *intent,
+            on_conflict_updates,
+            primary_key: primary_key.as_deref(),
+        }),
+        SqlPlan::VectorPrimaryDelete {
+            collection,
+            field,
+            filters,
+            target_keys,
+            primary_key,
+        } => visitor.vector_primary_delete(VectorPrimaryDeleteVisitArgs {
+            collection,
+            field,
+            filters,
+            target_keys,
+            primary_key: primary_key.as_deref(),
+        }),
+        SqlPlan::VectorPrimaryUpdate {
             collection,
             field,
             quantization,
             storage_dtype,
             payload_indexes,
-            rows,
-        ),
+            new_vector,
+            assignments,
+            filters,
+            target_keys,
+            returning,
+            primary_key,
+        } => visitor.vector_primary_update(VectorPrimaryUpdateVisitArgs {
+            collection,
+            field,
+            quantization: *quantization,
+            storage_dtype: *storage_dtype,
+            payload_indexes,
+            new_vector: new_vector.as_deref(),
+            assignments,
+            filters,
+            target_keys,
+            returning: *returning,
+            primary_key: primary_key.as_deref(),
+        }),
         SqlPlan::CreateIndex {
             index_name,
             collection,

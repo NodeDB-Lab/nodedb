@@ -42,6 +42,7 @@ pub fn plan_merge(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec
         .ok_or_else(|| SqlError::UnknownTable {
             name: target_name.clone(),
         })?;
+    crate::planner::dml_helpers::refuse_vector_primary_shape(&target_info, "MERGE")?;
 
     // ── Resolve source ──
     let source_plan = plan_merge_source(&merge.source, catalog)?;

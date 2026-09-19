@@ -137,6 +137,7 @@ impl EngineWriteResolver for ColumnarWriteResolver {
             },
             ResolvedRows::Kv { .. }
             | ResolvedRows::Document { .. }
+            | ResolvedRows::Vector { .. }
             | ResolvedRows::Timeseries { .. }
             | ResolvedRows::GraphEdgeDeleteAdmitted => {
                 return Err(crate::Error::Internal {

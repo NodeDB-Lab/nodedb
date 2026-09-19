@@ -1069,6 +1069,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
                 field: "emb".to_string(),
                 surrogate: Surrogate::new(1),
+                pk_bytes: Vec::new(),
                 vector: vec![1.0, 2.0, 3.0],
                 payload: Vec::new(),
                 quantization: nodedb_types::VectorQuantization::None,
@@ -1076,6 +1077,8 @@ mod tests {
                 payload_indexes: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                on_conflict_updates: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             }),
             PhysicalPlan::Vector(VectorOp::MultiVectorInsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "mc"),
@@ -1146,6 +1149,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
             field: "emb".to_string(),
             surrogate: Surrogate::new(42),
+            pk_bytes: Vec::new(),
             vector: vec![1.0, 2.0, 3.0],
             payload: Vec::new(),
             quantization: nodedb_types::VectorQuantization::None,
@@ -1153,6 +1157,8 @@ mod tests {
             payload_indexes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         let resp = src.execute_resolve_txn(&task, TID, TxnId::new(51), std::slice::from_ref(&plan));
         let redo = decode_redo(&resp);

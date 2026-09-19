@@ -199,6 +199,7 @@ impl EngineWriteResolver for KvWriteResolver {
             ResolvedRows::Update(_)
             | ResolvedRows::Delete(_)
             | ResolvedRows::Document { .. }
+            | ResolvedRows::Vector { .. }
             | ResolvedRows::Timeseries { .. }
             | ResolvedRows::GraphEdgeDeleteAdmitted => Err(crate::Error::Internal {
                 detail: format!(

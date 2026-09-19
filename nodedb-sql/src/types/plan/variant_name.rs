@@ -57,6 +57,8 @@ impl SqlPlan {
             SqlPlan::LateralTopK { .. } => "LateralTopK",
             SqlPlan::LateralLoop { .. } => "LateralLoop",
             SqlPlan::VectorPrimaryInsert { .. } => "VectorPrimaryInsert",
+            SqlPlan::VectorPrimaryDelete { .. } => "VectorPrimaryDelete",
+            SqlPlan::VectorPrimaryUpdate { .. } => "VectorPrimaryUpdate",
             SqlPlan::CreateIndex { .. } => "CreateIndex",
             SqlPlan::DropIndex { .. } => "DropIndex",
         }

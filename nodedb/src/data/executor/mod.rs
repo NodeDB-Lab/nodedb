@@ -54,6 +54,8 @@ mod wal_replay_redo_document;
 mod wal_replay_redo_graph;
 mod wal_replay_spatial;
 mod wal_replay_vector;
+mod wal_replay_vector_direct;
 mod wal_replay_vector_extended;
 mod wal_replay_vector_index_drop;
 mod wal_replay_vector_params;
+mod wal_replay_vector_resolved;

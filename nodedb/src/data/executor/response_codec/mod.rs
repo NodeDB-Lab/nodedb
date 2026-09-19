@@ -35,7 +35,7 @@ pub use encode::{decode_payload, decode_payload_to_json, decode_payload_value};
 pub(in crate::data::executor) use encode::{
     encode, encode_json_as_msgpack, encode_json_vec_as_msgpack, encode_serde, encode_value_vec,
 };
-pub(crate) use encode::{encode_affected_with_op, encode_count};
+pub(crate) use encode::{encode_affected, encode_affected_with_op, encode_count};
 #[allow(unused_imports)]
 pub(crate) use hits::ArrayAggregateResponse;
 pub(crate) use hits::{ArraySliceResponse, RowsPayload};

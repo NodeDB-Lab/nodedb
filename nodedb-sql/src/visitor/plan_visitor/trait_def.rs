@@ -10,20 +10,19 @@ use super::args::{
     HybridSearchTripleVisitArgs, HybridSearchVisitArgs, InsertVisitArgs, JoinVisitArgs,
     LateralLoopVisitArgs, LateralTopKVisitArgs, MergeVisitArgs, RecursiveScanVisitArgs,
     RecursiveValueVisitArgs, ScanVisitArgs, SpatialScanVisitArgs, SubqueryVisitArgs,
-    TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs, VectorSearchVisitArgs,
+    TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs, VectorPrimaryDeleteVisitArgs,
+    VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs, VectorSearchVisitArgs,
 };
 use crate::fts_types::FtsQuery;
 use crate::temporal::TemporalScope;
 use crate::types::SqlPlan;
 use crate::types::filter::Filter;
-use crate::types::plan::{KvInsertIntent, VectorPrimaryRow};
+use crate::types::plan::KvInsertIntent;
 use crate::types::query::EngineType;
 use crate::types_array::{
     ArrayBinaryOpAst, ArrayCoordLiteral, ArrayInsertRow, ArrayReducerAst, ArraySliceAst,
 };
 use crate::types_expr::{SqlExpr, SqlValue};
-use nodedb_types::PayloadIndexKind;
-use nodedb_types::VectorQuantization;
 
 /// Executor parity contract: every [`SqlPlan`] variant must be handled.
 /// Implement this trait and call [`dispatch`](super::dispatch) to route plans.
@@ -325,12 +324,19 @@ pub trait PlanVisitor {
     /// Handle [`SqlPlan::VectorPrimaryInsert`].
     fn vector_primary_insert(
         &mut self,
-        collection: &str,
-        field: &str,
-        quantization: &VectorQuantization,
-        storage_dtype: &nodedb_types::VectorStorageDtype,
-        payload_indexes: &[(String, PayloadIndexKind)],
-        rows: &[VectorPrimaryRow],
+        args: VectorPrimaryInsertVisitArgs<'_>,
+    ) -> Result<Self::Output, Self::Error>;
+
+    /// Handle [`SqlPlan::VectorPrimaryDelete`].
+    fn vector_primary_delete(
+        &mut self,
+        args: VectorPrimaryDeleteVisitArgs<'_>,
+    ) -> Result<Self::Output, Self::Error>;
+
+    /// Handle [`SqlPlan::VectorPrimaryUpdate`].
+    fn vector_primary_update(
+        &mut self,
+        args: VectorPrimaryUpdateVisitArgs<'_>,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::CreateIndex`].

@@ -154,6 +154,8 @@ fn collect_sides(plan: &SqlPlan, out: &mut Vec<JoinSide>) {
         | SqlPlan::LateralTopK { .. }
         | SqlPlan::LateralLoop { .. }
         | SqlPlan::VectorPrimaryInsert { .. }
+        | SqlPlan::VectorPrimaryDelete { .. }
+        | SqlPlan::VectorPrimaryUpdate { .. }
         | SqlPlan::CreateIndex { .. }
         | SqlPlan::DropIndex { .. } => {}
     }

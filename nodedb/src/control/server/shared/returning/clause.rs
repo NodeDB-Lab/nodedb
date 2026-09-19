@@ -105,7 +105,9 @@ pub fn returning_target_collection(plans: &[SqlPlan]) -> Option<String> {
         | SqlPlan::UpdateFrom { collection, .. }
         | SqlPlan::Delete { collection, .. }
         | SqlPlan::TimeseriesIngest { collection, .. }
-        | SqlPlan::VectorPrimaryInsert { collection, .. } => Some(collection.clone()),
+        | SqlPlan::VectorPrimaryInsert { collection, .. }
+        | SqlPlan::VectorPrimaryDelete { collection, .. }
+        | SqlPlan::VectorPrimaryUpdate { collection, .. } => Some(collection.clone()),
         SqlPlan::Merge { target, .. } | SqlPlan::InsertSelect { target, .. } => {
             Some(target.clone())
         }

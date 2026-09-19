@@ -18,7 +18,19 @@ impl VectorCollection {
     /// Insert a vector with an associated surrogate. The surrogate is
     /// allocated by the Control Plane before the call; the engine only
     /// stores the binding.
+    ///
+    /// One surrogate names one live node. A node already bound to
+    /// `surrogate` is soft-deleted before the new one is bound, so a
+    /// re-insert never leaves an unreachable node scoring in searches.
+    /// The caller owns the payload bitmap entries of the old node and
+    /// removes them with [`Self::local_for_surrogate`] before this call.
     pub fn insert_with_surrogate(&mut self, vector: Vec<f32>, surrogate: Surrogate) -> u32 {
+        if surrogate != Surrogate::ZERO
+            && let Some(old) = self.surrogate_to_local.get(&surrogate).copied()
+        {
+            self.delete_inner(old);
+            self.surrogate_map.remove(&old);
+        }
         let id = self.insert(vector);
         if surrogate != Surrogate::ZERO {
             self.surrogate_map.insert(id, surrogate);
@@ -149,5 +161,52 @@ impl VectorCollection {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hnsw::HnswParams;
+
+    fn collection() -> VectorCollection {
+        VectorCollection::new(2, HnswParams::default())
+    }
+
+    #[test]
+    fn re_insert_under_the_same_surrogate_leaves_one_live_node() {
+        let mut coll = collection();
+        let s = Surrogate::new(7);
+        let first = coll.insert_with_surrogate(vec![1.0, 0.0], s);
+        let second = coll.insert_with_surrogate(vec![0.0, 1.0], s);
+        assert_ne!(first, second);
+        assert_eq!(coll.live_count(), 1, "the old node must be tombstoned");
+        assert_eq!(coll.local_for_surrogate(s), Some(second));
+        assert_eq!(coll.get_surrogate(first), None);
+        assert_eq!(coll.get_surrogate(second), Some(s));
+    }
+
+    #[test]
+    fn delete_then_insert_under_the_same_surrogate_leaves_one_live_node() {
+        let mut coll = collection();
+        let s = Surrogate::new(9);
+        let first = coll.insert_with_surrogate(vec![1.0, 0.0], s);
+        assert!(coll.delete_by_surrogate(s));
+        assert_eq!(coll.local_for_surrogate(s), None);
+        let second = coll.insert_with_surrogate(vec![0.0, 1.0], s);
+        assert_ne!(first, second);
+        assert_eq!(coll.live_count(), 1);
+        assert_eq!(coll.local_for_surrogate(s), Some(second));
+        assert!(!coll.delete(first), "the first node is already gone");
+    }
+
+    #[test]
+    fn delete_by_surrogate_is_idempotent() {
+        let mut coll = collection();
+        let s = Surrogate::new(3);
+        coll.insert_with_surrogate(vec![1.0, 0.0], s);
+        assert!(coll.delete_by_surrogate(s));
+        assert!(!coll.delete_by_surrogate(s));
+        assert_eq!(coll.live_count(), 0);
     }
 }

@@ -5,8 +5,9 @@
 use sqlparser::ast;
 
 use super::super::dml_helpers::{
-    KvInsertParams, build_kv_insert_plan, check_declared_float_ranges_in_assignments,
-    check_declared_int_ranges_in_assignments, resolve_insert_columns,
+    KvInsertParams, VectorPrimaryInsertParams, build_kv_insert_plan,
+    build_vector_primary_insert_plan, check_declared_float_ranges_in_assignments,
+    check_declared_int_ranges_in_assignments, is_vector_primary, resolve_insert_columns,
 };
 use super::target::{
     column_schema, insert_columns, resolve_target, target_scope, typed_rows, values_rows,
@@ -78,6 +79,24 @@ fn plan_upsert_rows(
     )?;
     check_declared_int_ranges_in_assignments(&info.columns, &on_conflict_updates)?;
     check_declared_float_ranges_in_assignments(&info.columns, &on_conflict_updates)?;
+
+    // Vector-primary collection: an existing key is replaced, or patched by
+    // the carried assignments. The document upsert path never reaches the
+    // HNSW index, so it cannot serve this collection.
+    if is_vector_primary(&info)
+        && let Some(ref vpc) = info.vector_primary
+    {
+        return build_vector_primary_insert_plan(VectorPrimaryInsertParams {
+            collection: &table_name,
+            vpc,
+            rows: typed.rows,
+            volatile_defaults: typed.volatile_defaults,
+            intent: VectorPrimaryInsertIntent::Upsert,
+            on_conflict_updates,
+            primary_key: info.primary_key.clone(),
+        });
+    }
+
     let column_schema = column_schema(&info);
     let rules = engine_rules::resolve_engine_rules(info.engine);
     rules.plan_upsert(UpsertParams {

@@ -92,7 +92,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | VectorOp::MultiVectorScoreSearch { .. },
         ) => false,
 
-        // `to_replicated_entry` encodes all six (`encode/vector.rs`) — a plain
+        // `to_replicated_entry` encodes all ten (`encode/vector.rs`) — a plain
         // oracle-matching write, not a divergence. See `vector_variants_match_oracle`.
         PhysicalPlan::Vector(
             VectorOp::DeleteBySurrogate { .. }
@@ -100,13 +100,24 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | VectorOp::SparseDelete { .. }
             | VectorOp::MultiVectorInsert { .. }
             | VectorOp::MultiVectorDelete { .. }
-            | VectorOp::DirectUpsert { .. },
+            | VectorOp::DirectUpsert { .. }
+            | VectorOp::DirectInsert { .. }
+            | VectorOp::DirectInsertIfAbsent { .. }
+            | VectorOp::DirectDelete { .. }
+            | VectorOp::DirectUpdate { .. },
         ) => true,
 
         // DDL/Alter, not encoded.
         PhysicalPlan::Vector(
             VectorOp::Seal { .. } | VectorOp::CompactIndex { .. } | VectorOp::Rebuild { .. },
         ) => false,
+
+        // Read-only classification pass issued by the write-resolve orchestrator.
+        PhysicalPlan::Vector(VectorOp::ResolveDirectWrite(_)) => false,
+
+        // ---- Vector: resolved write — encoded, but autocommit-only ----
+        // Built by write-resolve on the autocommit path, proposed straight through Raft.
+        PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite { .. }) => false,
 
         // ---- Crdt: encoded (buffered) ----
         // Raw delta applies need preview admission before proposal; `route_in_tx_write` rejects them.
@@ -843,6 +854,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: String::new(),
                 surrogate: Surrogate::ZERO,
+                pk_bytes: Vec::new(),
                 vector: Vec::new(),
                 payload: Vec::new(),
                 quantization: Default::default(),
@@ -850,6 +862,55 @@ mod tests {
                 payload_indexes: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                on_conflict_updates: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectInsert {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                surrogate: Surrogate::ZERO,
+                pk_bytes: Vec::new(),
+                vector: Vec::new(),
+                payload: Vec::new(),
+                quantization: Default::default(),
+                storage_dtype: Default::default(),
+                payload_indexes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectInsertIfAbsent {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                surrogate: Surrogate::ZERO,
+                pk_bytes: Vec::new(),
+                vector: Vec::new(),
+                payload: Vec::new(),
+                quantization: Default::default(),
+                storage_dtype: Default::default(),
+                payload_indexes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectDelete {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                targets: nodedb_physical::physical_plan::VectorWriteTargets::Surrogates(Vec::new()),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectUpdate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                targets: nodedb_physical::physical_plan::VectorWriteTargets::Predicate(Vec::new()),
+                new_vector: None,
+                payload_patch: Vec::new(),
+                quantization: Default::default(),
+                storage_dtype: Default::default(),
+                payload_indexes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         ];
         for p in &plans {

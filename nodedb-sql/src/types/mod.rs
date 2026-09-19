@@ -14,8 +14,8 @@ pub use collection::{CollectionInfo, ColumnInfo, IndexSpec, IndexState};
 pub use filter::{CompareOp, Filter, FilterExpr};
 pub use plan::{
     ArrayPrefilter, DistanceMetric, KvInsertIntent, MergeClauseKind, MergePlanAction,
-    MergePlanClause, PlanCacheEligibility, SqlPlan, VectorAnnOptions, VectorPrimaryRow,
-    VectorQuantization, WriteRoute,
+    MergePlanClause, PlanCacheEligibility, SqlPlan, VectorAnnOptions, VectorPrimaryInsertIntent,
+    VectorPrimaryRow, VectorQuantization, WriteRoute,
 };
 pub use query::{
     AggOutputSlot, AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate,

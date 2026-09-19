@@ -57,5 +57,8 @@ pub use sort_key::SortKeySpec;
 pub use spatial::{SpatialOp, SpatialPredicate};
 pub use text::TextOp;
 pub use timeseries::{TimeseriesOp, UNBOUNDED_TIME_RANGE};
-pub use vector::VectorOp;
+pub use vector::{
+    VectorDirectWriteIntent, VectorOp, VectorResolveOutcome, VectorResolvedMutation,
+    VectorWriteTargets,
+};
 pub use wire::{decode, encode};

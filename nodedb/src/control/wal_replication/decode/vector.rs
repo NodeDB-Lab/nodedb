@@ -129,26 +129,90 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             collection,
             field,
             surrogate,
+            pk_bytes,
             vector,
             payload,
             quantization,
             storage_dtype,
             payload_indexes,
+            intent,
+            on_conflict_updates,
             returning,
             rls_filters,
-        } => direct_upsert(
+        } => super::vector_direct::direct_upsert(
             ctx,
-            DirectUpsertFields {
+            super::vector_direct::DirectUpsertFields {
                 collection,
                 field,
                 surrogate: *surrogate,
+                pk_bytes,
                 vector,
                 payload,
                 quantization: *quantization,
                 storage_dtype: *storage_dtype,
                 payload_indexes,
+                intent: *intent,
+                on_conflict_updates,
                 returning: decode_sync_engines::decode_returning(returning)?,
                 rls_filters,
+            },
+        ),
+        ReplicatedWrite::VectorDirectDelete {
+            collection,
+            field,
+            targets,
+            returning,
+            rls_filters,
+        } => Ok(super::vector_direct::direct_delete(
+            collection,
+            field,
+            targets,
+            decode_sync_engines::decode_returning(returning)?,
+            rls_filters,
+        )),
+        ReplicatedWrite::VectorDirectUpdate {
+            collection,
+            field,
+            targets,
+            new_vector,
+            payload_patch,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            returning,
+            rls_filters,
+        } => Ok(super::vector_direct::direct_update(
+            super::vector_direct::DirectUpdateFields {
+                collection,
+                field,
+                targets,
+                new_vector,
+                payload_patch,
+                quantization: *quantization,
+                storage_dtype: *storage_dtype,
+                payload_indexes,
+                returning: decode_sync_engines::decode_returning(returning)?,
+                rls_filters,
+            },
+        )),
+        ReplicatedWrite::VectorResolvedDirectWrite {
+            collection,
+            field,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            mutations,
+            response_payload,
+        } => super::vector_direct::resolved_direct_write(
+            ctx,
+            super::vector_direct::ResolvedDirectWriteFields {
+                collection,
+                field,
+                quantization: *quantization,
+                storage_dtype: *storage_dtype,
+                payload_indexes,
+                mutations,
+                response_payload,
             },
         ),
         _ => Err(crate::Error::Internal {
@@ -164,7 +228,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
 /// sidecar to bind against (headless vector inserts, multi-vector inserts,
 /// direct upserts, batch inserts) — each installs the exact carried identity
 /// on every replica instead of re-allocating.
-fn bind_self_keyed(
+pub(super) fn bind_self_keyed(
     ctx: &DecodeCtx,
     collection: &str,
     carried: Surrogate,
@@ -371,42 +435,6 @@ pub(super) fn delete_by_surrogate(
         surrogate: Surrogate::new(surrogate),
         field_name: field_name.to_owned(),
         provenance,
-    }))
-}
-
-/// Fields of the `DirectUpsert` wire variant, bundled so [`direct_upsert`]
-/// stays under the `too_many_arguments` clippy threshold.
-pub(super) struct DirectUpsertFields<'a> {
-    pub(super) collection: &'a str,
-    pub(super) field: &'a str,
-    pub(super) surrogate: u32,
-    pub(super) vector: &'a [f32],
-    pub(super) payload: &'a [u8],
-    pub(super) quantization: nodedb_types::VectorQuantization,
-    pub(super) storage_dtype: nodedb_types::VectorStorageDtype,
-    pub(super) payload_indexes: &'a [(String, nodedb_types::PayloadIndexKind)],
-    pub(super) returning: Option<nodedb_physical::physical_plan::ReturningSpec>,
-    pub(super) rls_filters: &'a [u8],
-}
-
-pub(super) fn direct_upsert(ctx: &DecodeCtx, f: DirectUpsertFields) -> crate::Result<PhysicalPlan> {
-    // Self-keyed bind: `DirectUpsert` has no PK sidecar (vector-primary
-    // collections are keyed by the vector index itself), so the surrogate
-    // binds by its own bytes, same as headless vector inserts.
-    let surrogate = bind_self_keyed(ctx, f.collection, Surrogate::new(f.surrogate))?;
-    Ok(PhysicalPlan::Vector(VectorOp::DirectUpsert {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
-        field: f.field.to_owned(),
-        surrogate,
-        vector: f.vector.to_vec(),
-        payload: f.payload.to_vec(),
-        quantization: f.quantization,
-        storage_dtype: f.storage_dtype,
-        payload_indexes: f.payload_indexes.to_vec(),
-        // Carried on the record — a replay re-executes this write for the
-        // originating request, not just for the follower's own state.
-        returning: f.returning,
-        rls_filters: f.rls_filters.to_vec(),
     }))
 }
 
@@ -686,6 +714,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "primary_vecs"),
             field: "embedding".into(),
             surrogate: Surrogate::new(999),
+            pk_bytes: Vec::new(),
             vector: vec![0.1, 0.2, 0.3, 0.4],
             payload: b"\x81\xa4name\xa5alice".to_vec(),
             quantization: VectorQuantization::Bbq,
@@ -696,6 +725,8 @@ mod tests {
             ],
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -741,6 +772,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vecs"),
             field: "emb".into(),
             surrogate: Surrogate::new(3),
+            pk_bytes: Vec::new(),
             vector: vec![0.5, 0.6],
             payload: vec![1, 2, 3],
             quantization: VectorQuantization::RaBitQ,
@@ -748,6 +780,8 @@ mod tests {
             payload_indexes: vec![("tenant_id".into(), PayloadIndexKind::Equality)],
             returning: Some(spec.clone()),
             rls_filters: b"rls-predicate".to_vec(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")

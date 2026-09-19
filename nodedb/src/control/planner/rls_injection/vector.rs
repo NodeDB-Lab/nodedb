@@ -69,7 +69,13 @@ pub(super) fn inject_vector(ctx: &RlsCtx<'_>, op: &mut VectorOp) -> crate::Resul
         // `payload` is a zerompk `HashMap<String, Value>`, whose values are
         // TAGGED, so it goes through the transcoding admission rather than the
         // raw-image one — see [`RlsCtx::admit_write_value_map_image`].
-        VectorOp::DirectUpsert {
+        VectorOp::DirectInsert {
+            collection,
+            payload,
+            rls_filters,
+            ..
+        }
+        | VectorOp::DirectInsertIfAbsent {
             collection,
             payload,
             rls_filters,
@@ -83,6 +89,46 @@ pub(super) fn inject_vector(ctx: &RlsCtx<'_>, op: &mut VectorOp) -> crate::Resul
             // can carry a `FOR SELECT` policy and no write policy at all, in
             // which case the write is unrestricted and only the returned row
             // set shrinks.
+            ctx.set_post_filters(collection, rls_filters)
+        }
+
+        // Admit the proposed image here; a conflict patch produces its merged
+        // image on the Data Plane, so the predicate ships for that path.
+        VectorOp::DirectUpsert {
+            collection,
+            payload,
+            rls_filters,
+            on_conflict_updates,
+            rls_write_check,
+            ..
+        } => {
+            ctx.admit_write_value_map_image(collection, payload)?;
+            if on_conflict_updates.is_empty() {
+                *rls_write_check = nodedb_types::RlsWriteCheck::decided_earlier_in_request();
+            } else {
+                ctx.set_write_check(collection, rls_write_check)?;
+            }
+            ctx.set_post_filters(collection, rls_filters)
+        }
+
+        // Ship the predicate and gate `RETURNING` as a read: the removed row
+        // or the patched post-image exists only where it is persisted, and
+        // the rows the clause hands back are bounded by the same read policy a
+        // `SELECT` by this principal is. Mirrors `KvOp::{Delete,
+        // PredicateUpdate}`.
+        VectorOp::DirectDelete {
+            collection,
+            rls_write_check,
+            rls_filters,
+            ..
+        }
+        | VectorOp::DirectUpdate {
+            collection,
+            rls_write_check,
+            rls_filters,
+            ..
+        } => {
+            ctx.set_write_check(collection, rls_write_check)?;
             ctx.set_post_filters(collection, rls_filters)
         }
 
@@ -108,6 +154,13 @@ pub(super) fn inject_vector(ctx: &RlsCtx<'_>, op: &mut VectorOp) -> crate::Resul
             "a vector write carries an embedding and a surrogate rather than the row body the \
              policy names, so no row image is available for it to be evaluated against",
         ),
+
+        // No-op: already decided by the resolve pass; re-injecting would
+        // replace a verdict with a predicate no applying node can decide.
+        VectorOp::ResolvedDirectWrite { .. } => Ok(()),
+
+        // Recurse: the wrapped op is the intercepted write verbatim.
+        VectorOp::ResolveDirectWrite(inner) => inject_vector(ctx, inner),
 
         // No-op: index parameters and index maintenance write no user row.
         VectorOp::SetParams { .. }
@@ -218,6 +271,7 @@ mod tests {
             ),
             field: "emb".into(),
             surrogate: nodedb_types::Surrogate::ZERO,
+            pk_bytes: Vec::new(),
             vector: vec![0.1, 0.2],
             payload,
             quantization: Default::default(),
@@ -225,6 +279,8 @@ mod tests {
             payload_indexes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         })
     }
 
@@ -266,12 +322,19 @@ mod tests {
         ));
     }
 
-    /// With no write policy the same upsert runs untouched.
+    /// With no write policy the same upsert runs with its payload, filters,
+    /// and patch untouched; only the write-check slot is stamped as decided.
     #[test]
     fn direct_upsert_without_a_policy_is_untouched() {
         let mut plan = direct_upsert("docs", &[("region", "eu")]);
-        let before = plan.clone();
+        let mut before = plan.clone();
         assert!(inject_without_policy(&mut plan).is_ok());
+        if let PhysicalPlan::Vector(VectorOp::DirectUpsert {
+            rls_write_check, ..
+        }) = &mut before
+        {
+            *rls_write_check = nodedb_types::RlsWriteCheck::decided_earlier_in_request();
+        }
         assert_eq!(plan, before);
     }
 
