@@ -7,6 +7,11 @@
 //! a doc-object UPSERT value, a string literal, a comment — belongs to its own
 //! handler and must never reach the function arm. These tests hold both
 //! directions: the literal stores verbatim, the anchored form still routes.
+//!
+//! The query-function family (`VERIFY_BALANCE`, `VERIFY_AUDIT_CHAIN`,
+//! `VERIFY_HASH_CHAIN`, `BALANCE_AS_OF`, `TEMPORAL_LOOKUP`,
+//! `CONVERT_CURRENCY_LOOKUP`) is matched by `contains` over the statement, so
+//! the same rule applies to a token inside a literal there.
 
 use crate::harness::TestServer;
 
@@ -158,5 +163,51 @@ async fn leading_whitespace_still_routes_anchored_arms() {
         top.len(),
         1,
         "row must be returned despite leading whitespace"
+    );
+}
+
+/// The six query-function keywords are matched by `contains`, not by a prefix
+/// anchor, so a value carrying one used to reach the function arm and answer
+/// with its argument error. The literal must store verbatim, and the anchored
+/// call must still reach the function arm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn value_carrying_verify_balance_does_not_misroute() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(
+            "CREATE COLLECTION lit_qf (id STRING PRIMARY KEY, name STRING) \
+             WITH (engine='kv')",
+        )
+        .await
+        .expect("create collection");
+
+    // The value carries a query-function token. The parenthesised form is a
+    // non-DDL parse, so it reaches the neutral dispatcher where the pre-fix
+    // substring match hijacked it; the brace form never gets there.
+    server
+        .exec("INSERT INTO lit_qf (id, name) VALUES ('a', 'verify_balance')")
+        .await
+        .expect("INSERT with a query-function token in a value must not misroute");
+
+    let rows = server
+        .query_text("SELECT name FROM lit_qf WHERE id = 'a'")
+        .await
+        .expect("read back the inserted row");
+    assert_eq!(
+        rows,
+        vec!["verify_balance".to_string()],
+        "the value must be stored verbatim"
+    );
+
+    // The anchored form still routes: the function arm reports the collection
+    // it was asked for, so a missing collection names it.
+    let err = server
+        .query_text("SELECT VERIFY_BALANCE('lit_qf_missing', 'name')")
+        .await
+        .expect_err("the anchored call must reach the function arm");
+    assert!(
+        err.contains("lit_qf_missing"),
+        "the anchored call must reach the function arm, got: {err}"
     );
 }
