@@ -186,15 +186,17 @@ impl CoreLoop {
         let Some(index) = self.vector_collections.get(&index_key) else {
             return Err(self.response_error(task, ErrorCode::NotFound));
         };
+        // An empty vector leg is an empty score set, not an empty response:
+        // the other fusion legs still rank, and the envelope keeps its shape.
         if index.is_empty() {
-            return Err(self.response_with_payload(task, b"[]".to_vec()));
+            return Ok((Vec::new(), HashMap::new(), Vec::new()));
         }
 
         let ef = vector_top_k.saturating_mul(4).max(64);
         let vector_results = index.search(query_vector, vector_top_k, ef);
 
         if vector_results.is_empty() {
-            return Err(self.response_with_payload(task, b"[]".to_vec()));
+            return Ok((Vec::new(), HashMap::new(), Vec::new()));
         }
 
         // Each hit is carried in two forms. The surrogate is the identity the
