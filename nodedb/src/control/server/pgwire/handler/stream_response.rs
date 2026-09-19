@@ -22,7 +22,7 @@ use crate::control::state::SharedState;
 use crate::data::executor::response_codec::{decode_payload_to_json, decode_payload_value};
 
 use super::super::ddl_encode::col_type_to_field_with_format;
-use super::super::types::{error_to_sqlstate, text_field};
+use super::super::types::{error_to_sqlstate, shaping_error_message, text_field};
 use super::shape_encode::{encode_shaped_row, shaped_query_response};
 
 /// The per-request plumbing a lazily-streamed pgwire response owns for its
@@ -215,10 +215,13 @@ pub(crate) fn streaming_shaped_response(
             }
 
             let value = decode_payload_value(&batch.payload).map_err(|e| {
+                let (severity, code, message) = error_to_sqlstate(&e);
+                let message =
+                    shaping_error_message(crate::error_classify::classify(&e).code(), message);
                 PgWireError::UserError(Box::new(ErrorInfo::new(
-                    "ERROR".to_owned(),
-                    "XX000".to_owned(),
-                    format!("failed to decode streamed batch: {e}"),
+                    severity.to_owned(),
+                    code.to_owned(),
+                    format!("failed to decode streamed batch: {message}"),
                 )))
             })?;
             // Resolved once before the first batch was pulled; this only
@@ -233,10 +236,13 @@ pub(crate) fn streaming_shaped_response(
                 None,
             )
             .map_err(|e| {
+                let (severity, code, message) = error_to_sqlstate(&e);
+                let message =
+                    shaping_error_message(crate::error_classify::classify(&e).code(), message);
                 PgWireError::UserError(Box::new(ErrorInfo::new(
-                    "ERROR".to_owned(),
-                    "XX000".to_owned(),
-                    format!("failed to shape streamed batch: {e}"),
+                    severity.to_owned(),
+                    code.to_owned(),
+                    format!("failed to shape streamed batch: {message}"),
                 )))
             })?;
             for row in &shaped.rows {
@@ -349,10 +355,13 @@ pub(crate) async fn streaming_star_response(
     ) {
         Ok(s) => s,
         Err(e) => {
+            let (severity, code, message) = error_to_sqlstate(&e);
+            let message =
+                shaping_error_message(crate::error_classify::classify(&e).code(), message);
             return single_pgwire_error(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "ERROR".to_owned(),
-                "XX000".to_owned(),
-                format!("failed to shape streamed batch: {e}"),
+                severity.to_owned(),
+                code.to_owned(),
+                format!("failed to shape streamed batch: {message}"),
             ))));
         }
     };
