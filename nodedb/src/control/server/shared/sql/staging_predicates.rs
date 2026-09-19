@@ -37,6 +37,8 @@ pub enum StagedWriteShape {
     Upsert,
     ConflictUpsert,
     RawPayload,
+    /// `TRUNCATE`: an overlay marker with no row count.
+    Truncate,
 }
 
 /// Classify a plan into the [`StagedWriteShape`] the in-transaction staging gate
@@ -62,6 +64,7 @@ pub fn stageable_write_shape(plan: &PhysicalPlan) -> Option<StagedWriteShape> {
             Some(StagedWriteShape::Delete)
         }
         PhysicalPlan::Document(DocumentOp::Upsert { .. }) => Some(StagedWriteShape::Upsert),
+        PhysicalPlan::Document(DocumentOp::Truncate { .. }) => Some(StagedWriteShape::Truncate),
         PhysicalPlan::Document(_) => None,
 
         PhysicalPlan::Kv(op) => kv_write_shape(op),
@@ -179,6 +182,7 @@ fn kv_write_shape(op: &KvOp) -> Option<StagedWriteShape> {
         | KvOp::TransferItem { .. } => Some(StagedWriteShape::RawPayload),
         // Mutates TTL metadata in place, not Insert/Delete of the row itself.
         KvOp::Expire { .. } | KvOp::Persist { .. } => Some(StagedWriteShape::Update),
+        KvOp::Truncate { .. } => Some(StagedWriteShape::Truncate),
         KvOp::Get { .. }
         | KvOp::Scan { .. }
         | KvOp::BatchGet { .. }
@@ -186,7 +190,6 @@ fn kv_write_shape(op: &KvOp) -> Option<StagedWriteShape> {
         | KvOp::DropIndex { .. }
         | KvOp::FieldGet { .. }
         | KvOp::GetTtl { .. }
-        | KvOp::Truncate { .. }
         | KvOp::RegisterSortedIndex { .. }
         | KvOp::DropSortedIndex { .. }
         | KvOp::SortedIndexRank { .. }
@@ -281,6 +284,8 @@ pub enum StagedTagKind {
     /// The staged handler computed a value, not a row count (`Incr`/`IncrFloat`/
     /// `Cas`/`GetSet`) — caller forwards the payload verbatim.
     RawPayload,
+    /// Bare `TRUNCATE`, no row count, matching the autocommit tag.
+    Truncate,
 }
 
 impl StagedWriteShape {
@@ -298,6 +303,7 @@ impl StagedWriteShape {
                 updated: extract_kv_conflict_op(payload).as_deref() == Some("update"),
             },
             StagedWriteShape::RawPayload => StagedTagKind::RawPayload,
+            StagedWriteShape::Truncate => StagedTagKind::Truncate,
         }
     }
 }
@@ -776,6 +782,41 @@ mod tests {
         });
         assert!(!is_stageable_write(&get));
         assert_eq!(stageable_write_shape(&get), None);
+    }
+
+    #[test]
+    fn document_truncate_stages_as_truncate_with_a_bare_tag() {
+        let plan = PhysicalPlan::Document(DocumentOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            restart_identity: false,
+            resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
+        });
+        assert!(is_stageable_write(&plan));
+        assert_eq!(
+            stageable_write_shape(&plan),
+            Some(StagedWriteShape::Truncate)
+        );
+        assert_eq!(
+            StagedWriteShape::Truncate.tag_kind(&[]),
+            StagedTagKind::Truncate
+        );
+    }
+
+    #[test]
+    fn kv_truncate_stages_as_truncate_with_a_bare_tag() {
+        let plan = kv_plan(KvOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+        });
+        assert!(is_stageable_write(&plan));
+        assert_eq!(
+            stageable_write_shape(&plan),
+            Some(StagedWriteShape::Truncate)
+        );
+        assert_eq!(
+            StagedWriteShape::Truncate.tag_kind(&[]),
+            StagedTagKind::Truncate
+        );
     }
 
     #[test]

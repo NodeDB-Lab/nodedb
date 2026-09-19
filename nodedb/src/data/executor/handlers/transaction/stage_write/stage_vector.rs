@@ -285,9 +285,9 @@ impl CoreLoop {
     }
 
     /// The row `surrogate` currently is under BASE ∪ OVERLAY: the staged
-    /// image, `None` past a staged tombstone, else the base node's vector
-    /// and sidecar. A base node with no sidecar row reads as an empty
-    /// payload, the same as the live handlers read it.
+    /// image, `None` past a staged tombstone or a staged TRUNCATE, else the
+    /// base node's vector and sidecar. A base node with no sidecar row reads
+    /// as an empty payload, the same as the live handlers read it.
     pub(super) fn stage_vector_current_row(
         &self,
         ctx: &StageCtx<'_>,
@@ -317,6 +317,7 @@ impl CoreLoop {
                     },
                 }));
             }
+            None if !self.stage_base_visible(ctx) => return Ok(None),
             None => {}
         }
         let Some(coll) = self.vector_collections.get(index_key) else {

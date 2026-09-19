@@ -23,6 +23,7 @@ use super::super::reservation_release;
 use super::super::store::SessionStore;
 use super::conflict::si_conflict_abort;
 use super::metering::meter_committed_buffered_writes;
+use super::restart_identity::restart_truncated_identities;
 use super::single_shard::dispatch_single_shard;
 
 /// Reverse whatever `begin_commit` already finalized to the catalog before a
@@ -255,6 +256,10 @@ pub async fn run_commit(
     // the peeked (not yet drained) task list, so this reads the same tasks
     // `dispatch_single_shard` / `run_commit_calvin` just replayed above.
     meter_committed_buffered_writes(state, identity, &buffered);
+
+    // A staged `TRUNCATE ... RESTART IDENTITY` resets its sequences only
+    // here, once the truncate is durable; a ROLLBACK never reaches this.
+    restart_truncated_identities(state, tenant_id, &buffered);
 
     // Release this transaction's read reservations (belt-and-suspenders: the
     // Calvin batch's `on_txn_complete` already releases the owner for keys in the

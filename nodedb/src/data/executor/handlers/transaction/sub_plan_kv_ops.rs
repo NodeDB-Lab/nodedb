@@ -47,12 +47,22 @@ impl CoreLoop {
             // `plan_requires_txn_buffering` classifies these unbuffered, so a
             // client statement never replays through this arm at commit; it
             // guards a hypothetical direct-dispatch route.
-            KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. } | KvOp::Truncate { .. } => {
-                Err(ErrorCode::Internal {
-                    detail: "KV secondary-index / truncate DDL is not permitted inside a \
-                             TransactionBatch"
-                        .into(),
-                })
+            KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. } => Err(ErrorCode::Internal {
+                detail: "KV secondary-index DDL is not permitted inside a TransactionBatch".into(),
+            }),
+
+            // ── Truncate — replayed live, in statement order ──
+            // Staged as an overlay marker at statement time; the live truncate
+            // wipes every row replayed before it in this batch. Like the
+            // Document truncate passthrough, it pushes no undo entry.
+            KvOp::Truncate { collection } => {
+                let resp = self.execute_kv_truncate(task, did, tid, collection.as_str());
+                if resp.status == Status::Error {
+                    return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
+                        detail: "kv truncate failed".into(),
+                    }));
+                }
+                Ok(resp)
             }
 
             // ── TTL ops — capture prior expiry, execute, push undo ───────────

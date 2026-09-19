@@ -15,7 +15,7 @@ impl CoreLoop {
     /// The row's current stored body inside `ctx.txn_id`: a staged put wins
     /// over base, a staged tombstone means absent, otherwise base storage
     /// (the current version on a bitemporal collection). `Ok(None)` when the
-    /// row is absent or tombstoned.
+    /// row is absent, tombstoned, or hidden by a staged TRUNCATE.
     pub(super) fn stage_current_body(&self, ctx: &StageCtx<'_>) -> crate::Result<Option<Vec<u8>>> {
         match self
             .txn_overlays
@@ -24,6 +24,7 @@ impl CoreLoop {
         {
             Some(Staged::Put(body)) => Ok(Some(body.clone())),
             Some(Staged::Tombstone) => Ok(None),
+            None if !self.stage_base_visible(ctx) => Ok(None),
             None => {
                 let storage_key = StorageKey::for_surrogate(ctx.surrogate);
                 if self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection) {

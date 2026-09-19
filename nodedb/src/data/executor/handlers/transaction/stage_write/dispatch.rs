@@ -380,6 +380,10 @@ impl CoreLoop {
                 self.stage_document_upsert(&ctx, value, on_conflict_updates, rls_write_check)
             }
 
+            DocumentOp::Truncate { collection, .. } => {
+                self.stage_document_truncate(task, tid, txn_id, collection.as_str())
+            }
+
             // `INSERT ... SELECT` is resolved into concrete `PointInsert` ops
             // at statement time; a raw `InsertSelect` never reaches here.
             DocumentOp::InsertSelect { .. }
@@ -393,7 +397,6 @@ impl CoreLoop {
             | DocumentOp::IndexedFetch { .. }
             | DocumentOp::DropIndex { .. }
             | DocumentOp::BackfillIndex { .. }
-            | DocumentOp::Truncate { .. }
             | DocumentOp::EstimateCount { .. }
             | DocumentOp::UpdateFromJoin { .. }
             | DocumentOp::Merge { .. }
@@ -426,6 +429,7 @@ impl CoreLoop {
         {
             Some(Staged::Put(_)) => OverlayPk::Present,
             Some(Staged::Tombstone) => OverlayPk::Absent,
+            None if !self.stage_base_visible(ctx) => OverlayPk::Absent,
             None => OverlayPk::Unstaged,
         }
     }

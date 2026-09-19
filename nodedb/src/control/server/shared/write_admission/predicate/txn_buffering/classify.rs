@@ -69,9 +69,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | DocumentOp::UpdateFromJoin { .. },
         ) => true,
 
-        // `Truncate` stays write-but-unbuffered: unverified whether the passthrough
-        // executes it correctly at COMMIT replay, so ROLLBACK still doesn't undo it.
-        PhysicalPlan::Document(DocumentOp::Truncate { .. }) => false,
+        // `Truncate` is staged as an overlay marker and replays through the
+        // live truncate at COMMIT, so ROLLBACK undoes it.
+        PhysicalPlan::Document(DocumentOp::Truncate { .. }) => true,
 
         // ---- Vector: encoded (buffered) ----
         PhysicalPlan::Vector(
@@ -224,11 +224,13 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | KvOp::ResolveWrite(_),
         ) => false,
 
-        // ---- Kv: index / DDL / truncate — encoded, but autocommit-only ----
+        // ---- Kv: truncate — encoded (buffered) ----
+        // Staged as an overlay marker; replays through the live truncate at COMMIT.
+        PhysicalPlan::Kv(KvOp::Truncate { .. }) => true,
+
+        // ---- Kv: index DDL — encoded, but autocommit-only ----
         // Inverse divergence: encoded, but transaction resolve rejects them.
-        PhysicalPlan::Kv(
-            KvOp::Truncate { .. } | KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. },
-        ) => false,
+        PhysicalPlan::Kv(KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. }) => false,
 
         // ---- Kv: resolved write — encoded, but autocommit-only ----
         // Same inverse divergence: encoded, but transaction resolve rejects it.
@@ -2106,12 +2108,12 @@ mod tests {
         }
     }
 
-    /// Pin the inverse divergence: truncate and KV index/DDL ops are autocommit-only
-    /// (resolve rejects them, so buffering is never needed), while `to_replicated_entry`
-    /// encodes them all.
+    /// Truncate is buffered in a transaction (overlay marker, COMMIT replay)
+    /// and matches the oracle; KV index DDL stays autocommit-only (resolve
+    /// rejects it) while `to_replicated_entry` encodes it.
     #[test]
-    fn truncate_and_index_variants_are_encoded_but_not_buffered() {
-        let plans = vec![
+    fn truncate_is_buffered_and_index_variants_are_not() {
+        let truncates = vec![
             PhysicalPlan::Document(DocumentOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 restart_identity: false,
@@ -2121,6 +2123,15 @@ mod tests {
             PhysicalPlan::Kv(KvOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             }),
+        ];
+        for p in &truncates {
+            assert!(
+                plan_requires_txn_buffering(p),
+                "expected {p:?} to require txn buffering"
+            );
+            assert_matches_oracle(p);
+        }
+        let plans = vec![
             PhysicalPlan::Kv(KvOp::RegisterIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: "f".into(),

@@ -79,20 +79,24 @@
 //! survived ROLLBACK.
 //!
 //! A second, inverse divergence exists in the opposite direction:
-//! `DocumentOp::Truncate` and `KvOp::{Truncate, RegisterIndex, DropIndex}`
-//! classify `false` here (not buffered) even though `to_replicated_entry` has
-//! an encoder arm for each and returns `Some`. This is not a bug in either
-//! function: every one of them is autocommit-only — `resolve/entry.rs`
-//! (`data/executor/handlers/transaction/resolve/entry.rs:329-334` for the Kv
-//! index/DDL/truncate arm, `:394-400` for the Document arm) rejects them with
-//! `PlanError` when they appear inside an explicit transaction, so they are
-//! never routed through `plan_requires_txn_buffering` for staging in practice.
-//! They only ever reach `to_replicated_entry` via the autocommit path, where
-//! they replicate normally. Pinned by
-//! `truncate_and_index_variants_are_encoded_but_not_buffered` below via
-//! `assert_encoded_but_not_buffered` — the inverse of
+//! `KvOp::{RegisterIndex, DropIndex}` classify `false` here (not buffered)
+//! even though `to_replicated_entry` has an encoder arm for each and returns
+//! `Some`. This is not a bug in either function: both are autocommit-only —
+//! `resolve/entry.rs` (`data/executor/handlers/transaction/resolve/entry.rs`,
+//! Kv index arm) rejects them with `PlanError` when they appear inside an
+//! explicit transaction, so they are never routed through
+//! `plan_requires_txn_buffering` for staging in practice. They only ever
+//! reach `to_replicated_entry` via the autocommit path, where they replicate
+//! normally. Pinned by `truncate_is_buffered_and_index_variants_are_not`
+//! below via `assert_encoded_but_not_buffered` — the inverse of
 //! `assert_buffered_but_unencoded` — and correspondingly excluded from
 //! `kv_variants_match_oracle`.
+//!
+//! `DocumentOp::Truncate` and `KvOp::Truncate` classify `true`: in a
+//! transaction they stage as a `TxnOverlay` truncate marker that hides every
+//! base row without a newer overlay entry, and COMMIT replays the live
+//! truncate in statement order. ROLLBACK and ROLLBACK TO SAVEPOINT drop the
+//! marker.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 

@@ -147,6 +147,9 @@ impl CoreLoop {
                     rls_write_check,
                 },
             ),
+            KvOp::Truncate { collection } => {
+                self.stage_kv_truncate(task, tid, txn_id, collection.as_str())
+            }
             KvOp::Get { .. }
             | KvOp::Scan { .. }
             | KvOp::BatchGet { .. }
@@ -154,7 +157,6 @@ impl CoreLoop {
             | KvOp::DropIndex { .. }
             | KvOp::FieldGet { .. }
             | KvOp::GetTtl { .. }
-            | KvOp::Truncate { .. }
             | KvOp::RegisterSortedIndex { .. }
             | KvOp::DropSortedIndex { .. }
             | KvOp::SortedIndexRank { .. }
@@ -284,6 +286,7 @@ impl CoreLoop {
         {
             Some(Staged::Put(body)) => Some(body.clone()),
             Some(Staged::Tombstone) => None,
+            None if !self.stage_base_visible(ctx) => None,
             None => {
                 let now_ms = current_ms();
                 self.kv_engine

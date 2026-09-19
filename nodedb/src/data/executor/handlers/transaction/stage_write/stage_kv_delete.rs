@@ -49,11 +49,11 @@ impl CoreLoop {
                 collection.to_string(),
             );
 
-            let overlay_staged = self
-                .txn_overlays
-                .get(&txn_id)
+            let overlay = self.txn_overlays.get(&txn_id);
+            let overlay_staged = overlay
                 .and_then(|o| o.get_by_doc_id(&coll_key, &doc_id))
                 .cloned();
+            let base_visible = overlay.is_none_or(|o| o.base_visible(&coll_key));
 
             let (surrogate, present) = match overlay_staged {
                 // A staged put exists: resolve its bound surrogate through
@@ -71,6 +71,8 @@ impl CoreLoop {
                 // matching PostgreSQL/Document DELETE semantics for a
                 // missing key (DELETE 0, not an error).
                 Some(Staged::Tombstone) => (Surrogate::ZERO, false),
+                // Hidden by a staged TRUNCATE of the collection: absent.
+                None if !base_visible => (Surrogate::ZERO, false),
                 // Nothing staged: resolve via the base KV engine's own
                 // key -> surrogate binding.
                 None => {

@@ -88,6 +88,10 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return Ok(());
         };
+        // A staged TRUNCATE hides every base hit; staged puts re-enter below.
+        if overlay.is_truncated(&coll_key) {
+            base_results.clear();
+        }
 
         let Some((positive_terms, negative_terms)) =
             self.analyze_query_terms(database_id.as_u64(), tid, collection, query)
@@ -188,6 +192,10 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return Ok(());
         };
+        // A staged TRUNCATE hides every base hit; staged puts re-enter below.
+        if overlay.is_truncated(&coll_key) {
+            base_results.clear();
+        }
 
         // Canonicalize each phrase term through the collection's configured
         // analyzer — the same resolution the base phrase search
@@ -270,6 +278,10 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return Ok(());
         };
+        // A staged TRUNCATE hides every base hit; staged puts re-enter below.
+        if overlay.is_truncated(&coll_key) {
+            base_results.clear();
+        }
         let Some((positive_terms, negative_terms)) =
             self.analyze_query_terms(database_id.as_u64(), tid, collection, query)
         else {
@@ -337,6 +349,7 @@ impl CoreLoop {
 
         let mut seen: std::collections::HashSet<u32> =
             rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
+        let base_visible = overlay.base_visible(&coll_key);
 
         rows.retain_mut(|(row_key, body)| {
             let surrogate = row_key.surrogate().as_u32();
@@ -346,7 +359,7 @@ impl CoreLoop {
                     *body = staged_body.clone();
                     score_map.contains_key(&Surrogate::new(surrogate))
                 }
-                None => true,
+                None => base_visible,
             }
         });
 

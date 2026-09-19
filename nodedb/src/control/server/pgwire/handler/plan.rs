@@ -116,6 +116,9 @@ pub(super) fn staged_dml_outcome(kind: StagedTagKind, affected: usize) -> DmlOut
         // exhaustive against a new `PhysicalPlan::Kv` caller; it renders the
         // same tag pgwire uses for a function-call `SELECT`.
         StagedTagKind::RawPayload => "SELECT",
+        // Staged `TRUNCATE`: `command_tag::render` drops the count for this
+        // verb, so the wire tag is the bare `TRUNCATE` autocommit answers with.
+        StagedTagKind::Truncate => "TRUNCATE",
     };
     DmlOutcome {
         verb,
@@ -434,5 +437,21 @@ mod tests {
                 affected: 4
             }
         );
+    }
+
+    /// A staged `TRUNCATE` renders the same bare tag autocommit does.
+    #[test]
+    fn staged_truncate_renders_a_bare_tag() {
+        let outcome = staged_dml_outcome(StagedTagKind::Truncate, 0);
+        assert_eq!(
+            outcome,
+            DmlOutcome {
+                verb: "TRUNCATE",
+                affected: 0
+            }
+        );
+        let tag: pgwire::messages::response::CommandComplete =
+            crate::control::server::pgwire::command_tag::render(outcome).into();
+        assert_eq!(tag.tag, "TRUNCATE");
     }
 }

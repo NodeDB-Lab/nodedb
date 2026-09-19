@@ -35,6 +35,7 @@ mod stage_point_document;
 mod stage_rls;
 mod stage_spatial;
 mod stage_timeseries;
+mod stage_truncate;
 mod stage_upsert;
 mod stage_vector;
 mod stage_vector_targets;

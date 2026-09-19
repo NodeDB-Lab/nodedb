@@ -66,6 +66,9 @@ impl CoreLoop {
         // Plan-driven serializers emit into `ops` during this walk; overlay-driven
         // serializers only collect collections here, serialized in phase two below.
         let mut ops: Vec<RedoSubRecord> = Vec::new();
+        // The declared primary key of each truncated document collection,
+        // from the plan: names every removed base row in its redo entry.
+        let truncate_primary_keys = truncate_declared_primary_keys(plans);
 
         for plan in plans {
             match plan {
@@ -169,6 +172,9 @@ impl CoreLoop {
                     TenantId::new(tid),
                     collection.clone(),
                 );
+                if overlay.is_truncated(&coll_key) {
+                    kv::serialize_kv_truncate(collection, &mut ops)?;
+                }
                 kv::serialize_kv_collection(overlay, &coll_key, collection, &mut ops)?;
             }
             for collection in &doc_collections {
@@ -181,6 +187,21 @@ impl CoreLoop {
                 // once so the serializer can decode them back to MessagePack.
                 let strict_schema =
                     self.resolve_strict_schema(task.request.database_id.as_u64(), tid, collection);
+                if overlay.is_truncated(&coll_key) {
+                    let rows =
+                        self.truncated_base_rows(task, tid, collection, overlay, &coll_key)?;
+                    document::serialize_truncated_base_rows(
+                        document::TruncatedBaseRows {
+                            collection,
+                            rows: &rows,
+                            strict_schema: strict_schema.as_ref(),
+                            declared_primary_key: truncate_primary_keys
+                                .get(collection.as_str())
+                                .and_then(|pk| pk.as_deref()),
+                        },
+                        &mut ops,
+                    )?;
+                }
                 document::serialize_document_collection(
                     overlay,
                     &coll_key,
@@ -220,6 +241,72 @@ impl CoreLoop {
         }
         Ok(ops)
     }
+
+    /// The base rows a staged TRUNCATE of `collection` removes at COMMIT and
+    /// that need a per-row `Delete` redo: every base row with no overlay
+    /// entry, on a collection with vector fields. Empty for a collection
+    /// without vector fields, where the autocommit truncate mints no per-row
+    /// redo either (row durability is redb-synchronous). Read-only against
+    /// base.
+    fn truncated_base_rows(
+        &self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        overlay: &crate::data::executor::handlers::transaction::overlay::TxnOverlay,
+        coll_key: &(crate::types::DatabaseId, TenantId, String),
+    ) -> crate::Result<Vec<(nodedb_types::StorageKey, Vec<u8>)>> {
+        let database_id = task.request.database_id.as_u64();
+        if !self.collection_has_vectors(database_id, tid, collection) {
+            return Ok(Vec::new());
+        }
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let mut rows = Vec::new();
+        for key in self.scan_matching_documents(database_id, tid, collection, &[])? {
+            if overlay.get(coll_key, key.surrogate().as_u32()).is_some() {
+                continue;
+            }
+            let body = if bitemporal {
+                self.sparse
+                    .versioned_get_current(database_id, tid, collection, &key)?
+            } else {
+                self.sparse.get(database_id, tid, collection, &key)?
+            };
+            if let Some(body) = body {
+                rows.push((key, body));
+            }
+        }
+        Ok(rows)
+    }
+}
+
+/// The declared primary key of every document collection a `Truncate` plan
+/// names, keyed by collection.
+fn truncate_declared_primary_keys(plans: &[PhysicalPlan]) -> BTreeMap<String, Option<String>> {
+    plans
+        .iter()
+        .filter_map(|plan| match plan {
+            PhysicalPlan::Document(DocumentOp::Truncate {
+                collection,
+                declared_primary_key,
+                ..
+            }) => Some((collection.to_string(), declared_primary_key.clone())),
+            PhysicalPlan::Document(_)
+            | PhysicalPlan::Kv(_)
+            | PhysicalPlan::Graph(_)
+            | PhysicalPlan::Crdt(_)
+            | PhysicalPlan::Text(_)
+            | PhysicalPlan::Query(_)
+            | PhysicalPlan::Meta(_)
+            | PhysicalPlan::Vector(_)
+            | PhysicalPlan::Array(_)
+            | PhysicalPlan::Columnar(_)
+            | PhysicalPlan::Timeseries(_)
+            | PhysicalPlan::Spatial(_)
+            | PhysicalPlan::ClusterArray(_)
+            | PhysicalPlan::ClusterEvent(_) => None,
+        })
+        .collect()
 }
 
 /// Classify a KV op for transaction resolve: collect the collection of a
@@ -293,14 +380,20 @@ fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Resul
             detail: "kv EXPIRE/PERSIST is not supported in transaction resolve".to_string(),
         }),
 
-        // Index / DDL / truncate: never stageable into the overlay, so no
-        // row-level redo shape carries them.
+        // Truncate: staged as an overlay marker; the serializer emits the
+        // `kv_truncate` redo ahead of the collection's row entries.
+        KvOp::Truncate { collection } => {
+            collections.insert(collection.to_string());
+            Ok(())
+        }
+
+        // Index / DDL: never stageable into the overlay, so no row-level
+        // redo shape carries them.
         KvOp::RegisterIndex { .. }
         | KvOp::DropIndex { .. }
         | KvOp::RegisterSortedIndex { .. }
-        | KvOp::DropSortedIndex { .. }
-        | KvOp::Truncate { .. } => Err(crate::Error::PlanError {
-            detail: "kv index/DDL/truncate op is not supported in transaction resolve".to_string(),
+        | KvOp::DropSortedIndex { .. } => Err(crate::Error::PlanError {
+            detail: "kv index/DDL op is not supported in transaction resolve".to_string(),
         }),
     }
 }
@@ -361,14 +454,20 @@ fn classify_document_op(op: &DocumentOp, collections: &mut BTreeSet<String>) -> 
                 .to_string(),
         }),
 
-        // Index / DDL / truncate: never stageable into the overlay, so no
-        // row-level redo shape carries them.
+        // Truncate: staged as an overlay marker; the serializer emits a
+        // `Delete` per removed base row on a vector collection ahead of the
+        // collection's overlay entries.
+        DocumentOp::Truncate { collection, .. } => {
+            collections.insert(collection.to_string());
+            Ok(())
+        }
+
+        // Index / DDL: never stageable into the overlay, so no row-level
+        // redo shape carries them.
         DocumentOp::Register { .. }
         | DocumentOp::DropIndex { .. }
-        | DocumentOp::BackfillIndex { .. }
-        | DocumentOp::Truncate { .. } => Err(crate::Error::PlanError {
-            detail: "document index/DDL/truncate op is not supported in transaction resolve"
-                .to_string(),
+        | DocumentOp::BackfillIndex { .. } => Err(crate::Error::PlanError {
+            detail: "document index/DDL op is not supported in transaction resolve".to_string(),
         }),
     }
 }

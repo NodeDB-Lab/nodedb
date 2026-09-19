@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use nodedb_types::RowIdentity;
 
 use super::lease::LeaseStamp;
+use super::staged_sidecar::{BitemporalStamp, StagedTtl};
 use crate::types::{DatabaseId, TenantId};
 
 /// Per-core upper bound on the total staged-body bytes a single transaction's
@@ -36,55 +37,23 @@ pub enum Staged {
     Tombstone,
 }
 
-/// A staged TTL delta for one KV row, kept OUTSIDE `Staged` because TTL is
-/// KV-specific (only KV entries carry `expire_at_ms`,
-/// `engine/kv/entry.rs::KvEntry.expire_at_ms`) while `Staged` is shared by
-/// every engine's read-merge. Only KV reads ever consult this map.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StagedTtl {
-    /// `EXPIRE` staged: the row expires at this absolute epoch-ms instant.
-    ExpireAt(u64),
-    /// `PERSIST` staged: any base TTL is cleared, the row never expires.
-    Persist,
-}
-
-/// The bitemporal system/valid-time stamp assigned to one staged document
-/// `Put` at COMMIT resolve time, kept OUTSIDE `Staged` because it is only
-/// meaningful for a `bitemporal=true` document collection (like [`StagedTtl`]
-/// is only meaningful for KV).
-///
-/// Assigning it ONCE at resolve — rather than re-deriving it at both the
-/// commit-time base install and WAL replay — is what keeps a normal restart
-/// from writing a SECOND version of the same row: the redo sub-record carries
-/// this stamp verbatim, and the base install reads the identical stamp back
-/// out of the overlay sidecar so both agree on the version key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BitemporalStamp {
-    /// System-time key (`_ts_system`) the version row is appended at.
-    pub sys_from_ms: i64,
-    /// Valid-time lower bound (`i64::MIN` = unbounded).
-    pub valid_from_ms: i64,
-    /// Valid-time upper bound (`i64::MAX` = unbounded).
-    pub valid_until_ms: i64,
-}
-
 /// Staged mutations for a single collection within one transaction.
 #[derive(Debug, Default)]
 pub struct CollectionOverlay {
     /// Staged mutation per surrogate — the authoritative storage key.
-    by_surrogate: HashMap<u32, Staged>,
+    pub(super) by_surrogate: HashMap<u32, Staged>,
     /// Resolves a row's client identity to its staged surrogate, for inserts
     /// that have not yet been made durable (and therefore have no other way
     /// to be looked up by identity).
-    doc_id_to_surrogate: HashMap<RowIdentity, u32>,
+    pub(super) doc_id_to_surrogate: HashMap<RowIdentity, u32>,
     /// Staged KV TTL delta per surrogate — sibling to `by_surrogate`, never
     /// consulted by non-KV engines. See [`StagedTtl`].
-    ttl_by_surrogate: HashMap<u32, StagedTtl>,
+    pub(super) ttl_by_surrogate: HashMap<u32, StagedTtl>,
     /// Bitemporal stamp per surrogate — sibling to `by_surrogate`, written at
     /// COMMIT resolve time for `bitemporal=true` document `Put`s and read back
     /// by the commit-time base install so redo and install share one stamp.
     /// See [`BitemporalStamp`]. Never consulted by non-bitemporal collections.
-    bitemporal_by_surrogate: HashMap<u32, BitemporalStamp>,
+    pub(super) bitemporal_by_surrogate: HashMap<u32, BitemporalStamp>,
 }
 
 impl CollectionOverlay {
@@ -116,18 +85,37 @@ struct OverlayUndo {
     prev_doc_binding: Option<u32>,
 }
 
+/// One undo-journal entry: a slot mutation or a truncate marker.
+#[derive(Debug, Clone)]
+enum JournalEntry {
+    /// A slot's prior state, captured before a staged value/TTL mutation.
+    Slot(OverlayUndo),
+    /// A truncate marker set on `coll_key`. `prev` is the journal position
+    /// of the marker it replaced, `None` when the collection was not
+    /// truncated before.
+    Truncated {
+        coll_key: (DatabaseId, TenantId, String),
+        prev: Option<usize>,
+    },
+}
+
 /// Per-transaction staging overlay: holds not-yet-durable writes for every
 /// collection touched by the transaction, keyed by
 /// `(DatabaseId, TenantId, collection)`.
 #[derive(Debug, Default)]
 pub struct TxnOverlay {
-    collections: HashMap<(DatabaseId, TenantId, String), CollectionOverlay>,
+    pub(super) collections: HashMap<(DatabaseId, TenantId, String), CollectionOverlay>,
+    /// Collections this transaction truncated, keyed to the journal position
+    /// of the marker. A truncated collection hides every base row that has
+    /// no newer overlay entry.
+    truncated: HashMap<(DatabaseId, TenantId, String), usize>,
     /// Append-only undo journal recording each slot's prior state before a
-    /// staged value/TTL mutation. `journal_len` reads its length (the savepoint
-    /// marker); `rollback_to` replays it in reverse down to a marker. Always
-    /// appended to by the value/TTL mutators so nothing escapes it; dropped with
-    /// the overlay when the transaction resolves.
-    journal: Vec<OverlayUndo>,
+    /// staged value/TTL mutation, and each truncate marker. `journal_len`
+    /// reads its length (the savepoint marker); `rollback_to` replays it in
+    /// reverse down to a marker. Always appended to by the value/TTL mutators
+    /// and `mark_truncated` so nothing escapes it; dropped with the overlay
+    /// when the transaction resolves.
+    journal: Vec<JournalEntry>,
     /// Advanced by every staged write AND every in-transaction
     /// read-your-own-write, so a live transaction's stamp always tracks the
     /// clock. See [`LeaseStamp`].
@@ -159,7 +147,7 @@ impl TxnOverlay {
     /// This is the single chokepoint every value/TTL mutator calls, so no
     /// mutation of `by_surrogate` / `ttl_by_surrogate` / `doc_id_to_surrogate`
     /// escapes the journal — the guarantee `ROLLBACK TO SAVEPOINT` relies on.
-    fn record_undo(
+    pub(super) fn record_undo(
         &mut self,
         coll_key: &(DatabaseId, TenantId, String),
         surrogate: u32,
@@ -173,14 +161,56 @@ impl TxnOverlay {
             ),
             None => (None, None, None),
         };
-        self.journal.push(OverlayUndo {
+        self.journal.push(JournalEntry::Slot(OverlayUndo {
             coll_key: coll_key.clone(),
             surrogate,
             doc_id: doc_id.clone(),
             prev_value,
             prev_ttl,
             prev_doc_binding,
+        }));
+    }
+
+    /// Stage a TRUNCATE of `coll_key`. Every row already staged in the
+    /// collection is tombstoned through the normal undo path, so a savepoint
+    /// rollback restores it; the marker then hides every base row that has
+    /// no newer overlay entry.
+    pub fn mark_truncated(&mut self, coll_key: (DatabaseId, TenantId, String)) {
+        let staged_puts: Vec<(RowIdentity, u32)> = self
+            .collections
+            .get(&coll_key)
+            .map(|overlay| {
+                overlay
+                    .doc_id_to_surrogate
+                    .iter()
+                    .filter(|(_, surrogate)| {
+                        matches!(overlay.by_surrogate.get(surrogate), Some(Staged::Put(_)))
+                    })
+                    .map(|(doc_id, surrogate)| (doc_id.clone(), *surrogate))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (doc_id, surrogate) in staged_puts {
+            self.insert_tombstone(coll_key.clone(), surrogate, &doc_id);
+        }
+        let prev = self.truncated.get(&coll_key).copied();
+        let position = self.journal.len();
+        self.journal.push(JournalEntry::Truncated {
+            coll_key: coll_key.clone(),
+            prev,
         });
+        self.truncated.insert(coll_key, position);
+    }
+
+    /// Whether `coll_key` is truncated in this transaction.
+    pub fn is_truncated(&self, coll_key: &(DatabaseId, TenantId, String)) -> bool {
+        self.truncated.contains_key(coll_key)
+    }
+
+    /// Whether a base row of `coll_key` with no staged mutation is visible to
+    /// this transaction: hidden while the collection is truncated.
+    pub fn base_visible(&self, coll_key: &(DatabaseId, TenantId, String)) -> bool {
+        !self.is_truncated(coll_key)
     }
 
     /// Stage a put (insert/update) for `surrogate` in the given collection.
@@ -252,26 +282,6 @@ impl TxnOverlay {
             .copied()
     }
 
-    /// Stage a KV TTL delta (`EXPIRE` / `PERSIST`) for `surrogate` in the
-    /// given collection, binding `doc_id` to `surrogate` the same way
-    /// `insert_put` / `insert_tombstone` do — a `GetTtl` (or a later
-    /// `Expire`/`Persist`/`Incr` in the same transaction) resolves the same
-    /// slot by the KV row's identity.
-    pub fn set_ttl(
-        &mut self,
-        coll_key: (DatabaseId, TenantId, String),
-        surrogate: u32,
-        doc_id: &RowIdentity,
-        ttl: StagedTtl,
-    ) {
-        self.record_undo(&coll_key, surrogate, doc_id);
-        let overlay = self.collections.entry(coll_key).or_default();
-        overlay.ttl_by_surrogate.insert(surrogate, ttl);
-        overlay
-            .doc_id_to_surrogate
-            .insert(doc_id.clone(), surrogate);
-    }
-
     /// Current length of the overlay undo journal — the savepoint marker a
     /// later `rollback_to` rewinds toward. Returned to the Control Plane by
     /// `MetaOp::MarkSavepoint`.
@@ -279,17 +289,28 @@ impl TxnOverlay {
         self.journal.len()
     }
 
-    /// Revert every staged value/TTL mutation recorded after `marker`,
-    /// restoring each slot to its pre-mutation state (or removing it when the
-    /// prior slot was absent), then truncate the journal to `marker`.
+    /// Revert every staged value/TTL mutation and truncate marker recorded
+    /// after `marker`, restoring each slot to its pre-mutation state (or
+    /// removing it when the prior slot was absent), then truncate the journal
+    /// to `marker`.
     ///
     /// Entries are replayed strictly in reverse so repeated writes to one slot
     /// unwind to the exact value present at the marked point. A `marker` at or
     /// beyond the current length is a no-op.
     pub fn rollback_to(&mut self, marker: usize) {
         while self.journal.len() > marker {
-            let Some(undo) = self.journal.pop() else {
+            let Some(entry) = self.journal.pop() else {
                 break;
+            };
+            let undo = match entry {
+                JournalEntry::Slot(undo) => undo,
+                JournalEntry::Truncated { coll_key, prev } => {
+                    match prev {
+                        Some(position) => self.truncated.insert(coll_key, position),
+                        None => self.truncated.remove(&coll_key),
+                    };
+                    continue;
+                }
             };
             let Some(overlay) = self.collections.get_mut(&undo.coll_key) else {
                 continue;
@@ -322,75 +343,6 @@ impl TxnOverlay {
             }
         }
         self.collections.retain(|_, overlay| !overlay.is_empty());
-    }
-
-    /// Look up the staged TTL delta for `surrogate` in the given collection.
-    pub fn get_ttl(
-        &self,
-        coll_key: &(DatabaseId, TenantId, String),
-        surrogate: u32,
-    ) -> Option<StagedTtl> {
-        self.collections
-            .get(coll_key)?
-            .ttl_by_surrogate
-            .get(&surrogate)
-            .copied()
-    }
-
-    /// Look up the staged TTL delta for `doc_id` in the given collection,
-    /// resolving through `doc_id_to_surrogate` first.
-    pub fn get_ttl_by_doc_id(
-        &self,
-        coll_key: &(DatabaseId, TenantId, String),
-        doc_id: &RowIdentity,
-    ) -> Option<StagedTtl> {
-        let overlay = self.collections.get(coll_key)?;
-        let surrogate = overlay.doc_id_to_surrogate.get(doc_id)?;
-        overlay.ttl_by_surrogate.get(surrogate).copied()
-    }
-
-    /// Record the resolve-time bitemporal stamp for `surrogate` in the given
-    /// collection. Assigned exactly once, at COMMIT resolve, after all
-    /// savepoint activity for the transaction has completed — so no undo
-    /// journalling is needed (it is never rolled back mid-statement).
-    pub fn set_bitemporal(
-        &mut self,
-        coll_key: &(DatabaseId, TenantId, String),
-        surrogate: u32,
-        stamp: BitemporalStamp,
-    ) {
-        self.collections
-            .entry(coll_key.clone())
-            .or_default()
-            .bitemporal_by_surrogate
-            .insert(surrogate, stamp);
-    }
-
-    /// Look up the resolve-time bitemporal stamp for `surrogate` in the given
-    /// collection. `Some` only for a `bitemporal=true` collection's staged
-    /// `Put` whose stamp was assigned at resolve.
-    pub fn get_bitemporal(
-        &self,
-        coll_key: &(DatabaseId, TenantId, String),
-        surrogate: u32,
-    ) -> Option<BitemporalStamp> {
-        self.collections
-            .get(coll_key)?
-            .bitemporal_by_surrogate
-            .get(&surrogate)
-            .copied()
-    }
-
-    /// Iterate every `(surrogate, BitemporalStamp)` staged across all
-    /// collections in this overlay. Surrogates are globally unique, so the
-    /// commit-time install flattens these into one per-core scratch map.
-    pub fn all_bitemporal_stamps(&self) -> impl Iterator<Item = (u32, BitemporalStamp)> + '_ {
-        self.collections.values().flat_map(|overlay| {
-            overlay
-                .bitemporal_by_surrogate
-                .iter()
-                .map(|(surrogate, stamp)| (*surrogate, *stamp))
-        })
     }
 
     /// Iterate all staged `(surrogate, Staged)` pairs for a collection.
@@ -431,11 +383,13 @@ impl TxnOverlay {
             })
     }
 
-    /// True if no collection has any staged mutation.
+    /// True if no collection has any staged mutation or truncate marker.
     pub fn is_empty(&self) -> bool {
-        self.collections
-            .values()
-            .all(|overlay| overlay.by_surrogate.is_empty())
+        self.truncated.is_empty()
+            && self
+                .collections
+                .values()
+                .all(|overlay| overlay.by_surrogate.is_empty())
     }
 
     /// Total number of staged mutations across all collections.
@@ -652,6 +606,71 @@ mod tests {
             Some(&Staged::Put(vec![1, 2, 3]))
         );
         assert_eq!(overlay.journal_len(), marker);
+    }
+
+    #[test]
+    fn mark_truncated_tombstones_staged_rows_and_hides_base() {
+        let mut overlay = TxnOverlay::new();
+        let users = key("users");
+        overlay.insert_put(users.clone(), 7, &id("doc-7"), vec![1]);
+        assert!(overlay.base_visible(&users));
+
+        overlay.mark_truncated(users.clone());
+
+        assert!(overlay.is_truncated(&users));
+        assert!(!overlay.base_visible(&users));
+        assert_eq!(overlay.get(&users, 7), Some(&Staged::Tombstone));
+        assert_eq!(
+            overlay.get_by_doc_id(&users, &id("doc-7")),
+            Some(&Staged::Tombstone)
+        );
+        assert!(!overlay.is_truncated(&key("other")));
+        assert!(!overlay.is_empty());
+    }
+
+    #[test]
+    fn rollback_to_before_marker_untruncates() {
+        let mut overlay = TxnOverlay::new();
+        let users = key("users");
+        overlay.insert_put(users.clone(), 7, &id("doc-7"), vec![1]);
+        let marker = overlay.journal_len();
+
+        overlay.mark_truncated(users.clone());
+        overlay.insert_put(users.clone(), 9, &id("doc-9"), vec![2]);
+        overlay.rollback_to(marker);
+
+        assert!(!overlay.is_truncated(&users));
+        assert_eq!(overlay.get(&users, 7), Some(&Staged::Put(vec![1])));
+        assert_eq!(overlay.get(&users, 9), None);
+        assert_eq!(overlay.journal_len(), marker);
+
+        overlay.mark_truncated(users.clone());
+        overlay.rollback_to(0);
+        assert!(!overlay.is_truncated(&users));
+        assert!(overlay.is_empty());
+    }
+
+    #[test]
+    fn insert_put_after_truncate_is_visible() {
+        let mut overlay = TxnOverlay::new();
+        let users = key("users");
+        overlay.mark_truncated(users.clone());
+        overlay.insert_put(users.clone(), 11, &id("doc-11"), vec![3]);
+
+        assert!(overlay.is_truncated(&users));
+        assert_eq!(overlay.get(&users, 11), Some(&Staged::Put(vec![3])));
+        assert_eq!(
+            overlay.get_by_doc_id(&users, &id("doc-11")),
+            Some(&Staged::Put(vec![3]))
+        );
+
+        // A second truncate tombstones the newer put and keeps the marker.
+        let marker = overlay.journal_len();
+        overlay.mark_truncated(users.clone());
+        assert_eq!(overlay.get(&users, 11), Some(&Staged::Tombstone));
+        overlay.rollback_to(marker);
+        assert!(overlay.is_truncated(&users));
+        assert_eq!(overlay.get(&users, 11), Some(&Staged::Put(vec![3])));
     }
 
     #[test]

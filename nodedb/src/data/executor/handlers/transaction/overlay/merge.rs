@@ -82,6 +82,8 @@ pub(in crate::data::executor) struct IndexOverlayMergeParams<'a> {
 /// A staged tombstone hides its base row. A staged put replaces the base
 /// body and is re-checked against the predicate. A staged put for a
 /// surrogate absent from base is appended when it satisfies the predicate.
+/// A base row with no overlay entry is dropped when the collection is
+/// truncated in this transaction.
 /// Turns a staged put body into the row body downstream stages read.
 pub(super) type StagedBodyOf<'a, E> = dyn Fn(&StorageKey, &[u8]) -> Result<Vec<u8>, E> + 'a;
 
@@ -96,6 +98,7 @@ pub(super) fn merge_staged_rows<E>(
     // this to avoid re-adding a row that base already carries (or that the
     // retain pass has just superseded in place).
     let mut seen: HashSet<u32> = rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
+    let base_visible = overlay.base_visible(coll_key);
 
     // `retain_mut` needs a `bool`, so a staged body that will not decode is
     // captured here and surfaced once the pass finishes.
@@ -118,7 +121,7 @@ pub(super) fn merge_staged_rows<E>(
                     false
                 }
             },
-            None => true,
+            None => base_visible,
         }
     });
     if let Some(e) = body_err.take() {
@@ -211,6 +214,7 @@ impl CoreLoop {
                 Some(StagedTtl::ExpireAt(t)) if t <= now_ms
             )
         };
+        let base_visible = overlay.base_visible(coll_key);
 
         rows.retain_mut(|(key, value)| {
             let doc_id = super::super::stage_write::kv_row_identity(key);
@@ -228,7 +232,7 @@ impl CoreLoop {
                     *value = staged_value.clone();
                     matches(value)
                 }
-                None => true,
+                None => base_visible,
             }
         });
 
@@ -364,18 +368,19 @@ impl CoreLoop {
         // Base doc IDs' surrogates, so additions don't re-append a row the
         // base index lookup already returned.
         let mut seen: HashSet<u32> = doc_ids.iter().map(|id| id.surrogate().as_u32()).collect();
+        let base_visible = overlay.base_visible(coll_key);
 
         // Base-minus-superseded: resolve each base storage key to its
         // surrogate and consult the overlay. A tombstone drops it; a staged
         // put re-checks whether the new body still equals the lookup value
         // (an update may have moved the row off the indexed value); no
-        // overlay entry keeps it as-is.
+        // overlay entry keeps it as-is unless the collection is truncated.
         doc_ids.retain(|doc_id| {
             let surrogate = doc_id.surrogate().as_u32();
             match overlay.get(coll_key, surrogate) {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(body)) => value_matches(body) && residual_matches(doc_id, body),
-                None => true,
+                None => base_visible,
             }
         });
 
@@ -416,9 +421,10 @@ impl CoreLoop {
     /// `doc_id` is the storage key the index lookup returned, so the overlay
     /// is consulted by surrogate (`get`), matching the identity the merge
     /// used — `get_by_doc_id` is keyed by the PK and would not match.
-    /// Returns `None` for a staged tombstone. Falls back to the lazy `base`
-    /// closure (skipped whenever the overlay already has the answer) when the
-    /// surrogate has no staged mutation.
+    /// Returns `None` for a staged tombstone, and for a base row of a
+    /// collection truncated in this transaction. Falls back to the lazy
+    /// `base` closure (skipped whenever the overlay already has the answer)
+    /// when the surrogate has no staged mutation.
     pub(in crate::data::executor) fn overlay_or_base_body(
         &self,
         txn_id: Option<TxnId>,
@@ -434,6 +440,7 @@ impl CoreLoop {
                 match overlay.get(coll_key, surrogate) {
                     Some(Staged::Put(body)) => return Ok(Some(body.clone())),
                     Some(Staged::Tombstone) => return Ok(None),
+                    None if overlay.is_truncated(coll_key) => return Ok(None),
                     None => {}
                 }
             }

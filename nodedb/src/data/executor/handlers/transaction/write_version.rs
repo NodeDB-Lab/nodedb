@@ -11,7 +11,7 @@ use crate::data::executor::core_loop::write_index::KeyRepr;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{Lsn, TenantId};
 use nodedb_physical::physical_plan::{
-    ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, SpatialOp, TextOp, TimeseriesOp, VectorOp,
+    ColumnarOp, CrdtOp, DocumentOp, GraphOp, SpatialOp, TextOp, TimeseriesOp, VectorOp,
     VectorWriteTargets,
 };
 use nodedb_types::Surrogate;
@@ -56,7 +56,11 @@ impl CoreLoop {
                     | ColumnarOp::Delete { collection, .. }
                     | ColumnarOp::ResolvedUpdate { collection, .. }
                     | ColumnarOp::ResolvedDelete { collection, .. } => Some(collection.as_str()),
-                    _ => None,
+                    // Read-only: nothing written, no version to record.
+                    ColumnarOp::Scan { .. } | ColumnarOp::MaterializeScan { .. } => None,
+                    // Resolve pass reads what a governed write depends on;
+                    // the write itself lands as ResolvedUpdate/ResolvedDelete.
+                    ColumnarOp::ResolveDml { .. } => None,
                 };
                 if let Some(c) = coll {
                     self.note_write_lsn(db, tenant, c, None, lsn);
@@ -70,7 +74,8 @@ impl CoreLoop {
                     SpatialOp::Insert { collection, .. } | SpatialOp::Delete { collection, .. } => {
                         Some(collection.as_str())
                     }
-                    _ => None,
+                    // Read-only: nothing written, no version to record.
+                    SpatialOp::Scan { .. } => None,
                 };
                 if let Some(c) = coll {
                     self.note_write_lsn(db, tenant, c, None, lsn);
@@ -80,7 +85,14 @@ impl CoreLoop {
                 let coll = match op {
                     TextOp::FtsIndexDoc { collection, .. }
                     | TextOp::FtsDeleteDoc { collection, .. } => Some(collection.as_str()),
-                    _ => None,
+                    // Read-only queries: nothing written, no version to record.
+                    TextOp::Search { .. }
+                    | TextOp::BM25ScoreScan { .. }
+                    | TextOp::PhraseSearch { .. }
+                    | TextOp::HybridSearch { .. }
+                    | TextOp::HybridSearchTriple { .. } => None,
+                    // Analyzer/config DDL: no key written.
+                    TextOp::SetTextConfig { .. } => None,
                 };
                 if let Some(c) = coll {
                     self.note_write_lsn(db, tenant, c, None, lsn);
@@ -126,7 +138,35 @@ impl CoreLoop {
                 surrogate,
                 ..
             } => (collection.as_str(), *surrogate),
-            _ => return,
+            // Whole-collection mutation: key set is every row, so only the
+            // collection floor applies.
+            DocumentOp::Truncate { collection, .. } => {
+                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                return;
+            }
+            // No per-key version recorded: reads, DDL/index ops, and
+            // multi-row ops that carry no single surrogate.
+            DocumentOp::PointGet { .. }
+            | DocumentOp::PointUpdate { .. }
+            | DocumentOp::Scan { .. }
+            | DocumentOp::BatchInsert { .. }
+            | DocumentOp::RangeScan { .. }
+            | DocumentOp::Register { .. }
+            | DocumentOp::IndexLookup { .. }
+            | DocumentOp::IndexedFetch { .. }
+            | DocumentOp::DropIndex { .. }
+            | DocumentOp::BackfillIndex { .. }
+            | DocumentOp::EstimateCount { .. }
+            | DocumentOp::InsertSelect { .. }
+            | DocumentOp::Upsert { .. }
+            | DocumentOp::UpdateFromJoin { .. }
+            | DocumentOp::BulkUpdate { .. }
+            | DocumentOp::BulkDelete { .. }
+            | DocumentOp::Merge { .. }
+            | DocumentOp::MaterializeScan { .. }
+            | DocumentOp::ApplyBalanceDelta { .. }
+            | DocumentOp::ResolveWrite(_)
+            | DocumentOp::ResolvedWrite { .. } => return,
         };
         self.note_write_lsn(
             db,
@@ -342,95 +382,30 @@ impl CoreLoop {
                     );
                 }
             }
-            _ => {}
-        }
-    }
-
-    fn record_kv_version(
-        &mut self,
-        db: crate::types::DatabaseId,
-        tenant: TenantId,
-        op: &KvOp,
-        lsn: Lsn,
-    ) {
-        match op {
-            KvOp::Put {
-                collection, key, ..
-            }
-            | KvOp::Insert {
-                collection, key, ..
-            }
-            | KvOp::InsertIfAbsent {
-                collection, key, ..
-            }
-            | KvOp::InsertOnConflictUpdate {
-                collection, key, ..
-            }
-            | KvOp::Expire {
-                collection, key, ..
-            }
-            | KvOp::Persist {
-                collection, key, ..
-            }
-            | KvOp::FieldSet {
-                collection, key, ..
-            }
-            | KvOp::Incr {
-                collection, key, ..
-            }
-            | KvOp::IncrFloat {
-                collection, key, ..
-            }
-            | KvOp::Cas {
-                collection, key, ..
-            }
-            | KvOp::GetSet {
-                collection, key, ..
-            } => {
-                self.note_write_lsn(
-                    db,
-                    tenant,
-                    collection.as_str(),
-                    Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                    lsn,
-                );
-            }
-            KvOp::Delete {
-                collection, keys, ..
-            } => {
-                for key in keys {
-                    self.note_write_lsn(
-                        db,
-                        tenant,
-                        collection.as_str(),
-                        Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                        lsn,
-                    );
-                }
-            }
-            KvOp::BatchPut {
-                collection,
-                entries,
-                ..
-            } => {
-                for (key, _value) in entries {
-                    self.note_write_lsn(
-                        db,
-                        tenant,
-                        collection.as_str(),
-                        Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                        lsn,
-                    );
-                }
-            }
-            // Whole-collection mutations: key set is every row or predicate-
-            // resolved at apply time, so only the collection floor applies.
-            KvOp::Truncate { collection }
-            | KvOp::PredicateUpdate { collection, .. }
-            | KvOp::PredicateDelete { collection, .. } => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
-            }
-            _ => {}
+            // Resolve pass reads what a governed write depends on; the
+            // decided delete lands as EdgeDelete once proposed.
+            GraphOp::ResolveEdgeDelete(_) => {}
+            // Node-label mutations carry no collection/surrogate context, so
+            // no key version is recorded for them.
+            GraphOp::SetNodeLabels { .. } | GraphOp::RemoveNodeLabels { .. } => {}
+            // Read-only traversals, pattern matches, and stats: nothing
+            // written, no version to record.
+            GraphOp::Hop { .. }
+            | GraphOp::Neighbors { .. }
+            | GraphOp::NeighborsMulti { .. }
+            | GraphOp::Path { .. }
+            | GraphOp::Subgraph { .. }
+            | GraphOp::RagFusion { .. }
+            | GraphOp::Algo { .. }
+            | GraphOp::Match { .. }
+            | GraphOp::MatchContinuation { .. }
+            | GraphOp::MatchVarLenResume { .. }
+            | GraphOp::TemporalNeighbors { .. }
+            | GraphOp::TemporalAlgorithm { .. }
+            | GraphOp::Stats { .. } => {}
+            // Distributed algorithm supersteps: compute passes over an
+            // in-memory CSR snapshot, no key written.
+            GraphOp::BspSuperstep(_) | GraphOp::WccSuperstep(_) => {}
         }
     }
 }

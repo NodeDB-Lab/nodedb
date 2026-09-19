@@ -257,6 +257,8 @@ mod sql_transactions_scan_overlay;
 mod sql_transactions_spatial_overlay;
 mod sql_transactions_staged_point_writes;
 mod sql_transactions_timeseries_overlay;
+mod sql_transactions_truncate_overlay;
+mod sql_transactions_truncate_overlay_lifecycle;
 mod sql_transactions_unique_violation;
 mod sql_transactions_upsert_overlay;
 mod sql_transactions_vector_overlay;

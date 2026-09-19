@@ -116,6 +116,10 @@ impl CoreLoop {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
         if let Some(overlay) = self.txn_overlays.get(&txn_id) {
+            // A staged TRUNCATE hides every base hit; staged puts re-enter below.
+            if overlay.is_truncated(&coll_key) {
+                hits.clear();
+            }
             let mut seen: HashMap<HybridFusionKey, usize> = hits
                 .iter()
                 .enumerate()

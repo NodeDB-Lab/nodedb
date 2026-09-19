@@ -155,12 +155,13 @@ impl CoreLoop {
         // error is captured in `first_err` and checked once the retain pass
         // finishes, aborting the merge before the overlay-addition pass runs.
         let mut first_err: Option<crate::Error> = None;
+        let base_visible = overlay.base_visible(coll_key);
         results.retain_mut(|row| {
             if first_err.is_some() {
                 return true;
             }
             let Some(raw) = row_surrogate(row) else {
-                return true;
+                return base_visible;
             };
             match overlay.get(coll_key, raw) {
                 Some(Staged::Tombstone) => false,
@@ -188,7 +189,7 @@ impl CoreLoop {
                     *row = project_doc(&doc, &doc_id, projection);
                     true
                 }
-                None => true,
+                None => base_visible,
             }
         });
         if let Some(e) = first_err {

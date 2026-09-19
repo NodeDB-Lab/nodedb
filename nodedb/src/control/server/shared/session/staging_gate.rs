@@ -339,11 +339,12 @@ where
     // (`stage_count_response`), so a missing one means a staging handler stopped
     // reporting — surface it instead of assuming the statement touched a row.
     //
-    // `RawPayload` is the one outcome with no count to report: the atomic KV ops
-    // (`Incr` / `IncrFloat` / `Cas` / `GetSet` / `Transfer`) answer with a
-    // computed VALUE, which the caller reads from `payload`. `affected` is never
-    // rendered for those, so there is nothing to require and nothing to assume.
-    let affected = if matches!(kind, StagedTagKind::RawPayload) {
+    // Two outcomes carry no count: `RawPayload` (the atomic KV ops `Incr` /
+    // `IncrFloat` / `Cas` / `GetSet` / `Transfer` answer with a computed VALUE,
+    // which the caller reads from `payload`) and `Truncate` (the tag is bare,
+    // matching autocommit). `affected` is never rendered for either, so there
+    // is nothing to require and nothing to assume.
+    let affected = if matches!(kind, StagedTagKind::RawPayload | StagedTagKind::Truncate) {
         0
     } else {
         require_affected_count(resp.payload.as_ref()).map_err(StagingGateError::Dispatch)? as usize
