@@ -146,16 +146,17 @@ impl NodeDbPgHandler {
 
         // An externally-supplied prepared-statement schema (from the Describe
         // phase) names the columns; otherwise the planner's fresh output
-        // schema for this statement does. The Control-Plane computed list is
-        // known only to this statement's plan, so it rides along under the
-        // Describe-phase columns: the shaper evaluates it before those
-        // columns project, and a computed alias never renders as NULL.
+        // schema for this statement does. The two merge, never replace: the
+        // lookup keys come from the planner — the single derivation that runs
+        // `cell_keys`, so two output columns sharing a display name keep
+        // distinct cells (`id`, `id_1`) — while the Describe phase supplies
+        // the client-facing display names and the catalog types it announced.
+        // The Control-Plane computed list is known only to this statement's
+        // plan, so it rides along under the announced columns: the shaper
+        // evaluates it before those columns project, and a computed alias
+        // never renders as NULL.
         let effective_schema_owned = match shaping.projection {
-            Some(described) => crate::control::server::response_shape::schema::OutputSchema {
-                columns: described.columns.clone(),
-                is_star: described.is_star,
-                cp_computed: output_schema.cp_computed,
-            },
+            Some(described) => effective_output_schema(&output_schema, described),
             None => output_schema,
         };
         let effective_schema = Some(&effective_schema_owned);
@@ -266,5 +267,112 @@ impl NodeDbPgHandler {
             },
         )
         .await
+    }
+}
+
+/// Merge the planner's output schema with the Describe phase's.
+///
+/// Lookup keys come from the planner — the single derivation that runs
+/// `cell_keys`, so two output columns sharing a display name keep distinct
+/// cells (`id`, `id_1`). The Describe phase supplies only what it knows: the
+/// client-facing display names and the catalog types it announced.
+fn effective_output_schema(
+    planner: &crate::control::server::response_shape::schema::OutputSchema,
+    described: &crate::control::server::response_shape::schema::OutputSchema,
+) -> crate::control::server::response_shape::schema::OutputSchema {
+    use crate::control::server::response_shape::project::cell_keys;
+    use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
+
+    let mut columns = planner.columns.clone();
+    if columns.len() == described.columns.len() {
+        for (column, announced) in columns.iter_mut().zip(described.columns.iter()) {
+            column.display_name = announced.display_name.clone();
+            column.ty = announced.ty.clone();
+        }
+    } else {
+        // The announced field list and the plan disagree on arity. Keep the
+        // columns the client was told about, and derive their keys the same
+        // way the row writer does, so reader and writer still agree.
+        let names: Vec<String> = described
+            .columns
+            .iter()
+            .map(|column| column.display_name.clone())
+            .collect();
+        columns = described
+            .columns
+            .iter()
+            .zip(cell_keys(&names))
+            .map(|(column, key)| OutputColumn {
+                display_name: column.display_name.clone(),
+                lookup_key: key,
+                ty: column.ty.clone(),
+            })
+            .collect();
+    }
+    OutputSchema {
+        columns,
+        is_star: described.is_star,
+        cp_computed: planner.cp_computed.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
+    use crate::control::server::response_shape::types::DdlColType;
+
+    fn column(name: &str, key: &str) -> OutputColumn {
+        OutputColumn {
+            display_name: name.to_owned(),
+            lookup_key: key.to_owned(),
+            ty: DdlColType::Text,
+        }
+    }
+
+    fn schema(columns: Vec<OutputColumn>) -> OutputSchema {
+        OutputSchema {
+            columns,
+            is_star: false,
+            cp_computed: Vec::new(),
+        }
+    }
+
+    /// The announced schema never replaces the planner's keys: two columns
+    /// announced as `id` still read `id` and `id_1`.
+    #[test]
+    fn announced_display_names_keep_the_planner_keys() {
+        let planner = schema(vec![column("id", "id"), column("id", "id_1")]);
+        let described = schema(vec![column("id", "id"), column("id", "id")]);
+
+        let merged = effective_output_schema(&planner, &described);
+        let keys: Vec<&str> = merged
+            .columns
+            .iter()
+            .map(|column| column.lookup_key.as_str())
+            .collect();
+        assert_eq!(keys, ["id", "id_1"]);
+        let names: Vec<&str> = merged
+            .columns
+            .iter()
+            .map(|column| column.display_name.as_str())
+            .collect();
+        assert_eq!(names, ["id", "id"]);
+    }
+
+    /// An announced field count that disagrees with the plan falls back to
+    /// keys derived from the announced names — reader and writer still agree.
+    #[test]
+    fn arity_mismatch_derives_announced_keys() {
+        let planner = schema(vec![column("one", "one")]);
+        let described = schema(vec![column("id", "id"), column("id", "id")]);
+
+        let merged = effective_output_schema(&planner, &described);
+        let keys: Vec<&str> = merged
+            .columns
+            .iter()
+            .map(|column| column.lookup_key.as_str())
+            .collect();
+        assert_eq!(keys, ["id", "id_1"]);
     }
 }
