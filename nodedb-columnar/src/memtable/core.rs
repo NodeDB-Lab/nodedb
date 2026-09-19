@@ -51,6 +51,11 @@ impl ColumnarMemtable {
         self.row_count >= self.flush_threshold
     }
 
+    /// Row count at which [`Self::should_flush`] turns true.
+    pub fn flush_threshold(&self) -> usize {
+        self.flush_threshold
+    }
+
     /// Whether the memtable is empty.
     pub fn is_empty(&self) -> bool {
         self.row_count == 0
