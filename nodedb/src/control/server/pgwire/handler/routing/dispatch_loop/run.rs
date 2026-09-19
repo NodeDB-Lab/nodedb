@@ -3,8 +3,8 @@
 //! The per-task dispatch loop for non-Calvin pgwire queries: tenant check,
 //! in-transaction routing, streaming fast path, pre-dispatch hooks, dispatch,
 //! read tracking, AFTER triggers, and metering. Shaping one task's response
-//! lives in `task.rs`; the statement's tail (folded RETURNING rows and the
-//! set-op merge) lives in `finish.rs`.
+//! lives in `task.rs`; the statement's tail (folded RETURNING rows, the
+//! set-op merge, and the one folded command tag) lives in `finish.rs`.
 //!
 //! Split out of `execute.rs`, which keeps the plan/authorize/admit entry
 //! points and hands the admitted task list here.
@@ -17,7 +17,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::redaction::QueryRedaction;
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::types::{ShapedRows, StatementTag};
 use crate::control::server::shared::ddl::neutral::maintenance::auto_analyze;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
@@ -26,11 +26,12 @@ use crate::types::TenantId;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::super::super::types::{
-    error_to_sqlstate, response_status_to_sqlstate, sqlstate_error,
+    dml_fold_error_to_pg, error_to_sqlstate, response_status_to_sqlstate, sqlstate_error,
 };
 use super::super::super::core::NodeDbPgHandler;
 use super::super::super::plan::{PlanKind, describe_plan};
-use super::super::execute_dml_hooks;
+use super::super::cluster_array::ClusterArrayResult;
+use super::super::execute_dml_hooks::{self, PreDispatchHandled};
 use super::super::result_shaping::ResultShaping;
 use super::super::streaming::StreamSelectContext;
 use super::finish::StatementTail;
@@ -76,6 +77,10 @@ impl NodeDbPgHandler {
         // loop rather than as a RowDescription/DataRow sequence per task, which
         // an extended-query client reads as several results for one statement.
         let mut returning_rows: Option<ShapedRows> = None;
+        // The statement's ONE command tag, folded over its write tasks the
+        // same way. `execute_sql` calls this loop once per `;`-separated
+        // statement, so the fold never crosses a statement boundary.
+        let mut statement_tag = StatementTag::default();
         let mut responses = Vec::with_capacity(tasks.len());
         // Session-scoped sequence access for the statement's Control-Plane
         // computed columns, resolved once: every task of one statement
@@ -120,7 +125,7 @@ impl NodeDbPgHandler {
                 execute_dml_hooks::TxnRouteOutcome::Proceed(routed_task) => {
                     task = *routed_task;
                 }
-                execute_dml_hooks::TxnRouteOutcome::Handled(resp) => {
+                execute_dml_hooks::TxnRouteOutcome::Handled(handled) => {
                     if returns_rows {
                         let (severity, code, message) = error_to_sqlstate(
                             &crate::control::server::shared::returning::
@@ -132,7 +137,7 @@ impl NodeDbPgHandler {
                             message,
                         ))));
                     }
-                    responses.push(resp);
+                    handled.fold_into(&mut statement_tag)?;
                     continue;
                 }
             }
@@ -158,7 +163,7 @@ impl NodeDbPgHandler {
                             "ClusterArray authorization returned no capability".to_owned(),
                         )))
                     })?;
-                let response = self
+                match self
                     .dispatch_cluster_array_task(
                         authorized,
                         projection,
@@ -166,8 +171,13 @@ impl NodeDbPgHandler {
                         session_id,
                         auth_ctx,
                     )
-                    .await?;
-                responses.push(response);
+                    .await?
+                {
+                    ClusterArrayResult::Rows(response) => responses.push(response),
+                    ClusterArrayResult::Dml(outcome) => statement_tag
+                        .fold(outcome)
+                        .map_err(|e| dml_fold_error_to_pg(&e))?,
+                }
                 continue;
             }
 
@@ -244,8 +254,16 @@ impl NodeDbPgHandler {
                 )
                 .await?
             {
-                execute_dml_hooks::PreDispatchOutcome::Handled(resp) => {
-                    responses.push(resp);
+                execute_dml_hooks::PreDispatchOutcome::Handled(PreDispatchHandled::Rows(
+                    response,
+                )) => {
+                    responses.push(response);
+                    continue;
+                }
+                execute_dml_hooks::PreDispatchOutcome::Handled(PreDispatchHandled::Write(
+                    handled,
+                )) => {
+                    handled.fold_into(&mut statement_tag)?;
                     continue;
                 }
                 execute_dml_hooks::PreDispatchOutcome::Proceed(proceed) => {
@@ -416,6 +434,7 @@ impl NodeDbPgHandler {
                     },
                     &mut responses,
                     &mut returning_rows,
+                    &mut statement_tag,
                 )?
             };
 
@@ -434,6 +453,7 @@ impl NodeDbPgHandler {
             &mut responses,
             StatementTail {
                 returning_rows,
+                statement_tag,
                 dedup_payloads,
                 dedup_set_op,
                 projection,

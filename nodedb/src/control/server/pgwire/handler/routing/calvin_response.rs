@@ -7,10 +7,9 @@
 //! a different concern from planning a single statement into tasks — this file
 //! owns the former, `planning.rs` the latter.
 
-use pgwire::api::results::Tag;
 use pgwire::error::{ErrorInfo, PgWireError};
 
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::types::{DmlOutcome, ShapedRows};
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -33,8 +32,11 @@ pub(super) struct CalvinResponseCtx<'a> {
 pub(super) enum CalvinTaskOutcome {
     /// RETURNING rows, to be folded into the statement's single result set.
     Rows(ShapedRows),
-    /// A command tag, emitted as its own response.
-    Tag(pgwire::api::results::Response),
+    /// A count-bearing outcome, to be folded into the statement's one tag.
+    Dml(DmlOutcome),
+    /// No count and no verb: the statement renders `OK` unless a
+    /// count-bearing task is folded too.
+    Opaque,
 }
 
 /// Build the pgwire outcome for one task of a completed Calvin batch.
@@ -45,13 +47,15 @@ pub(super) enum CalvinTaskOutcome {
 /// multi-row write plans one task per row and an extended-query client reads a
 /// RowDescription/DataRow sequence per task as several results for one
 /// statement. Every other task (and a RETURNING task with no carried payload)
-/// keeps the synthesised `Response::Execution` command tag.
+/// contributes to the statement's one command tag.
 pub(super) fn calvin_execution_response(
     task: &PhysicalTask,
     apply_resp: Option<&crate::bridge::envelope::Response>,
     ctx: CalvinResponseCtx<'_>,
 ) -> pgwire::error::PgWireResult<CalvinTaskOutcome> {
-    use super::super::plan::{calvin_tag_for_plan, is_calvin_foldable};
+    use super::super::plan::{
+        calvin_tag_for_plan, dml_outcome_by_op, dml_outcome_from_payload, is_calvin_foldable,
+    };
     use crate::control::server::response_shape::compose::{
         ShapeOutcome, shape_response_materialized,
     };
@@ -98,18 +102,8 @@ pub(super) fn calvin_execution_response(
     // does not, the deposit path regressed: fail loudly rather than synthesise a
     // count, which is what made a delete of an absent row report a removed row.
     let plan_kind = describe_plan(&task.plan);
-    let count_bearing_tag = match plan_kind {
-        PlanKind::DmlResult(tag) => Some(tag),
-        // The verb is in the payload; the error text below only names the kind.
-        PlanKind::DmlResultByOp => Some("insert-or-update"),
-        PlanKind::Execution
-        | PlanKind::ArraySlice
-        | PlanKind::ReturningRows
-        | PlanKind::SingleDocument
-        | PlanKind::MultiRow => None,
-    };
-    if let Some(tag) = count_bearing_tag {
-        let resp = apply_resp.ok_or_else(|| {
+    let applied = |tag: &str| {
+        apply_resp.ok_or_else(|| {
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
                 "XX000".to_owned(),
@@ -118,18 +112,33 @@ pub(super) fn calvin_execution_response(
                      affected-row count from"
                 ),
             )))
-        })?;
-        return Ok(CalvinTaskOutcome::Tag(
-            super::super::plan::payload_to_response(resp.payload.as_bytes(), plan_kind)?.response,
-        ));
-    }
-
-    let tag = if is_calvin_foldable(&task.plan) {
-        calvin_tag_for_plan(&task.plan)?
-    } else {
-        Tag::new("OK")
+        })
     };
-    Ok(CalvinTaskOutcome::Tag(
-        pgwire::api::results::Response::Execution(tag),
-    ))
+    match plan_kind {
+        PlanKind::DmlResult(verb) => {
+            let resp = applied(verb)?;
+            Ok(CalvinTaskOutcome::Dml(dml_outcome_from_payload(
+                resp.payload.as_bytes(),
+                verb,
+            )?))
+        }
+        // The verb is in the payload; the error text only names the kind.
+        PlanKind::DmlResultByOp => {
+            let resp = applied("insert-or-update")?;
+            Ok(CalvinTaskOutcome::Dml(dml_outcome_by_op(
+                resp.payload.as_bytes(),
+            )?))
+        }
+        PlanKind::Execution
+        | PlanKind::ArraySlice
+        | PlanKind::ReturningRows
+        | PlanKind::SingleDocument
+        | PlanKind::MultiRow => {
+            if is_calvin_foldable(&task.plan) {
+                Ok(CalvinTaskOutcome::Dml(calvin_tag_for_plan(&task.plan)?))
+            } else {
+                Ok(CalvinTaskOutcome::Opaque)
+            }
+        }
+    }
 }

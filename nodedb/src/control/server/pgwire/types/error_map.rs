@@ -7,6 +7,7 @@ use pgwire::error::{ErrorInfo, PgWireError};
 
 use crate::OllpExhaustedCause;
 use crate::bridge::envelope::{ErrorCode, Status};
+use crate::control::server::response_shape::types::DmlFoldError;
 
 /// Create a pgwire ErrorResponse with a SQLSTATE code.
 pub fn sqlstate_error(code: &str, message: &str) -> PgWireError {
@@ -15,6 +16,13 @@ pub fn sqlstate_error(code: &str, message: &str) -> PgWireError {
         code.to_owned(),
         message.to_owned(),
     )))
+}
+
+/// Map a statement-tag fold refusal to the pgwire error the client reads.
+/// Two tasks of one statement disagreeing on their verb is a planner bug,
+/// so it surfaces as an internal error.
+pub fn dml_fold_error_to_pg(e: &DmlFoldError) -> PgWireError {
+    sqlstate_error("XX000", &e.to_string())
 }
 
 /// Map an error raised while shaping a response to the pgwire error the

@@ -14,7 +14,9 @@
 //! `RESTORE TENANT`, `CREATE COLLECTION`, ...) — those keep whatever shape
 //! their caller already used; the protocol has no rule to conform to.
 
-use pgwire::api::results::Tag;
+use pgwire::api::results::{Response, Tag};
+
+use crate::control::server::response_shape::types::{DmlOutcome, FoldedTag};
 
 /// OID reported in the `INSERT <oid> <rows>` tag. Real Postgres has emitted
 /// `0` here since 8.x (the OID-based tag only mattered for `oid`-typed
@@ -32,6 +34,25 @@ pub(in crate::control::server::pgwire) fn dml_tag(command: &str, rows: usize) ->
         // a count — drop it here too rather than inventing one.
         "TRUNCATE" => Tag::new(command),
         _ => Tag::new(command).with_rows(rows),
+    }
+}
+
+/// Render a folded statement outcome as its `CommandComplete` tag.
+pub(in crate::control::server::pgwire) fn render(outcome: DmlOutcome) -> Tag {
+    dml_tag(outcome.verb, outcome.affected as usize)
+}
+
+/// Push the statement's one folded tag onto `responses`, after its rows: its
+/// DML tag when it folded a count-bearing task, `OK` when only opaque tasks
+/// folded, nothing when it folded no task at all.
+pub(in crate::control::server::pgwire) fn push_folded_tag(
+    responses: &mut Vec<Response>,
+    tag: Option<FoldedTag>,
+) {
+    match tag {
+        Some(FoldedTag::Dml(outcome)) => responses.push(Response::Execution(render(outcome))),
+        Some(FoldedTag::Opaque) => responses.push(Response::Execution(Tag::new("OK"))),
+        None => {}
     }
 }
 
@@ -55,6 +76,16 @@ mod tests {
     fn truncate_drops_the_count() {
         let tag: pgwire::messages::response::CommandComplete = dml_tag("TRUNCATE", 9).into();
         assert_eq!(tag.tag, "TRUNCATE");
+    }
+
+    #[test]
+    fn render_follows_the_outcome_verb() {
+        let tag: pgwire::messages::response::CommandComplete = render(DmlOutcome {
+            verb: "INSERT",
+            affected: 3,
+        })
+        .into();
+        assert_eq!(tag.tag, "INSERT 0 3");
     }
 
     #[test]

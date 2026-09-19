@@ -17,17 +17,29 @@ use crate::control::server::dispatch_utils::publish_cluster_array_change_events;
 use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::response_shape::types::DmlOutcome;
 use crate::control::server::shared::session::SessionId;
 
 use super::super::super::types::{error_to_sqlstate, shape_error_to_pg};
 use super::super::core::NodeDbPgHandler;
-use super::super::plan::{PlanKind, payload_to_response};
+use super::super::plan::{
+    PlanKind, dml_outcome_by_op, dml_outcome_from_payload, payload_to_response,
+};
 use super::super::shape_encode;
+
+/// What one `ClusterArrayOp` answers with.
+pub(super) enum ClusterArrayResult {
+    /// A read's rows (`Slice` / `Agg`), encoded. Caller pushes the response.
+    Rows(Response),
+    /// A write's count (`Put` / `Delete`). Caller folds it into the
+    /// statement tag.
+    Dml(DmlOutcome),
+}
 
 impl NodeDbPgHandler {
     /// Execute a single `ClusterArrayOp` via the `ArrayCoordinator` and shape
-    /// its payload into one pgwire `Response`. Any carried notice is pushed to
-    /// the supplied session.
+    /// its payload into one pgwire `Response` or one count-bearing outcome.
+    /// Any carried notice is pushed to the supplied session.
     ///
     /// On a successful `Put`/`Delete` (writes; `Slice`/`Agg` are reads and
     /// publish nothing), publishes a CDC change event keyed by the op's own
@@ -42,7 +54,7 @@ impl NodeDbPgHandler {
         result_formats: &[FieldFormat],
         session_id: SessionId,
         auth: &crate::control::security::auth_context::AuthContext,
-    ) -> PgWireResult<Response> {
+    ) -> PgWireResult<ClusterArrayResult> {
         use crate::control::cluster::ClusterArrayExecutor;
         use std::sync::Arc;
 
@@ -141,15 +153,28 @@ impl NodeDbPgHandler {
                 if let Some(n) = notice {
                     self.sessions.push_notice(session_id, n);
                 }
-                Ok(response)
+                Ok(ClusterArrayResult::Rows(response))
             }
-            ShapeOutcome::Passthrough => {
-                let shaped = payload_to_response(&payload_bytes, cluster_plan_kind)?;
-                if let Some(notice) = shaped.notice {
-                    self.sessions.push_notice(session_id, notice);
+            ShapeOutcome::Passthrough => match cluster_plan_kind {
+                PlanKind::DmlResult(verb) => Ok(ClusterArrayResult::Dml(dml_outcome_from_payload(
+                    &payload_bytes,
+                    verb,
+                )?)),
+                PlanKind::DmlResultByOp => {
+                    Ok(ClusterArrayResult::Dml(dml_outcome_by_op(&payload_bytes)?))
                 }
-                Ok(shaped.response)
-            }
+                PlanKind::Execution
+                | PlanKind::ArraySlice
+                | PlanKind::ReturningRows
+                | PlanKind::SingleDocument
+                | PlanKind::MultiRow => {
+                    let shaped = payload_to_response(&payload_bytes, cluster_plan_kind)?;
+                    if let Some(notice) = shaped.notice {
+                        self.sessions.push_notice(session_id, notice);
+                    }
+                    Ok(ClusterArrayResult::Rows(shaped.response))
+                }
+            },
         }
     }
 }

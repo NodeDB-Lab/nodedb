@@ -2,8 +2,10 @@
 
 //! Protocol-neutral plan classification and shaped row-set types.
 
+pub mod dml_outcome;
 pub mod plan_kind;
 pub mod shaped;
 
+pub use dml_outcome::{DmlFoldError, DmlOutcome, FoldedTag, StatementTag};
 pub use plan_kind::{PlanKind, describe_plan};
 pub use shaped::{DdlColType, ShapedRow, ShapedRows};

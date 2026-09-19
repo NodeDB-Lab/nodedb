@@ -17,10 +17,12 @@ use crate::control::server::shared::sql::staging_predicates::{
     StagedTagKind, extract_kv_conflict_op, require_affected_count,
 };
 
-use super::super::command_tag::dml_tag;
+use super::super::command_tag::render;
 use super::super::types::text_field;
 
-pub(super) use crate::control::server::response_shape::types::{PlanKind, describe_plan};
+pub(super) use crate::control::server::response_shape::types::{
+    DmlOutcome, PlanKind, describe_plan,
+};
 
 /// Returns `true` when a plan can produce a deterministic pgwire tag without
 /// a round-trip to the Data Plane.
@@ -85,55 +87,62 @@ pub(super) fn is_calvin_foldable(plan: &PhysicalPlan) -> bool {
     }
 }
 
-/// Render a neutral [`StagedTagKind`] (decided by the protocol-neutral
-/// staging gate) as the pgwire `CommandComplete` tag, preserving the exact
-/// tag strings the pre-refactor `point_write_tag` / `kv_write_tag` produced:
-/// `INSERT 0 n` / `UPDATE n` / `DELETE n`, and for a KV
-/// `InsertOnConflictUpdate` outcome, `UPDATE n` when the stage handler
-/// resolved to an update or `INSERT 0 n` when it resolved to an insert.
-pub(super) fn tag_from_staged(kind: StagedTagKind, affected: usize) -> Tag {
-    match kind {
-        StagedTagKind::Insert => dml_tag("INSERT", affected),
-        StagedTagKind::Update => dml_tag("UPDATE", affected),
-        StagedTagKind::Delete => dml_tag("DELETE", affected),
-        StagedTagKind::KvUpsert { updated: true } => dml_tag("UPDATE", affected),
-        StagedTagKind::KvUpsert { updated: false } => dml_tag("INSERT", affected),
+/// The count-bearing outcome of a staged write, from the neutral
+/// [`StagedTagKind`] the staging gate decided. Verb mapping: `INSERT` /
+/// `UPDATE` / `DELETE` by kind, and for a KV `InsertOnConflictUpdate` the
+/// verb the stage handler resolved to.
+pub(super) fn staged_dml_outcome(kind: StagedTagKind, affected: usize) -> DmlOutcome {
+    let verb = match kind {
+        StagedTagKind::Insert => "INSERT",
+        StagedTagKind::Update => "UPDATE",
+        StagedTagKind::Delete => "DELETE",
+        StagedTagKind::KvUpsert { updated: true } => "UPDATE",
+        StagedTagKind::KvUpsert { updated: false } => "INSERT",
         // Matches the autocommit `DocumentOp::Upsert` / `KvOp::Put` tag
         // exactly: always the literal `UPSERT` command, regardless of
         // insert-vs-update outcome (see `response_shape::types::describe_plan`'s
-        // `DmlResult("UPSERT")` arms and `payload_to_response`'s
-        // `PlanKind::DmlResult` rendering).
-        StagedTagKind::Upsert => dml_tag("UPSERT", affected),
+        // `DmlResult("UPSERT")` arms).
+        StagedTagKind::Upsert => "UPSERT",
         // Statement-time in-transaction MERGE: the Postgres command tag for a
         // MERGE is `MERGE <total-rows-affected>` across all arms.
-        StagedTagKind::Merge => dml_tag("MERGE", affected),
+        StagedTagKind::Merge => "MERGE",
         // Statement-time in-transaction `UPDATE ... FROM`: an UPDATE reports the
         // Postgres `UPDATE <n>` command tag over the matched target rows.
-        StagedTagKind::UpdateFromJoin => dml_tag("UPDATE", affected),
+        StagedTagKind::UpdateFromJoin => "UPDATE",
         // KV `Incr` / `IncrFloat` / `Cas` / `GetSet` never reach pgwire's
-        // generic tag-rendering path today: their sole SQL surface (`SELECT
+        // generic tag-rendering path: their sole SQL surface (`SELECT
         // KV_INCR(..)` and friends, in `ddl/neutral/kv_atomic/`) reads
         // `StagedWriteOutcome::payload` directly and never calls
-        // `tag_from_staged`. This arm exists only so the match stays
+        // `staged_dml_outcome`. This arm exists only so the match stays
         // exhaustive against a new `PhysicalPlan::Kv` caller; it renders the
         // same tag pgwire uses for a function-call `SELECT`.
-        StagedTagKind::RawPayload => dml_tag("SELECT", affected),
+        StagedTagKind::RawPayload => "SELECT",
+    };
+    DmlOutcome {
+        verb,
+        affected: affected as u64,
     }
 }
 
-/// Synthesise the pgwire `CommandComplete` tag for a Calvin-foldable plan.
+/// Synthesise the count-bearing outcome for a Calvin-foldable plan.
 ///
 /// Caller invariant: `plan` must already have passed `is_calvin_foldable`.
 /// The match arms here are kept in lockstep with that predicate so a desync
 /// between the two is loud rather than silent.
-pub(super) fn calvin_tag_for_plan(plan: &PhysicalPlan) -> PgWireResult<Tag> {
+pub(super) fn calvin_tag_for_plan(plan: &PhysicalPlan) -> PgWireResult<DmlOutcome> {
     use nodedb_physical::physical_plan::KvOp;
 
     match plan {
-        PhysicalPlan::Document(DocumentOp::PointPut { .. }) => Ok(dml_tag("INSERT", 1)),
+        PhysicalPlan::Document(DocumentOp::PointPut { .. }) => Ok(DmlOutcome {
+            verb: "INSERT",
+            affected: 1,
+        }),
         // The SQL `UPSERT` statement: same tag as its `DocumentOp::Upsert`
         // sibling and as `describe_plan`'s `DmlResult("UPSERT")` arm.
-        PhysicalPlan::Kv(KvOp::Put { .. }) => Ok(dml_tag("UPSERT", 1)),
+        PhysicalPlan::Kv(KvOp::Put { .. }) => Ok(DmlOutcome {
+            verb: "UPSERT",
+            affected: 1,
+        }),
 
         other => Err(invalid_plan_shape(format!(
             "calvin_tag_for_plan called on non-foldable plan: {other:?}"
@@ -160,40 +169,80 @@ impl From<Response> for ShapedResponse {
     }
 }
 
+/// The count-bearing outcome a `DmlResult(verb)` payload reports.
+///
+/// The count comes from the write, always. There is no "point operations
+/// affected exactly 1 row" shortcut: a point delete or a conflicting
+/// `ON CONFLICT DO NOTHING` insert is the same plan whether it touched a row
+/// or not, so assuming 1 here reported rows that were never there.
+pub(super) fn dml_outcome_from_payload(
+    payload: &[u8],
+    verb: &'static str,
+) -> PgWireResult<DmlOutcome> {
+    let affected = require_affected_count(payload).map_err(|e| {
+        invalid_plan_shape(format!(
+            "{verb} response is missing its affected count: {e}"
+        ))
+    })?;
+    Ok(DmlOutcome { verb, affected })
+}
+
+/// The count-bearing outcome a `DmlResultByOp` payload reports.
+///
+/// The handler decides insert-vs-update at apply time and reports it as
+/// `op`. A missing or unknown verb is a handler bug, never a default tag.
+pub(super) fn dml_outcome_by_op(payload: &[u8]) -> PgWireResult<DmlOutcome> {
+    let affected = require_affected_count(payload).map_err(|e| {
+        invalid_plan_shape(format!(
+            "DmlResultByOp response is missing its affected count: {e}"
+        ))
+    })?;
+    let verb = match extract_kv_conflict_op(payload).as_deref() {
+        Some("insert") => "INSERT",
+        Some("update") => "UPDATE",
+        other => {
+            return Err(invalid_plan_shape(format!(
+                "DmlResultByOp response carries no usable `op` verb \
+                 (got {other:?}); the handler must report `insert` or `update`"
+            )));
+        }
+    };
+    Ok(DmlOutcome { verb, affected })
+}
+
+/// The count-bearing outcome of a passthrough payload: `Some` for the
+/// count-bearing kinds, `None` for an opaque `Execution`, an error for a
+/// row-shaped kind (those never reach a tag).
+pub(super) fn payload_to_dml_outcome(
+    payload: &[u8],
+    kind: PlanKind,
+) -> PgWireResult<Option<DmlOutcome>> {
+    match kind {
+        PlanKind::Execution => Ok(None),
+        PlanKind::DmlResult(verb) => dml_outcome_from_payload(payload, verb).map(Some),
+        PlanKind::DmlResultByOp => dml_outcome_by_op(payload).map(Some),
+        PlanKind::ArraySlice
+        | PlanKind::ReturningRows
+        | PlanKind::SingleDocument
+        | PlanKind::MultiRow => Err(invalid_plan_shape(format!(
+            "payload_to_dml_outcome cannot handle plan kind {kind:?}"
+        ))),
+    }
+}
+
+/// Shape a passthrough payload into one pgwire `Response`. A count-bearing
+/// kind renders its own tag here; a caller folding several tasks into one
+/// statement tag reads [`payload_to_dml_outcome`] instead.
 pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> PgWireResult<ShapedResponse> {
     match kind {
         PlanKind::Execution => Ok(Response::Execution(Tag::new("OK")).into()),
-        PlanKind::DmlResult(tag) => {
-            // The count comes from the write, always. There is no "point
-            // operations affected exactly 1 row" shortcut: a point delete or a
-            // conflicting `ON CONFLICT DO NOTHING` insert is the same plan
-            // whether it touched a row or not, so assuming 1 here reported rows
-            // that were never there.
-            let count = require_affected_count(payload).map_err(|e| {
-                invalid_plan_shape(format!("{tag} response is missing its affected count: {e}"))
-            })? as usize;
-            Ok(Response::Execution(dml_tag(tag, count)).into())
+        PlanKind::DmlResult(verb) => {
+            let outcome = dml_outcome_from_payload(payload, verb)?;
+            Ok(Response::Execution(render(outcome)).into())
         }
         PlanKind::DmlResultByOp => {
-            let count = require_affected_count(payload).map_err(|e| {
-                invalid_plan_shape(format!(
-                    "DmlResultByOp response is missing its affected count: {e}"
-                ))
-            })? as usize;
-            // The handler decides insert-vs-update at apply time and reports
-            // it as `op`. A missing or unknown verb is a handler bug, never a
-            // default tag.
-            let tag = match extract_kv_conflict_op(payload).as_deref() {
-                Some("insert") => "INSERT",
-                Some("update") => "UPDATE",
-                other => {
-                    return Err(invalid_plan_shape(format!(
-                        "DmlResultByOp response carries no usable `op` verb \
-                         (got {other:?}); the handler must report `insert` or `update`"
-                    )));
-                }
-            };
-            Ok(Response::Execution(dml_tag(tag, count)).into())
+            let outcome = dml_outcome_by_op(payload)?;
+            Ok(Response::Execution(render(outcome)).into())
         }
         PlanKind::ArraySlice | PlanKind::ReturningRows | PlanKind::SingleDocument => {
             Err(invalid_plan_shape(format!(
@@ -289,9 +338,15 @@ mod tests {
             rls_filters: Vec::new(),
         });
         assert!(is_calvin_foldable(&plan));
-        let tag: pgwire::messages::response::CommandComplete = calvin_tag_for_plan(&plan)
-            .expect("foldable plan renders a tag")
-            .into();
+        let outcome = calvin_tag_for_plan(&plan).expect("foldable plan renders a tag");
+        assert_eq!(
+            outcome,
+            DmlOutcome {
+                verb: "UPSERT",
+                affected: 1
+            }
+        );
+        let tag: pgwire::messages::response::CommandComplete = render(outcome).into();
         assert_eq!(tag.tag, "UPSERT 1");
     }
 
@@ -364,5 +419,45 @@ mod tests {
         let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 0 }))
             .expect("encode count payload");
         assert!(payload_to_response(&payload, PlanKind::DmlResult("DELETE")).is_ok());
+    }
+
+    /// The fold reads the neutral outcome: a count for the count-bearing
+    /// kinds, nothing for an opaque execution, a refusal for row kinds.
+    #[test]
+    fn dml_outcome_follows_plan_kind() {
+        let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 2 }))
+            .expect("encode count payload");
+        assert_eq!(
+            payload_to_dml_outcome(&payload, PlanKind::DmlResult("INSERT")).expect("insert"),
+            Some(DmlOutcome {
+                verb: "INSERT",
+                affected: 2
+            })
+        );
+        assert_eq!(
+            payload_to_dml_outcome(&[], PlanKind::Execution).expect("opaque"),
+            None
+        );
+        assert!(payload_to_dml_outcome(&[], PlanKind::MultiRow).is_err());
+        assert!(payload_to_dml_outcome(&[], PlanKind::ReturningRows).is_err());
+    }
+
+    /// Staged outcomes carry the verb the staging gate decided.
+    #[test]
+    fn staged_outcome_maps_kind_to_verb() {
+        assert_eq!(
+            staged_dml_outcome(StagedTagKind::KvUpsert { updated: true }, 1),
+            DmlOutcome {
+                verb: "UPDATE",
+                affected: 1
+            }
+        );
+        assert_eq!(
+            staged_dml_outcome(StagedTagKind::Merge, 4),
+            DmlOutcome {
+                verb: "MERGE",
+                affected: 4
+            }
+        );
     }
 }
