@@ -8,11 +8,23 @@ use nodedb_types::value::Value;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
+use crate::data::executor::spatial_key::SpatialIndexKey;
 use crate::data::executor::task::ExecutionTask;
+
+use super::geometry_remove::RemovedSpatialEntry;
+
+/// What one geometry-index pass changed, for a transactional caller to
+/// reverse: the entries it removed (a re-indexed `id`'s prior geometry) and
+/// the entries it inserted.
+#[derive(Default)]
+pub(in crate::data::executor) struct GeometryIndexDelta {
+    pub removed: Vec<RemovedSpatialEntry>,
+    pub inserted: Vec<(SpatialIndexKey, u64)>,
+}
 
 impl CoreLoop {
     /// Populate the R-tree for any `Geometry` columns on `schema`, from the
-    /// rows just inserted (`ndb_rows`).
+    /// rows just inserted (`ndb_rows`). Returns what it changed.
     ///
     /// `schema` is threaded in from the caller rather than re-read from
     /// `columnar_engines` here: the caller already resolved it, and taking it
@@ -26,7 +38,8 @@ impl CoreLoop {
         schema: &ColumnarSchema,
         collection: &str,
         ndb_rows: &[nodedb_types::Value],
-    ) {
+    ) -> GeometryIndexDelta {
+        let mut delta = GeometryIndexDelta::default();
         let db_id = task.request.database_id;
         let tid = task.request.tenant_id;
         let geom_cols: Vec<usize> = schema
@@ -38,7 +51,7 @@ impl CoreLoop {
             .collect();
 
         if geom_cols.is_empty() {
-            return;
+            return delta;
         }
         for row in ndb_rows {
             let obj = match row {
@@ -59,15 +72,15 @@ impl CoreLoop {
             // without clearing first the tree would carry a stale bbox
             // alongside the fresh one and a scan would match/emit the
             // document twice. Mirrors `apply_point_put_spatial`'s use of
-            // the same helper; the removed tuples aren't needed here
-            // since this insert path has no transactional undo to feed.
+            // the same helper. The removed tuples are reported so a
+            // transactional caller can put them back on rollback.
             let spatial_entry_id = SpatialEntryId::from_user_id(&doc_id);
-            let _ = self.remove_document_spatial_indexes(
+            delta.removed.extend(self.remove_document_spatial_indexes(
                 db_id.as_u64(),
                 tid.as_u64(),
                 collection,
                 spatial_entry_id,
-            );
+            ));
             for &col_idx in &geom_cols {
                 let col_def = &schema.columns[col_idx];
                 let field_val = match obj.get(&col_def.name) {
@@ -110,7 +123,31 @@ impl CoreLoop {
                     ),
                     doc_id.clone(),
                 );
+                delta.inserted.push((index_key, entry_id));
             }
+        }
+        delta
+    }
+
+    /// Record a geometry-index pass on `undo_log` so a rollback reverses
+    /// it: the removed entries re-insert, the inserted entries delete. The
+    /// entries are pushed removed-first, so the reverse-order rollback
+    /// deletes the fresh entries before it re-inserts the prior ones.
+    pub(in crate::data::executor) fn push_geometry_index_undo(
+        undo_log: &mut Vec<crate::data::executor::handlers::transaction::undo::UndoEntry>,
+        delta: GeometryIndexDelta,
+    ) {
+        use crate::data::executor::handlers::transaction::undo::UndoEntry;
+        for (key, entry_id, bbox, document_id) in delta.removed {
+            undo_log.push(UndoEntry::SpatialDelete {
+                key,
+                entry_id,
+                bbox,
+                document_id,
+            });
+        }
+        for (key, entry_id) in delta.inserted {
+            undo_log.push(UndoEntry::SpatialInsert { key, entry_id });
         }
     }
 }

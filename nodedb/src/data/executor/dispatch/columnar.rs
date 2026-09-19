@@ -71,6 +71,7 @@ impl CoreLoop {
                         rls_write_check,
                         returning: returning.as_ref(),
                         rls_filters,
+                        spatial_undo: None,
                     },
                 )
             }

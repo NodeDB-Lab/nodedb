@@ -237,6 +237,7 @@ impl CoreLoop {
                 // waiting on a projection, and no identity to gate reads for.
                 returning: None,
                 rls_filters: &[],
+                spatial_undo: None,
             },
         );
         if response.status != crate::bridge::envelope::Status::Ok {

@@ -10,6 +10,19 @@ use nodedb_types::value::Value;
 use crate::data::executor::core_loop::CoreLoop;
 
 impl CoreLoop {
+    /// Read the live row bound to `pk_bytes`, wherever it lives: the memtable
+    /// first, then a flushed segment. `None` when the PK is unbound.
+    pub(in crate::data::executor) fn read_columnar_row_by_pk(
+        &self,
+        engine_key: &(nodedb_types::DatabaseId, crate::types::TenantId, String),
+        pk_bytes: &[u8],
+    ) -> Option<Vec<Value>> {
+        self.columnar_engines
+            .get(engine_key)
+            .and_then(|e| e.lookup_memtable_row_by_pk(pk_bytes))
+            .or_else(|| self.read_flushed_row_by_pk(engine_key, pk_bytes))
+    }
+
     /// Read a single row from a flushed columnar segment by PK, if the PK
     /// index points to one. Returns `None` when the PK lives in the
     /// memtable, when the segment is not in memory, or when the row was
@@ -23,7 +36,7 @@ impl CoreLoop {
         let engine = self.columnar_engines.get(engine_key)?;
         let loc = engine.pk_index().get(pk_bytes).copied()?;
         // Memtable case is already covered by the engine-side lookup.
-        if loc.segment_id == 0 {
+        if loc.segment_id == engine.memtable_segment_id() {
             return None;
         }
         // Tombstoned — prior row no longer logically present.

@@ -7,6 +7,7 @@ pub mod columnar_agg;
 pub(super) mod columnar_agg_support;
 pub mod columnar_filter;
 pub mod columnar_mutation;
+pub mod columnar_mutation_apply;
 pub mod columnar_read;
 pub mod columnar_resolve;
 pub mod columnar_resolve_dml;

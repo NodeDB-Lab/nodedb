@@ -27,7 +27,7 @@
 
 use nodedb_columnar::pk_index::encode_pk;
 use nodedb_types::Value;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -57,7 +57,7 @@ impl CoreLoop {
             task.request.tenant_id,
             collection.to_string(),
         );
-        let engine = match self.columnar_engines.get_mut(&key) {
+        let engine = match self.columnar_engines.get(&key) {
             Some(e) => e,
             None => {
                 return self.response_error(
@@ -104,65 +104,19 @@ impl CoreLoop {
             }
         }
 
-        let track = undo_log.is_some();
         let row_count_before = engine.memtable().row_count();
-        let mut inserted_pks: Vec<Vec<u8>> = Vec::new();
-        let mut displaced: Vec<(Vec<u8>, nodedb_columnar::pk_index::RowLocation)> = Vec::new();
-        let mut restored: Vec<(Vec<u8>, nodedb_columnar::pk_index::RowLocation)> = Vec::new();
-
-        let mut affected = 0u64;
-        for (pk, new_row) in rows {
-            let old_pk_bytes = encode_pk(pk);
-
-            // Capture the pre-image BEFORE mutating, exactly as
-            // `execute_columnar_update` does.
-            let capture = if track {
-                let old_location = engine.pk_index().get(&old_pk_bytes).copied();
-                let new_pk_bytes = engine.encode_pk_from_row(new_row).ok();
-                let displaced_entry = match &new_pk_bytes {
-                    Some(nb) if *nb != old_pk_bytes => engine
-                        .pk_index()
-                        .get(nb)
-                        .copied()
-                        .filter(|loc| loc.segment_id == engine.memtable_segment_id())
-                        .map(|loc| (nb.clone(), loc)),
-                    _ => None,
-                };
-                Some((old_pk_bytes, old_location, new_pk_bytes, displaced_entry))
-            } else {
-                None
-            };
-
-            match engine.update(pk, new_row) {
-                Ok(_result) => {
-                    affected += 1;
-                    if let Some((old_pk_bytes, old_location, new_pk_bytes, displaced_entry)) =
-                        capture
-                    {
-                        if let Some(nb) = new_pk_bytes {
-                            inserted_pks.push(nb);
-                        }
-                        if let Some(loc) = old_location {
-                            restored.push((old_pk_bytes, loc));
-                        }
-                        if let Some(d) = displaced_entry {
-                            displaced.push(d);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(core = self.core_id, %collection, error = %e, "columnar resolved update row failed");
-                }
-            }
-        }
+        let mut undo_log = undo_log;
+        let outcome =
+            self.apply_columnar_update_rows(task, &key, &schema, rows, undo_log.as_deref_mut());
+        let affected = outcome.affected;
 
         if let Some(log) = undo_log {
             log.push(UndoEntry::ColumnarUpdate {
                 collection_key: key,
                 row_count_before,
-                inserted_pks,
-                displaced,
-                restored,
+                inserted_pks: outcome.inserted_pks,
+                displaced: outcome.displaced,
+                restored: outcome.restored,
             });
         }
 
@@ -209,7 +163,7 @@ impl CoreLoop {
             task.request.tenant_id,
             collection.to_string(),
         );
-        let engine = match self.columnar_engines.get_mut(&key) {
+        let engine = match self.columnar_engines.get(&key) {
             Some(e) => e,
             None => {
                 return self.response_error(
@@ -239,38 +193,14 @@ impl CoreLoop {
             }
         }
 
-        let track = undo_log.is_some();
-        let mut restored: Vec<(Vec<u8>, nodedb_columnar::pk_index::RowLocation)> = Vec::new();
-
-        let mut affected = 0u64;
-        for pk in pks {
-            let captured = if track {
-                let pk_bytes = encode_pk(pk);
-                engine
-                    .pk_index()
-                    .get(&pk_bytes)
-                    .copied()
-                    .map(|loc| (pk_bytes, loc))
-            } else {
-                None
-            };
-            match engine.delete(pk) {
-                Ok(_) => {
-                    affected += 1;
-                    if let Some(entry) = captured {
-                        restored.push(entry);
-                    }
-                }
-                Err(e) => {
-                    warn!(core = self.core_id, %collection, error = %e, "columnar resolved delete row failed");
-                }
-            }
-        }
+        let mut undo_log = undo_log;
+        let outcome = self.apply_columnar_delete_pks(&key, &schema, pks, undo_log.as_deref_mut());
+        let affected = outcome.affected;
 
         if let Some(log) = undo_log {
             log.push(UndoEntry::ColumnarDelete {
                 collection_key: key,
-                restored,
+                restored: outcome.restored,
             });
         }
 
@@ -384,6 +314,7 @@ mod tests {
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
+                spatial_undo: None,
             },
         );
         assert_eq!(
