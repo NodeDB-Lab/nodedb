@@ -142,6 +142,74 @@ async fn extended_query_pure_constant_projection() {
     assert_eq!(y, "hi");
 }
 
+/// Two output columns announced under the same name must render their own
+/// cells: the Describe phase supplies display names, but the lookup keys come
+/// from the planner (`cell_keys`), so `id` and `id_1` stay distinct.
+#[tokio::test]
+async fn extended_query_duplicate_column_names_keep_distinct_cells() {
+    let server = TestServer::start().await;
+
+    let rows = server
+        .client
+        .query("SELECT 1 AS id, 2 AS id", &[])
+        .await
+        .expect("prepared query should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 2, "both announced columns must be present");
+
+    let first: i64 = rows[0].get(0);
+    let second: i64 = rows[0].get(1);
+    assert_eq!(first, 1);
+    assert_eq!(
+        second, 2,
+        "the second column must read its own cell, not the first"
+    );
+}
+
+/// The issue's second repro: a join whose two sides project a bare `id`.
+/// Each column must read its own cell through the prepared path.
+#[tokio::test]
+async fn extended_query_duplicate_join_columns_keep_distinct_cells() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION w (id STRING PRIMARY KEY, b_id STRING) \
+             WITH (engine='document_strict')",
+        )
+        .await
+        .unwrap();
+    server
+        .exec("CREATE COLLECTION b (id STRING PRIMARY KEY) WITH (engine='document_strict')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO b (id) VALUES ('b1')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO w (id, b_id) VALUES ('w1', 'b1')")
+        .await
+        .unwrap();
+
+    let rows = server
+        .client
+        .query("SELECT w.id, b.id FROM w JOIN b ON w.b_id = b.id", &[])
+        .await
+        .expect("prepared join should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 2, "both joined columns must be present");
+
+    let first: &str = rows[0].get(0);
+    let second: &str = rows[0].get(1);
+    assert_eq!(first, "w1");
+    assert_eq!(
+        second, "b1",
+        "the joined column must read its own cell, not the first"
+    );
+}
+
 /// Star projection with a parameterised filter must expand to every
 /// collection column in the row output.
 #[tokio::test]
