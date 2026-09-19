@@ -143,6 +143,11 @@ pub struct ArrayShardPutReq {
 pub struct ArrayShardPutResp {
     pub shard_id: u32,
     pub applied_lsn: u64,
+    /// Cells this shard actually wrote, read from the Data Plane handler's
+    /// `{"inserted": n}` count. The coordinator sums this across shards for
+    /// the client-facing `INSERT n` count — never `cells.len()`, which counts
+    /// coordinates named, not cells written.
+    pub affected: u64,
 }
 
 /// Scatter request: coordinator asks a shard to delete cells by exact coords.
@@ -166,6 +171,12 @@ pub struct ArrayShardDeleteReq {
 pub struct ArrayShardDeleteResp {
     pub shard_id: u32,
     pub applied_lsn: u64,
+    /// Cells this shard actually removed, read from the Data Plane handler's
+    /// `{"deleted": n}` count (the number of coords that existed, not the
+    /// number named). A delete of an absent coordinate contributes 0. The
+    /// coordinator sums this across shards for the client-facing `DELETE n`
+    /// count — never `coords.len()`.
+    pub affected: u64,
 }
 
 /// Scatter request: coordinator asks a shard to run a surrogate bitmap scan.

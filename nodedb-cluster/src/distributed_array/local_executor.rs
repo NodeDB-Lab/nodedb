@@ -38,6 +38,17 @@ pub struct ArrayAggExec {
     pub truncated_before_horizon: bool,
 }
 
+/// Result of a local shard write (put or delete): the LSN the coordinator
+/// acks with, plus the real cell count the Data Plane handler reported.
+///
+/// `affected` is read from the handler's `{"inserted": n}` / `{"deleted": n}`
+/// response payload — never the number of cells/coords named in the request,
+/// which for delete over-counts absent coordinates.
+pub struct ArrayShardWriteOutcome {
+    pub applied_lsn: u64,
+    pub affected: u64,
+}
+
 /// Execute array operations against the local Data Plane.
 ///
 /// `local_vshard_id` is the destination vShard from the validated RPC envelope.
@@ -103,7 +114,14 @@ pub trait ArrayLocalExecutor: Send + Sync + 'static {
     /// the same Hilbert-prefix tile. The shard handler has already validated
     /// that this shard owns the tile; the executor dispatches directly to the
     /// Data Plane without further routing checks.
-    async fn exec_put(&self, local_vshard_id: u32, req: &ArrayShardPutReq) -> Result<u64>;
+    ///
+    /// Returns the applied LSN plus the real cell count the Data Plane
+    /// handler reported, read from its `{"inserted": n}` response.
+    async fn exec_put(
+        &self,
+        local_vshard_id: u32,
+        req: &ArrayShardPutReq,
+    ) -> Result<ArrayShardWriteOutcome>;
 
     /// Delete cells by exact coordinates from the local array engine.
     ///
@@ -111,6 +129,12 @@ pub trait ArrayLocalExecutor: Send + Sync + 'static {
     /// local executor can apply the original delete payload on the validated
     /// `local_vshard_id`, mirroring [`Self::exec_put`].
     ///
-    /// Returns the `applied_lsn` (equal to `req.wal_lsn` on success).
-    async fn exec_delete(&self, local_vshard_id: u32, req: &ArrayShardDeleteReq) -> Result<u64>;
+    /// Returns the applied LSN (equal to `req.wal_lsn` on success) plus the
+    /// number of coords that existed and were removed, read from the Data
+    /// Plane handler's `{"deleted": n}` response.
+    async fn exec_delete(
+        &self,
+        local_vshard_id: u32,
+        req: &ArrayShardDeleteReq,
+    ) -> Result<ArrayShardWriteOutcome>;
 }

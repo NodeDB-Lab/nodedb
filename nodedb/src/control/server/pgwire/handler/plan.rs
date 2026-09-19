@@ -17,7 +17,6 @@ use crate::control::server::shared::sql::staging_predicates::{
     StagedTagKind, extract_kv_conflict_op, require_affected_count,
 };
 
-use super::super::command_tag::render;
 use super::super::types::text_field;
 
 pub(super) use crate::control::server::response_shape::types::{
@@ -230,29 +229,6 @@ pub(super) fn payload_to_dml_outcome(
     }
 }
 
-/// Shape a passthrough payload into one pgwire `Response`. A count-bearing
-/// kind renders its own tag here; a caller folding several tasks into one
-/// statement tag reads [`payload_to_dml_outcome`] instead.
-pub(super) fn payload_to_response(payload: &[u8], kind: PlanKind) -> PgWireResult<ShapedResponse> {
-    match kind {
-        PlanKind::Execution => Ok(Response::Execution(Tag::new("OK")).into()),
-        PlanKind::DmlResult(verb) => {
-            let outcome = dml_outcome_from_payload(payload, verb)?;
-            Ok(Response::Execution(render(outcome)).into())
-        }
-        PlanKind::DmlResultByOp => {
-            let outcome = dml_outcome_by_op(payload)?;
-            Ok(Response::Execution(render(outcome)).into())
-        }
-        PlanKind::ArraySlice | PlanKind::ReturningRows | PlanKind::SingleDocument => {
-            Err(invalid_plan_shape(format!(
-                "payload_to_response cannot handle plan kind {kind:?}"
-            )))
-        }
-        PlanKind::MultiRow => Ok(multirow_payload_to_response(payload)),
-    }
-}
-
 pub(super) fn multirow_payload_to_response(payload: &[u8]) -> ShapedResponse {
     let schema = Arc::new(vec![text_field("result")]);
     if payload.is_empty() {
@@ -296,6 +272,7 @@ fn invalid_plan_shape(message: String) -> PgWireError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::command_tag::render;
     use super::*;
     use nodedb_physical::physical_plan::KvOp;
     use nodedb_types::{DatabaseId, QualifiedCollection};
@@ -313,9 +290,9 @@ mod tests {
 
     #[test]
     fn passthrough_rejects_precomposed_shapes() {
-        assert!(payload_to_response(&[], PlanKind::ArraySlice).is_err());
-        assert!(payload_to_response(&[], PlanKind::ReturningRows).is_err());
-        assert!(payload_to_response(&[], PlanKind::SingleDocument).is_err());
+        assert!(payload_to_dml_outcome(&[], PlanKind::ArraySlice).is_err());
+        assert!(payload_to_dml_outcome(&[], PlanKind::ReturningRows).is_err());
+        assert!(payload_to_dml_outcome(&[], PlanKind::SingleDocument).is_err());
     }
 
     #[test]
@@ -359,11 +336,10 @@ mod tests {
             "op": "update"
         }))
         .expect("encode payload");
-        let shaped = payload_to_response(&update, PlanKind::DmlResultByOp).expect("update tag");
-        let Response::Execution(tag) = shaped.response else {
-            panic!("expected an execution tag");
-        };
-        let tag: pgwire::messages::response::CommandComplete = tag.into();
+        let outcome = payload_to_dml_outcome(&update, PlanKind::DmlResultByOp)
+            .expect("update tag")
+            .expect("count-bearing");
+        let tag: pgwire::messages::response::CommandComplete = render(outcome).into();
         assert_eq!(tag.tag, "UPDATE 1");
 
         let insert = nodedb_types::json_to_msgpack(&serde_json::json!({
@@ -371,16 +347,15 @@ mod tests {
             "op": "insert"
         }))
         .expect("encode payload");
-        let shaped = payload_to_response(&insert, PlanKind::DmlResultByOp).expect("insert tag");
-        let Response::Execution(tag) = shaped.response else {
-            panic!("expected an execution tag");
-        };
-        let tag: pgwire::messages::response::CommandComplete = tag.into();
+        let outcome = payload_to_dml_outcome(&insert, PlanKind::DmlResultByOp)
+            .expect("insert tag")
+            .expect("count-bearing");
+        let tag: pgwire::messages::response::CommandComplete = render(outcome).into();
         assert_eq!(tag.tag, "INSERT 0 1");
 
         let no_verb = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 1 }))
             .expect("encode payload");
-        assert!(payload_to_response(&no_verb, PlanKind::DmlResultByOp).is_err());
+        assert!(payload_to_dml_outcome(&no_verb, PlanKind::DmlResultByOp).is_err());
     }
 
     /// A write that can legitimately touch nothing must NOT be folded: its count
@@ -415,10 +390,10 @@ mod tests {
     /// A count-bearing response with no count is a handler bug, not a `1`.
     #[test]
     fn dml_tag_requires_a_reported_count() {
-        assert!(payload_to_response(&[], PlanKind::DmlResult("DELETE")).is_err());
+        assert!(payload_to_dml_outcome(&[], PlanKind::DmlResult("DELETE")).is_err());
         let payload = nodedb_types::json_to_msgpack(&serde_json::json!({ "affected": 0 }))
             .expect("encode count payload");
-        assert!(payload_to_response(&payload, PlanKind::DmlResult("DELETE")).is_ok());
+        assert!(payload_to_dml_outcome(&payload, PlanKind::DmlResult("DELETE")).is_ok());
     }
 
     /// The fold reads the neutral outcome: a count for the count-bearing

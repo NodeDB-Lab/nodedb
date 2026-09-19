@@ -242,6 +242,48 @@ pub(super) async fn run_dispatch_loop(
             }
         };
 
+        // `ClusterArray` plans are handled entirely on the Control Plane by
+        // the `ArrayCoordinator` — they must never reach the SPSC bridge or
+        // the trigger/DML machinery. A write reshapes into per-shard
+        // `ArrayOp` tasks inside the staging gate above and never reaches
+        // here as `ClusterArray`; only reads (`Slice`/`Agg`) and autocommit
+        // `Put`/`Delete` arrive as this plan by the time `routed` resolves to
+        // `Read`. Intercepted here, before `dispatch_task` would otherwise
+        // route it through the gateway toward the Data Plane. Metering is
+        // not applied here, matching pgwire's `ClusterArray` short-circuit,
+        // which also does not meter this path.
+        if matches!(
+            task.plan,
+            crate::bridge::envelope::PhysicalPlan::ClusterArray(_)
+        ) {
+            let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
+                Ok(a) => a,
+                Err(e) => return resp(error_to_native(seq, &e)),
+            };
+            match super::cluster_array::dispatch_cluster_array_task(ctx, authorized, output_schema)
+                .await
+            {
+                Ok(super::cluster_array::ClusterArrayOutcome::Rows {
+                    columns,
+                    rows,
+                    notice,
+                }) => {
+                    if let Some(n) = notice {
+                        warnings.push(n);
+                    }
+                    if !columns.is_empty() && all_columns.is_none() {
+                        all_columns = Some(columns);
+                    }
+                    all_rows.extend(rows);
+                }
+                Ok(super::cluster_array::ClusterArrayOutcome::Affected(n)) => {
+                    total_affected += n;
+                }
+                Err(e) => return resp(error_to_native(seq, &e)),
+            }
+            continue;
+        }
+
         let plan_for_response = task.plan.clone();
         let task_vshard = task.vshard_id;
         let (task_resp, shard_watermarks, dist_reads) = match dispatch_task(ctx, task).await {

@@ -129,6 +129,10 @@ where
     }))
     .await;
 
+    tracing::debug!(
+        shards = responses.len(),
+        "cluster array write staged per shard"
+    );
     let mut affected = 0usize;
     let mut first_ok: Option<Response> = None;
     for resp in responses {

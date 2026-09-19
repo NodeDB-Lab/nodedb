@@ -123,6 +123,49 @@ pub(super) async fn dispatch_single_task(
         }
     };
 
+    // `ClusterArray` plans are handled entirely on the Control Plane by the
+    // `ArrayCoordinator` — they must never reach the SPSC bridge or the
+    // trigger/DML machinery. A write reshapes into per-shard `ArrayOp` tasks
+    // inside `route_in_tx_write` above and never reaches here as
+    // `ClusterArray`; only reads (`Slice`/`Agg`) and autocommit `Put`/`Delete`
+    // arrive as this plan by the time the route resolves to `Read`.
+    // Intercepted here, before `dispatch_authorized_single_task` would
+    // otherwise route it toward the Data Plane. No SQL output schema exists
+    // on this direct-op path, so no projection narrows the shaped rows.
+    // Metering is not applied here, matching pgwire's `ClusterArray`
+    // short-circuit, which also does not meter this path.
+    if matches!(
+        task.plan,
+        crate::bridge::envelope::PhysicalPlan::ClusterArray(_)
+    ) {
+        let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
+            Ok(a) => a,
+            Err(e) => return error_to_native(seq, &e),
+        };
+        return match super::cluster_array::dispatch_cluster_array_task(ctx, authorized, None).await
+        {
+            Ok(super::cluster_array::ClusterArrayOutcome::Rows {
+                columns,
+                rows,
+                notice,
+            }) => {
+                let mut r = NativeResponse::ok(seq);
+                if !columns.is_empty() {
+                    r.columns = Some(columns);
+                }
+                r.rows = Some(rows);
+                r.warnings = notice.into_iter().collect();
+                r
+            }
+            Ok(super::cluster_array::ClusterArrayOutcome::Affected(n)) => {
+                let mut r = NativeResponse::ok(seq);
+                r.rows_affected = Some(n);
+                r
+            }
+            Err(e) => error_to_native(seq, &e),
+        };
+    }
+
     let plan_for_response = task.plan.clone();
     let task_vshard = task.vshard_id;
     match dispatch_authorized_single_task(

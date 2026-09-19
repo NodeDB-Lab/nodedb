@@ -193,6 +193,11 @@ mod tests {
             let resp = ArrayShardPutResp {
                 shard_id: req.vshard_id,
                 applied_lsn: shard_req.wal_lsn,
+                // The shard's cell count, as the Data Plane's `{"inserted": n}`
+                // would report for a batch with no conflicts.
+                affected: zerompk::from_msgpack::<Vec<Vec<u8>>>(&shard_req.cells_msgpack)
+                    .unwrap()
+                    .len() as u64,
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -228,6 +233,11 @@ mod tests {
             let resp = ArrayShardDeleteResp {
                 shard_id: req.vshard_id,
                 applied_lsn: shard_req.wal_lsn,
+                // The shard's coordinate count, as the Data Plane's
+                // `{"deleted": n}` would report when every cell exists.
+                affected: zerompk::from_msgpack::<Vec<Vec<u8>>>(&shard_req.coords_msgpack)
+                    .unwrap()
+                    .len() as u64,
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -283,6 +293,27 @@ mod tests {
         for r in &resps {
             assert_eq!(r.applied_lsn, 42);
         }
+    }
+
+    #[tokio::test]
+    async fn coord_put_reports_real_affected_per_shard_for_summing() {
+        // Two shards with one and two cells. The coordinator hands back each
+        // shard's own `affected` (what the Data Plane reported), so the caller
+        // sums shard reports rather than counting the cells it sent.
+        let p0 = 0x0000_0000_0000_0000u64;
+        let p1 = 0x0040_0000_0000_0000u64;
+        let cells = vec![(p0, vec![0x01u8]), (p1, vec![0x02u8]), (p1, vec![0x03u8])];
+
+        let dispatch: Arc<dyn ShardRpcDispatch> = Arc::new(PutEchoDispatch);
+        let mut resps = coord_put(&write_params(), vec![], 10, 7, &cells, &dispatch, &cb())
+            .await
+            .expect("coord_put should succeed");
+        resps.sort_by_key(|r| r.affected);
+
+        let per_shard: Vec<u64> = resps.iter().map(|r| r.affected).collect();
+        assert_eq!(per_shard, vec![1, 2], "each shard reports its own count");
+        let total_affected: u64 = per_shard.iter().sum();
+        assert_eq!(total_affected, 3);
     }
 
     #[tokio::test]

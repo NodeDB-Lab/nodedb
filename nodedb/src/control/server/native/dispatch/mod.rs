@@ -4,6 +4,7 @@
 
 mod admission_op;
 mod auth;
+mod cluster_array;
 mod conversion;
 mod ctx;
 mod direct_ops;

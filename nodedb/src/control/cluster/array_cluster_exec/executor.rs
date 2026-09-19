@@ -328,7 +328,7 @@ impl ClusterArrayExecutor {
             source_node: self.source_node,
             timeout_ms: ARRAY_RPC_TIMEOUT_MS,
         };
-        coord_put(
+        let resps = coord_put(
             &params,
             array_id_msgpack.to_vec(),
             prefix_bits,
@@ -340,9 +340,12 @@ impl ClusterArrayExecutor {
         .await
         .map_err(cluster_err)?;
 
-        // `{"inserted": n}`, the same count map the local `ArrayOp::Put`
-        // handler emits, so `extract_affected_count` reads both.
-        response_codec::encode_count("inserted", cells.len())
+        // Sum each shard's real `affected` count — never `cells.len()`, which
+        // counts cells named in the request, not cells the Data Plane
+        // actually wrote. `{"inserted": n}` matches what the local
+        // `ArrayOp::Put` handler emits, so `extract_affected_count` reads both.
+        let affected: u64 = resps.iter().map(|r| r.affected).sum();
+        response_codec::encode_count("inserted", affected as usize)
     }
 
     async fn execute_delete(
@@ -356,7 +359,7 @@ impl ClusterArrayExecutor {
             source_node: self.source_node,
             timeout_ms: ARRAY_RPC_TIMEOUT_MS,
         };
-        coord_delete(
+        let resps = coord_delete(
             &params,
             array_id_msgpack.to_vec(),
             prefix_bits,
@@ -368,7 +371,11 @@ impl ClusterArrayExecutor {
         .await
         .map_err(cluster_err)?;
 
-        // `{"deleted": n}`, matching the local `ArrayOp::Delete` handler.
-        response_codec::encode_count("deleted", coords.len())
+        // Sum each shard's real `affected` count — never `coords.len()`,
+        // which counts coordinates named, not coordinates that existed and
+        // were removed. A DELETE of an absent coordinate must answer 0, and
+        // `{"deleted": n}` matches the local `ArrayOp::Delete` handler.
+        let affected: u64 = resps.iter().map(|r| r.affected).sum();
+        response_codec::encode_count("deleted", affected as usize)
     }
 }

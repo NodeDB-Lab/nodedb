@@ -61,6 +61,10 @@ pub(crate) fn error_to_native(seq: u64, e: &crate::Error) -> NativeResponse {
             let (_severity, sqlstate, message) = error_code_to_sqlstate(code);
             (sqlstate, message)
         }
+        crate::Error::Shaping(e) => (
+            crate::control::server::pgwire::types::error_map::numeric_code_to_sqlstate(e.code()),
+            e.message().to_string(),
+        ),
         other => ("XX000", format!("{other}")),
     };
     let ndb_code = crate::error_classify::classify(e).code().0;

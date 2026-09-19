@@ -119,10 +119,11 @@ async fn handle_put(
     // wrong shard.
     validate_put_routing(&req, local_vshard_id)?;
 
-    let applied_lsn = executor.exec_put(local_vshard_id, &req).await?;
+    let outcome = executor.exec_put(local_vshard_id, &req).await?;
     let resp = ArrayShardPutResp {
         shard_id: local_vshard_id,
-        applied_lsn,
+        applied_lsn: outcome.applied_lsn,
+        affected: outcome.affected,
     };
     serialise(resp)
 }
@@ -139,10 +140,11 @@ async fn handle_delete(
 
     validate_delete_routing(&req, local_vshard_id)?;
 
-    let applied_lsn = executor.exec_delete(local_vshard_id, &req).await?;
+    let outcome = executor.exec_delete(local_vshard_id, &req).await?;
     let resp = ArrayShardDeleteResp {
         shard_id: local_vshard_id,
-        applied_lsn,
+        applied_lsn: outcome.applied_lsn,
+        affected: outcome.affected,
     };
     serialise(resp)
 }
@@ -248,7 +250,9 @@ mod tests {
     use crate::distributed_array::wire::{ArrayShardAggReq, ArrayShardDeleteReq, ArrayShardPutReq};
     use crate::error::Result;
 
-    use super::super::local_executor::{ArrayAggExec, ArrayLocalExecutor, ArraySliceExec};
+    use super::super::local_executor::{
+        ArrayAggExec, ArrayLocalExecutor, ArrayShardWriteOutcome, ArraySliceExec,
+    };
     use super::super::opcodes::{
         ARRAY_SHARD_AGG_REQ, ARRAY_SHARD_DELETE_REQ, ARRAY_SHARD_PUT_REQ, ARRAY_SHARD_SLICE_REQ,
         ARRAY_SHARD_SURROGATE_BITMAP_REQ,
@@ -267,6 +271,7 @@ mod tests {
         bitmap: Vec<u8>,
         partials: Vec<ArrayAggPartial>,
         truncated_before_horizon: bool,
+        affected: u64,
     }
 
     #[async_trait]
@@ -302,16 +307,26 @@ mod tests {
             })
         }
 
-        async fn exec_put(&self, _local_vshard_id: u32, req: &ArrayShardPutReq) -> Result<u64> {
-            Ok(req.wal_lsn)
+        async fn exec_put(
+            &self,
+            _local_vshard_id: u32,
+            req: &ArrayShardPutReq,
+        ) -> Result<ArrayShardWriteOutcome> {
+            Ok(ArrayShardWriteOutcome {
+                applied_lsn: req.wal_lsn,
+                affected: self.affected,
+            })
         }
 
         async fn exec_delete(
             &self,
             _local_vshard_id: u32,
             req: &ArrayShardDeleteReq,
-        ) -> Result<u64> {
-            Ok(req.wal_lsn)
+        ) -> Result<ArrayShardWriteOutcome> {
+            Ok(ArrayShardWriteOutcome {
+                applied_lsn: req.wal_lsn,
+                affected: self.affected,
+            })
         }
     }
 
@@ -369,6 +384,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: false,
+            affected: 0,
         });
         let payload = make_slice_req_bytes();
         let resp_bytes = handle_array_shard_rpc(ARRAY_SHARD_SLICE_REQ, 0, &payload, &executor)
@@ -392,6 +408,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: true,
+            affected: 0,
         });
         let payload = make_slice_req_bytes();
         let resp_bytes = handle_array_shard_rpc(ARRAY_SHARD_SLICE_REQ, 0, &payload, &executor)
@@ -412,6 +429,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: true,
+            affected: 0,
         });
         let payload = make_agg_req_bytes();
         let resp_bytes = handle_array_shard_rpc(ARRAY_SHARD_AGG_REQ, 0, &payload, &executor)
@@ -433,6 +451,7 @@ mod tests {
             bitmap: bitmap.clone(),
             partials: vec![],
             truncated_before_horizon: false,
+            affected: 0,
         });
         let payload = make_bitmap_req_bytes();
         let resp_bytes =
@@ -454,6 +473,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![partial.clone()],
             truncated_before_horizon: false,
+            affected: 0,
         });
         let payload = make_agg_req_bytes();
         let resp_bytes = handle_array_shard_rpc(ARRAY_SHARD_AGG_REQ, 3, &payload, &executor)
@@ -510,6 +530,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: false,
+            affected: 3,
         });
         // prefix_bits=0 disables routing validation.
         let payload = make_put_req_bytes(0, 0);
@@ -521,15 +542,22 @@ mod tests {
             zerompk::from_msgpack(&resp_bytes).expect("response should deserialise");
         assert_eq!(resp.shard_id, 0);
         assert_eq!(resp.applied_lsn, 77);
+        assert_eq!(
+            resp.affected, 3,
+            "handler must forward the executor's real affected count, not cells.len()"
+        );
     }
 
     #[tokio::test]
     async fn handle_delete_delegates_to_executor_and_echoes_lsn() {
+        // The executor reports 0 affected even though the request named a
+        // coordinate: DELETE of an absent coordinate must answer DELETE 0.
         let executor: Arc<dyn ArrayLocalExecutor> = Arc::new(StubExecutor {
             rows: vec![],
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: false,
+            affected: 0,
         });
         let payload = make_delete_req_bytes();
         let resp_bytes = handle_array_shard_rpc(ARRAY_SHARD_DELETE_REQ, 2, &payload, &executor)
@@ -540,6 +568,10 @@ mod tests {
             zerompk::from_msgpack(&resp_bytes).expect("response should deserialise");
         assert_eq!(resp.shard_id, 2);
         assert_eq!(resp.applied_lsn, 88);
+        assert_eq!(
+            resp.affected, 0,
+            "deleting an absent coordinate must report 0 affected, not coords.len()"
+        );
     }
 
     #[tokio::test]
@@ -549,6 +581,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: false,
+            affected: 0,
         });
         // prefix_bits=10, stride=1 → bucket = top 10 bits of hilbert_prefix.
         // hilbert_prefix = 0 → bucket 0 → expected vshard 0.
@@ -629,6 +662,7 @@ mod tests {
             bitmap: vec![],
             partials: vec![],
             truncated_before_horizon: false,
+            affected: 0,
         });
         let err = handle_array_shard_rpc(0xFF, 0, &[], &executor)
             .await

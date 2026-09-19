@@ -202,6 +202,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::DataPlane(code) => {
             crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(code)
         }
+        crate::Error::Shaping(e) => (
+            "ERROR",
+            numeric_code_to_sqlstate(e.code()),
+            e.message().to_string(),
+        ),
         _ => ("ERROR", sqlstate::INTERNAL_ERROR, err.to_string()),
     }
 }
