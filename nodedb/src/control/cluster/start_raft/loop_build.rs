@@ -94,6 +94,7 @@ pub(super) fn build_raft_loop(
         .with_plan_executor(plan_executor)
         .with_metadata_applier(metadata_applier)
         .with_metadata_cache(shared.metadata_cache.clone())
+        .with_lease_liveness(Arc::clone(&handle.lease_liveness))
         .with_vshard_handler(vshard_handler)
         .with_tick_interval(tick_interval)
         .with_group_watchers(handle.group_watchers.clone())
@@ -173,6 +174,7 @@ pub(super) fn build_raft_loop(
             Arc::clone(&handle.transport),
             raft_loop_handle,
             &handle.catalog,
+            Arc::clone(&handle.lease_liveness),
         ))
     })
     .map_err(|e| crate::Error::Config {

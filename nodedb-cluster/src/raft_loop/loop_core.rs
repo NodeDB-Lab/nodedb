@@ -291,6 +291,12 @@ pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     /// periodic lease-GC sweep can read committed lease state directly.
     /// `None` in cluster-only tests that don't wire it.
     pub(super) metadata_cache: Option<Arc<RwLock<MetadataCache>>>,
+
+    /// Optional lease-holder liveness fed by SWIM verdicts. When set, the
+    /// periodic lease-GC sweep releases a holder's leases as soon as SWIM
+    /// marks it Dead/Left, instead of waiting for topology removal or lease
+    /// expiry. `None` in cluster-only tests that don't wire it.
+    pub(super) lease_liveness: Option<Arc<crate::lease_liveness::LeaseHolderLiveness>>,
 }
 
 impl<A: CommitApplier> RaftLoop<A> {
@@ -344,6 +350,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             tick_count: std::sync::atomic::AtomicU64::new(0),
             reconcile_notify: tokio::sync::Notify::new(),
             metadata_cache: None,
+            lease_liveness: None,
         }
     }
 }

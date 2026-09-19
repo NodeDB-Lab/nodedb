@@ -164,6 +164,7 @@ pub async fn init_cluster_with_transport(
         pending_subsystems: Mutex::new(Some(crate::control::cluster::handle::PendingSubsystems {
             config: cluster_config,
         })),
+        lease_liveness: Arc::new(nodedb_cluster::LeaseHolderLiveness::new()),
     })
 }
 

@@ -80,6 +80,22 @@ impl LeaseHolderLivenessHook {
     }
 }
 
+/// Build the same SWIM-id → numeric-id resolver the routing hook uses:
+/// parse the decimal node id and require it to exist in the live topology.
+/// Placeholder entries (`seed:…`) resolve to `None` and are ignored.
+pub fn topology_resolver(
+    topology: Arc<RwLock<crate::topology::ClusterTopology>>,
+) -> NodeIdResolver {
+    Arc::new(move |node_id| {
+        let topo = topology.read().unwrap_or_else(|poison| poison.into_inner());
+        node_id
+            .as_str()
+            .parse::<u64>()
+            .ok()
+            .filter(|&id| topo.get_node(id).is_some())
+    })
+}
+
 impl MembershipSubscriber for LeaseHolderLivenessHook {
     fn on_state_change(&self, node_id: &NodeId, _old: Option<MemberState>, new: MemberState) {
         let Some(numeric_id) = (self.resolver)(node_id) else {
