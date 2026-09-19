@@ -93,6 +93,14 @@ impl EngineRules for TimeseriesRules {
         })
     }
 
+    fn plan_truncate(&self, p: TruncateParams) -> Result<Vec<SqlPlan>> {
+        Ok(vec![SqlPlan::Truncate {
+            collection: p.collection,
+            engine: EngineType::Timeseries,
+            restart_identity: p.restart_identity,
+        }])
+    }
+
     fn plan_aggregate(&self, p: AggregateParams) -> Result<SqlPlan> {
         if p.temporal.is_temporal() && !p.bitemporal {
             return Err(SqlError::Unsupported {

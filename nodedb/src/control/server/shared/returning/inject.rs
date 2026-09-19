@@ -274,6 +274,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | VectorOp::MultiVectorInsert { .. }
             | VectorOp::MultiVectorDelete { .. }
             | VectorOp::MultiVectorScoreSearch { .. }
+            | VectorOp::DirectTruncate { .. }
             | VectorOp::ResolveDirectWrite(_)
             | VectorOp::ResolvedDirectWrite { .. },
         )

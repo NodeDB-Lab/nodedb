@@ -255,6 +255,7 @@ pub(crate) fn build_truncate(
 ) -> crate::Result<PhysicalPlan> {
     Ok(PhysicalPlan::Kv(KvOp::Truncate {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
+        restart_identity: false,
     }))
 }
 

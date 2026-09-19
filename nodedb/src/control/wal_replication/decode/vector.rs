@@ -170,6 +170,15 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             decode_sync_engines::decode_returning(returning)?,
             rls_filters,
         )),
+        ReplicatedWrite::VectorDirectTruncate {
+            collection,
+            field,
+            restart_identity,
+        } => Ok(super::vector_direct::direct_truncate(
+            collection,
+            field,
+            *restart_identity,
+        )),
         ReplicatedWrite::VectorDirectUpdate {
             collection,
             field,

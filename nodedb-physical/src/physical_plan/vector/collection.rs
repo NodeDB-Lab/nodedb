@@ -18,6 +18,7 @@ impl VectorOp {
             | VectorOp::DirectInsert { collection, .. }
             | VectorOp::DirectInsertIfAbsent { collection, .. }
             | VectorOp::DirectDelete { collection, .. }
+            | VectorOp::DirectTruncate { collection, .. }
             | VectorOp::DirectUpdate { collection, .. }
             | VectorOp::ResolvedDirectWrite { collection, .. } => Some(collection.as_str()),
             VectorOp::ResolveDirectWrite(inner) => inner.direct_write_collection(),

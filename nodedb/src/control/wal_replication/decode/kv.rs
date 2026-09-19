@@ -425,9 +425,10 @@ pub(super) fn transfer(ctx: &DecodeCtx, f: TransferFields) -> crate::Result<Phys
 
 /// Reconstruct a `Truncate` plan. Same idempotent-replay contract as
 /// `document::truncate` — no surrogate binding, whole-collection clear.
-pub(super) fn truncate(collection: &str) -> PhysicalPlan {
+pub(super) fn truncate(collection: &str, restart_identity: bool) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Truncate {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        restart_identity,
     })
 }
 
@@ -566,6 +567,7 @@ mod tests {
 
         let plan = PhysicalPlan::Kv(KvOp::Truncate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
+            restart_identity: true,
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -575,8 +577,12 @@ mod tests {
             .expect("from_replicated_entry error")
             .expect("from_replicated_entry returned None");
         match decoded_plan {
-            PhysicalPlan::Kv(KvOp::Truncate { collection }) => {
+            PhysicalPlan::Kv(KvOp::Truncate {
+                collection,
+                restart_identity,
+            }) => {
                 assert_eq!(collection.as_str(), "kv");
+                assert!(restart_identity, "restart_identity must round-trip");
             }
             other => panic!("expected Kv(Truncate), got {other:?}"),
         }

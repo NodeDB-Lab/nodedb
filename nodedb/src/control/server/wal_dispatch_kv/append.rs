@@ -269,7 +269,7 @@ pub fn wal_append_kv_op(
             let entry = encode_kv_drop_sorted_index(index_name)?;
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)
         }
-        KvOp::Truncate { collection } => {
+        KvOp::Truncate { collection, .. } => {
             let entry = encode_kv_truncate(collection.as_str())?;
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)
         }

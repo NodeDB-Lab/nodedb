@@ -40,6 +40,19 @@ pub(super) fn direct_delete(
     })
 }
 
+/// `ReplicatedWrite::VectorDirectTruncate` → `VectorOp::DirectTruncate`.
+pub(super) fn direct_truncate(
+    collection: &str,
+    field: &str,
+    restart_identity: bool,
+) -> PhysicalPlan {
+    PhysicalPlan::Vector(VectorOp::DirectTruncate {
+        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        field: field.to_owned(),
+        restart_identity,
+    })
+}
+
 /// Fields of the `VectorDirectUpdate` wire variant, bundled so
 /// [`direct_update`] stays under the `too_many_arguments` clippy threshold.
 pub(super) struct DirectUpdateFields<'a> {

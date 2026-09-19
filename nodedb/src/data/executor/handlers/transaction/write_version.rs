@@ -263,6 +263,10 @@ impl CoreLoop {
                     self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
                 }
             }
+            // Every row of the collection: the collection floor only.
+            VectorOp::DirectTruncate { collection, .. } => {
+                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+            }
             // A point-targeted delete or update names its surrogates; a
             // predicate-targeted one resolves them on apply, so it records the
             // collection floor only.

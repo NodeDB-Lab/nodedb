@@ -175,6 +175,7 @@ impl SqlPlan {
             | Self::ArrayCompact { .. }
             | Self::VectorPrimaryInsert { .. }
             | Self::VectorPrimaryDelete { .. }
+            | Self::VectorPrimaryTruncate { .. }
             | Self::VectorPrimaryUpdate { .. }
             | Self::CreateIndex { .. }
             | Self::DropIndex { .. } => Cacheable,

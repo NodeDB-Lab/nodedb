@@ -281,7 +281,10 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             surrogate.as_u32(),
         ),
 
-        KvOp::Truncate { collection } => kv::truncate(collection.as_str()),
+        KvOp::Truncate {
+            collection,
+            restart_identity,
+        } => kv::truncate(collection.as_str(), *restart_identity),
 
         // Verdict is already on the plan (`RlsWriteCheck::DecidedEarlierInRequest`),
         // so no predicate to drop here.

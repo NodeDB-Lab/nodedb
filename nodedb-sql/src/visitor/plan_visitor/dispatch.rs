@@ -184,8 +184,9 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
         } => visitor.delete(collection, *engine, filters, target_keys),
         SqlPlan::Truncate {
             collection,
+            engine,
             restart_identity,
-        } => visitor.truncate(collection, *restart_identity),
+        } => visitor.truncate(collection, *engine, *restart_identity),
         SqlPlan::Join {
             left,
             right,

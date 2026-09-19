@@ -114,6 +114,18 @@ impl WalManager {
         self.append_record(RecordType::VectorDirectDelete, tid, vs, db, p)
     }
 
+    /// Append a `VectorDirectTruncate` record for a vector-primary truncate.
+    /// Payload is produced by `encode_vector_direct_truncate_payload`.
+    pub fn append_vector_direct_truncate(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        p: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::VectorDirectTruncate, tid, vs, db, p)
+    }
+
     /// Append a `VectorDirectUpdate` record for a vector-primary update.
     /// Payload is produced by `encode_vector_direct_update_payload`.
     pub fn append_vector_direct_update(

@@ -382,7 +382,7 @@ fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Resul
 
         // Truncate: staged as an overlay marker; the serializer emits the
         // `kv_truncate` redo ahead of the collection's row entries.
-        KvOp::Truncate { collection } => {
+        KvOp::Truncate { collection, .. } => {
             collections.insert(collection.to_string());
             Ok(())
         }

@@ -155,6 +155,13 @@ pub(super) fn inject_vector(ctx: &RlsCtx<'_>, op: &mut VectorOp) -> crate::Resul
              policy names, so no row image is available for it to be evaluated against",
         ),
 
+        // Refuse: removes every row without reading one, so no image
+        // exists to evaluate against. Mirrors `KvOp::Truncate`.
+        VectorOp::DirectTruncate { collection, .. } => ctx.refuse_if_write_policy(
+            collection,
+            "a truncate removes every row without reading one, so no row image is available",
+        ),
+
         // No-op: already decided by the resolve pass; re-injecting would
         // replace a verdict with a predicate no applying node can decide.
         VectorOp::ResolvedDirectWrite { .. } => Ok(()),
@@ -210,6 +217,34 @@ mod tests {
     #[test]
     fn vector_insert_without_a_policy_is_untouched() {
         let mut plan = vector_insert("docs");
+        let before = plan.clone();
+        assert!(inject_without_policy(&mut plan).is_ok());
+        assert_eq!(plan, before);
+    }
+
+    fn vector_truncate(collection: &str) -> PhysicalPlan {
+        PhysicalPlan::Vector(VectorOp::DirectTruncate {
+            collection: nodedb_types::QualifiedCollection::new(
+                nodedb_types::DatabaseId::DEFAULT,
+                collection,
+            ),
+            field: "vec".into(),
+            restart_identity: false,
+        })
+    }
+
+    /// A truncate reads no row, so nothing exists for the write policy to
+    /// decide against; it is refused like `KvOp::Truncate`.
+    #[test]
+    fn vector_truncate_is_refused_under_a_write_policy() {
+        let store = store_with_write_policy("docs");
+        let mut plan = vector_truncate("docs");
+        assert_write_refused(inject(&mut plan, &store), "docs");
+    }
+
+    #[test]
+    fn vector_truncate_without_a_policy_is_untouched() {
+        let mut plan = vector_truncate("docs");
         let before = plan.clone();
         assert!(inject_without_policy(&mut plan).is_ok());
         assert_eq!(plan, before);

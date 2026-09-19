@@ -218,6 +218,8 @@ fn vector_point_key(op: &VectorOp) -> Option<LockKey> {
             surrogate: surrogates[0].as_u32(),
         }),
         VectorOp::DirectDelete { .. } | VectorOp::DirectUpdate { .. } => None,
+        // Every row of the collection: no single stable identity.
+        VectorOp::DirectTruncate { .. } => None,
         VectorOp::BatchInsert { .. }
         | VectorOp::Delete { .. }
         | VectorOp::SparseInsert { .. }

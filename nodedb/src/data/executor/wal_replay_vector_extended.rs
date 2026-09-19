@@ -51,6 +51,7 @@ impl CoreLoop {
                 Some(RecordType::VectorDirectUpsert)
                     | Some(RecordType::VectorDirectDelete)
                     | Some(RecordType::VectorDirectUpdate)
+                    | Some(RecordType::VectorDirectTruncate)
                     | Some(RecordType::VectorResolvedDirectWrite)
                     | Some(RecordType::SparseVectorPut)
                     | Some(RecordType::SparseVectorDelete)
@@ -93,6 +94,13 @@ impl CoreLoop {
                     tombstones,
                 ),
                 Some(RecordType::VectorDirectUpdate) => self.replay_direct_update(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    record_lsn,
+                    tombstones,
+                ),
+                Some(RecordType::VectorDirectTruncate) => self.replay_direct_truncate(
                     &record.payload,
                     tenant_id,
                     database_id,

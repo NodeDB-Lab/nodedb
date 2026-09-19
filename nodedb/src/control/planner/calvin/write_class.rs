@@ -158,6 +158,7 @@ fn vector_is_write(op: &VectorOp) -> bool {
         | VectorOp::DirectInsert { .. }
         | VectorOp::DirectInsertIfAbsent { .. }
         | VectorOp::DirectDelete { .. }
+        | VectorOp::DirectTruncate { .. }
         | VectorOp::DirectUpdate { .. }
         // Mutates the rows its mutation list names, like any other write.
         | VectorOp::ResolvedDirectWrite { .. } => true,
@@ -409,6 +410,7 @@ mod tests {
     fn is_write_plan_true_for_kv_truncate() {
         let plan = PhysicalPlan::Kv(KvOp::Truncate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
+            restart_identity: false,
         });
         assert!(is_write_plan(&plan), "KvOp::Truncate must be a write");
     }

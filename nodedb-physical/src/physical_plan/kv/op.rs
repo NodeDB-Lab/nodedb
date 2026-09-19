@@ -297,7 +297,13 @@ pub enum KvOp {
     },
 
     /// Truncate: delete ALL entries in a KV collection.
-    Truncate { collection: QualifiedCollection },
+    Truncate {
+        collection: QualifiedCollection,
+        /// `TRUNCATE ... RESTART IDENTITY`: the Control Plane resets the
+        /// collection's sequences after the Data Plane clears the entries.
+        #[serde(default)]
+        restart_identity: bool,
+    },
 
     /// Atomic increment: init 0 if absent, `TypeMismatch` if not i64,
     /// `OverflowError` on wrap. `ttl_ms > 0` sets/resets TTL; `0` preserves it.

@@ -28,6 +28,7 @@ pub mod spatial;
 pub mod streaming;
 pub mod text;
 pub mod timeseries;
+pub mod truncate_target;
 pub mod vector;
 pub mod wire;
 

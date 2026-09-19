@@ -228,6 +228,7 @@ pub enum SqlPlan {
     },
     Truncate {
         collection: String,
+        engine: EngineType,
         restart_identity: bool,
     },
 
@@ -773,6 +774,15 @@ pub enum SqlPlan {
         target_keys: Vec<SqlValue>,
         /// Resolved primary-key column name. See `Insert::primary_key`.
         primary_key: Option<String>,
+    },
+    /// TRUNCATE on a vector-primary collection.
+    ///
+    /// Removes every row from the HNSW index and its payload sidecar.
+    VectorPrimaryTruncate {
+        collection: String,
+        /// Vector column name; keys the HNSW index the rows live in.
+        field: String,
+        restart_identity: bool,
     },
     /// UPDATE on a vector-primary collection.
     ///

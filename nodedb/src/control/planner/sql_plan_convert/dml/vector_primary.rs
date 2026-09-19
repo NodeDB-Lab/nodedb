@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `SqlPlan::VectorPrimary{Insert,Delete,Update}` → `PhysicalTask` lowering.
+//! `SqlPlan::VectorPrimary{Insert,Delete,Truncate,Update}` → `PhysicalTask` lowering.
 //!
 //! A vector-primary row is keyed by its declared primary key, through the
 //! same identity path a document row takes: the key content-addresses a
@@ -262,6 +262,28 @@ pub(in super::super) fn convert_vector_primary_delete(
             rls_write_check: RlsWriteCheck::pending_injection(),
         },
     )])
+}
+
+/// Lower a vector-primary `TRUNCATE`. The Data Plane resolves every live
+/// surrogate of the primary index itself, so no key is bound here.
+pub(in super::super) fn convert_vector_primary_truncate(
+    collection: &str,
+    field: &str,
+    restart_identity: bool,
+    tenant_id: TenantId,
+    ctx: &ConvertContext,
+) -> Vec<PhysicalTask> {
+    let r = routing(ctx, collection);
+    vec![task(
+        tenant_id,
+        &r,
+        ctx,
+        VectorOp::DirectTruncate {
+            collection: r.qualified.clone(),
+            field: field.to_string(),
+            restart_identity,
+        },
+    )]
 }
 
 /// Inputs to [`convert_vector_primary_update`].

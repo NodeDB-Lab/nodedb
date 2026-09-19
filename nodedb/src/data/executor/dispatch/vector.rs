@@ -388,6 +388,11 @@ impl CoreLoop {
                     rls_write_check,
                 },
             ),
+            VectorOp::DirectTruncate {
+                collection,
+                field,
+                restart_identity: _,
+            } => self.execute_vector_direct_truncate(task, tid, collection.as_str(), field),
             VectorOp::DirectUpdate {
                 collection,
                 field,

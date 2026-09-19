@@ -147,8 +147,8 @@ impl CoreLoop {
                     rls_write_check,
                 },
             ),
-            KvOp::Truncate { collection } => {
-                self.stage_kv_truncate(task, tid, txn_id, collection.as_str())
+            KvOp::Truncate { collection, .. } => {
+                self.stage_collection_truncate(task, tid, txn_id, collection.as_str())
             }
             KvOp::Get { .. }
             | KvOp::Scan { .. }

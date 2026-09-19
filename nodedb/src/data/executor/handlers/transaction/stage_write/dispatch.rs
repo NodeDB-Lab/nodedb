@@ -381,7 +381,7 @@ impl CoreLoop {
             }
 
             DocumentOp::Truncate { collection, .. } => {
-                self.stage_document_truncate(task, tid, txn_id, collection.as_str())
+                self.stage_collection_truncate(task, tid, txn_id, collection.as_str())
             }
 
             // `INSERT ... SELECT` is resolved into concrete `PointInsert` ops

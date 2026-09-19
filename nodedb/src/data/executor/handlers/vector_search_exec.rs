@@ -204,7 +204,7 @@ impl CoreLoop {
             if let Some(txn_id) = task.request.txn_id {
                 return staged_only(self, txn_id);
             }
-            return self.response_with_payload(task, b"[]".to_vec());
+            return super::vector_search::empty_hits_response(self, task);
         }
 
         // Quantization mismatch: if the SQL caller requested a specific
@@ -437,7 +437,7 @@ impl CoreLoop {
             rls_filters,
         } = params;
         if ivf.is_empty() {
-            return self.response_with_payload(task, b"[]".to_vec());
+            return super::vector_search::empty_hits_response(self, task);
         }
         let fetch_k = if filter_bitmap.is_some() || !rls_filters.is_empty() {
             top_k * self.query_tuning.bitmap_over_fetch_factor.max(2)

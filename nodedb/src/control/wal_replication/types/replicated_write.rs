@@ -702,6 +702,10 @@ pub enum ReplicatedWrite {
     },
     KvTruncate {
         collection: String,
+        /// `TRUNCATE ... RESTART IDENTITY`; the applying node resets the
+        /// collection's sequences after the clear.
+        #[serde(default)]
+        restart_identity: bool,
     },
     ConstraintChange {
         collection: String,
@@ -862,6 +866,16 @@ pub enum ReplicatedWrite {
         /// See `ReplicatedWrite::PointPut::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+    },
+
+    /// Vector-primary `TRUNCATE`: every replica clears the collection's
+    /// primary index and sidecar rows. `restart_identity` is applied by the
+    /// applying node's sequence store after the clear.
+    VectorDirectTruncate {
+        collection: String,
+        field: String,
+        #[serde(default)]
+        restart_identity: bool,
     },
 
     /// Vector-primary `UPDATE` on a collection with NO write policy — see

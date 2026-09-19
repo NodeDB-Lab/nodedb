@@ -20,10 +20,12 @@ macro_rules! impl_set_ops_arms_for_convert_visitor {
         fn truncate(
             &mut self,
             collection: &str,
+            engine: nodedb_sql::types::EngineType,
             restart_identity: bool,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             super::super::set_ops::convert_truncate(
                 collection,
+                engine,
                 restart_identity,
                 self.tenant_id,
                 self.ctx,

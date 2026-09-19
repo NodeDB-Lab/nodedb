@@ -158,6 +158,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | VectorOp::DirectInsert { .. }
             | VectorOp::DirectInsertIfAbsent { .. }
             | VectorOp::DirectDelete { .. }
+            | VectorOp::DirectTruncate { .. }
             | VectorOp::DirectUpdate { .. }
             // Never client-issued: write-resolve orchestrator builds it post-authorization.
             | VectorOp::ResolvedDirectWrite { .. },

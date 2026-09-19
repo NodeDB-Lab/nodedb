@@ -224,6 +224,15 @@ pub(super) fn encode(op: &VectorOp) -> Option<ReplicatedWrite> {
             returning: super::entry::encode_returning(returning),
             rls_filters: rls_filters.clone(),
         },
+        VectorOp::DirectTruncate {
+            collection,
+            field,
+            restart_identity,
+        } => ReplicatedWrite::VectorDirectTruncate {
+            collection: collection.as_str().to_owned(),
+            field: field.to_owned(),
+            restart_identity: *restart_identity,
+        },
         VectorOp::DirectUpdate {
             collection,
             field,
@@ -545,5 +554,36 @@ mod tests {
         assert_eq!(mutations.len(), 1);
         assert_eq!(response_payload, vec![0x81]);
         assert!(!rls_write_check.has_predicate());
+    }
+
+    /// A vector-primary truncate replicates with its `restart_identity`
+    /// flag, so every applying node resets the same sequences.
+    #[test]
+    fn direct_truncate_round_trips_with_restart_identity() {
+        let tenant = TenantId::new(1);
+        let vshard = VShardId::new(0);
+        let plan = PhysicalPlan::Vector(VectorOp::DirectTruncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vecs"),
+            field: "emb".into(),
+            restart_identity: true,
+        });
+        let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
+            .expect("encode must not error")
+            .expect("a truncate must replicate");
+        let (_, _, decoded, _) =
+            crate::control::wal_replication::from_replicated_entry(&entry.to_bytes(), None)
+                .expect("decode")
+                .expect("a replicated entry");
+        let PhysicalPlan::Vector(VectorOp::DirectTruncate {
+            collection,
+            field,
+            restart_identity,
+        }) = decoded
+        else {
+            panic!("decoded to the wrong shape");
+        };
+        assert_eq!(collection.as_str(), "vecs");
+        assert_eq!(field, "emb");
+        assert!(restart_identity);
     }
 }

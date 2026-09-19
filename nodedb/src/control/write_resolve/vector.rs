@@ -92,6 +92,8 @@ pub(super) fn resolver_for_vector_op(op: &VectorOp) -> Option<Box<dyn EngineWrit
         // Decided Control-Plane-side against the payload image.
         VectorOp::DirectInsert { .. }
         | VectorOp::DirectInsertIfAbsent { .. }
+        // Refused at injection under a write policy; carries no predicate.
+        | VectorOp::DirectTruncate { .. }
         // Already decided, or reads.
         | VectorOp::ResolveDirectWrite(_)
         | VectorOp::ResolvedDirectWrite { .. }

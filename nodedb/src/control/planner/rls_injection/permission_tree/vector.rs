@@ -71,6 +71,7 @@ pub(super) fn apply_vector(ctx: &PermCtx<'_>, op: &mut VectorOp) -> crate::Resul
         // entry from the index.
         VectorOp::Delete { collection, .. }
         | VectorOp::DirectDelete { collection, .. }
+        | VectorOp::DirectTruncate { collection, .. }
         | VectorOp::DeleteBySurrogate { collection, .. }
         | VectorOp::SparseDelete { collection, .. }
         | VectorOp::MultiVectorDelete { collection, .. } => {

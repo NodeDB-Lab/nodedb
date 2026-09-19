@@ -55,7 +55,7 @@ impl CoreLoop {
             // Staged as an overlay marker at statement time; the live truncate
             // wipes every row replayed before it in this batch. Like the
             // Document truncate passthrough, it pushes no undo entry.
-            KvOp::Truncate { collection } => {
+            KvOp::Truncate { collection, .. } => {
                 let resp = self.execute_kv_truncate(task, did, tid, collection.as_str());
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {

@@ -194,6 +194,11 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             target_keys,
             primary_key: primary_key.as_deref(),
         }),
+        SqlPlan::VectorPrimaryTruncate {
+            collection,
+            field,
+            restart_identity,
+        } => visitor.vector_primary_truncate(collection, field, *restart_identity),
         SqlPlan::VectorPrimaryUpdate {
             collection,
             field,

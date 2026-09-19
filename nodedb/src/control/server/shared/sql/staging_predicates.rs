@@ -115,6 +115,7 @@ pub fn stageable_write_shape(plan: &PhysicalPlan) -> Option<StagedWriteShape> {
         }) if !on_conflict_updates.is_empty() => Some(StagedWriteShape::ConflictUpsert),
         PhysicalPlan::Vector(VectorOp::DirectUpsert { .. }) => Some(StagedWriteShape::Upsert),
         PhysicalPlan::Vector(VectorOp::DirectDelete { .. }) => Some(StagedWriteShape::Delete),
+        PhysicalPlan::Vector(VectorOp::DirectTruncate { .. }) => Some(StagedWriteShape::Truncate),
         PhysicalPlan::Vector(VectorOp::DirectUpdate { .. }) => Some(StagedWriteShape::Update),
         PhysicalPlan::Vector(_) => None,
 
@@ -807,6 +808,7 @@ mod tests {
     fn kv_truncate_stages_as_truncate_with_a_bare_tag() {
         let plan = kv_plan(KvOp::Truncate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            restart_identity: false,
         });
         assert!(is_stageable_write(&plan));
         assert_eq!(
@@ -816,6 +818,20 @@ mod tests {
         assert_eq!(
             StagedWriteShape::Truncate.tag_kind(&[]),
             StagedTagKind::Truncate
+        );
+    }
+
+    #[test]
+    fn vector_truncate_stages_as_truncate_with_a_bare_tag() {
+        let plan = PhysicalPlan::Vector(VectorOp::DirectTruncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "v"),
+            field: "vec".into(),
+            restart_identity: false,
+        });
+        assert!(is_stageable_write(&plan));
+        assert_eq!(
+            stageable_write_shape(&plan),
+            Some(StagedWriteShape::Truncate)
         );
     }
 

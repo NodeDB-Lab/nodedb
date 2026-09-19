@@ -33,9 +33,9 @@
 //! `array_and_cluster_array_variants_match_oracle` below.
 //! `VectorOp::{DeleteBySurrogate, SparseInsert, SparseDelete,
 //! MultiVectorInsert, MultiVectorDelete, DirectUpsert, DirectInsert,
-//! DirectInsertIfAbsent, DirectDelete, DirectUpdate}` are likewise NOT in
-//! this exception list: `to_replicated_entry` has encoder arms for
-//! all ten (see `control/wal_replication/encode/vector.rs::encode`), so they
+//! DirectInsertIfAbsent, DirectDelete, DirectTruncate, DirectUpdate}` are
+//! likewise NOT in this exception list: `to_replicated_entry` has encoder
+//! arms for all eleven (see `control/wal_replication/encode/vector.rs::encode`), so they
 //! do not diverge from the oracle and are covered by
 //! `vector_variants_match_oracle` below.
 //! `CrdtOp::{ListInsert, ListDelete, ListMove}` are likewise NOT in this
@@ -92,7 +92,8 @@
 //! `assert_buffered_but_unencoded` — and correspondingly excluded from
 //! `kv_variants_match_oracle`.
 //!
-//! `DocumentOp::Truncate` and `KvOp::Truncate` classify `true`: in a
+//! `DocumentOp::Truncate`, `KvOp::Truncate`, and `VectorOp::DirectTruncate`
+//! classify `true`: in a
 //! transaction they stage as a `TxnOverlay` truncate marker that hides every
 //! base row without a newer overlay entry, and COMMIT replays the live
 //! truncate in statement order. ROLLBACK and ROLLBACK TO SAVEPOINT drop the

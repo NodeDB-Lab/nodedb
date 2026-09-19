@@ -74,6 +74,7 @@ pub fn replay_surrogate_records(
             | RecordType::VectorDirectUpsert
             | RecordType::VectorDirectDelete
             | RecordType::VectorDirectUpdate
+            | RecordType::VectorDirectTruncate
             | RecordType::VectorResolvedDirectWrite
             | RecordType::SparseVectorPut
             | RecordType::SparseVectorDelete

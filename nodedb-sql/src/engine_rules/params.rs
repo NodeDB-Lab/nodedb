@@ -99,6 +99,12 @@ pub struct DeleteParams {
     pub target_keys: Vec<SqlValue>,
 }
 
+/// Parameters for planning a TRUNCATE operation.
+pub struct TruncateParams {
+    pub collection: String,
+    pub restart_identity: bool,
+}
+
 /// Parameters for planning a MERGE operation.
 pub struct MergeParams {
     pub collection: String,

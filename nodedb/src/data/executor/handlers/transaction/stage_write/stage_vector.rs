@@ -3,7 +3,8 @@
 //! Statement-time staging for vector-primary direct writes issued inside a
 //! `BEGIN..COMMIT` block: the insert family here (`DirectInsert`,
 //! `DirectInsertIfAbsent`, `DirectUpsert`), `DirectDelete` / `DirectUpdate`
-//! in `stage_vector_targets`.
+//! in `stage_vector_targets`, `DirectTruncate` through the shared overlay
+//! truncate marker in `stage_truncate`.
 //!
 //! A vector-primary row is one surrogate-keyed row. Its staged body is a
 //! [`StagedVectorRow`]: the vector plus the exact sidecar bytes the live
@@ -198,6 +199,13 @@ impl CoreLoop {
                 targets,
                 rls_write_check,
             }),
+            // An overlay marker hides every base row; COMMIT replays the
+            // live truncate.
+            VectorOp::DirectTruncate {
+                collection,
+                field: _,
+                restart_identity: _,
+            } => self.stage_collection_truncate(task, tid, txn_id, collection.as_str()),
             VectorOp::DirectUpdate {
                 collection,
                 field,

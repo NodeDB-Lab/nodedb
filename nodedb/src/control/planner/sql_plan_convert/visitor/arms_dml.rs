@@ -214,6 +214,21 @@ macro_rules! impl_dml_arms_for_convert_visitor {
             )
         }
 
+        fn vector_primary_truncate(
+            &mut self,
+            collection: &str,
+            field: &str,
+            restart_identity: bool,
+        ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
+            Ok(super::super::dml::convert_vector_primary_truncate(
+                collection,
+                field,
+                restart_identity,
+                self.tenant_id,
+                self.ctx,
+            ))
+        }
+
         fn vector_primary_update(
             &mut self,
             args: nodedb_sql::VectorPrimaryUpdateVisitArgs<'_>,

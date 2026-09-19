@@ -340,19 +340,11 @@ impl NodeDbPgHandler {
         }
 
         // Extract truncate restart_identity info before task is moved.
-        let truncate_restart_collection =
-            if let nodedb_physical::physical_plan::PhysicalPlan::Document(
-                nodedb_physical::physical_plan::DocumentOp::Truncate {
-                    collection,
-                    restart_identity: true,
-                    ..
-                },
-            ) = &task.plan
-            {
-                Some(collection.to_string())
-            } else {
-                None
-            };
+        // Engine-neutral: `truncate_target` names every truncate-shaped op.
+        let truncate_restart_collection = match task.plan.truncate_target() {
+            Some((collection, true)) => Some(collection.to_string()),
+            Some((_, false)) | None => None,
+        };
 
         // --- Clone write-path interception ---
         // Protocol-neutral hook (`shared::clone_write`); native, RESP, and

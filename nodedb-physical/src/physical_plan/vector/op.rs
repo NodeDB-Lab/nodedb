@@ -409,6 +409,18 @@ pub enum VectorOp {
         rls_write_check: nodedb_types::RlsWriteCheck,
     },
 
+    /// Vector-primary `TRUNCATE`. Removes every live row of the collection's
+    /// primary index: each HNSW node, its payload bitmap entries, and its
+    /// payload sidecar row. Reports the number of rows that existed.
+    DirectTruncate {
+        collection: QualifiedCollection,
+        /// Vector column name; keys the HNSW index.
+        field: String,
+        /// `TRUNCATE ... RESTART IDENTITY`: the Control Plane resets the
+        /// collection's sequences after the Data Plane clears the rows.
+        restart_identity: bool,
+    },
+
     /// Vector-primary `UPDATE`. A `new_vector` rebuilds the HNSW node under
     /// the same surrogate; `payload_patch` merges into the sidecar and moves
     /// the payload bitmap entries. Reports the number of rows that existed.

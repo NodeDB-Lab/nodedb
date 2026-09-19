@@ -68,6 +68,13 @@ pub enum RecordType {
     /// Required: skipping on replay loses an acknowledged vector-primary write.
     VectorResolvedDirectWrite = 24 | 0x8000,
 
+    /// Vector engine: remove every row of a vector-primary collection
+    /// (`TRUNCATE`).
+    ///
+    /// Required: skipping on replay resurrects every truncated row, because
+    /// the `VectorDirectUpsert` records that created them are still in the log.
+    VectorDirectTruncate = 25 | 0x8000,
+
     /// Vector engine: insert (upsert) a sparse vector into the inverted index.
     ///
     /// Targets the `SparseInvertedIndex` (keyed by document id), a separate
@@ -345,6 +352,7 @@ impl RecordType {
             x if x == 19 | 0x8000 => Some(Self::VectorDirectDelete),
             x if x == 23 | 0x8000 => Some(Self::VectorDirectUpdate),
             x if x == 24 | 0x8000 => Some(Self::VectorResolvedDirectWrite),
+            x if x == 25 | 0x8000 => Some(Self::VectorDirectTruncate),
             x if x == 14 | 0x8000 => Some(Self::SparseVectorPut),
             x if x == 15 | 0x8000 => Some(Self::SparseVectorDelete),
             x if x == 16 | 0x8000 => Some(Self::MultiVectorPut),
@@ -426,6 +434,7 @@ mod tests {
             RecordType::VectorDirectDelete,
             RecordType::VectorDirectUpdate,
             RecordType::VectorResolvedDirectWrite,
+            RecordType::VectorDirectTruncate,
             RecordType::SparseVectorPut,
             RecordType::SparseVectorDelete,
             RecordType::MultiVectorPut,

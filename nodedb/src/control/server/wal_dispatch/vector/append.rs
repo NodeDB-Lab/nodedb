@@ -18,9 +18,9 @@ use super::encode::{
     encode_sparse_vector_delete_payload, encode_sparse_vector_put_payload,
     encode_vector_batch_put_payload, encode_vector_delete_by_surrogate_payload,
     encode_vector_delete_payload, encode_vector_direct_delete_payload,
-    encode_vector_direct_update_payload, encode_vector_direct_upsert_payload,
-    encode_vector_index_drop_payload, encode_vector_put_payload,
-    encode_vector_resolved_direct_write_payload,
+    encode_vector_direct_truncate_payload, encode_vector_direct_update_payload,
+    encode_vector_direct_upsert_payload, encode_vector_index_drop_payload,
+    encode_vector_put_payload, encode_vector_resolved_direct_write_payload,
 };
 use nodedb_physical::physical_plan::VectorDirectWriteIntent;
 
@@ -289,6 +289,17 @@ pub(crate) fn wal_append_vector_op(
         } => {
             let entry = encode_vector_direct_delete_payload(collection.as_str(), field, targets)?;
             Some(wal.append_vector_direct_delete(tenant_id, vshard_id, database_id, &entry)?)
+        }
+        // `restart_identity` is applied by the Control Plane after commit,
+        // against the sequence store; the Data-Plane record carries only what
+        // replay re-applies.
+        VectorOp::DirectTruncate {
+            collection,
+            field,
+            restart_identity: _,
+        } => {
+            let entry = encode_vector_direct_truncate_payload(collection.as_str(), field)?;
+            Some(wal.append_vector_direct_truncate(tenant_id, vshard_id, database_id, &entry)?)
         }
         VectorOp::DirectUpdate {
             collection,

@@ -194,6 +194,22 @@ pub(crate) type VectorDirectDeleteRecord = (
     nodedb_physical::physical_plan::VectorWriteTargets,
 );
 
+/// Encode a `VectorDirectTruncate` record: `(collection, field)`. The
+/// `restart_identity` flag is a Control-Plane sequence concern and never
+/// enters the Data-Plane record.
+pub(crate) fn encode_vector_direct_truncate_payload(
+    collection: &str,
+    field: &str,
+) -> crate::Result<Vec<u8>> {
+    zerompk::to_msgpack_vec(&(collection, field)).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("wal vector direct truncate: {e}"),
+    })
+}
+
+/// The decoded form of a `VectorDirectTruncate` record.
+pub(crate) type VectorDirectTruncateRecord = (String, String);
+
 /// Fields of a `VectorDirectUpdate` WAL record.
 pub(crate) struct VectorDirectUpdatePayload<'a> {
     pub collection: &'a str,

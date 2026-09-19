@@ -214,6 +214,7 @@ fn vector_routing(op: &VectorOp, database_id: DatabaseId) -> PlanRouting {
         | VectorOp::DirectInsert { collection, .. }
         | VectorOp::DirectInsertIfAbsent { collection, .. }
         | VectorOp::DirectDelete { collection, .. }
+        | VectorOp::DirectTruncate { collection, .. }
         | VectorOp::DirectUpdate { collection, .. } => {
             PlanRouting::Vshards(vec![collection_vshard_in_database(
                 database_id,

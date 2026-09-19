@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Plan construction for `UPDATE` / `DELETE` against a vector-primary
+//! Plan construction for `UPDATE` / `DELETE` / `TRUNCATE` against a vector-primary
 //! collection, plus the refusals for the write shapes it does not carry.
 
 use super::vector_primary_insert::sql_values_to_vector;
@@ -107,6 +107,19 @@ pub(crate) fn build_vector_primary_delete_plan(
         target_keys,
         primary_key: info.primary_key.clone(),
     }]
+}
+
+/// Build a `SqlPlan::VectorPrimaryTruncate`.
+pub(crate) fn build_vector_primary_truncate_plan(
+    collection: &str,
+    vpc: &nodedb_types::VectorPrimaryConfig,
+    restart_identity: bool,
+) -> SqlPlan {
+    SqlPlan::VectorPrimaryTruncate {
+        collection: collection.to_string(),
+        field: vpc.vector_field.clone(),
+        restart_identity,
+    }
 }
 
 /// The `f32` components of an assigned vector expression.

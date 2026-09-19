@@ -238,7 +238,8 @@ pub(crate) fn collection_name_from_plan(plan: &PhysicalPlan) -> String {
             VectorOp::Insert { collection, .. }
             | VectorOp::BatchInsert { collection, .. }
             | VectorOp::Delete { collection, .. }
-            | VectorOp::DeleteBySurrogate { collection, .. },
+            | VectorOp::DeleteBySurrogate { collection, .. }
+            | VectorOp::DirectTruncate { collection, .. },
         ) => collection.to_string(),
         PhysicalPlan::Graph(
             GraphOp::EdgePut { collection, .. } | GraphOp::EdgeDelete { collection, .. },

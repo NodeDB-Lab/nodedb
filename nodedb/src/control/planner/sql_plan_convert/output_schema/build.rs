@@ -376,6 +376,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         // so announcing columns for one would hold a count payload to a row
         // shape it does not have.
         SqlPlan::Truncate { .. }
+        | SqlPlan::VectorPrimaryTruncate { .. }
         | SqlPlan::CreateArray { .. }
         | SqlPlan::DropArray { .. }
         | SqlPlan::AlterArray { .. }

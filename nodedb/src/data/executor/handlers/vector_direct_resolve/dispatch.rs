@@ -127,6 +127,7 @@ impl CoreLoop {
             | VectorOp::MultiVectorScoreSearch { .. }
             | VectorOp::DirectInsert { .. }
             | VectorOp::DirectInsertIfAbsent { .. }
+            | VectorOp::DirectTruncate { .. }
             | VectorOp::ResolveDirectWrite(_)
             | VectorOp::ResolvedDirectWrite { .. } => Err(ErrorCode::Internal {
                 detail: "vector resolve-direct-write wraps an op with no governed row image; \

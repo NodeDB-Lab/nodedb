@@ -80,6 +80,7 @@ pub mod vector_direct_delete;
 pub mod vector_direct_resolve;
 pub mod vector_direct_row;
 pub mod vector_direct_targets;
+pub mod vector_direct_truncate;
 pub mod vector_direct_update;
 pub mod vector_index_drop;
 pub mod vector_lifecycle;

@@ -286,6 +286,7 @@ pub(super) async fn run_dispatch_loop(
 
         let plan_for_response = task.plan.clone();
         let task_vshard = task.vshard_id;
+        let task_database_id = task.database_id;
         let (task_resp, shard_watermarks, dist_reads) = match dispatch_task(ctx, task).await {
             Ok(r) => r,
             Err(e) => return resp(error_to_native(seq, &e)),
@@ -329,6 +330,19 @@ pub(super) async fn run_dispatch_loop(
 
         if task_resp.status == Status::Error {
             return resp(error_response_to_native(seq, &task_resp));
+        }
+
+        // --- TRUNCATE RESTART IDENTITY ---
+        // Autocommit only: a buffered truncate restarts its sequences at
+        // COMMIT. Same rule as the pgwire dispatch loop.
+        if let Some((collection, true)) = plan_for_response.truncate_target() {
+            ctx.state
+                .sequence_registry
+                .restart_sequences_for_collection(
+                    task_database_id.as_u64(),
+                    ctx.tenant_id().as_u64(),
+                    collection.as_str(),
+                );
         }
 
         last_lsn = task_resp.watermark_lsn.as_u64();

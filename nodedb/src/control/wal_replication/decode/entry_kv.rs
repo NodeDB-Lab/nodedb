@@ -18,7 +18,10 @@ pub(super) fn decode_arm(
 ) -> crate::Result<(PhysicalPlan, Option<u64>)> {
     let mut resolved_now_ms: Option<u64> = None;
     let plan = match write {
-        ReplicatedWrite::KvTruncate { collection } => kv::truncate(collection),
+        ReplicatedWrite::KvTruncate {
+            collection,
+            restart_identity,
+        } => kv::truncate(collection, *restart_identity),
         ReplicatedWrite::KvPut {
             collection,
             key,

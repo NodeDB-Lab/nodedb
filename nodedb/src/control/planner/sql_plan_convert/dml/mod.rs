@@ -19,5 +19,6 @@ pub(super) use update_delete::{
 pub(super) use upsert::{ConvertUpsertArgs, convert_upsert};
 pub(super) use vector_primary::{
     VectorPrimaryCfg, VectorPrimaryInsertArgs, VectorPrimaryUpdateArgs,
-    convert_vector_primary_delete, convert_vector_primary_insert, convert_vector_primary_update,
+    convert_vector_primary_delete, convert_vector_primary_insert, convert_vector_primary_truncate,
+    convert_vector_primary_update,
 };

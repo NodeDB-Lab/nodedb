@@ -20,31 +20,12 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
 
 impl CoreLoop {
-    /// Stage a `DocumentOp::Truncate` of `collection` into `txn_id`'s overlay.
-    pub(in crate::data::executor) fn stage_document_truncate(
-        &mut self,
-        task: &ExecutionTask,
-        tid: u64,
-        txn_id: TxnId,
-        collection: &str,
-    ) -> Response {
-        self.stage_truncate_marker(task, tid, txn_id, collection)
-    }
-
-    /// Stage a `KvOp::Truncate` of `collection` into `txn_id`'s overlay. KV
-    /// rows share the document overlay (keyed by `kv_row_identity`), so the
-    /// same marker hides them.
-    pub(in crate::data::executor) fn stage_kv_truncate(
-        &mut self,
-        task: &ExecutionTask,
-        tid: u64,
-        txn_id: TxnId,
-        collection: &str,
-    ) -> Response {
-        self.stage_truncate_marker(task, tid, txn_id, collection)
-    }
-
-    fn stage_truncate_marker(
+    /// Stage a whole-collection truncate (`DocumentOp::Truncate`,
+    /// `KvOp::Truncate`, `VectorOp::DirectTruncate`) of `collection` into
+    /// `txn_id`'s overlay. KV rows and vector-primary sidecar rows share the
+    /// document overlay, keyed by their row identity, so one marker hides
+    /// every engine's rows.
+    pub(in crate::data::executor) fn stage_collection_truncate(
         &mut self,
         task: &ExecutionTask,
         tid: u64,

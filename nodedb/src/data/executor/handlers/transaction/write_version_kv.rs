@@ -89,7 +89,7 @@ impl CoreLoop {
             }
             // Whole-collection mutations: key set is every row or predicate-
             // resolved at apply time, so only the collection floor applies.
-            KvOp::Truncate { collection }
+            KvOp::Truncate { collection, .. }
             | KvOp::PredicateUpdate { collection, .. }
             | KvOp::PredicateDelete { collection, .. } => {
                 self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);

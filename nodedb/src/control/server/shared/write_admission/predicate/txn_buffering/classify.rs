@@ -104,6 +104,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | VectorOp::DirectInsert { .. }
             | VectorOp::DirectInsertIfAbsent { .. }
             | VectorOp::DirectDelete { .. }
+            | VectorOp::DirectTruncate { .. }
             | VectorOp::DirectUpdate { .. },
         ) => true,
 
@@ -2122,6 +2123,12 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                restart_identity: false,
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectTruncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: "vec".into(),
+                restart_identity: false,
             }),
         ];
         for p in &truncates {

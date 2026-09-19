@@ -1,15 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compact and snapshot operations for `VectorCollection`.
+//! Truncate, compact, and snapshot operations for `VectorCollection`.
 
 use nodedb_types::Surrogate;
 
 use super::lifecycle::VectorCollection;
+use crate::flat::FlatIndex;
 
 /// One exported vector: global node id, full-precision data, optional surrogate.
 pub type ExportedVector = (u32, Vec<f32>, Option<Surrogate>);
 
 impl VectorCollection {
+    /// Drop every vector, sealed segment, in-flight build, surrogate binding,
+    /// and payload bitmap row. Returns the number of live vectors dropped.
+    ///
+    /// Configuration survives: dimension, HNSW params, index config,
+    /// quantization, seal threshold, memory budget, and the registered
+    /// payload index fields. `next_id` and `next_segment_id` keep counting
+    /// so a build completion for a segment sealed before the truncate finds
+    /// no matching entry in `building` and is ignored, and an mmap file name
+    /// is never reused. The mmap file of each dropped sealed segment is
+    /// removed from disk.
+    pub fn truncate(&mut self) -> usize {
+        let dropped = self.live_count();
+        self.growing = FlatIndex::new(self.dim, self.params.metric);
+        self.growing_base_id = self.next_id;
+        for seg in self.sealed.drain(..) {
+            let mmap_path = seg.mmap_vectors.as_ref().map(|m| m.path().to_path_buf());
+            // Unmap before the file goes.
+            drop(seg);
+            if let Some(path) = mmap_path
+                && let Err(e) = std::fs::remove_file(&path)
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "vector truncate: mmap segment file not removed"
+                );
+            }
+        }
+        self.building.clear();
+        self.mmap_segment_count = 0;
+        self.surrogate_map.clear();
+        self.surrogate_to_local.clear();
+        self.multi_doc_map.clear();
+        self.codec_dispatch = None;
+        self.payload.clear_rows();
+        dropped
+    }
+
     /// Compact sealed segments by removing tombstoned nodes.
     ///
     /// Rewrites `surrogate_map` and `multi_doc_map` for every sealed
@@ -114,5 +153,59 @@ impl VectorCollection {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hnsw::HnswParams;
+    use nodedb_types::{PayloadIndexKind, Value};
+    use std::collections::HashMap;
+
+    #[test]
+    fn truncate_drops_every_row_and_keeps_config() {
+        let mut coll = VectorCollection::with_seal_threshold(2, HnswParams::default(), 2);
+        coll.payload.add_index("owner", PayloadIndexKind::Equality);
+        let mut fields = HashMap::new();
+        fields.insert("owner".to_string(), Value::String("a".into()));
+        for (i, v) in [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]].into_iter().enumerate() {
+            let s = Surrogate::new(i as u32 + 1);
+            let id = coll.insert_with_surrogate(v.to_vec(), s);
+            coll.payload.insert_row(id, &fields);
+        }
+        assert!(
+            coll.seal("k").is_some(),
+            "threshold reached, growing sealed"
+        );
+        assert_eq!(coll.live_count(), 3);
+        let next_before = coll.next_id;
+
+        assert_eq!(coll.truncate(), 3);
+        assert_eq!(coll.live_count(), 0);
+        assert!(coll.surrogate_to_local.is_empty());
+        assert!(coll.surrogate_map.is_empty());
+        assert!(coll.building.is_empty());
+        assert!(coll.sealed.is_empty());
+        assert_eq!(coll.dim(), 2);
+        assert_eq!(coll.next_id, next_before, "ids stay monotonic");
+        assert_eq!(coll.growing_base_id, next_before);
+        assert!(
+            coll.payload.field_names().any(|f| f == "owner"),
+            "registered payload index survives"
+        );
+        let hits = coll
+            .payload
+            .pre_filter(&super::super::payload_index::FilterPredicate::Eq {
+                field: "owner".to_string(),
+                value: Value::String("a".into()),
+            })
+            .expect("owner is indexed");
+        assert!(hits.is_empty(), "payload rows cleared");
+
+        let s = Surrogate::new(42);
+        let id = coll.insert_with_surrogate(vec![0.5, 0.5], s);
+        assert_eq!(coll.local_for_surrogate(s), Some(id));
+        assert_eq!(coll.live_count(), 1);
     }
 }

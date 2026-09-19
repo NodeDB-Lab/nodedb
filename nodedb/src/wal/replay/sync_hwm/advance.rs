@@ -93,6 +93,7 @@ pub fn replay_sync_hwm_records(
             | RecordType::VectorDirectUpsert
             | RecordType::VectorDirectDelete
             | RecordType::VectorDirectUpdate
+            | RecordType::VectorDirectTruncate
             | RecordType::VectorResolvedDirectWrite
             | RecordType::SparseVectorPut
             | RecordType::SparseVectorDelete

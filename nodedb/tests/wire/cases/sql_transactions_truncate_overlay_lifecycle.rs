@@ -178,3 +178,78 @@ async fn truncate_restart_identity_applies_only_at_commit() {
         "a committed RESTART IDENTITY restarts the sequence"
     );
 }
+
+/// Keys of every row in a KV collection, sorted ascending.
+async fn kv_keys(server: &TestServer, name: &str) -> Vec<String> {
+    let mut keys = server
+        .query_text(&format!("SELECT k FROM {name}"))
+        .await
+        .unwrap_or_else(|e| panic!("kv keys of {name}: {e}"));
+    keys.sort();
+    keys
+}
+
+/// A KV `TRUNCATE` inside a transaction stages an overlay marker like the
+/// document engine's: ROLLBACK leaves every row in place, and COMMIT
+/// replays the truncate so the collection reads back empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn truncate_kv_inside_transaction_rollback_restores_and_commit_empties() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION trunc_lc_kv (k TEXT PRIMARY KEY, v TEXT) WITH (engine='kv')")
+        .await
+        .unwrap();
+    for k in ["a", "b", "c"] {
+        server
+            .exec(&format!(
+                "INSERT INTO trunc_lc_kv (k, v) VALUES ('{k}', 'x')"
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(kv_keys(&server, "trunc_lc_kv").await, ids(&["a", "b", "c"]));
+
+    server.exec("BEGIN").await.unwrap();
+    server.exec("TRUNCATE trunc_lc_kv").await.unwrap();
+    assert_eq!(
+        kv_keys(&server, "trunc_lc_kv").await,
+        Vec::<String>::new(),
+        "a staged KV truncate hides every base row from the transaction's reads"
+    );
+    server.exec("ROLLBACK").await.unwrap();
+    assert_eq!(
+        kv_keys(&server, "trunc_lc_kv").await,
+        ids(&["a", "b", "c"]),
+        "ROLLBACK drops the truncate marker and leaves every row in place"
+    );
+    assert_eq!(
+        server
+            .query_text("SELECT v FROM trunc_lc_kv WHERE k = 'a'")
+            .await
+            .unwrap(),
+        vec!["x".to_string()]
+    );
+
+    server.exec("BEGIN").await.unwrap();
+    server.exec("TRUNCATE trunc_lc_kv").await.unwrap();
+    server.exec("COMMIT").await.unwrap();
+    assert_eq!(
+        kv_keys(&server, "trunc_lc_kv").await,
+        Vec::<String>::new(),
+        "COMMIT replays the KV truncate"
+    );
+    assert_eq!(
+        server
+            .query_text("SELECT v FROM trunc_lc_kv WHERE k = 'a'")
+            .await
+            .unwrap(),
+        Vec::<String>::new(),
+        "a point read of a truncated key returns no row"
+    );
+
+    server
+        .exec("INSERT INTO trunc_lc_kv (k, v) VALUES ('z', 'new')")
+        .await
+        .unwrap();
+    assert_eq!(kv_keys(&server, "trunc_lc_kv").await, ids(&["z"]));
+}

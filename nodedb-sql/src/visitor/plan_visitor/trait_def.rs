@@ -120,6 +120,7 @@ pub trait PlanVisitor {
     fn truncate(
         &mut self,
         collection: &str,
+        engine: EngineType,
         restart_identity: bool,
     ) -> Result<Self::Output, Self::Error>;
 
@@ -331,6 +332,14 @@ pub trait PlanVisitor {
     fn vector_primary_delete(
         &mut self,
         args: VectorPrimaryDeleteVisitArgs<'_>,
+    ) -> Result<Self::Output, Self::Error>;
+
+    /// Handle [`SqlPlan::VectorPrimaryTruncate`].
+    fn vector_primary_truncate(
+        &mut self,
+        collection: &str,
+        field: &str,
+        restart_identity: bool,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::VectorPrimaryUpdate`].

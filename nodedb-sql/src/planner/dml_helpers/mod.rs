@@ -7,7 +7,7 @@
 //! - [`ast_extract`] — table-name / primary-key point-lookup extraction
 //! - [`declared_defaults`] — declared column DEFAULT materialization
 //! - [`vector_primary_insert`] — vector-primary collection insert plans
-//! - [`vector_primary_dml`] — vector-primary collection update / delete plans
+//! - [`vector_primary_dml`] — vector-primary collection update / delete / truncate plans
 //! - [`kv_insert`] — KV engine insert plans
 //! - [`insert_select_bind`] — `INSERT ... SELECT` target-column binding
 //! - [`params`] — parameter structs for the helpers above
@@ -36,8 +36,9 @@ pub(super) use range_check::{
 };
 pub(super) use value_convert::convert_value_rows;
 pub(super) use vector_primary_dml::{
-    VectorPrimaryUpdateParams, build_vector_primary_delete_plan, build_vector_primary_update_plan,
-    is_vector_primary, refuse_vector_primary_shape,
+    VectorPrimaryUpdateParams, build_vector_primary_delete_plan,
+    build_vector_primary_truncate_plan, build_vector_primary_update_plan, is_vector_primary,
+    refuse_vector_primary_shape,
 };
 pub(super) use vector_primary_insert::{
     VectorPrimaryInsertParams, build_vector_primary_insert_plan,

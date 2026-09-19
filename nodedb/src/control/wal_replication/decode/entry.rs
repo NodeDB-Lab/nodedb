@@ -89,6 +89,7 @@ fn to_physical_plan(
         | ReplicatedWrite::DeleteBySurrogate { .. }
         | ReplicatedWrite::DirectUpsert { .. }
         | ReplicatedWrite::VectorDirectDelete { .. }
+        | ReplicatedWrite::VectorDirectTruncate { .. }
         | ReplicatedWrite::VectorDirectUpdate { .. }
         | ReplicatedWrite::VectorResolvedDirectWrite { .. } => {
             Ok((vector::decode_arm(ctx, write)?, None))

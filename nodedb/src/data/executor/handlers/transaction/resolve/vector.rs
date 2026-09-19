@@ -28,6 +28,8 @@
 //!   post-image with its intent (`replay_direct_upsert`).
 //! * `DirectDelete` → `RecordType::VectorDirectDelete`,
 //!   `(collection, field, targets)` (`replay_direct_delete`).
+//! * `DirectTruncate` → `RecordType::VectorDirectTruncate`,
+//!   `(collection, field)` (`replay_direct_truncate`).
 //! * `DirectUpdate` → `RecordType::VectorDirectUpdate`, the 8-element
 //!   vector-primary patch (`replay_direct_update`).
 //! * `MultiVectorInsert` → `RecordType::MultiVectorPut`, the 6-element
@@ -72,8 +74,9 @@ use crate::control::server::wal_dispatch::{
     encode_sparse_vector_delete_payload, encode_sparse_vector_put_payload,
     encode_vector_batch_put_payload, encode_vector_delete_by_surrogate_payload,
     encode_vector_delete_payload, encode_vector_direct_delete_payload,
-    encode_vector_direct_update_payload, encode_vector_direct_upsert_payload,
-    encode_vector_put_payload, encode_vector_resolved_direct_write_payload,
+    encode_vector_direct_truncate_payload, encode_vector_direct_update_payload,
+    encode_vector_direct_upsert_payload, encode_vector_put_payload,
+    encode_vector_resolved_direct_write_payload,
 };
 use crate::wal::RedoSubRecord;
 use nodedb_physical::physical_plan::VectorDirectWriteIntent;
@@ -298,6 +301,21 @@ pub(super) fn serialize_vector_op(
             let payload = encode_vector_direct_delete_payload(collection.as_str(), field, targets)?;
             ops.push(RedoSubRecord {
                 record_type: RecordType::VectorDirectDelete as u32,
+                payload,
+            });
+            Ok(())
+        }
+        // Vector-primary truncate, replayed via `replay_direct_truncate`.
+        // `restart_identity` is a Control-Plane sequence concern and never
+        // enters the redo record.
+        VectorOp::DirectTruncate {
+            collection,
+            field,
+            restart_identity: _,
+        } => {
+            let payload = encode_vector_direct_truncate_payload(collection.as_str(), field)?;
+            ops.push(RedoSubRecord {
+                record_type: RecordType::VectorDirectTruncate as u32,
                 payload,
             });
             Ok(())

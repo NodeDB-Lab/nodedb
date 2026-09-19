@@ -117,6 +117,7 @@ pub fn returning_target_collection(plans: &[SqlPlan]) -> Option<String> {
         | SqlPlan::DocumentIndexLookup { .. }
         | SqlPlan::RangeScan { .. }
         | SqlPlan::Truncate { .. }
+        | SqlPlan::VectorPrimaryTruncate { .. }
         | SqlPlan::Join { .. }
         | SqlPlan::Aggregate { .. }
         | SqlPlan::TimeseriesScan { .. }

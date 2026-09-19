@@ -226,7 +226,7 @@ pub(super) fn extract_write_metadata(
         PhysicalPlan::Kv(KvOp::BatchPut { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
-        PhysicalPlan::Kv(KvOp::Truncate { collection }) => {
+        PhysicalPlan::Kv(KvOp::Truncate { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Debits + credits two keys in the same collection; not individually addressable,
@@ -346,6 +346,9 @@ pub(super) fn extract_write_metadata(
             targets,
             ..
         }) => vector_target_events(collection, targets, ChangeOperation::Delete),
+        PhysicalPlan::Vector(VectorOp::DirectTruncate { collection, .. }) => {
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
+        }
         PhysicalPlan::Vector(VectorOp::DirectUpdate {
             collection,
             targets,

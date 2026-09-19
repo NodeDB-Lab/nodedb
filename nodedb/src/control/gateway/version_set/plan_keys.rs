@@ -28,7 +28,7 @@ fn kv_touched_collections(op: &nodedb_physical::physical_plan::KvOp, out: &mut V
         | DropIndex { collection, .. }
         | FieldGet { collection, .. }
         | FieldSet { collection, .. }
-        | Truncate { collection }
+        | Truncate { collection, .. }
         | Incr { collection, .. }
         | IncrFloat { collection, .. }
         | Cas { collection, .. }
@@ -174,6 +174,7 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
                 | DirectInsertIfAbsent { collection, .. }
                 | DirectDelete { collection, .. }
                 | DirectUpdate { collection, .. }
+                | DirectTruncate { collection, .. }
                 | ResolvedDirectWrite { collection, .. }
                 | DeleteBySurrogate { collection, .. } => out.push(collection.as_str().to_owned()),
                 // The wrapped op is the intercepted write verbatim.

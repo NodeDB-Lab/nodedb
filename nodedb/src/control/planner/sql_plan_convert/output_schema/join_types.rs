@@ -131,6 +131,7 @@ fn collect_sides(plan: &SqlPlan, out: &mut Vec<JoinSide>) {
         | SqlPlan::UpdateFrom { .. }
         | SqlPlan::Delete { .. }
         | SqlPlan::Truncate { .. }
+        | SqlPlan::VectorPrimaryTruncate { .. }
         | SqlPlan::Aggregate { .. }
         | SqlPlan::TimeseriesIngest { .. }
         | SqlPlan::Union { .. }

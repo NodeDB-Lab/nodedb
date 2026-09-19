@@ -618,6 +618,7 @@ mod tests {
                 nodedb_types::DatabaseId::DEFAULT,
                 "sessions",
             ),
+            restart_identity: false,
         });
         assert_write_refused(inject(&mut plan, &store), "sessions");
     }

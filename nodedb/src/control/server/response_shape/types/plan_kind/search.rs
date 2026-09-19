@@ -35,6 +35,7 @@ pub(super) fn describe_vector(op: &VectorOp) -> PlanKind {
         } if !on_conflict_updates.is_empty() => PlanKind::DmlResultByOp,
         VectorOp::DirectUpsert { .. } => PlanKind::DmlResult("UPSERT"),
         VectorOp::DirectDelete { .. } => PlanKind::DmlResult("DELETE"),
+        VectorOp::DirectTruncate { .. } => PlanKind::DmlResult("TRUNCATE"),
         VectorOp::DirectUpdate { .. } => PlanKind::DmlResult("UPDATE"),
 
         // Read-only resolve: payload is the internal mutation list, never a client row.
