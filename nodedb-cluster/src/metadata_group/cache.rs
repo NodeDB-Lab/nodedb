@@ -35,6 +35,11 @@ pub struct MetadataCache {
     /// `(descriptor_id, node_id) -> lease`.
     pub leases: HashMap<(DescriptorId, u64), DescriptorLease>,
 
+    /// Fencing incarnation per `(descriptor_id, node_id)`, recorded by the
+    /// fenced grant variant. Absent for a grant that carried none — a
+    /// pre-fencing lease or a mixed-version cluster.
+    pub lease_incarnations: HashMap<(DescriptorId, u64), u64>,
+
     /// Topology mutations applied so far.
     pub topology_log: Vec<TopologyChange>,
     pub routing_log: Vec<RoutingChange>,
@@ -67,6 +72,13 @@ impl MetadataCache {
         if index > self.applied_index {
             self.applied_index = index;
         }
+    }
+
+    /// The fencing incarnation recorded for `(descriptor_id, holder)`, when
+    /// the grant carried one. `None` means the lease is unfenced: release
+    /// decisions fall back to the topology/verdict alone.
+    pub fn lease_incarnation(&self, id: &DescriptorId, holder: u64) -> Option<u64> {
+        self.lease_incarnations.get(&(id.clone(), holder)).copied()
     }
 
     /// Apply a committed entry. Idempotent by `applied_index`:
@@ -114,12 +126,27 @@ impl MetadataCache {
                 self.leases
                     .insert((lease.descriptor_id.clone(), lease.node_id), lease.clone());
             }
+            MetadataEntry::DescriptorLeaseGrantFenced {
+                lease,
+                holder_incarnation,
+            } => {
+                if lease.expires_at > self.last_applied_hlc {
+                    self.last_applied_hlc = lease.expires_at;
+                }
+                self.leases
+                    .insert((lease.descriptor_id.clone(), lease.node_id), lease.clone());
+                self.lease_incarnations.insert(
+                    (lease.descriptor_id.clone(), lease.node_id),
+                    *holder_incarnation,
+                );
+            }
             MetadataEntry::DescriptorLeaseRelease {
                 node_id,
                 descriptor_ids,
             } => {
                 for id in descriptor_ids {
                     self.leases.remove(&(id.clone(), *node_id));
+                    self.lease_incarnations.remove(&(id.clone(), *node_id));
                 }
             }
             // Drain state is host-side (lives in
@@ -311,4 +338,58 @@ fn apply_compensation(
         "compensation applied"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata_group::descriptors::DescriptorKind;
+
+    fn lease(id: &DescriptorId, holder: u64) -> DescriptorLease {
+        DescriptorLease {
+            descriptor_id: id.clone(),
+            version: 1,
+            node_id: holder,
+            expires_at: Hlc::new(1_000_000, 0),
+        }
+    }
+
+    /// A fenced grant records its incarnation; the release clears both the
+    /// lease and the fence.
+    #[test]
+    fn fenced_grant_records_and_release_clears_the_fence() {
+        let mut cache = MetadataCache::new();
+        let orders = DescriptorId::new(0, 1, DescriptorKind::Collection, "orders".to_string());
+
+        cache.apply(
+            1,
+            &MetadataEntry::DescriptorLeaseGrantFenced {
+                lease: lease(&orders, 2),
+                holder_incarnation: 9,
+            },
+        );
+        assert!(cache.leases.contains_key(&(orders.clone(), 2)));
+        assert_eq!(cache.lease_incarnation(&orders, 2), Some(9));
+
+        cache.apply(
+            2,
+            &MetadataEntry::DescriptorLeaseRelease {
+                node_id: 2,
+                descriptor_ids: vec![orders.clone()],
+            },
+        );
+        assert!(!cache.leases.contains_key(&(orders.clone(), 2)));
+        assert_eq!(cache.lease_incarnation(&orders, 2), None);
+    }
+
+    /// An unfenced grant records no incarnation — release decisions fall
+    /// back to the topology/verdict alone.
+    #[test]
+    fn unfenced_grant_records_no_incarnation() {
+        let mut cache = MetadataCache::new();
+        let orders = DescriptorId::new(0, 1, DescriptorKind::Collection, "orders".to_string());
+
+        cache.apply(1, &MetadataEntry::DescriptorLeaseGrant(lease(&orders, 2)));
+        assert_eq!(cache.lease_incarnation(&orders, 2), None);
+    }
 }

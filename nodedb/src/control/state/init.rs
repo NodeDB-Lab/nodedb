@@ -35,12 +35,11 @@ impl SharedState {
 
     /// Create shared state with a pre-built credential store (for tests that need catalog).
     ///
-    /// `is_cluster` is the static, deployment-time surrogate-registry mode
-    /// choice — same predicate as `SharedState::open`'s `is_cluster`
-    /// (whether this node's caller is about to wire it into a real Raft
-    /// cluster), not a property of the credential store. Almost every
-    /// caller is a single-process fixture and passes `false`; the cluster
-    /// test harness passes `true`.
+    /// `is_cluster` is the static, deployment-time surrogate-registry mode choice —
+    /// same predicate as `SharedState::open`'s `is_cluster` (whether this node's
+    /// caller is about to wire it into a real Raft cluster), not a property of the
+    /// credential store. Almost every caller is a single-process fixture and passes
+    /// `false`; the cluster test harness passes `true`.
     pub fn new_with_credentials(
         dispatcher: Dispatcher,
         wal: Arc<WalManager>,
@@ -122,9 +121,9 @@ impl SharedState {
         Self::new_inner(dispatcher, wal)
     }
 
-    /// Create shared state whose risk scorer is built from `risk_config`
-    /// instead of the disabled default (for tests that exercise the risk
-    /// gate). Production wires the same configuration from `[auth.risk]`.
+    /// Create shared state whose risk scorer is built from `risk_config` instead
+    /// of the disabled default (tests exercising the risk gate; production wires
+    /// the same configuration from `[auth.risk]`).
     pub fn new_with_risk_config(
         dispatcher: Dispatcher,
         wal: Arc<WalManager>,
@@ -233,6 +232,7 @@ impl SharedState {
             cluster_routing: None,
             cluster_transport: None,
             node_id: 0,
+            node_incarnation: 0,
             metadata_cache: Arc::new(std::sync::RwLock::new(nodedb_cluster::MetadataCache::new())),
             catalog_change_tx: tokio::sync::broadcast::channel(
                 crate::control::cluster::metadata_applier::CATALOG_CHANNEL_CAPACITY,

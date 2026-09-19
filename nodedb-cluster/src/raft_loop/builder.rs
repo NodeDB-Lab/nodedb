@@ -68,6 +68,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             // fresh `Notify` has no pending permit, so this loses nothing.
             reconcile_notify: tokio::sync::Notify::new(),
             metadata_cache: self.metadata_cache,
+            lease_liveness: self.lease_liveness,
         }
     }
 
@@ -272,6 +273,18 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// host passes the same `Arc` the production metadata applier holds.
     pub fn with_metadata_cache(mut self, cache: Arc<RwLock<MetadataCache>>) -> Self {
         self.metadata_cache = Some(cache);
+        self
+    }
+
+    /// Wire the lease-holder liveness set fed by SWIM verdicts. The host
+    /// passes the same `Arc` the `LeaseHolderLivenessHook` subscriber writes
+    /// into, so the periodic lease-GC sweep releases a holder's leases as
+    /// soon as its verdict is Dead/Left.
+    pub fn with_lease_liveness(
+        mut self,
+        liveness: Arc<crate::lease_liveness::LeaseHolderLiveness>,
+    ) -> Self {
+        self.lease_liveness = Some(liveness);
         self
     }
 

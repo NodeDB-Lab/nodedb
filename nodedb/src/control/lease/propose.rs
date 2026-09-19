@@ -209,7 +209,17 @@ fn refresh_lease_after_admission(
 
     // Cluster path: encode + propose + block on apply via the
     // shared `propose_and_wait` helper.
-    let entry = MetadataEntry::DescriptorLeaseGrant(lease.clone());
+    let entry = if shared
+        .cluster_version_view()
+        .can_activate_feature(crate::control::rolling_upgrade::LEASE_FENCING_VERSION)
+    {
+        MetadataEntry::DescriptorLeaseGrantFenced {
+            lease: lease.clone(),
+            holder_incarnation: shared.node_incarnation,
+        }
+    } else {
+        MetadataEntry::DescriptorLeaseGrant(lease.clone())
+    };
     super::propose_and_wait(shared, &entry, "grant")?;
 
     // Re-read the cache. Under normal conditions the apply path

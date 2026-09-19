@@ -55,6 +55,11 @@ pub struct BootstrapCtx {
     /// the receiver exposed on `RunningCluster::decommission_signal`
     /// from this sender via `subscribe()`.
     pub decommission_signal: watch::Sender<bool>,
+
+    /// Lease-holder liveness fed by SWIM verdicts. The host creates it,
+    /// registers [`crate::LeaseHolderLivenessHook`] as a SWIM subscriber,
+    /// and hands the same `Arc` to the raft loop's lease GC.
+    pub lease_liveness: Arc<crate::lease_liveness::LeaseHolderLiveness>,
 }
 
 impl BootstrapCtx {
@@ -66,6 +71,7 @@ impl BootstrapCtx {
         multi_raft: Arc<Mutex<MultiRaft>>,
         health: ClusterHealth,
         decommission_signal: watch::Sender<bool>,
+        lease_liveness: Arc<crate::lease_liveness::LeaseHolderLiveness>,
     ) -> Self {
         Self {
             topology,
@@ -74,6 +80,7 @@ impl BootstrapCtx {
             multi_raft,
             health,
             decommission_signal,
+            lease_liveness,
         }
     }
 }

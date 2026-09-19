@@ -17,23 +17,48 @@ use crate::topology::ClusterTopology;
 
 use super::loop_core::{CommitApplier, RaftLoop};
 
-/// Pure collection: `(node_id, descriptor_ids)` for every lease holder that
-/// is not in `topology`. Sorted by `node_id` for deterministic proposal
-/// order. Extracted so the sweep's decision logic is unit-testable without
-/// a full `RaftLoop`.
+/// Pure collection: `(node_id, descriptor_ids)` for every lease holder that is
+/// gone — not in `topology`, or marked gone by the SWIM-fed
+/// [`LeaseHolderLiveness`](crate::lease_liveness::LeaseHolderLiveness) set.
+/// Sorted by `node_id` for deterministic proposal order. Extracted so the
+/// sweep's decision logic is unit-testable without a full `RaftLoop`.
 pub(super) fn collect_non_member_lease_releases(
     topology: &ClusterTopology,
     cache: &MetadataCache,
+    liveness: Option<&crate::lease_liveness::LeaseHolderLiveness>,
 ) -> Vec<(u64, Vec<DescriptorId>)> {
     let mut by_holder: HashMap<u64, Vec<DescriptorId>> = HashMap::new();
     for (id, holder) in cache.leases.keys() {
-        if !topology.contains(*holder) {
+        let gone = !topology.contains(*holder)
+            || liveness
+                .is_some_and(|l| l.is_gone(*holder) && fence_allows_release(cache, id, *holder, l));
+        if gone {
             by_holder.entry(*holder).or_default().push(id.clone());
         }
     }
     let mut out: Vec<(u64, Vec<DescriptorId>)> = by_holder.into_iter().collect();
     out.sort_by_key(|(node_id, _)| *node_id);
     out
+}
+
+/// Whether a liveness verdict releases this lease, per the fencing rule.
+///
+/// A verdict at incarnation `N` releases leases stamped at `<= N`; a lease
+/// with no stamped incarnation — a pre-fencing grant, or a grant from a
+/// mixed-version cluster — is released too, matching the topology-only
+/// behaviour.
+fn fence_allows_release(
+    cache: &MetadataCache,
+    id: &DescriptorId,
+    holder: u64,
+    liveness: &crate::lease_liveness::LeaseHolderLiveness,
+) -> bool {
+    match liveness.fence_at(holder) {
+        None => true,
+        Some(gone_at) => cache
+            .lease_incarnation(id, holder)
+            .map_or(true, |stamped| stamped <= gone_at),
+    }
 }
 
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
@@ -50,7 +75,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             }
             let topo = self.topology.read().unwrap_or_else(|p| p.into_inner());
             let cache = cache.read().unwrap_or_else(|p| p.into_inner());
-            collect_non_member_lease_releases(&topo, &cache)
+            collect_non_member_lease_releases(&topo, &cache, self.lease_liveness.as_deref())
         };
 
         for (node_id, descriptor_ids) in to_release {
@@ -132,7 +157,7 @@ mod tests {
             .leases
             .insert((metrics.clone(), 3), lease(&metrics, 3));
 
-        let collected = collect_non_member_lease_releases(&topo, &cache);
+        let collected = collect_non_member_lease_releases(&topo, &cache, None);
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0].0, 2);
         assert_eq!(collected[0].1, vec![orders.clone()]);
@@ -153,13 +178,71 @@ mod tests {
                 .insert((orders.clone(), holder), lease(&orders, holder));
         }
 
-        assert!(collect_non_member_lease_releases(&topo, &cache).is_empty());
+        assert!(collect_non_member_lease_releases(&topo, &cache, None).is_empty());
     }
 
     #[test]
     fn gc_collects_empty_cache() {
         let topo = topo_with(&[1]);
         let cache = MetadataCache::new();
-        assert!(collect_non_member_lease_releases(&topo, &cache).is_empty());
+        assert!(collect_non_member_lease_releases(&topo, &cache, None).is_empty());
+    }
+
+    /// A holder SWIM marked Dead is collectible while it is still a topology
+    /// member; a refuted (Alive) verdict clears the mark again.
+    #[test]
+    fn gc_collects_a_dead_member_from_liveness() {
+        use crate::lease_liveness::LeaseHolderLiveness;
+
+        let topo = topo_with(&[1, 2]);
+        let mut cache = MetadataCache::new();
+        let orders = DescriptorId::new(0, 1, DescriptorKind::Collection, "orders".to_string());
+        cache.leases.insert((orders.clone(), 1), lease(&orders, 1));
+        cache.leases.insert((orders.clone(), 2), lease(&orders, 2));
+
+        let liveness = LeaseHolderLiveness::new();
+        assert!(collect_non_member_lease_releases(&topo, &cache, Some(&liveness)).is_empty());
+
+        liveness.mark_gone(2);
+        let collected = collect_non_member_lease_releases(&topo, &cache, Some(&liveness));
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, 2);
+        assert_eq!(collected[0].1, vec![orders]);
+
+        liveness.revive(2);
+        assert!(collect_non_member_lease_releases(&topo, &cache, Some(&liveness)).is_empty());
+    }
+
+    /// A fencing verdict spares a lease re-acquired at a newer incarnation,
+    /// releases one stamped at or below it, and releases unstamped leases
+    /// unconditionally.
+    #[test]
+    fn a_fenced_verdict_spares_a_newer_lease() {
+        use crate::lease_liveness::LeaseHolderLiveness;
+
+        let topo = topo_with(&[2]);
+        let liveness = LeaseHolderLiveness::new();
+        liveness.mark_gone_at(2, 4);
+        let orders = DescriptorId::new(0, 1, DescriptorKind::Collection, "orders".to_string());
+
+        let mut cache = MetadataCache::new();
+        cache.leases.insert((orders.clone(), 2), lease(&orders, 2));
+
+        // Stamped above the verdict's incarnation: a restart re-acquired.
+        cache.lease_incarnations.insert((orders.clone(), 2), 5);
+        assert!(collect_non_member_lease_releases(&topo, &cache, Some(&liveness)).is_empty());
+
+        // Stamped at the verdict's incarnation: released.
+        cache.lease_incarnations.insert((orders.clone(), 2), 4);
+        let collected = collect_non_member_lease_releases(&topo, &cache, Some(&liveness));
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, 2);
+
+        // No stamp (pre-fencing grant): unconditional release.
+        cache.lease_incarnations.clear();
+        assert_eq!(
+            collect_non_member_lease_releases(&topo, &cache, Some(&liveness)).len(),
+            1
+        );
     }
 }

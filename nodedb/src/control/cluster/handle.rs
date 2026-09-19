@@ -66,4 +66,12 @@ pub struct ClusterHandle {
     /// calls [`nodedb_cluster::start_cluster_subsystems`] with the
     /// loop's shared `multi_raft` handle.
     pub pending_subsystems: Mutex<Option<PendingSubsystems>>,
+    /// Lease-holder liveness fed by SWIM verdicts. Registered as a SWIM
+    /// subscriber at subsystem start and handed to the `RaftLoop`'s lease GC,
+    /// which releases a Dead/Left holder's descriptor leases without waiting
+    /// for topology removal or expiry.
+    pub lease_liveness: Arc<nodedb_cluster::LeaseHolderLiveness>,
+    /// This node's SWIM incarnation, resolved at init (the persisted value
+    /// bumped, or zero on a fresh node). Stamped on fenced lease grants.
+    pub node_incarnation: u64,
 }

@@ -44,6 +44,7 @@ pub mod ghost;
 pub mod ghost_sweeper;
 pub mod health;
 pub mod install_snapshot;
+pub mod lease_liveness;
 pub mod lifecycle;
 pub mod lifecycle_state;
 pub mod loop_metrics;
@@ -100,6 +101,7 @@ pub use error::{
 pub use forward::{ChunkSink, NoopPlanExecutor, PlanExecutor};
 pub use ghost::{GhostStub, GhostTable};
 pub use health::{HealthConfig, HealthMonitor};
+pub use lease_liveness::{LeaseHolderLiveness, LeaseHolderLivenessHook};
 pub use lifecycle_state::{ClusterLifecycleState, ClusterLifecycleTracker};
 pub use loop_metrics::{LoopMetrics, LoopMetricsRegistry};
 pub use migration::{MigrationPhase, MigrationState};

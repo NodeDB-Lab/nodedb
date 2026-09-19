@@ -112,7 +112,10 @@ pub fn register_default_subsystems(
         swim_cfg,
         Arc::clone(&ctx.routing),
         Arc::clone(&ctx.topology),
-        vec![],
+        vec![Arc::new(crate::LeaseHolderLivenessHook::new(
+            Arc::clone(&ctx.lease_liveness),
+            crate::lease_liveness::topology_resolver(Arc::clone(&ctx.topology)),
+        ))],
     )));
 
     registry.register(Arc::new(ReachabilitySubsystem::new(
@@ -208,6 +211,7 @@ pub async fn start_cluster_subsystems(
     transport: Arc<NexarTransport>,
     raft_multi_raft: Arc<std::sync::Mutex<crate::multi_raft::MultiRaft>>,
     catalog: &Arc<ClusterCatalog>,
+    lease_liveness: Arc<crate::lease_liveness::LeaseHolderLiveness>,
 ) -> Result<RunningCluster> {
     let health = ClusterHealth::new();
     let (decommission_signal, _) = tokio::sync::watch::channel(false);
@@ -218,6 +222,7 @@ pub async fn start_cluster_subsystems(
         Arc::clone(&raft_multi_raft),
         health,
         decommission_signal,
+        lease_liveness,
     );
 
     let executor = Arc::new(MigrationExecutor::new(
