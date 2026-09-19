@@ -166,7 +166,20 @@ pub(crate) fn ddl_result_to_native(
         // the first element is the first meaningful result — mirroring the
         // previous bridge, which returned on the first known variant.
         Ok(results) => match results.into_iter().next() {
-            Some(DdlResult::Status { command, .. }) => NativeResponse::status_row(seq, command),
+            Some(DdlResult::Status {
+                command,
+                rows_affected,
+            }) => {
+                let mut r = NativeResponse::status_row(seq, command);
+                // `status_row` defaults to the `Some(1)` "one command ran"
+                // sentinel for count-less DDL. A count-bearing status (the
+                // graph edge/label DSL statements) overrides it with the
+                // real affected count instead.
+                if let Some(n) = rows_affected {
+                    r.rows_affected = Some(n);
+                }
+                r
+            }
             Some(DdlResult::Rows(shaped)) => {
                 let (columns, rows) = to_native_columns_rows(&shaped);
                 NativeResponse {
@@ -258,9 +271,10 @@ pub(crate) fn calvin_native_response(
     if let Some(resp) = &apply_result {
         r.watermark_lsn = resp.watermark_lsn.as_u64();
     }
-    // A batch with no count-bearing plan (pure graph / vector / DDL work) has no
-    // row count to report, and says so by leaving `rows_affected` unset rather
-    // than inventing one from the task count.
+    // A batch with no count-bearing plan (vector / DDL work) has no row count
+    // to report, and says so by leaving `rows_affected` unset rather than
+    // inventing one from the task count. Graph edge/label writes classify as
+    // count-bearing (`PlanKind::DmlResult`), same as any other DML.
     if dml_plan.is_some() {
         let count = apply_result.as_ref().map_or_else(
             || {

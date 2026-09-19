@@ -52,6 +52,11 @@ use super::support::ddl_err;
 /// existing cross-shard commit path.
 ///
 /// Caller invariant: the session is `InBlock`.
+///
+/// Returns the affected count the DSL caller renders in its command tag. A
+/// dual-home edge stages the identical op into both endpoint overlays, so the
+/// count is read from the `vsrc` home only — the canonical owner of logical
+/// edge cardinality (mirrors `owns_logical_edge_stats` in the Data Plane).
 pub(super) async fn stage_edge_dual_home(
     state: &SharedState,
     tenant_id: TenantId,
@@ -59,7 +64,7 @@ pub(super) async fn stage_edge_dual_home(
     homes: EdgeHomes,
     op: GraphOp,
     txn_ctx: &DmlTxnCtx<'_>,
-) -> Result<(), DdlError> {
+) -> Result<u64, DdlError> {
     let EdgeHomes {
         vsrc,
         vdst,
@@ -79,7 +84,7 @@ pub(super) async fn stage_edge_dual_home(
     }
 
     // Dual-home: stage the same edge into both endpoint overlays.
-    stage_edge_write_in_txn(
+    let affected = stage_edge_write_in_txn(
         state,
         tenant_id,
         database_id,
@@ -96,15 +101,16 @@ pub(super) async fn stage_edge_dual_home(
         PhysicalPlan::Graph(op),
         txn_ctx,
     )
-    .await
+    .await?;
+    Ok(affected)
 }
 
 /// Stage a graph-edge write (`GraphOp::EdgePut` / `EdgeDelete`) into the active
 /// transaction's overlay on ONE `vshard` through the neutral staging gate.
 ///
 /// Caller invariant: the session is `InBlock` and `plan` is a stageable
-/// `GraphOp` write. Returns `Ok(())` once the write is staged + buffered; a
-/// staging rejection or dispatch failure maps to a [`DdlError`].
+/// `GraphOp` write. Returns the staged write's affected count once staged +
+/// buffered; a staging rejection or dispatch failure maps to a [`DdlError`].
 pub(super) async fn stage_edge_write_in_txn(
     state: &SharedState,
     tenant_id: TenantId,
@@ -112,7 +118,7 @@ pub(super) async fn stage_edge_write_in_txn(
     vshard: VShardId,
     plan: PhysicalPlan,
     txn_ctx: &DmlTxnCtx<'_>,
-) -> Result<(), DdlError> {
+) -> Result<u64, DdlError> {
     let task = PhysicalTask {
         tenant_id,
         vshard_id: vshard,
@@ -142,12 +148,13 @@ pub(super) async fn stage_edge_write_in_txn(
     .await;
 
     match routed {
+        Ok(InTxnRoute::Staged(outcome)) => Ok(outcome.affected as u64),
         // Edge writes are stageable (`is_stageable_write`), so inside a
         // transaction block the gate always returns `Staged`. `Read` (not in a
         // block) and `Buffered` (non-stageable write) cannot occur for a
-        // caller that already checked `InBlock`; treat them as a successful
-        // no-op tag rather than panicking.
-        Ok(InTxnRoute::Staged(_)) | Ok(InTxnRoute::Read(_)) | Ok(InTxnRoute::Buffered) => Ok(()),
+        // caller that already checked `InBlock`; there is no affected count to
+        // report for either, so treat them as a no-op tag rather than panicking.
+        Ok(InTxnRoute::Read(_)) | Ok(InTxnRoute::Buffered) => Ok(0),
         Err(StagingGateError::Dispatch(e)) => Err(ddl_err("XX000", e.to_string())),
         Err(StagingGateError::Rejected { code }) => {
             let (_, sqlstate, message) = match code {

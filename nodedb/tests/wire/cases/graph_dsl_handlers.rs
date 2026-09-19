@@ -25,6 +25,103 @@
 use crate::harness::TestServer;
 use tokio_postgres::SimpleQueryMessage;
 
+/// The row count carried by the first `CommandComplete` in `sql`'s response.
+/// Mirrors `command_complete_tag_conformance.rs`'s `affected` helper.
+async fn affected(server: &TestServer, sql: &str) -> u64 {
+    let messages = server
+        .client
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|e| panic!("run {sql}: {e:?}"));
+    for m in messages {
+        if let SimpleQueryMessage::CommandComplete(n) = m {
+            return n;
+        }
+    }
+    panic!("statement reported no command tag: {sql}")
+}
+
+// ── 0. Graph edge/label writes report a real affected count ──────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_insert_edge_reports_one_affected() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION tag_edges").await.unwrap();
+
+    assert_eq!(
+        affected(
+            &server,
+            "GRAPH INSERT EDGE IN 'tag_edges' FROM 'a' TO 'b' TYPE 'l'"
+        )
+        .await,
+        1,
+        "INSERT EDGE always writes exactly one edge"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_delete_edge_of_an_existing_edge_reports_one_affected() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION tag_edges_del")
+        .await
+        .unwrap();
+    server
+        .exec("GRAPH INSERT EDGE IN 'tag_edges_del' FROM 'a' TO 'b' TYPE 'l'")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        affected(
+            &server,
+            "GRAPH DELETE EDGE IN 'tag_edges_del' FROM 'a' TO 'b' TYPE 'l'"
+        )
+        .await,
+        1,
+        "deleting a live edge must report exactly one affected"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_delete_edge_of_an_absent_edge_reports_zero_affected() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION tag_edges_absent")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        affected(
+            &server,
+            "GRAPH DELETE EDGE IN 'tag_edges_absent' FROM 'ghost-a' TO 'ghost-b' TYPE 'l'"
+        )
+        .await,
+        0,
+        "deleting an edge that was never written must report zero affected"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_label_and_unlabel_report_one_affected() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION tag_labels").await.unwrap();
+    server
+        .exec("GRAPH INSERT EDGE IN 'tag_labels' FROM 'alice' TO 'bob' TYPE 'l'")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        affected(&server, "GRAPH LABEL 'alice' AS 'Person'").await,
+        1,
+        "LABEL touches exactly one node"
+    );
+    assert_eq!(
+        affected(&server, "GRAPH UNLABEL 'alice' AS 'Person'").await,
+        1,
+        "UNLABEL touches exactly one node"
+    );
+}
+
 // ── 1. GRAPH PATH returns a path, not a BFS frontier ─────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

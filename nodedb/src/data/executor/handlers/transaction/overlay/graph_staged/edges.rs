@@ -36,6 +36,28 @@ impl GraphTxnOverlay {
         overlay.pending_edge_tombstones.insert(key);
     }
 
+    /// Whether `(src, label, dst)` is currently staged in this transaction's
+    /// own overlay: `Some(true)` when staged as a put, `Some(false)` when
+    /// staged as a tombstone, `None` when this transaction has not touched
+    /// the edge — the caller must then resolve it against BASE state.
+    pub fn staged_edge_presence(
+        &self,
+        coll_key: &GraphCollKey,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> Option<bool> {
+        let overlay = self.collections.get(coll_key)?;
+        let key = (src.to_string(), label.to_string(), dst.to_string());
+        if overlay.pending_edges.contains_key(&key) {
+            Some(true)
+        } else if overlay.pending_edge_tombstones.contains(&key) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// True if `(src, label, dst)` has been staged-deleted in this
     /// transaction.
     pub fn is_edge_tombstoned(

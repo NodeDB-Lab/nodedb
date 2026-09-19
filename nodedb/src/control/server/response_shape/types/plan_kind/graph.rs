@@ -26,14 +26,17 @@ pub(super) fn describe_graph(op: &GraphOp) -> PlanKind {
         | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. } => PlanKind::MultiRow,
 
-        // Handler reports no count yet.
-        GraphOp::EdgePut { .. }
-        | GraphOp::EdgePutBatch { .. }
-        | GraphOp::EdgeDelete { .. }
+        GraphOp::EdgePut { .. } | GraphOp::EdgePutBatch { .. } => PlanKind::DmlResult("INSERT"),
+
+        // `ResolveEdgeDelete` reports the same live/absent verdict as the
+        // delete it wraps, via `response_affected` — matches an edge delete's
+        // tag even though the resolve pass itself writes nothing.
+        GraphOp::EdgeDelete { .. }
         | GraphOp::EdgeDeleteBatch { .. }
-        | GraphOp::SetNodeLabels { .. }
-        | GraphOp::RemoveNodeLabels { .. }
-        // Read-only resolve: payload is the internal admission verdict, never a client row.
-        | GraphOp::ResolveEdgeDelete(_) => PlanKind::Execution,
+        | GraphOp::ResolveEdgeDelete(_) => PlanKind::DmlResult("DELETE"),
+
+        GraphOp::SetNodeLabels { .. } | GraphOp::RemoveNodeLabels { .. } => {
+            PlanKind::DmlResult("UPDATE")
+        }
     }
 }

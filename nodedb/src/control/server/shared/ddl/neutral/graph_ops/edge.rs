@@ -12,6 +12,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::planner::calvin::{build_static_tx_class, submit_calvin_routed};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::{DmlTxnCtx, TransactionState};
+use crate::control::server::shared::sql::staging_predicates::require_affected_count;
 use crate::control::server::surrogate_exchange::assign_surrogate_routed;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId, VShardId};
@@ -21,6 +22,17 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 use super::super::super::result::{DdlError, DdlResult};
 use super::edge_parse::{properties_to_json, validate_edge_label};
 use super::support::{data_plane_verdict, ddl_err};
+
+/// Read the affected count off a Data-Plane response, mapping a missing count
+/// to a [`DdlError`] via `ddl_err` — never a default.
+fn response_affected(response: &crate::bridge::envelope::Response) -> Result<u64, DdlError> {
+    require_affected_count(response.payload.as_bytes()).map_err(|e| {
+        ddl_err(
+            "XX000",
+            format!("edge write response is missing its affected count: {e}"),
+        )
+    })
+}
 
 /// `GRAPH INSERT EDGE IN '<collection>' FROM '<src>' TO '<dst>' TYPE '<label>' [PROPERTIES '<json>' | { ... }]`
 ///
@@ -117,7 +129,7 @@ pub async fn insert_edge(
     // In a transaction, an insert stages into `GraphTxnOverlay` instead of applying now
     // (COMMIT replays, ROLLBACK discards); a cross-shard edge stages into both endpoints.
     if txn_ctx.sessions.transaction_state(txn_ctx.session_id) == TransactionState::InBlock {
-        super::edge_stage::stage_edge_dual_home(
+        let affected = super::edge_stage::stage_edge_dual_home(
             state,
             tenant_id,
             database_id,
@@ -132,11 +144,11 @@ pub async fn insert_edge(
         .await?;
         return Ok(vec![DdlResult::Status {
             command: "INSERT EDGE".to_string(),
-            rows_affected: None,
+            rows_affected: Some(affected),
         }]);
     }
 
-    if single_home {
+    let affected = if single_home {
         // F1a fast path: single-home write to `vsrc` covers both forward and reverse.
         let plan = PhysicalPlan::Graph(edge_put);
         let response =
@@ -152,6 +164,7 @@ pub async fn insert_edge(
             .await
             .map_err(|e| ddl_err("XX000", e.to_string()))?;
         data_plane_verdict(&response)?;
+        response_affected(&response)?
     } else {
         // Cross-shard: dual-home atomically via Calvin. `build_static_tx_class` enumerates
         // {vsrc, vdst}, each running the same EdgePut with identical surrogates.
@@ -168,14 +181,29 @@ pub async fn insert_edge(
         let response = submit_calvin_routed(state, tx_class)
             .await
             .map_err(|e| ddl_err("XX000", e.to_string()))?;
-        if let Some(response) = response {
-            data_plane_verdict(&response)?;
+        match response {
+            Some(response) => {
+                data_plane_verdict(&response)?;
+                response_affected(&response)?
+            }
+            // `plans_have_primary_write` treats a Graph-only tx_class (no
+            // accompanying primary DML, exactly this DSL's own tx_class) as
+            // primary, so `commit_apply_tail` always deposits this
+            // participant's applied response. A missing deposit here is a
+            // scheduler invariant violation, never a value to guess.
+            None => {
+                return Err(ddl_err(
+                    "XX000",
+                    "cross-shard edge insert completed with no applied response to read \
+                     its affected count from",
+                ));
+            }
         }
-    }
+    };
 
     Ok(vec![DdlResult::Status {
         command: "INSERT EDGE".to_string(),
-        rows_affected: None,
+        rows_affected: Some(affected),
     }])
 }
 
@@ -277,7 +305,7 @@ pub async fn delete_edge(
     // Inside a transaction, an edge delete stages into `GraphTxnOverlay` instead of
     // applying now, so RYOW sees it removed; COMMIT replays it, ROLLBACK discards it.
     if txn_ctx.sessions.transaction_state(txn_ctx.session_id) == TransactionState::InBlock {
-        super::edge_stage::stage_edge_dual_home(
+        let affected = super::edge_stage::stage_edge_dual_home(
             state,
             tenant_id,
             database_id,
@@ -292,7 +320,7 @@ pub async fn delete_edge(
         .await?;
         return Ok(vec![DdlResult::Status {
             command: "DELETE EDGE".to_string(),
-            rows_affected: None,
+            rows_affected: Some(affected),
         }]);
     }
 
@@ -306,16 +334,16 @@ pub async fn delete_edge(
             tenant_id,
             database_id,
         };
-        crate::control::write_resolve::run_write_resolve(state, ctx, &*resolver)
+        let response = crate::control::write_resolve::run_write_resolve(state, ctx, &*resolver)
             .await
             .map_err(|e| ddl_err("XX000", e.to_string()))?;
         return Ok(vec![DdlResult::Status {
             command: "DELETE EDGE".to_string(),
-            rows_affected: None,
+            rows_affected: Some(response_affected(&response)?),
         }]);
     }
 
-    if single_home {
+    let affected = if single_home {
         // F1a fast path: single-home write to `vsrc` tombstones both rows together.
         let plan = PhysicalPlan::Graph(edge_delete);
         let response =
@@ -331,6 +359,7 @@ pub async fn delete_edge(
             .await
             .map_err(|e| ddl_err("XX000", e.to_string()))?;
         data_plane_verdict(&response)?;
+        response_affected(&response)?
     } else {
         // Cross-shard edge: dual-home the delete atomically via Calvin, mirroring
         // the insert path — {vsrc, vdst} each run the same EdgeDelete.
@@ -347,14 +376,31 @@ pub async fn delete_edge(
         let response = submit_calvin_routed(state, tx_class)
             .await
             .map_err(|e| ddl_err("XX000", e.to_string()))?;
-        if let Some(response) = response {
-            data_plane_verdict(&response)?;
+        match response {
+            Some(response) => {
+                data_plane_verdict(&response)?;
+                response_affected(&response)?
+            }
+            // `plans_have_primary_write` treats a Graph-only tx_class (no
+            // accompanying primary DML, exactly this DSL's own tx_class) as
+            // primary, so `commit_apply_tail` always deposits this
+            // participant's applied response. A delete's count is not
+            // deterministic from the plan alone (the edge may already be
+            // absent), so a missing deposit here is a scheduler invariant
+            // violation, never a value to guess.
+            None => {
+                return Err(ddl_err(
+                    "XX000",
+                    "cross-shard edge delete completed with no applied response to read \
+                     its affected count from",
+                ));
+            }
         }
-    }
+    };
 
     Ok(vec![DdlResult::Status {
         command: "DELETE EDGE".to_string(),
-        rows_affected: None,
+        rows_affected: Some(affected),
     }])
 }
 
@@ -414,6 +460,6 @@ pub async fn set_node_labels(
     let tag = if remove { "UNLABEL" } else { "LABEL" };
     Ok(vec![DdlResult::Status {
         command: tag.to_string(),
-        rows_affected: None,
+        rows_affected: Some(response_affected(&response)?),
     }])
 }
