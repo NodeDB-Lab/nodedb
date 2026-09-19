@@ -412,7 +412,19 @@ impl<S: LogStorage> RaftNode<S> {
     }
 
     pub(super) fn collect_committed_entries(&mut self) {
-        let from = self.volatile.last_applied + 1;
+        // Resume from the furthest index already queued into `Ready`, not only
+        // from `last_applied`. This runs on every commit-index advance — a
+        // follower's AppendEntries, a single voter's propose — while the loop
+        // drains `Ready` and advances `last_applied` later. Two advances inside
+        // one window would queue the same committed range twice, and the
+        // applier then receives the same committed index twice in one batch.
+        let queued_through = self
+            .ready
+            .committed_entries
+            .last()
+            .map(|entry| entry.index)
+            .unwrap_or(0);
+        let from = self.volatile.last_applied.max(queued_through) + 1;
         let to = self.volatile.commit_index;
         if from > to {
             return;
@@ -432,5 +444,41 @@ impl<S: LogStorage> RaftNode<S> {
         let max = self.config.election_timeout_max.as_millis() as u64;
         let timeout = Duration::from_millis(rng.random_range(min..=max));
         self.election_deadline = Instant::now() + timeout;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::node::core::RaftNode;
+    use crate::storage::MemStorage;
+    use crate::test_support::{force_election, test_config};
+
+    /// Two commit advances inside one `Ready` window queue each index once:
+    /// the second collect resumes past what the first already queued.
+    #[test]
+    fn repeated_collection_queues_each_index_once() {
+        let mut node = RaftNode::new(test_config(1, vec![]), MemStorage::new());
+        force_election(&mut node);
+        let election = node.take_ready();
+        if let Some(last) = election.committed_entries.last() {
+            node.advance_applied(last.index);
+        }
+
+        node.propose(b"one".to_vec())
+            .expect("single voter commits immediately");
+        node.propose(b"two".to_vec())
+            .expect("single voter commits immediately");
+
+        let ready = node.take_ready();
+        let indices: Vec<u64> = ready
+            .committed_entries
+            .iter()
+            .map(|entry| entry.index)
+            .collect();
+        assert_eq!(indices.len(), 2, "one entry per propose: {indices:?}");
+        assert!(
+            indices.windows(2).all(|pair| pair[0] < pair[1]),
+            "queued indices must be strictly increasing: {indices:?}"
+        );
     }
 }

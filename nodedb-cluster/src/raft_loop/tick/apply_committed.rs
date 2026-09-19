@@ -12,10 +12,30 @@ use crate::forward::PlanExecutor;
 
 use super::super::loop_core::{CommitApplier, RaftLoop};
 
+/// The first committed index a batch carries twice, when it carries one.
+///
+/// A batch that repeats an index is the shape that once let an append-shaped
+/// write apply twice before the applier's delivery guard landed. The guard
+/// stays the boundary; this makes a producer-side repeat observable instead
+/// of silent.
+fn first_duplicate_committed_index(entries: &[nodedb_raft::LogEntry]) -> Option<u64> {
+    let mut seen = std::collections::BTreeSet::new();
+    entries
+        .iter()
+        .map(|entry| entry.index)
+        .find(|index| !seen.insert(*index))
+}
+
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// Apply one group's committed entries from this tick's `Ready` output.
     /// Called only when `!group_ready.committed_entries.is_empty()`.
     pub(super) fn apply_group_commits(&self, group_id: u64, group_ready: &nodedb_raft::Ready) {
+        if let Some(index) = first_duplicate_committed_index(&group_ready.committed_entries) {
+            warn!(
+                group_id,
+                index, "committed batch repeats an index; the applier guard absorbs it"
+            );
+        }
         for entry in &group_ready.committed_entries {
             if let Some(cc) = ConfChange::from_entry_data(&entry.data) {
                 let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
@@ -109,5 +129,28 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                 self.propose_cluster_epoch_bump();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_raft::LogEntry;
+
+    fn entry(index: u64) -> LogEntry {
+        LogEntry {
+            term: 1,
+            index,
+            data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn detects_a_repeated_committed_index() {
+        assert_eq!(first_duplicate_committed_index(&[entry(1), entry(2)]), None);
+        assert_eq!(
+            first_duplicate_committed_index(&[entry(1), entry(2), entry(1)]),
+            Some(1)
+        );
     }
 }
